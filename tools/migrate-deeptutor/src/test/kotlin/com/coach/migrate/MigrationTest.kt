@@ -151,3 +151,36 @@ class MigrationTest {
     }
 
 }
+
+class ChoiceMappingTest {
+    @Test fun `legacy keys become option identities independently of letter ordering`() {
+        fun source(reverse: Boolean) = buildJsonObject {
+            put("question_type","single_choice"); put("question","Synthetic import question")
+            put("correct_answer",if(reverse) "D" else "A")
+            put("options", buildJsonObject {
+                val texts=listOf("right","wrong one","wrong two","wrong three").let { if(reverse) it.reversed() else it }
+                listOf("A","B","C","D").zip(texts).forEach { (k,v) -> put(k,v) }
+            })
+        }
+        val first=mapChoiceQuestion(source(false));val second=mapChoiceQuestion(source(true))
+        assertEquals(first["correctOptionId"],second["correctOptionId"])
+        assertEquals(first["fingerprint"],second["fingerprint"])
+        assertEquals("UNREVIEWED",first.str("keyState"))
+        assertFalse(first.containsKey("correct_answer"));assertFalse(first.containsKey("key"))
+        assertEquals(4,first.array("options").size)
+    }
+}
+
+class FiveOptionMigrationTest {
+    @Test fun `five-option source preserves the fifth answer and never discards an option`() {
+        val q=buildJsonObject {
+            put("question_type","single_choice");put("question","Synthetic five-option source question")
+            put("correct_answer","E")
+            put("options",buildJsonObject { for(i in 0..4) put(('A'+i).toString(),"Synthetic option $i") })
+        }
+        val mapped=mapChoiceQuestion(q)
+        assertEquals(5,mapped.array("options").size)
+        assertEquals("Synthetic option 4",mapped.array("options").single { it.jsonObject.str("optionId")==mapped.str("correctOptionId") }.jsonObject.str("text"))
+        assertFalse(mapped.containsKey("importIssue"))
+    }
+}

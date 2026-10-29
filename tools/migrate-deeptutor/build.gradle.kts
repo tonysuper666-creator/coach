@@ -4,6 +4,7 @@ plugins {
     application
 }
 dependencies {
+    implementation(project(":shared:domain"))
     implementation(libs.sqlite.jdbc)
     implementation(libs.serialization.json)
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")

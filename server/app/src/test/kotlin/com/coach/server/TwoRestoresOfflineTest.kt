@@ -13,6 +13,12 @@ import kotlin.test.*
 
 /** Regression from the independent review: real SQLite stores with an in-process transport adapter. */
 class TwoRestoresOfflineTest {
+    private val options = listOf(Option("one","First synthetic option"), Option("two","Second synthetic option"),
+        Option("three","Third synthetic option"), Option("four","Fourth synthetic option"))
+    private val frozenMap = kotlinx.serialization.json.JsonObject(
+        assignLetters(listOf(ChoiceKey(options,"one")),null,kotlin.random.Random(1042)).single()
+            .mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) })
+
     private class Direct(var store: LedgerStore) : LedgerTransport {
         override suspend fun hello(epoch: String?) = store.hello()
         override suspend fun snapshot(course: String) = store.snapshot(course)
@@ -20,8 +26,8 @@ class TwoRestoresOfflineTest {
         override suspend fun command(command: WireCommand) = store.command(command)
         override suspend fun watch(onLedger: suspend () -> Unit) {}
     }
-    private fun posed(id: String)=json("attemptId" to id,"questionId" to id,"fingerprint" to id,"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"format" to "SINGLE_CHOICE")
-    private fun submit(id: String)=CommandBody("submit_answer","course",System.currentTimeMillis(),json("attemptId" to id,"answer" to "A","offline" to true,"posedSnapshot" to posed(id)))
+    private fun posed(id: String)=json("attemptId" to id,"questionId" to id,"fingerprint" to questionFingerprint("Synthetic choice", options),"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"groupId" to "synthetic-group", "letterMap" to frozenMap, "format" to "SINGLE_CHOICE")
+    private fun submit(id: String)=CommandBody("submit_answer","course",System.currentTimeMillis(),json("attemptId" to id,"answer" to frozenMap.str("one"),"offline" to true,"posedSnapshot" to posed(id)))
 
     @Test fun twoRestoresWhileClientOffline(): Unit = runBlocking { exercise(false) }
     @Test fun retainedCommandAlreadyInRestoredBackupIsDeduplicated(): Unit = runBlocking { exercise(true) }
@@ -32,7 +38,7 @@ class TwoRestoresOfflineTest {
         val driver=JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         try {
             val data=root.resolve("server")
-            store.registerQuestion("q1","course","q1","SINGLE_CHOICE","Synthetic choice","VERIFIED","A")
+            store.registerQuestion("q1","course","q1","SINGLE_CHOICE","Synthetic choice","VERIFIED","one", options)
             val initial=store.backup(root.resolve("b0"))
             val transport=Direct(store)
             ClientDatabase.Schema.create(driver)
@@ -54,7 +60,7 @@ class TwoRestoresOfflineTest {
             client.syncOnce()
             val facts=store.events("course")
             assertEquals(1,facts.count { it.type=="answer_submitted" && it.payload.str("attemptId")=="q1" })
-            assertEquals("A",facts.single { it.type=="answer_submitted" }.payload.str("answer"))
+            assertEquals(frozenMap.str("one"),facts.single { it.type=="answer_submitted" }.payload.str("answer"))
             assertEquals(store.hello().epoch,client.epoch)
             assertEquals(store.snapshot("course").projection.bytes(),client.projection("course").bytes())
             if(answerInBackup) {

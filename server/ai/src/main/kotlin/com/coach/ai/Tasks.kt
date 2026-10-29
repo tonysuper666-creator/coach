@@ -1,5 +1,8 @@
 package com.coach.ai
 
+import com.coach.domain.*
+import kotlin.random.Random
+import java.util.UUID
 import com.coach.domain.grade.EvidenceCheck
 import com.coach.domain.grade.VerbatimEvidence
 import kotlinx.serialization.json.Json
@@ -22,8 +25,8 @@ import java.text.Normalizer
 
 data class Mcq(
     val stem: String,
-    val options: Map<String, String>,
-    val key: String,
+    val options: List<Option>,
+    val correctOptionId: String,
     val explanation: String,
     val sourceQuote: String,
 )
@@ -62,17 +65,24 @@ Source excerpt (textbook; the ONLY allowed basis):
 $excerpt
 >>>
 
-Write $count distinct single-answer multiple-choice questions (4 options A-D) that test this knowledge point at midterm level.
+Write $count distinct single-answer multiple-choice questions (one correct text and three distractor texts) that test this knowledge point at midterm level.
 Rules: exactly one option is correct; distractors plausible; answerable from the excerpt alone; English.
 For each, include "source_quote": a verbatim sentence fragment (>= 8 words) copied from the excerpt that supports the key.$avoidBlock
-Return a JSON array: [{"stem":..., "options":{"A":...,"B":...,"C":...,"D":...}, "key":"A|B|C|D", "explanation":..., "source_quote":...}]
+Do not assign letters, positions, or option IDs. Explanations must refer to option text only.
+Return a JSON array: [{"stem":..., "correct_text":..., "distractors":[...,...,...], "explanation":..., "source_quote":...}]
         """.trim()
+    }
+
+    private fun reviewOptions(question: Mcq, rng: Random) = buildJsonArray {
+        question.options.shuffled(rng).forEachIndexed { i, option ->
+            add(buildJsonObject { put("temporary_number", i + 1); put("text", option.text) })
+        }
     }
 
     val REVIEW_SYSTEM = "You are an independent blind reviewer of exam questions. Output JSON only."
 
     /** 盲复核：只给题干与选项，不给答案键（ADR-0003 决定 4 的「不看键、自己作答再比对」）。 */
-    fun blindReview(excerpt: String, questions: List<Mcq>): String {
+    fun blindReview(excerpt: String, questions: List<Mcq>, rng: Random = Random.Default): String {
         val source = if (excerpt.isBlank()) {
             "No source excerpt is provided. Use standard health-economics knowledge and the question text only."
         } else {
@@ -84,9 +94,7 @@ Return a JSON array: [{"stem":..., "options":{"A":...,"B":...,"C":...,"D":...}, 
                     buildJsonObject {
                         put("id", index)
                         put("stem", question.stem)
-                        putJsonObject("options") {
-                            question.options.forEach { (letter, text) -> put(letter, text) }
-                        }
+                        put("options", reviewOptions(question, rng))
                     },
                 )
             }
@@ -101,13 +109,14 @@ $source
 Questions:
 $items
 
-Return JSON only: [{"id":0,"answer":"A|B|C|D|NONE","defects":["ambiguous"|"multiple_correct"|"no_correct"|"not_supported_by_source"|"other: ..."],"note":"..."}]
-Use an empty defects list if the question is sound.
+Return JSON only: [{"id":0,"answer_text":"verbatim chosen option text, or NONE","defects":["ambiguous"|"multiple_correct"|"no_correct"|"not_supported_by_source"|"other: ..."],"note":"..."}]
+Use an empty defects list if the question is sound. Temporary numbers are only for reading; never return them.
+Refer to option texts only in notes; never return letters, positions, option IDs, or numbers as answers.
         """.trim()
     }
 
     /** 一次复核多个 KP 的题（Claude 每日 60 次硬上限下的批法）：每个 KP 带自己的原文，题号全局唯一。 */
-    fun blindReviewGroup(groups: List<ReviewGroupInput>): String {
+    fun blindReviewGroup(groups: List<ReviewGroupInput>, rng: Random = Random.Default): String {
         val body = StringBuilder()
         groups.forEachIndexed { groupIndex, group ->
             val source = if (group.excerpt.isBlank()) {
@@ -121,9 +130,7 @@ Use an empty defects list if the question is sound.
                         buildJsonObject {
                             put("id", group.firstId + index)
                             put("stem", question.stem)
-                            putJsonObject("options") {
-                                question.options.forEach { (letter, text) -> put(letter, text) }
-                            }
+                            put("options", reviewOptions(question, rng))
                         },
                     )
                 }
@@ -140,8 +147,9 @@ Use the "id" values exactly as given (they are unique across the whole batch).
 
 $body
 
-Return JSON only: [{"id":0,"answer":"A|B|C|D|NONE","defects":["ambiguous"|"multiple_correct"|"no_correct"|"not_supported_by_source"|"other: ..."],"note":"..."}]
-Use an empty defects list if the question is sound.
+Return JSON only: [{"id":0,"answer_text":"verbatim chosen option text, or NONE","defects":["ambiguous"|"multiple_correct"|"no_correct"|"not_supported_by_source"|"other: ..."],"note":"..."}]
+Use an empty defects list if the question is sound. Temporary numbers are only for reading; never return them.
+Refer to option texts only in notes; never return letters, positions, option IDs, or numbers as answers.
         """.trim()
     }
 
@@ -378,21 +386,33 @@ object TaskParsing {
 
     fun mcqs(text: String): List<Mcq> = JsonText.arrayOf(text).map { element ->
         val obj = element.jsonObject
-        val options = obj["options"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap()
+        require(obj.keys.all { it in setOf("stem","correct_text","distractors","explanation","source_quote") }) {
+            "Generation must use option texts without display keys or answer positions"
+        }
+        val correctText = obj.getValue("correct_text").jsonPrimitive.content
+        val texts = listOf(correctText) + obj.getValue("distractors").jsonArray.map { it.jsonPrimitive.content }
+        val options = texts.map { Option(UUID.randomUUID().toString(), it) }
         Mcq(
             stem = obj["stem"]?.jsonPrimitive?.content?.trim() ?: "",
-            options = options,
-            key = obj["key"]?.jsonPrimitive?.content?.trim()?.uppercase() ?: "",
+            options = options.shuffled(),
+            correctOptionId = options.first().optionId,
             explanation = obj["explanation"]?.jsonPrimitive?.content ?: "",
             sourceQuote = obj["source_quote"]?.jsonPrimitive?.content ?: "",
         )
     }
 
+    /** Only resolved option IDs leave the review boundary. Unknown/ambiguous text fails closed. */
+    fun resolveVerdict(verdict: ReviewVerdict, question: Mcq): ReviewVerdict = verdict.copy(
+        answer = question.options.singleOrNull {
+            normalizeChoiceText(it.text) == normalizeChoiceText(verdict.answer)
+        }?.optionId ?: "NONE"
+    )
+
     fun verdicts(text: String): List<ReviewVerdict> = JsonText.arrayOf(text).map { element ->
         val obj = element.jsonObject
         ReviewVerdict(
             id = obj["id"]?.jsonPrimitive?.content?.toIntOrNull() ?: -1,
-            answer = obj["answer"]?.jsonPrimitive?.content?.trim()?.uppercase() ?: "NONE",
+            answer = obj["answer_text"]?.jsonPrimitive?.content?.trim() ?: "NONE",
             defects = (obj["defects"] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList(),
             note = obj["note"]?.jsonPrimitive?.content ?: "",
         )
@@ -466,9 +486,10 @@ object QuestionGate {
         val defects = ArrayList<String>()
         if (mcq.stem.length < 15) defects.add("stem_too_short")
         if (mcq.options.size < 4) defects.add("needs_four_options")
-        if (mcq.key !in mcq.options) defects.add("key_not_an_option")
-        if (mcq.options.values.map { it.trim().lowercase() }.toSet().size != mcq.options.size) defects.add("duplicate_options")
-        if (mcq.options.values.any { it.isBlank() }) defects.add("blank_option")
+        if (mcq.options.none { it.optionId == mcq.correctOptionId }) defects.add("key_not_an_option")
+        if (mcq.options.map { normalizeChoiceText(it.text) }.toSet().size != mcq.options.size) defects.add("duplicate_options")
+        if (mcq.options.any { it.text.isBlank() }) defects.add("blank_option")
+        if (mcq.options.map { it.optionId }.distinct().size != mcq.options.size) defects.add("duplicate_option_ids")
         if (mcq.sourceQuote.isBlank()) defects.add("missing_source_quote")
         return defects
     }

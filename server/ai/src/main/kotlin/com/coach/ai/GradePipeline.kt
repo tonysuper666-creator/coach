@@ -100,7 +100,14 @@ class QuestionPool(private val client: BridgeClient) {
         )
         val verdicts = when (response) {
             is BridgeResult.Failure -> emptyMap()
-            is BridgeResult.Success -> runCatching { TaskParsing.verdicts(response.text).associateBy { it.id } }
+            is BridgeResult.Success -> runCatching { TaskParsing.verdicts(response.text).also { verdicts ->
+                require(verdicts.map { it.id }.distinct().size == verdicts.size) { "Duplicate review IDs" }
+            }.map { verdict ->
+                val question = entries.firstOrNull { verdict.id in it.firstId until it.firstId + it.questions.size }
+                    ?.let { it.questions[verdict.id - it.firstId] }
+                requireNotNull(question) { "Unknown review ID" }
+                TaskParsing.resolveVerdict(verdict, question)
+            }.associateBy { it.id } }
                 .getOrDefault(emptyMap())
         }
         return ReviewBatch(verdicts, response.call, (System.nanoTime() - started) / 1_000_000)
@@ -114,7 +121,7 @@ class QuestionPool(private val client: BridgeClient) {
         if (verdict == null) {
             reasons.add("blind_review_missing")
         } else {
-            if (verdict.answer != mcq.key) reasons.add("blind_review_disagrees:${verdict.answer}")
+            if (verdict.answer != mcq.correctOptionId) reasons.add("blind_review_disagrees:${verdict.answer}")
             if (verdict.defects.isNotEmpty()) reasons.addAll(verdict.defects.map { "defect:$it" })
         }
         return reasons
@@ -267,7 +274,8 @@ class GradePipeline(private val client: BridgeClient) {
 
     companion object {
         /** 选择题判分：无模型，立即 EXACT。 */
-        fun gradeChoice(key: String, chosen: String): Boolean = key.trim().uppercase() == chosen.trim().uppercase()
+        fun gradeChoice(correctOptionId: String, chosenLetter: String, letterMap: Map<String, String>): Boolean =
+            letterMap[correctOptionId] == chosenLetter.trim().uppercase()
 
         /** 计算题终值：认得就由服务端比，认不出（不是单个数值）返回 null 交回 AI 批过程。 */
         fun gradeNumeric(expected: String, learner: String): Boolean? {

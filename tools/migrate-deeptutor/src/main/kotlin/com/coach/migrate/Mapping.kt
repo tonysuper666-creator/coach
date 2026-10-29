@@ -181,7 +181,7 @@ fun mapSnapshot(snap:Path):Result {
         put("legacy_passed",JsonArray(passed.map { record("mastery.sqlite3","mastery_levels",it,JsonPrimitive(1.0)) }))
         put("legacy_attempts",JsonArray(attempts));put("legacy_attempt_groups",JsonArray(groupMappings));put("legacy_schedule",JsonArray(schedules))
         put("question_kp_candidates",JsonArray(matches))
-        put("questions",JsonArray(questions.mapIndexed { n,q -> record("ECNM10119-期中练习题.json","questions",q.str("id").ifBlank { n.toString() },q) }))
+        put("questions",JsonArray(questions.mapIndexed { n,q -> JsonObject(record("ECNM10119-期中练习题.json","questions",q.str("id").ifBlank { n.toString() },q) + ("question" to mapChoiceQuestion(q))) }))
         put("notes",JsonArray(notes));put("journal",record("journal.json","journal","root",journal))
         put("journal_days",JsonObject(journalDays.mapValues { JsonArray(it.value) }))
         put("textbook_page_inventory",JsonArray(textbooks));put("exam_weights_set",JsonArray(weightRows))

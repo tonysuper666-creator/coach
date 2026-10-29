@@ -13,7 +13,7 @@ object MathDelimiters {
     private val greek = "\\u0370-\\u03ff\\u1f00-\\u1fff"
     private val words = setOf("ATE", "ATT", "Cov", "E", "FOC", "GDP", "IV", "MRS", "MRT", "OLS", "Pr", "SE", "Var")
     private fun valid(body: String) = !Regex("</?[A-Za-z][^<>]*>").containsMatchIn(body) &&
-        !han.containsMatchIn(body.replace(Regex("\\\\(?:text|operatorname|mathrm|textbf|textit)\\s*\\{[^{}]*}"), ""))
+        !han.containsMatchIn(body.replace(Regex("\\\\(?:text|operatorname|mathrm|textbf|textit)\\s*\\{[^\\{\\}]*\\}"), ""))
     private fun literal(s: String, needle: String, from: Int): Int {
         var i = from
         while (i <= s.length - needle.length) {
@@ -150,12 +150,12 @@ object MathDelimiters {
                 if (c in "([") depth++
                 else if (c in ")]") { depth--; if (depth < 0) break }
                 else if (c == '=' && depth == 0) { eq = p; break }
-                else if (!Regex("[A-Za-z0-9${greek}_^{}()\\[\\]+*/×·⋅%\\- ]").matches(c.toString())) break
+                else if (!Regex("[A-Za-z0-9${greek}_^\\{\\}()\\[\\]+*/×·⋅%\\- ]").matches(c.toString())) break
                 p++
             }
             if (eq < 0) { i++; continue }
             val lhs = s.substring(i, eq).trimEnd()
-            val plain = lhs.replace(Regex("[_^](?:\\{[^{}]*}|[A-Za-z]+)"), "")
+            val plain = lhs.replace(Regex("[_^](?:\\{[^\\{\\}]*\\}|[A-Za-z]+)"), "")
             if (lhs.isEmpty() || !Regex("[A-Za-z${greek}0-9)\\]]").matches(lhs.last().toString()) || Regex("[A-Za-z]{2,}").findAll(plain).any { it.value !in words }) { i++; continue }
             var r = eq + 1; while (s.getOrNull(r) == ' ' || s.getOrNull(r) == '\t') r++
             val end = rhs(s, r)
@@ -174,8 +174,8 @@ object MathDelimiters {
             if (v.length in 1..220 && !v.contains('$') && !v.contains('`') && !han.containsMatchIn(v) && (single || list || Regex("[_^=≤≥≈≠]").containsMatchIn(v)))
                 "${it.groupValues[1]}\$$v\$${it.groupValues[3]}${it.groupValues[4]}" else it.value
         }
-        s = s.replace(Regex("(E\\s*\\[[^\\]\\n]+]\\s*(?:=|≈|≠|≤|≥|<|>)\\s*[-+]?(?:\\d+(?:\\.\\d+)?|[A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^{}\\n]+}|[A-Za-z0-9$greek]))?))")) { "\$${it.value.trim()}\$" }
-        s = s.replace(Regex("([A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^{}\\n]+}|[A-Za-z0-9$greek]+))?\\s*(?:≈|≠|≤|≥|<|>)\\s*[-+−]?\\d+(?:\\.\\d+)?)")) { "\$${brace(it.value.trim())}\$" }
+        s = s.replace(Regex("(E\\s*\\[[^\\]\\n]+]\\s*(?:=|≈|≠|≤|≥|<|>)\\s*[-+]?(?:\\d+(?:\\.\\d+)?|[A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]))?))")) { "\$${it.value.trim()}\$" }
+        s = s.replace(Regex("([A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]+))?\\s*(?:≈|≠|≤|≥|<|>)\\s*[-+−]?\\d+(?:\\.\\d+)?)")) { "\$${brace(it.value.trim())}\$" }
         return equations(s)
     }
     private fun repair(s: String): String {

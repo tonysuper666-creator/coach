@@ -31,11 +31,12 @@ class MainActivity : ComponentActivity() {
         }
         owner = ViewModelProvider(this)[ReplayOwner::class.java]
         owner.attach(this)
+        val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
+        setContent { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage) }
+        // JankStats needs the DecorView, which setContent installs.
         jank = JankStats.createAndTrack(window) { frame ->
             if (owner.state.running) { frames++; if (frame.isJank) badFrames++ }
         }
-        val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
-        setContent { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage) }
     }
     override fun onPause() {
         owner.save()

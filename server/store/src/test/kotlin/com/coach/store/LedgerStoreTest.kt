@@ -9,24 +9,30 @@ import java.nio.file.Path
 import kotlin.test.*
 
 class LedgerStoreTest {
-    private fun wire(id: String, answer: String = "A", device: String = "phone", snapshot: JsonSnapshot = JsonSnapshot()): WireCommand {
+    private val options = listOf(Option("one","First synthetic option"), Option("two","Second synthetic option"),
+        Option("three","Third synthetic option"), Option("four","Fourth synthetic option"))
+    private val frozenMap = kotlinx.serialization.json.JsonObject(
+        assignLetters(listOf(ChoiceKey(options,"one")),null,kotlin.random.Random(1042)).single()
+            .mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) })
+
+    private fun wire(id: String, answer: String = frozenMap.str("one"), device: String = "phone", snapshot: JsonSnapshot = JsonSnapshot()): WireCommand {
         val body=CommandBody("submit_answer","course",1793188800000L,json("attemptId" to snapshot.attempt,"answer" to answer,"posedSnapshot" to snapshot.payload(),"offline" to true))
         val bytes=canonicalJson(LedgerJson.encodeToJsonElement(body))
         return WireCommand(device,id,bytes,sha256(bytes.toByteArray()))
     }
-    private data class JsonSnapshot(val attempt: String="attempt",val question: String="q") {
-        fun payload()=json("attemptId" to attempt,"questionId" to question,"fingerprint" to question,"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"format" to "SINGLE_CHOICE")
+    private inner class JsonSnapshot(val attempt: String="attempt",val question: String="q") {
+        fun payload()=json("attemptId" to attempt,"questionId" to question,"fingerprint" to questionFingerprint("Synthetic choice", options),"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"groupId" to "synthetic-group", "letterMap" to frozenMap, "format" to "SINGLE_CHOICE")
     }
     @Test fun commandsAreAtomicIdempotentAndCrossDeviceConflictsRetainText() {
         val dir=Files.createTempDirectory("coach-command-")
         try { LedgerStore(dir).use { db ->
-            db.registerQuestion("q","course","q","SINGLE_CHOICE","Synthetic choice","VERIFIED","A")
+            db.registerQuestion("q","course","q","SINGLE_CHOICE","Synthetic choice","VERIFIED","one", options)
             val c=wire("command")
             val first=db.command(c);assertEquals("OK",first.status);assertEquals(3,first.eventSeqs.size)
             assertEquals("DUPLICATE",db.command(c).status);assertEquals(3,db.events("course").size)
             assertEquals("SYSTEM",db.events("course").single { it.type=="attempt_graded" }.actor)
             assertEquals("LEARNER",db.events("course").single { it.type=="answer_submitted" }.actor)
-            assertEquals("PAYLOAD_MISMATCH",db.command(wire("command","B")).error)
+            assertEquals("PAYLOAD_MISMATCH",db.command(wire("command",frozenMap.str("two"))).error)
             val conflict=db.command(wire("other","different raw answer","mac"));assertEquals("CONFLICT",conflict.status)
             assertEquals(1,db.events("course").count { it.type=="answer_submitted" })
             assertEquals("different raw answer",db.events("course").single { it.type=="answer_orphaned" }.payload.str("rawAnswer"))
@@ -39,7 +45,7 @@ class LedgerStoreTest {
         val backupDir=Files.createTempDirectory("coach-archive-").resolve("snapshot")
         var db=LedgerStore(dir)
         try {
-            db.registerQuestion("q","course","q","SINGLE_CHOICE","Synthetic choice","VERIFIED","A")
+            db.registerQuestion("q","course","q","SINGLE_CHOICE","Synthetic choice","VERIFIED","one", options)
             val blob=db.putBlob("immutable synthetic blob".toByteArray(),"text/plain")
             db.startMessage("thread","msg","partial text")
             val job=db.enqueueJob("grade","attempt","v1","hash")

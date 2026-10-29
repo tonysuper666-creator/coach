@@ -32,3 +32,11 @@ tasks.register<JavaExec>("liveTest") {
     )
     environment("COACH_BRIDGE_URL", System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:8791")
 }
+
+/** Replay the existing private TON-1041 fixtures using a local HTTP stub; no subscription CLI runs. */
+tasks.register<JavaExec>("plantedReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.ai.PlantedReplayKt")
+}

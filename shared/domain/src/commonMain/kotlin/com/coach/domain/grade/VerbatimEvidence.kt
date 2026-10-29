@@ -168,6 +168,10 @@ object VerbatimEvidence {
         cp in 0x3400..0x4DBF || cp in 0x4E00..0x9FFF || cp in 0xF900..0xFAFF ||
             cp in 0x20000..0x2EBEF || cp in 0x30000..0x3134F
 
+    /**
+     * 字母词元比 ADR 写的「连续拉丁字母」宽：这里的 isLetter 也包括希腊字母（σ、β、γ、δ）、
+     * 假名和星平面字母。计量课里公式记号就是希腊字母，按拉丁字母处理会把 σ 切成单字符、把词元边界搞乱。
+     */
     private fun isLetterToken(cp: Int): Boolean = !isHan(cp) && isLetter(cp)
 
     private fun isLetter(cp: Int): Boolean = if (cp >= 0x10000) true else cp.toChar().isLetter()

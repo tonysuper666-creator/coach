@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.12.0")
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
+    implementation("androidx.metrics:metrics-performance:1.0.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")

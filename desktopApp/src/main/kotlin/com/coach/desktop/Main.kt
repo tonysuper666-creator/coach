@@ -3,7 +3,11 @@ package com.coach.desktop
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
-import com.coach.ui.DiagnosticsScreen
+import com.coach.ui.*
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlinx.coroutines.delay
 import org.jetbrains.skiko.SkiaLayer
 import org.jetbrains.skia.Image
@@ -18,9 +22,28 @@ private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
     }
 }
 
-fun main() = application {
+fun main() {
+    if (System.getProperty("coach.exportFormulas") != null) { exportFormulas(); return }
+    val stateFile = File(System.getenv("COACH_RENDER_STATE") ?: File(System.getProperty("user.home"), "Coach/state/render-spike.json").path)
+    val state = ReplayState(stateFile.takeIf { it.exists() }?.readText())
+    val corpusFile = File(System.getenv("COACH_REPLAY_FILE") ?: File(System.getProperty("user.home"), "Coach/corpus/render/replay.json").path)
+    val corpus = corpusFile.takeIf { it.exists() }?.let { ReplayCorpus.load(it.readText()) }
+    fun save() {
+        stateFile.parentFile.mkdirs()
+        val tmp = File(stateFile.parentFile, "render-spike.next")
+        tmp.writeText(state.snapshot())
+        Files.move(tmp.toPath(), stateFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }
+    application {
     Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = 840.dp, height = 600.dp)) {
-        DiagnosticsScreen("FLAT")
+        RenderingReplayScreen(state, corpus, true, "FLAT", ::save, ::println)
+        DisposableEffect(window) {
+            val listener = object : java.awt.event.WindowAdapter() {
+                override fun windowLostFocus(e: java.awt.event.WindowEvent) { save() }
+            }
+            window.addWindowFocusListener(listener)
+            onDispose { save(); window.removeWindowFocusListener(listener) }
+        }
         LaunchedEffect(Unit) {
             delay(1500)
             val layer = window.skiaLayers().first()
@@ -42,4 +65,6 @@ fun main() = application {
             }
         }
     }
+}
+
 }

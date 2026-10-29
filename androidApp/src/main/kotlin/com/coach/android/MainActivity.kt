@@ -7,10 +7,18 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.lifecycleScope
 import androidx.window.layout.FoldingFeature
 import androidx.window.layout.WindowInfoTracker
-import com.coach.ui.DiagnosticsScreen
+import com.coach.ui.*
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import android.util.Log
+import androidx.metrics.performance.JankStats
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private lateinit var owner: ReplayOwner
+    private var jank: JankStats? = null
+    private var frames = 0
+    private var badFrames = 0
     private var folding by mutableStateOf("FLAT (no hinge)")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -21,6 +29,34 @@ class MainActivity : ComponentActivity() {
                 }.ifEmpty { "FLAT (no hinge)" }
             }
         }
-        setContent { DiagnosticsScreen(folding) }
+        owner = ViewModelProvider(this)[ReplayOwner::class.java]
+        owner.attach(this)
+        jank = JankStats.createAndTrack(window) { frame ->
+            if (owner.state.running) { frames++; if (frame.isJank) badFrames++ }
+        }
+        val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
+        setContent { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage) }
+    }
+    override fun onPause() {
+        owner.save()
+        Log.i("CoachRender", "JANK frames=$frames jank=$badFrames percent=${if (frames == 0) 0.0 else badFrames * 100.0 / frames}")
+        super.onPause()
+    }
+    override fun onDestroy() { jank?.isTrackingEnabled = false; super.onDestroy() }
+}
+
+class ReplayOwner : ViewModel() {
+    lateinit var state: ReplayState; private set
+    var corpus: ReplayCorpus? = null; private set
+    private var preferences: android.content.SharedPreferences? = null
+    fun attach(activity: MainActivity) {
+        if (::state.isInitialized) return
+        preferences = activity.getSharedPreferences("render-replay", android.content.Context.MODE_PRIVATE)
+        state = ReplayState(preferences?.getString("state", null))
+        corpus = java.io.File(activity.filesDir, "replay.json").takeIf { it.exists() }?.let { ReplayCorpus.load(it.readText()) }
+    }
+    fun save() {
+        // Synchronous private-file commit at lifecycle boundaries; replay is a small spike state.
+        preferences?.edit()?.putString("state", state.snapshot())?.commit()
     }
 }

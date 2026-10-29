@@ -1,0 +1,21 @@
+{
+  "name": "coach-mathsvc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Coach 公式服务：TeX -> SVG（MathJax 3.2.2，fontCache:none）",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --experimental-strip-types --test",
+    "corpus": "node --experimental-strip-types scripts/build-corpus.ts",
+    "measure": "node --experimental-strip-types scripts/measure.ts",
+    "delims": "node --experimental-strip-types delims/run-cases.ts"
+  },
+  "dependencies": {
+    "mathjax-full": "3.2.2"
+  },
+  "devDependencies": {}
+}

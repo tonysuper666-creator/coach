@@ -298,13 +298,19 @@ def report(path: Path) -> None:
     """把 --out 的 JSONL 汇总成一份可贴进交付评论的数字表。"""
     rows = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()] \
         if path.exists() else []
-    claude = [r for r in rows if r["stage"] == "claude" and r.get("ttft_ms")]
-    for eff in sorted({str(r.get("effort")) for r in claude}):
-        sub = [r for r in claude if str(r.get("effort")) == eff]
+    # 同一次跑里 i 从 0 递增；i 回绕就是新的一批（换个备课包/强度重跑），分开报
+    batches: list[list[dict]] = []
+    for r in rows:
+        if r["stage"] != "claude" or not r.get("ttft_ms"):
+            continue
+        if not batches or r["i"] <= batches[-1][-1]["i"]:
+            batches.append([])
+        batches[-1].append(r)
+    for bi, sub in enumerate(batches, 1):
         vals = [r["ttft_ms"] for r in sub]
-        print(f"Claude 流式追问（effort={eff}，备课包 {sub[0]['pack_chars']} 字，冷缓存）："
+        print(f"Claude 流式追问 批{bi}（备课包 {sub[0]['pack_chars']} 字，effort={sub[0].get('effort') or '默认'}，冷缓存）："
               f"n={len(vals)} p50={pct(vals,50)}ms p90={pct(vals,90)}ms max={max(vals):.0f}ms min={min(vals):.0f}ms "
-              f"queue={sorted({r.get('queue_ms') for r in sub})}")
+              f"queue_max={max(r.get('queue_ms') or 0 for r in sub)}ms")
     codex = [r for r in rows if r["stage"] == "codex"]
     if codex:
         tot = [r["total_ms"] for r in codex]

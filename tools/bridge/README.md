@@ -89,3 +89,19 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 - **Grok**：`grok` 还没 live 实测，按 ADR-0002(8) 不注册为导师；接的时候加一个 `call_grok` + 注册表条目即可（`--reasoning-effort` 已在参数表里）。
 - **agy**：默认关（`BRIDGE_AGY_ENABLED=0`）；条款风险未定前不打开。
 - **超时/兜底的客户端侧**（25 秒首字截止、8 秒「还在想」、显式调 Codex）在 Coach 服务端，不在这座桥里。
+
+## M0 实测（2026-10-29，真实 CLI + 真实教材页）
+
+原始逐条数据：`tests/results/live-20261029.jsonl`（每行一个请求）。
+
+| 项 | 结果 |
+|---|---|
+| Claude 流式追问首字（备课包 40,077 字，逆向选择章 08→09，冷缓存，n=20） | p50 **2068 ms**、p90 **4280 ms**、max 4737 ms、min 1506 ms；排队 ≤2.5 ms → **达到** p50≤5s / p90≤8s |
+| 同协议但备课包只含 1–2 章（问题在材料里答不了，n=20） | p50 6816 ms、p90 9525 ms → 说明「包里有没有答案」比包大小更影响首字，与 d3 结论一致 |
+| Codex 非流式（n=5） | 全部 complete，7.2–12.2 s（p50 9.3 s），`served_by=gpt-6.1-sol` |
+| 对 Codex 发 `stream=true`（n=3） | 每请求 3 个 chunk，首末块间隔 0.0–0.1 ms → 确认不真流式（`true_stream=false`） |
+| 流到一半断开（n=2） | `pgrep -f "claude -p"` 立即回到基线（0 次轮询即已退出），日志 `status=truncated reason=client_gone` |
+| 桩 CLI 故障注入 | 51 项断言全绿（`tests/fault_injection.py`） |
+| 8790 与 `subscription_bridge.py` | 全程 PID 70368、shasum `ef98bb7…` 未变 |
+
+本卡物理调用：Claude 20+20+2（取消）=42，Codex 5+3=8，合计 **50**。

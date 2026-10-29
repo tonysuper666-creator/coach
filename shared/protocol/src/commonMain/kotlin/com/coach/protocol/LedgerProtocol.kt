@@ -15,3 +15,7 @@ const val PROTOCOL_VERSION = 1
 @Serializable data class Snapshot(val hello: Hello, val courseId: String, val events: List<Event>, val projection: Projection)
 @Serializable data class EventsPage(val epoch: String, val events: List<Event>, val throughSeq: Long, val hasMore: Boolean = false)
 @Serializable data class LedgerFrame(val t: String = "ledger", val course: String, val epoch: String, val events: List<Event>)
+
+/** Keys travel only with offline packs, separately from the question events. */
+@Serializable data class OfflineKey(val attemptId: String, val correctOptionId: String)
+@Serializable data class OfflineChoicePack(val groups: List<List<Event>>, val keys: List<OfflineKey>)

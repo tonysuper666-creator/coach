@@ -20,6 +20,19 @@ import java.util.UUID
 import kotlin.test.*
 
 class OfflineRestoreTest {
+    private val options = listOf(Option("one","First synthetic option"), Option("two","Second synthetic option"),
+        Option("three","Third synthetic option"), Option("four","Fourth synthetic option"))
+    private val ids = listOf("online","q1","q2","q3","q4","q5")
+    private val frozenMaps = run {
+        val rng = kotlin.random.Random(1042)
+        var previous: String? = null
+        ids.chunked(3).flatMap { group ->
+            val maps = assignLetters(group.map { ChoiceKey(options,"one") },previous,rng)
+            previous = maps.last().getValue("one")
+            group.zip(maps).map { (id,map) -> id to kotlinx.serialization.json.JsonObject(map.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) }) }
+        }.toMap()
+    }
+
     private class Server(val store: LedgerStore, port: Int=0) {
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
         val actor=LedgerActor(scope,store)
@@ -32,8 +45,8 @@ class OfflineRestoreTest {
         suspend fun close() { engine.stopSuspend(0,1000);actor.close();scope.cancel() }
     }
     private val token="isolated-test-token-32-characters-minimum"
-    private fun posed(id: String)=json("attemptId" to id,"questionId" to id,"fingerprint" to id,"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"format" to "SINGLE_CHOICE","keyState" to "VERIFIED","offlinePack" to true)
-    private fun submit(id: String)=CommandBody("submit_answer","course",System.currentTimeMillis(),json("attemptId" to id,"answer" to "A","offline" to true,"posedSnapshot" to posed(id)))
+    private fun posed(id: String)=json("attemptId" to id,"questionId" to id,"fingerprint" to questionFingerprint("Synthetic choice $id", options),"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"groupId" to "synthetic-group-${ids.indexOf(id)/3}", "letterMap" to frozenMaps.getValue(id), "format" to "SINGLE_CHOICE","keyState" to "VERIFIED","offlinePack" to true)
+    private fun submit(id: String)=CommandBody("submit_answer","course",System.currentTimeMillis(),json("attemptId" to id,"answer" to frozenMaps.getValue(id).str("one"),"offline" to true,"posedSnapshot" to posed(id)))
 
     @Test fun offlineFiveAnswersRestartRollbackAndAutomaticEpochResyncLoseNothing() = runBlocking {
         val root=Files.createTempDirectory("coach-e2e-")
@@ -45,10 +58,10 @@ class OfflineRestoreTest {
         try {
             var store=LedgerStore(data)
             store.enroll("phone",token)
-            for(id in listOf("online","q1","q2","q3","q4")) store.registerQuestion(id,"course",id,"SINGLE_CHOICE","Synthetic choice $id","VERIFIED","A")
+            for(id in listOf("online","q1","q2","q3","q4")) store.registerQuestion(id,"course",id,"SINGLE_CHOICE","Synthetic choice $id","VERIFIED","one", options)
             val baseline=store.backup(root.resolve("old-backup"))
             // This question and the downloaded pack do not exist in the baseline backup.
-            store.registerQuestion("q5","course","q5","SINGLE_CHOICE","Synthetic missing question","VERIFIED","A")
+            store.registerQuestion("q5","course","q5","SINGLE_CHOICE","Synthetic missing question","VERIFIED","one", options)
             for(i in 1..5) store.append("course","question_posed",posed("q$i"),"attempt:q$i")
             server=Server(store);val port=server.port()
             transport=HttpLedgerTransport("http://127.0.0.1:$port","phone",token)
@@ -84,7 +97,7 @@ class OfflineRestoreTest {
             val answers=facts.filter { it.type in setOf("answer_submitted","answer_orphaned") }
             assertEquals(6,answers.size);assertEquals(6,answers.map { it.payload.str("attemptId") }.distinct().size)
             assertEquals(5,facts.count { it.type=="answer_submitted" });assertEquals(1,facts.count { it.type=="answer_orphaned" })
-            assertEquals("A",facts.single { it.type=="answer_orphaned" }.payload.str("rawAnswer"))
+            assertEquals(frozenMaps.getValue("q5").str("one"),facts.single { it.type=="answer_orphaned" }.payload.str("rawAnswer"))
             assertEquals(store.snapshot("course").projection.bytes(),client.projection("course").bytes())
             assertEquals(5,client.projection("course").journal.values.sumOf { it.answers })
             val seq=store.hello().lastSeq;client.syncOnce();assertEquals(seq,store.hello().lastSeq)

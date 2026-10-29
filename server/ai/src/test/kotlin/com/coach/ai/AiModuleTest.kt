@@ -1,5 +1,6 @@
 package com.coach.ai
 
+import com.coach.domain.Option
 import com.coach.domain.grade.NumericValue
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -148,7 +149,7 @@ class TaskContractTest {
     @Test
     fun blindReviewPromptCarriesNoAnswerKey() {
         val questions = listOf(
-            Mcq("Stem one is long enough", mapOf("A" to "a", "B" to "b", "C" to "c", "D" to "d"), "C", "expl", "quote"),
+            Mcq("Stem one is long enough", listOf(Option("one", "a"), Option("two", "b"), Option("three", "c"), Option("four", "d")), "three", "expl", "quote"),
         )
         val prompt = Prompts.blindReview("excerpt text", questions)
         assertFalse(prompt.contains("\"key\""))
@@ -167,13 +168,13 @@ class TaskContractTest {
 
     @Test
     fun structuralGateRejectsBadKeysAndMissingOptions() {
-        val bad = Mcq("A stem that is long enough to pass", mapOf("A" to "x", "B" to "y", "C" to "z"), "D", "", "")
+        val bad = Mcq("A stem that is long enough to pass", listOf(Option("one", "x"), Option("two", "y"), Option("three", "z")), "missing", "", "")
         val defects = QuestionGate.structural(bad)
         assertTrue(defects.contains("needs_four_options"))
         assertTrue(defects.contains("key_not_an_option"))
         assertTrue(defects.contains("missing_source_quote"))
         assertEquals(emptyList(), QuestionGate.structural(
-            Mcq("A stem that is long enough to pass", mapOf("A" to "x", "B" to "y", "C" to "z", "D" to "w"), "D", "", "a quote here"),
+            Mcq("A stem that is long enough to pass", listOf(Option("one", "x"), Option("two", "y"), Option("three", "z"), Option("four", "w")), "four", "", "a quote here"),
         ))
     }
 
@@ -209,8 +210,8 @@ class TaskContractTest {
 
     @Test
     fun choiceAndNumericGradingAreDeterministic() {
-        assertTrue(GradePipeline.gradeChoice("B", "b"))
-        assertFalse(GradePipeline.gradeChoice("B", "C"))
+        assertTrue(GradePipeline.gradeChoice("two", "b", mapOf("two" to "B")))
+        assertFalse(GradePipeline.gradeChoice("two", "C", mapOf("two" to "B")))
         assertEquals(true, GradePipeline.gradeNumeric("负十一分之三", "−3/11"))
         assertEquals(false, GradePipeline.gradeNumeric("0.25", "0.52"))
         assertNull(GradePipeline.gradeNumeric("讲不清", "0.25"))

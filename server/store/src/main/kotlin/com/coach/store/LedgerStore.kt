@@ -9,6 +9,7 @@ import java.nio.file.*
 import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
+import kotlin.random.Random
 
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 private val idRandom = java.security.SecureRandom()
@@ -34,7 +35,36 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 1) { "Database schema is newer than this server" }
+        require(version <= 2) { "Database schema is newer than this server" }
+        if (version < 2) {
+            rawBackup(directory.resolve("backups/pre-V002-${uid()}"))
+            transaction {
+                // Historical events stay byte-for-byte intact. New questions and keys use option IDs.
+                val legacy = query("SELECT question_id,stem_md,options FROM questions WHERE format='SINGLE_CHOICE'") {
+                    Triple(it.getString(1), it.getString(2), it.getString(3))
+                }
+                for ((id, stem, raw) in legacy) {
+                    val old = raw?.let { LedgerJson.parseToJsonElement(it) } as? JsonObject
+                    if (old == null || old.size !in 2..26) {
+                        sql("UPDATE questions SET key_state='UNREVIEWED' WHERE question_id=?", id)
+                        sql("DELETE FROM answer_keys WHERE question_id=?", id)
+                        continue
+                    }
+                    val options = old.entries.map { Option(uid(), it.value.jsonPrimitive.content) }
+                    val key = query("SELECT key_json FROM answer_keys WHERE question_id=?", id) {
+                        LedgerJson.parseToJsonElement(it.getString(1)).jsonObject.str("choice")
+                    }.singleOrNull()
+                    val correct = old.keys.indexOf(key).let { options.getOrNull(it)?.optionId }
+                    sql("UPDATE questions SET options=?,fingerprint=? WHERE question_id=?",
+                        LedgerJson.encodeToString(options), questionFingerprint(stem, options), id)
+                    if (correct == null) {
+                        sql("DELETE FROM answer_keys WHERE question_id=?", id)
+                        sql("UPDATE questions SET key_state='UNREVIEWED' WHERE question_id=?", id)
+                    } else sql("UPDATE answer_keys SET key_json=? WHERE question_id=?", json("correctOptionId" to correct).toString(), id)
+                }
+                sql("PRAGMA user_version=2")
+            }
+        }
     }
     private fun sql(statement: String, vararg values: Any?) = connection.prepareStatement(statement).use { ps ->
         values.forEachIndexed { i,v -> ps.setObject(i+1,v) }; ps.execute(); ps.updateCount.coerceAtLeast(0)
@@ -75,6 +105,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         device: String = "server", actor: String = "SYSTEM", command: WireCommand? = null,
         effect: Int = 0, occurredAt: Long = clock(), thread: String? = null): Event {
         if(connection.autoCommit) return transaction { append(course,type,payload,idem,device,actor,command,effect,occurredAt,thread) }
+        if (type == "question_posed" && payload.str("format") == "SINGLE_CHOICE") {
+            require(payload.str("groupId").isNotBlank() && validLetterMap(choiceOptions(payload.str("questionId")), letterMap(payload))) { "Invalid choice letter map" }
+        }
         val at = clock()
         val seq = lastSeq() + 1
         val e = Event(seq,uid(),course,type,recordedAt=at,occurredAt=occurredAt.coerceAtMost(at),
@@ -86,10 +119,77 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return e
     }
     fun registerQuestion(id: String, course: String, fingerprint: String, format: String, stem: String,
-        keyState: String, correctChoice: String? = null) = transaction {
-        sql("INSERT INTO questions(question_id,course_id,format,stem_md,origin,fingerprint,key_state) VALUES(?,?,?,?,?,?,?)",id,course,format,stem,"COACH",fingerprint,keyState)
-        if (correctChoice != null) sql("INSERT INTO answer_keys(question_id,key_json) VALUES(?,?)",id,json("choice" to correctChoice).toString())
+        keyState: String, correctOptionId: String? = null, options: List<Option> = emptyList(),
+        kpIds: List<String> = emptyList()) = transaction {
+        if (format == "SINGLE_CHOICE") ChoiceKey(options, requireNotNull(correctOptionId))
+        val fp = if (format == "SINGLE_CHOICE") questionFingerprint(stem, options) else fingerprint
+        sql("INSERT INTO questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state) VALUES(?,?,?,?,?,?,?,?)",
+            id,course,format,stem,LedgerJson.encodeToString(options),"COACH",fp,keyState)
+        if (correctOptionId != null) sql("INSERT INTO answer_keys(question_id,key_json) VALUES(?,?)",id,json("correctOptionId" to correctOptionId).toString())
+        for (kp in kpIds) sql("INSERT INTO question_kp(question_id,kp_id,is_primary) VALUES(?,?,1)", id, kp)
     }
+
+    private fun choiceOptions(id: String): List<Option> = query("SELECT options FROM questions WHERE question_id=?", id) {
+        LedgerJson.decodeFromString<List<Option>>(it.getString(1) ?: "[]")
+    }.singleOrNull().orEmpty()
+    private fun choiceId(id: String): String? = query("SELECT key_json FROM answer_keys WHERE question_id=?",id) {
+        LedgerJson.parseToJsonElement(it.getString(1)).jsonObject.str("correctOptionId").ifBlank { null }
+    }.singleOrNull()
+    private fun letterMap(payload: JsonObject): Map<String,String> {
+        val raw = payload["letterMap"] as? JsonObject ?: return emptyMap()
+        if (raw.values.any { it !is JsonPrimitive || !it.isString }) return emptyMap()
+        return raw.mapValues { it.value.jsonPrimitive.content }
+    }
+
+    /** Called inside the single-writer actor; all letters and all group events commit together. */
+    fun poseChoiceGroup(course: String, groupId: String, requests: List<JsonObject>,
+        rng: Random = Random.Default, offline: Boolean = false, device: String = "server"): List<Event> = transaction {
+        poseChoiceGroupInTransaction(course, groupId, requests, rng, device, offline)
+    }
+    private fun poseChoiceGroupInTransaction(course: String, groupId: String, requests: List<JsonObject>,
+        rng: Random, device: String, offline: Boolean = true): List<Event> {
+        require(groupId.isNotBlank() && requests.isNotEmpty())
+        require(requests.map { it.str("attemptId") }.distinct().size == requests.size)
+        val existing = events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
+        if (existing.isNotEmpty()) {
+            require(existing.map { it.payload.str("attemptId") to it.payload.str("questionId") } ==
+                requests.map { it.str("attemptId") to it.str("questionId") }) { "Group identity mismatch" }
+            return existing
+        }
+        val keys = requests.map { request ->
+            require(request.str("attemptId").isNotBlank() && request.strings("kpIds").isNotEmpty())
+            require(request.str("purpose") in Purpose.entries.map { it.name } && request.num("policyVersion") > 0)
+            val valid = query("SELECT key_state FROM questions WHERE question_id=? AND course_id=? AND format='SINGLE_CHOICE'",request.str("questionId"),course) { it.getString(1) }.singleOrNull()
+            require(valid == "VERIFIED") { "Only verified choices can be posed" }
+            ChoiceKey(choiceOptions(request.str("questionId")), requireNotNull(choiceId(request.str("questionId"))))
+        }
+        val previous = events(course).lastOrNull { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" }
+            ?.payload?.let { letterMap(it)[choiceId(it.str("questionId"))] }
+        val maps = assignLetters(keys, previous, rng)
+        return requests.mapIndexed { index, request ->
+            val qid = request.str("questionId")
+            val content = query("SELECT stem_md,fingerprint FROM questions WHERE question_id=?",qid) { it.getString(1) to it.getString(2) }.single()
+            val payload = JsonObject(request + mapOf(
+                "groupId" to JsonPrimitive(groupId), "letterMap" to JsonObject(maps[index].mapValues { JsonPrimitive(it.value) }),
+                "stem" to JsonPrimitive(content.first), "options" to LedgerJson.encodeToJsonElement(keys[index].options),
+                "fingerprint" to JsonPrimitive(content.second), "format" to JsonPrimitive("SINGLE_CHOICE"),
+                "keyState" to JsonPrimitive("VERIFIED"), "offlinePack" to JsonPrimitive(offline)
+            ) - "correctOptionId")
+            append(course,"question_posed",payload,"attempt:${request.str("attemptId")}",device=device)
+        }
+    }
+
+    /** Offline selection supplies the same requests as online selection; default groups have three questions. */
+    fun offlineChoicePack(course: String, packId: String, requests: List<JsonObject>, device: String,
+        rng: Random = Random.Default): OfflineChoicePack = transaction {
+        require(requests.isNotEmpty())
+        val groups = requests.chunked(3).mapIndexed { index, group ->
+            // Inline implementation shares this transaction with all groups.
+            poseChoiceGroupInTransaction(course, "$packId:$index", group, rng, device)
+        }
+        OfflineChoicePack(groups, groups.flatten().map { OfflineKey(it.payload.str("attemptId"), requireNotNull(choiceId(it.payload.str("questionId")))) })
+    }
+
     fun authorize(device: String, token: String): Boolean = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull() == sha256(token.toByteArray(Charsets.UTF_8))
     fun enroll(device: String, token: String) { require(token.length >= 32); sql("INSERT INTO devices(device_id,token_sha256,created_at) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET token_sha256=excluded.token_sha256,revoked_at=NULL",device,sha256(token.toByteArray(Charsets.UTF_8)),clock()) }
 
@@ -137,6 +237,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                 emit("answer_orphaned",json("attemptId" to attemptId,"posedSnapshot" to posedSnapshot,"rawAnswer" to p.str("answer"),"reason" to "QUESTION_MISSING"),"attempt:$attemptId:answer")
                             } else if (posed == null && question.second != posedSnapshot.str("fingerprint")) {
                                 emit("answer_orphaned",json("attemptId" to attemptId,"posedSnapshot" to posedSnapshot,"rawAnswer" to p.str("answer"),"reason" to "QUESTION_CHANGED"),"attempt:$attemptId:answer")
+                            } else if (question.first == "SINGLE_CHOICE" &&
+                                (posedSnapshot.str("groupId").isBlank() || !validLetterMap(choiceOptions(qid), letterMap(posedSnapshot)) ||
+                                 (posed != null && (letterMap(posed.payload) != letterMap(posedSnapshot) || posed.payload.str("groupId") != posedSnapshot.str("groupId"))))) {
+                                status="REJECTED"; error="INVALID_LETTER_MAP"
                             } else {
                                 if (posed == null) {
                                     // Key state and format come from authoritative storage, never the client snapshot.
@@ -145,8 +249,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                 }
                                 emit("answer_submitted",json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline")),"attempt:$attemptId:answer")
                                 if (question.first == "SINGLE_CHOICE") {
-                                    val key = query("SELECT key_json FROM answer_keys WHERE question_id=?",qid) { LedgerJson.parseToJsonElement(it.getString(1)).jsonObject }.singleOrNull()
-                                    if (key != null) emit("attempt_graded",json("attemptId" to attemptId,"score" to if(key.str("choice") == p.str("answer")) 1 else 0,"max" to 1,"status" to "EXACT"),"attempt:$attemptId:grade:exact")
+                                    val correct = choiceId(qid)
+                                    val frozenMap = letterMap(posed?.payload ?: posedSnapshot)
+                                    if (correct != null) emit("attempt_graded",json("attemptId" to attemptId,
+                                        "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
+                                        "max" to 1,"status" to "EXACT",
+                                        "feedback" to choiceFeedback(correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
                                 }
                             }
                         }

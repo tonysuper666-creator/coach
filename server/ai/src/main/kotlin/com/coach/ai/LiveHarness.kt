@@ -1,5 +1,7 @@
 package com.coach.ai
 
+import com.coach.domain.Option
+import java.util.UUID
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -294,7 +296,7 @@ class LiveHarness(
                             add(
                                 buildJsonObject {
                                     put("stem", rejected.mcq.stem)
-                                    put("key", rejected.mcq.key)
+                                    put("correctOptionId", rejected.mcq.correctOptionId)
                                     put("reviewer_answer", rejected.reviewerAnswer ?: "")
                                     put("reasons", buildJsonArray { rejected.reasons.forEach { add(it) } })
                                 },
@@ -316,13 +318,21 @@ class LiveHarness(
         println("summary kps generated=$generated attempted=$attempted accepted=$accepted claude_calls=$claudeCalls")
     }
 
-    private fun questionJson(obj: JsonObject): Mcq = Mcq(
-        stem = obj["stem"]?.jsonPrimitive?.content ?: "",
-        options = (obj["options"] as? JsonObject)?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap(),
-        key = obj["key"]?.jsonPrimitive?.content ?: "",
-        explanation = obj["explanation"]?.jsonPrimitive?.content ?: "",
-        sourceQuote = obj["source_quote"]?.jsonPrimitive?.content ?: "",
-    )
+    /** Legacy corpus is converted once on load; letters never enter a model request. */
+    private fun questionJson(obj: JsonObject): Mcq {
+        val raw = obj["options"]
+        val options = if (raw is JsonObject) raw.entries.map { entry ->
+            Option(UUID.randomUUID().toString(), entry.value.jsonPrimitive.content)
+        } else (raw as? JsonArray).orEmpty().map { value ->
+            val option = value.jsonObject
+            Option(option.getValue("optionId").jsonPrimitive.content, option.getValue("text").jsonPrimitive.content)
+        }
+        val key = if (raw is JsonObject) raw.keys.indexOf(obj["key"]?.jsonPrimitive?.content).let {
+            options.getOrNull(it)?.optionId ?: "NONE"
+        } else obj["correctOptionId"]?.jsonPrimitive?.content ?: "NONE"
+        return Mcq(obj["stem"]?.jsonPrimitive?.content ?: "", options, key,
+            obj["explanation"]?.jsonPrimitive?.content ?: "", obj["source_quote"]?.jsonPrimitive?.content ?: "")
+    }
 
     fun mcq() {
         val all = JsonText.json.parseToJsonElement(inputs.resolve("mcq60.json").readText()).jsonArray
@@ -342,13 +352,7 @@ class LiveHarness(
             if (!gate.allowed) abort(gate.reason!!)
             val questions = batch.map { element ->
                 val obj = element.jsonObject
-                Mcq(
-                    stem = obj["stem"]!!.jsonPrimitive.content,
-                    options = obj["options"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
-                    key = obj["key"]!!.jsonPrimitive.content,
-                    explanation = "",
-                    sourceQuote = "",
-                )
+                questionJson(obj)
             }
             val request = ChatRequest(
                 task = "blind_review_existing",
@@ -366,13 +370,13 @@ class LiveHarness(
                 is BridgeResult.Success -> runCatching { TaskParsing.verdicts(response.text) }.getOrDefault(emptyList())
             }
             val rows = questions.mapIndexed { index, question ->
-                val verdict = verdicts.firstOrNull { it.id == index }
-                val agrees = verdict != null && verdict.answer == question.key && verdict.defects.isEmpty()
+                val verdict = verdicts.singleOrNull { it.id == index }?.let { TaskParsing.resolveVerdict(it, question) }
+                val agrees = verdict != null && verdict.answer == question.correctOptionId && verdict.defects.isEmpty()
                 if (agrees) agreed++
                 total++
                 buildJsonObject {
                     put("stem", question.stem)
-                    put("key", question.key)
+                    put("correctOptionId", question.correctOptionId)
                     put("reviewer_answer", verdict?.answer ?: "NONE")
                     put("defects", buildJsonArray { verdict?.defects?.forEach { add(it) } })
                     put("note", verdict?.note ?: "")
@@ -402,13 +406,7 @@ class LiveHarness(
         val items = payload["items"]!!.jsonArray
         val questions = items.map { element ->
             val obj = element.jsonObject
-            Mcq(
-                stem = obj["stem"]!!.jsonPrimitive.content,
-                options = obj["options"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content },
-                key = obj["key"]!!.jsonPrimitive.content,
-                explanation = "",
-                sourceQuote = "",
-            )
+            questionJson(obj)
         }
         val gate = preflight.check(needsClaude = true)
         if (!gate.allowed) abort(gate.reason!!)
@@ -430,12 +428,12 @@ class LiveHarness(
         }
         val rows = questions.mapIndexed { index, question ->
             val plantedKind = items[index].jsonObject["plant"]!!.jsonPrimitive.content
-            val verdict = verdicts.firstOrNull { it.id == index }
-            val flagged = verdict == null || verdict.answer != question.key || verdict.defects.isNotEmpty()
+            val verdict = verdicts.singleOrNull { it.id == index }?.let { TaskParsing.resolveVerdict(it, question) }
+            val flagged = verdict == null || verdict.answer != question.correctOptionId || verdict.defects.isNotEmpty()
             buildJsonObject {
                 put("plant", plantedKind)
                 put("stem", question.stem.take(120))
-                put("key", question.key)
+                put("correctOptionId", question.correctOptionId)
                 put("reviewer_answer", verdict?.answer ?: "NONE")
                 put("defects", buildJsonArray { verdict?.defects?.forEach { add(it) } })
                 put("flagged", flagged)
@@ -668,8 +666,8 @@ class LiveHarness(
 
     private fun mcqJson(mcq: Mcq): JsonObject = buildJsonObject {
         put("stem", mcq.stem)
-        put("key", mcq.key)
-        put("options", buildJsonObject { mcq.options.forEach { (k, v) -> put(k, v) } })
+        put("correctOptionId", mcq.correctOptionId)
+        put("options", buildJsonArray { mcq.options.forEach { option -> add(buildJsonObject { put("optionId", option.optionId); put("text", option.text) }) } })
         put("source_quote", mcq.sourceQuote)
     }
 

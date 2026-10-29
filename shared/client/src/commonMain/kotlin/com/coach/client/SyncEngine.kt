@@ -64,7 +64,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             check(snapshots.all { it.hello.epoch == hello.epoch }) { "Epoch changed during snapshot" }
             db.transaction {
                 q.clearReplica();q.clearProjections()
-                q.replayAfter(hello.lastSeqBefore)
+                // Ack seq belongs to its old epoch. Replay all retained commands before pruning
+                // against this epoch's backup watermark; commandId makes existing facts duplicates.
+                q.replayAfter(-1)
                 for(s in snapshots) { save(s.events); q.putMeta("cursor:${s.courseId}",s.hello.lastSeq.toString());q.putMeta("serverProjection:${s.courseId}",LedgerJson.encodeToString(s.projection)) }
                 q.putMeta("epoch",hello.epoch)
             }

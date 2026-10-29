@@ -8,7 +8,7 @@ python3 tools/dev/check-ledger-android.py
 COACH_VERIFY_LEDGER_WAKE=1 COACH_SKIP_SERVE=1 python3 tools/dev/check-android.py
 ```
 
-第一条运行 common 领域黄金用例、10,000 组随机排列/重复/晚到复核的字节一致性测试、SQLite 幂等/备份/栅栏测试和真实 HTTP/WS/JVM 客户端端到端测试。后者按顺序：
+第一条运行 common 领域黄金用例、10,000 组随机排列/重复/晚到复核的字节一致性测试、3,000 组序列逐前缀的掌握不变量测试、SQLite 幂等/备份/栅栏测试和真实 HTTP/WS/JVM 客户端端到端测试。后者按顺序：
 
 1. 创建旧备份，再产生题包；其中一题在备份里不存在。
 2. 在线提交并确认 1 答，停服务，离线落库 5 答，关闭并重开 SQLDelight 客户端。
@@ -16,6 +16,8 @@ COACH_VERIFY_LEDGER_WAKE=1 COACH_SKIP_SERVE=1 python3 tools/dev/check-android.py
 4. 停服务并恢复旧备份，生成新 epoch，重启；客户端自行检测、清副本、拉快照、重放。
 5. 核对 6 条原答、0 丢失、0 重复首答；缺题的 1 条为可见孤儿作答，不计分。客户端与服务端投影字节一致。
 6. 再同步不多写事件；新备份成功覆盖后才删保留命令。
+
+另有连续两次回档回归：手机确认一答后离线，服务端先恢复旧备份，再写入其他事件并备份，使新库 seq 超过这条旧确认 seq，然后再恢复。手机重连后仍须找回该答、保留原命令字节且不重复；已经包含在备份中的保留命令须返回 DUPLICATE。新纪元成功备份覆盖后，发件箱才正常清理。
 
 另一测试对真实 Ktor 子进程组 STOP 32 秒再 CONT，检查消息 truncated/suspended、running job 重新排队且 fence 增大、客户端自行重连。另一个 Android 仪器测试通过相同的 32 秒 STOP/CONT，要求手机端 SyncEngine 实际先观察到 offline，再自行重连到 online。它们覆盖进程调度间隔检测；没有调用系统休眠，因而不能推断物理休眠期间 macOS 单调钟是否前进。未动 Tailscale。
 
@@ -28,6 +30,8 @@ Android 脚本先构建，再用同一把重任务锁启动自己的 API 35 模�
 `SyncEngine` 接收平台 SQLDelight driver、设备 ID、ID 生成器、SHA-256 函数、HTTP transport。`enqueue()` 完成数据库插入后才可锁定题卡、显示本地反馈；客户端必须保留返回的命令原始字节和哈希。`start(scope)` 自动同步和重连；`syncOnce()` 可供人工复验。新 ID 应由设备生成，ULID 可用 domain 的纯函数 `ulid(timestampMillis, entropy)`。客户端本地数据库必须放应用持久数据目录，不能放缓存目录。
 
 `WireCommand.payloadBytes` 是原始 JSON UTF-8 字符串；外层 JSON 的转义不改变哈希输入。服务端不重序列化载荷来比较 command_log。回执含 epoch、backedUpThroughSeq、eventSeqs；冲突返回 HTTP 409 和已入账原答/判分，失败设备自己的原文作为记录保留。
+
+确认 seq 只在所属 epoch 内有意义，不能跨纪元比较。换纪元时，客户端先将所有仍保留且非 REJECTED 的命令重置为待重放，再应用新纪元的备份水位；已在恢复库中的命令由 commandId 去重。即使旧确认 seq 小于等于新库 `lastSeqBefore`，也必须重放，否则手机错过连续多次回档时会丢答。这与当前 DESIGN §4.3「只重放 seq 大于 lastSeqBefore」的字面条件不同，设计修订应将该句同步改成「重放全部仍保留的非 REJECTED 命令」，保留同段按 commandId 去重的规定；此次未改设计正文。
 
 `GET /v1/hello`、`GET /v1/courses/{c}/events?after=&limit=`、`GET /v1/courses/{c}/snapshot`、`POST /v1/commands`（单个或数组）与 `WS /v1/ws` 都要求 `Authorization: Bearer ...` 和 `X-Coach-Device`。令牌与设备绑定。WS 发 epoch 与 ledger 增量，重连可发 `{"t":"hello","epoch":"...","ledgerAfter":{"course":42}}`。REST 增量使用全库游标，课程序号有空洞是正常的。
 
@@ -63,9 +67,11 @@ COACH_DATA_DIR="$HOME/Coach/data" server/app/build/install/app/bin/app restore "
 
 恢复前检查备份完整标记和 SQLite integrity_check，当前数据库与 blobs 移到同目录的 before-restore 安全副本。旧 queued/running job 置 cancelled 后另行排队，清空租约，生成新 epoch 和 server_restored。设备只重放自己的命令；永远不再上线的设备仍无法补回自己的答题。这是设计的已知边界。
 
+已知边界：如果最新备份损坏而选择更早的备份，两份备份之间的已确认命令可能已经按较新的水位从发件箱删除，无法从该设备补回。M1 可评估延长已备份命令的保留时间，本次不改变保留策略。另在未知 attempt、题目仍在库时，补写 posed 的 kpIds 和 purpose 来自客户端快照，format 和 keyState 取服务端；单用户 M0 接受此边界，M1 的 question_kp 可用后应从服务端校验并取值。题目也不在库时则只保留孤儿作答、不计分。
+
 ## 本机测量（2026-10-29）
 
-22 个 JVM 测试通过，含 10,000 组随机用例；真实 HTTP/WS 回档演练 6/6 答找回、零丢失、零重复首答。Android 网络测试 3 项通过，系统 SQLite 3.44.3；Android SyncEngine 也实际经历了服务端挂起 32 秒，先观察到 offline，再自动重连至 online。下面数字来自 sable-api35（API 35、2 cores、nice 15），不含事件构造和进程启动时间：
+初次交付 head `09c9a29` 的 22 个 JVM 测试通过，含 10,000 组随机用例；真实 HTTP/WS 回档演练 6/6 答找回、零丢失、零重复首答。Android 网络测试 3 项通过，系统 SQLite 3.44.3；Android SyncEngine 也实际经历了服务端挂起 32 秒，先观察到 offline，再自动重连至 online。下面数字来自 sable-api35（API 35、2 cores、nice 15），不含事件构造和进程启动时间：
 
 | 测量 | 耗时 |
 |---|---:|
@@ -74,3 +80,5 @@ COACH_DATA_DIR="$HOME/Coach/data" server/app/build/install/app/bin/app restore "
 | force-stop 后新进程读缓存并首次解析 | 96 ms |
 
 两种缓存读取都与完整投影字节/哈希一致；首轮未加缓存的测量为 3,133 ms。测试打印实际读数，未用计时断言让慢机器失败。32 秒 STOP/CONT 与三进程按 PID 起停均已真实运行；没有进行物理系统休眠，没有修改 Tailscale 配置。桥仅在隔离 18798 端口做 health 检查，live AI / 桥物理调用数为 0。
+
+本轮复核修复的 `tools/dev/check-ledger.sh` 实测 25 个 JVM 测试、0 失败、0 跳过。连续两次回档补回答案与备份内命令去重两种回归均通过，原 HTTP/WS 演练仍是 6/6、零丢失零重复。新增不变量测试生成 3,000 组序列，检查 76,791 个前缀；有效性事件之外撤销通过、复习撤销通过、提示/assisted 进入稳固锁存、稳固但未通过，违规计数均为 0。Android/JVM 共享客户端构建通过；本轮未重测模拟器耗时，上表保留原测量的 head 与来源。

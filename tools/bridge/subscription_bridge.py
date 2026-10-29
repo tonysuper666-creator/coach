@@ -1226,6 +1226,7 @@ def buffered_stream(req: ReqCtx, cid: str, created: int, oc: Outcome, content: s
     served = oc.served_by or req.model
 
     async def gen():
+        final = oc
         try:
             yield sse(chunk_obj(cid, created, served,
                                 {"role": "assistant", "content": None if calls and not content else ""}))
@@ -1237,11 +1238,11 @@ def buffered_stream(req: ReqCtx, cid: str, created: int, oc: Outcome, content: s
             for f in terminal_frames(req, cid, created, oc, want_usage, oc.usage):
                 yield f
         except asyncio.CancelledError:
-            log_req(req, Outcome("truncated" if content else "failed", "client_gone", "error",
-                                 served, started=bool(content)))
+            final = Outcome("truncated" if content else "failed", "client_gone", "error",
+                            served, started=bool(content))
             raise
         finally:
-            log_req(req, oc)
+            log_req(req, final)
 
     headers = base_headers(req)
     headers["X-Served-Model"] = served
@@ -1425,7 +1426,7 @@ async def chat(request: Request):
                         break
             except StopAsyncIteration:
                 end_ev = None
-            except (BridgeError, BackgroundPaused):
+            except (BridgeError, BackgroundPaused, ClientGone):
                 await events.aclose()
                 raise
             for ev in pending:

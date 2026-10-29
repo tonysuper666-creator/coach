@@ -40,6 +40,24 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(("PASS  " if cond else "FAIL  ") + name + (f"  [{detail}]" if detail else ""), flush=True)
 
 
+def stub_procs(stub_dir: Path) -> int:
+    """桩是按 <stubdir>/claude 这个名字启动的（不是 stub_cli.py），按这个名字数。"""
+    out = subprocess.run(["pgrep", "-f", str(stub_dir / "claude")], capture_output=True, text=True)
+    return len([x for x in out.stdout.split() if x.strip()])
+
+
+def abort_after(port: int, body: dict, delay: float) -> None:
+    """发一个请求，delay 秒后直接断开（模拟客户端取消），一句话都不读。"""
+    s = socket.create_connection(("127.0.0.1", port), timeout=30)
+    payload = json.dumps(body, ensure_ascii=False).encode()
+    head = ("POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n")
+    s.sendall(head.encode() + payload)
+    time.sleep(delay)
+    s.close()
+
+
 def free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -209,6 +227,18 @@ def main() -> int:
         check("hang: status=failed", oc and oc["status"] == "failed", str(oc))
         check("hang: reason=timeout", oc and oc["reason"] == "timeout", str(oc and oc["reason"]))
         check("hang: finish_reason=error", oc and oc["finish_reason"] == "error")
+
+        # ---- 2c. 出字前取消：CLI 必须被杀掉，2 秒内无残留 ----
+        b.set_mode("hang")
+        before = stub_procs(stub_dir)
+        abort_after(b.port, {"model": "claude-sonnet-5-5", "stream": True,
+                             "messages": [{"role": "user", "content": "取消测试"}]}, delay=1.0)
+        during = stub_procs(stub_dir)
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and stub_procs(stub_dir) > before:
+            time.sleep(0.05)
+        check("取消（出字前）: 桩确实在跑过，之后 2 秒内回到基线", during > before and stub_procs(stub_dir) <= before,
+              f"before={before} during={during} after={stub_procs(stub_dir)}")
 
         # ---- 2b. 挂起（出字后）→ truncated / timeout ----
         b.set_mode("hang_after")

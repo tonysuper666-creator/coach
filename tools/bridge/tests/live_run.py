@@ -15,8 +15,10 @@ import argparse
 import os
 import subprocess
 import sys
+import json
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -47,7 +49,14 @@ def main() -> int:
     env = dict(os.environ)
     env.setdefault("COACH_BRIDGE_HOME", args.bridge_home)
     env["BRIDGE_PORT"] = str(args.port)
+    out_path = Path(args.out)
+    started = datetime.now().astimezone()
     bridge = subprocess.Popen([PY, str(BRIDGE_DIR / "subscription_bridge.py")], env=env)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "a", encoding="utf-8") as f:      # 起停时间要能进交付报告
+        f.write(json.dumps({"stage": "bridge", "event": "start", "at": started.isoformat(timespec="seconds"),
+                            "pid": bridge.pid, "port": args.port}, ensure_ascii=False) + "\n")
+    print(f"8791 起 {started:%H:%M:%S}（pid {bridge.pid}，端口 {args.port}）", flush=True)
     try:
         for _ in range(150):
             if healthy(args.port):
@@ -82,6 +91,11 @@ def main() -> int:
             bridge.wait(timeout=10)
         except subprocess.TimeoutExpired:
             bridge.kill()
+        stopped = datetime.now().astimezone()
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"stage": "bridge", "event": "stop", "at": stopped.isoformat(timespec="seconds"),
+                                "pid": bridge.pid, "port": args.port}, ensure_ascii=False) + "\n")
+        print(f"8791 停 {stopped:%H:%M:%S}（pid {bridge.pid}）", flush=True)
 
 
 if __name__ == "__main__":

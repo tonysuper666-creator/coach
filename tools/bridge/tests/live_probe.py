@@ -22,13 +22,15 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 BRIDGE_DIR = HERE.parent
 PY = sys.executable
-LIB = Path.home() / "DeepTutor" / "library" / "ECNM10119-健康经济学" / "教材"
+# 真实语料不进仓库（DESIGN §12.1）：默认从 ~/Coach/corpus/bridge-8791/ 读教材页，可用 COACH_CORPUS_DIR 覆盖。
+CORPUS = Path(os.environ.get("COACH_CORPUS_DIR", str(Path.home() / "Coach" / "corpus" / "bridge-8791"))).expanduser()
 DEEPTUTOR_LOG = Path.home() / "DeepTutor" / "data" / "user" / "runtime" / "bridge.log"
 PACK_LIMIT = 40_000          # 备课包上限（ADR-0002 §4：≤40K 字）
 PROGRESSIVE = ("system", "message_start", "content_block_start", "ping", "rate_limit_event",
@@ -37,7 +39,9 @@ PROGRESSIVE = ("system", "message_start", "content_block_start", "ping", "rate_l
 
 def build_pack(limit: int = PACK_LIMIT) -> str:
     """按真实备课包的取法拼：先用本知识点所在章节（逆向选择 08→09），不够再用其它章。"""
-    files = sorted(LIB.glob("*.md"))
+    files = sorted(CORPUS.glob("*.md"))
+    if not files:
+        raise SystemExit(f"语料目录 {CORPUS} 是空的：把教材页放进去，或设 COACH_CORPUS_DIR")
     preferred = [f for f in files if "Adverse selection" in f.name]
     ordered = preferred + [f for f in files if f not in preferred]
     corpus = ""
@@ -72,6 +76,44 @@ def recent_deeptutor_activity(minutes: int = 10) -> str | None:
     if age < minutes:
         return f"DeepTutor 的 8790 在 {age:.1f} 分钟前刚有请求（{m.group(1)}），按约束推迟"
     return None
+
+
+SKIP_QUIET = [False]       # --skip-quiet-check：只跳过 DeepTutor 占用检查，黑名单与额度检查照旧
+
+
+class Abort(Exception):
+    """触发期中保护：整批中止（不是重试）。"""
+
+
+BLACKOUT_START = datetime(2026, 11, 1, 18, 0)     # 11-01 18:00 起
+BLACKOUT_END = datetime(2026, 11, 2, 15, 0)       # 到 11-02 15:00 不跑任何 Claude live
+
+
+def in_blackout(now: datetime | None = None) -> bool:
+    now = now or datetime.now()
+    return BLACKOUT_START <= now < BLACKOUT_END
+
+
+def preflight(port: int, claude: bool, skip_quiet: bool = False) -> None:
+    """每个请求前都跑：黑名单时段、DeepTutor 是否在忙、额度是否有余量。任一不满足就中止整批。"""
+    if claude and in_blackout():
+        raise Abort(f"{BLACKOUT_START:%m-%d %H:%M} 至 {BLACKOUT_END:%m-%d %H:%M} 不跑 Claude live")
+    if not skip_quiet:
+        busy = recent_deeptutor_activity(10)
+        if busy:
+            raise Abort(busy)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
+            h = json.loads(r.read().decode("utf-8"))
+    except OSError:
+        return
+    rl = h.get("rate_limit") or {}
+    if rl.get("all_paused"):
+        raise Abort(f"rate_limit utilization={rl.get('utilization')} ≥ {rl.get('pause_at')}，全部调用暂停")
+    daily = h.get("daily") or {}
+    cap = daily.get("claude_cap") or 0
+    if claude and cap > 0 and (daily.get("remaining") or 0) <= 0:
+        raise Abort(f"今日 Claude 物理调用已用完（{daily.get('claude_calls')}/{cap}）")
 
 
 def claude_procs() -> int:
@@ -135,6 +177,7 @@ class SSE:
 def run_claude(port: int, pack: str, n: int, out: Path, effort: str | None = None) -> None:
     rows = []
     for i in range(n):
+        preflight(port, claude=True, skip_quiet=SKIP_QUIET[0])   # 每个请求前都查，不是在批开始前查一次
         nonce = os.urandom(6).hex()          # 每个请求冷缓存，与核查员 d3 探针同口径
         system = (f"[session {nonce}]\n你是健康经济学导师。下面是本知识点的备课材料（教材原文页）。"
                   f"只依据材料回答，用中文，120–180 字。\n\n{pack}")
@@ -184,6 +227,7 @@ def run_claude(port: int, pack: str, n: int, out: Path, effort: str | None = Non
 def run_codex(port: int, pack: str, n: int, out: Path, stream: bool = False) -> None:
     rows = []
     for i in range(n):
+        preflight(port, claude=False, skip_quiet=SKIP_QUIET[0])
         nonce = os.urandom(6).hex()
         system = f"[session {nonce}]\n你是健康经济学导师。材料：\n\n{pack}"
         body = {"model": "gpt-6.1-sol", "stream": stream,
@@ -237,6 +281,7 @@ def run_codex(port: int, pack: str, n: int, out: Path, stream: bool = False) -> 
 
 def run_cancel(port: int, pack: str, n: int, out: Path) -> None:
     for i in range(n):
+        preflight(port, claude=True, skip_quiet=SKIP_QUIET[0])
         base = claude_procs()
         nonce = os.urandom(6).hex()
         system = f"[session {nonce}]\n你是健康经济学导师。材料：\n\n{pack}"
@@ -324,8 +369,14 @@ def report(path: Path) -> None:
     if canc:
         print(f"取消：{len(canc)} 次全部在 2 秒内回到基线={[r['ok_within_2s'] for r in canc]}，"
               f"清理耗时={[r['cleanup_ms'] for r in canc]}ms")
+    bridges = [r for r in rows if r["stage"] == "bridge"]
+    for ev in ("start", "stop"):
+        ts = [r["at"][11:19] for r in bridges if r["event"] == ev]
+        if ts:
+            print(f"8791 {'起' if ev == 'start' else '停'}：{', '.join(ts)}")
     calls = sum((r.get("physical_calls") or 0) for r in rows)
-    print(f"本文件物理调用合计：{calls}")
+    aborted = [r for r in rows if r.get("event") == "aborted"]
+    print(f"本文件物理调用合计：{calls}" + (f"；中止批次 {len(aborted)} 次（期中保护）" if aborted else ""))
 
 
 def main() -> int:
@@ -345,22 +396,23 @@ def main() -> int:
         report(out)
         return 0
 
-    if not args.skip_quiet_check:
-        busy = recent_deeptutor_activity(10)
-        if busy:
-            print(f"推迟：{busy}", flush=True)
-            return 3
+    SKIP_QUIET[0] = args.skip_quiet_check
 
     pack = build_pack(args.pack)
-    print(f"备课包 {len(pack)} 字（来自 {LIB}）", flush=True)
-    if args.stage == "claude":
-        run_claude(args.port, pack, args.n, out, args.effort)
-    elif args.stage == "codex":
-        run_codex(args.port, pack, args.n, out, stream=False)
-    elif args.stage == "codex-stream":
-        run_codex(args.port, pack, args.n, out, stream=True)
-    else:
-        run_cancel(args.port, pack, args.n, out)
+    print(f"备课包 {len(pack)} 字（来自 {CORPUS}）", flush=True)
+    try:
+        if args.stage == "claude":
+            run_claude(args.port, pack, args.n, out, args.effort)
+        elif args.stage == "codex":
+            run_codex(args.port, pack, args.n, out, stream=False)
+        elif args.stage == "codex-stream":
+            run_codex(args.port, pack, args.n, out, stream=True)
+        else:
+            run_cancel(args.port, pack, args.n, out)
+    except Abort as e:
+        append(out, {"stage": args.stage, "event": "aborted", "reason": str(e), "at": time.time()})
+        print(f"中止整批：{e}", flush=True)
+        return 3
     return 0
 
 

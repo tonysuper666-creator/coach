@@ -85,6 +85,14 @@ BACKGROUND_BACKEND = os.environ.get("BRIDGE_BACKGROUND_BACKEND", "codex")
 BACKGROUND_MODEL = os.environ.get("BRIDGE_BACKGROUND_MODEL", "gpt-6.1-sol")
 AGY_ENABLED = os.environ.get("BRIDGE_AGY_ENABLED", "0") == "1"     # agy 默认关（条款风险）
 HEALTH_CACHE_SEC = float(os.environ.get("BRIDGE_HEALTH_CACHE_SEC", "60"))
+# 期中保护（TON-1036 评审 I8，2026-10-29 收紧）：Coach 的 Claude 物理调用每天硬上限，
+# 与 TON-1041 合计 60 次；同一天还有别的卡在跑时把这里调成剩余额度。
+DAILY_CLAUDE_CAP = int(os.environ.get("BRIDGE_DAILY_CLAUDE_CAP", "60"))
+RATE_PAUSE_AT = float(os.environ.get("BRIDGE_RATE_PAUSE_AT", "0.5"))   # utilization ≥ 这个值就暂停全部调用
+STATE_DIR = BRIDGE_HOME / "state"
+DAILY_FILE = STATE_DIR / "daily.json"
+SANDBOX_TEMPLATE = BRIDGE_DIR / "sandbox" / "agent_sandbox.sb.in"
+SANDBOX_PROFILE = WORK_DIR / "agent_sandbox.sb"
 
 REFUSAL_FALLBACK = "gpt-6.1-sol"            # 仅当 X-Coach-Fallback: on 时才会被用到
 
@@ -111,7 +119,7 @@ def build_registry() -> dict[str, ModelSpec]:
 
 MODELS = build_registry()
 
-for _d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent):
+for _d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
     try:
         _d.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -119,6 +127,68 @@ for _d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent):
 
 EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh", "max"}
 CLAUDE_EFFORT_VALUES = {"low", "medium", "high", "xhigh", "max"}
+
+
+def render_sandbox_profile() -> Path:
+    """把 sandbox/agent_sandbox.sb.in 里的 @@HOME@@ 换成真实主目录，渲染到 bridge 的 work 目录。
+
+    仓库里不留本机绝对路径（DESIGN §12.1）；沙箱包装用 COACH_SANDBOX_PROFILE 指过来。
+    """
+    try:
+        tpl = SANDBOX_TEMPLATE.read_text(encoding="utf-8")
+    except OSError:
+        return SANDBOX_PROFILE
+    body = tpl.replace("@@HOME@@", str(Path.home()))
+    try:
+        SANDBOX_PROFILE.parent.mkdir(parents=True, exist_ok=True)
+        if not SANDBOX_PROFILE.exists() or SANDBOX_PROFILE.read_text(encoding="utf-8") != body:
+            tmp = SANDBOX_PROFILE.with_suffix(".tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(SANDBOX_PROFILE)
+    except OSError:
+        pass
+    return SANDBOX_PROFILE
+
+
+render_sandbox_profile()      # 定义之后立刻渲染一份，供 codex/agy 的沙箱包装用
+
+
+def _today() -> str:
+    return datetime.now().astimezone().date().isoformat()
+
+
+def read_daily() -> dict:
+    try:
+        data = json.loads(DAILY_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict) or data.get("date") != _today():
+        data = {"date": _today(), "claude_calls": 0}
+    return data
+
+
+def daily_used() -> int:
+    return int(read_daily().get("claude_calls") or 0)
+
+
+def reserve_claude_call() -> None:
+    """每次真的 spawn claude 之前先占用今日额度；超了就不 spawn（硬上限，不是建议值）。"""
+    if DAILY_CLAUDE_CAP <= 0:
+        return
+    data = read_daily()
+    used = int(data.get("claude_calls") or 0)
+    if used >= DAILY_CLAUDE_CAP:
+        raise BridgeError(429, f"今日 Claude 物理调用已达上限 {DAILY_CLAUDE_CAP} 次"
+                               "（期中保护，与 TON-1041 合计），今天不再调用 Claude",
+                          "rate_limit_error", "daily_claude_cap")
+    data["claude_calls"] = used + 1
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = DAILY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(DAILY_FILE)
+    except OSError:
+        pass
 
 
 # ---------- 错误与终态 ----------
@@ -144,6 +214,10 @@ class ClientGone(Exception):
 
 class BackgroundPaused(Exception):
     """额度紧张，后台生成暂停。"""
+
+
+class RatePaused(Exception):
+    """utilization 太高，全部调用暂停（期中保护）。"""
 
 
 def err_response(e: BridgeError, *, x_coach: dict | None = None, headers: dict | None = None) -> JSONResponse:
@@ -381,15 +455,24 @@ class RateLimit:
     at: float | None = None
 
     def blocked(self) -> bool:
+        """后台生成的暂停阈值（utilization≥0.8 或状态不允许）。"""
         if self.status and self.status.lower() not in ("allowed", "ok"):
             return True
         return self.utilization is not None and self.utilization >= 0.8
+
+    def paused_all(self) -> bool:
+        """期中保护：utilization≥0.5 或状态不允许时，前台后台都不再调用。"""
+        if self.status and self.status.lower() not in ("allowed", "ok"):
+            return True
+        return self.utilization is not None and self.utilization >= RATE_PAUSE_AT
 
     def snapshot(self) -> dict:
         return {"utilization": self.utilization, "status": self.status,
                 "resets_at": self.resets_at,
                 "at": datetime.fromtimestamp(self.at).astimezone().isoformat(timespec="seconds") if self.at else None,
-                "background_paused": self.blocked()}
+                "background_paused": self.blocked(),
+                "all_paused": self.paused_all(),
+                "pause_at": RATE_PAUSE_AT}
 
 
 RATE_LIMIT = RateLimit()
@@ -486,6 +569,7 @@ def child_env(backend: str) -> dict[str, str]:
     env["PATH"] = CHILD_PATH + ":" + env.get("PATH", "")
     env["LANG"] = "en_US.UTF-8"
     env["TMPDIR"] = str(TMP_DIR)
+    env["COACH_SANDBOX_PROFILE"] = str(SANDBOX_PROFILE)
     if backend == "claude":
         # 只走订阅登录：从别处（如 Claude Code 桌面端）继承来的 ANTHROPIC_* / CLAUDE_* 会改线路或改模式，一律去掉。
         for k in list(env):
@@ -640,6 +724,7 @@ async def call_claude(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     """非流式 Claude：--output-format json。"""
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
+        reserve_claude_call()
         req.physical_calls += 1
         argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=False)
         budget = CLAUDE_TIMEOUT + STREAM_TOTAL_TIMEOUT   # 非流式：整段等回来
@@ -704,6 +789,7 @@ async def claude_stream(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
     argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=True)
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
+        reserve_claude_call()
         proc = await spawn(argv, CLAUDE_CWD, child_env("claude"), stdin_pipe=True)
         req.physical_calls += 1
 
@@ -905,6 +991,8 @@ async def call_codex(req: ReqCtx, model: str, effort: str | None) -> Outcome:
 async def slot(req: ReqCtx, backend: str):
     """拿到槽之后把 t_acq 交出去；后台请求额外占一个后台槽，额度紧张时直接拒。"""
     global BG_ACTIVE
+    if RATE_LIMIT.paused_all():
+        raise RatePaused()
     if req.background:
         if RATE_LIMIT.blocked():
             raise BackgroundPaused()
@@ -1014,8 +1102,9 @@ def clean_json(text: str) -> str:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent):
+    for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    render_sandbox_profile()
     try:
         yield
     finally:
@@ -1103,6 +1192,8 @@ async def health_payload() -> dict:
         "concurrency": {name: gate.snapshot() for name, gate in GATES.items()}
                        | {"background": {"limit": BACKGROUND_SLOTS, "active": BG_ACTIVE}},
         "background_backend": BACKGROUND_BACKEND or None,
+        "daily": {"date": _today(), "claude_calls": daily_used(), "claude_cap": DAILY_CLAUDE_CAP,
+                  "remaining": max(0, DAILY_CLAUDE_CAP - daily_used()) if DAILY_CLAUDE_CAP > 0 else None},
         "rate_limit": RATE_LIMIT.snapshot(),
         "fallback_default": "off",
     }
@@ -1429,7 +1520,7 @@ async def chat(request: Request):
             except ClientGone:
                 await events.aclose()
                 raise
-            except BackgroundPaused:
+            except (BackgroundPaused, RatePaused):
                 await events.aclose()
                 raise
             except BridgeError as e:
@@ -1499,6 +1590,12 @@ async def chat(request: Request):
         return err_response(BridgeError(429, "额度紧张（rate_limit utilization≥0.8 或 status≠allowed），后台生成暂停",
                                         "rate_limit_error", "background_paused"),
                             headers={"X-Request-Id": rid, "Retry-After": "900"})
+    except RatePaused:
+        rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
+        return err_response(BridgeError(429, f"额度 usage 已达 {RATE_LIMIT.utilization}（阈值 {RATE_PAUSE_AT}），"
+                                               "期中保护：全部调用暂停，等他复习完再跑",
+                                        "rate_limit_error", "rate_limit_paused"),
+                            headers={"X-Request-Id": rid, "Retry-After": "900"})
     except BridgeError as e:
         rid = req.request_id if req else (request.headers.get("x-request-id") or secrets.token_hex(8))
         headers = {"X-Request-Id": rid, "X-Coach-Fallback": "on" if (req and req.fallback_enabled) else "off"}
@@ -1524,6 +1621,7 @@ async def chat(request: Request):
 
 
 if __name__ == "__main__":
-    for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent):
+    for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    render_sandbox_profile()
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning", access_log=False)

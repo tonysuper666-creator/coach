@@ -338,8 +338,34 @@ def main() -> int:
               json.loads(b3.http("GET", "/health")[2])["rate_limit"]["utilization"] == 0.95)
         r = b3.ask("后台请求应被拒", headers={"X-Coach-Background": "1"})
         check("rate: 后台请求 429", r["status"] == 429, str(r["status"]))
+        r = b3.ask("前台也应被拒")          # 期中保护：utilization≥0.5 暂停全部调用
+        check("rate: 前台请求也 429（≥0.5 全停）", r["status"] == 429, str(r["status"]))
+        h = json.loads(b3.http("GET", "/health")[2])
+        check("rate: /health 报 all_paused 与阈值 0.5",
+              h["rate_limit"]["all_paused"] is True and h["rate_limit"]["pause_at"] == 0.5)
+        calls_before = stub_procs(stub_dir)
+        check("rate: 暂停后没有新的桩进程", calls_before == 0, str(calls_before))
     finally:
         b3.stop()
+
+    # ---- 每天 Claude 物理调用硬上限 ----
+    b4 = Bridge(stub_dir, run_dir / "home-d", {"BRIDGE_DAILY_CLAUDE_CAP": "2"})
+    try:
+        b4.set_mode("ok")
+        h = json.loads(b4.http("GET", "/health")[2])
+        check("daily: /health 报当天已用/上限", h["daily"]["claude_cap"] == 2 and h["daily"]["claude_calls"] == 0,
+              str(h["daily"]))
+        codes = [b4.ask(f"额度第 {i} 次")["status"] for i in range(3)]
+        check("daily: 前 2 次放行、第 3 次 429", codes[:2] == [200, 200] and codes[2] == 429, str(codes))
+        r = b4.ask("超出后再来一次")
+        check("daily: 超上限后仍 429", r["status"] == 429 and (r["error"] or {}).get("code") == "daily_claude_cap",
+              str((r["error"] or {}).get("code")))
+        h = json.loads(b4.http("GET", "/health")[2])
+        check("daily: 计数停在 2", h["daily"]["claude_calls"] == 2 and h["daily"]["remaining"] == 0, str(h["daily"]))
+        r = b4.ask("Codex 不受 Claude 额度限制", model="gpt-6.1-sol", stream=False)
+        check("daily: Codex 照常可用", r["status"] == 200, str(r["status"]))
+    finally:
+        b4.stop()
 
     shutil.rmtree(run_dir, ignore_errors=True)
 

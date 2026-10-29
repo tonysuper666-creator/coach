@@ -69,9 +69,20 @@ HTTP 4xx/429 只留给请求本身的问题（坏 JSON、未知模型、提示�
 
 ## 沙箱
 
-`bin/{codex,agy,grok}` → `sandbox/sandboxed_agent.sh` → `sandbox/agent_sandbox.sb`。
-`.sb` 从 DeepTutor 版复制后重审过（见文件头注释）：去掉 `~/DeepTutor/library` 的读权限（备课包走提示词，CLI 不需要翻课程文件）、
+`bin/{codex,agy,grok}` → `sandbox/sandboxed_agent.sh` → 由桥渲染的 `$COACH_BRIDGE_HOME/work/agent_sandbox.sb`。
+SBPL 模板是 `sandbox/agent_sandbox.sb.in`（`@@HOME@@` 占位），启动时渲染 —— 仓库里不留本机绝对路径（DESIGN §12.1）。
+白名单从 DeepTutor 版复制后重审过（见文件头注释）：去掉 `~/DeepTutor/library` 的读权限（备课包走提示词，CLI 不需要翻课程文件）、
 `~/Coach` 默认全禁只放行 `~/Coach/bridge/work`。Claude 不走沙箱，与 8790 现役行为一致（`--tools "" --strict-mcp-config`，无工具面）。
+
+## 期中保护（2026-10-29 收紧，至 11-02 15:00）
+
+| 规则 | 落地 |
+|---|---|
+| 每个请求前都查 DeepTutor 是否在忙 | `tests/live_probe.py` 的 `preflight()` 每个请求前跑一次，最后一行 10 分钟内有活动就**中止整批**（不是只在批首查） |
+| Coach 的 Claude 物理调用 ≤60 次/天（与 TON-1041 合计） | 桥内硬上限 `BRIDGE_DAILY_CLAUDE_CAP`（默认 60），计数在 `$COACH_BRIDGE_HOME/state/daily.json`，超了直接 429 `daily_claude_cap`，不 spawn；同一天还有别的卡在跑就把 cap 调成剩余额度 |
+| `rate_limit_event` utilization ≥0.5 暂停全部调用 | `BRIDGE_RATE_PAUSE_AT`（默认 0.5）：前台后台一起 429 `rate_limit_paused`；后台另有 0.8 的更严阈值 |
+| 11-01 18:00 – 11-02 15:00 不跑任何 Claude live | `live_probe.in_blackout()` 直接拒跑（Codex live 不受限） |
+| 8791 只在测试时段手动起，测完按 PID 停 | `live_run.py` 起停各写一行 `stage=bridge` 记录（含 pid 与时间），报告里据此列起停时间；不装 LaunchAgent |
 
 ## 测试
 
@@ -79,7 +90,8 @@ HTTP 4xx/429 只留给请求本身的问题（坏 JSON、未知模型、提示�
 # 桩 CLI 故障注入（不花额度）：kill -9 中途、挂起超时、拒答兜底开/关、max_output_tokens、4 请求排队
 tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py
 
-# live（真实 CLI + 真实教材页；跑前只读检查 ~/DeepTutor/.../bridge.log，10 分钟内有活动就推迟）
+# live（真实 CLI + 真实教材页；每个请求前都只读检查 DeepTutor 的 bridge.log，忙就中止整批）
+# 语料：把教材页放进 ~/Coach/corpus/bridge-8791/（或用 COACH_CORPUS_DIR 指过去），仓库里不放语料
 tools/bridge/.venv/bin/python tools/bridge/tests/live_run.py --stages claude --claude-n 20
 tools/bridge/.venv/bin/python tools/bridge/tests/live_run.py --stages codex,codex-stream,cancel --codex-n 5
 ```
@@ -105,6 +117,9 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 | 流到一半断开（n=2） | `pgrep -f "claude -p"` 立即回到基线（0 次轮询即已退出），日志 `status=truncated reason=client_gone` |
 | 桩 CLI 故障注入 | 51 项断言全绿（`tests/fault_injection.py`） |
 | 8790 与 `subscription_bridge.py` | 全程 PID 70368、shasum `ef98bb7…` 未变 |
+
+8791 起停（每次都是 `live_run.py` 起、跑完按 PID 停）：20:00 起–20:05 停（33 个请求）、20:21 起–20:24 停（20）、20:24 起–20:25 停（1，改完再验一次）。
+当天 Claude 物理调用 43 次（上限 60），`state/daily.json` 已按实际数记为 43（计数器是这批跑完之后才加的）。
 
 本卡物理调用：Claude 20+20+2（取消）+1（改完再验一次）=43，Codex 5+3=8，合计 **51**。
 （`bridge.log` 里有 3 行 codex-stream 重复，是 7477290 修掉的双记日志，不是多出来的调用。）

@@ -19,31 +19,51 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
-fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null) {
+fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null, autoplay: Int = 0, baselineSheet: Boolean = false) {
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             if (chinesePage != null && corpus != null) { ChineseSheet(corpus.chinese.drop(chinesePage * 2).take(2)); return@Surface }
+            if (baselineSheet && corpus != null) { BaselineSheet(corpus.assets); return@Surface }
             LaunchedEffect(Unit) { report("READY messages=${corpus?.messages?.size ?: 0}") }
             val list = rememberLazyListState(state.scrollIndex, state.scrollOffset)
+            // Autoplay always starts from the first answer, before any saved cursor can be read.
+            remember(autoplay) { if (autoplay != 0 && corpus != null) { state.message = 0; state.cursor = 0; state.scrollIndex = 0; state.scrollOffset = 0; state.running = true } }
             val message = corpus?.messages?.getOrNull(state.message).orEmpty()
             val engine = remember(message) { StreamingMarkdown() }
             var blocks by remember(message) { mutableStateOf(engine.append(message.take(state.cursor), state.cursor >= message.length)) }
-            var pinned by remember { mutableStateOf(true) }
+            var pinned by remember { mutableStateOf(autoplay != 2) }
             val failures = remember { mutableSetOf<String>() }
             var maxShift by remember { mutableStateOf(0f) }
+            // Run-wide metrics for autoplay: sealed-block height change, first visible item shift while the reader is scrolled away.
+            val run = remember { RunMetrics() }
             val heights = remember(message) { mutableMapOf<Int, Pair<Int, Int>>() }
             val density = LocalDensity.current
             LaunchedEffect(state.running, message) {
+                var scrolledAway = false
                 while (state.running && state.cursor < message.length) {
                     delay(50)
                     val end = minOf(state.cursor + 30, message.length)
+                    if (autoplay == 2 && !scrolledAway && state.cursor > message.length * 2 / 5 && blocks.size > 2) { list.scrollToItem(1, 0); scrolledAway = true }
+                    val beforeIndex = list.firstVisibleItemIndex; val beforeOffset = list.firstVisibleItemScrollOffset
                     blocks = engine.append(message.substring(state.cursor, end), end == message.length)
                     state.cursor = end
                     if (pinned && blocks.isNotEmpty()) list.scrollToItem(blocks.lastIndex)
+                    else if (scrolledAway) {
+                        androidx.compose.runtime.withFrameNanos { }
+                        run.firstVisibleShift = maxOf(run.firstVisibleShift, if (list.firstVisibleItemIndex == beforeIndex) kotlin.math.abs(list.firstVisibleItemScrollOffset - beforeOffset).toFloat() else Float.MAX_VALUE)
+                        run.firstVisibleSamples++
+                    }
                 }
                 if (state.cursor >= message.length) state.running = false
                 save()
                 report("REPLAY message=${state.message} chars=${state.cursor} blocks=${blocks.size} sealedHeightShiftPx=$maxShift failures=${failures.size} parsedChars=${engine.parsedCharacters}")
+                if (autoplay != 0 && corpus != null && state.cursor >= message.length && run.lastCounted != state.message) {
+                    run.lastCounted = state.message
+                    run.sealedShift = maxOf(run.sealedShift, maxShift); run.failures += failures.size; run.messages++
+                    if (state.message + 1 < corpus.messages.size) {
+                        state.message += 1; state.cursor = 0; state.scrollIndex = 0; state.scrollOffset = 0; pinned = autoplay != 2; state.running = true
+                    } else report("SUMMARY mode=${if (autoplay == 2) "scrolled-away" else "pinned"} messages=${run.messages} sealedHeightShiftPx=${run.sealedShift} firstVisibleShiftPx=${run.firstVisibleShift} firstVisibleSamples=${run.firstVisibleSamples} failures=${run.failures}")
+                }
             }
             LaunchedEffect(list) {
                 snapshotFlow { Triple(list.firstVisibleItemIndex, list.firstVisibleItemScrollOffset, list.isScrollInProgress) }.distinctUntilChanged().collect { (i, offset, scrolling) ->
@@ -94,6 +114,17 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                 }
             }
         }
+    }
+}
+
+private class RunMetrics { var sealedShift = 0f; var firstVisibleShift = 0f; var firstVisibleSamples = 0; var failures = 0; var messages = 0; var lastCounted = -1 }
+
+/** Digits sit on the baseline in both the text font and the MathJax glyphs, so their ink bottoms expose inline baseline error. */
+@Composable
+private fun BaselineSheet(assets: Map<String, MathAsset>) {
+    val blocks = remember { StreamingMarkdown().append("40 $40$ 12 $12$ 3 $3$ 40", true) }
+    Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).padding(24.dp)) {
+        blocks.forEach { MarkdownContent(it, assets, modifier = Modifier.fillMaxWidth()) }
     }
 }
 

@@ -43,7 +43,12 @@ private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: 
     val style = MaterialTheme.typography.bodyLarge
     val density = androidx.compose.ui.platform.LocalDensity.current
     val foreground = LocalContentColor.current
+    // Fixed line height keeps the line box constant, but the baseline inside it depends on whether the line holds CJK
+    // fallback glyphs. Pad for both, then read the real line baseline from the layout (see onTextLayout below).
+    val latinLayout = remember(style, density) { measurer.measure(AnnotatedString("Hx"), style) }
     val textLayout = remember(style, density) { measurer.measure(AnnotatedString("Hx中文"), style) }
+    val baselines = remember(source) { mutableStateMapOf<String, Float>() }
+    val order = mutableListOf<String>()
     val em = with(density) { style.fontSize.toPx() }
     val tokens = remember(source, model) { MathDelimiters.tokenize(source, model).segments }
     val inline = mutableMapOf<String, InlineTextContent>()
@@ -59,43 +64,64 @@ private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: 
                     LaunchedEffect(key) { onFailure(key) }
                     withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = MaterialTheme.colorScheme.surfaceVariant)) { append("⟦$tex⟧") }
                 } else {
+                    val boxLatin = inlineMathBox(document.ascentEm * em, document.descentEm * em, latinLayout.firstBaseline, latinLayout.size.height.toFloat())
                     val box = inlineMathBox(document.ascentEm * em, document.descentEm * em, textLayout.firstBaseline, textLayout.size.height.toFloat())
+                        .let { if (boxLatin.height > it.height) boxLatin.copy(baseline = it.baseline + (boxLatin.height - it.height) / 2) else it }
                     val id = "math$index"
                     val w = with(density) { (document.widthEm * em).toSp() }
                     val h = with(density) { box.height.toSp() }
                     inline[id] = InlineTextContent(Placeholder(w, h, PlaceholderVerticalAlign.TextCenter)) {
-                        Image(MathSvgPainter(document, foreground, measurer, em, box.baseline, box.height), tex, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.None)
+                        Image(MathSvgPainter(document, foreground, measurer, em, baselines[id] ?: box.baseline, box.height), tex, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.None)
                     }
                     if (token.display && length > 0) append('\n')
+                    order += id
                     appendInlineContent(id, tex)
                     if (token.display) append('\n')
                 }
             }
         }
     }
-    Text(text, modifier, style = style, inlineContent = inline)
+    Text(text, modifier, style = style, inlineContent = inline, onTextLayout = { layout ->
+        layout.placeholderRects.forEachIndexed { i, rect ->
+            val id = order.getOrNull(i) ?: return@forEachIndexed
+            if (rect == null) return@forEachIndexed
+            val baseline = layout.getLineBaseline(layout.getLineForVerticalPosition(rect.center.y)) - rect.top
+            if (kotlin.math.abs((baselines[id] ?: Float.MAX_VALUE) - baseline) > .25f) baselines[id] = baseline
+        }
+    })
 }
 
 /** Render inline AST styles; reference definitions/links and raw HTML stay literal. */
 private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
     val root = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(source)
     fun visit(node: ASTNode) {
-        val type = node.type.toString()
+        val type = node.type.name
         val value = source.substring(node.startOffset, node.endOffset)
         when {
             type == "LINK_DEFINITION" || type.contains("REFERENCE_LINK") -> append(value)
-            type == "STRONG" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { node.children.filterNot { it.type.toString() in setOf("EMPH", "STRONG") && it.children.isEmpty() }.forEach(::visit) }
-            type == "EMPH" && node.children.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { node.children.filterNot { it.type.toString() == "EMPH" && it.children.isEmpty() }.forEach(::visit) }
+            type == "STRONG" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { node.children.filterNot { it.type.name in setOf("EMPH", "STRONG") && it.children.isEmpty() }.forEach(::visit) }
+            type == "EMPH" && node.children.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { node.children.filterNot { it.type.name == "EMPH" && it.children.isEmpty() }.forEach(::visit) }
             type == "CODE_SPAN" -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(value.trim('`')) }
             type == "ATX_CONTENT" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontSize = 22.sp)) { node.children.forEach(::visit) }
             type == "INLINE_LINK" -> {
-                val label = node.children.find { it.type.toString() == "LINK_TEXT" }
+                val label = node.children.find { it.type.name == "LINK_TEXT" }
                 withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) { if (label != null) append(source.substring(label.startOffset, label.endOffset).trim('[', ']')) else append(value) }
             }
             node.children.isNotEmpty() -> node.children.forEach(::visit)
             type == "ATX_HEADER" -> Unit
-            else -> append(value)
+            else -> append(unescapeBackslashes(value))
         }
     }
     visit(root)
+}
+
+/** CommonMark backslash escapes: a backslash before ASCII punctuation is dropped. Plain loop, no regex (ICU rejects `{` in classes). */
+private fun unescapeBackslashes(text: String): String {
+    val punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+    val out = StringBuilder(text.length)
+    var i = 0
+    while (i < text.length) {
+        if (text[i] == '\\' && i + 1 < text.length && text[i + 1] in punctuation) { out.append(text[i + 1]); i += 2 } else { out.append(text[i]); i++ }
+    }
+    return out.toString()
 }

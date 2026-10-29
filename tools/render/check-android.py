@@ -18,8 +18,8 @@ def text(*args): return device(*args,capture_output=True,text=True).stdout
 def snapshot():
     xml = text('exec-out','run-as',package,'cat','shared_prefs/render-replay.xml')
     return json.loads(ET.fromstring(xml).find("string[@name='state']").text)
-def launch(page=None):
-    args=['am','start','-W','-n',package+'/.MainActivity']
+def launch(page=None,extra=()):
+    args=['am','start','-W','-n',package+'/.MainActivity',*extra]
     if page is not None: args += ['--ei','chinesePage',str(page)]
     shell(*args,capture_output=True)
 def home(): shell('input','keyevent','KEYCODE_HOME'); time.sleep(.5)
@@ -93,10 +93,29 @@ try:
     for page in range(7):
         home();shell('am','force-stop',package);launch(page);time.sleep(.8);capture(f'chinese-{page+1}.png')
     home()
+    # Full replay of the 20 staged answers: pinned to bottom, then scrolled away from the tail (wm size is still Pad landscape).
+    shell('wm','size','1248x1972')
+    runs={}
+    for name,mode in [('pinned',1),('scrolled-away',2)]:
+        shell('am','force-stop',package);device('logcat','-c');launch(extra=['--ei','autoplay',str(mode)])
+        for _ in range(400):
+            logs=text('logcat','-d','-s','CoachRender:I','AndroidRuntime:E','*:S')
+            if 'FATAL EXCEPTION' in logs: raise RuntimeError(logs)
+            if 'SUMMARY mode=' in logs: break
+            time.sleep(.5)
+        else: raise RuntimeError('autoplay timeout: '+logs[-2000:])
+        capture(f'replay-{name}.png');home();time.sleep(.5)
+        logs=text('logcat','-d','-s','CoachRender:I','AndroidRuntime:E','*:S')
+        runs[name]={'summary':[l.split('CoachRender: ',1)[1] for l in logs.splitlines() if 'SUMMARY mode=' in l][-1],
+                    'jank':[l.split('CoachRender: ',1)[1] for l in logs.splitlines() if 'JANK frames' in l][-1]}
+        (out/f'runtime-{name}.log').write_text(logs)
+    # Inline baseline sheet: digits in text and formula must share a baseline.
+    shell('am','force-stop',package);launch(extra=['--ez','baseline','true']);time.sleep(1.5);capture('baseline.png');home()
+    shell('wm','size','reset');shell('wm','density','reset')
     logs=text('logcat','-d','-s','CoachRender:I','AndroidRuntime:E','*:S')
     (out/'runtime.log').write_text(logs)
     assert 'FATAL EXCEPTION' not in logs,logs
-    summary={'forms':results,'beforeKill':before,'afterKill':after,'processReclaimed':True,'chineseScreenshots':7,'chineseFormulas':14,'ai_calls':0}
+    summary={'forms':results,'beforeKill':before,'afterKill':after,'processReclaimed':True,'chineseScreenshots':7,'chineseFormulas':14,'replayRuns':runs,'ai_calls':0}
     (out/'summary.json').write_text(json.dumps(summary,indent=2))
     print(json.dumps({'forms':len(results),'processReclaimed':True,'chineseFormulas':14,'statePreserved':True}))
 finally:

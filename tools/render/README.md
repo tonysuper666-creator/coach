@@ -39,33 +39,25 @@ a fabricated tutor response. Exporting formulas is a developer-only entry point.
 
 ## Current evidence and handoff
 
-- Shared JVM checks pass: 36 language-independent delimiter cases; replay of
-  20 staged answers (215 formulas); 579 currency lines with 0 differences in
-  recognized-formula count from the service reference. Tests also cover sealed
-  block identity, the Enter policy, state serialization and baseline geometry.
-  Formula counts are not a substitute for independently annotating currencies.
-- Both debug APK and desktop app-image build, including an offline rebuild.
-- Painter raster export completed for 265 formula instances (50 course formulas
-  plus all formulas in the 20 answers). Final strict pixel comparison passes only 2/265 (0.75%).
-  The Chinese glyph width was corrected to retain the spacing between MathJax's
-  1000-unit glyph origins; text ink uses its actual font-size estimate.
-- **Android currently crashes on startup**: `JankStats.createAndTrack(window)` is
-  called before `setContent`, so `window.peekDecorView()` is null. Initialize it
-  after the decor exists, then rerun the complete emulator check. Two Android runs
-  encountered this startup problem; work was handed to the configured fallback.
-- Four-form state retention, actual background process recovery, JankStats,
-  sealed-block displacement, first-visible-message displacement, baseline
-  screenshot comparison and the fourteen Android Chinese formulas are **not
-  verified**. The height probe reports height changes only; it is not a full
-  displacement measurement. The scripts do not establish those acceptance targets.
-- Literal code handling, rich table layout, complete cross-platform raster QA,
-  formula fallback validation and lifecycle behavior require further review.
-- No WebView fallback was introduced. Any route change must follow the issue's
-  requirement to report measured Android results before implementing the fallback.
-- Li Zheng still needs to test both Doubao and system Pinyin IMEs: multi-character
-  composition + Enter, one-letter composition + Enter, Shift+Enter and digit
-  candidate selection, in both `gradlew run` and the packaged `.app`. Actual Fold8
-  and Pad window dp and physical-device JankStats remain unmeasured.
+Environment used for the numbers below: macOS arm64, JDK 17, `ANDROID_HOME` = the Homebrew command-line tools
+SDK (it holds `emulator/` and the `sable-api35` image), emulator `-gpu host`, density 420.
+`compare.py` and `baseline.py` need Python `numpy`, `pillow`, `playwright` (a venv under `~/Coach/` works).
 
-This is a draft implementation, not an accepted rendering spike. AI physical
-calls made by the spike tools: **0**.
+Comparison rule (Mika, TON-1040): same SVG, 32 px/em, black on white; a pixel differs when any
+channel differs by more than 16/255; a formula is consistent when differing pixels are at most 2% of the ink
+bounding box of the two renderings. `compare.py` also reports a +-1px-neighbourhood diagnostic, the
+ink-mass ratio and the worst 16px-column ink deviation, and writes side-by-side images of every formula
+that is not automatically consistent to `review/`. Inline baseline: `baseline.py` reads the Android
+`baseline.png` (digits in text vs digits in formulas on one line). Whole-answer replay metrics come from
+`check-android.py`, which replays all 20 answers pinned to the bottom and scrolled away from the tail.
+
+Fixes made while taking over: JankStats is created after `setContent`; regex character classes no longer
+contain bare `{}` (ICU on Android reads them as string sets and crashed the first paragraph with a formula);
+the inline formula baseline is now read from the laid out line (a fixed line height keeps the line box
+constant but the baseline moves when the line contains CJK fallback glyphs); Markdown styling matched
+`node.type.toString()` (`Markdown:STRONG`) so bold, italic, code and headings never applied.
+
+Not verified: IME composition-Enter on a real Mac (Doubao, system Pinyin), `gradlew run` and packaged `.app`
+by hand, real Z Fold8 / Pad window dp and physical-device JankStats. The desktop app starts and replays
+(window opened, METAL) but no desktop screenshot was captured: screen capture is not permitted in the agent session.
+No WebView fallback was introduced.

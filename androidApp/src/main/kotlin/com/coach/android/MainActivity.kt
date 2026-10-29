@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
         owner = ViewModelProvider(this)[ReplayOwner::class.java]
         owner.attach(this)
         val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
-        setContent { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage) }
+        setContent { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage, intent.getIntExtra("autoplay", 0), intent.getBooleanExtra("baseline", false)) }
         // JankStats needs the DecorView, which setContent installs.
         jank = JankStats.createAndTrack(window) { frame ->
             if (owner.state.running) { frames++; if (frame.isJank) badFrames++ }

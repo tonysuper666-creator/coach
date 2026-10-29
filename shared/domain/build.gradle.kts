@@ -1,4 +1,5 @@
 plugins {
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp)
 }
@@ -9,9 +10,14 @@ kotlin {
         compileSdk = 37
         minSdk = 34
     }
-    jvmToolchain(17)
+    sourceSets.commonMain.dependencies { api(libs.serialization.json) }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
-    sourceSets.jvmTest.dependencies { implementation(libs.serialization.json) }
+    sourceSets.jvmTest { kotlin.srcDir("src/benchmark/kotlin") }
+    jvmToolchain(17)
+    sourceSets.getByName("jvmTest").dependencies {
+        implementation(kotlin("test"))
+        implementation(libs.serialization.json)
+    }
 }
 
 tasks.withType<Test>().configureEach { systemProperty("coach.repo", rootDir.absolutePath) }

@@ -52,6 +52,7 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    sourceSets.getByName("androidTest").kotlin.srcDir("../shared/domain/src/benchmark/kotlin")
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -64,6 +65,9 @@ dependencies {
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
+    androidTestImplementation(project(":shared:domain"))
+    androidTestImplementation(project(":shared:client"))
+    androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")

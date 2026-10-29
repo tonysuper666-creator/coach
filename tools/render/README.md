@@ -67,6 +67,14 @@ the inline formula baseline is now read from the laid out line (a fixed line hei
 constant but the baseline moves when the line contains CJK fallback glyphs); Markdown styling matched
 `node.type.toString()` (`Markdown:STRONG`) so bold, italic, code and headings never applied.
 
+Display formulas: every `$$ ... $$` / `\\[ ... \\]` formula is its own `ScrollableMath` row at natural size and scrolls sideways, in the Markdown
+path and on the Chinese-formula page, so a formula wider than the screen is never cut off (the first version drew the
+Chinese page at fixed size and cut the right end of the widest formula off). Text and inline formulas between display
+formulas still wrap as one paragraph. `check-android.py` takes every Chinese page and the three widest display formulas
+(Markdown path, narrow outer screen and Pad landscape) at both ends (`--ez scrollEnd true` scrolls every display formula to
+its end); `ends.py` checks that each row that scrolled reaches the right content edge. It does not read symbols: look at the
+end screenshots too.
+
 Reading anchor: `ReplayState` stores `anchorKey`/`anchorFraction`/`pinned`; the screen re-scrolls to the same block at the
 same fraction when the width changes and after a process restore (without this the check fails: same block moved from
 0.40 to 0.79 of its height on outer -> inner). `autoplay` Intent extras only reset the replay once per `runId`, because

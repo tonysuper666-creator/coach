@@ -12,6 +12,7 @@ import androidx.compose.ui.text.font.*
 import androidx.compose.ui.text.style.*
 import androidx.compose.ui.unit.*
 import com.coach.domain.math.MathDelimiters
+import com.coach.domain.math.MathSegment
 import com.coach.ui.math.*
 import org.intellij.markdown.ast.ASTNode
 import org.intellij.markdown.flavours.gfm.GFMFlavourDescriptor
@@ -25,7 +26,7 @@ fun mathKey(tex: String, display: Boolean) = "$display:$tex"
 fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean = true, modifier: Modifier = Modifier, onFailure: (String) -> Unit = {}) {
     val source = block.source
     val kind = block.ast.children.firstOrNull { source.substring(it.startOffset, it.endOffset).isNotBlank() }?.type.toString()
-    val horizontal = kind.contains("CODE") || kind.contains("TABLE") || source.trimStart().startsWith("$$") || source.trimStart().startsWith("\\[")
+    val horizontal = kind.contains("CODE") || kind.contains("TABLE")
     val scroll = if (horizontal) Modifier.horizontalScroll(rememberScrollState()) else Modifier
     if (!block.sealed) {
         // Delimiter repair and SVG layout happen only when the block seals.
@@ -37,8 +38,53 @@ fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model:
     }
 }
 
+/** Test hook: scroll every display formula to its right end (used to prove the end of a wide formula is reachable). */
+val LocalScrollMathToEnd = compositionLocalOf { false }
+
+/** One display formula: natural size, horizontally scrollable so a formula wider than the screen is never cut off. */
+@Composable
+fun ScrollableMath(document: MathSvgDocument, tex: String, emPx: Float, color: Color, modifier: Modifier = Modifier) {
+    val measurer = rememberTextMeasurer()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val scroll = rememberScrollState()
+    if (LocalScrollMathToEnd.current) LaunchedEffect(scroll.maxValue) { if (scroll.maxValue > 0) scroll.scrollTo(scroll.maxValue) }
+    Box(modifier.fillMaxWidth().horizontalScroll(scroll)) {
+        val width = with(density) { (document.widthEm * emPx).toDp() }
+        val height = with(density) { ((document.ascentEm + document.descentEm) * emPx).toDp() }
+        Image(MathSvgPainter(document, color, measurer, emPx), tex, Modifier.size(width, height))
+    }
+}
+
 @Composable
 private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: Boolean, modifier: Modifier, onFailure: (String) -> Unit) {
+    val tokens = remember(source, model) { MathDelimiters.tokenize(source, model).segments }
+    // Display formulas get their own scrollable row; text and inline formulas between them flow and wrap as one paragraph.
+    val runs = remember(tokens) {
+        val out = mutableListOf<List<IndexedValue<MathSegment>>>(); var open = mutableListOf<IndexedValue<MathSegment>>()
+        tokens.withIndex().forEach { t ->
+            if (t.value.math != null && t.value.display) { if (open.isNotEmpty()) out += open; out += listOf(t); open = mutableListOf() } else open += t
+        }
+        if (open.isNotEmpty()) out += open
+        out
+    }
+    val style = MaterialTheme.typography.bodyLarge
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val em = with(density) { style.fontSize.toPx() }
+    val foreground = LocalContentColor.current
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        runs.forEach { run ->
+            val first = run.first().value
+            val asset = if (first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
+            val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
+            if (document != null) ScrollableMath(document, first.math!!, em, foreground)
+            else InlineRun(run, assets, onFailure)
+        }
+    }
+}
+
+@Composable
+private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit) {
+    val source = run.joinToString("") { it.index.toString() }
     val measurer = rememberTextMeasurer()
     val style = MaterialTheme.typography.bodyLarge
     val density = androidx.compose.ui.platform.LocalDensity.current
@@ -50,10 +96,9 @@ private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: 
     val baselines = remember(source) { mutableStateMapOf<String, Float>() }
     val order = mutableListOf<String>()
     val em = with(density) { style.fontSize.toPx() }
-    val tokens = remember(source, model) { MathDelimiters.tokenize(source, model).segments }
     val inline = mutableMapOf<String, InlineTextContent>()
     val text = buildAnnotatedString {
-        tokens.forEachIndexed { index, token ->
+        run.forEach { (index, token) ->
             if (token.text != null) appendStyledMarkdown(token.text!!)
             else {
                 val tex = token.math!!
@@ -73,15 +118,13 @@ private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: 
                     inline[id] = InlineTextContent(Placeholder(w, h, PlaceholderVerticalAlign.TextCenter)) {
                         Image(MathSvgPainter(document, foreground, measurer, em, baselines[id] ?: box.baseline, box.height), tex, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.None)
                     }
-                    if (token.display && length > 0) append('\n')
                     order += id
                     appendInlineContent(id, tex)
-                    if (token.display) append('\n')
                 }
             }
         }
     }
-    Text(text, modifier, style = style, inlineContent = inline, onTextLayout = { layout ->
+    Text(text, Modifier, style = style, inlineContent = inline, onTextLayout = { layout ->
         layout.placeholderRects.forEachIndexed { i, rect ->
             val id = order.getOrNull(i) ?: return@forEachIndexed
             if (rect == null) return@forEachIndexed

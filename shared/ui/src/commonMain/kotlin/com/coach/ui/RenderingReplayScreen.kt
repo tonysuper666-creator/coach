@@ -21,10 +21,11 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 
 @Composable
-fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null, autoplay: Int = 0, baselineSheet: Boolean = false, tickMs: Long = 50, streamOnly: Int = -1, chunk: Int = 30, runId: Long = 0L) {
+fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null, autoplay: Int = 0, baselineSheet: Boolean = false, tickMs: Long = 50, streamOnly: Int = -1, chunk: Int = 30, runId: Long = 0L, scrollEnd: Boolean = false, wideSheet: Boolean = false) {
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
-            if (chinesePage != null && corpus != null) { ChineseSheet(corpus.chinese.drop(chinesePage * 2).take(2)); return@Surface }
+            if (chinesePage != null && corpus != null) { CompositionLocalProvider(LocalScrollMathToEnd provides scrollEnd) { ChineseSheet(corpus.chinese.drop(chinesePage * 2).take(2)) }; return@Surface }
+            if (wideSheet && corpus != null) { CompositionLocalProvider(LocalScrollMathToEnd provides scrollEnd) { WideSheet(corpus.assets) }; return@Surface }
             if (baselineSheet && corpus != null) { BaselineSheet(corpus.assets); return@Surface }
             LaunchedEffect(Unit) { report("READY messages=${corpus?.messages?.size ?: 0}") }
             val list = rememberLazyListState(state.scrollIndex, state.scrollOffset)
@@ -192,15 +193,27 @@ private fun BaselineSheet(assets: Map<String, MathAsset>) {
 
 @Composable
 private fun ChineseSheet(assets: List<MathAsset>) {
-    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     val density = LocalDensity.current
     Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).padding(24.dp), verticalArrangement = Arrangement.spacedBy(48.dp)) {
         Text("中文公式 · Android", style = MaterialTheme.typography.titleLarge)
         assets.forEach { asset ->
             Text(asset.tex, style = MaterialTheme.typography.bodyMedium)
             val doc = remember(asset.sha) { MathSvgDocument.parse(asset.sha, asset.svg) }
-            val em = with(density) { 24.dp.toPx() }
-            Image(MathSvgPainter(doc, androidx.compose.ui.graphics.Color.Black, measurer, em), asset.tex, Modifier.size((doc.widthEm * 24).dp, ((doc.ascentEm + doc.descentEm) * 24).dp))
+            // A formula wider than the page scrolls sideways instead of being cut off.
+            ScrollableMath(doc, asset.tex, with(density) { 24.dp.toPx() }, androidx.compose.ui.graphics.Color.Black)
+        }
+    }
+}
+
+/** The three widest display formulas, through the real Markdown path (`$$ ... $$` block), to show wide formulas stay reachable. */
+@Composable
+private fun WideSheet(assets: Map<String, MathAsset>) {
+    val widest = remember(assets) { assets.values.filter { it.display }.sortedByDescending { MathSvgDocument.parse(it.sha, it.svg).widthEm }.take(3) }
+    Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).padding(24.dp), verticalArrangement = Arrangement.spacedBy(40.dp)) {
+        Text("宽公式 · Markdown 入口", style = MaterialTheme.typography.titleLarge)
+        widest.forEach { asset ->
+            val block = remember(asset.sha) { StreamingMarkdown().append("前文一行。\n\n$$" + asset.tex + "$$\n\n后文一行。", true) }
+            Column { block.forEach { MarkdownContent(it, assets, modifier = Modifier.fillMaxWidth()) } }
         }
     }
 }

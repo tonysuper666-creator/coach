@@ -97,7 +97,14 @@ try:
         record=None
     # All fourteen CJK formulas, two per actual Android screenshot.
     for page in range(7):
+        # Left end, then right end (every display formula scrolled to its end) so a formula wider than the page is checked at both ends.
         home();shell('am','force-stop',package);launch(page);time.sleep(.8);capture(f'chinese-{page+1}.png')
+        home();shell('am','force-stop',package);launch(page,extra=['--ez','scrollEnd','true']);time.sleep(1.2);capture(f'chinese-{page+1}-end.png')
+    # Widest display formulas through the real Markdown path, narrow outer screen and Pad landscape, both ends.
+    for shape,size in [('outer','1248x1972'),('pad','2520x1680')]:
+        shell('wm','size',size)
+        for tag,extra in [('start',[]),('end',['--ez','scrollEnd','true'])]:
+            home();shell('am','force-stop',package);launch(extra=['--ez','wide','true',*extra]);time.sleep(1.2);capture(f'wide-{shape}-{tag}.png')
     home()
     # Full replay of the 20 staged answers: pinned to bottom, then scrolled away from the tail (wm size is still Pad landscape).
     shell('wm','size','1248x1972')

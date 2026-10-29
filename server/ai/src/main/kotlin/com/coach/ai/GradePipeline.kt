@@ -171,6 +171,8 @@ class GradePipeline(private val client: BridgeClient) {
         val crossReview: CrossReview?,
         val evidence: List<String>,
         val rubricFingerprint: String,
+        /** 草稿逐条（含模型给的引文）——不为通过，只为失败时能看清是模型引错了还是校验器误拒。 */
+        val draft: DraftGrade? = null,
     )
 
     fun gradeConstructed(
@@ -211,7 +213,7 @@ class GradePipeline(private val client: BridgeClient) {
         defects.addAll(GradeGate.arithmetic(draft, question.rubric))
         defects.addAll(evidenceDefects)
         if (defects.isNotEmpty()) {
-            return Outcome(false, null, defects, calls, null, spans, fingerprint)
+            return Outcome(false, null, defects, calls, null, spans, fingerprint, draft)
         }
         val reviewed = client.chat(
             ChatRequest(
@@ -234,9 +236,9 @@ class GradePipeline(private val client: BridgeClient) {
             return Outcome(false, null, listOf("review_unparsable"), calls, null, spans, fingerprint)
         }
         if (verdict.verdict != "CONFIRM") {
-            return Outcome(false, null, listOf("review_${verdict.verdict.lowercase()}"), calls, verdict, spans, fingerprint)
+            return Outcome(false, null, listOf("review_${verdict.verdict.lowercase()}"), calls, verdict, spans, fingerprint, draft)
         }
-        return Outcome(true, draft.awarded, emptyList(), calls, verdict, spans, fingerprint)
+        return Outcome(true, draft.awarded, emptyList(), calls, verdict, spans, fingerprint, draft)
     }
 
     companion object {

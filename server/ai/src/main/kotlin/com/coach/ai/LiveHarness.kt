@@ -104,7 +104,8 @@ class Preflight(private val bridge: BridgeClient, private val bridgeLog: Path) {
         if (remaining != null && remaining <= 0) return Verdict(false, "daily_claude_cap:remaining=$remaining")
         if (utilization != null && utilization >= 0.5) return Verdict(false, "rate_limit_paused:${utilization}")
         if (status != null && status != "allowed" && status != "unknown") return Verdict(false, "rate_limit_paused:$status")
-        busyReason()?.let { return Verdict(false, it) }
+        // 10 分钟静默窗口保护的是 Claude 订阅；Codex 生成走另一家订阅，CPU 由 nice 约束
+        if (needsClaude) busyReason()?.let { return Verdict(false, it) }
         return Verdict(true, null)
     }
 
@@ -172,45 +173,97 @@ class LiveHarness(
         val offset = effective["offset"]?.toInt() ?: 0
         val groupSize = effective["group"]?.toInt() ?: 4
         val count = effective["count"]?.toInt() ?: 3
+        val mode = effective["mode"] ?: "both" // gen | review | both
         val slice = all.drop(offset).take(limit).map { it.jsonObject }
         var accepted = 0
         var attempted = 0
         var generated = 0
         for (group in slice.chunked(groupSize)) {
-            val pending = group.filter {
-                val id = it["id"]!!.jsonPrimitive.content
-                force || !runs.resolve("kp").resolve("$id.json").exists()
+            val pending = group.filter { kp ->
+                val id = kp["id"]!!.jsonPrimitive.content
+                val final = runs.resolve("kp").resolve("$id.json")
+                val gen = runs.resolve("kp").resolve("$id.gen.json")
+                when (mode) {
+                    "gen" -> force || !gen.exists()
+                    "review" -> !final.exists() && (force || gen.exists())
+                    else -> force || !final.exists()
+                }
             }
             if (pending.isEmpty()) {
-                println("skip group ${group.map { it["id"]!!.jsonPrimitive.content }}（已有结果）")
+                println("skip group ${group.map { it["id"]!!.jsonPrimitive.content }}（无待办）")
                 continue
             }
             val pool = QuestionPool(client)
-            val calls = ArrayList<AiCall>()
-            val entries = ArrayList<QuestionPool.ReviewEntry>()
             val batches = LinkedHashMap<String, QuestionPool.GenBatch>()
-            var nextId = 0
-            for (kp in pending) {
-                val gate = preflight.check(needsClaude = false)
-                if (!gate.allowed) abort(gate.reason!!)
-                val id = kp["id"]!!.jsonPrimitive.content
-                val objective = kp["objective"]!!.jsonPrimitive.content
-                val excerpt = kp["excerpt"]!!.jsonPrimitive.content
-                val batch = pool.generateFor(id, objective, excerpt, count = count)
-                calls.add(batch.call)
-                batches[id] = batch
-                generated += batch.questions.size
-                if (batch.questions.isNotEmpty()) {
-                    entries.add(QuestionPool.ReviewEntry(id, excerpt, batch.questions, nextId))
-                    nextId += batch.questions.size
+            if (mode == "review") {
+                for (kp in pending) {
+                    val id = kp["id"]!!.jsonPrimitive.content
+                    val stored = runCatching {
+                        JsonText.json.parseToJsonElement(runs.resolve("kp").resolve("$id.gen.json").readText()).jsonObject
+                    }.getOrNull()
+                    if (stored == null) continue
+                    val excerpt = kp["excerpt"]!!.jsonPrimitive.content
+                    val questions = (stored["questions"] as? kotlinx.serialization.json.JsonArray)
+                        ?.map { questionJson(it.jsonObject) } ?: emptyList()
+                    if (questions.isEmpty()) continue
+                    val call = AiCall(
+                        callId = stored["call_id"]?.jsonPrimitive?.content ?: "gen-$id",
+                        task = "gen_mcq",
+                        requestedModel = BridgeClient.CODEX,
+                        servedBy = stored["served_by"]?.jsonPrimitive?.content,
+                        status = "complete",
+                        ttftMs = null,
+                        durMs = stored["gen_ms"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0,
+                        queueMs = null,
+                        physicalCalls = 1,
+                        requestId = stored["request_id"]?.jsonPrimitive?.content ?: "",
+                        inChars = 0,
+                        outChars = 0,
+                        startedAt = stored["started_at"]?.jsonPrimitive?.content ?: "",
+                    )
+                    batches[id] = QuestionPool.GenBatch(id, questions, call, true, call.durMs)
+                    generated += questions.size
                 }
-                println("gen $id: ${batch.questions.size} 道 ${batch.wallMs}ms served=${batch.call.servedBy}")
+            } else {
+                for (kp in pending) {
+                    val gate = preflight.check(needsClaude = false)
+                    if (!gate.allowed) abort(gate.reason!!)
+                    val id = kp["id"]!!.jsonPrimitive.content
+                    val objective = kp["objective"]!!.jsonPrimitive.content
+                    val excerpt = kp["excerpt"]!!.jsonPrimitive.content
+                    val batch = pool.generateFor(id, objective, excerpt, count = count)
+                    record(listOf(batch.call))
+                    batches[id] = batch
+                    generated += batch.questions.size
+                    println("gen $id: ${batch.questions.size} 道 ${batch.wallMs}ms served=${batch.call.servedBy} status=${batch.call.status}")
+                    if (mode == "gen") {
+                        val stored = buildJsonObject {
+                            put("kp", id)
+                            put("gen_ms", batch.wallMs)
+                            put("served_by", batch.call.servedBy ?: batch.call.requestedModel)
+                            put("call_id", batch.call.callId)
+                            put("request_id", batch.call.requestId ?: "")
+                            put("started_at", batch.call.startedAt)
+                            put("questions", buildJsonArray { batch.questions.forEach { add(mcqJson(it)) } })
+                        }
+                        runs.resolve("kp").resolve("$id.gen.json").writeText(json.encodeToString(JsonObject.serializer(), stored))
+                    }
+                }
+                if (mode == "gen") continue
             }
+            val entries = ArrayList<QuestionPool.ReviewEntry>()
+            var nextId = 0
+            for ((id, batch) in batches) {
+                if (batch.questions.isEmpty()) continue
+                val excerpt = slice.first { it["id"]!!.jsonPrimitive.content == id }["excerpt"]!!.jsonPrimitive.content
+                entries.add(QuestionPool.ReviewEntry(id, excerpt, batch.questions, nextId))
+                nextId += batch.questions.size
+            }
+            if (entries.isEmpty()) continue
             val reviewGate = preflight.check(needsClaude = true)
             if (!reviewGate.allowed) abort(reviewGate.reason!!)
             val review = pool.reviewGroup(entries)
-            review.call?.let { calls.add(it) }
-            record(calls)
+            review.call?.let { record(listOf(it)) }
             for (entry in entries) {
                 val batch = batches[entry.kpId]!!
                 val acceptedList = ArrayList<Mcq>()
@@ -226,6 +279,9 @@ class LiveHarness(
                         rejectedList.add(QuestionPool.Rejected(mcq, reasons, verdict?.answer))
                     }
                 }
+                val groupCalls = ArrayList<AiCall>()
+                groupCalls.add(batch.call)
+                review.call?.let { groupCalls.add(it) }
                 val payload = buildJsonObject {
                     put("kp", entry.kpId)
                     put("gen_ms", batch.wallMs)
@@ -245,10 +301,10 @@ class LiveHarness(
                             )
                         }
                     })
-                    put("group_size", pending.size)
-                    put("physical_calls", calls.sumOf { it.physicalCalls })
-                    put("claude_calls", calls.count { it.requestedModel == BridgeClient.CLAUDE })
-                    put("calls", buildJsonArray { calls.forEach { add(it.toJson()) } })
+                    put("group_size", entries.size)
+                    put("physical_calls", groupCalls.sumOf { it.physicalCalls })
+                    put("claude_calls", groupCalls.count { it.requestedModel == BridgeClient.CLAUDE })
+                    put("calls", buildJsonArray { groupCalls.forEach { add(it.toJson()) } })
                 }
                 runs.resolve("kp").resolve("${entry.kpId}.json").writeText(json.encodeToString(JsonObject.serializer(), payload))
                 println(
@@ -259,6 +315,14 @@ class LiveHarness(
         }
         println("summary kps generated=$generated attempted=$attempted accepted=$accepted claude_calls=$claudeCalls")
     }
+
+    private fun questionJson(obj: JsonObject): Mcq = Mcq(
+        stem = obj["stem"]?.jsonPrimitive?.content ?: "",
+        options = (obj["options"] as? JsonObject)?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap(),
+        key = obj["key"]?.jsonPrimitive?.content ?: "",
+        explanation = obj["explanation"]?.jsonPrimitive?.content ?: "",
+        sourceQuote = obj["source_quote"]?.jsonPrimitive?.content ?: "",
+    )
 
     fun mcq() {
         val all = JsonText.json.parseToJsonElement(inputs.resolve("mcq60.json").readText()).jsonArray
@@ -292,7 +356,7 @@ class LiveHarness(
                 system = Prompts.REVIEW_SYSTEM,
                 user = Prompts.blindReview("", questions),
                 stream = false,
-                background = true,
+                background = false,
                 maxTokens = 4000,
             )
             val response = client.chat(request)
@@ -350,7 +414,7 @@ class LiveHarness(
                 system = Prompts.REVIEW_SYSTEM,
                 user = Prompts.blindReview(excerpt, questions),
                 stream = false,
-                background = true,
+                background = false,
                 maxTokens = 4000,
             ),
         )
@@ -483,7 +547,7 @@ class LiveHarness(
                 system = Prompts.GEN_SYSTEM,
                 user = Prompts.genConstructed(objective, excerpt, 2),
                 stream = false,
-                background = true,
+                background = false,
                 maxTokens = 4000,
             ),
         )
@@ -509,7 +573,7 @@ class LiveHarness(
                 system = Prompts.CROSS_REVIEW_SYSTEM,
                 user = Prompts.reviewConstructedKey(question, excerpt),
                 stream = false,
-                background = true,
+                background = false,
                 maxTokens = 1500,
             ),
         )
@@ -581,6 +645,20 @@ class LiveHarness(
         put("review_verdict", outcome.crossReview?.verdict ?: "MISSING")
         put("evidence", buildJsonArray { outcome.evidence.forEach { add(it) } })
         put("physical_calls", outcome.calls.sumOf { it.physicalCalls })
+        outcome.draft?.let { draft ->
+            put("draft", buildJsonArray {
+                draft.items.forEach { item ->
+                    add(
+                        buildJsonObject {
+                            put("id", item.id)
+                            put("points", item.points)
+                            put("evidence", item.evidence)
+                            put("reason", item.reason)
+                        },
+                    )
+                }
+            })
+        }
     }
 
     private fun mcqJson(mcq: Mcq): JsonObject = buildJsonObject {
@@ -593,7 +671,19 @@ class LiveHarness(
     private fun record(calls: List<AiCall>) {
         calls.forEach { call ->
             if (call.requestedModel == BridgeClient.CLAUDE) claudeCalls += 1
-            callsPath.appendText(JsonObject.serializer().let { JsonText.json.encodeToString(it, call.toJson()) } + "\n")
+            val line = JsonText.json.encodeToString(JsonObject.serializer(), call.toJson()) + "\n"
+            try {
+                java.nio.file.Files.writeString(
+                    callsPath,
+                    line,
+                    java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND,
+                )
+            } catch (error: Exception) {
+                System.err.println("record failed: ${error.javaClass.name}: ${error.message}")
+                error.printStackTrace()
+            }
         }
     }
 

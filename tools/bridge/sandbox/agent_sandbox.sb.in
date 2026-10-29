@@ -1,0 +1,43 @@
+(version 1)
+; Coach 8791 订阅桥副本调用 Codex / Grok / Antigravity 时套的 macOS 沙箱（由 sandbox/sandboxed_agent.sh 加载）。
+; 模板：启动时由 subscription_bridge.py 把 @@HOME@@ 换成真实主目录，渲染到 $COACH_BRIDGE_HOME/work/agent_sandbox.sb。
+; 仓库里不留本机绝对路径（DESIGN §12.1 公开仓库纪律）。
+; 来源：DeepTutor 的 tools/agent_sandbox.sb，按 ADR-0002(1)「复制进 Coach 后再审一遍白名单」重审：
+;   - 去掉 ~/DeepTutor/library 的读权限：Coach 把备课包直接放进提示词，CLI 不需要读课程文件，
+;     这样导师绕开备课包自己去翻整本教材的路也就断了。
+;   - 去掉 ~/DeepTutor/sealed 的单列规则（已不在视野内，保留会给出错误暗示）。
+;   - ~/Coach 默认全禁，只放行桥自己的工作目录 ~/Coach/bridge/work（CLI 的 cwd 与临时输出）。
+;     课程库、事件账本、备份（~/Coach/data、~/Coach/backups）对 CLI 一律不可读。
+;   - 其余白名单与 DeepTutor 版一致：CLI 自己的程序、配置、登录状态、缓存、工具链与 shell 启动文件。
+; Claude 不走这个沙箱（与 8790 现役行为一致：--tools "" + --strict-mcp-config + 无 MCP，天然没有工具面）。
+(allow default)
+
+(deny file-read* file-write* (subpath "@@HOME@@"))
+; 只看文件属性（stat）不暴露内容，放行，免得解析路径的工具出错。
+(allow file-read-metadata)
+
+(define (home rel) (subpath (string-append "@@HOME@@/" rel)))
+(define (home-file rel) (literal (string-append "@@HOME@@/" rel)))
+
+; CLI 自己的程序、配置、登录状态、缓存：可读写。
+(allow file-read* file-write*
+  (home ".codex") (home ".grok") (home ".gemini")
+  (home ".cache") (home ".config") (home ".local/state") (home ".local/share")
+  (home "Library/Caches") (home "Library/Logs") (home "Library/Keychains"))
+(allow file-read*
+  (home ".local/bin") (home ".local/CodexCLI.app") (home ".local/lib")
+  (home "Library/Preferences"))
+
+; Codex 用 zsh -lc 跑命令，需要读 shell 启动文件和它们加载的工具链（只读）。
+(allow file-read*
+  (home-file ".zshenv") (home-file ".zprofile") (home-file ".zshrc") (home-file ".zlogin")
+  (home-file ".profile") (home-file ".gitconfig") (home-file ".npmrc") (home-file ".CFUserTextEncoding")
+  (home ".zsh") (home ".cargo") (home ".nvm") (home ".bun") (home ".rustup"))
+(allow file-read* file-write* (regex #"^@@HOME@@/\.zcompdump"))
+
+; 桥自己的工作目录（CLI 的 cwd、codex 的 -o 输出文件）。
+(allow file-read* file-write* (home "Coach/bridge/work"))
+
+; 课程库与运行数据：写在最后，优先于上面的放行规则。
+(deny file-read* file-write* (home "Coach"))
+(allow file-read* file-write* (home "Coach/bridge/work"))

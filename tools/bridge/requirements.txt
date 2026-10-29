@@ -1,0 +1,9 @@
+# Coach 订阅桥副本 8791 的运行时依赖（全部锁版本，装进 tools/bridge/.venv，不借用 DeepTutor 的 venv）。
+# 建立：python3 -m venv tools/bridge/.venv && tools/bridge/.venv/bin/python -m pip install -r tools/bridge/requirements.txt
+# 版本与 DeepTutor 现役 8790 一致（fastapi 0.162.0 / uvicorn 0.54.0 / pydantic 2.14.1），避免两边行为漂移。
+fastapi==0.162.0
+uvicorn==0.54.0
+pydantic==2.14.1
+pydantic_core==2.50.1
+starlette==1.10.0
+anyio==4.15.1

@@ -4,6 +4,10 @@ plugins {
     application
 }
 dependencies {
+    implementation(project(":shared:client"))
+    testImplementation(kotlin("test"))
+    testImplementation(libs.sqldelight.driver)
+    testImplementation(libs.sqlite.jdbc)
     implementation(project(":server:core"))
     implementation(libs.ktor.core)
     implementation(libs.ktor.netty)
@@ -12,3 +16,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }
 application { mainClass = "com.coach.server.MainKt" }
+tasks.test {
+    dependsOn(tasks.installDist)
+    systemProperty("coach.serverBinary", layout.buildDirectory.file("install/app/bin/app").get().asFile.absolutePath)
+}

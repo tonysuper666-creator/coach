@@ -28,16 +28,11 @@ tools/dev/heavy ./gradlew :desktopApp:run --offline -Pcoach.autoExitSeconds=5 --
 ### 服务端与网络小样
 
 ```sh
-server/app/build/install/app/bin/app
-curl --fail http://127.0.0.1:18791/v1/hello
-COACH_TAIL_HOST=$(sed -n 's/^coach.tailHost=//p' ~/Coach/config/local.properties)
-curl --fail "http://$COACH_TAIL_HOST:18791/v1/hello"
-# 启动另一个实例，模拟 Tailscale 地址尚未就绪：
-COACH_PORT=18792 COACH_TAIL_HOST=192.0.2.1 server/app/build/install/app/bin/app
-curl --fail http://127.0.0.1:18792/v1/hello
+tools/dev/heavy ./gradlew :server:app:installDist --max-workers=2
+python3 tools/dev/check-server.py
 ```
 
-两路独立监听，永不绑定 `0.0.0.0`。tailnet 监听有监督协程，1 秒到 60 秒退避；接口消失后重绑。`GET /v1/hello` 返回 `Hello from Coach`；同一路径提供 WS 问候用于传输验收。这是 S0 连通性入口，M1 接入 ADR-0004 的设备令牌，当前不要放用户数据。
+两路独立监听，永不绑定 `0.0.0.0`。tailnet 监听有监督协程，1 秒到 60 秒退避；接口消失后重绑。账本接入后 `GET /v1/hello` 返回带 epoch 与备份水位的 JSON，WS 使用 `/v1/ws`，包括本机回环在内都要求设备令牌。验证脚本使用隔离数据目录；首次启动本机令牌位于该目录的 `device-token`（权限 0600）。令牌不进入 URL。完整接口、回档复验与三进程起停见 [账本复验](tools/dev/ledger.md)。
 
 Android 的明文例外只允许 `coach.tailHost` 指定的本机 tailnet IP，其余地址禁用。在服务端运行且模拟器已启动时，用 adb 安装上面两个 APK，再执行：
 
@@ -45,10 +40,11 @@ Android 的明文例外只允许 `coach.tailHost` 指定的本机 tailnet IP，�
 adb -s emulator-5554 install -r androidApp/build/outputs/apk/debug/androidApp-debug.apk
 adb -s emulator-5554 install -r androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk
 adb -s emulator-5554 shell am start -n com.coach.android/.MainActivity
-adb -s emulator-5554 shell am instrument -w com.coach.android.test/androidx.test.runner.AndroidJUnitRunner
+# 网络测试需要隔离服务令牌；check-android.py 会注入且不打印令牌
+python3 tools/dev/check-android.py
 ```
 
-仪器测试实际请求 HTTP 和 WS，断言允许地址收到问候，未允许的 `10.0.2.2` 在发包前以 `CLEARTEXT` 拒绝。两端显示可用窗口 dp、密度、字体缩放和 FoldingFeature；桌面恒 FLAT，安卓订阅真实 WindowInfoTracker。
+仪器测试实际请求 HTTP 和 WS，断言允许地址收到认证后的 epoch，未允许的 `10.0.2.2` 在发包前以 `CLEARTEXT` 拒绝。两端显示可用窗口 dp、密度、字体缩放和 FoldingFeature；桌面恒 FLAT，安卓订阅真实 WindowInfoTracker。
 
 ### SQLite 与真实教材
 

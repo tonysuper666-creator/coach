@@ -198,6 +198,66 @@ Return JSON only:
 
     val GRADE_SYSTEM = "You are a strict grader bound to a frozen rubric. Output JSON only."
 
+    /** ADR-0003 决定 6：证据校验失败时，把原因发回原批改模型修一次（仍失败才算批改不可用）。 */
+    fun repairGrade(
+        question: ConstructedQuestion,
+        answer: String,
+        rejected: DraftGrade,
+        defects: List<String>,
+    ): String {
+        val rubric = buildJsonArray {
+            question.rubric.forEach { item ->
+                add(
+                    buildJsonObject {
+                        put("id", item.id)
+                        put("text", item.text)
+                        put("points", item.points)
+                    },
+                )
+            }
+        }
+        val previous = buildJsonArray {
+            rejected.items.forEach { item ->
+                add(
+                    buildJsonObject {
+                        put("id", item.id)
+                        put("points", item.points)
+                        put("reason", item.reason)
+                        put("evidence", item.evidence)
+                    },
+                )
+            }
+        }
+        return """
+Your previous grading output failed the deterministic checks below. Rubric points are FROZEN: do not change
+the rubric, do not change the point values, do not add or drop items.
+
+Question: ${question.stem}
+
+Frozen rubric:
+$rubric
+
+Student answer (verbatim, may contain typos and speech-input errors):
+<<<
+$answer
+>>>
+
+Your previous items:
+$previous
+
+Failures to fix:
+${defects.joinToString("\n") { "- $it" }}
+
+How to fix evidence: copy the WHOLE clause verbatim from the student answer, including the punctuation at the end,
+keep typos and speech-input errors, do not rewrite, do not paraphrase, do not give character offsets. If the answer
+earns a numeric final value, quote the number together with its clause. An item that is not earned gets 0 points and
+an empty evidence string.
+
+Return the corrected JSON only:
+{"items":[{"id":"R1","points":2,"reason":"...","evidence":"..."}],"total":10,"awarded":6.5,"confidence":0.0-1.0}
+        """.trim()
+    }
+
     fun crossReviewGrade(
         question: ConstructedQuestion,
         answer: String,

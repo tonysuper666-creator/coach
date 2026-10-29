@@ -91,9 +91,29 @@ gpt-6.1-sol 一次出 3 道要 17–72 秒；d4 spike 里 Claude 出题是 10–
 | 批半截答案 | 写入 1.0 分，异厂复核 CONFIRM（2 次物理调用） |
 | 为一个已通过 KP 补 2 道构答题（出题 + rubric 复核） | **2 次物理调用、29.8 s** |
 
-参考答案那次批改的 3 条引文被逐字校验判为「跨词元边界」，按设计不写任何结果——fail closed 生效，
-但到底是模型把句子截断在词中间，还是校验器对英文长引文误拒，这一轮没留下模型原始引文，
-**待下一轮用已存下的 draft 判断**。
+参考答案那次批改的 3 条引文被逐字校验判为「跨词元边界」，按设计不写任何结果。事后查明这是**校验器的 bug**：
+引文以句末标点（`.`/`。`）结尾、而这个标点后面紧跟空白/引号时，边界判定只看「词元首尾」，把这种位置误判成词元内部。
+已修（见「复核整改」），并用 5 个探针样例锁住；那一轮的 live 数字没有重跑，配额留给验收。
+
+## 复核整改（Architect 关键异源复核退回的 4 项，2026-10-29）
+
+| # | 问题 | 改法 | 锁住它的用例 |
+|---|---|---|---|
+| 1 | 引文以标点结尾、后面紧跟空白/引号时误判 `CROSSES_TOKEN_BOUNDARY` | 边界改成「不在任何词元内部的位置」；顺带修掉「引到原答末尾时区间带上尾部空白」 | `quoteEndingAtPunctuationFollowedBySpaceIsAccepted`（5 个探针）、`trailingWhitespaceIsNotIncludedInTheSpan` |
+| 2 | 证据被拒就直接 fail closed，缺「带原因修复一次」 | 证据/算术检查失败时把原因发回原批改模型修一次（计入 `ai_calls` 与物理调用数），仍失败才不写 | `rejectedEvidenceIsRepairedOnceAndThenWritten`、`forgedEvidenceIsSentBackOnceAndThenFailsClosed`、`repairCannotChangeFrozenRubric` |
+| 3 | 没校验 `served_by` / `fallback`，「异厂复核」可能同厂 | 关了兜底却收到 `fallback=true`，或 `served_by` 与请求不同家 → `served_by_mismatch` | `servedByFromAnotherVendorIsRejected`、`fallbackDespiteFallbackOffIsRejected` |
+| 4 | 失败调用在 `ai_calls` 里记 `physical_calls = 0`，少算每日上限 | 非 200 时解析错误体里的 `x_coach` 取 `physical_calls`/`served_by`；传输异常保守按 1 次计 | `httpErrorKeepsBridgePhysicalCalls` |
+
+探针（对着打好的 jar 跑，不是只在用例里）：
+
+| 原答 | 引文 | 修前 | 修后 |
+|---|---|---|---|
+| `Adverse selection happens before the contract. Adverse selection is not moral hazard.` | `Adverse selection happens before the contract.` | 拒 | **通过** `[0,46)` |
+| `The elasticity is 0.5. So demand is inelastic.` | `The elasticity is 0.5.` | 拒 | **通过** `[0,22)` |
+| `需求弹性小。 所以降价没用` | `需求弹性小。` | 拒 | **通过** `[0,6)` |
+| `第一，需求弹性小，⏎所以降价没用` | `第一，需求弹性小，` | 拒 | **通过** `[0,9)` |
+| `他说“需求弹性小。”所以降价没用` | `需求弹性小。` | 拒 | **通过** `[3,9)` |
+| `0.25` / `-0.25` / `逆向选择` / `重量是1㎏` | `25` / `0.25` / `选择` / `1k` | 拒 | **仍然拒** |
 
 ## 已知局限（照 ADR-0003 决定 9，不假装解决）
 
@@ -103,9 +123,10 @@ gpt-6.1-sol 一次出 3 道要 17–72 秒；d4 spike 里 Claude 出题是 10–
 
 ## 测试
 
-`./gradlew :server:ai:test :shared:domain:jvmTest`：40 个用例，全部本地、不花钱。
-覆盖 SSE 终态与截断、`X-Coach-*` 头部、盲复核 prompt 不含答案键、rubric 冻结指纹、
-伪造证据/断流/REVISE 三种 fail-closed、中文与英文与全角与星平面与 NFKC 展开的 UTF-16 区间、中文数字与分数比对。
+`./gradlew :server:ai:test :shared:domain:jvmTest`：47 个用例，全部本地、不花钱。
+覆盖 SSE 终态与截断、`X-Coach-*` 头部、served_by/fallback 异厂校验、错误体里的物理调用数、
+盲复核 prompt 不含答案键、rubric 冻结指纹、伪造证据的「修复一次」与断流/REVISE 的 fail-closed、
+中文与英文与全角与星平面与 NFKC 展开的 UTF-16 区间、中文数字与分数比对。
 
 ## 跑法与复跑
 

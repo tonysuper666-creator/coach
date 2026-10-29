@@ -24,6 +24,28 @@ class VerbatimEvidenceTest {
     }
 
     @Test
+    fun quoteEndingAtPunctuationFollowedBySpaceIsAccepted() {
+        // 批改 prompt 要求「逐字照抄整个分句」，模型会把句末标点带上：标点之后是边界，不是词元内部
+        accepted(
+            "Adverse selection happens before the contract. Adverse selection is not moral hazard.",
+            "Adverse selection happens before the contract.",
+        )
+        accepted("The elasticity is 0.5. So demand is inelastic.", "The elasticity is 0.5.")
+        accepted("需求弹性小。 所以降价没用", "需求弹性小。")
+        accepted("第一，需求弹性小，\n所以降价没用", "第一，需求弹性小，")
+        accepted("他说“需求弹性小。”所以降价没用", "需求弹性小。")
+    }
+
+    @Test
+    fun trailingWhitespaceIsNotIncludedInTheSpan() {
+        val answer = "需求弹性小。  \n"
+        val span = accepted(answer, "需求弹性小。")
+        assertEquals(0, span.start)
+        assertEquals(6, span.end)
+        assertEquals("需求弹性小。", span.text)
+    }
+
+    @Test
     fun clauseDelimitedBySpacesIsAccepted() {
         // 带标号的短答：整个分句就是「逆向选择」，比 8 字短也得过
         accepted("a 逆向选择 b 道德风险", "逆向选择")

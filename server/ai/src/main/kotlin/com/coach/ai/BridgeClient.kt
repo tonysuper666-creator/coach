@@ -186,7 +186,8 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
                 call = AiCall(
                     callId = callId, task = request.task, requestedModel = request.model, servedBy = null,
                     status = "failed", ttftMs = null, durMs = millisSince(started), queueMs = null,
-                    physicalCalls = 0, requestId = requestId, inChars = request.system.length + request.user.length,
+                    // 传输超时的时候 CLI 多半已经跑过：保守按 1 次计，别把每日上限算少
+                    physicalCalls = 1, requestId = requestId, inChars = request.system.length + request.user.length,
                     outChars = 0, startedAt = startedAt, error = error.message,
                 ),
             )
@@ -195,13 +196,19 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         response.body().use { body ->
             if (response.statusCode() != 200) {
                 val text = body.readBytes().decodeToString()
+                // 错误体里也可能带 x_coach（例如 CLI 跑了一半超时后退出）：照它的 physical_calls 记账
+                val terminal = runCatching {
+                    (json.parseToJsonElement(text).jsonObject["x_coach"] as? JsonObject)?.let { TerminalState.fromJson(it) }
+                }.getOrNull()
                 return BridgeResult.Failure(
                     reason = "http_${response.statusCode()}: ${text.take(300)}",
-                    terminal = null,
+                    terminal = terminal,
                     call = AiCall(
                         callId = callId, task = request.task, requestedModel = request.model,
-                        servedBy = null, status = "failed", ttftMs = null, durMs = millisSince(started),
-                        queueMs = null, physicalCalls = 0, requestId = requestId,
+                        servedBy = terminal?.servedBy, status = terminal?.status ?: "failed",
+                        ttftMs = null, durMs = millisSince(started),
+                        queueMs = terminal?.queueMs, physicalCalls = terminal?.physicalCalls ?: 1,
+                        requestId = terminal?.requestId ?: requestId,
                         inChars = request.system.length + request.user.length, outChars = 0,
                         startedAt = startedAt, error = "http_${response.statusCode()}",
                     ),
@@ -241,6 +248,11 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             ?.get("message")?.jsonObject
             ?.stringOrNull("content")
             ?: ""
+        if (terminal != null && terminal.complete) {
+            independenceProblem(request.model, terminal)?.let { problem ->
+                return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length))
+            }
+        }
         val call = AiCall(
             callId = callId, task = request.task, requestedModel = request.model,
             servedBy = terminal?.servedBy ?: root.stringOrNull("model"), status = terminal?.status ?: "unknown",
@@ -309,6 +321,11 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             error = failure ?: if (resolved == null) "no_x_coach" else null,
         )
         val streamError = failure
+        if (resolved != null && resolved.complete) {
+            independenceProblem(request.model, resolved)?.let { problem ->
+                return BridgeResult.Failure(problem, resolved, call)
+            }
+        }
         return when {
             streamError != null -> BridgeResult.Failure(streamError, resolved, call)
             // ADR-0002：收不到终态帧按截断处理
@@ -319,6 +336,40 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     }
 
     private fun millisSince(started: Long): Long = (System.nanoTime() - started) / 1_000_000
+
+    /**
+     * 异厂独立性（ADR-0002 第 3、4 条）：我们关了兜底，桥就不许兜底；`served_by` 必须和请求的是同一家。
+     * 否则「异厂复核」可能是同一家模型，上层却照常写结果。
+     */
+    private fun independenceProblem(requested: String, terminal: TerminalState): String? {
+        if (terminal.fallback) return "served_by_mismatch:fallback"
+        val served = terminal.servedBy ?: return null
+        if (vendorOf(served) != vendorOf(requested)) return "served_by_mismatch:$served"
+        return null
+    }
+
+    private fun vendorOf(model: String): String = when {
+        model.startsWith("claude") -> "claude"
+        model.startsWith("gpt") -> "openai"
+        else -> model.substringBefore('-')
+    }
+
+    private fun callFor(
+        request: ChatRequest,
+        callId: String,
+        requestId: String,
+        startedAt: String,
+        started: Long,
+        terminal: TerminalState,
+        outChars: Int,
+    ): AiCall = AiCall(
+        callId = callId, task = request.task, requestedModel = request.model,
+        servedBy = terminal.servedBy, status = terminal.status, ttftMs = terminal.ttftMs,
+        durMs = millisSince(started), queueMs = terminal.queueMs, physicalCalls = terminal.physicalCalls,
+        requestId = terminal.requestId ?: requestId,
+        inChars = request.system.length + request.user.length, outChars = outChars,
+        startedAt = startedAt,
+    )
 
     companion object {
         const val CLAUDE = "claude-sonnet-5-5"

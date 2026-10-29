@@ -49,7 +49,7 @@ object VerbatimEvidence {
             if (aligned && passesFloor) {
                 if (normalized.exactStart[index] && normalized.exactStart[end]) {
                     val start = normalized.origin[index]
-                    val stop = if (end == text.length) answer.length else normalized.origin[end]
+                    val stop = normalized.origin[end]
                     return EvidenceCheck.Accepted(
                         EvidenceSpan(start = start, end = stop, text = answer.substring(start, stop)),
                         effectiveChars = effectiveChars,
@@ -105,13 +105,18 @@ object VerbatimEvidence {
 
     internal data class Token(val start: Int, val end: Int)
 
+    /**
+     * 「词元边界」= 不在任何词元内部的位置。标点、空白的前后都是边界，
+     * 所以引文可以带着句末的 `。`/`.` 结尾（批改 prompt 正是要求逐字照抄整个分句）。
+     */
     private fun tokenEdges(text: String): BooleanArray {
-        val edges = BooleanArray(text.length + 1)
-        edges[0] = true
-        edges[text.length] = true
+        val edges = BooleanArray(text.length + 1) { true }
         for (token in tokenize(text)) {
-            edges[token.start] = true
-            edges[token.end] = true
+            var index = token.start + 1
+            while (index < token.end) {
+                edges[index] = false
+                index++
+            }
         }
         return edges
     }
@@ -246,6 +251,7 @@ object VerbatimEvidence {
         val origin = ArrayList<Int>(answer.length + 8)
         val exact = ArrayList<Boolean>(answer.length + 8)
         var lastSpace = false
+        var keepEnd = 0
         var index = 0
         while (index < answer.length) {
             val cp = codePointAt(answer, index)
@@ -268,6 +274,7 @@ object VerbatimEvidence {
                     offset++
                 }
                 lastSpace = false
+                keepEnd = index + charCount(cp)
             }
             index += charCount(cp)
         }
@@ -276,7 +283,8 @@ object VerbatimEvidence {
             origin.removeAt(origin.size - 1)
             exact.removeAt(exact.size - 1)
         }
-        origin.add(answer.length)
+        // 末尾哨兵指向「最后一个保留字符之后」，不是原答长度：否则引到结尾的区间会把尾部空白/换行也包进去
+        origin.add(keepEnd)
         exact.add(true)
         return NormalizedAnswer(
             text = text.toString(),

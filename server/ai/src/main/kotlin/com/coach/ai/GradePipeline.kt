@@ -208,19 +208,43 @@ class GradePipeline(private val client: BridgeClient) {
         } catch (error: Exception) {
             return Outcome(false, null, listOf("grade_unparsable"), calls, null, emptyList(), fingerprint)
         }
-        val (evidenceDefects, spans) = GradeGate.evidence(answer, draft)
-        val defects = ArrayList<String>()
-        defects.addAll(GradeGate.arithmetic(draft, question.rubric))
-        defects.addAll(evidenceDefects)
+        fun checks(candidate: DraftGrade): List<String> =
+            GradeGate.arithmetic(candidate, question.rubric) + GradeGate.evidence(answer, candidate).first
+
+        var current = draft
+        var spans = GradeGate.evidence(answer, current).second
+        var defects = checks(current)
         if (defects.isNotEmpty()) {
-            return Outcome(false, null, defects, calls, null, spans, fingerprint, draft)
+            // ADR-0003 决定 6：失败带原因修复一次，仍失败才算批改不可用（这次修复也计入 ai_calls 与物理调用数）
+            val repaired = client.chat(
+                ChatRequest(
+                    task = "repair_grade",
+                    model = graderModel,
+                    system = Prompts.GRADE_SYSTEM,
+                    user = Prompts.repairGrade(question, answer, current, defects),
+                    stream = false,
+                    background = background,
+                    maxTokens = 2000,
+                ),
+            )
+            calls.add(repaired.call)
+            if (repaired is BridgeResult.Success) {
+                runCatching { TaskParsing.grade(repaired.text) }.getOrNull()?.let { fixed ->
+                    current = fixed
+                    spans = GradeGate.evidence(answer, fixed).second
+                    defects = checks(fixed)
+                }
+            }
+        }
+        if (defects.isNotEmpty()) {
+            return Outcome(false, null, defects, calls, null, spans, fingerprint, current)
         }
         val reviewed = client.chat(
             ChatRequest(
                 task = "cross_review_grade",
                 model = reviewerModel,
                 system = Prompts.CROSS_REVIEW_SYSTEM,
-                user = Prompts.crossReviewGrade(question, answer, draft, spans),
+                user = Prompts.crossReviewGrade(question, answer, current, spans),
                 stream = false,
                 background = background,
                 maxTokens = 1500,
@@ -238,7 +262,7 @@ class GradePipeline(private val client: BridgeClient) {
         if (verdict.verdict != "CONFIRM") {
             return Outcome(false, null, listOf("review_${verdict.verdict.lowercase()}"), calls, verdict, spans, fingerprint, draft)
         }
-        return Outcome(true, draft.awarded, emptyList(), calls, verdict, spans, fingerprint, draft)
+        return Outcome(true, current.awarded, emptyList(), calls, verdict, spans, fingerprint, current)
     }
 
     companion object {

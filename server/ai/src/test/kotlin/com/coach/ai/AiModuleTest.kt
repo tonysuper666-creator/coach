@@ -12,9 +12,13 @@ class BridgeClientTest {
 
     private fun client(bridge: StubBridge) = BridgeClient(stubConfig(bridge))
 
-    private fun request(stream: Boolean, background: Boolean = false) = ChatRequest(
+    private fun request(
+        stream: Boolean,
+        background: Boolean = false,
+        model: String = BridgeClient.CLAUDE,
+    ) = ChatRequest(
         task = "test",
-        model = BridgeClient.CLAUDE,
+        model = model,
         system = "sys",
         user = "usr",
         stream = stream,
@@ -30,7 +34,7 @@ class BridgeClientTest {
                 StubBridge.terminal("complete"),
                 StubBridge.DONE,
             )
-            val result = client(bridge).chat(request(stream = true))
+            val result = client(bridge).chat(request(stream = true, model = BridgeClient.CODEX))
             assertIs<BridgeResult.Success>(result)
             assertEquals("逆向选择", result.text)
             assertEquals("complete", result.terminal.status)
@@ -58,6 +62,41 @@ class BridgeClientTest {
             assertIs<BridgeResult.Failure>(result)
             assertEquals("status_failed", result.reason)
             assertEquals("timeout", result.terminal?.reason)
+        }
+    }
+
+    @Test
+    fun servedByFromAnotherVendorIsRejected() {
+        StubBridge().use { bridge ->
+            // 我们关了兜底，桥却把 Claude 的请求给了 Codex：异厂独立性没了，不能当成功
+            bridge.enqueue(200, StubBridge.completion("ok", served = "gpt-6.1-sol"))
+            val result = client(bridge).chat(request(stream = false))
+            assertIs<BridgeResult.Failure>(result)
+            assertEquals("served_by_mismatch:gpt-6.1-sol", result.reason)
+            assertEquals("gpt-6.1-sol", result.call.servedBy)
+        }
+    }
+
+    @Test
+    fun fallbackDespiteFallbackOffIsRejected() {
+        StubBridge().use { bridge ->
+            bridge.enqueue(200, StubBridge.fallbackCompletion("ok"))
+            val result = client(bridge).chat(request(stream = false))
+            assertIs<BridgeResult.Failure>(result)
+            assertEquals("served_by_mismatch:fallback", result.reason)
+        }
+    }
+
+    @Test
+    fun httpErrorKeepsBridgePhysicalCalls() {
+        StubBridge().use { bridge ->
+            bridge.enqueue(504, StubBridge.errorWithTerminal(504))
+            val result = client(bridge).chat(request(stream = false))
+            assertIs<BridgeResult.Failure>(result)
+            assertTrue(result.reason.startsWith("http_504"))
+            // 每日上限按 ai_calls 算：CLI 已经跑过，错误体里的 physical_calls 不能丢
+            assertEquals(1, result.call.physicalCalls)
+            assertEquals("claude-sonnet-5-5", result.call.servedBy)
         }
     }
 
@@ -205,13 +244,45 @@ class GradePipelineTest {
     }
 
     @Test
-    fun forgedEvidenceFailsClosedWithoutCallingReviewer() {
+    fun forgedEvidenceIsSentBackOnceAndThenFailsClosed() {
         StubBridge().use { bridge ->
-            bridge.enqueue(200, StubBridge.completion("""{"items":[{"id":"R1","points":2,"reason":"ok","evidence":"他在买保险之前就信息不对称"}],"total":2,"awarded":2}"""))
+            val forged = """{"items":[{"id":"R1","points":2,"reason":"ok","evidence":"他在买保险之前就信息不对称"}],"total":2,"awarded":2}"""
+            bridge.enqueue(200, StubBridge.completion(forged))
+            bridge.enqueue(200, StubBridge.completion(forged))
             val outcome = GradePipeline(client(bridge)).gradeConstructed(question, question.referenceAnswer)
             assertFalse(outcome.written)
             assertTrue(outcome.defects.any { it.startsWith("evidence_") })
-            assertEquals(1, bridge.requests.size)
+            // 一次批改 + 一次带原因的修复；修复仍失败 → 不写、也不再叫复核
+            assertEquals(2, bridge.requests.size)
+            assertEquals(2, outcome.calls.size)
+            assertTrue(outcome.calls[1].task == "repair_grade")
+            assertTrue(bridge.requests[1].contains("Your previous grading output failed"))
+        }
+    }
+
+    @Test
+    fun rejectedEvidenceIsRepairedOnceAndThenWritten() {
+        StubBridge().use { bridge ->
+            bridge.enqueue(200, StubBridge.completion("""{"items":[{"id":"R1","points":2,"reason":"ok","evidence":"他在买保险之前就信息不对称"}],"total":2,"awarded":2}"""))
+            bridge.enqueue(200, StubBridge.completion("""{"items":[{"id":"R1","points":2,"reason":"ok","evidence":"因为买了保险之后信息不对称"}],"total":2,"awarded":2}"""))
+            bridge.enqueue(200, StubBridge.completion("""{"verdict":"CONFIRM","note":"fine","revised_total":2}"""))
+            val outcome = GradePipeline(client(bridge)).gradeConstructed(question, question.referenceAnswer)
+            assertTrue(outcome.written)
+            assertEquals(2.0, outcome.awarded)
+            assertEquals(3, outcome.calls.size)
+            assertEquals(listOf("grade_constructed", "repair_grade", "cross_review_grade"), outcome.calls.map { it.task })
+        }
+    }
+
+    @Test
+    fun repairCannotChangeFrozenRubric() {
+        StubBridge().use { bridge ->
+            bridge.enqueue(200, StubBridge.completion("""{"items":[{"id":"R1","points":2,"reason":"ok","evidence":"他在买保险之前就信息不对称"}],"total":2,"awarded":2}"""))
+            // 修复时偷偷把分数改成 5 分：算术闸门仍然拦
+            bridge.enqueue(200, StubBridge.completion("""{"items":[{"id":"R1","points":5,"reason":"ok","evidence":"因为买了保险之后信息不对称"}],"total":5,"awarded":5}"""))
+            val outcome = GradePipeline(client(bridge)).gradeConstructed(question, question.referenceAnswer)
+            assertFalse(outcome.written)
+            assertTrue(outcome.defects.contains("points_out_of_range:R1"))
         }
     }
 

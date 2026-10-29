@@ -35,10 +35,13 @@ class StubBridge : AutoCloseable {
     }
 
     private fun handle(exchange: HttpExchange) {
-        requests.add(exchange.requestBody.readBytes().decodeToString())
+        val request = exchange.requestBody.readBytes().decodeToString()
+        requests.add(request)
         requestedHeaders.add(exchange.requestHeaders.mapValues { it.value.toList() })
+        val model = Regex("\"model\"\\s*:\\s*\"([^\"]+)\"").find(request)?.groupValues?.get(1) ?: ""
         val (status, body) = responses.removeFirstOrNull() ?: (500 to """{"error":"no stub response"}""")
-        respond(exchange, status, body, contentType = "text/event-stream")
+        // __MODEL__ 发回时替换成请求里的模型：默认让 served_by 与请求同家（异厂校验放行）
+        respond(exchange, status, body.replace("__MODEL__", model), contentType = "text/event-stream")
     }
 
     private fun respond(exchange: HttpExchange, status: Int, body: String, contentType: String = "application/json") {
@@ -56,17 +59,29 @@ class StubBridge : AutoCloseable {
         fun frame(content: String): String =
             "data: " + """{"choices":[{"index":0,"delta":{"content":"$content"}}]}""" + "\n\n"
 
-        fun terminal(status: String, reason: String? = null, served: String = "gpt-6.1-sol"): String =
+        fun terminal(status: String, reason: String? = null, served: String = "__MODEL__"): String =
             "data: " + """{"choices":[],"x_coach":{"status":"$status","reason":${reason?.let { "\"$it\"" } ?: "null"},""" +
                 """"finish_reason":"stop","served_by":"$served","fallback":false,"physical_calls":1,""" +
                 """"request_id":"rid-1","queue_ms":3,"ttft_ms":900,"elapsed_ms":1500}}""" + "\n\n"
 
         const val DONE = "data: [DONE]\n\n"
 
-        fun completion(text: String, served: String = "claude-sonnet-5-5"): String =
+        fun completion(text: String, served: String = "__MODEL__"): String =
             """{"model":"$served","choices":[{"index":0,"message":{"role":"assistant","content":${quote(text)}}}],""" +
                 """"x_coach":{"status":"complete","reason":null,"finish_reason":"stop","served_by":"$served",""" +
                 """"fallback":false,"physical_calls":1,"request_id":"rid-2","queue_ms":1,"ttft_ms":800,"elapsed_ms":2100}}"""
+
+        /** 桥没遵守 `X-Coach-Fallback: off` 时的回包（fallback=true）。 */
+        fun fallbackCompletion(text: String): String =
+            """{"model":"__MODEL__","choices":[{"index":0,"message":{"role":"assistant","content":${quote(text)}}}],""" +
+                """"x_coach":{"status":"complete","reason":null,"finish_reason":"stop","served_by":"__MODEL__",""" +
+                """"fallback":true,"physical_calls":2,"request_id":"rid-3","queue_ms":0,"ttft_ms":700,"elapsed_ms":1900}}"""
+
+        /** 非 200 但错误体里带 `x_coach`（CLI 跑了一半超时）：物理调用数不能丢。 */
+        fun errorWithTerminal(status: Int): String =
+            """{"error":{"type":"bridge_error","code":$status,"message":"cli timeout"},"x_coach":{""" +
+                """"status":"failed","reason":"timeout","finish_reason":"error","served_by":"claude-sonnet-5-5",""" +
+                """"fallback":false,"physical_calls":1,"request_id":"rid-4","queue_ms":0,"ttft_ms":-1,"elapsed_ms":90000}}"""
 
         private fun quote(text: String): String =
             "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""

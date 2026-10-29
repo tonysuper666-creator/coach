@@ -1,4 +1,5 @@
-import subprocess, os, time, urllib.request, signal, socket
+import subprocess, os, time, urllib.request, signal, socket, json
+from urllib.parse import urlparse
 from pathlib import Path
 from local_config import tail_host
 
@@ -9,11 +10,15 @@ logroot.mkdir(exist_ok=True)
 server = r / "server/app/build/install/app/bin/app"
 procs = []
 handles = []
+data_by_port = {}
 
 
 def start(name, env):
     f = open(logroot / (name + ".log"), "w")
     handles.append(f)
+    data = logroot / (name + "-data")
+    env = dict(env, COACH_DATA_DIR=str(data))
+    data_by_port[int(env["COACH_PORT"])] = data
     p = subprocess.Popen(
         [str(server)],
         env=dict(os.environ, **env),
@@ -26,7 +31,9 @@ def start(name, env):
 
 
 def get(url):
-    with urllib.request.urlopen(url, timeout=2) as res:
+    token = (data_by_port[urlparse(url).port] / "device-token").read_text().strip()
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token, "X-Coach-Device": "desktop"})
+    with urllib.request.urlopen(request, timeout=2) as res:
         return res.read().decode()
 
 
@@ -34,10 +41,10 @@ def ready(url):
     for _ in range(50):
         try:
             body = get(url)
-            assert body == "Hello from Coach"
+            assert json.loads(body)["epoch"]
             print(url, body, flush=True)
             return
-        except (OSError, AssertionError):
+        except (OSError, AssertionError, ValueError):
             time.sleep(0.2)
     raise RuntimeError("not ready " + url)
 

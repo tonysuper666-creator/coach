@@ -1,4 +1,4 @@
-import os, subprocess, time, signal, urllib.request
+import os, subprocess, time, signal, urllib.request, json
 from pathlib import Path
 from local_config import tail_host, value
 
@@ -26,6 +26,8 @@ def run(args, **kwargs):
 def server(name, env):
     f = open(name + ".log", "w")
     logs.append(f)
+    data = out / (name + "-data")
+    env = dict(env, COACH_DATA_DIR=str(data))
     p = subprocess.Popen(
         [str(r / "server/app/build/install/app/bin/app")],
         env=dict(os.environ, **env),
@@ -37,10 +39,10 @@ def server(name, env):
     port = env.get("COACH_PORT", "18791")
     for _ in range(60):
         try:
-            with urllib.request.urlopen(
-                "http://127.0.0.1:" + port + "/v1/hello", timeout=1
-            ) as response:
-                assert response.read() == b"Hello from Coach"
+            token = (data / "device-token").read_text().strip()
+            request = urllib.request.Request("http://127.0.0.1:" + port + "/v1/hello", headers={"Authorization": "Bearer " + token, "X-Coach-Device": "desktop"})
+            with urllib.request.urlopen(request, timeout=1) as response:
+                assert json.load(response)["epoch"]
             return p
         except OSError:
             time.sleep(0.2)
@@ -55,19 +57,14 @@ try:
         raise RuntimeError(
             serial + " is already in use; will not stop an existing emulator"
         )
-    server("server-android", {})
+    ledger_server = server("server-android", {})
     if os.environ.get("COACH_VERIFY_PEER"):
-        run(
-            [
-                "ssh",
-                "-oBatchMode=yes",
-                "-oConnectTimeout=8",
-                os.environ["COACH_VERIFY_PEER"],
-                f"curl -fsS --connect-timeout 5 --max-time 10 http://{tail}:18791/v1/hello",
-            ],
-            timeout=20,
-        )
-        print("\nNormal tailnet listener reachable from peer", flush=True)
+        response = run([
+            "ssh", "-oBatchMode=yes", "-oConnectTimeout=8", os.environ["COACH_VERIFY_PEER"],
+            f"curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{{http_code}}' http://{tail}:18791/v1/hello"
+        ], capture_output=True, text=True, timeout=20)
+        assert response.stdout.strip() == "401", response.stdout
+        print("Normal tailnet listener reachable; unpaired peer rejected with 401", flush=True)
     current = run([ts, "serve", "status"], capture_output=True, text=True).stdout
     print("serve status before:", repr(current), flush=True)
     if (
@@ -79,20 +76,12 @@ try:
         # The task explicitly authorizes this one temporary TCP mapping.
         run([ts, "serve", "--bg", "--tcp=18793", "tcp://127.0.0.1:18795"], timeout=20)
         serve_owned = True
-        run(
-            [
-                "ssh",
-                "-oBatchMode=yes",
-                "-oConnectTimeout=8",
-                os.environ["COACH_VERIFY_PEER"],
-                f"curl -fsS --connect-timeout 5 --max-time 10 http://{tail}:18793/v1/hello",
-            ],
-            timeout=20,
-        )
-        print(
-            "\nTCP serve forwards to loopback-only Ktor from another tailnet peer",
-            flush=True,
-        )
+        response = run([
+            "ssh", "-oBatchMode=yes", "-oConnectTimeout=8", os.environ["COACH_VERIFY_PEER"],
+            f"curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{{http_code}}' http://{tail}:18793/v1/hello"
+        ], capture_output=True, text=True, timeout=20)
+        assert response.stdout.strip() == "401", response.stdout
+        print("TCP serve forwards to authenticated loopback; unpaired peer rejected with 401", flush=True)
         run([ts, "serve", "--tcp=18793", "off"])
         serve_owned = False
         run([ts, "serve", "status"])
@@ -180,7 +169,8 @@ try:
     time.sleep(3)
     with open("android-app.png", "wb") as screenshot:
         run([adb, "-s", serial, "exec-out", "screencap", "-p"], stdout=screenshot)
-    result = run(
+    token = (out / "server-android-data/device-token").read_text().strip()
+    result = subprocess.run(
         [
             adb,
             "-s",
@@ -189,15 +179,53 @@ try:
             "am",
             "instrument",
             "-w",
+            "-e", "class", "com.coach.android.NetworkSecuritySmoke",
+            "-e", "coachToken", token,
             "com.coach.android.test/androidx.test.runner.AndroidJUnitRunner",
         ],
         capture_output=True,
         text=True,
         timeout=90,
     )
+    result.check_returncode()
     print(result.stdout, flush=True)
     assert "OK (3 tests)" in result.stdout
     run([adb, "-s", serial, "logcat", "-d", "-s", "CoachSmoke:I", "*:S"])
+    if os.environ.get("COACH_VERIFY_LEDGER_WAKE") == "1":
+        run([adb,"-s",serial,"logcat","-c"])
+        reconnect_log = open("android-reconnect.txt","w")
+        logs.append(reconnect_log)
+        instrument = subprocess.Popen([
+            adb,"-s",serial,"shell","am","instrument","-w",
+            "-e","class","com.coach.android.LedgerReconnectSmoke",
+            "-e","coachToken",token,
+            "com.coach.android.test/androidx.test.runner.AndroidJUnitRunner"
+        ],stdout=reconnect_log,stderr=subprocess.STDOUT,start_new_session=True)
+        procs.append(instrument)
+        for _ in range(150):
+            report = run([adb,"-s",serial,"logcat","-d","-s","CoachReconnect:I","*:S"],capture_output=True,text=True).stdout
+            if "READY" in report:
+                break
+            if instrument.poll() is not None:
+                raise RuntimeError("Android reconnect test exited before ready")
+            time.sleep(.2)
+        else:
+            raise RuntimeError("Android SyncEngine never became ready")
+        paused = False
+        try:
+            os.killpg(ledger_server.pid,signal.SIGSTOP)
+            paused = True
+            time.sleep(32)
+        finally:
+            if paused:
+                os.killpg(ledger_server.pid,signal.SIGCONT)
+        instrument.wait(timeout=60)
+        assert "OK (1 test)" in Path("android-reconnect.txt").read_text()
+        report = run([adb,"-s",serial,"logcat","-d","-s","CoachReconnect:I","*:S"],capture_output=True,text=True).stdout
+        Path("android-reconnect-log.txt").write_text(report)
+        assert "OFFLINE" in report and "RECONNECTED" in report
+        assert "wake detected" in Path("server-android.log").read_text()
+        print("Android SyncEngine: server group STOP=32s, offline observed, wake detected, automatically reconnected",flush=True)
     run(
         [
             adb,

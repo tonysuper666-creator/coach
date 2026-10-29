@@ -5,3 +5,6 @@ node_modules/
 /local.properties
 /.s0-evidence/
 __pycache__/
+
+/.ledger-evidence/
+/tools/bridge/.venv/

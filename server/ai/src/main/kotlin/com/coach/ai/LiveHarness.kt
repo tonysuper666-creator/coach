@@ -392,6 +392,11 @@ class LiveHarness(
     }
 
     fun planted() {
+        // 已有结论就跳过，别为了复跑再花一次 Claude 额度（要重跑加 --force）
+        if (runs.resolve("planted.json").exists() && !force) {
+            println("skip planted（已有 runs/planted.json；要重跑加 --force）")
+            return
+        }
         val payload = JsonText.json.parseToJsonElement(inputs.resolve("planted.json").readText()).jsonObject
         val excerpt = payload["excerpt"]!!.jsonPrimitive.content
         val items = payload["items"]!!.jsonArray

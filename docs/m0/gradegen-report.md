@@ -68,7 +68,7 @@ gpt-6.1-sol 一次出 3 道要 17–72 秒；d4 spike 里 Claude 出题是 10–
 |---|---|---|
 | `no_correct`（没有正确选项） | 1 | 1（复核答 NONE） |
 | `multiple_correct`（不止一个对） | 2 | 2（复核答对了键，但标了 `multiple_correct`） |
-| `wrong_key`（答案键写错） | 2 | 2（1 条复核答 B、1 条标 `not_supported_by_source`） |
+| `wrong_key`（答案键写错） | 2 | 2（一条复核答 B 且标 `not_supported_by_source`；另一条复核答 A、缺陷为空，只因与写入的键不一致被拦） |
 | 干净对照 | 1 | 0 误报 |
 
 第一轮跑出 4/5：其中一条「六家平分」的题标注为错键，但键 A（非集中）其实是对的（HHI=1/6≈0.167），

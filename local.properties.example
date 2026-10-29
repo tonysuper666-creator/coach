@@ -1,0 +1,5 @@
+# Copy to ~/Coach/config/local.properties and replace the documentation values.
+coach.tailHost=192.0.2.10
+coach.textbookDir=~/DeepTutor/library/<course>/textbook
+coach.sdkDir=~/Library/Android/sdk
+coach.tailscaleCli=~/bin/tailscale

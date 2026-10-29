@@ -109,6 +109,6 @@ tools/corpus/prepare-gradegen.py check          # 语料装配齐不齐（教材
 ./gradlew liveTest                              # 需要桥副本 8791 在跑：1 个 KP + 植入题 + 真实作答
 ```
 
-桥副本 8791 起停：2026-10-29 20:42:13 UTC 起（`screen -S coach-bridge-8791`），本轮跑完按 PID 停。
+桥副本 8791 起停：2026-10-29 20:42:13 UTC 起、21:40:45 UTC 停（`screen -S coach-bridge-8791`，按 PID 4811 停）；同期 DeepTutor 的 8790 未动（PID 70368 全程在）。
 每次 Claude 请求前只读检查 DeepTutor 的 `bridge.log`，命中活动就中止整批、等下一个 10 分钟静默窗口——
-本轮因此在 21:24–21:33 的窗口里跑完复核与批改；Codex 生成侧不占 Claude 订阅窗口，只在 `nice` 下跑。
+本轮因此在 21:24–21:33 的窗口里跑完复核与批改；Codex 生成侧不占 Claude 订阅窗口（另走 ChatGPT 订阅），生成那 20 次是在他在线时跑的，只占本机 CPU。

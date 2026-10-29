@@ -34,9 +34,13 @@ fun main() {
         tmp.writeText(state.snapshot())
         Files.move(tmp.toPath(), stateFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
     }
+    val summaryLine = androidx.compose.runtime.mutableStateOf<String?>(null)
     application {
     Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = 840.dp, height = 600.dp)) {
-        RenderingReplayScreen(state, corpus, true, "FLAT", ::save, ::println)
+        RenderingReplayScreen(state, corpus, true, "FLAT", ::save, { line ->
+            println(line)
+            if (line.startsWith("SUMMARY")) summaryLine.value = line
+        }, autoplay = System.getenv("COACH_AUTOPLAY")?.toIntOrNull() ?: 0, tickMs = System.getenv("COACH_TICK_MS")?.toLongOrNull() ?: 50L, streamOnly = System.getenv("COACH_STREAM_MESSAGE")?.toIntOrNull() ?: -1, chunk = System.getenv("COACH_CHUNK")?.toIntOrNull() ?: 30)
         DisposableEffect(window) {
             val listener = object : java.awt.event.WindowAdapter() {
                 override fun windowLostFocus(e: java.awt.event.WindowEvent) { save() }
@@ -58,6 +62,14 @@ fun main() {
                     }
                 }
                 println("COACH live window surface captured: $path")
+            }
+            System.getProperty("coach.summaryCapturePath")?.let { path ->
+                // Autoplay verification: wait for the whole replay, then capture the final live surface and leave.
+                while (summaryLine.value == null) delay(500)
+                val bitmap = checkNotNull(layer.screenshot())
+                bitmap.use { Image.makeFromBitmap(it).use { image -> image.encodeToData()!!.use { data -> File(path).writeBytes(data.bytes) } } }
+                println("COACH replay finished; surface captured: $path")
+                exitApplication()
             }
             System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let {
                 delay(it * 1000)

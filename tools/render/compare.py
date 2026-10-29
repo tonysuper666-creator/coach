@@ -1,5 +1,5 @@
 """Compare identical MathJax SVGs in Chromium and the real common Painter (32 px/em)."""
-import argparse, json, math, os
+import argparse, json, math, os, sys
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -12,6 +12,9 @@ root = args.corpus
 rows = json.loads((root / 'formulas.json').read_text())
 (root / 'browser').mkdir(exist_ok=True)
 reports = []
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from inkgap import ink_gap
 with sync_playwright() as p:
     browser = p.chromium.launch(executable_path=os.environ.get("COACH_CHROMIUM_BIN"))
     page = browser.new_page(device_scale_factor=1)
@@ -35,22 +38,19 @@ with sync_playwright() as p:
         ys, xs = np.where(ink)
         box_px = int((ys.max()-ys.min()+1)*(xs.max()-xs.min()+1)) if len(ys) else 1
         pct = float(diff.sum()*100/box_px)
-        # Diagnostic: a pixel only counts when it is outside the +-1px neighbourhood range of the
-        # other renderer's output, which removes sub-pixel placement and anti-aliasing differences.
+        # Diagnostic (does not replace the 2% rule): ink coverage. An ink pixel (darkness >= 128) of one rendering
+        # with no ink (>= 64) within 1px in the other counts as missing/extra. Deleted or added strokes always count.
         ga, gb = np.max(255-a,axis=2), np.max(255-b,axis=2)
-        def span(g):
-            pad = np.pad(g,1,mode='edge'); stack = [pad[y:y+g.shape[0],x:x+g.shape[1]] for y in range(3) for x in range(3)]
-            return np.min(stack,axis=0), np.max(stack,axis=0)
-        (lo_a,hi_a),(lo_b,hi_b) = span(ga),span(gb)
-        tol = (np.maximum(lo_b-hi_a, lo_a-hi_b) > 16)
-        tol_pct = float(tol.sum()*100/box_px)
+        miss, extra = ink_gap(ga, gb), ink_gap(gb, ga)
+        tol_pct = float((miss.sum()+extra.sum())*100/box_px)
+        tol = miss | extra
         ia, ib = (255-a).max(axis=2).astype(float), (255-b).max(axis=2).astype(float)
         ratio = float(ib.sum()/max(ia.sum(),1))
         win = 16; per = max(ia.sum()/max(ia.shape[1]//win,1),1)
         dev = max([abs(ia[:,k:k+win].sum()-ib[:,k:k+win].sum())/max(ia[:,k:k+win].sum(),ib[:,k:k+win].sum(),1)
                    for k in range(0,ia.shape[1]-win+1,win) if max(ia[:,k:k+win].sum(),ib[:,k:k+win].sum()) > .02*per] or [0])
         row_report = {'ink_ratio':ratio,'max_window_ink_deviation':dev,'id':row['id'],'strict_different_pixels_percent':exact,'diff_over_16_pixels':int(diff.sum()),
-            'bbox_pixels':box_px,'diff_over_16_percent_of_bbox':pct,'auto_consistent':pct <= 2,'shift_tolerant_diff_pixels':int(tol.sum()),'shift_tolerant_percent_of_bbox':tol_pct,
+            'bbox_pixels':box_px,'diff_over_16_percent_of_bbox':pct,'auto_consistent':pct <= 2,'ink_missing_pixels':int(miss.sum()),'ink_extra_pixels':int(extra.sum()),'ink_gap_percent_of_bbox':tol_pct,
             'has_chinese':bool(re.search('[\u3400-\u9fff]',row['tex']))}
         if not row_report['auto_consistent']:
             (root / 'review').mkdir(exist_ok=True)
@@ -62,7 +62,8 @@ with sync_playwright() as p:
 auto = sum(r['auto_consistent'] for r in reports)
 report = {'em_px':32,'pixel_rule':'A pixel differs when any RGB channel differs by >16/255; a formula is consistent when differing pixels <=2% of the ink bounding box (union of both renderers). Strict any-channel percentage is reported per row for reference.',
     'formulas':len(rows),'auto_consistent':auto,'auto_consistent_percent':auto*100/len(rows),
-    'shift_tolerant_le_2pct':sum(r['shift_tolerant_percent_of_bbox'] <= 2 for r in reports),
+    'ink_gap_zero_pixels_non_cjk':sum(r['ink_missing_pixels']+r['ink_extra_pixels'] == 0 for r in reports if not r['has_chinese']),'non_cjk_formulas':sum(not r['has_chinese'] for r in reports),'cjk_with_ink_gap':[r['id'] for r in reports if r['has_chinese'] and r['ink_missing_pixels']+r['ink_extra_pixels']],
+    'ink_gap_le_2pct':sum(r['ink_gap_percent_of_bbox'] <= 2 for r in reports),
     'ink_ratio_outside_0.9_1.1':sum(not .9 <= r['ink_ratio'] <= 1.1 for r in reports),'max_window_ink_deviation':max(r['max_window_ink_deviation'] for r in reports),
     'needs_review':[r['id'] for r in reports if not r['auto_consistent']],'rows':reports}
 (root / 'comparison.json').write_text(json.dumps(report,indent=2))

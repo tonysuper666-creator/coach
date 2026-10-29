@@ -35,9 +35,10 @@ class RenderingQualityTest {
         assertFalse(shouldSendOnEnter(false, true, false, false))
     }
     @Test fun localSnapshotRetainsDraftChoiceStreamAndAnchor() {
-        val old = ReplayState().apply { input = TextFieldValue("中文 x^2", TextRange(2)); selected = "B"; cursor = 174; running = true; scrollIndex = 3; scrollOffset = 91; message = 7 }
+        val old = ReplayState().apply { input = TextFieldValue("中文 x^2", TextRange(2)); selected = "B"; cursor = 174; running = true; scrollIndex = 3; scrollOffset = 91; message = 7; pinned = false; anchorKey = 17; anchorFraction = 0.397f; autoplayRun = 1234L }
         val restored = ReplayState(old.snapshot())
         assertEquals(old.snapshot(), restored.snapshot())
+        assertEquals(17, restored.anchorKey); assertEquals(0.397f, restored.anchorFraction); assertEquals(false, restored.pinned)
     }
     @Test fun inlinePlaceholderRetainsBaselineForTallAndDeepMath() {
         for ((h, d) in listOf(12f to 3f, 36f to 21f, 5f to 38f)) {

@@ -45,11 +45,21 @@ SDK (it holds `emulator/` and the `sable-api35` image), emulator `-gpu host`, de
 
 Comparison rule (Mika, TON-1040): same SVG, 32 px/em, black on white; a pixel differs when any
 channel differs by more than 16/255; a formula is consistent when differing pixels are at most 2% of the ink
-bounding box of the two renderings. `compare.py` also reports a +-1px-neighbourhood diagnostic, the
-ink-mass ratio and the worst 16px-column ink deviation, and writes side-by-side images of every formula
-that is not automatically consistent to `review/`. Inline baseline: `baseline.py` reads the Android
+bounding box of the two renderings. The area rule is only a triage: a small glyph is far below 2% of the box, so
+every formula that fails it is reviewed by eye (`review-sheets.py` builds Chromium-over-Painter contact sheets).
+`compare.py` also reports an ink-gap diagnostic (an ink pixel of one rendering with no ink within 1px in the other,
+missing or extra, in absolute pixels), the ink-mass ratio and the worst 16px-column ink deviation. `selftest.py`
+proves the ink-gap diagnostic catches a deleted glyph band and a 3px shift on all 265 real rasters. (The first
+version of this diagnostic compared 3x3 min/max ranges and missed deleted thin strokes; do not reintroduce it.) Inline baseline: `baseline.py` reads the Android
 `baseline.png` (digits in text vs digits in formulas on one line). Whole-answer replay metrics come from
-`check-android.py`, which replays all 20 answers pinned to the bottom and scrolled away from the tail.
+`check-android.py`, which replays all 20 answers pinned to the bottom and scrolled away from the tail (first-visible
+shift counts only samples with content still below the viewport; shorter content is at its end and follows the tail),
+and streams the longest answer slowly (8 chars / 700 ms), reads into the middle of a block, changes the window through
+the four shapes while the stream is still arriving, then `am kill`s the process mid-stream. After every step the live
+anchor (first visible block key, fraction into it, measured from the layout) and the top visible text from
+`uiautomator` must be the same; block height is allowed to change. Desktop: `COACH_AUTOPLAY=1|2` with
+`-Dcoach.summaryCapturePath=<png>` replays everything in the Mac app, prints the same SUMMARY (frame gaps measured
+with a continuous frame loop) and exports the live Skia surface.
 
 Fixes made while taking over: JankStats is created after `setContent`; regex character classes no longer
 contain bare `{}` (ICU on Android reads them as string sets and crashed the first paragraph with a formula);
@@ -57,7 +67,12 @@ the inline formula baseline is now read from the laid out line (a fixed line hei
 constant but the baseline moves when the line contains CJK fallback glyphs); Markdown styling matched
 `node.type.toString()` (`Markdown:STRONG`) so bold, italic, code and headings never applied.
 
+Reading anchor: `ReplayState` stores `anchorKey`/`anchorFraction`/`pinned`; the screen re-scrolls to the same block at the
+same fraction when the width changes and after a process restore (without this the check fails: same block moved from
+0.40 to 0.79 of its height on outer -> inner). `autoplay` Intent extras only reset the replay once per `runId`, because
+Android re-delivers the task's launch Intent after a kill.
+
 Not verified: IME composition-Enter on a real Mac (Doubao, system Pinyin), `gradlew run` and packaged `.app`
-by hand, real Z Fold8 / Pad window dp and physical-device JankStats. The desktop app starts and replays
-(window opened, METAL) but no desktop screenshot was captured: screen capture is not permitted in the agent session.
+by hand, real Z Fold8 / Pad window dp and physical-device JankStats. The desktop app replays all 20 answers in both modes (see SUMMARY lines); its screenshots come from the in-app Skia surface
+export because the agent session may not capture other windows.
 No WebView fallback was introduced.

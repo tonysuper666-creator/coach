@@ -1,5 +1,5 @@
 """Foreground, isolated emulator replay; owns and cleans up only the emulator it starts."""
-import os, subprocess, time, signal, json, xml.etree.ElementTree as ET
+import os, re, subprocess, time, signal, json, xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -19,6 +19,8 @@ def snapshot():
     xml = text('exec-out','run-as',package,'cat','shared_prefs/render-replay.xml')
     return json.loads(ET.fromstring(xml).find("string[@name='state']").text)
 def launch(page=None,extra=()):
+    extra=list(extra)
+    if '--ei' in extra and 'autoplay' in extra: extra += ['--el','runId',str(time.time_ns())]
     args=['am','start','-W','-n',package+'/.MainActivity',*extra]
     if page is not None: args += ['--ei','chinesePage',str(page)]
     shell(*args,capture_output=True)
@@ -66,7 +68,11 @@ try:
         if 'READY messages=20' in logs: break
         time.sleep(.5)
     else: raise RuntimeError('UI readiness timeout: '+logs)
-    time.sleep(1.5)
+    for _ in range(40):  # cold start on a slow emulator: wait until the stream has really advanced (progress label "N/total", N > 0)
+        shell('uiautomator','dump','/sdcard/coach-render-ui.xml',capture_output=True)
+        labels=[n.get('text') for n in ET.fromstring(text('exec-out','cat','/sdcard/coach-render-ui.xml')).iter('node') if re.fullmatch(r'\d+/\d+',n.get('text') or '')]
+        if labels and int(labels[0].split('/')[0])>0: break
+        time.sleep(.5)
     capture('outer-stream.png');home();before=snapshot()
     assert before['draft']==state['draft'] and before['option']=='B' and before['cursor']>0,before
     # Record a real running screen through the resize sequence; collect before exit.
@@ -109,13 +115,65 @@ try:
         runs[name]={'summary':[l.split('CoachRender: ',1)[1] for l in logs.splitlines() if 'SUMMARY mode=' in l][-1],
                     'jank':[l.split('CoachRender: ',1)[1] for l in logs.splitlines() if 'JANK frames' in l][-1]}
         (out/f'runtime-{name}.log').write_text(logs)
+    # Mid-stream: the longest answer streams slowly (1 tick/s); once the reader has scrolled away from the tail the window changes
+    # shape four times while it is still arriving, then the process is killed. The reader must keep the same content under their eyes.
+    import re
+    messages = json.loads((root/'replay.json').read_text())['messages']
+    longest = max(range(len(messages)), key=lambda i: len(messages[i])); total = len(messages[longest])
+    def anchor_lines(): return [l.split('CoachRender: ',1)[1] for l in text('logcat','-d','-s','CoachRender:I','*:S').splitlines() if 'ANCHOR key=' in l]
+    def live_anchor(width_hint=None):
+        for _ in range(30):
+            lines = anchor_lines()
+            if lines:
+                m = dict(re.findall(r'(\w+)=([-\d.]+)', lines[-1]))
+                if width_hint is None or int(m['viewportWidthPx']) == width_hint: return {k:float(v) for k,v in m.items()}
+            time.sleep(.5)
+        raise RuntimeError('no ANCHOR line for width %s: %s' % (width_hint, anchor_lines()[-2:]))
+    def top_text():
+        shell('uiautomator','dump','/sdcard/coach-render-ui.xml',capture_output=True)
+        nodes = [(n.get('text') or '', list(map(int,re.findall(r'\d+',n.get('bounds'))))) for n in ET.fromstring(text('exec-out','cat','/sdcard/coach-render-ui.xml')).iter('node')]
+        list_top = max([b[3] for t,b in nodes if t == '钉底'] or [0])
+        body = sorted([(b[3], t) for t,b in nodes if len(t) >= 8 and b[3] > list_top + 2 and b[1] < 1500 and not t.startswith(('Coach','窗口','草稿','失败'))])
+        return body[0][1][:28] if body else ''
+    def wait_for(token, secs=60):
+        for _ in range(int(secs*2)):
+            logs = text('logcat','-d','-s','CoachRender:I','AndroidRuntime:E','*:S')
+            if 'FATAL EXCEPTION' in logs: raise RuntimeError(logs)
+            if token in logs: return
+            time.sleep(.5)
+        raise RuntimeError('timeout waiting for '+token)
+    shell('wm','size','1248x1972');shell('am','force-stop',package);device('logcat','-c')
+    launch(extra=['--ei','autoplay','3','--el','tickMs','700','--ei','chunk','8','--ei','streamOnly',str(longest)])
+    wait_for('SCROLLED_AWAY',120);time.sleep(2.5)
+    stream=[];widths={'outer':1248,'inner':1848,'fold-landscape':2448,'pad-landscape':2520}
+    reading=lambda: {'live':live_anchor(),'top':top_text(),'state':snapshot()}
+    prev=reading();stream.append({'shape':'outer','size':'1248x1972',**prev});capture('stream-outer.png')
+    for name,size in [('inner','1848x2448'),('fold-landscape','2448x1848'),('pad-landscape','2520x1680'),('outer','1248x1972')]:
+        device('logcat','-c');shell('wm','size',size);time.sleep(2.5)
+        now=reading()
+        assert now['live']['key']==prev['live']['key'] and now['top']==prev['top'],(name,prev,now)
+        assert abs(now['live']['fraction']-prev['live']['fraction'])<=.03,('anchor fraction moved',name,prev['live'],now['live'])
+        assert now['live']['cursor']>prev['live']['cursor'] and now['state']['cursor']<total,('stream not live in '+name,now['state'],total)
+        assert now['state']['draft']==state['draft'] and now['state']['option']=='B'
+        capture('stream-'+name+'.png');stream.append({'shape':name,'size':size,**now});prev=now
+    # Kill while still streaming and read the same place after the restart (state is restored from private storage).
+    before=reading();assert before['state']['cursor']<total and before['state']['running'],before['state']
+    home();shell('am','kill',package);time.sleep(.5)
+    assert subprocess.run([adb,'-s',serial,'shell','pidof',package],capture_output=True).returncode!=0,'am kill did not reclaim process'
+    device('logcat','-c');launch();time.sleep(3)
+    after=reading();capture('stream-restored.png')
+    assert after['live']['key']==before['live']['key'] and after['top']==before['top'],(before,after)
+    assert abs(after['live']['fraction']-before['live']['fraction'])<=.03,('restored anchor fraction',before['live'],after['live'])
+    assert after['state']['cursor']>=before['state']['cursor'] and after['state']['draft']==before['state']['draft']
+    stream.append({'shape':'after-kill','size':'1248x1972',**after})
+    home()
     # Inline baseline sheet: digits in text and formula must share a baseline.
     shell('am','force-stop',package);launch(extra=['--ez','baseline','true']);time.sleep(1.5);capture('baseline.png');home()
     shell('wm','size','reset');shell('wm','density','reset')
     logs=text('logcat','-d','-s','CoachRender:I','AndroidRuntime:E','*:S')
     (out/'runtime.log').write_text(logs)
     assert 'FATAL EXCEPTION' not in logs,logs
-    summary={'forms':results,'beforeKill':before,'afterKill':after,'processReclaimed':True,'chineseScreenshots':7,'chineseFormulas':14,'replayRuns':runs,'ai_calls':0}
+    summary={'forms':results,'beforeKill':before,'afterKill':after,'processReclaimed':True,'chineseScreenshots':7,'chineseFormulas':14,'replayRuns':runs,'streamingForms':stream,'ai_calls':0}
     (out/'summary.json').write_text(json.dumps(summary,indent=2))
     print(json.dumps({'forms':len(results),'processReclaimed':True,'chineseFormulas':14,'statePreserved':True}))
 finally:

@@ -51,7 +51,7 @@ fun main() {
         LaunchedEffect(Unit) {
             delay(1500)
             val layer = window.skiaLayers().first()
-            println("COACH window showing=${window.isShowing} bounds=${window.bounds} renderApi=${layer.renderApi}")
+            println("COACH window showing=${window.isShowing} focused=${window.isFocused} active=${window.isActive} bounds=${window.bounds} renderApi=${layer.renderApi}")
             // Capture the existing on-screen Skia surface. This needs no permission
             // to capture other applications and is only enabled for local verification.
             System.getProperty("coach.capturePath")?.let { path ->
@@ -66,6 +66,7 @@ fun main() {
             System.getProperty("coach.summaryCapturePath")?.let { path ->
                 // Autoplay verification: wait for the whole replay, then capture the final live surface and leave.
                 while (summaryLine.value == null) delay(500)
+                println("COACH window at end showing=${window.isShowing} focused=${window.isFocused} active=${window.isActive}")
                 val bitmap = checkNotNull(layer.screenshot())
                 bitmap.use { Image.makeFromBitmap(it).use { image -> image.encodeToData()!!.use { data -> File(path).writeBytes(data.bytes) } } }
                 println("COACH replay finished; surface captured: $path")

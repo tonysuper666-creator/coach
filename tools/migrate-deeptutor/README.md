@@ -31,3 +31,5 @@ cmp "$HOME/Coach/migrate-out/check-a/report.md" "$HOME/Coach/migrate-out/check-b
 验收者应重新捕获一份副本，在副本上手工 SQL 核对路径内嵌 KP、mastery_interactions、mastery_learning_evidence、mastery_events、assessment_attempts，并抽十条映射对照源主键。对账基线是设计中的历史时点，之后真实学习新增的数据会成为差异；不得修改源记录以凑齐基线。
 
 独立 SQL 计数在 `verify-counts.sql`；仅对复制库运行 `sqlite3 -readonly`，先把 `mapping.json` 的 `path_id` 设为 `@path_id` 参数，再 `.read tools/migrate-deeptutor/verify-counts.sql`。该文件通过 SQLite JSON 函数直接数源聚合，不使用迁移器的计数结果。另在 chat 副本上核对 `assessment_attempts` 的 `mastery_path_id`、题库 JSON 的 `question_type` 分组和笔记的 `records` 长度。
+
+组题容器另存为 `legacy_attempt_groups` 并引用已有子题；`attempts` 只计叶子事实，`interaction_rows` 保留原始行数。原类型备份无法按源 ID 找到时，`type=null`，当前源类型保留在 `current_source_type`，由后续事实确认处理。

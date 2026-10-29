@@ -10,7 +10,7 @@ SELECT 'schedules', count(*)
 FROM mastery_paths p, json_each(p.state_json, '$.repetition_states') r
 WHERE p.path_id = @path_id;
 SELECT 'retained_evidence', count(*) FROM mastery_learning_evidence WHERE path_id = @path_id;
-SELECT 'attempts', count(*) FROM mastery_interactions WHERE path_id = @path_id AND length(trim(user_answer)) > 0;
+SELECT 'attempts', count(*) FROM mastery_interactions WHERE path_id = @path_id AND length(trim(user_answer)) > 0 AND coalesce(json_extract(question_json, '$.question_type'),'') != 'group';
 SELECT 'events', count(*) FROM mastery_events WHERE path_id = @path_id;
 SELECT 'graded_events', count(*) FROM mastery_events WHERE path_id = @path_id AND event_type = 'interaction.graded';
 SELECT 'schedules_not_passed', r.key

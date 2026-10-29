@@ -40,7 +40,8 @@ fun mapSnapshot(snap:Path):Result {
         buildJsonObject {
             put("id",id); put("legacy_id","legacy:mastery.sqlite3:knowledge_points:$id")
             put("name",k.str("name")); put("module_id",module.str("id"))
-            put("type",gates[id] ?: k["type"] ?: JsonNull)
+            put("type",gates[id] ?: JsonNull)
+            put("current_source_type",k["type"] ?: JsonNull)
             put("original_type_available",gates.containsKey(id))
             put("examFormats",JsonArray(if("【Essay】" in k.str("name")) listOf(JsonPrimitive("ESSAY")) else emptyList()))
             put("prerequisite_ids",JsonArray(emptyList()))
@@ -50,7 +51,19 @@ fun mapSnapshot(snap:Path):Result {
     } }
     val kpIds=kps.map { it.str("id") }.toSet()
     val passed=state.obj("mastery_levels").filter { (id,v) -> id in kpIds && (v.jsonPrimitive.doubleOrNull ?: 0.0)>=1.0 }.keys.sorted()
-    val interactions=mastery.getValue("mastery_interactions").filter { it.str("path_id")==mainPath && it.str("user_answer").isNotBlank() }
+    val answeredRows=mastery.getValue("mastery_interactions").filter { it.str("path_id")==mainPath && it.str("user_answer").isNotBlank() }
+    val groups=answeredRows.filter { parseText(it.str("question_json")).jsonObject.str("question_type")=="group" }
+    val interactions=answeredRows.filterNot { it in groups }
+    val interactionIds=interactions.map { it.str("interaction_id") }.toSet()
+    val groupMappings=groups.map { row ->
+        val question=parseText(row.str("question_json")).jsonObject
+        val children=question.array("questions").map { it.jsonObject.str("question_id") }
+        JsonObject(legacy("mastery.sqlite3","mastery_interactions",row) + mapOf(
+            "child_ids" to JsonArray(children.map { JsonPrimitive("legacy:mastery.sqlite3:mastery_interactions:${java.net.URLEncoder.encode(it,Charsets.UTF_8)}") }),
+            "missing_child_rows" to JsonArray(children.filterNot { it in interactionIds }.map(::JsonPrimitive)),
+            "window_eligible" to JsonPrimitive(false)
+        ))
+    }
     val learning=mastery.getValue("mastery_learning_evidence").filter { it.str("path_id")==mainPath }
     val events=mastery.getValue("mastery_events").filter { it.str("path_id")==mainPath }
     val assessments=chat["assessment_attempts"].orEmpty().filter { it.str("mastery_path_id")==mainPath }
@@ -132,6 +145,9 @@ fun mapSnapshot(snap:Path):Result {
     val count=buildJsonObject {
         put("knowledge_points",kps.size);put("modules",modules.size);put("questions",questions.size)
         put("mcq",questions.count { it.str("question_type").ifBlank { it.str("type") }.lowercase() in setOf("mcq","multiple_choice","single_choice","choice") })
+        put("interaction_rows",answeredRows.size);put("attempt_groups",groups.size)
+        put("groups_missing_children",groupMappings.sumOf { it.array("missing_child_rows").size })
+        put("original_types_missing",kps.count { it["original_type_available"]==JsonPrimitive(false) })
         put("attempts",attempts.size);put("retained_evidence",learning.size);put("reset_attempts",attempts.count { it["reset"]==JsonPrimitive(true) })
         put("schedules",schedules.size);put("notes",notes.size);put("passed",passed.size)
         put("deterministic_questions",matches.count { it.str("status")=="deterministic" })
@@ -163,7 +179,7 @@ fun mapSnapshot(snap:Path):Result {
         put("knowledge_points",JsonArray(kps))
         put("modules",JsonArray(modules.map { record("mastery.sqlite3","modules",it.str("id"),it) }))
         put("legacy_passed",JsonArray(passed.map { record("mastery.sqlite3","mastery_levels",it,JsonPrimitive(1.0)) }))
-        put("legacy_attempts",JsonArray(attempts));put("legacy_schedule",JsonArray(schedules))
+        put("legacy_attempts",JsonArray(attempts));put("legacy_attempt_groups",JsonArray(groupMappings));put("legacy_schedule",JsonArray(schedules))
         put("question_kp_candidates",JsonArray(matches))
         put("questions",JsonArray(questions.mapIndexed { n,q -> record("ECNM10119-期中练习题.json","questions",q.str("id").ifBlank { n.toString() },q) }))
         put("notes",JsonArray(notes));put("journal",record("journal.json","journal","root",journal))
@@ -184,7 +200,8 @@ fun mapSnapshot(snap:Path):Result {
         append("\n自动归属：${count.str("deterministic_questions")}/${questions.size}（${"%.2f".format(java.util.Locale.ROOT,rate)}%）；其余需模型/人工确认。\n")
         append("\nlegacy_schedule 不在 legacy_passed：${excludedSchedules.size}；这些项不进入复习队列。\n")
         excludedSchedules.forEach { append("- $it\n") }
-        append("\n原类型缺失：${kps.count { it["original_type_available"]==JsonPrimitive(false) }}。实际表结构以 mastery_paths.state_json 内嵌 KP/掌握度/复习状态为准。\n")
+        append("\n原类型缺失：${kps.count { it["original_type_available"]==JsonPrimitive(false) }}；缺失时 type 为 null，当前松绑后的类型单列 current_source_type，不冒充原类型。实际表结构以 mastery_paths.state_json 内嵌 KP/掌握度/复习状态为准。\n")
+        append("\n作答按叶子事实计数：${answeredRows.size} 行含 ${groups.size} 个组题容器，容器另存且只引用子题，不重复计为作答。${attempts.size} 条事实 = 当前证据 ${learning.size} + 重置 ${attempts.count { it["reset"]==JsonPrimitive(true) }}；两者仍有差异时须核对报告里的缺证据计数。\n")
         append("\n没有原始 ID 的题目以源数组位置为稳定键；内容修改是修订，题库重排需先人工核对，不能直接增量导入。\n")
         append("\n全部计数：\n```json\n${canonical(count)}```\n")
         append("\n教材只统计页标与页数，不建正式库；无页标记文件保留清单。资料仅列文件名，不进入导师上下文。\n")

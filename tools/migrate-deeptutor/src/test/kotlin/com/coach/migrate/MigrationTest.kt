@@ -94,7 +94,7 @@ class MigrationTest {
             write("data/user/workspace/courses/courses.json","{\"courses\":[]}")
             write("data/learning_journal/journal.json","{\"records\":[]}")
             write("data/digests/questions/ECNM10119-期中练习题.json","[{\"id\":\"q\",\"question_type\":\"single_choice\",\"tags\":[\"Ch1\"]}]")
-            write("tools/patch_backups/gate_types_before.json","{\"passed\":\"concept\",\"unpassed\":\"design\"}")
+            write("tools/patch_backups/gate_types_before.json","{\"passed\":\"concept\"}")
             write("data/user/workspace/notebook/synthetic.json","{\"records\":[{\"id\":\"n\",\"title\":\"Ch1\",\"output\":\"synthetic\"}]}")
             write("library/ECNM10119-健康经济学/教材/synthetic.md","<!-- PDF 第 1 页 · 书第 1 页 --> synthetic")
             write("library/ECNM10119-健康经济学/资料/synthetic.md","synthetic")
@@ -108,6 +108,7 @@ class MigrationTest {
                 db.prepareStatement("INSERT INTO mastery_paths VALUES (?,?)").use { ps -> ps.setString(1,MAIN_PATH);ps.setString(2,state.toString());ps.executeUpdate() }
                 st.execute("CREATE TABLE mastery_interactions(interaction_id TEXT PRIMARY KEY,path_id TEXT,user_answer TEXT,question_json TEXT)")
                 st.execute("INSERT INTO mastery_interactions VALUES('i','$MAIN_PATH','synthetic','{\"question_id\":\"q\"}')")
+                st.execute("INSERT INTO mastery_interactions VALUES('group','$MAIN_PATH','synthetic','{\"question_id\":\"group\",\"question_type\":\"group\",\"questions\":[{\"question_id\":\"i\"}]}')")
                 st.execute("CREATE TABLE mastery_learning_evidence(path_id TEXT,ordinal INTEGER,evidence_json TEXT,PRIMARY KEY(path_id,ordinal))")
                 st.execute("INSERT INTO mastery_learning_evidence VALUES('$MAIN_PATH',0,'{\"question_id\":\"q\"}')")
                 st.execute("CREATE TABLE mastery_events(id INTEGER PRIMARY KEY,path_id TEXT)")
@@ -124,6 +125,11 @@ class MigrationTest {
             assertEquals(before,inventory(source.resolve("data")))
             val attempt=a.mapping.array("legacy_attempts").single().jsonObject
             assertEquals(JsonPrimitive(false),attempt["window_eligible"])
+            val group=a.mapping.array("legacy_attempt_groups").single().jsonObject
+            assertEquals(listOf(attempt.getValue("id")),group.array("child_ids"))
+            val unknownType=a.mapping.array("knowledge_points").map { it.jsonObject }.single { it.str("id")=="unpassed" }
+            assertEquals(JsonNull,unknownType["type"])
+            assertEquals("memory",unknownType.str("current_source_type"))
             val schedules=a.mapping.array("legacy_schedule").map { it.jsonObject }.associateBy { it.str("kp_id") }
             assertEquals(JsonPrimitive(false),schedules.getValue("unpassed")["queue_eligible"])
             assertEquals(JsonPrimitive(true),schedules.getValue("passed")["queue_eligible"])

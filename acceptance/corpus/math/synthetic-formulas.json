@@ -1,0 +1,168 @@
+{
+  "note": "入仓库的合成样例：公式与句子都是编的（虚构数值、虚构课程），只用来在没有本机语料时验证 mathsvc 与分词规则。真实语料（课程公式、真题、导师回答、课程库原句）在 ~/Coach/corpus/<slug>/，不进仓库——见本目录 README。",
+  "version": 1,
+  "formulas": [
+    {
+      "id": "synth-01",
+      "tex": "\\text{总额} = \\text{单价} \\times \\text{数量}",
+      "display": true,
+      "src": "synthetic/algebra"
+    },
+    {
+      "id": "synth-02",
+      "tex": "x_1 + x_2 = 10",
+      "display": false,
+      "src": "synthetic/algebra"
+    },
+    {
+      "id": "synth-03",
+      "tex": "\\frac{a+b}{2}",
+      "display": false,
+      "src": "synthetic/algebra"
+    },
+    {
+      "id": "synth-04",
+      "tex": "\\sum_{i=1}^{n} w_i x_i",
+      "display": true,
+      "src": "synthetic/sums"
+    },
+    {
+      "id": "synth-05",
+      "tex": "E[X] = \\sum_{k} k \\cdot p_k",
+      "display": true,
+      "src": "synthetic/probability"
+    },
+    {
+      "id": "synth-06",
+      "tex": "\\underbrace{a+b}_{\\text{两组之和}}",
+      "display": true,
+      "src": "synthetic/braces"
+    },
+    {
+      "id": "synth-07",
+      "tex": "\\sqrt{\\frac{p(1-p)}{n}}",
+      "display": false,
+      "src": "synthetic/statistics"
+    },
+    {
+      "id": "synth-08",
+      "tex": "\\mathbb{E}\\left[Y \\mid X=1\\right] = 3.5",
+      "display": false,
+      "src": "synthetic/probability"
+    },
+    {
+      "id": "synth-09",
+      "tex": "\\frac{1}{1+r}",
+      "display": false,
+      "src": "synthetic/discounting"
+    },
+    {
+      "id": "synth-10",
+      "tex": "\\text{弹性} = \\frac{\\Delta Q}{\\Delta P}\\cdot\\frac{P}{Q}",
+      "display": true,
+      "src": "synthetic/elasticity"
+    },
+    {
+      "id": "synth-11",
+      "tex": "\\begin{matrix} 1 & 2 \\\\ 3 & 4 \\end{matrix}",
+      "display": true,
+      "src": "synthetic/matrix"
+    },
+    {
+      "id": "synth-12",
+      "tex": "p \\le 0.05",
+      "display": false,
+      "src": "synthetic/inequality"
+    },
+    {
+      "id": "synth-13",
+      "tex": "\\varepsilon = -0.4",
+      "display": false,
+      "src": "synthetic/elasticity"
+    },
+    {
+      "id": "synth-14",
+      "tex": "y = \\alpha + \\beta x + u",
+      "display": true,
+      "src": "synthetic/regression"
+    },
+    {
+      "id": "synth-15",
+      "tex": "\\prod_{i=1}^{3} a_i",
+      "display": false,
+      "src": "synthetic/products"
+    },
+    {
+      "id": "synth-16",
+      "tex": "\\text{注：} a \\ne b",
+      "display": false,
+      "src": "synthetic/text"
+    },
+    {
+      "id": "synth-17",
+      "tex": "\\int_0^1 x^2\\,dx = \\tfrac13",
+      "display": true,
+      "src": "synthetic/calculus"
+    },
+    {
+      "id": "synth-18",
+      "tex": "\\hat{\\theta} = \\arg\\min_\\theta L(\\theta)",
+      "display": true,
+      "src": "synthetic/estimation"
+    },
+    {
+      "id": "synth-19",
+      "tex": "\\frac{\\text{收益}}{\\text{成本}} > 1",
+      "display": false,
+      "src": "synthetic/ratio"
+    },
+    {
+      "id": "synth-20",
+      "tex": "P_{\\text{自付}} = P(1-c)",
+      "display": false,
+      "src": "synthetic/text"
+    }
+  ],
+  "currency_sentences": [
+    {
+      "id": "synth-cur-01",
+      "text": "the pilot programme cost $11 trillion in total."
+    },
+    {
+      "id": "synth-cur-02",
+      "text": "spending rose from $3.4 trillion to $5.6 trillion"
+    },
+    {
+      "id": "synth-cur-03",
+      "text": "价格从 $26 降到 $52"
+    },
+    {
+      "id": "synth-cur-04",
+      "text": "each visit costs $1,200 or $2,400"
+    },
+    {
+      "id": "synth-cur-05",
+      "text": "a $700 bill, of which $450 is covered"
+    },
+    {
+      "id": "synth-cur-06",
+      "text": "it grew by $47 billion, i.e. $4.7\\times10^{10}$ dollars"
+    },
+    {
+      "id": "synth-cur-07",
+      "text": "the prize is $8 billion for the first team"
+    },
+    {
+      "id": "synth-cur-08",
+      "text": "a deductible of $3,000 a year, then $45 per visit"
+    },
+    {
+      "id": "synth-cur-09",
+      "text": "pay $17 up front and $9 later"
+    },
+    {
+      "id": "synth-cur-10",
+      "text": "the budget is $310 million; the shortfall is $65 million"
+    }
+  ]
+}

@@ -1,0 +1,524 @@
+{
+  "note": "语言无关的 `$` 定界用例：输入 → 期望片段序列。入仓库的句子与公式全部是合成的（虚构数值），真实课程原句只在 ~/Coach/corpus/math/ 的本机语料里。Kotlin 移植（MathSvgPainter/流式 Markdown）按这份 JSON 对齐；expect 里 {text} 是原样文本，{math, display} 是公式片段。unresolved 是「无法判定、保留原文」的定界符条数。source=model 才会跑 bare-math 修复。",
+  "version": 1,
+  "cases": [
+    {
+      "name": "currency-bare-trillion",
+      "source": "library",
+      "input": "The pilot programme cost $11 trillion in total.",
+      "expect": [
+        {
+          "text": "The pilot programme cost $11 trillion in total."
+        }
+      ],
+      "unresolved": 1,
+      "note": "单个货币 $，Pandoc 规则判不成公式"
+    },
+    {
+      "name": "currency-two-amounts",
+      "source": "library",
+      "input": "from $3.4 trillion to $5.6 trillion",
+      "expect": [
+        {
+          "text": "from $3.4 trillion to $5.6 trillion"
+        }
+      ],
+      "unresolved": 2,
+      "note": "闭 $ 前必须是空白 → 不是公式"
+    },
+    {
+      "name": "currency-chinese-price-range",
+      "source": "library",
+      "input": "价格从 $26 降到 $52",
+      "expect": [
+        {
+          "text": "价格从 $26 降到 $52"
+        }
+      ],
+      "unresolved": 2
+    },
+    {
+      "name": "currency-thousands-separator",
+      "source": "library",
+      "input": "cost $1,200 or $2,400",
+      "expect": [
+        {
+          "text": "cost $1,200 or $2,400"
+        }
+      ],
+      "unresolved": 2
+    },
+    {
+      "name": "currency-adjacent-to-real-math",
+      "source": "library",
+      "input": "grew by $47 billion, i.e. $4.7\\times10^{10}$ dollars",
+      "expect": [
+        {
+          "text": "grew by $47 billion, i.e. "
+        },
+        {
+          "math": "4.7\\times10^{10}",
+          "display": false
+        },
+        {
+          "text": " dollars"
+        }
+      ],
+      "unresolved": 1,
+      "note": "货币 $ 留文本（1 条 unresolved），紧跟的真公式照常进 SVG"
+    },
+    {
+      "name": "inline-math-starts-with-digit",
+      "source": "library",
+      "input": "约 $6.5\\times 10^{9}$ 美元",
+      "expect": [
+        {
+          "text": "约 "
+        },
+        {
+          "math": "6.5\\times 10^{9}",
+          "display": false
+        },
+        {
+          "text": " 美元"
+        }
+      ]
+    },
+    {
+      "name": "inline-math-fraction-percent",
+      "source": "library",
+      "input": "20 道题里答对 11 道，约 $11/20\\approx55\\%$。",
+      "expect": [
+        {
+          "text": "20 道题里答对 11 道，约 "
+        },
+        {
+          "math": "11/20\\approx55\\%",
+          "display": false
+        },
+        {
+          "text": "。"
+        }
+      ]
+    },
+    {
+      "name": "inline-math-negative-number",
+      "source": "library",
+      "input": "第一种算法得到 $-0.42$，反过来得到 $-0.11$。",
+      "expect": [
+        {
+          "text": "第一种算法得到 "
+        },
+        {
+          "math": "-0.42",
+          "display": false
+        },
+        {
+          "text": "，反过来得到 "
+        },
+        {
+          "math": "-0.11",
+          "display": false
+        },
+        {
+          "text": "。"
+        }
+      ]
+    },
+    {
+      "name": "display-dollar-dollar",
+      "source": "library",
+      "input": "公式：\n$$\n\\frac{a}{b}=1\n$$\n结束",
+      "expect": [
+        {
+          "text": "公式：\n"
+        },
+        {
+          "math": "\\frac{a}{b}=1",
+          "display": true
+        },
+        {
+          "text": "\n结束"
+        }
+      ]
+    },
+    {
+      "name": "latex-paren-bracket",
+      "source": "library",
+      "input": "行内 \\(x+1\\) 与 \\[y=2\\]",
+      "expect": [
+        {
+          "text": "行内 "
+        },
+        {
+          "math": "x+1",
+          "display": false
+        },
+        {
+          "text": " 与 "
+        },
+        {
+          "math": "y=2",
+          "display": true
+        }
+      ]
+    },
+    {
+      "name": "code-span-keeps-dollar",
+      "source": "library",
+      "input": "写成 `$x$` 才是代码",
+      "expect": [
+        {
+          "text": "写成 `$x$` 才是代码"
+        }
+      ]
+    },
+    {
+      "name": "fenced-block-keeps-dollar",
+      "source": "library",
+      "input": "```\n$x=1$\n```\n外面 $y=2$",
+      "expect": [
+        {
+          "text": "```\n$x=1$\n```\n外面 "
+        },
+        {
+          "math": "y=2",
+          "display": false
+        }
+      ]
+    },
+    {
+      "name": "escaped-dollar",
+      "source": "library",
+      "input": "标价 \\$5 美元",
+      "expect": [
+        {
+          "text": "标价 \\$5 美元"
+        }
+      ]
+    },
+    {
+      "name": "unmatched-single-dollar",
+      "source": "library",
+      "input": "这里只有一个 $ 符号",
+      "expect": [
+        {
+          "text": "这里只有一个 $ 符号"
+        }
+      ],
+      "unresolved": 0,
+      "note": "开 $ 后接空白：确定不是公式，保留原文，不计 unresolved"
+    },
+    {
+      "name": "open-dollar-followed-by-space",
+      "source": "library",
+      "input": "a $ b $ c",
+      "expect": [
+        {
+          "text": "a $ b $ c"
+        }
+      ],
+      "unresolved": 0,
+      "note": "Pandoc：开 $ 后不能是空白"
+    },
+    {
+      "name": "html-br-between-math",
+      "source": "library",
+      "input": "P=1<br>$x=2$",
+      "expect": [
+        {
+          "text": "P=1<br>"
+        },
+        {
+          "math": "x=2",
+          "display": false
+        }
+      ]
+    },
+    {
+      "name": "html-tag-around-math",
+      "source": "library",
+      "input": "<b>$x=2$</b>",
+      "expect": [
+        {
+          "text": "<b>"
+        },
+        {
+          "math": "x=2",
+          "display": false
+        },
+        {
+          "text": "</b>"
+        }
+      ]
+    },
+    {
+      "name": "bare-eq-br-not-wrapped-singleton",
+      "source": "model",
+      "input": "x=1<br>2",
+      "expect": [
+        {
+          "math": "x = 1",
+          "display": false
+        },
+        {
+          "text": "<br>2"
+        }
+      ],
+      "note": "SC 缺陷：<br> 会被吃进 $…$。这里的硬边界保证标签留在外面"
+    },
+    {
+      "name": "bare-eq-html-both-sides",
+      "source": "model",
+      "input": "x=1<b>x</b>y",
+      "expect": [
+        {
+          "math": "x = 1",
+          "display": false
+        },
+        {
+          "text": "<b>x</b>y"
+        }
+      ],
+      "note": "SC 输出 $x=1<b>x</b>y$（标签被包进公式），这里必须拆开"
+    },
+    {
+      "name": "bare-eq-after-br",
+      "source": "model",
+      "input": "<br>P=2",
+      "expect": [
+        {
+          "text": "<br>"
+        },
+        {
+          "math": "P = 2",
+          "display": false
+        }
+      ]
+    },
+    {
+      "name": "bare-eq-not-for-library",
+      "source": "library",
+      "input": "x=1<br>2",
+      "expect": [
+        {
+          "text": "x=1<br>2"
+        }
+      ],
+      "note": "资料原文不跑 bare-math 修复"
+    },
+    {
+      "name": "bare-eq-simple",
+      "source": "model",
+      "input": "所以 x_1=1 成立",
+      "expect": [
+        {
+          "text": "所以 "
+        },
+        {
+          "math": "x_1 = 1",
+          "display": false
+        },
+        {
+          "text": " 成立"
+        }
+      ]
+    },
+    {
+      "name": "bare-eq-greek-word-subscript",
+      "source": "model",
+      "input": "ε_arc = -0.23",
+      "expect": [
+        {
+          "math": "ε_{arc} = -0.23",
+          "display": false
+        }
+      ],
+      "note": "多字母下标补花括号，否则 TeX 读成 ε_a·r·c"
+    },
+    {
+      "name": "bare-eq-parenthesised-lhs",
+      "source": "model",
+      "input": "ΔQ/(Q1+Q2) = 0.25/3.5 ≈ 0.07",
+      "expect": [
+        {
+          "math": "ΔQ/(Q1+Q2) = 0.25/3.5 ≈ 0.07",
+          "display": false
+        }
+      ]
+    },
+    {
+      "name": "bare-eq-expectation",
+      "source": "model",
+      "input": "E[Y]=10 而 E[X]=20",
+      "expect": [
+        {
+          "math": "E[Y]=10",
+          "display": false
+        },
+        {
+          "text": " 而 "
+        },
+        {
+          "math": "E[X]=20",
+          "display": false
+        }
+      ]
+    },
+    {
+      "name": "bare-notation-list-head",
+      "source": "model",
+      "input": "- x_i: 第 i 个样本值",
+      "expect": [
+        {
+          "text": "- "
+        },
+        {
+          "math": "x_i",
+          "display": false
+        },
+        {
+          "text": ": 第 i 个样本值"
+        }
+      ]
+    },
+    {
+      "name": "bare-prose-equals-untouched",
+      "source": "model",
+      "input": "总开销 = 固定开销 + 变动开销",
+      "expect": [
+        {
+          "text": "总开销 = 固定开销 + 变动开销"
+        }
+      ],
+      "note": "中文散文里的 = 不是公式"
+    },
+    {
+      "name": "bare-prose-prefix-not-in-lhs",
+      "source": "model",
+      "input": "and ΔP/(P1+P2) = 1",
+      "expect": [
+        {
+          "text": "and "
+        },
+        {
+          "math": "ΔP/(P1+P2) = 1",
+          "display": false
+        }
+      ],
+      "note": "散文词 and 不进左式；ΔP/(P1+P2) 本身是公式，照常包"
+    },
+    {
+      "name": "bare-snake-case-untouched",
+      "source": "model",
+      "input": "snake_case 是写法，不是公式",
+      "expect": [
+        {
+          "text": "snake_case 是写法，不是公式"
+        }
+      ]
+    },
+    {
+      "name": "bare-currency-untouched",
+      "source": "model",
+      "input": "看病的人付 $37，对方付 $163",
+      "expect": [
+        {
+          "text": "看病的人付 $37，对方付 $163"
+        }
+      ],
+      "unresolved": 2,
+      "note": "模型文本里的货币同样不能被 bare-math 修复包成公式"
+    },
+    {
+      "name": "bare-times-damage-repair",
+      "source": "model",
+      "input": "5 $times 3",
+      "expect": [
+        {
+          "text": "5 × 3"
+        }
+      ],
+      "unresolved": 0,
+      "note": "JSON 转义损伤 $times 先还原成 ×；还原后不再有 $，所以 unresolved 为 0"
+    },
+    {
+      "name": "bare-existing-inline-math-preserved",
+      "source": "model",
+      "input": "已标注的 $\\varepsilon$ 不动，裸的 p_1≈0.3 才修",
+      "expect": [
+        {
+          "text": "已标注的 "
+        },
+        {
+          "math": "\\varepsilon",
+          "display": false
+        },
+        {
+          "text": " 不动，裸的 "
+        },
+        {
+          "math": "p_1≈0.3",
+          "display": false
+        },
+        {
+          "text": " 才修"
+        }
+      ]
+    },
+    {
+      "name": "inline-math-bare-chinese-rejected",
+      "source": "library",
+      "input": "区间 $5–6 年时，费用走高",
+      "expect": [
+        {
+          "text": "区间 $5–6 年时，费用走高"
+        }
+      ],
+      "unresolved": 1,
+      "note": "硬拒 1：中文只能出现在 \\text{} 里，裸中文说明不是公式"
+    },
+    {
+      "name": "inline-math-html-tag-rejected",
+      "source": "library",
+      "input": "($9k, 2 years)<br>100<br>$ (thousands)",
+      "expect": [
+        {
+          "text": "($9k, 2 years)<br>100<br>$ (thousands)"
+        }
+      ],
+      "unresolved": 1,
+      "note": "硬拒 2：正文里出现裸 HTML 标签，说明是两条货币被强行配对（OCR 行）"
+    },
+    {
+      "name": "inline-math-comparison-kept",
+      "source": "library",
+      "input": "全社会的收益 $160 > 120$，值得做",
+      "expect": [
+        {
+          "text": "全社会的收益 "
+        },
+        {
+          "math": "160 > 120",
+          "display": false
+        },
+        {
+          "text": "，值得做"
+        }
+      ],
+      "note": "硬拒不能误伤：比大小的是真公式"
+    },
+    {
+      "name": "inline-math-text-chinese-allowed",
+      "source": "library",
+      "input": "$Q_{\\text{自付}} = q(1-s)$",
+      "expect": [
+        {
+          "math": "Q_{\\text{自付}} = q(1-s)",
+          "display": false
+        }
+      ],
+      "note": "\\text{} 里的中文是合法公式"
+    }
+  ]
+}

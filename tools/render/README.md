@@ -46,7 +46,7 @@ a fabricated tutor response. Exporting formulas is a developer-only entry point.
   Formula counts are not a substitute for independently annotating currencies.
 - Both debug APK and desktop app-image build, including an offline rebuild.
 - Painter raster export completed for 265 formula instances (50 course formulas
-  plus all formulas in the 20 answers). Strict pixel comparison passes only 3/265.
+  plus all formulas in the 20 answers). Final strict pixel comparison passes only 2/265 (0.75%).
   The Chinese glyph width was corrected to retain the spacing between MathJax's
   1000-unit glyph origins; text ink uses its actual font-size estimate.
 - **Android currently crashes on startup**: `JankStats.createAndTrack(window)` is

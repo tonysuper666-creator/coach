@@ -1,0 +1,7 @@
+CREATE VIRTUAL TABLE fts_zh USING fts5(body, tokenize='trigram');
+
+search:
+SELECT body FROM fts_zh WHERE fts_zh MATCH ? ORDER BY rank;
+
+score:
+SELECT bm25(fts_zh) FROM fts_zh WHERE fts_zh MATCH ?;

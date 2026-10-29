@@ -1,0 +1,28 @@
+#!/bin/bash
+set -eu
+if [ "$#" -eq 0 ]; then echo "usage: tools/dev/heavy COMMAND [ARG ...]" >&2; exit 64; fi
+lock="${COACH_HEAVY_LOCK:-$HOME/dev/.coach-heavy.lock}"
+mkdir -p "$(dirname "$lock")"
+while ! mkdir "$lock" 2>/dev/null; do
+    echo "Coach heavy: waiting; $(cat "$lock/owner" 2>/dev/null || echo 'owner is initializing')" >&2
+    sleep 5
+done
+child=''
+cleanup() { rm -f "$lock/owner"; rmdir "$lock"; }
+stop_tree() {
+    local pid="$1" descendant
+    for descendant in $(pgrep -P "$pid" || true); do stop_tree "$descendant"; done
+    kill -TERM "$pid" 2>/dev/null || true
+}
+stop() { if [ -n "$child" ]; then stop_tree "$child"; wait "$child" || true; fi; exit 130; }
+trap cleanup EXIT
+trap stop INT TERM HUP
+printf 'PID=%s command=' "$$" > "$lock/owner"
+printf '%q ' "$@" >> "$lock/owner"
+printf '\n' >> "$lock/owner"
+nice -n 15 "$@" &
+child=$!
+set +e
+wait "$child"
+result=$?
+exit "$result"

@@ -1,1 +1,7 @@
 node_modules/
+**/.gradle/
+**/.kotlin/
+**/build/
+/local.properties
+/.s0-evidence/
+__pycache__/

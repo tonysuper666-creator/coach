@@ -355,7 +355,7 @@ KP 流程：IDLE → PREPARE(确定性备课：KP 锚点页 ≤6 页 + 笔记 + 
 `hello` 交换 `[min,max]`，取最高公共主版本；无公共版本 → 客户端显示「请更新」并给 `/app.apk`（沿用现在手机入口的做法）。次版本只加字段；事件 schema 按类型独立演进（§3.4）。
 
 ### 6.5 认证（决定）
-服务器只绑定 `127.0.0.1` 和本机 Tailscale 地址（现为 100.88.12.89），不绑 0.0.0.0。Tailscale（WireGuard）已经负责加密与设备准入；应用层再加一层**设备令牌**：Mac 桌面端显示 6 位配对码（5 分钟有效）→ 手机输入 → 服务器发 256 位随机令牌、只存 sha256；每台设备可单独吊销。安卓令牌存 Keystore 加密存储；Mac 桌面端同机，令牌文件 0600 自动配置。安卓 `network_security_config` 只对该地址允许明文。**建议**：开启 tailnet HTTPS 后用 `tailscale serve` 提供 HTTPS（要改 tailnet 设置，由他定）。**开放**：用 Tailscale LocalAPI 的 whois 识别对端设备、免配对——更省事，但多一层依赖，CLI 目前不在 PATH。
+服务器只绑定 `127.0.0.1` 和本机 Tailscale 地址（现为 <Mac 的 Tailscale IP>），不绑 0.0.0.0。Tailscale（WireGuard）已经负责加密与设备准入；应用层再加一层**设备令牌**：Mac 桌面端显示 6 位配对码（5 分钟有效）→ 手机输入 → 服务器发 256 位随机令牌、只存 sha256；每台设备可单独吊销。安卓令牌存 Keystore 加密存储；Mac 桌面端同机，令牌文件 0600 自动配置。安卓 `network_security_config` 只对该地址允许明文。**建议**：开启 tailnet HTTPS 后用 `tailscale serve` 提供 HTTPS（要改 tailnet 设置，由他定）。**开放**：用 Tailscale LocalAPI 的 whois 识别对端设备、免配对——更省事，但多一层依赖，CLI 目前不在 PATH。
 
 ---
 

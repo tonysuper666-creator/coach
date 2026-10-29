@@ -7,8 +7,8 @@
 2. ~/DeepTutor/StudyCoach与DeepTutor深度对比与结合方案.md —— 两个现有应用的对比、割裂点诊断。
 3. ~/DeepTutor/DeepTutor改造记录.md —— 我们现有的订阅桥、真流式、补丁、手机入口、安卓壳、折叠屏适配的全部做法与数据。
 4. ~/DeepTutor/原生应用评估.md。
-5. StudyCoach 只读源码：/private/tmp/claude-501/-Users-zheng-li/af30aae9-a910-489f-aa59-a62aa8ea8550/scratchpad/sc/src （重点：packages/contracts、domain、projections、ai-runtime、design-tokens、docs/architecture、apps/web/src/learn）。
-6. DeepTutor 源码（只读）：/Users/zheng_li/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor （重点：learning/*、capabilities/mastery/*、api/routers/unified_ws.py、mastery_path.py）。
+5. StudyCoach 只读源码：<核查员临时目录>/sc/src （重点：packages/contracts、domain、projections、ai-runtime、design-tokens、docs/architecture、apps/web/src/learn）。
+6. DeepTutor 源码（只读）：~/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor （重点：learning/*、capabilities/mastery/*、api/routers/unified_ws.py、mastery_path.py）。
 7. 订阅桥：~/DeepTutor/tools/subscription_bridge.py。
 
 ## 已定的决定（不要再争论，除非发现致命问题，致命问题要明说）

@@ -4,13 +4,13 @@
 
 路径缩写：
 
-- `S`＝`/private/tmp/claude-501/-Users-zheng-li/af30aae9-a910-489f-aa59-a62aa8ea8550/scratchpad/sc/src`
-- `D`＝`/Users/zheng_li/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor`
-- `B`＝[`/Users/zheng_li/DeepTutor/tools/subscription_bridge.py`](/Users/zheng_li/DeepTutor/tools/subscription_bridge.py)
+- `S`＝`<核查员临时目录>/sc/src`
+- `D`＝`~/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor`
+- `B`＝[`~/DeepTutor/tools/subscription_bridge.py`](~/DeepTutor/tools/subscription_bridge.py)
 
 ## 核心赌注
 
-1. **学习不中断，比功能齐全重要。** 押“打开继续、断网能答、展开不丢”。Mac 休眠是确定存在的架构限制，所以离线基础能力必须进入 M1。依据：[立项方案](/Users/zheng_li/DeepTutor/新应用立项方案v2.md)。
+1. **学习不中断，比功能齐全重要。** 押“打开继续、断网能答、展开不丢”。Mac 休眠是确定存在的架构限制，所以离线基础能力必须进入 M1。依据：[立项方案](~/DeepTutor/新应用立项方案v2.md)。
 2. **通过与稳固必须分开。** 押“冲刺允许选择题过关，稳固要求独立迁移证据”。否则要么重现答题不推进，要么把记住答案包装成掌握。依据：`D/learning/mastery.py`、`S/packages/domain/src/mastery-evidence-policy.ts`。
 3. **先证明真实 AI 和公式体验，再扩产品面。** 押“服务端编排、模型提供内容；Compose 管交互，浏览器引擎管富文本”。最大风险是跨端渲染和桥的完成语义，并非 Kotlin 领域逻辑。
 
@@ -284,7 +284,7 @@ WS   /v1/stream
 - 真实AI端到端：真实CLI＋真实课程页＋真人答案，验讲解、出题、引用、批改、实际模型身份和取消；模拟断网可以，模型回复不能用模板冒充。
 
 **建议：**至少20条代表性真实场景，包含公式、选择题、简答、争议评分、兜底、超时。报告全程首字p50/p95、误判、未判与成本；状态提示不算首字。  
-**开放问题：**首字≤5秒作为实测目标，不把旧桥正文阶段4秒当端到端承诺。依据：[改造记录](/Users/zheng_li/DeepTutor/DeepTutor改造记录.md)。
+**开放问题：**首字≤5秒作为实测目标，不把旧桥正文阶段4秒当端到端承诺。依据：[改造记录](~/DeepTutor/DeepTutor改造记录.md)。
 
 ## 12. 里程碑、spike与团队执行
 

@@ -10,4 +10,7 @@ kotlin {
         minSdk = 34
     }
     jvmToolchain(17)
+    sourceSets.getByName("jvmTest").dependencies {
+        implementation(kotlin("test"))
+    }
 }

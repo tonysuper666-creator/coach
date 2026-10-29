@@ -14,4 +14,7 @@ kotlin {
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
     sourceSets.jvmTest { kotlin.srcDir("src/benchmark/kotlin") }
     jvmToolchain(17)
+    sourceSets.getByName("jvmTest").dependencies {
+        implementation(kotlin("test"))
+    }
 }

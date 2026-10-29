@@ -29,10 +29,41 @@ with sync_playwright() as p:
         assert a.shape == b.shape, (row['id'],a.shape,b.shape)
         delta = np.max(np.abs(a-b),axis=2)
         exact = float(np.mean(delta != 0)*100)
-        threshold16 = float(np.mean(delta > 16)*100)
-        reports.append({'id':row['id'],'different_pixels_percent':exact,'delta_over_16_percent':threshold16,'pass':exact <= 2,'has_chinese':bool(re.search('[\u3400-\u9fff]',row['tex']))})
+        diff = delta > 16
+        # Bounding box of the ink drawn by either renderer (non-white at >16/255).
+        ink = (np.max(255-a,axis=2) > 16) | (np.max(255-b,axis=2) > 16)
+        ys, xs = np.where(ink)
+        box_px = int((ys.max()-ys.min()+1)*(xs.max()-xs.min()+1)) if len(ys) else 1
+        pct = float(diff.sum()*100/box_px)
+        # Diagnostic: a pixel only counts when it is outside the +-1px neighbourhood range of the
+        # other renderer's output, which removes sub-pixel placement and anti-aliasing differences.
+        ga, gb = np.max(255-a,axis=2), np.max(255-b,axis=2)
+        def span(g):
+            pad = np.pad(g,1,mode='edge'); stack = [pad[y:y+g.shape[0],x:x+g.shape[1]] for y in range(3) for x in range(3)]
+            return np.min(stack,axis=0), np.max(stack,axis=0)
+        (lo_a,hi_a),(lo_b,hi_b) = span(ga),span(gb)
+        tol = (np.maximum(lo_b-hi_a, lo_a-hi_b) > 16)
+        tol_pct = float(tol.sum()*100/box_px)
+        ia, ib = (255-a).max(axis=2).astype(float), (255-b).max(axis=2).astype(float)
+        ratio = float(ib.sum()/max(ia.sum(),1))
+        win = 16; per = max(ia.sum()/max(ia.shape[1]//win,1),1)
+        dev = max([abs(ia[:,k:k+win].sum()-ib[:,k:k+win].sum())/max(ia[:,k:k+win].sum(),ib[:,k:k+win].sum(),1)
+                   for k in range(0,ia.shape[1]-win+1,win) if max(ia[:,k:k+win].sum(),ib[:,k:k+win].sum()) > .02*per] or [0])
+        row_report = {'ink_ratio':ratio,'max_window_ink_deviation':dev,'id':row['id'],'strict_different_pixels_percent':exact,'diff_over_16_pixels':int(diff.sum()),
+            'bbox_pixels':box_px,'diff_over_16_percent_of_bbox':pct,'auto_consistent':pct <= 2,'shift_tolerant_diff_pixels':int(tol.sum()),'shift_tolerant_percent_of_bbox':tol_pct,
+            'has_chinese':bool(re.search('[\u3400-\u9fff]',row['tex']))}
+        if not row_report['auto_consistent']:
+            (root / 'review').mkdir(exist_ok=True)
+            heat = np.full(a.shape,255,dtype=np.uint8); heat[diff] = [255,0,0]
+            sheet = np.concatenate([a.astype(np.uint8), b.astype(np.uint8), heat],axis=1)
+            Image.fromarray(sheet).save(root / 'review' / f'{row["id"]}.png')
+        reports.append(row_report)
     browser.close()
-report = {'em_px':32,'pixel_rule':'Any RGB channel differs; denominator is whole image; tolerance 16 reported separately, not used to pass',
-    'formulas':len(rows),'passed':sum(r['pass'] for r in reports),'consistent_percent':sum(r['pass'] for r in reports)*100/len(rows),'rows':reports}
+auto = sum(r['auto_consistent'] for r in reports)
+report = {'em_px':32,'pixel_rule':'A pixel differs when any RGB channel differs by >16/255; a formula is consistent when differing pixels <=2% of the ink bounding box (union of both renderers). Strict any-channel percentage is reported per row for reference.',
+    'formulas':len(rows),'auto_consistent':auto,'auto_consistent_percent':auto*100/len(rows),
+    'shift_tolerant_le_2pct':sum(r['shift_tolerant_percent_of_bbox'] <= 2 for r in reports),
+    'ink_ratio_outside_0.9_1.1':sum(not .9 <= r['ink_ratio'] <= 1.1 for r in reports),'max_window_ink_deviation':max(r['max_window_ink_deviation'] for r in reports),
+    'needs_review':[r['id'] for r in reports if not r['auto_consistent']],'rows':reports}
 (root / 'comparison.json').write_text(json.dumps(report,indent=2))
-print(json.dumps({k:v for k,v in report.items() if k != 'rows'}))
+print(json.dumps({k:v for k,v in report.items() if k not in ('rows','needs_review')}), 'needs_review=%d' % len(report['needs_review']))

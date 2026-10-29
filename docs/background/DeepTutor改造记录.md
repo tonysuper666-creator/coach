@@ -93,7 +93,7 @@
 - **公式显示**：概览页「精通会话」卡的预览是原始 markdown/LaTeX（`$$NPV=\sum…$$`），脚本把它清成可读文字（希腊字母、Σ 等转符号）；聊天正文里的公式本来就有渲染，没动。
 - 注意缓存：上游页面带 ETag，手机会拿到 304 一直用旧缓存，所以手机入口对 HTML 去掉条件请求头并返回 no-store，否则改了注入脚本手机看不到。
 
-- **访问**：局域网 192.168.1.247 在他的设备上打不开（疑似路由器隔离或 VPN 抢线路），改用 Tailscale 地址 `100.88.12.89`。
+- **访问**：局域网 <局域网地址> 在他的设备上打不开（疑似路由器隔离或 VPN 抢线路），改用 Tailscale 地址 `<Mac 的 Tailscale IP>`。
 - **手机入口 3790**（`tools/mobile_proxy.py`，screen `dtmobile`，随启动脚本起）：转发 3782，HTML 里注入脚本：点一下进全屏、会话页去掉顶部栏、左边缘 ⛶ / ☰ 两个小按钮。`/app.apk` 提供安装包。
 - **安卓 App**（`android/`，包名 `local.deeptutor`）：全屏 WebView，先连 Tailscale 地址，连不上试局域网，都不行显示重试页；屏幕常亮、返回键后退、支持上传附件。`build.sh` 不用 Gradle，用 aapt2 + javac + d8 + apksigner，用 `~/.android/debug.keystore` 签名（覆盖安装要同一把钥匙）。在模拟器 sable-api35 上验证过；真机装机后的体验未逐项验证。
 

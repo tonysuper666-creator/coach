@@ -1,6 +1,6 @@
 建议以 **Astra 的服务端与同步契约为骨架，合入 Opus 的产品细节、Sonnet 的盲复核**；三份都不能原样交给团队实现。以下已完整审阅三稿，包括 Astra 自稿。
 
-引用简称：[O＝Opus](/Users/zheng_li/DeepTutor/design/round1-opus-full.md)、[S＝Sonnet](/Users/zheng_li/DeepTutor/design/round1-sonnet-full.md)、[A＝Astra](/Users/zheng_li/DeepTutor/design/round1-astra-full.md)；节号指对应设计。`DT`＝`/Users/zheng_li/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor`；`SC`＝[brief](/Users/zheng_li/DeepTutor/design/brief.md) 指定的 StudyCoach 源码根目录。
+引用简称：[O＝Opus](~/DeepTutor/design/round1-opus-full.md)、[S＝Sonnet](~/DeepTutor/design/round1-sonnet-full.md)、[A＝Astra](~/DeepTutor/design/round1-astra-full.md)；节号指对应设计。`DT`＝`~/DeepTutor/.venv/lib/python3.12/site-packages/deeptutor`；`SC`＝[brief](~/DeepTutor/design/brief.md) 指定的 StudyCoach 源码根目录。
 
 **1．逐节对比**
 
@@ -27,7 +27,7 @@
 
 - **致命｜§2、11规则不可能同时成立。**“复习能产生稳固”“稳固⇒已通过”“复习永不改变已通过”三者冲突。必须选择普通复习不升掌握，或明确允许复习中的独立测评升掌握。
 - **致命｜§10活库读取错误。**对仍运行的DeepTutor使用`immutable=1`，会跳过锁与变化检测；它不是普通只读模式。应采用只读连接的一致性快照。依据：[SQLite URI说明](https://www.sqlite.org/uri.html)。
-- **致命｜§5桥修补不够。**只增加身份、请求ID、推理强度，仍无法识别中途失败：现有桥捕获异常后继续发送默认`stop`与`[DONE]`，可能把残缺讲解记为完成。依据：[subscription_bridge.py:692](/Users/zheng_li/DeepTutor/tools/subscription_bridge.py:692)。
+- **致命｜§5桥修补不够。**只增加身份、请求ID、推理强度，仍无法识别中途失败：现有桥捕获异常后继续发送默认`stop`与`[DONE]`，可能把残缺讲解记为完成。依据：[subscription_bridge.py:692](~/DeepTutor/tools/subscription_bridge.py:692)。
 - **重要｜§3、4序号矛盾。**信封规定课程内连续序号，DDL却是全库`seq PRIMARY KEY`；多课程会冲突或出现课程游标“缺口”。
 - **重要｜§4租约无fence。**租约到期后旧任务仍可能提交；单写者只能串行写库，不能判定任务已失权。
 - **重要｜§5短答被拒。**复制“≥3词元、≥8字符”会拒绝“0”“无”等正确答案；中文词边界规则还可能拒绝句中片段。依据：`SC/packages/ai-runtime/src/grade-validation.ts`。

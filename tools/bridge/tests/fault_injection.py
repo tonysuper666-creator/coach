@@ -223,7 +223,8 @@ def main() -> int:
         b.set_mode("hang")
         r = b.ask("挂起不出字")
         oc = r["x_coach"]
-        check("hang: HTTP 504", r["status"] == 504, str(r["status"]))
+        check("hang: 仍是 SSE 200 + 终态帧（客户端只认 x_coach）", r["status"] == 200 and r["frames"],
+              str(r["status"]))
         check("hang: status=failed", oc and oc["status"] == "failed", str(oc))
         check("hang: reason=timeout", oc and oc["reason"] == "timeout", str(oc and oc["reason"]))
         check("hang: finish_reason=error", oc and oc["finish_reason"] == "error")
@@ -252,7 +253,7 @@ def main() -> int:
         b.set_mode("refuse")
         r = b.ask("拒答，别兜底")
         oc = r["x_coach"]
-        check("拒答/兜底关: HTTP 502", r["status"] == 502, str(r["status"]))
+        check("拒答/兜底关: 仍是 SSE 200 + 终态帧", r["status"] == 200, str(r["status"]))
         check("拒答/兜底关: status=failed", oc and oc["status"] == "failed", str(oc))
         check("拒答/兜底关: reason=cli_exit", oc and oc["reason"] == "cli_exit", str(oc and oc["reason"]))
         check("拒答/兜底关: physical_calls=1（没有第二次调用）", oc and oc["physical_calls"] == 1)

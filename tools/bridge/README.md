@@ -41,6 +41,8 @@ curl -s localhost:8791/health | python3 -m json.tool
 ```
 
 Coach 只把 `status==complete` 记为讲解完成；收不到这一帧按截断处理。
+**流式请求一律以终态帧结束**（HTTP 200），上游失败也是 `status=failed` 的终态帧，不用 HTTP 状态码表达；
+HTTP 4xx/429 只留给请求本身的问题（坏 JSON、未知模型、提示词超长、额度紧张时暂停后台）。
 中途失败时 `finish_reason` 只会是 `length`（max_output_tokens）或 `error`，**不会再发 `stop`**。
 终态判定按 Claude `result` 的 `is_error` / `terminal_reason` / `api_error`（真实 max_output_tokens 是 rc=1 + `api_error=max_output_tokens`，先看 `is_error` 再看 rc）。
 
@@ -104,4 +106,5 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 | 桩 CLI 故障注入 | 51 项断言全绿（`tests/fault_injection.py`） |
 | 8790 与 `subscription_bridge.py` | 全程 PID 70368、shasum `ef98bb7…` 未变 |
 
-本卡物理调用：Claude 20+20+2（取消）=42，Codex 5+3=8，合计 **50**。
+本卡物理调用：Claude 20+20+2（取消）+1（改完再验一次）=43，Codex 5+3=8，合计 **51**。
+（`bridge.log` 里有 3 行 codex-stream 重复，是 7477290 修掉的双记日志，不是多出来的调用。）

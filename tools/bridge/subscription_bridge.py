@@ -1426,8 +1426,17 @@ async def chat(request: Request):
                         break
             except StopAsyncIteration:
                 end_ev = None
-            except (BridgeError, BackgroundPaused, ClientGone):
+            except ClientGone:
                 await events.aclose()
+                raise
+            except BackgroundPaused:
+                await events.aclose()
+                raise
+            except BridgeError as e:
+                await events.aclose()
+                if e.status >= 500:      # 上游失败：流式请求也走终态帧，保持「每个流都以 x_coach 结束」
+                    oc = Outcome("failed", e.reason, "error", req.served_by or target, detail=e.message)
+                    return buffered_stream(req, cid, created, oc, None, None, want_usage)
                 raise
             for ev in pending:
                 if ev.get("kind") == "meta":
@@ -1444,8 +1453,8 @@ async def chat(request: Request):
                     req.out_chars = len(fb.text)
                     return buffered_stream(req, cid, created, fb, content, calls, want_usage)
                 if oc.status == "failed":
-                    raise BridgeError(504 if oc.reason == "timeout" else 502,
-                                      f"claude CLI 失败：{oc.detail or oc.reason}", reason=oc.reason)
+                    # 流式请求也给终态帧：Coach 只认 x_coach，HTTP 层面保持 200
+                    return buffered_stream(req, cid, created, oc, None, None, want_usage)
                 content, calls, _ = shape_output(req, oc)
                 req.out_chars = len(oc.text)
                 return buffered_stream(req, cid, created, oc, content, calls, want_usage)
@@ -1457,6 +1466,9 @@ async def chat(request: Request):
         except BridgeError as e:
             if req.fallback_enabled and e.reason in ("cli_exit", "timeout"):
                 oc = await fallback_call(req, e)
+            elif req.stream and e.status >= 500:
+                oc = Outcome("failed", e.reason, "error", req.served_by or target, detail=e.message)
+                return buffered_stream(req, cid, created, oc, None, None, want_usage)
             else:
                 raise
 

@@ -47,7 +47,7 @@ Coach 最终设计 v1（2026-10-29，负责人 Mika 整合裁决）
 用户永远不选笔记本/题库/阅读集。多位导师 = 服务器按任务分配的模型角色，透明但不可选；「换个老师讲」M1 只有 Codex（Grok 待桥副本 live 实测后再上，d2）。
 
 **有待答题时的追问**（决定，推翻 O 的「每次导师回复算一次提示」）〔d4 建议 1、评S D6〕：
-- 只有用户点「要提示」才记 `hint_revealed`；带提示的作答**不进**已通过窗口（不按半分，不算错）。
+- `hint_revealed` 有两种 cause：BUTTON（用户点了「要提示」）和 LEAK（下面的泄题检测命中）。导师普通回复不记提示。有任何 `hint_revealed` 的作答**不进**已通过窗口（不按半分，不算错）〔验收 TON-1045 #2〕。
 - 待答时追问不记提示，但该作答由投影判为 assisted（§3.2，不写进作答载荷）：不影响「已通过」，**不算稳固证据**。输入框上方一行字：「现在问不影响已通过，但这题不算稳固证据」。导师在待答状态下的系统提示要求不直接给出答案；选择题服务端另做确定性泄题检测（回复含正确选项字母+文本）→ 命中则记 `hint_revealed cause=LEAK`。
 - 理由：核查员要求取消自动记提示（否则 3 连对几乎过不了，重现 10-28）；但完全不记会让「问完再答」成为稳固证据，稳固就失去意义。`assisted` 只挡稳固，两头都保住。
 
@@ -65,7 +65,7 @@ Coach 最终设计 v1（2026-10-29，负责人 Mika 整合裁决）
 
 `purpose` 由用户显式发起的活动决定：「练一题」= `PRACTICE`；「闭卷检查」= `CLOSED_BOOK`；复习里首次见到的题 = `UNSEEN_VARIANT`，见过的 = `RECALL`；模考 = `TIMED/FULL_MOCK`（M2）。
 
-一次作答是**有效首答**，当且仅当：未作废；判分状态 ∈ {EXACT, VERIFIED}；题目 `keyState=VERIFIED`（迁移来的 108 题也一样，未复核不计任何一层）；同一题在该 KP 上第一次作答；题目指纹 14 天内未答过（按 `occurredAt` 算，`occurredAt` 先截断到 [该 attempt 的 posedAt, recordedAt] 之间，防设备时钟漂移）〔评R3 m7〕；未点「要提示」；origin ≠ LEGACY。
+一次作答是**有效首答**，当且仅当：未作废；判分状态 ∈ {EXACT, VERIFIED}；题目 `keyState=VERIFIED`（迁移来的 108 题也一样，未复核不计任何一层）；同一题在该 KP 上第一次作答；题目指纹 14 天内未答过（按 `occurredAt` 算，`occurredAt` 先截断到 [该 attempt 的 posedAt, recordedAt] 之间，防设备时钟漂移）〔评R3 m7〕；没有任何 `hint_revealed`（BUTTON 或 LEAK 都算）〔验收 TON-1045 #2〕；origin ≠ LEGACY。
 
 **迁移来的作答（origin=LEGACY）永不进任何窗口**（已通过、稳固都不进）：它们只用于 `legacy_passed` 锁存和记录页展示；108 题在 M1 复核通过后，旧作答也不回溯计入 〔评R3 I4〕。
 
@@ -74,7 +74,7 @@ Coach 最终设计 v1（2026-10-29，负责人 Mika 整合裁决）
 | | 已通过（冲刺层） | 稳固（严格层） |
 |---|---|---|
 | 判据 | **最近 3 次有效首答全对**（选择题精确对；构答得分率 ≥0.8），3 道题指纹互不相同 | 合格证据 ≥2 条，其中 ≥1 条构答（简答/论述/计算），分布在 ≥2 个逻辑日，平均得分率 ≥0.85。**M1 下稳固 = ≥2 条有效构答**（单选只在 TIMED/FULL_MOCK 合格，模考在 M2）〔评R3 I1〕 |
-| 合格证据（稳固） | — | 必须是**有效首答**（§2.1）且 `hints = 0`、非 assisted（删去沿用 SC 的 `hints <3`，免得点过提示的作答进得了严格层、进不了冲刺层）〔评R3 I2〕；另沿用 SC `mastery-evidence-policy.ts` 去掉阶段后的条件：purpose ∈ {CLOSED_BOOK, UNSEEN_VARIANT, TIMED, FULL_MOCK}；判分 ∈ {EXACT, VERIFIED}；单选题只在 TIMED/FULL_MOCK 合格；离线作答不可能是 TIMED；origin=LEGACY 永不合格 |
+| 合格证据（稳固） | — | 必须是**有效首答**（§2.1）且 `hints = 0`、非 assisted；`hints` 同时计 BUTTON 和 LEAK，即该作答无任何 `hint_revealed` 〔验收 TON-1045 #2〕（删去沿用 SC 的 `hints <3`，免得点过提示的作答进得了严格层、进不了冲刺层）〔评R3 I2〕；另沿用 SC `mastery-evidence-policy.ts` 去掉阶段后的条件：purpose ∈ {CLOSED_BOOK, UNSEEN_VARIANT, TIMED, FULL_MOCK}；判分 ∈ {EXACT, VERIFIED}；单选题只在 TIMED/FULL_MOCK 合格；离线作答不可能是 TIMED；origin=LEGACY 永不合格 |
 | 锁存 | 首次达到即锁存；之后答错不撤销，只标「需回炉」，明天进复习；证据被作废时按下文撤销 | 最近一次合格情境失败 → 显示「曾稳固」，直到新的合格通过 |
 | 窗口排序 | 按服务端 `seq`（答案提交入账顺序），不按设备时钟 〔C#3〕 | 学习日按 `occurredAt` 归日 |
 | 展示 | DT 5 次加权分只作展示 | 进度「2/2 条 · 构答 1 · 2 天 · 均 0.88」 |
@@ -361,7 +361,7 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 
 工具 `tools/migrate-deeptutor`，映射表照 `O §10`，修改：
 - **读法**：期中前（≤2026-11-02 14:25）不对 DeepTutor 数据目录开任何连接：在 DeepTutor 空闲时把库文件**拷贝**到暂存目录：拷贝前后对 db 和 `-wal` 各做一次 stat（size + mtime），一致才算有效拷贝，否则重拷；不拷 `-shm`；`courses.json`、`journal.json`、`notebook/` 在同一个空闲窗口里一起拷 〔评R3 m6〕；对拷贝做 `PRAGMA integrity_check` 后再读。期中后：`file:...?mode=ro` 打开 + `VACUUM INTO` 出快照，所有读取对快照做；幂等键用快照 sha256。不用 `?immutable=1`。最终切换那次先停 DeepTutor 或确认空闲，再核对跨库关联。
-- **稳定源 ID**：每条源记录用源库主键作 `legacy:{source}:{table}:{pk}`（与 ADR-0006 决定 3 一致），源记录内容变了 → 生成修订而不是第二份学习事实 〔评A §2、§5〕。
+- **稳定源 ID**：每条源记录用源库主键作 `legacy:{source}:{table}:{pk}`（与 ADR-0006 决定 3 一致）；`{source}` 取库文件名（如 `mastery.sqlite3`、`chat_history.db`），不加它两个库的主键会撞 〔验收 TON-1045 R1〕；源记录内容变了 → 生成修订而不是第二份学习事实 〔评A §2、§5〕。
 - 17/20 条作答：以 `mastery_interactions` + `mastery_events`（20 条）为准；缺证据的 3 条标「大纲合并时重置」，列进对账报告。全部 20 条迁移作答都不进任何窗口（§2.1），只用于 `legacy_passed` 锁存与展示 〔评R3 I4〕。
 - 108 题归属 KP：章 → 模块 → 页码重叠 → 模型选 1–2 个 KP 并盲复核；60 道选择题逐批盲复核入池；48 道简答由模型生成 rubric → 异厂复核 → 他抽查 10 题（M1）。
 - 5 个已通过 KP → `legacy_passed`；5 条复习状态 → `legacy_schedule`。
@@ -390,7 +390,7 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 - 真实语料放 `~/Coach/corpus/`（按 spike 分子目录，每个文件写明来源与生成命令）；仓库里只放语料**加载器**、生成脚本（路径用环境变量或 `~` 相对路径）和**合成样例**。live 测试与验收读本机语料；没有本机语料时测试明确报「缺语料，未运行」，不假装通过。
 - 本机配置 `~/Coach/config/local.properties`（Tailscale IP、tailnet 名、端口），构建与运行时注入；仓库只放 `local.properties.example`。
 - 核查员的实验产物在 `~/Coach/verifier-artifacts/`，结论已写进各 ADR。
-- 每个 PR 提交前自查：`git diff origin/main --stat` 里没有语料、数据库、`*.db`、日志、截图里的私人内容；`git grep -nE '/Users/|100\.[0-9]+\.[0-9]+\.[0-9]+|\.ts\.net'` 无命中（示例文件里的占位符除外）。
+- 每个 PR 提交前自查：`git diff origin/main --stat` 里没有语料、数据库、`*.db`、日志、截图里的私人内容；`git grep -nE '/Users/|100\.[0-9]+\.[0-9]+\.[0-9]+|tail1e4fd6|192\.168'` 只命中本条命令（与验收卡一致；不查 `.ts.net`，仓库里的 `<tailnet>.ts.net` 是占位符）〔验收 TON-1045 R3〕。
 
 ## 13. 里程碑
 

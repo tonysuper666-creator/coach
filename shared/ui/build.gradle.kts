@@ -13,6 +13,9 @@ kotlin {
     }
     jvmToolchain(17)
     sourceSets.commonMain.dependencies {
+        implementation(project(":shared:domain"))
+        implementation("org.jetbrains:markdown:0.7.3")
+        implementation(libs.coroutines.core)
         implementation(compose.runtime)
         implementation(compose.foundation)
         implementation(libs.material3)
@@ -20,4 +23,5 @@ kotlin {
         implementation(libs.serialization.json)
         implementation(libs.navigationevent)
     }
+    sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
 }

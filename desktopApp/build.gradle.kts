@@ -7,6 +7,7 @@ plugins {
 }
 dependencies {
     implementation(project(":shared:ui"))
+    implementation(libs.serialization.json)
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)
 }
@@ -23,4 +24,8 @@ compose.desktop {
 }
 tasks.withType<JavaExec>().configureEach {
     providers.gradleProperty("coach.autoExitSeconds").orNull?.let { systemProperty("coach.autoExitSeconds", it) }
+}
+
+tasks.withType<JavaExec>().configureEach {
+    for (key in listOf("coach.exportFormulas", "coach.capturePath")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
 }

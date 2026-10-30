@@ -57,6 +57,8 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
             }
             "msg.snapshot" -> {
                 val index = obj.str("i").toIntOrNull() ?: 0
+                // An earlier resume response can arrive after a newer cursor.
+                if (index < (lastIndex[messageId] ?: 0)) return emptyList()
                 val text = obj.str("text")
                 lastIndex[messageId] = index
                 bodies[messageId] = StringBuilder(text)
@@ -76,8 +78,7 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
             }
             else -> emptyList()
         }
-        // 一条消息结束后不再需要去重游标（同一 id 不会复用）
-        if (type == "msg.end") lastIndex.remove(messageId)
+        // Keep the cursor for as long as the body: late replayed deltas after end must still deduplicate.
         return updates
     }
 

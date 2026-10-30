@@ -58,6 +58,24 @@ class ChatStreamAssemblerTest {
     }
 
     @Test
+    fun lateReplayAfterEndCannotDuplicateTheAnswer() {
+        val assembler = ChatStreamAssembler()
+        assembler.feed(delta("m1", 1, "完整回答。"))
+        assembler.feed("""{"t":"msg.end","msg":"m1","status":"complete"}""")
+        assertTrue(assembler.feed(delta("m1", 1, "完整回答。")).isEmpty())
+        assertEquals("完整回答。", assembler.text("m1"))
+    }
+
+    @Test
+    fun delayedSnapshotCannotRollBackANewerResume() {
+        val assembler = ChatStreamAssembler()
+        assembler.feed("""{"t":"msg.snapshot","msg":"m1","i":8,"text":"较新的回答","status":"streaming"}""")
+        assertTrue(assembler.feed("""{"t":"msg.snapshot","msg":"m1","i":6,"text":"旧回答","status":"streaming"}""").isEmpty())
+        assembler.feed(delta("m1", 9, "。"))
+        assertEquals("较新的回答。", assembler.text("m1"))
+    }
+
+    @Test
     fun unknownFramesAreIgnoredInsteadOfThrowing() {
         val assembler = ChatStreamAssembler()
         assertTrue(assembler.feed("not json").isEmpty())

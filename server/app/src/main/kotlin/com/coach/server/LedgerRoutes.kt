@@ -12,6 +12,8 @@ import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
@@ -81,7 +83,9 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             // Receive and push concurrently; StateFlow is not a durable ledger, reconnect catches up from SQLite.
             val sender=launch { pushes.collect { catchUp() } }
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
-            val tutor=chat?.let { service -> launch { service.hub.frames.collect { send(Frame.Text(it.toString())) } } }
+            // Serialize resume snapshot creation + delivery against this socket's deltas.
+            val tutorSend = Mutex()
+            val tutor=chat?.let { service -> launch { service.hub.frames.collect { frame -> tutorSend.withLock { send(Frame.Text(frame.toString())) } } } }
             try { for(frame in incoming) if(frame is Frame.Text) {
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
                 when(message.str("t")) {
@@ -101,8 +105,10 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     }
                     "msg.cancel" -> chat?.cancel(message.str("msg"))
                     "msg.resume" -> {
-                        val snapshot=chat?.snapshot(message.str("msg"))
-                        if(snapshot!=null) send(Frame.Text(snapshot.toString()))
+                        tutorSend.withLock {
+                            val snapshot=chat?.snapshot(message.str("msg"))
+                            if(snapshot!=null) send(Frame.Text(snapshot.toString()))
+                        }
                     }
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin() }

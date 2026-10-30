@@ -39,6 +39,19 @@ private fun JsonObject.str(key: String): String =
  */
 class ChatFlowTest {
 
+    @Test
+    fun everyBridgeTerminalStatusReachesTheClientUnchanged() {
+        for (status in listOf("complete", "truncated", "failed", "cancelled")) Harness().use { h ->
+            val frames = if (status == "failed") emptyArray() else arrayOf("导师回答。")
+            h.tutor.stream(10, *frames, StubTutor.terminal(status), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val end = ws.await("msg.end")
+                assertEquals(status, end.str("status"))
+            }
+        }
+    }
+
     private class Harness(timings: ChatTimings = defaultTimings()) : AutoCloseable {
         val tutor = StubTutor()
         val token = "stream-test-token-32-characters-minimum"

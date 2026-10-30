@@ -44,6 +44,7 @@ object StreamStatus {
         cancelled -> CANCELLED
         status == null -> TRUNCATED
         status == COMPLETE -> COMPLETE
+        status == CANCELLED -> CANCELLED
         status == TRUNCATED -> TRUNCATED
         status == "failed" -> if (hasText) TRUNCATED else FAILED
         else -> FAILED

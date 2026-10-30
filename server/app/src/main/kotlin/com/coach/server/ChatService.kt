@@ -78,8 +78,9 @@ class ChatService(
         @Volatile var forcedReason: String? = null
         @Volatile var lastDeltaAtMs: Long = -1
         @Volatile var thinkingSent: Boolean = false
-        @Volatile var liveText: String = ""
-        @Volatile var liveIndex: Int = 0
+        // One publication: a snapshot must never pair a new index with old text.
+        data class Cursor(val text: String = "", val index: Int = 0)
+        @Volatile var cursor = Cursor()
         val finished = AtomicBoolean(false)
 
         /** 取消只有一条路径：断开 HTTP，桥据此杀掉 CLI 整个进程组（§5.5）。 */
@@ -117,9 +118,10 @@ class ChatService(
     suspend fun snapshot(messageId: String): JsonObject? {
         val live = sessions[messageId]
         if (live != null) {
+            val cursor = live.cursor
             return json(
                 "t" to "msg.snapshot", "msg" to messageId, "threadId" to live.threadId,
-                "i" to live.liveIndex, "text" to live.liveText, "status" to "streaming", "reason" to null,
+                "i" to cursor.index, "text" to cursor.text, "status" to "streaming", "reason" to null,
             )
         }
         val row = actor.execute { messageSnapshot(messageId) } ?: return null
@@ -146,8 +148,8 @@ class ChatService(
                 if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
                     lastPersist = now
                     // 每秒落库（§6）：写的是过滤后的可见正文与 (msg, i)
-                    val content = session.liveText
-                    val index = session.liveIndex
+                    val content = session.cursor.text
+                    val index = session.cursor.index
                     scope.launch { actor.execute { updateStreamingMessage(session.messageId, content, index) } }
                 }
             }
@@ -215,9 +217,9 @@ class ChatService(
         val reason = session.forcedReason ?: terminal?.reason ?: (result as? BridgeResult.Failure)
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
 
-        sessions.remove(session.messageId)
         val content = visibleText.toString()
-        actor.execute { finishMessage(session.messageId, status, reason, content, session.liveIndex) }
+        actor.execute { finishMessage(session.messageId, status, reason, content, session.cursor.index) }
+        sessions.remove(session.messageId)
         actor.execute {
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
@@ -256,8 +258,8 @@ class ChatService(
         for (segment in segments) emitSegment(session, segment, content)
         val status = if (result is BridgeResult.Success && content.isNotEmpty()) StreamStatus.COMPLETE else StreamStatus.FAILED
         val reason = (result as? BridgeResult.Failure)?.reason
+        actor.execute { finishMessage(messageId, status, reason, content.toString(), session.cursor.index) }
         sessions.remove(messageId)
-        actor.execute { finishMessage(messageId, status, reason, content.toString(), session.liveIndex) }
         actor.execute {
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
@@ -276,27 +278,27 @@ class ChatService(
      */
     private fun emitSegment(session: Session, segment: VisibleStream.Segment, text: StringBuilder): Int = when (segment) {
         is VisibleStream.Segment.Text -> {
-            if (segment.text.isEmpty()) session.liveIndex
+            if (segment.text.isEmpty()) session.cursor.index
             else {
-                session.liveIndex += 1
                 text.append(segment.text)
-                session.liveText = text.toString()
-                hub.emit(json("t" to "msg.delta", "msg" to session.messageId, "i" to session.liveIndex, "text" to segment.text))
-                session.liveIndex
+                val cursor = Session.Cursor(text.toString(), session.cursor.index + 1)
+                session.cursor = cursor
+                hub.emit(json("t" to "msg.delta", "msg" to session.messageId, "i" to cursor.index, "text" to segment.text))
+                cursor.index
             }
         }
         is VisibleStream.Segment.Math -> {
-            session.liveIndex += 1
             // 落库用 Markdown 形态，重连拿到 snapshot 也能重新渲染公式
             text.append("$$").append(segment.tex).append("$$")
-            session.liveText = text.toString()
+            val cursor = Session.Cursor(text.toString(), session.cursor.index + 1)
+            session.cursor = cursor
             hub.emit(
                 json(
-                    "t" to "msg.math", "msg" to session.messageId, "i" to session.liveIndex,
+                    "t" to "msg.math", "msg" to session.messageId, "i" to cursor.index,
                     "tex" to segment.tex, "display" to segment.display,
                 ),
             )
-            session.liveIndex
+            cursor.index
         }
     }
 

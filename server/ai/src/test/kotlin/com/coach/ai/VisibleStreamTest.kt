@@ -103,6 +103,29 @@ class VisibleStreamTest {
     }
 
     @Test
+    fun rawJsonWithoutProtocolKeywordsIsInternalEvenAcrossChunks() {
+        val recorder = Recorder()
+        recorder.push("{\n\"answer\": \"internal ")
+        recorder.push("value\", \"meta\": [1, {\"debug\": true}]\n}\n正常的导师回答。\n")
+        recorder.finish()
+        assertEquals("正常的导师回答。\n", recorder.texts.toString())
+        assertTrue(recorder.drops.any { it.reason == "raw_json" })
+    }
+
+    @Test
+    fun formulaDelimitersSplitAcrossChunksStillYieldOneMathBlock() {
+        val recorder = Recorder()
+        recorder.push("公式 ")
+        recorder.push("$")
+        recorder.push("\$E = p")
+        recorder.push(" q$")
+        recorder.push("\$。")
+        recorder.finish()
+        assertEquals(listOf("E = p q"), recorder.maths)
+        assertEquals("公式 。", recorder.texts.toString())
+    }
+
+    @Test
     fun displayMathBecomesATypedMathBlock() {
         val recorder = Recorder()
         val token = "$" + "$"

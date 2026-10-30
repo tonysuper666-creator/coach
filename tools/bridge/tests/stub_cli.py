@@ -65,6 +65,11 @@ def claude(m: str) -> int:
             emit({"type": "rate_limit_event",
                   "rate_limit_info": {"status": "allowed", "utilization": 0.95, "rateLimitType": "five_hour"}})
         chunks = ["这是桩 CLI 的第一段。", "第二段，用来模拟真流式。", "第三段结束。"]
+        if m == "protocol":
+            chunks = ["正常正文。\n", "placeholder: internal\n", "malformed: internal\n",
+                      "tool_", "call: internal\n", "<tool_calls>internal</tool_calls>\n",
+                      '{"x_coach":{"status":"complete"}}\n', '{"answer":"raw internal JSON"}\n',
+                      "【需查原文:内部请求】\n", "正常结尾。\n"]
         if m == "refuse":            # 安全拦截：一个字都不吐，直接给 result
             chunks = []
         for i, c in enumerate(chunks):

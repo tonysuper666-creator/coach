@@ -2,6 +2,28 @@
 
 M1-01 把三段接成一条链路：`server/app`（Ktor）↔ 桥副本 8791（`server/ai` 的 `BridgeClient.streamChat`）↔ `/v1/ws` 客户端（`shared/client` 的 `ChatStreamAssembler`）。这段协议是 DESIGN §6 的实现说明，不是新设计。
 
+## 独立复跑 live 验收
+
+先查看 `date`、`uptime`。2026-11-02 00:00–15:00 GMT 不运行构建与 live。重负载统一经 `tools/dev/heavy` 串行执行。
+
+```sh
+python3 -m venv tools/bridge/.venv
+tools/bridge/.venv/bin/python -m pip install -r tools/bridge/requirements.txt
+tools/dev/heavy ./gradlew liveTest --max-workers=2
+```
+
+前提：本机 Claude CLI 已登录，8791 空闲，真实课程页位于 `~/Coach/corpus/bridge-8791/*.md`（可用 `COACH_CORPUS_DIR` 指定）。缺语料明确失败，不跳过或伪造成功。
+
+`LiveChatTest` 只在显式 `liveTest` 下执行，默认 `test/check` 不产生订阅调用。它在同一前台运行内启动并回收 8791 桥、真实 Ktor 路由、隔离账本与 WS 客户端，调用共享 `ChatStreamAssembler`；不启动 UI、不改变网络设置、不读写 8790 或 DeepTutor。保留桥现有的每日计数，每次调用前检查 60 次/日、使用率 0.5 的保护，任一触发就停止，不换新目录规避额度。
+
+默认预计 **33 次真实 Claude 物理调用**：首字 20 次；关闭客户端 socket 10 秒后重连 10 次（回答可能仍在流式，也可能已结束）；流中取消 2 次（记录真实 CLI 及其子进程 PID，并检查 2 秒内退出）；真实 SSE 转发至首个正文 delta 后切断上游 1 次。首字从 `msg.ask` 发出计至共享消费器交付首个非空正文/公式，排除进度帧。续传逐条比较客户端与账本的 SHA-256。正常结束时逐条比较 `msg.end.status`（离线期间已结束则读完成快照）与 `BridgeClient` 从真实 `x_coach` 解析并记录的终态；主动取消/断流没有 `x_coach`，单独报告预期的 `cancelled/truncated`，不充当终态映射样本。
+
+最后另起一次同端口的**桩 CLI 回放**（`replay`，不消耗真实订阅）：隔离账本与桩桥目录，注入协议关键词、跨 delta 的 `tool_` + `call`、无协议关键词的原始 JSON、查原文标记。断言共享客户端与落库正文都只留下合成的正常回答，丢弃内容写内部日志。桩计数与真实桥日计数分离；真实测试不覆盖 `BRIDGE_CHILD_PATH`。
+
+逐条指标、散列、进程退出耗时和桥起停记录写入 `~/Coach/corpus/m1-stream/<run>/results.jsonl`。用 `COACH_LIVE_OUT` 指定独立的输出目录；账本、桥日志只留本地，不提交。报告采用 nearest-rank 分位数；延迟目标数字照实报告，功能、文本一致性和进程退出失败均使测试报错。
+
+额度不足完整批次但足够首字组时，测试只跑首字组并明确记录其余项延期；不足首字组就失败。也可指定 `COACH_LIVE_STAGES=first`。分组续跑支持 `first,resume,cancel,cut,replay`；`COACH_LIVE_FIRST_N` 默认 20、`COACH_LIVE_RESUME_N` 默认 10，减少数量仅用于排障，不能作为完整验收。每次运行写出实际调用数，不将未执行项计入通过。
+
 ## 客户端 → 服务端（`/v1/ws`，与账本帧共用一条连接）
 
 | 帧 | 字段 | 说明 |

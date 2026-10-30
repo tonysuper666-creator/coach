@@ -34,6 +34,20 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
         val out = ArrayList<Segment>()
         while (true) {
             val s = buffer.toString()
+            // A model can return raw JSON without any of the named protocol tokens.
+            // Keep that structured block internal, including pretty-printed / split chunks.
+            val leading = s.trimStart()
+            if (leading.startsWith("{") || (leading.startsWith("[") &&
+                    (leading.length == 1 || leading[1] in "\"{[]0123456789-"))) {
+                val end = structuredEnd(s)
+                if (end == null) {
+                    if (final) { buffer.setLength(0); drop("raw_json", s) }
+                    return out
+                }
+                buffer.delete(0, end)
+                drop("raw_json", s.substring(0, end))
+                continue
+            }
             val newline = s.indexOf('\n')
             if (newline < 0) break
             buffer.delete(0, newline + 1)
@@ -63,7 +77,36 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
         var cut = s.length - prefixSuffixLength(s)
         val mark = s.indexOf(MARK)
         if (mark in 0 until cut) cut = mark
+        // A formula is one typed block even if its delimiters arrive in different deltas.
+        var from = 0
+        while (true) {
+            val open = s.indexOf("$$", from)
+            if (open < 0) break
+            val close = s.indexOf("$$", open + 2)
+            if (close < 0) { cut = minOf(cut, open); break }
+            from = close + 2
+        }
+        if (s.endsWith('$') && !s.endsWith("$$")) cut = minOf(cut, s.length - 1)
         return cut.coerceAtLeast(0)
+    }
+
+    /** Find the end of a JSON-shaped block without ever publishing its partial prefix. */
+    private fun structuredEnd(s: String): Int? {
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        for ((i, c) in s.withIndex()) {
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') quoted = false
+            } else when (c) {
+                '"' -> quoted = true
+                '{', '[' -> depth++
+                '}', ']' -> { depth--; if (depth == 0) return i + 1 }
+            }
+        }
+        return null
     }
 
     /** 结尾有多少字符可能是某个标记/token 的前缀（这些字符必须留在缓冲里）。 */

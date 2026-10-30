@@ -7,3 +7,9 @@ plugins {
     alias(libs.plugins.android.kmp) apply false
     alias(libs.plugins.sqldelight) apply false
 }
+
+tasks.register("liveTest") {
+    group = "verification"
+    description = "Opt-in live streaming acceptance (requires local corpus and authenticated Claude CLI)"
+    dependsOn(":server:app:liveTest")
+}

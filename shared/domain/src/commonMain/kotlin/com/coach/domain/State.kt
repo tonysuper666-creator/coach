@@ -21,6 +21,7 @@ import kotlinx.serialization.Serializable
 @Serializable data class Coverage(val passed: Int = 0, val solid: Int = 0, val total: Int = 0)
 @Serializable data class Projection(
     val version: Int = PROJECTION_VERSION, val lastSeq: Long = 0,
+    val taughtConceptIds: Set<String> = emptySet(), val explainedKpIds: Set<String> = emptySet(),
     val position: Position = Position(), val mastery: Map<String, Mastery> = emptyMap(),
     val review: Map<String, Review> = emptyMap(), val journal: Map<Long, Journal> = emptyMap(),
     val coverage: Coverage = Coverage(), val orphanedAttempts: List<String> = emptyList(),

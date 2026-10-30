@@ -16,6 +16,7 @@ class StubTutor : AutoCloseable {
     @Volatile var framesWritten = 0
     @Volatile var aborted = false
     @Volatile var requests = 0
+    val requestBodies = java.util.Collections.synchronizedList(ArrayList<String>())
 
     init {
         server.createContext("/v1/chat/completions") { exchange -> handle(exchange) }
@@ -42,7 +43,7 @@ class StubTutor : AutoCloseable {
 
     private fun handle(exchange: HttpExchange) {
         requests++
-        exchange.requestBody.readBytes()
+        requestBodies.add(exchange.requestBody.readBytes().decodeToString())
         val (body, delay) = replies.pollFirst() ?: ("""{"error":"no stub reply"}""" to -1L)
         if (delay < 0) {
             val bytes = body.toByteArray()

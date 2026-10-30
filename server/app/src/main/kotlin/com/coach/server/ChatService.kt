@@ -7,7 +7,11 @@ import com.coach.ai.BridgeStreamSink
 import com.coach.ai.StreamStatus
 import com.coach.ai.VisibleStream
 import com.coach.ai.teachRequest
-import com.coach.core.LedgerActor
+import com.coach.core.*
+import com.coach.domain.*
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import com.coach.domain.json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +68,7 @@ class ChatService(
 ) {
 
     val hub = ChatHub()
+    val tutor = TutorMachine(actor)
     private val sessions = ConcurrentHashMap<String, Session>()
 
     class Session(
@@ -72,6 +77,7 @@ class ChatService(
         val courseId: String,
         val model: String,
         val fallback: Boolean,
+        val plan: TutorReplyPlan? = null,
     ) {
         @Volatile var handle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
@@ -93,13 +99,59 @@ class ChatService(
 
     /** 追问/问答：立刻返回 messageId，流在后台推进（每帧经 [hub] 广播）。 */
     suspend fun ask(threadId: String, courseId: String, question: String, pack: String = ""): String {
+        when (tutorIntent(question)) {
+            TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack)
+            TutorIntent.TEST_ME -> return nextStep(threadId,courseId,pack,true)
+            null -> Unit
+        }
+        val plan = if (tutor.hasThread(courseId,threadId)) tutor.followup(courseId,threadId) else null
+        return startReply(threadId,courseId,question,pack,plan)
+    }
+
+    suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String) {
+        publish(tutor.open(courseId,threadId,kpId,concepts,title),threadId,courseId)
+    }
+
+    suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false): String {
+        val outcome = tutor.next(courseId,threadId,testUntaught)
+        publish(outcome,threadId,courseId)
+        return outcome.plan?.let { startReply(threadId,courseId,"请讲解当前知识点。",pack,it) }.orEmpty()
+    }
+
+    suspend fun configureTutor(threadId: String, courseId: String, groupSize: Int?, mode: TeachingMode?) {
+        publish(tutor.settings(courseId,threadId,groupSize,mode),threadId,courseId)
+    }
+
+    suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String) {
+        val outcome = tutor.explain(courseId,threadId,mode)
+        publish(outcome,threadId,courseId)
+        startReply(threadId,courseId,"请按指定模式讲解。",pack,outcome.plan)
+    }
+
+    suspend fun submitGroup(threadId: String, courseId: String, group: String, answers: Map<String,String>, device: String, submission: String) {
+        publish(tutor.submit(courseId,threadId,group,answers,device,submission),threadId,courseId)
+    }
+
+    private fun publish(outcome: TutorOutcome, thread: String, course: String) {
+        hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,"state" to outcome.state.name,"nextLabel" to outcome.nextLabel))
+        if (outcome.cards.isNotEmpty()) hub.emit(json("t" to "tutor.cards","threadId" to thread,"courseId" to course,
+            "groupId" to outcome.cards.first().payload.str("groupId"),"cards" to JsonArray(outcome.cards.map { it.payload })))
+        if (outcome.grades.isNotEmpty()) hub.emit(json("t" to "tutor.feedback","threadId" to thread,"courseId" to course,
+            "grades" to JsonArray(outcome.grades.map { it.payload })))
+        if (outcome.waitingForPool) hub.emit(json("t" to "tutor.progress","threadId" to thread,"courseId" to course,
+            "phase" to "pool_queued","text" to "题池暂空，已排队补题"))
+    }
+
+    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?): String {
         val messageId = UUID.randomUUID().toString()
-        val session = Session(messageId, threadId, courseId, BridgeClient.CLAUDE, false)
+        val session = Session(messageId, threadId, courseId, BridgeClient.CLAUDE, false, plan)
         sessions[messageId] = session
         val recent = actor.execute { recentTurns(threadId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
-        scope.launch(Dispatchers.IO) { run(session, question, pack, recent) }
+        val context = listOf(TutorOutputGuard.modelInput(pack.take(40_000)), plan?.instruction().orEmpty()).joinToString("\n")
+        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
+            recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
         return messageId
     }
 
@@ -135,15 +187,36 @@ class ChatService(
         val visibleText = StringBuilder()
         val started = System.nanoTime()
         var lastPersist = started
-        val visible = VisibleStream { drop ->
+        var visible = VisibleStream { drop ->
             log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
         }
         fun elapsedMs(): Long = (System.nanoTime() - started) / 1_000_000
 
+        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true) { attempt ->
+            session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
+        }
+        fun acceptFiltered(text: String) {
+            val revision = guard.takeRevision()
+            if (revision == null) {
+                for (segment in visible.push(text)) emitSegment(session,segment,visibleText)
+            } else {
+                // A sentence can acquire a forbidden reference after its safe prefix was streamed.
+                // Replace that prefix via the existing snapshot protocol; the letter itself never streams.
+                visible = VisibleStream()
+                visibleText.setLength(0)
+                for (segment in visible.push(revision)) when (segment) {
+                    is VisibleStream.Segment.Text -> visibleText.append(segment.text)
+                    is VisibleStream.Segment.Math -> visibleText.append("\$\$").append(segment.tex).append("\$\$")
+                }
+                session.cursor = Session.Cursor(visibleText.toString(), session.cursor.index + 1)
+                hub.emit(json("t" to "msg.snapshot","msg" to session.messageId,"threadId" to session.threadId,
+                    "i" to session.cursor.index,"text" to session.cursor.text,"status" to "streaming"))
+            }
+        }
         val sink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
                 session.lastDeltaAtMs = maxOf(session.lastDeltaAtMs, atMs)
-                for (segment in visible.push(text)) emitSegment(session, segment, visibleText)
+                acceptFiltered(guard.push(text))
                 val now = System.nanoTime()
                 if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
                     lastPersist = now
@@ -204,6 +277,7 @@ class ChatService(
             session.finished.set(true)
         }
 
+        acceptFiltered(guard.finish())
         for (segment in visible.finish()) emitSegment(session, segment, visibleText)
 
         val forcedStatus = session.forcedStatus
@@ -218,22 +292,25 @@ class ChatService(
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
 
         val content = visibleText.toString()
-        actor.execute { finishMessage(session.messageId, status, reason, content, session.cursor.index) }
-        sessions.remove(session.messageId)
-        actor.execute {
+        val willFallback = status == StreamStatus.FAILED && reason == "first_token_timeout" && fallbackOnFirstTokenTimeout
+        val persist: com.coach.store.LedgerStore.() -> Unit = {
+            finishMessage(session.messageId, status, reason, content, session.cursor.index)
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
                 servedBy = result.call.servedBy ?: session.model, ttftMs = result.call.ttftMs,
                 durMs = result.call.durMs, inChars = result.call.inChars, outChars = content.length,
-                status = status, queueMs = result.call.queueMs, physicalCalls = result.call.physicalCalls,
+                status = if (guard.letterReferenceStripped) "letter_ref_stripped" else status, queueMs = result.call.queueMs, physicalCalls = result.call.physicalCalls,
             )
         }
+        val plan = session.plan
+        if (plan != null && !willFallback) {
+            val outcome = tutor.finish(plan,session.messageId,result is BridgeResult.Success && status == StreamStatus.COMPLETE && content.isNotBlank(),persist)
+            publish(outcome,session.threadId,session.courseId)
+        } else actor.execute { tutorTransaction(persist) }
+        sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length))
         log("COACH msg.end msg=${session.messageId} model=${session.model} status=$status reason=$reason chars=${content.length} ttft=${result.call.ttftMs} terminal=${terminal?.status} failure=${(result as? BridgeResult.Failure)?.reason}")
-
-        if (status == StreamStatus.FAILED && reason == "first_token_timeout" && fallbackOnFirstTokenTimeout) {
-            fallback(session, question, pack)
-        }
+        if (willFallback) fallback(session,question,pack)
     }
 
     /**
@@ -242,7 +319,7 @@ class ChatService(
      */
     private suspend fun fallback(previous: Session, question: String, pack: String) {
         val messageId = UUID.randomUUID().toString()
-        val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true)
+        val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan)
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
         hub.emit(startFrame(session))
@@ -253,21 +330,27 @@ class ChatService(
         val visible = VisibleStream { drop ->
             log("COACH visible-drop msg=$messageId reason=${drop.reason} excerpt=${drop.excerpt}")
         }
-        val segments = visible.push(text) + visible.finish()
+        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true) { attempt ->
+            session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
+        }
+        val segments = visible.push(guard.push(text) + guard.finish()) + visible.finish()
         val content = StringBuilder()
         for (segment in segments) emitSegment(session, segment, content)
         val status = if (result is BridgeResult.Success && content.isNotEmpty()) StreamStatus.COMPLETE else StreamStatus.FAILED
         val reason = (result as? BridgeResult.Failure)?.reason
-        actor.execute { finishMessage(messageId, status, reason, content.toString(), session.cursor.index) }
-        sessions.remove(messageId)
-        actor.execute {
+        val persist: com.coach.store.LedgerStore.() -> Unit = {
+            finishMessage(messageId, status, reason, content.toString(), session.cursor.index)
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
                 servedBy = result.call.servedBy ?: fallbackModel, ttftMs = result.call.ttftMs,
                 durMs = result.call.durMs, inChars = result.call.inChars, outChars = content.length,
-                status = status, queueMs = result.call.queueMs, physicalCalls = result.call.physicalCalls,
+                status = if (guard.letterReferenceStripped) "letter_ref_stripped" else status, queueMs = result.call.queueMs, physicalCalls = result.call.physicalCalls,
             )
         }
+        val plan = session.plan
+        if (plan != null) publish(tutor.finish(plan,messageId,status == StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
+        else actor.execute { tutorTransaction(persist) }
+        sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length))
         log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=$reason")
     }

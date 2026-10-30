@@ -83,10 +83,36 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         values.forEachIndexed { i,v -> ps.setObject(i+1,v) }; ps.executeQuery().use { rs -> buildList { while(rs.next()) add(read(rs)) } }
     }
     private fun <T> transaction(block: () -> T): T {
-        check(connection.autoCommit) { "Nested write transaction" }
+        if (!connection.autoCommit) return block() // Nested operations join the actor-owned transaction.
         connection.autoCommit = false
         try { val v = block(); connection.commit(); return v } catch(e: Throwable) { connection.rollback(); throw e } finally { connection.autoCommit = true }
     }
+    /** Core orchestrations commit state, cards and per-question answers as one unit. */
+    fun <T> tutorTransaction(block: LedgerStore.() -> T): T = transaction { block() }
+
+    /** A KP has exactly one course-bound thread; reopening cannot move it to another course or KP. */
+    fun bindTutorThread(course: String, thread: String, kp: String) {
+        require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
+        val row = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?", thread) {
+            Triple(it.getString(1), it.getString(2), it.getString(3))
+        }.singleOrNull()
+        if (row == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'KP','KP',?)", thread,course,kp)
+        else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
+    }
+
+    fun ensureTutorPoolJob(course: String, kp: String): String {
+        val subject = "$course:$kp"
+        return query("SELECT job_id FROM jobs WHERE kind='gen_mcq' AND subject=? AND state IN ('queued','running') ORDER BY created_at LIMIT 1", subject) { it.getString(1) }
+            .singleOrNull() ?: enqueueJob("gen_mcq",subject)
+    }
+
+    fun tutorQuestions(course: String, kp: String): List<String> = query(
+        "SELECT q.question_id FROM questions q JOIN question_kp k ON q.question_id=k.question_id WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format='SINGLE_CHOICE' ORDER BY q.question_id", course,kp
+    ) { it.getString(1) }.filter { choiceOptions(it).size == 4 }
+
+    /** Server-only answer key, never included in a card or model prompt. */
+    fun tutorChoiceKey(questionId: String): ChoiceKey = ChoiceKey(choiceOptions(questionId), requireNotNull(choiceId(questionId)))
+
     fun hello(): Hello = query("SELECT epoch,backed_up_through_seq,last_seq_before FROM ledger_meta") {
         Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
     }.single()
@@ -153,11 +179,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** Called inside the single-writer actor; all letters and all group events commit together. */
     fun poseChoiceGroup(course: String, groupId: String, requests: List<JsonObject>,
-        rng: Random = Random.Default, offline: Boolean = false, device: String = "server"): List<Event> = transaction {
-        poseChoiceGroupInTransaction(course, groupId, requests, rng, device, offline)
+        rng: Random = Random.Default, offline: Boolean = false, device: String = "server", thread: String? = null): List<Event> = transaction {
+        poseChoiceGroupInTransaction(course, groupId, requests, rng, device, offline, thread)
     }
     private fun poseChoiceGroupInTransaction(course: String, groupId: String, requests: List<JsonObject>,
-        rng: Random, device: String, offline: Boolean = true): List<Event> {
+        rng: Random, device: String, offline: Boolean = true, thread: String? = null): List<Event> {
         require(groupId.isNotBlank() && requests.isNotEmpty())
         require(requests.map { it.str("attemptId") }.distinct().size == requests.size)
         val existing = events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
@@ -185,7 +211,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "fingerprint" to JsonPrimitive(content.second), "format" to JsonPrimitive("SINGLE_CHOICE"),
                 "keyState" to JsonPrimitive("VERIFIED"), "offlinePack" to JsonPrimitive(offline)
             ) - "correctOptionId")
-            append(course,"question_posed",payload,"attempt:${request.str("attemptId")}",device=device)
+            append(course,"question_posed",payload,"attempt:${request.str("attemptId")}",device=device, thread=thread)
         }
     }
 
@@ -203,7 +229,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun authorize(device: String, token: String): Boolean = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull() == sha256(token.toByteArray(Charsets.UTF_8))
     fun enroll(device: String, token: String) { require(token.length >= 32); sql("INSERT INTO devices(device_id,token_sha256,created_at) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET token_sha256=excluded.token_sha256,revoked_at=NULL",device,sha256(token.toByteArray(Charsets.UTF_8)),clock()) }
 
-    fun command(c: WireCommand): Receipt {
+    fun command(c: WireCommand, tutorGroup: Boolean = false): Receipt {
         val meta = hello()
         fun receipt(status: String, seqs: List<Long> = emptyList(), result: JsonObject = json(), error: String? = null) = Receipt(c.commandId,status,seqs,result,error,meta.epoch,meta.backedUpThroughSeq)
         if (sha256(c.payloadBytes.toByteArray(Charsets.UTF_8)) != c.payloadSha256) return receipt("REJECTED",error="PAYLOAD_MISMATCH")
@@ -243,7 +269,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             val posed = query("SELECT event_json FROM events WHERE course_id=? AND idem_key=?",body.courseId,"attempt:$attemptId") { LedgerJson.decodeFromString<Event>(it.getString(1)) }.singleOrNull()
                             val qid = posed?.payload?.str("questionId") ?: posedSnapshot.str("questionId")
                             val question = query("SELECT format,fingerprint,key_state FROM questions WHERE question_id=? AND course_id=?",qid,body.courseId) { Triple(it.getString(1),it.getString(2),it.getString(3)) }.singleOrNull()
-                            if (question == null) {
+                            val tutorThread = posed?.threadId
+                            val tutorState = tutorThread?.let { thread -> events(body.courseId).lastOrNull { it.threadId == thread && it.type == "tutor_state_changed" } }
+                            val activeReply = tutorState?.payload?.str("turnId").orEmpty().isNotEmpty()
+                            val tutorGroupSize = if (tutorState == null) 0 else events(body.courseId).count {
+                                it.type == "question_posed" && it.payload.str("groupId") == posed?.payload?.str("groupId")
+                            }
+                            if (activeReply) {
+                                status="REJECTED"; error="TUTOR_BUSY"
+                            } else if (!tutorGroup && tutorGroupSize > 1) {
+                                status="REJECTED"; error="GROUP_SUBMISSION_REQUIRED"
+                            } else if (question == null) {
                                 emit("answer_orphaned",json("attemptId" to attemptId,"posedSnapshot" to posedSnapshot,"rawAnswer" to p.str("answer"),"reason" to "QUESTION_MISSING"),"attempt:$attemptId:answer")
                             } else if (posed == null && question.second != posedSnapshot.str("fingerprint")) {
                                 emit("answer_orphaned",json("attemptId" to attemptId,"posedSnapshot" to posedSnapshot,"rawAnswer" to p.str("answer"),"reason" to "QUESTION_CHANGED"),"attempt:$attemptId:answer")

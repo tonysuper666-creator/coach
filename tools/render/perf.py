@@ -41,10 +41,12 @@ def finish_run(r, **fields):
 
 # ---------------- Android
 def device(*a, **kw): return sh([adb, '-s', serial, *a], **kw)
-proc = subprocess.Popen(['nice', '-n', '15', str(sdk / 'emulator/emulator'), '-avd', 'sable-api35', '-port', '5574', '-no-snapshot-save', '-no-boot-anim', '-no-audio', '-no-window', '-gpu', 'host', '-cores', '2'], stdout=(out / 'emulator.log').open('w'), stderr=subprocess.STDOUT, start_new_session=True)
+proc = None
 try:
     if not wait_quiet(wait_s):
         print(json.dumps({'aborted': 'machine busy', 'snapshot': snapshot()})); sys.exit(3)
+    # Start the emulator only once the machine is quiet, so it is not part of the load that the gate looks at.
+    proc = subprocess.Popen(['nice', '-n', '15', str(sdk / 'emulator/emulator'), '-avd', 'sable-api35', '-port', '5574', '-no-snapshot-save', '-no-boot-anim', '-no-audio', '-no-window', '-gpu', 'host', '-cores', '2'], stdout=(out / 'emulator.log').open('w'), stderr=subprocess.STDOUT, start_new_session=True)
     for _ in range(180):
         if device('shell', 'getprop', 'sys.boot_completed').strip() == '1': break
         time.sleep(1)
@@ -69,9 +71,10 @@ try:
             finish_run(r, index=i + 1, summary=summary[-1] if summary else 'MISSING', jankstats=jank[-1] if jank else 'MISSING', fatal='FATAL EXCEPTION' in logs)
     device('shell', 'wm', 'size', 'reset'); device('shell', 'wm', 'density', 'reset')
 finally:
-    subprocess.run([adb, '-s', serial, 'emu', 'kill'], capture_output=True, timeout=15)
-    try: proc.wait(timeout=30)
-    except subprocess.TimeoutExpired: os.killpg(proc.pid, signal.SIGTERM)
+    if proc is not None:
+        subprocess.run([adb, '-s', serial, 'emu', 'kill'], capture_output=True, timeout=15)
+        try: proc.wait(timeout=30)
+        except subprocess.TimeoutExpired: os.killpg(proc.pid, signal.SIGTERM)
 
 # ---------------- Mac desktop (window 840x568dp, replay all 20 answers at 30 chars / 50 ms)
 app = repo / 'desktopApp/build/compose/binaries/main/app/Coach.app/Contents/MacOS/Coach'

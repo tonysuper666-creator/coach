@@ -74,7 +74,7 @@ class LiveChatTest {
         val h = health()
         val daily = h.getValue("daily").jsonObject
         val rate = h.getValue("rate_limit").jsonObject
-        require(daily.str("claude_cap") == "60" && rate.str("pause_at") == "0.5") { "桥保护参数必须为 60 / 0.5" }
+        require(daily.str("claude_cap").toInt() > 0 && rate.str("pause_at") == "0.5") { "桥保护参数必须开启测试上限 / 0.5" }
         require(rate.str("all_paused") != "true") { "桥因订阅使用率暂停；本批停止，不重试" }
         require(daily.str("remaining").toInt() >= requiredCalls) { "今日额度不足 $requiredCalls；停止本批" }
         return h
@@ -97,7 +97,7 @@ class LiveChatTest {
             process = ProcessBuilder(python, "tools/bridge/subscription_bridge.py").apply {
                 environment().remove("BRIDGE_CHILD_PATH")
                 environment()["BRIDGE_PORT"] = "8791"
-                environment()["BRIDGE_DAILY_CLAUDE_CAP"] = "60"
+                environment()["BRIDGE_DAILY_CLAUDE_CAP"] = "150"
                 environment()["BRIDGE_RATE_PAUSE_AT"] = "0.5"
                 environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
                 environment()["BRIDGE_AGY_ENABLED"] = "0"
@@ -162,7 +162,7 @@ class LiveChatTest {
         val store = LedgerStore(directory).also { it.enroll("live-client", token) }
         val actor = LedgerActor(scope, store)
         val logs: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
+        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl, testTraffic = true)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 64), chat)
         }.apply {
@@ -195,7 +195,7 @@ class LiveChatTest {
                 try {
                     val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8791/v1/chat/completions"))
                         .POST(HttpRequest.BodyPublishers.ofByteArray(exchange.requestBody.readBytes()))
-                    for (key in listOf("Content-Type", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id")) {
+                    for (key in listOf("Content-Type", "X-Coach-Traffic", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id")) {
                         exchange.requestHeaders.getFirst(key)?.let { request.header(key, it) }
                     }
                     val response = HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofInputStream())

@@ -85,10 +85,9 @@ BACKGROUND_BACKEND = os.environ.get("BRIDGE_BACKGROUND_BACKEND", "codex")
 BACKGROUND_MODEL = os.environ.get("BRIDGE_BACKGROUND_MODEL", "gpt-6.1-sol")
 AGY_ENABLED = os.environ.get("BRIDGE_AGY_ENABLED", "0") == "1"     # agy 默认关（条款风险）
 HEALTH_CACHE_SEC = float(os.environ.get("BRIDGE_HEALTH_CACHE_SEC", "60"))
-# 期中保护（TON-1036 评审 I8，2026-10-29 收紧）：Coach 的 Claude 物理调用每天硬上限，
-# 与 TON-1041 合计 60 次；同一天还有别的卡在跑时把这里调成剩余额度。
-DAILY_CLAUDE_CAP = int(os.environ.get("BRIDGE_DAILY_CLAUDE_CAP", "60"))
-RATE_PAUSE_AT = float(os.environ.get("BRIDGE_RATE_PAUSE_AT", "0.5"))   # utilization ≥ 这个值就暂停全部调用
+# Test-only budget (TON-1128); unmarked learner traffic is always counted but never capped.
+DAILY_CLAUDE_CAP = int(os.environ.get("BRIDGE_DAILY_CLAUDE_CAP", "150"))
+RATE_PAUSE_AT = float(os.environ.get("BRIDGE_RATE_PAUSE_AT", "0.5"))   # utilization ≥ 这个值就暂停测试调用
 STATE_DIR = BRIDGE_HOME / "state"
 DAILY_FILE = STATE_DIR / "daily.json"
 SANDBOX_TEMPLATE = BRIDGE_DIR / "sandbox" / "agent_sandbox.sb.in"
@@ -168,27 +167,24 @@ def read_daily() -> dict:
 
 
 def daily_used() -> int:
-    return int(read_daily().get("claude_calls") or 0)
+    return int(read_daily().get("test_claude_calls") or 0)
 
 
-def reserve_claude_call() -> None:
-    """每次真的 spawn claude 之前先占用今日额度；超了就不 spawn（硬上限，不是建议值）。"""
-    if DAILY_CLAUDE_CAP <= 0:
-        return
+def reserve_claude_call(test_traffic: bool = False) -> None:
+    """Count every physical call; only explicitly marked tests consume the test budget."""
     data = read_daily()
-    used = int(data.get("claude_calls") or 0)
-    if used >= DAILY_CLAUDE_CAP:
-        raise BridgeError(429, f"今日 Claude 物理调用已达上限 {DAILY_CLAUDE_CAP} 次"
-                               "（期中保护，与 TON-1041 合计），今天不再调用 Claude",
+    used = int(data.get("test_claude_calls") or 0)
+    if test_traffic and DAILY_CLAUDE_CAP > 0 and used >= DAILY_CLAUDE_CAP:
+        raise BridgeError(429, f"今日 Claude 测试调用已达上限 {DAILY_CLAUDE_CAP} 次",
                           "rate_limit_error", "daily_claude_cap")
-    data["claude_calls"] = used + 1
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = DAILY_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(DAILY_FILE)
-    except OSError:
-        pass
+    data["claude_calls"] = int(data.get("claude_calls") or 0) + 1
+    if test_traffic:
+        data["test_claude_calls"] = used + 1
+    # A failed accounting write must not silently permit uncounted test calls.
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = DAILY_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(DAILY_FILE)
 
 
 # ---------- 错误与终态 ----------
@@ -235,7 +231,7 @@ def write_log(**kw: Any) -> None:
     line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
             f"rid={kw.get('request_id') or '-'} model={str(kw.get('model'))[:48]} "
             f"served={str(kw.get('served_by') or '-')[:48]} stream={int(bool(kw.get('stream')))} "
-            f"bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
+            f"traffic={kw.get('traffic', 'user')} bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
             f"in={kw.get('in_chars', 0)} out={kw.get('out_chars', 0)} "
             f"queue={kw.get('queue_ms', 0)}ms ttft={kw.get('ttft_ms') if kw.get('ttft_ms') is not None else '-'}ms "
             f"total={kw.get('total_ms', 0)}ms status={kw.get('status')} reason={kw.get('reason') or '-'} "
@@ -522,6 +518,7 @@ class ReqCtx:
     effort: str | None
     t_req: float
     in_chars: int
+    test_traffic: bool = False
     # 运行中更新
     served_by: str | None = None
     t_acq: float | None = None
@@ -724,7 +721,7 @@ async def call_claude(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     """非流式 Claude：--output-format json。"""
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
-        reserve_claude_call()
+        reserve_claude_call(req.test_traffic)
         req.physical_calls += 1
         argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=False)
         budget = CLAUDE_TIMEOUT + STREAM_TOTAL_TIMEOUT   # 非流式：整段等回来
@@ -789,7 +786,7 @@ async def claude_stream(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
     argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=True)
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
-        reserve_claude_call()
+        reserve_claude_call(req.test_traffic)
         proc = await spawn(argv, CLAUDE_CWD, child_env("claude"), stdin_pipe=True)
         req.physical_calls += 1
 
@@ -991,16 +988,18 @@ async def call_codex(req: ReqCtx, model: str, effort: str | None) -> Outcome:
 async def slot(req: ReqCtx, backend: str):
     """拿到槽之后把 t_acq 交出去；后台请求额外占一个后台槽，额度紧张时直接拒。"""
     global BG_ACTIVE
-    if RATE_LIMIT.paused_all():
+    if req.test_traffic and RATE_LIMIT.paused_all():
         raise RatePaused()
     if req.background:
-        if RATE_LIMIT.blocked():
+        if req.test_traffic and RATE_LIMIT.blocked():
             raise BackgroundPaused()
         await BG_SLOTS.acquire()
         BG_ACTIVE += 1
     try:
         await GATES[backend].acquire(req.background)
         try:
+            if req.test_traffic and RATE_LIMIT.paused_all():
+                raise RatePaused()
             yield time.monotonic()
         finally:
             await GATES[backend].release()
@@ -1192,7 +1191,7 @@ async def health_payload() -> dict:
         "concurrency": {name: gate.snapshot() for name, gate in GATES.items()}
                        | {"background": {"limit": BACKGROUND_SLOTS, "active": BG_ACTIVE}},
         "background_backend": BACKGROUND_BACKEND or None,
-        "daily": {"date": _today(), "claude_calls": daily_used(), "claude_cap": DAILY_CLAUDE_CAP,
+        "daily": {"date": _today(), "scope": "test", "total_claude_calls": int(read_daily().get("claude_calls") or 0), "claude_calls": daily_used(), "claude_cap": DAILY_CLAUDE_CAP,
                   "remaining": max(0, DAILY_CLAUDE_CAP - daily_used()) if DAILY_CLAUDE_CAP > 0 else None},
         "rate_limit": RATE_LIMIT.snapshot(),
         "fallback_default": "off",
@@ -1250,6 +1249,7 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     return ReqCtx(request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
                   stream=bool(body.get("stream")), background=background,
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
+                  test_traffic=(headers.get("x-coach-traffic") or "").strip().lower() == "test",
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
 
@@ -1304,7 +1304,7 @@ def terminal_frames(req: ReqCtx, cid: str, created: int, oc: Outcome, want_usage
 
 def log_req(req: ReqCtx, oc: Outcome) -> None:
     write_log(request_id=req.request_id, model=req.model, served_by=oc.served_by or req.served_by,
-              stream=req.stream, background=req.background, effort=req.effort,
+              stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
               in_chars=req.in_chars, out_chars=req.out_chars, queue_ms=req.queue_ms(),
               ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status=oc.status, reason=oc.reason,
               finish_reason=oc.finish_reason, physical_calls=req.physical_calls,
@@ -1593,7 +1593,7 @@ async def chat(request: Request):
     except RatePaused:
         rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
         return err_response(BridgeError(429, f"额度 usage 已达 {RATE_LIMIT.utilization}（阈值 {RATE_PAUSE_AT}），"
-                                               "期中保护：全部调用暂停，等他复习完再跑",
+                                               "测试调用暂停，用户学习照常",
                                         "rate_limit_error", "rate_limit_paused"),
                             headers={"X-Request-Id": rid, "Retry-After": "900"})
     except BridgeError as e:
@@ -1610,7 +1610,7 @@ async def chat(request: Request):
         rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
         if req:
             write_log(request_id=req.request_id, model=req.model, served_by=req.served_by,
-                      stream=req.stream, background=req.background, effort=req.effort,
+                      stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
                       in_chars=req.in_chars, out_chars=0, queue_ms=req.queue_ms(),
                       ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status="failed",
                       reason="cli_exit", finish_reason="error",

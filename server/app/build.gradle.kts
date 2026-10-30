@@ -27,6 +27,7 @@ tasks.test {
 
 // Opt-in: real CLI calls and local course material, never part of test/check.
 tasks.register<Test>("liveTest") {
+    environment("COACH_TRAFFIC", "test")
     description = "Real 8791 bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
     group = "verification"
     testClassesDirs = sourceSets.test.get().output.classesDirs
@@ -37,3 +38,6 @@ tasks.register<Test>("liveTest") {
     workingDir(rootProject.projectDir)
     testLogging { showStandardStreams = true }
 }
+
+// All automated test traffic opts into the bridge test budget.
+tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }

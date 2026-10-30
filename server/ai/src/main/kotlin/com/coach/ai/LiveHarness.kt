@@ -42,7 +42,7 @@ fun main(args: Array<String>) {
     val command = args.firstOrNull() ?: "help"
     val options = parseOptions(args.drop(1))
     val corpus = Path.of(System.getenv("COACH_CORPUS_DIR") ?: "${System.getProperty("user.home")}/Coach/corpus/gradegen")
-    val client = BridgeClient()
+    val client = BridgeClient(BridgeConfig(testTraffic = true))
     val harness = LiveHarness(corpus, client, options)
     when (command) {
         "kps" -> harness.kps()
@@ -118,7 +118,7 @@ class Preflight(private val bridge: BridgeClient, private val bridgeLog: Path) {
         return if (now.isAfter(start) && now.isBefore(end)) "blackout_before_midterm" else null
     }
 
-    /** Coach 的 Claude 物理调用每日硬上限（默认 60，与同一天其他卡合计，计数在桥的 state/daily.json）。 */
+    /** Coach 的 Claude 物理调用每日硬上限（默认 150，仅测试请求，与同一天其他卡合计，计数在桥的 state/daily.json）。 */
     fun dailyBudget(needsClaude: Boolean): String? {
         if (!needsClaude) return null
         val statePath = Path.of(
@@ -128,8 +128,8 @@ class Preflight(private val bridge: BridgeClient, private val bridgeLog: Path) {
         val state = runCatching { JsonText.json.parseToJsonElement(statePath.readText()).jsonObject }.getOrNull() ?: return null
         val date = state["date"]?.jsonPrimitive?.content ?: return null
         val today = java.time.LocalDate.now().toString()
-        val used = if (date == today) state["claude_calls"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0 else 0
-        val cap = System.getenv("BRIDGE_DAILY_CLAUDE_CAP")?.toIntOrNull() ?: 60
+        val used = if (date == today) state["test_claude_calls"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0 else 0
+        val cap = System.getenv("BRIDGE_DAILY_CLAUDE_CAP")?.toIntOrNull() ?: 150
         return if (used >= cap) "daily_claude_cap:$used/$cap" else null
     }
 

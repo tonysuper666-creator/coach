@@ -51,7 +51,7 @@ def abort_after(port: int, body: dict, delay: float) -> None:
     s = socket.create_connection(("127.0.0.1", port), timeout=30)
     payload = json.dumps(body, ensure_ascii=False).encode()
     head = ("POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
-            "Content-Type: application/json\r\n"
+            "Content-Type: application/json\r\nX-Coach-Traffic: test\r\n"
             f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n")
     s.sendall(head.encode() + payload)
     time.sleep(delay)
@@ -114,7 +114,7 @@ class Bridge:
     def http(self, method: str, path: str, body: dict | None = None,
              headers: dict | None = None, timeout: float = 30):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Content-Type": "application/json"}
+        h = {"Content-Type": "application/json", "X-Coach-Traffic": "test"}
         h.update(headers or {})
         payload = json.dumps(body).encode() if body is not None else None
         conn.request(method, path, body=payload, headers=h)
@@ -343,6 +343,9 @@ def main() -> int:
         h = json.loads(b3.http("GET", "/health")[2])
         check("rate: /health 报 all_paused 与阈值 0.5",
               h["rate_limit"]["all_paused"] is True and h["rate_limit"]["pause_at"] == 0.5)
+        b3.set_mode("ok")
+        r = b3.ask("本人学习不受测试暂停线影响", headers={"X-Coach-Traffic": "user"})
+        check("rate: 用户请求在暂停线之上仍可用", r["status"] == 200, str(r["status"]))
         calls_before = stub_procs(stub_dir)
         check("rate: 暂停后没有新的桩进程", calls_before == 0, str(calls_before))
     finally:
@@ -362,6 +365,12 @@ def main() -> int:
               str((r["error"] or {}).get("code")))
         h = json.loads(b4.http("GET", "/health")[2])
         check("daily: 计数停在 2", h["daily"]["claude_calls"] == 2 and h["daily"]["remaining"] == 0, str(h["daily"]))
+        r = b4.ask("本人学习不占测试预算", headers={"X-Coach-Traffic": "user"})
+        check("daily: 测试满额后用户仍可用", r["status"] == 200, str(r["status"]))
+        r = b4.ask("默认请求是本人学习", headers={"X-Coach-Traffic": ""})
+        check("daily: 无标记的用户请求仍可用", r["status"] == 200, str(r["status"]))
+        h = json.loads(b4.http("GET", "/health")[2])
+        check("daily: 用户请求记物理调用但不占测试额度", h["daily"]["claude_calls"] == 2 and h["daily"]["total_claude_calls"] == 4, str(h["daily"]))
         r = b4.ask("Codex 不受 Claude 额度限制", model="gpt-6.1-sol", stream=False)
         check("daily: Codex 照常可用", r["status"] == 200, str(r["status"]))
     finally:

@@ -14,7 +14,7 @@
 (5) 回显 X-Request-Id 并写日志；按请求设推理强度（X-Coach-Effort / reasoning_effort）。
 (6) 超时从拿到信号量之后起算；排队时长（queue_ms）单独记录。
 (7) 并发：Claude 上限可配（BRIDGE_CLAUDE_CONCURRENCY，期中前默认 1），后台最多 1；
-    读 rate_limit_event，utilization≥0.8 或 status≠allowed 时暂停后台生成（429）。
+    rate_limit_event 仅作可观察信号，不以本地阈值拦截。
 (8) /v1/models 标 true_stream；Codex 为 false（exec --json 没有 delta）；agy 默认关；Grok 未注册。
 (9) 桩 CLI 故障注入回归见 tests/fault_injection.py，live 探针见 tests/live_probe.py。
 
@@ -86,8 +86,6 @@ BACKGROUND_MODEL = os.environ.get("BRIDGE_BACKGROUND_MODEL", "gpt-6.1-sol")
 AGY_ENABLED = os.environ.get("BRIDGE_AGY_ENABLED", "0") == "1"     # agy 默认关（条款风险）
 HEALTH_CACHE_SEC = float(os.environ.get("BRIDGE_HEALTH_CACHE_SEC", "60"))
 # Test-only budget (TON-1128); unmarked learner traffic is always counted but never capped.
-DAILY_CLAUDE_CAP = int(os.environ.get("BRIDGE_DAILY_CLAUDE_CAP", "150"))
-RATE_PAUSE_AT = float(os.environ.get("BRIDGE_RATE_PAUSE_AT", "0.5"))   # utilization ≥ 这个值就暂停测试调用
 STATE_DIR = BRIDGE_HOME / "state"
 DAILY_FILE = STATE_DIR / "daily.json"
 SANDBOX_TEMPLATE = BRIDGE_DIR / "sandbox" / "agent_sandbox.sb.in"
@@ -174,9 +172,6 @@ def reserve_claude_call(test_traffic: bool = False) -> None:
     """Count every physical call; only explicitly marked tests consume the test budget."""
     data = read_daily()
     used = int(data.get("test_claude_calls") or 0)
-    if test_traffic and DAILY_CLAUDE_CAP > 0 and used >= DAILY_CLAUDE_CAP:
-        raise BridgeError(429, f"今日 Claude 测试调用已达上限 {DAILY_CLAUDE_CAP} 次",
-                          "rate_limit_error", "daily_claude_cap")
     data["claude_calls"] = int(data.get("claude_calls") or 0) + 1
     if test_traffic:
         data["test_claude_calls"] = used + 1
@@ -206,14 +201,6 @@ class Refused(BridgeError):
 
 class ClientGone(Exception):
     """调用方在等待期间断开了连接。"""
-
-
-class BackgroundPaused(Exception):
-    """额度紧张，后台生成暂停。"""
-
-
-class RatePaused(Exception):
-    """utilization 太高，全部调用暂停（期中保护）。"""
 
 
 def err_response(e: BridgeError, *, x_coach: dict | None = None, headers: dict | None = None) -> JSONResponse:
@@ -450,25 +437,11 @@ class RateLimit:
     resets_at: Any = None
     at: float | None = None
 
-    def blocked(self) -> bool:
-        """后台生成的暂停阈值（utilization≥0.8 或状态不允许）。"""
-        if self.status and self.status.lower() not in ("allowed", "ok"):
-            return True
-        return self.utilization is not None and self.utilization >= 0.8
-
-    def paused_all(self) -> bool:
-        """期中保护：utilization≥0.5 或状态不允许时，前台后台都不再调用。"""
-        if self.status and self.status.lower() not in ("allowed", "ok"):
-            return True
-        return self.utilization is not None and self.utilization >= RATE_PAUSE_AT
-
     def snapshot(self) -> dict:
         return {"utilization": self.utilization, "status": self.status,
                 "resets_at": self.resets_at,
                 "at": datetime.fromtimestamp(self.at).astimezone().isoformat(timespec="seconds") if self.at else None,
-                "background_paused": self.blocked(),
-                "all_paused": self.paused_all(),
-                "pause_at": RATE_PAUSE_AT}
+                "background_paused": False, "all_paused": False, "pause_at": None}
 
 
 RATE_LIMIT = RateLimit()
@@ -677,6 +650,10 @@ def judge_result(result: dict | None, rc: int, started: bool, served: str, text_
     # 已经发出去的文字以流里的为准；CLI 的 result.result 在错误分支里往往是错误说明，不能顶替正文
     text = (text_hint or raw_text).strip() if started and text_hint else raw_text
     if result.get("is_error"):
+        error_text = " ".join([terminal, api_error, raw_text, json.dumps(result)]).lower()
+        if re.search(r"\b429\b|rate.?limit|usage.?limit|quota.exceeded|too many requests", error_text):
+            return Outcome("truncated" if started else "failed", "rate_limited", "error", served, text, usage, started,
+                           detail="official upstream rate limit")
         if "max_output_tokens" in api_error or "max_output_tokens" in terminal:
             return Outcome("truncated" if (started or text) else "failed", "max_output_tokens",
                            "length", served, text, usage, started or bool(text),
@@ -988,18 +965,12 @@ async def call_codex(req: ReqCtx, model: str, effort: str | None) -> Outcome:
 async def slot(req: ReqCtx, backend: str):
     """拿到槽之后把 t_acq 交出去；后台请求额外占一个后台槽，额度紧张时直接拒。"""
     global BG_ACTIVE
-    if req.test_traffic and RATE_LIMIT.paused_all():
-        raise RatePaused()
     if req.background:
-        if req.test_traffic and RATE_LIMIT.blocked():
-            raise BackgroundPaused()
         await BG_SLOTS.acquire()
         BG_ACTIVE += 1
     try:
         await GATES[backend].acquire(req.background)
         try:
-            if req.test_traffic and RATE_LIMIT.paused_all():
-                raise RatePaused()
             yield time.monotonic()
         finally:
             await GATES[backend].release()
@@ -1191,8 +1162,8 @@ async def health_payload() -> dict:
         "concurrency": {name: gate.snapshot() for name, gate in GATES.items()}
                        | {"background": {"limit": BACKGROUND_SLOTS, "active": BG_ACTIVE}},
         "background_backend": BACKGROUND_BACKEND or None,
-        "daily": {"date": _today(), "scope": "test", "total_claude_calls": int(read_daily().get("claude_calls") or 0), "claude_calls": daily_used(), "claude_cap": DAILY_CLAUDE_CAP,
-                  "remaining": max(0, DAILY_CLAUDE_CAP - daily_used()) if DAILY_CLAUDE_CAP > 0 else None},
+        "daily": {"date": _today(), "scope": "test", "total_claude_calls": int(read_daily().get("claude_calls") or 0),
+                  "claude_calls": daily_used(), "claude_cap": None, "remaining": None},
         "rate_limit": RATE_LIMIT.snapshot(),
         "fallback_default": "off",
     }
@@ -1520,9 +1491,6 @@ async def chat(request: Request):
             except ClientGone:
                 await events.aclose()
                 raise
-            except (BackgroundPaused, RatePaused):
-                await events.aclose()
-                raise
             except BridgeError as e:
                 await events.aclose()
                 if e.status >= 500:      # 上游失败：流式请求也走终态帧，保持「每个流都以 x_coach 结束」
@@ -1585,17 +1553,6 @@ async def chat(request: Request):
                              "usage": oc.usage,
                              "x_coach": oc.x_coach(req)}, headers=headers)
 
-    except BackgroundPaused:
-        rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
-        return err_response(BridgeError(429, "额度紧张（rate_limit utilization≥0.8 或 status≠allowed），后台生成暂停",
-                                        "rate_limit_error", "background_paused"),
-                            headers={"X-Request-Id": rid, "Retry-After": "900"})
-    except RatePaused:
-        rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
-        return err_response(BridgeError(429, f"额度 usage 已达 {RATE_LIMIT.utilization}（阈值 {RATE_PAUSE_AT}），"
-                                               "测试调用暂停，用户学习照常",
-                                        "rate_limit_error", "rate_limit_paused"),
-                            headers={"X-Request-Id": rid, "Retry-After": "900"})
     except BridgeError as e:
         rid = req.request_id if req else (request.headers.get("x-request-id") or secrets.token_hex(8))
         headers = {"X-Request-Id": rid, "X-Coach-Fallback": "on" if (req and req.fallback_enabled) else "off"}

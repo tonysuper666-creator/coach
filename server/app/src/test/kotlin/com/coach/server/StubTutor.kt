@@ -37,9 +37,11 @@ class StubTutor : AutoCloseable {
     }
 
     /** 整段非流式回包（兜底路径）。 */
-    fun completion(text: String) {
-        replies.addLast(completionBody(text) to -1L)
+    fun completion(text: String, model: String = "claude-sonnet-5-5") {
+        replies.addLast(completionBody(text).replace("claude-sonnet-5-5", model) to -1L)
     }
+
+    fun rateLimit() { replies.addLast("""{"error":{"code":"rate_limit_error","message":"429 Too many requests"}}""" to -429L) }
 
     private fun handle(exchange: HttpExchange) {
         requests++
@@ -48,7 +50,7 @@ class StubTutor : AutoCloseable {
         if (delay < 0) {
             val bytes = body.toByteArray()
             exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.sendResponseHeaders(if (delay == -429L) 429 else 200, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
             return
         }

@@ -139,6 +139,50 @@ class ChatFlowTest {
     )
 
     @Test
+    fun official429FallsBackWithoutWaitingForFirstTokenDeadline() {
+        Harness().use { h ->
+            h.tutor.rateLimit()
+            h.tutor.completion("兜底的完整回答。", BridgeClient.CODEX)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                ws.await("msg.start")
+                val notice = ws.await("tutor.progress")
+                assertEquals("Claude 暂时限流，已换 ${BridgeClient.CODEX} 回答", notice.str("text"))
+                val replacement = ws.await("msg.snapshot")
+                assertEquals("", replacement.str("text"))
+                ws.await("msg.end")
+                val fallback = ws.await("msg.start")
+                assertEquals(BridgeClient.CODEX, fallback.str("model"))
+                val end = ws.await("msg.end")
+                assertEquals("complete", end.str("status"))
+                val row = runBlocking { h.snapshot(fallback.str("msg")) }!!
+                assertEquals("兜底的完整回答。", row.content)
+                assertEquals(2, h.tutor.requests)
+            }
+        }
+    }
+
+    @Test
+    fun officialRateLimitAfterPartialTextReplacesTheIncompleteAnswer() {
+        Harness().use { h ->
+            h.tutor.stream(10, "未写完的解释。", StubTutor.terminal("truncated", "rate_limited"), StubTutor.DONE)
+            h.tutor.completion("换模型后的完整解释。", BridgeClient.CODEX)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val original = ws.await("msg.start")
+                ws.await("tutor.progress")
+                val replacement = ws.await("msg.snapshot")
+                assertEquals("", replacement.str("text"))
+                ws.await("msg.end")
+                val fallback = ws.await("msg.start")
+                assertEquals("complete", ws.await("msg.end").str("status"))
+                assertEquals("", runBlocking { h.snapshot(original.str("msg")) }!!.content)
+                assertEquals("换模型后的完整解释。", runBlocking { h.snapshot(fallback.str("msg")) }!!.content)
+            }
+        }
+    }
+
+    @Test
     fun streamedAnswerReachesTheClientAndLandsComplete() {
         Harness().use { h ->
             h.tutor.stream(40, "你好，", "这是导师的", "回答。", StubTutor.terminal("complete"), StubTutor.DONE)

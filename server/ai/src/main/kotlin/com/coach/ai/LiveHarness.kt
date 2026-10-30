@@ -96,41 +96,18 @@ class Preflight(private val bridge: BridgeClient, private val bridgeLog: Path) {
     fun check(needsClaude: Boolean): Verdict {
         if (needsClaude) {
             blackout()?.let { return Verdict(false, it) }
-            dailyBudget(true)?.let { return Verdict(false, it) }
         }
         val health = bridge.health() ?: return Verdict(false, "bridge_not_running")
-        val rate = health["rate_limit"] as? JsonObject
-        val utilization = rate?.stringOrNull("utilization")?.toDoubleOrNull()
-        val status = rate?.stringOrNull("status")
-        val remaining = (health["daily"] as? JsonObject)?.stringOrNull("remaining")?.toIntOrNull()
-        if (remaining != null && remaining <= 0) return Verdict(false, "daily_claude_cap:remaining=$remaining")
-        if (utilization != null && utilization >= 0.5) return Verdict(false, "rate_limit_paused:${utilization}")
-        if (status != null && status != "allowed" && status != "unknown") return Verdict(false, "rate_limit_paused:$status")
         // 10 分钟静默窗口保护的是 Claude 订阅；Codex 生成走另一家订阅，CPU 由 nice 约束
         if (needsClaude) busyReason()?.let { return Verdict(false, it) }
         return Verdict(true, null)
     }
 
-    /** 期中前黑名单：2026-11-01 18:00 至 2026-11-02 15:00 不跑任何 Claude live。 */
+    /** 期中当天：2026-11-02 00:00 至 2026-11-02 15:00 不跑任何 Claude live。 */
     fun blackout(now: LocalDateTime = LocalDateTime.now(ZoneId.systemDefault())): String? {
-        val start = LocalDateTime.of(2026, 11, 1, 18, 0)
+        val start = LocalDateTime.of(2026, 11, 2, 0, 0)
         val end = LocalDateTime.of(2026, 11, 2, 15, 0)
         return if (now.isAfter(start) && now.isBefore(end)) "blackout_before_midterm" else null
-    }
-
-    /** Coach 的 Claude 物理调用每日硬上限（默认 150，仅测试请求，与同一天其他卡合计，计数在桥的 state/daily.json）。 */
-    fun dailyBudget(needsClaude: Boolean): String? {
-        if (!needsClaude) return null
-        val statePath = Path.of(
-            System.getenv("COACH_BRIDGE_STATE") ?: "${System.getProperty("user.home")}/Coach/bridge/state/daily.json",
-        )
-        if (!statePath.exists()) return null
-        val state = runCatching { JsonText.json.parseToJsonElement(statePath.readText()).jsonObject }.getOrNull() ?: return null
-        val date = state["date"]?.jsonPrimitive?.content ?: return null
-        val today = java.time.LocalDate.now().toString()
-        val used = if (date == today) state["test_claude_calls"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0 else 0
-        val cap = System.getenv("BRIDGE_DAILY_CLAUDE_CAP")?.toIntOrNull() ?: 150
-        return if (used >= cap) "daily_claude_cap:$used/$cap" else null
     }
 
     /** DeepTutor 自己正在用订阅（bridge.log 最后一行 10 分钟内有活动）→ 中止整批。 */

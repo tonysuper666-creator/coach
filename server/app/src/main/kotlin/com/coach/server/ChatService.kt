@@ -282,7 +282,7 @@ class ChatService(
 
         val forcedStatus = session.forcedStatus
         val terminal = result.terminal
-        val status = forcedStatus ?: when {
+        var status = forcedStatus ?: when {
             terminal != null -> StreamStatus.fromBridge(terminal.status, false, visibleText.isNotEmpty())
             visibleText.isEmpty() -> StreamStatus.FAILED
             // ADR-0002：收不到终态帧按截断处理（已经出过字就一定不是「完整」）
@@ -291,8 +291,18 @@ class ChatService(
         val reason = session.forcedReason ?: terminal?.reason ?: (result as? BridgeResult.Failure)
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
 
+        val rateLimited = forcedStatus == null && (reason == "rate_limited" || (result as? BridgeResult.Failure)?.reason?.startsWith("http_429") == true)
+        if (rateLimited) {
+            status = StreamStatus.FAILED
+            visibleText.setLength(0)
+            session.cursor = Session.Cursor("", session.cursor.index + 1)
+            hub.emit(json("t" to "msg.snapshot", "msg" to session.messageId, "threadId" to session.threadId,
+                "i" to session.cursor.index, "text" to "", "status" to "failed", "reason" to "rate_limited"))
+            hub.emit(json("t" to "tutor.progress", "threadId" to session.threadId, "courseId" to session.courseId,
+                "phase" to "fallback", "text" to "Claude 暂时限流，已换 $fallbackModel 回答"))
+        }
         val content = visibleText.toString()
-        val willFallback = status == StreamStatus.FAILED && reason == "first_token_timeout" && fallbackOnFirstTokenTimeout
+        val willFallback = rateLimited || (status == StreamStatus.FAILED && reason == "first_token_timeout" && fallbackOnFirstTokenTimeout)
         val persist: com.coach.store.LedgerStore.() -> Unit = {
             finishMessage(session.messageId, status, reason, content, session.cursor.index)
             recordAiCall(

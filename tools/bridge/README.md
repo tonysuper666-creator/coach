@@ -24,7 +24,7 @@ curl -s localhost:8791/health | python3 -m json.tool
 | 头 | 作用 |
 |---|---|
 | `X-Request-Id` | 回显进响应头与日志，也进 `x_coach.request_id`；不带就生成一个 |
-| `X-Coach-Traffic: test` | 测试与 liveTest 必带；只有测试受每日上限和暂停线约束。无标记为用户学习，照常记物理调用。 |
+| `X-Coach-Traffic: test` | 测试与 liveTest 必带；仅区分测试流量，无本地调用上限；照常记物理调用。 |
 | `X-Coach-Fallback: off\|on` | **默认 off**：不偷偷换模型，失败就如实报失败。`on` 时才由桥兜底到 `gpt-6.1-sol`，`physical_calls` 照实累加 |
 | `X-Coach-Effort: low\|medium\|high\|xhigh\|max` | 按请求设推理强度（也可用 body 的 `reasoning_effort`）。Claude 走 `--effort`，Codex 走 `model_reasoning_effort`，agy 走 `--reasoning-effort` |
 | `X-Coach-Background: 1` | 后台任务：最多占 1 个槽；期中前一律转派 Codex；`rate_limit_event` 显示紧张时直接 429 |
@@ -58,7 +58,7 @@ HTTP 4xx/429 只留给请求本身的问题（坏 JSON、未知模型、提示�
 
 - Claude 上限 `BRIDGE_CLAUDE_CONCURRENCY`，**期中前默认 1**（ADR-0002 裁决；期中后按设计改 2）。
 - 后台任务最多 1 个（`BRIDGE_BACKGROUND_SLOTS`），且**排在所有前台请求之后**：他的复习不能被 Coach 的后台预生成挤到。
-- 读到 `rate_limit_event` 且 `utilization≥0.8` 或 `status≠allowed` → 后台请求 429（`Retry-After: 900`），用户前台照常。
+- `rate_limit_event` 仅报告使用率；不因本地阈值拦截请求。
 - `BRIDGE_BACKGROUND_BACKEND=codex`（默认）：后台请求直接转派 Codex，转派后的模型名照实写进 `served_by`，响应头带 `X-Coach-Routed-From`。
 
 ## 计时口径
@@ -75,15 +75,12 @@ SBPL 模板是 `sandbox/agent_sandbox.sb.in`（`@@HOME@@` 占位），启动时�
 白名单从 DeepTutor 版复制后重审过（见文件头注释）：去掉 `~/DeepTutor/library` 的读权限（备课包走提示词，CLI 不需要翻课程文件）、
 `~/Coach` 默认全禁只放行 `~/Coach/bridge/work`。Claude 不走沙箱，与 8790 现役行为一致（`--tools "" --strict-mcp-config`，无工具面）。
 
-## 期中保护（2026-10-29 收紧，至 11-02 15:00）
+## 使用与验证约束
 
-| 规则 | 落地 |
-|---|---|
-| 每个请求前都查 DeepTutor 是否在忙 | `tests/live_probe.py` 的 `preflight()` 每个请求前跑一次，最后一行 10 分钟内有活动就**中止整批**（不是只在批首查） |
-| Coach 的 Claude 测试物理调用 ≤150 次/天（与 TON-1041 合计） | 桥内硬上限 `BRIDGE_DAILY_CLAUDE_CAP`（默认 150，只计 `X-Coach-Traffic: test`），计数在 `$COACH_BRIDGE_HOME/state/daily.json`，超了直接 429 `daily_claude_cap`，不 spawn；同一天还有别的卡在跑就把 cap 调成剩余额度 |
-| `rate_limit_event` utilization ≥0.5 暂停测试调用 | `BRIDGE_RATE_PAUSE_AT`（默认 0.5）：测试前台后台一起 429 `rate_limit_paused`；后台另有 0.8 的更严阈值 |
-| 11-01 18:00 – 11-02 15:00 不跑任何 Claude live | `live_probe.in_blackout()` 直接拒跑（Codex live 不受限） |
-| 8791 只在测试时段手动起，测完按 PID 停 | `live_run.py` 起停各写一行 `stage=bridge` 记录（含 pid 与时间），报告里据此列起停时间；不装 LaunchAgent |
+- 不设置本地每日调用上限或使用率暂停线。所有物理调用照常记账；`X-Coach-Traffic: test` 仅用于区分测试流量。
+- 官方限流会在终态带 `reason=rate_limited`，Coach 服务端显式切换到 Codex，清除半截回答并提示实际模型；复核任务仍保持异厂独立性，桥不会静默替换模型。
+- 2026-11-02 00:00–15:00 GMT 不运行构建、模拟器与 live。
+- 8791 只由 Coach 服务管理，独立于 DeepTutor 的 8790。
 
 ## 测试
 

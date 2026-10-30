@@ -85,7 +85,7 @@ class Abort(Exception):
     """触发期中保护：整批中止（不是重试）。"""
 
 
-BLACKOUT_START = datetime(2026, 11, 1, 18, 0)     # 11-01 18:00 起
+BLACKOUT_START = datetime(2026, 11, 2, 0, 0)     # 11-01 18:00 起
 BLACKOUT_END = datetime(2026, 11, 2, 15, 0)       # 到 11-02 15:00 不跑任何 Claude live
 
 

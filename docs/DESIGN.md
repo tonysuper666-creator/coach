@@ -427,7 +427,7 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 
 - 不动 DeepTutor 的运行文件（8790 桥、数据库、补丁）。期中 2026-11-02 14:25 前它必须稳定。
 - CPU：大构建与模拟器 `nice -n 15`；Gradle `--max-workers=2`；全机同一时间最多一个重构建（`tools/dev/heavy` 锁，S0 提供）；11-02 当天 00:00–15:00 不跑模拟器、Gradle 全量构建与 live AI 测试。
-- 额度：不新增花钱；Claude 订阅也供他本人用 → 工程主力 Codex/CodeBuddy；Expert、Sage 只点名；Antigravity 不进 M0。期中前 Coach 的 Claude 物理调用每日 ≤60 次、11-01 18:00 至 11-02 15:00 不跑 Claude live、8791 测完按 PID 停（§5.4）〔评R3 I8〕。
+- 额度：不新增花钱；Claude 订阅也供他本人用 → 工程主力 Codex/CodeBuddy；Expert、Sage 只点名；Antigravity 不进 M0。Coach 不设本地调用次数上限，ai_calls 照常记账；Claude 官方限流时显式切换 Codex 并显示实际模型。11-02 00:00–15:00 GMT 全停。8791 由 Coach 服务端常驻管理。
 - 交付走 GitHub PR（§13.3），公开仓库纪律见 §12.1。
 - 每张卡交付首行「结果：达到/部分达到/未达到 + 数字证据」，附本卡 `ai_calls` 调用数。
 

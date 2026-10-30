@@ -2,7 +2,7 @@
 
 `prepare-replay.py` 只准备 DESIGN §5.8 / §12 的输入，实际 Coach 回放及断言验收由后续任务完成。Python 3.11+，仅标准库；不调用订阅 CLI、不运行 Gradle。
 
-首次导出或考后更新：
+首次导出或空闲时更新：
 
 ```sh
 python3 tools/corpus/prepare-replay.py --snapshot
@@ -42,4 +42,4 @@ tools/dev/heavy python3 -m unittest discover -s tools/corpus -p 'test_prepare_re
 
 验收者在本机对 `source/…/chat.snapshot.db` 独立查询 `messages`，随机抽 5 条 `replay-input.jsonl`，逐字比较 user、同 session 内相邻助手回复、原始时间与 ID；不在评论中粘贴真实会话。源码自查命令见 DESIGN §12.1。
 
-第二次导出需在 2026-11-02 15:00 GMT 之后再次 `--snapshot`，保留第一次输出和第二次输出的 summary 分别报告；同一快照的重复导出仅用于可复现验证，不算第二次采样。
+第二次导出可在 DeepTutor 无活跃会话、机器负载低的空闲窗口再次 `--snapshot`，不必等考后；先看 `date` 和 `uptime`，2026-11-02 00:00–15:00 GMT 暂停采样。保留第一次输出和第二次输出的 summary 分别报告；同一快照的重复导出仅用于可复现验证，不算第二次采样。

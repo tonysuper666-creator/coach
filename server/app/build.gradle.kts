@@ -6,9 +6,12 @@ plugins {
 dependencies {
     implementation(project(":shared:client"))
     testImplementation(kotlin("test"))
+    // §14 #7：同一负载下 Netty vs CIO 实测（只跑桩桥，不调真实 CLI）
+    testImplementation(libs.ktor.cio)
     testImplementation(libs.sqldelight.driver)
     testImplementation(libs.sqlite.jdbc)
     implementation(project(":server:core"))
+    implementation(project(":server:ai"))
     implementation(libs.ktor.core)
     implementation(libs.ktor.netty)
     implementation(libs.ktor.websockets)

@@ -24,7 +24,7 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>) {
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null) {
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
         val device = call.request.header("X-Coach-Device")
@@ -80,13 +80,32 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             catchUp()
             // Receive and push concurrently; StateFlow is not a durable ledger, reconnect catches up from SQLite.
             val sender=launch { pushes.collect { catchUp() } }
+            // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
+            val tutor=chat?.let { service -> launch { service.hub.frames.collect { send(Frame.Text(it.toString())) } } }
             try { for(frame in incoming) if(frame is Frame.Text) {
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
-                if(message.str("t")=="hello") {
-                    for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) cursors[course]=seq.jsonPrimitive.long
-                    catchUp()
+                when(message.str("t")) {
+                    "hello" -> {
+                        for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) cursors[course]=seq.jsonPrimitive.long
+                        catchUp()
+                    }
+                    "msg.ask" -> {
+                        val service=chat
+                        val threadId=message.str("threadId")
+                        val courseId=message.str("courseId")
+                        val question=message.str("text").trim()
+                        if(service==null) Unit
+                        else if(threadId.isBlank()||courseId.isBlank()||question.isEmpty()) {
+                            send(Frame.Text(LedgerJson.encodeToString(json("t" to "msg.error","msg" to message.str("clientMsgId"),"error" to "missing_field"))))
+                        } else service.ask(threadId,courseId,question,message.str("pack"))
+                    }
+                    "msg.cancel" -> chat?.cancel(message.str("msg"))
+                    "msg.resume" -> {
+                        val snapshot=chat?.snapshot(message.str("msg"))
+                        if(snapshot!=null) send(Frame.Text(snapshot.toString()))
+                    }
                 }
-            } } finally { sender.cancelAndJoin() }
+            } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin() }
         }
     }
 }

@@ -35,7 +35,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 2) { "Database schema is newer than this server" }
+        require(version <= 3) { "Database schema is newer than this server" }
+        if (version < 3) {
+            rawBackup(directory.resolve("backups/pre-V003-${uid()}"))
+            transaction {
+                // 断线续传按 (msg, i) 去重：i 必须随正文一起落库，重连才能接着往下发。
+                // 老库可能已经被手工改回过 user_version（回档演练），列存在就不再 ALTER。
+                val columns = query("PRAGMA table_info(messages)") { it.getString(2) }
+                if ("delta_index" !in columns) sql("ALTER TABLE messages ADD COLUMN delta_index INTEGER NOT NULL DEFAULT 0")
+                sql("PRAGMA user_version=3")
+            }
+        }
         if (version < 2) {
             rawBackup(directory.resolve("backups/pre-V002-${uid()}"))
             transaction {
@@ -368,6 +378,42 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun startMessage(thread: String, message: String, content: String = "") { sql("INSERT INTO messages(thread_id,mseq,message_id,status,content_md,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,'streaming',?,?)",thread,thread,message,content,clock()) }
     fun messageStatus(id: String): Pair<String,String?>? = query("SELECT status,reason FROM messages WHERE message_id=?",id) { it.getString(1) to it.getString(2) }.singleOrNull()
+
+    /** 流式消息的一生：streaming 立即可见（§4.2），每秒把已可见正文与 `(msg, i)` 计数一起落库。 */
+    fun beginStreamingMessage(thread: String, message: String, model: String, role: String = "assistant") {
+        sql("INSERT INTO messages(thread_id,mseq,message_id,role,model,status,content_md,delta_index,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,?,?,'streaming','',0,?)",
+            thread,thread,message,role,model,clock())
+    }
+
+    fun updateStreamingMessage(message: String, content: String, index: Int) {
+        sql("UPDATE messages SET content_md=?,delta_index=? WHERE message_id=? AND status='streaming'",content,index,message)
+    }
+
+    fun finishMessage(message: String, status: String, reason: String?, content: String, index: Int) {
+        sql("UPDATE messages SET status=?,reason=?,content_md=?,delta_index=? WHERE message_id=?",status,reason,content,index,message)
+    }
+
+    data class MessageSnapshot(val status: String, val reason: String?, val content: String, val index: Int, val threadId: String)
+
+    fun messageSnapshot(id: String): MessageSnapshot? =
+        query("SELECT status,reason,coalesce(content_md,''),delta_index,thread_id FROM messages WHERE message_id=?",id) {
+            MessageSnapshot(it.getString(1),it.getString(2),it.getString(3),it.getInt(4),it.getString(5))
+        }.singleOrNull()
+
+    /** 最近几轮对话（追问带最近 12 轮，§5.2）。只取已经写完的消息，流式中的一条不喂回模型。 */
+    fun recentTurns(thread: String, limit: Int = 12): List<Pair<String,String>> =
+        query("SELECT role,coalesce(content_md,'') FROM messages WHERE thread_id=? AND status IN ('complete','truncated') ORDER BY mseq DESC LIMIT ?",thread,limit) {
+            (it.getString(1) ?: "assistant") to it.getString(2)
+        }.reversed()
+
+    /** `ai_calls`（§5.7）：只记长度与耗时，不记内容。 */
+    fun recordAiCall(callId: String, task: String, requestedModel: String, servedBy: String?, ttftMs: Long?,
+        durMs: Long, inChars: Int, outChars: Int, status: String, queueMs: Long?, physicalCalls: Int) {
+        sql("INSERT OR REPLACE INTO ai_calls(call_id,task,requested_model,served_by,ttft_ms,dur_ms,in_chars,out_chars,status,request_type,effort,pack_chars,queue_ms,physical_calls,cache_read,cache_create) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            callId,task,requestedModel,servedBy,ttftMs,durMs,inChars,outChars,status,
+            "dev_live",null,null,queueMs,physicalCalls,null,null)
+    }
+
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()
     private fun markRestored(from: String) = transaction {
         val last = lastSeq(); val epoch = uid()

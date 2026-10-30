@@ -12,9 +12,15 @@ import java.time.Duration
 class StubBridge : AutoCloseable {
 
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    private val responses = ArrayDeque<Pair<Int, String>>()
+    private val responses = ArrayDeque<Triple<Int, String, Long>>()
     val requests = ArrayList<String>()
     val requestedHeaders = ArrayList<Map<String, List<String>>>()
+
+    /** 客户端在流途中主动断开（取消）时置位：证明 `cancel()` 真的断开了 HTTP。 */
+    val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 已写出的帧数：取消后必须明显少于整条流，证明没有把剩下的正文发完。 */
+    @Volatile var framesWritten = 0
 
     init {
         server.createContext("/v1/chat/completions") { exchange -> handle(exchange) }
@@ -27,11 +33,16 @@ class StubBridge : AutoCloseable {
     val baseUrl: String get() = "http://127.0.0.1:${server.address.port}"
 
     fun enqueue(status: Int, body: String) {
-        responses.addLast(status to body)
+        responses.addLast(Triple(status, body, 0L))
     }
 
     fun enqueueSse(vararg frames: String) {
         enqueue(200, frames.joinToString(""))
+    }
+
+    /** 逐帧下发、帧间停顿 [delayMs]；断流与取消测试靠它把「边到边发」变成可观测的。 */
+    fun enqueueStream(delayMs: Long, vararg frames: String) {
+        responses.addLast(Triple(200, frames.joinToString(""), delayMs))
     }
 
     private fun handle(exchange: HttpExchange) {
@@ -39,9 +50,33 @@ class StubBridge : AutoCloseable {
         requests.add(request)
         requestedHeaders.add(exchange.requestHeaders.mapValues { it.value.toList() })
         val model = Regex("\"model\"\\s*:\\s*\"([^\"]+)\"").find(request)?.groupValues?.get(1) ?: ""
-        val (status, body) = responses.removeFirstOrNull() ?: (500 to """{"error":"no stub response"}""")
+        val (status, body, delay) = responses.removeFirstOrNull() ?: Triple(500, """{"error":"no stub response"}""", 0L)
         // __MODEL__ 发回时替换成请求里的模型：默认让 served_by 与请求同家（异厂校验放行）
-        respond(exchange, status, body.replace("__MODEL__", model), contentType = "text/event-stream")
+        val text = body.replace("__MODEL__", model)
+        when {
+            delay <= 0 -> respond(exchange, status, text, contentType = "text/event-stream")
+            else -> stream(exchange, status, text, delay)
+        }
+    }
+
+    /** 分块下发（chunked），每帧写一次并 flush；客户端断开时写会抛 IOException。 */
+    private fun stream(exchange: HttpExchange, status: Int, body: String, delayMs: Long) {
+        exchange.responseHeaders.add("Content-Type", "text/event-stream")
+        val frames = body.split("\n\n").filter { it.isNotBlank() }.map { it + "\n\n" }
+        try {
+            exchange.sendResponseHeaders(status, 0)
+            exchange.responseBody.use { out ->
+                for (frame in frames) {
+                    // 先等再写：模拟桥「出一段话要几百毫秒」，首字时间才有意义
+                    Thread.sleep(delayMs)
+                    out.write(frame.toByteArray())
+                    out.flush()
+                    framesWritten++
+                }
+            }
+        } catch (error: java.io.IOException) {
+            aborted.set(true)
+        }
     }
 
     private fun respond(exchange: HttpExchange, status: Int, body: String, contentType: String = "application/json") {

@@ -21,6 +21,7 @@ coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", 
 ktor-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
 ktor-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
 ktor-websockets = { module = "io.ktor:ktor-server-websockets", version.ref = "ktor" }
+ktor-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 sqldelight-driver = { module = "app.cash.sqldelight:sqlite-driver", version.ref = "sqldelight" }
 

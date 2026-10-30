@@ -16,5 +16,8 @@ kotlin {
     jvmToolchain(17)
     sourceSets.getByName("jvmTest").dependencies {
         implementation(kotlin("test"))
+        implementation(libs.serialization.json)
     }
 }
+
+tasks.withType<Test>().configureEach { systemProperty("coach.repo", rootDir.absolutePath) }

@@ -12,6 +12,8 @@ tools/bridge/.venv/bin/python -m pip install -r tools/bridge/requirements.txt
 tools/dev/heavy ./gradlew liveTest --max-workers=2
 ```
 
+Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:ai:liveTest`（出题/批改验收）。只执行本卡可用 `tools/dev/heavy ./gradlew :liveTest --max-workers=2`，或 `:server:app:liveTest`；既有出题/批改入口保留原义。
+
 前提：本机 Claude CLI 已登录，8791 空闲，真实课程页位于 `~/Coach/corpus/bridge-8791/*.md`（可用 `COACH_CORPUS_DIR` 指定）。缺语料明确失败，不跳过或伪造成功。
 
 `LiveChatTest` 只在显式 `liveTest` 下执行，默认 `test/check` 不产生订阅调用。它在同一前台运行内启动并回收 8791 桥、真实 Ktor 路由、隔离账本与 WS 客户端，调用共享 `ChatStreamAssembler`；不启动 UI、不改变网络设置、不读写 8790 或 DeepTutor。保留桥现有的每日计数，每次调用前检查 60 次/日、使用率 0.5 的保护，任一触发就停止，不换新目录规避额度。

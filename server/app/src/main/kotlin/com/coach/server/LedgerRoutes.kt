@@ -88,7 +88,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             val tutor=chat?.let { service -> launch { service.hub.frames.collect { frame -> tutorSend.withLock { send(Frame.Text(frame.toString())) } } } }
             try { for(frame in incoming) if(frame is Frame.Text) {
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
-                when(message.str("t")) {
+                try { when(message.str("t")) {
                     "hello" -> {
                         for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) cursors[course]=seq.jsonPrimitive.long
                         catchUp()
@@ -103,6 +103,13 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                             send(Frame.Text(LedgerJson.encodeToString(json("t" to "msg.error","msg" to message.str("clientMsgId"),"error" to "missing_field"))))
                         } else service.ask(threadId,courseId,question,message.str("pack"))
                     }
+                    "tutor.open" -> chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
+                    "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test")
+                    "tutor.settings" -> chat?.configureTutor(message.str("threadId"),message.str("courseId"),
+                        message["groupSize"]?.jsonPrimitive?.int, message["mode"]?.jsonPrimitive?.content?.let { TeachingMode.valueOf(it) })
+                    "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"))
+                    "tutor.answer" -> chat?.submitGroup(message.str("threadId"),message.str("courseId"),message.str("groupId"),
+                        (message["answers"] as? JsonObject).orEmpty().mapValues { it.value.jsonPrimitive.content },device,message.str("submissionId"))
                     "msg.cancel" -> chat?.cancel(message.str("msg"))
                     "msg.resume" -> {
                         tutorSend.withLock {
@@ -110,6 +117,8 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                             if(snapshot!=null) send(Frame.Text(snapshot.toString()))
                         }
                     }
+                } } catch (error: IllegalArgumentException) {
+                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin() }
         }

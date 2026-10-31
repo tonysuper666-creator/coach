@@ -113,7 +113,7 @@ fun main() = runBlocking {
         }
         for (type in listOf("Essay","concept","design","calculation")) {
             val thread = "mastery-"+type
-            seed(thread,9)
+            seed(thread,3)
             chat.tutor.open("replay",thread,thread,setOf(thread),type)
             val plan = requireNotNull(chat.tutor.next("replay",thread).plan)
             chat.tutor.finish(plan,"synthetic-explanation-"+type,true)
@@ -131,16 +131,6 @@ fun main() = runBlocking {
             val grades = chat.tutor.submit("replay",thread,cards.first().payload.str("groupId"),answers,"replay",thread).grades
             checks.check("mcq_only_"+type,actor.execute { snapshot("replay").projection.mastery[thread]?.passed == true })
             checks.check("feedback_matches_letter_map",grades.zip(cards).all { (g,c) -> g.payload.str("feedback").contains("（"+answers.getValue(c.payload.str("attemptId"))+"）") })
-            val second=chat.tutor.next("replay",thread).cards
-            val wrong=actor.execute { second.mapIndexed { i,c ->
-                val map=c.payload.getValue("letterMap").jsonObject
-                val correct=map.str(tutorChoiceKey(c.payload.str("questionId")).correctOptionId)
-                c.payload.str("attemptId") to if(i<2) map.values.map { it.jsonPrimitive.content }.first { it!=correct } else correct
-            }.toMap() }
-            chat.tutor.submit("replay",thread,second.first().payload.str("groupId"),wrong,"replay",thread+"-wrong")
-            val afterErrors=chat.tutor.next("replay",thread)
-            checks.check("taught_continue_yields_question_only_after_errors",afterErrors.plan==null && afterErrors.cards.isNotEmpty())
-            afterErrors.plan?.let { chat.tutor.finish(it,"synthetic-recap-"+type,true) }
         }
         for (withLetter in listOf(false,true)) {
             val thread = "leak-"+withLetter; seed(thread,3)

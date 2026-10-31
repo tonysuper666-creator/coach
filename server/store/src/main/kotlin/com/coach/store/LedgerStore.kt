@@ -15,6 +15,10 @@ fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").dige
 private val idRandom = java.security.SecureRandom()
 private fun uid() = ulid(System.currentTimeMillis(),ByteArray(10).also(idRandom::nextBytes))
 data class Fence(val epoch: String, val value: Long, val id: String)
+data class PairedDevice(val id: String, val name: String, val createdAt: Long, val revokedAt: Long?)
+// Deliberately no generated toString: credentials must never reach logs.
+class DeviceCredential(val deviceId: String, val token: String)
+class PairingCode(val code: String, val expiresAt: Long)
 
 class LedgerStore(val directory: Path, private val clock: () -> Long = System::currentTimeMillis) : AutoCloseable {
     private val dbFile = directory.resolve("coach.sqlite")
@@ -35,7 +39,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 4) { "Database schema is newer than this server" }
+        require(version <= 5) { "Database schema is newer than this server" }
         if (version < 3) {
             rawBackup(directory.resolve("backups/pre-V003-${uid()}"))
             transaction {
@@ -75,11 +79,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=2")
             }
         }
-        if (version < 4) {
-            rawBackup(directory.resolve("backups/pre-V004-${uid()}"))
+        if (version < 5) {
+            rawBackup(directory.resolve("backups/pre-V005-${uid()}"))
             transaction {
                 sql("CREATE TABLE IF NOT EXISTS pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
-                sql("PRAGMA user_version=4")
+                sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
+                sql("PRAGMA user_version=5")
             }
         }
 
@@ -234,10 +239,44 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         OfflineChoicePack(groups, groups.flatten().map { OfflineKey(it.payload.str("attemptId"), requireNotNull(choiceId(it.payload.str("questionId")))) })
     }
 
-    fun authorize(device: String, token: String): Boolean = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull() == sha256(token.toByteArray(Charsets.UTF_8))
+    fun authorize(device: String, token: String): Boolean {
+        if (device.length > 128 || token.length !in 32..256) return false
+        val expected = query("SELECT token_sha256 FROM devices WHERE device_id=? AND revoked_at IS NULL",device) { it.getString(1) }.singleOrNull()
+            ?: "0".repeat(64)
+        return MessageDigest.isEqual(expected.toByteArray(), sha256(token.toByteArray(Charsets.UTF_8)).toByteArray())
+    }
     fun enroll(device: String, token: String) { require(token.length >= 32); sql("INSERT INTO devices(device_id,token_sha256,created_at) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET token_sha256=excluded.token_sha256,revoked_at=NULL",device,sha256(token.toByteArray(Charsets.UTF_8)),clock()) }
 
+    fun createPairingCode(): PairingCode {
+        val code = idRandom.nextInt(1_000_000).toString().padStart(6, '0')
+        val expires = clock() + 300_000
+        sql("INSERT INTO pairing_code(singleton,code_sha256,expires_at,attempts) VALUES(1,?,?,0) ON CONFLICT(singleton) DO UPDATE SET code_sha256=excluded.code_sha256,expires_at=excluded.expires_at,attempts=0", sha256(code.toByteArray()), expires)
+        return PairingCode(code, expires)
+    }
+
+    /** Wall clock expiry, five total guesses, single use across both listeners/restarts. */
+    fun pair(code: String, name: String): DeviceCredential? = transaction {
+        val active = query("SELECT code_sha256,expires_at,attempts FROM pairing_code WHERE singleton=1") {
+            Triple(it.getString(1), it.getLong(2), it.getInt(3))
+        }.singleOrNull() ?: return@transaction null
+        if (clock() >= active.second || active.third >= 5) return@transaction null
+        sql("UPDATE pairing_code SET attempts=attempts+1 WHERE singleton=1")
+        if (!code.matches(Regex("[0-9]{6}")) || name.isBlank() || name.length > 80 ||
+            !MessageDigest.isEqual(active.first.toByteArray(), sha256(code.toByteArray()).toByteArray())) return@transaction null
+        val token = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also(idRandom::nextBytes))
+        val device = uid()
+        sql("INSERT INTO devices(device_id,name,token_sha256,created_at) VALUES(?,?,?,?)", device, name, sha256(token.toByteArray()), clock())
+        sql("DELETE FROM pairing_code WHERE singleton=1")
+        DeviceCredential(device, token)
+    }
+
+    fun pairedDevices(): List<PairedDevice> = query("SELECT device_id,name,created_at,revoked_at FROM devices ORDER BY created_at,device_id") {
+        PairedDevice(it.getString(1), it.getString(2) ?: it.getString(1), it.getLong(3), it.getObject(4)?.let { value -> (value as Number).toLong() })
+    }
+    fun revokeDevice(device: String) { sql("UPDATE devices SET revoked_at=? WHERE device_id=? AND revoked_at IS NULL", clock(), device) }
+
     fun command(c: WireCommand, tutorGroup: Boolean = false): Receipt {
+
         val meta = hello()
         fun receipt(status: String, seqs: List<Long> = emptyList(), result: JsonObject = json(), error: String? = null) = Receipt(c.commandId,status,seqs,result,error,meta.epoch,meta.backedUpThroughSeq)
         if (sha256(c.payloadBytes.toByteArray(Charsets.UTF_8)) != c.payloadSha256) return receipt("REJECTED",error="PAYLOAD_MISMATCH")

@@ -20,7 +20,7 @@ dependencies {
 }
 application { mainClass = "com.coach.server.MainKt" }
 tasks.test {
-    exclude("**/LiveChatTest*")
+    exclude("**/LiveChatTest*", "**/TutorLiveTest*")
     dependsOn(tasks.installDist)
     systemProperty("coach.serverBinary", layout.buildDirectory.file("install/app/bin/app").get().asFile.absolutePath)
 }
@@ -32,6 +32,19 @@ tasks.register<Test>("liveTest") {
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
     include("**/LiveChatTest*")
+    outputs.upToDateWhen { false }
+    maxParallelForks = 1
+    workingDir(rootProject.projectDir)
+    testLogging { showStandardStreams = true }
+}
+
+
+// Explicit two-call real-CLI tutor state-machine walk; local private inputs and isolated ledger.
+tasks.register<Test>("tutorLive") {
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    include("**/TutorLiveTest*")
     outputs.upToDateWhen { false }
     maxParallelForks = 1
     workingDir(rootProject.projectDir)

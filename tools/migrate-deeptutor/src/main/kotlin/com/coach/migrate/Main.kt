@@ -2,9 +2,11 @@ package com.coach.migrate
 
 import java.nio.file.Path
 import kotlin.io.path.*
+import kotlinx.serialization.json.*
 
 private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only | --snapshot DIR]
     [--source DIR] [--staging DIR] [--out DIR] [--weights FILE]
+    [--seed-manifest FILE [--proposal FILE]]
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
 No formal import, network access, or AI calls. See README for independent verification.
 """
@@ -26,12 +28,13 @@ fun main(args: Array<String>) {
     var i=0
     while(i<args.size) {
         val key=args[i++]
-        require(key in setOf("--dry-run", "--capture-only", "--source", "--staging", "--snapshot", "--out", "--weights")) { "Unknown option: $key\n$USAGE" }
+        require(key in setOf("--dry-run", "--capture-only", "--source", "--staging", "--snapshot", "--out", "--weights", "--seed-manifest", "--proposal")) { "Unknown option: $key\n$USAGE" }
         require(key !in options) { "Duplicate option: $key" }
         options[key] = if(key in setOf("--dry-run", "--capture-only")) "true" else args.getOrElse(i++) { error("Missing value for $key") }
     }
     require(options.containsKey("--dry-run")) { "Only --dry-run is supported; no formal import is permitted\n$USAGE" }
     require(!(options.containsKey("--capture-only") && options.containsKey("--snapshot"))) { "Choose capture-only or an existing snapshot" }
+    require(!options.containsKey("--proposal") || options.containsKey("--seed-manifest")) { "Proposal needs the existing seeded course manifest" }
     val home=Path.of(System.getProperty("user.home"))
     fun option(key:String, default:Path)= resolvedDestination(options[key]?.let(Path::of) ?: default)
     val source=option("--source",home.resolve("DeepTutor"))
@@ -44,10 +47,28 @@ fun main(args: Array<String>) {
         option("--weights",home.resolve("dev/coach/docs/background/期中分值覆盖表.md")))
     requirePrivateDestination(snap,protectedSources)
     if(options.containsKey("--capture-only")) { println("Captured: $snap"); return }
+    require(!out.startsWith(snap) && !snap.startsWith(out)) { "Output and captured snapshot must be separate" }
     val result=mapSnapshot(snap)
+    val proposal=options["--proposal"]?.let { parseFile(Path.of(it)).jsonObject }
+    val plan=options["--seed-manifest"]?.let { importPlan(result.mapping,parseFile(Path.of(it)).jsonObject,proposal) }
+    require(plan!=null || !out.resolve("import-plan.json").exists()) { "Existing plan output requires --seed-manifest; use a new output directory for mapping only" }
     privateDir(out)
     out.resolve("mapping.json").writeText(canonical(result.mapping))
     out.resolve("report.md").writeText(result.report)
+    out.resolve("proposal-input.json").writeText(canonical(proposalInput(result.mapping)))
+    out.resolve("confirmation.md").writeText(confirmationSummary(result.mapping,proposal))
+    out.resolve("confirmation-details.md").writeText(confirmationSheet(result.mapping,proposal))
+    if(plan!=null) {
+        out.resolve("import-plan.json").writeText(canonical(plan))
+        val first=simulatePlan(plan);val second=simulatePlan(plan,first.state)
+        check(canonical(first.state)==canonical(second.state)) { "Import simulation is not idempotent" }
+        out.resolve("simulated-state.json").writeText(canonical(first.state))
+        out.resolve("simulation.json").writeText(canonical(buildJsonObject {
+            put("first_inserted",first.inserted);put("second_inserted",second.inserted)
+            put("second_revised",second.revised);put("second_unchanged",second.unchanged)
+            put("state_sha256",sha(canonical(first.state)));put("content_inserts",0)
+        }))
+    }
     println(canonical(result.mapping.getValue("counts")))
     println("Dry-run outputs written outside the source and repository")
 }

@@ -70,7 +70,10 @@ fun mapSnapshot(snap:Path):Result {
     val sessionIds=(interactions.map { it.str("session_id") } + assessments.map { it.str("session_id") } + pathRow.str("owner_session_id")).filter { it.isNotBlank() }.toSet()
     val courseChat=mapOf(
         "sessions" to chat["sessions"].orEmpty().filter { it.str("id") in sessionIds },
-        "messages" to chat["messages"].orEmpty().filter { it.str("session_id") in sessionIds },
+        "messages" to chat["messages"].orEmpty().filter { it.str("session_id") in sessionIds }.map { row ->
+            // Never archive model turns, tool events, attachments or hidden reasoning.
+            JsonObject(row.filterKeys { it in setOf("_source_pk","id","session_id","role","content","created_at","parent_message_id") })
+        },
         "assessment_attempts" to assessments
     )
     val attempts=interactions.map { row ->

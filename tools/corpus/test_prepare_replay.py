@@ -17,6 +17,39 @@ spec.loader.exec_module(replay)
 
 
 class ReplayTest(unittest.TestCase):
+    def test_coach_copy_preserves_user_text_cutoff_and_does_not_invent_missing_speech(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            source = home / 'Coach/corpus/replay/source/snapshot'
+            source.mkdir(parents=True)
+            path = source / 'coach.snapshot.sqlite'
+            cutoff = 1793455140000
+            with sqlite3.connect(path) as db:
+                db.execute('CREATE TABLE threads(thread_id TEXT,course_id TEXT)')
+                db.execute('CREATE TABLE messages(thread_id TEXT,mseq INTEGER,message_id TEXT,role TEXT,content_md TEXT,created_at INTEGER)')
+                db.execute('CREATE TABLE events(seq INTEGER,event_json TEXT,occurred_at INTEGER)')
+                db.execute("INSERT INTO threads VALUES ('thread','ECNM10119')")
+                db.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?)',[
+                    ('thread',1,'old','user','Before cutoff',cutoff-1),
+                    ('thread',2,'assistant','assistant','Invented flower lesson',cutoff),
+                    ('thread',3,'new','user','继续',cutoff),
+                    ('thread',4,'reply','assistant','Invented card',cutoff+1)])
+            args=argparse.Namespace(output=home/'out',coach_copy=path,since='2026-10-31T13:59:00Z',course='ECNM10119')
+            with patch.object(replay,'HOME',home):
+                replay.export_coach(args,'synthetic Coach copy test')
+                rows=[json.loads(line) for line in (args.output/'coach-replay-input.jsonl').read_text().splitlines()]
+                self.assertEqual(['继续'],[r['user']['content'] for r in rows])
+                self.assertEqual(cutoff,rows[0]['user']['coach_row']['created_at'])
+                self.assertEqual('Invented card',rows[0]['assistant_after'][0]['content'])
+                self.assertTrue(rows[0]['id'].startswith('coach:'))
+                with sqlite3.connect(path) as db:
+                    db.execute("DELETE FROM messages WHERE role='user'")
+                replay.export_coach(args,'synthetic Coach copy test')
+                summary=json.loads((args.output/'coach-summary.json').read_text())
+                self.assertEqual(0,summary['user_utterances'])
+                self.assertTrue(summary['missing_user_text'])
+
     def setUp(self):
         self.fixture = [json.loads(line) for line in (HERE / "fixtures/replay-synthetic.jsonl").read_text().splitlines()]
 

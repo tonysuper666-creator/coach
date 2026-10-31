@@ -68,3 +68,13 @@ tasks.register<JavaExec>("sourceReplay") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.server.SourceLookupReplayKt")
 }
+
+// Explicit §12 replay: private outputs, isolated ledger, real CLI only when opted in.
+tasks.register<JavaExec>("acceptanceReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.ReplayAcceptanceKt")
+    workingDir(rootProject.projectDir)
+    environment("COACH_TRAFFIC", "test")
+}

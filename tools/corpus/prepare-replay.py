@@ -138,13 +138,13 @@ def snapshot(source, output, command):
         idle(source)
         if before != inventory(source / "data"):
             raise ValueError("源数据在拷贝期间变化；已丢弃快照")
-        # Fold the copied WAL into a stable local DB; no live SQLite connection.
+        # VACUUM INTO the copied DB+WAL. Never connect SQLite to live DeepTutor.
         db = open_copy(target / "chat_history.db")
-        stable = sqlite3.connect(target / "chat.snapshot.db")
         try:
-            db.backup(stable)
+            db.rollback()
+            db.execute("PRAGMA query_only=OFF")
+            db.execute("VACUUM INTO ?", (str(target / "chat.snapshot.db"),))
         finally:
-            stable.close()
             db.close()
         with closing(open_copy(target / "chat.snapshot.db")) as check:
             check.rollback()
@@ -156,7 +156,7 @@ def snapshot(source, output, command):
         write(target / "SOURCE.md", f"来源：{source}\n\n拷贝时间（UTC）：{copied_at}\n\n"
               f"生成命令：`{command}`\n\n复用 Snapshot.kt：十分钟空闲，先拷 db 和存在的 WAL，"
               "不拷 SHM；复制前后 data 的 size/mtime 一致；仅对副本 integrity_check=ok。"
-              "chat.snapshot.db 合并了副本 WAL；sha256 和逐文件 stat 见 copy-stats.json。\n")
+              "chat.snapshot.db 由副本 VACUUM INTO 生成并合并副本 WAL；sha256 和逐文件 stat 见 copy-stats.json。\n")
         return target
     except BaseException:
         shutil.rmtree(target)
@@ -300,12 +300,50 @@ def export(args, command):
     print(dump(summary))
 
 
+def export_coach(args, command):
+    """Read a VACUUM INTO snapshot, never infer missing user speech from events."""
+    output = outside(args.output, [PROTECTED, ROOT])
+    source = unaliased(args.coach_copy.expanduser().absolute())
+    if not source.is_relative_to((HOME / "Coach/corpus/replay/source").resolve()):
+        raise ValueError("Coach 输入必须是 replay/source 下预先 VACUUM INTO 的副本")
+    since = datetime.fromisoformat(args.since).timestamp() * 1000
+    with closing(open_copy(source)) as db:
+        sessions = []
+        for thread in db.execute("SELECT * FROM threads ORDER BY thread_id"):
+            messages = []
+            for row in db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY mseq", (thread['thread_id'],)):
+                message = dict(row)
+                message.update(id=row['message_id'], session_id=thread['thread_id'], coach_row=dict(row),
+                               content=row['content_md'] or '', created_at=(row['created_at'] or 0) / 1000)
+                messages.append(message)
+            sessions.append({'session': {'id': thread['thread_id'], 'preferences_json': dump({'course_id': thread['course_id']})},
+                             'messages': messages})
+        events = [json.loads(row['event_json']) for row in db.execute(
+            "SELECT event_json FROM events WHERE occurred_at>=? ORDER BY seq", (since,))]
+        selected, replay = prepare(sessions, args.course, set(), since / 1000)
+        for row in replay:
+            row['id'] = 'coach:messages:' + str(row['user']['id'])
+            row['course_evidence'] = 'coach_thread'
+        recent = [m for s in sessions for m in s['messages'] if m['created_at'] * 1000 >= since]
+    private_dir(output)
+    for name, rows in [('coach-sessions.jsonl', selected), ('coach-replay-input.jsonl', replay), ('coach-events.jsonl', events)]:
+        write(output / name, ''.join(dump(row) + '\n' for row in rows))
+    summary = {'sessions': len(selected), 'user_utterances': len(replay), 'messages_since_cutoff': len(recent),
+               'events_since_cutoff': len(events), 'source_sha256': sha(source), 'synthetic': False,
+               'missing_user_text': not any(m['role'] == 'user' for s in sessions for m in s['messages'])}
+    write(output / 'coach-summary.json', dump(summary) + '\n')
+    write(output / 'coach-SOURCE.md', f'来源：VACUUM INTO 副本 {source}\n\n生成命令：`{command}`\n\n'
+          f'截止时间：{args.since}。不从状态事件补造用户发言；0 条必须报未覆盖。\n')
+    print(dump(summary))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", action="store_true", help="先安全拷贝当前库，再导出")
     parser.add_argument("--deeptutor", type=Path, default=Path(os.environ.get("COACH_DEEPTUTOR_DIR", PROTECTED)))
     parser.add_argument("--output", type=Path, default=Path(os.environ.get("COACH_REPLAY_DIR", HOME / "Coach/corpus/replay")))
     parser.add_argument("--synthetic", type=Path, help="显式指定合成 JSONL，不回退冒充真实语料")
+    parser.add_argument("--coach-copy", type=Path, help="导出预先 VACUUM INTO 的 Coach 副本（单独输出 coach-*）")
     parser.add_argument("--course", default="ECNM10119")
     parser.add_argument("--since", default="2026-10-23T00:00:00+01:00", help="带时区 ISO 时间；默认伦敦 10-23 零时")
     args = parser.parse_args()
@@ -315,7 +353,13 @@ def main():
         parser.error("--since 必须带时区")
     os.umask(0o077)
     try:
-        export(args, shlex.join(["python3", "tools/corpus/prepare-replay.py", *sys.argv[1:]]))
+        command = shlex.join(["python3", "tools/corpus/prepare-replay.py", *sys.argv[1:]])
+        if args.coach_copy:
+            if args.snapshot or args.synthetic:
+                parser.error("--coach-copy 与 --snapshot/--synthetic 互斥")
+            export_coach(args, command)
+        else:
+            export(args, command)
     except (ValueError, OSError, sqlite3.Error, KeyError) as error:
         print(str(error), file=sys.stderr)
         return 2

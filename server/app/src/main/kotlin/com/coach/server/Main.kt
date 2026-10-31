@@ -22,6 +22,10 @@ import java.util.Base64
 
 fun main(args: Array<String>): Unit = runBlocking {
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
+    if (args.firstOrNull() in setOf("pair-code", "devices", "revoke")) {
+        pairingCommand(args, data)
+        return@runBlocking
+    }
     Files.createDirectories(data)
     val fileLock = FileChannel.open(data.resolve("server.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)
     val lock = fileLock.tryLock() ?: error("Another Coach server owns this data directory")
@@ -44,6 +48,7 @@ fun main(args: Array<String>): Unit = runBlocking {
             while(encoded.hasRemaining()) channel.write(encoded)
         }
     }
+    secureTokenFile(tokenPath)
     val token = Files.readString(tokenPath).trim()
     store.enroll(device,token)
     val actor = LedgerActor(this,store)
@@ -65,7 +70,7 @@ fun main(args: Array<String>): Unit = runBlocking {
             } else actor.execute { backupIfDue() }
         }
     }
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat) }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

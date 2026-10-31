@@ -50,7 +50,7 @@ Set `COACH_BRIDGE_URL` to the Coach bridge (default loopback 8791). The CLI uses
 
 The six-worker/no-nice build allowance expires 2026-10-31 08:00 GMT; thereafter invoke through `tools/dev/heavy` with `--max-workers=2`. No builds/live during 2026-11-02 00:00–15:00 GMT. Do not use port 8790 or DeepTutor runtime files.
 
-## Evidence (2026-10-31)
+## Initial stub evidence (2026-10-31 00:06 GMT)
 
 - `./gradlew :server:ai:test :server:store:test --max-workers=6 --console=plain`: exit 0; 42 AI tests + 9 store tests, zero failures/errors/skips.
 - Four injected generation failures: each yielded 3 existing cards and the matching fallback reason; empty inventory yielded 0 cards and actual queued job state.
@@ -60,3 +60,18 @@ The six-worker/no-nice build allowance expires 2026-10-31 08:00 GMT; thereafter 
 - Actual `PoolCommandKt` process against a local HTTP fixture: 3 VERIFIED questions persisted, 2 fixture calls; repeating the command made 0 calls. This is stub verification, **not** a live CLI latency measurement.
 
 Real subscription calls this delivery: **0**. PR #13 is still pending; the prior handoff requires its merge before live work. No claim of ≤25-second refill, 49-KP supply, UI rendering, automatic scheduling or zero-wait user experience is made by these tests. Independent acceptance must run from the final rebased PR head and the real protected bridge after the dependency merges.
+
+
+## Rebased live evidence (2026-10-31 01:05 GMT)
+
+PR #13 merged as `0d41533`; this branch now rebases onto it. Preserve the upstream V002 → V003 migration ordering before V004. The schema regression now expects V004 and still verifies that reopening does not migrate again. `PoolCommand` opts into the upstream `testTraffic` bridge marker.
+
+- `./gradlew :server:ai:test :server:store:test :server:ai:installDist --max-workers=6 --console=plain`: exit 0, **45 AI + 10 store tests**, zero failures/errors/skips.
+- Real source: a private copy of KP `01-1-1` from the existing course corpus, 2,929 source characters. Dedicated local database, not the learning database.
+- Two real CLI batches, each Claude Sonnet 5.5 generates 3 and GPT-6.1 Sol independently reviews: **14,680 ms / 16,876 ms**, 3/3 VERIFIED each. These are two observations, not a percentile/SLA claim. Generation durations: 7,976 / 9,244 ms; review durations: 6,633 / 7,567 ms.
+- Inventory reached **6**. A separate Java process called `takePoolGroup`: **3 actual question_posed**, READY, 3 unseen remaining; repeated group ID returned identical events. Reopened database retained 3 unseen questions.
+- `ai_calls`: **4 real physical calls** (2 Claude, 2 Codex), all actual served model names present, all complete. No same-vendor substitute.
+- Shared port 8791 was already owned by the integration service. Its health reported Codex configuration permission failure from inherited task-local `CODEX_HOME`; the same account's ordinary Codex login worked. The measurements therefore used the repository's real bridge on **isolated loopback 18792**, with ordinary Codex home and separate bridge work directory. No daily call limit; no 0.5 utilization gate. This validates the pipeline, **not the shared 8791 service**.
+- Isolated bridge process lifetimes: 01:04:04–01:04:20 GMT (PID 85396), 01:04:39–01:04:58 GMT (PID 89629); both stopped. Shared 8791 and DeepTutor 8790 were neither restarted nor changed.
+
+The overnight backend slice is ready for independent review. The complete card remains partial: 49-KP supply, automatic application scheduling/UI, explanation pregeneration and constructed-question supply are not validated by this isolated run. Integration must correct the shared bridge environment before prewarming through that service.

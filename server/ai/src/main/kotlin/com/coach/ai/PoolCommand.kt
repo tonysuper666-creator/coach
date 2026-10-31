@@ -22,7 +22,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         lock.use {
             val actor=LedgerActor(this,LedgerStore(data))
             try {
-                val client=BridgeClient(BridgeConfig(requestTimeout=java.time.Duration.ofSeconds(90)))
+                val client=BridgeClient(BridgeConfig(requestTimeout=java.time.Duration.ofSeconds(90), testTraffic=true))
                 val worker=PoolWorker(actor,client,beforeCall={
                     // Owner removed local call-count/rate thresholds on 2026-10-31.
                     // Keep only the explicit examination stop window; upstream 429 remains a real failure.

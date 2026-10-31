@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hmac
 import json
 import os
 import re
@@ -91,6 +92,7 @@ HEALTH_CACHE_SEC = float(os.environ.get("BRIDGE_HEALTH_CACHE_SEC", "60"))
 # Test-only budget (TON-1128); unmarked learner traffic is always counted but never capped.
 STATE_DIR = BRIDGE_HOME / "state"
 DAILY_FILE = STATE_DIR / "daily.json"
+SOURCE_KEY_FILE = Path(os.environ.get("COACH_BRIDGE_PRODUCTION_KEY_FILE", str(STATE_DIR / "production-key"))).expanduser()
 SANDBOX_TEMPLATE = BRIDGE_DIR / "sandbox" / "agent_sandbox.sb.in"
 SANDBOX_PROFILE = WORK_DIR / "agent_sandbox.sb"
 
@@ -221,7 +223,7 @@ def write_log(**kw: Any) -> None:
     line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
             f"rid={kw.get('request_id') or '-'} model={str(kw.get('model'))[:48]} "
             f"served={str(kw.get('served_by') or '-')[:48]} stream={int(bool(kw.get('stream')))} "
-            f"traffic={kw.get('traffic', 'user')} bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
+            f"traffic={kw.get('traffic', 'unknown')} source={kw.get('source', 'unknown')} bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
             f"in={kw.get('in_chars', 0)} out={kw.get('out_chars', 0)} "
             f"queue={kw.get('queue_ms', 0)}ms ttft={kw.get('ttft_ms') if kw.get('ttft_ms') is not None else '-'}ms "
             f"total={kw.get('total_ms', 0)}ms status={kw.get('status')} reason={kw.get('reason') or '-'} "
@@ -500,6 +502,8 @@ class ReqCtx:
     in_chars: int
     exact_model: bool = False
     test_traffic: bool = False
+    traffic: str = "unknown"
+    production_source: bool = False
     # 运行中更新
     served_by: str | None = None
     t_acq: float | None = None
@@ -533,7 +537,7 @@ class Outcome:
         return {"status": self.status, "reason": self.reason, "finish_reason": self.finish_reason,
                 "served_by": self.served_by, "fallback": req.fallback,
                 "physical_calls": req.physical_calls, "request_id": req.request_id,
-                "requested_model": req.model, "queue_ms": req.queue_ms(),
+                "requested_model": req.model, "traffic": req.traffic, "source": "production" if req.production_source else "unknown", "queue_ms": req.queue_ms(),
                 "ttft_ms": req.ttft_ms, "elapsed_ms": req.total_ms()}
 
 
@@ -1099,8 +1103,31 @@ def clean_json(text: str) -> str:
 
 # ---------- HTTP ----------
 
+def ensure_production_key() -> None:
+    SOURCE_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(SOURCE_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "w") as output:
+        output.write(secrets.token_hex(32))
+
+
+def production_source(headers: Any) -> bool:
+    supplied = headers.get("x-coach-production-key") or ""
+    if not re.fullmatch(r"[a-f0-9]{64}", supplied):
+        return False
+    try:
+        expected = SOURCE_KEY_FILE.read_text().strip()
+        return len(expected) == 64 and hmac.compare_digest(expected, supplied)
+    except OSError:
+        return False
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if USER_ONLY:
+        ensure_production_key()
     for d in (WORK_DIR, TMP_DIR, CLAUDE_CWD, AGY_CWD, CODEX_CWD, LOG_FILE.parent, STATE_DIR):
         d.mkdir(parents=True, exist_ok=True)
     render_sandbox_profile()
@@ -1251,11 +1278,14 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     background = (headers.get("x-coach-background") or "").strip().lower() in ("1", "true", "yes") \
         or (headers.get("x-coach-priority") or "").strip().lower() == "background"
     effort = norm_effort(headers.get("x-coach-effort") or body.get("reasoning_effort"))
+    tag = (headers.get("x-coach-traffic") or "unknown").strip().lower()
+    trusted = production_source(headers)
+    traffic = "test" if tag == "test" else "user" if tag == "user" and trusted else "unknown"
     return ReqCtx(request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
                   stream=bool(body.get("stream")), background=background,
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
                   exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
-                  test_traffic=(headers.get("x-coach-traffic") or "").strip().lower() == "test",
+                  test_traffic=tag == "test", traffic=traffic, production_source=trusted,
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
 
@@ -1310,7 +1340,7 @@ def terminal_frames(req: ReqCtx, cid: str, created: int, oc: Outcome, want_usage
 
 def log_req(req: ReqCtx, oc: Outcome) -> None:
     write_log(request_id=req.request_id, model=req.model, served_by=oc.served_by or req.served_by,
-              stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
+              stream=req.stream, background=req.background, effort=req.effort, traffic=req.traffic, source="production" if req.production_source else "unknown",
               in_chars=req.in_chars, out_chars=req.out_chars, queue_ms=req.queue_ms(),
               ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status=oc.status, reason=oc.reason,
               finish_reason=oc.finish_reason, physical_calls=req.physical_calls,
@@ -1498,10 +1528,10 @@ async def chat(request: Request):
         if not isinstance(body, dict):
             raise BridgeError(400, "请求体必须是 JSON 对象", "invalid_request_error")
         req = build_req(body, request.headers)
-        if USER_ONLY and req.test_traffic:
-            raise BridgeError(403, "测试流量请使用独立桥端口", reason="test_traffic_forbidden")
         if exam_protection_active():
             raise BridgeError(503, "考前保护：11 月 2 日 00:00–15:00 GMT 暂停模型调用", reason="exam_protection")
+        if USER_ONLY and (req.traffic != "user" or not req.production_source):
+            raise BridgeError(403, "生产桥只接收已验证的生产服务端用户请求", reason="test_traffic_forbidden" if req.test_traffic else "untrusted_source")
 
         # Optional background routing must honor the caller's no-fallback independence contract.
         target = req.model
@@ -1612,7 +1642,7 @@ async def chat(request: Request):
         rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
         if req:
             write_log(request_id=req.request_id, model=req.model, served_by=req.served_by,
-                      stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
+                      stream=req.stream, background=req.background, effort=req.effort, traffic=req.traffic, source="production" if req.production_source else "unknown",
                       in_chars=req.in_chars, out_chars=0, queue_ms=req.queue_ms(),
                       ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status="failed",
                       reason="cli_exit", finish_reason="error",

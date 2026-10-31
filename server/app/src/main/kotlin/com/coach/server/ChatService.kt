@@ -533,7 +533,7 @@ class ChatService(
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
-        log("COACH msg.end msg=${session.messageId} model=${session.model} status=$status reason=$reason chars=${content.length} ttft=${result.call.ttftMs} terminal=${terminal?.status} failure=${(result as? BridgeResult.Failure)?.reason}")
+        log("COACH msg.end msg=${session.messageId} rid=${result.call.requestId ?: "-"} traffic=${terminal?.traffic ?: "unknown"} source=${terminal?.source ?: "unknown"} model=${session.model} status=$status reason=$reason chars=${content.length} ttft=${result.call.ttftMs} terminal=${terminal?.status} failure=${(result as? BridgeResult.Failure)?.reason}")
         if (willFallback) fallback(session,question,pack)
     }
 

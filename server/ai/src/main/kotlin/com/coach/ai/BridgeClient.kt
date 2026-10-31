@@ -12,6 +12,8 @@ import kotlinx.serialization.json.putJsonArray
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -24,7 +26,10 @@ data class BridgeConfig(
     val baseUrl: String = System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:8791",
     val connectTimeout: Duration = Duration.ofSeconds(5),
     val requestTimeout: Duration = Duration.ofSeconds(240),
-    val testTraffic: Boolean = System.getenv("COACH_TRAFFIC") == "test",
+    val testTraffic: Boolean = (System.getenv("COACH_TRAFFIC") ?: if (System.getenv("COACH_MANAGE_SERVICES") == "1") "user" else "test") != "user",
+    val productionKeyFile: Path? = if (System.getenv("COACH_MANAGE_SERVICES") == "1") Path.of(
+        System.getenv("COACH_BRIDGE_PRODUCTION_KEY_FILE") ?: Path.of(System.getenv("COACH_BRIDGE_HOME") ?:
+            Path.of(System.getProperty("user.home"),"Coach/bridge").toString()).resolve("state/production-key").toString()) else null,
 )
 
 /** 一次逻辑请求。`task` 只用于 `ai_calls` 归类，不发给模型。 */
@@ -51,6 +56,8 @@ data class TerminalState(
     val queueMs: Long?,
     val ttftMs: Long?,
     val elapsedMs: Long?,
+    val traffic: String? = null,
+    val source: String? = null,
 ) {
     val complete: Boolean get() = status == "complete"
 
@@ -66,6 +73,7 @@ data class TerminalState(
             queueMs = obj["queue_ms"]?.jsonPrimitive?.content?.toLongOrNull(),
             ttftMs = obj["ttft_ms"]?.jsonPrimitive?.content?.toLongOrNull(),
             elapsedMs = obj["elapsed_ms"]?.jsonPrimitive?.content?.toLongOrNull(),
+            traffic = obj.stringOrNull("traffic"), source = obj.stringOrNull("source"),
         )
     }
 }
@@ -379,7 +387,13 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             .header("X-Coach-Fallback", "off")
             .header("X-Coach-Model-Policy", "exact")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-        if (config.testTraffic) builder.header("X-Coach-Traffic", "test")
+        builder.header("X-Coach-Traffic", if (config.testTraffic) "test" else "user")
+        if (!config.testTraffic && config.productionKeyFile != null) {
+            require(URI(config.baseUrl).host in setOf("127.0.0.1","localhost","::1","[::1]")) { "Production bridge credentials stay on loopback" }
+            val key = Files.readString(config.productionKeyFile).trim()
+            require(key.matches(Regex("[a-f0-9]{64}"))) { "Invalid local production bridge credential" }
+            builder.header("X-Coach-Production-Key",key)
+        }
         request.effort?.let { builder.header("X-Coach-Effort", it) }
         if (request.background) builder.header("X-Coach-Background", "1")
         return builder

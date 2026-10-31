@@ -136,13 +136,15 @@ class BridgeClientTest {
     }
 
     @Test
-    fun testTrafficIsExplicitAndUserTrafficIsUnmarked() {
+    fun testTrafficAndUserTrafficAreExplicit() {
         StubBridge().use { bridge ->
             repeat(2) { bridge.enqueue(200, StubBridge.completion("ok")) }
             BridgeClient(stubConfig(bridge).copy(testTraffic = true)).chat(request(stream = false))
             BridgeClient(stubConfig(bridge).copy(testTraffic = false)).chat(request(stream = false))
             assertEquals("test", bridge.requestedHeaders[0].entries.first { it.key.equals("X-Coach-Traffic", true) }.value.first())
-            assertTrue(bridge.requestedHeaders[1].keys.none { it.equals("X-Coach-Traffic", true) })
+            assertEquals("user", bridge.requestedHeaders[1].entries.first { it.key.equals("X-Coach-Traffic", true) }.value.first())
+            assertTrue(bridge.requestedHeaders[0].keys.none { it.equals("X-Coach-Production-Key", true) })
+            assertTrue(bridge.requestedHeaders[1].keys.none { it.equals("X-Coach-Production-Key", true) })
         }
     }
 

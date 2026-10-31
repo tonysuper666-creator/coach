@@ -27,6 +27,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         pairingCommand(args, data)
         return@runBlocking
     }
+    configureBridgeTraffic(System.getenv(), managed)
     // Management commands print their result to the invoking terminal, never service logs.
     if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)

@@ -124,9 +124,11 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 
 ### 用户桥与测试隔离（TON-1140）
 
-8791 固定只接用户流量：`X-Coach-Traffic: test` 在占并发槽、启动 CLI 之前返回
+8791 固定只接带本机生产凭据、明确标记为 user 的生产服务端流量。`X-Coach-Traffic: test` 在占并发槽、启动 CLI 之前返回
 403 / `test_traffic_forbidden` / `physical_calls=0`。该端口不能用环境变量取消保护。
-测试客户端 `BridgeConfig(testTraffic=true)` 也在发起模型请求前拒绝 8791。
+未标记或无有效生产凭据的请求同样返回 403 / `untrusted_source`；流量记为 unknown，不能污染用户统计。
+生产凭据文件 `COACH_BRIDGE_HOME/state/production-key` 仅托管服务读取，权限 0600；独立验收实例的凭据只在自己的目录里生成。
+测试客户端 `BridgeConfig(testTraffic=true)` 也在发起模型请求前拒绝 8790/8791。
 这不提供抢占已在执行的用户请求的保证；用户自身并发仍受后端槽位限制。
 
 旧 live 探针也禁止 8790/8791：`live_run.py` 默认分配端口及新目录；`live_probe.py` 必须显式指定测试端口。

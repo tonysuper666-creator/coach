@@ -1,6 +1,12 @@
 # 复习流量保护与使用观测
 
-生产桥 8791 不接受标记为测试的模型请求。测试必须用自己的桥、服务端端口和数据副本；
+生产桥 8791 只接受 `traffic=user` 且带有效本机生产凭据的模型请求。
+未标记、冒充 user、伪造凭据、标记为 test 的请求在启动 CLI 前都被拒绝。
+凭据由托管服务/桥在 `COACH_BRIDGE_HOME/state/production-key` 首次启动时建立（0600），不进入日志、学习内容或客户端。
+非托管服务默认 test，并在启动时要求显式指定 8790/8791 之外的桥 URL；不能通过单设 `COACH_TRAFFIC=user` 冒充生产。
+桥的未标记/未验证请求记为 `traffic=unknown source=unknown`。
+生产首字统计须将服务端 `COACH msg.end rid=...` 与桥日志同 rid 对上，只收 `traffic=user source=production`。
+缓存讲解另列，不能混入真实模型首字。测试必须用自己的桥、服务端端口和数据副本；
 不能仅设置 `COACH_TRAFFIC=test` 后继续连 8791。详见 `tools/bridge/README.md`。
 
 服务端正常启动后自动开启以下记录，双监听共用一个记录器：
@@ -43,3 +49,12 @@ tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
 生产部署须等 TON-1132 升级 main 完成、用户连续 15 分钟空闲，并完成 Scout 验收与 Architect 复核。
 11 月 2 日 00:00–15:00 GMT 不部署、不预热。此变更需要服务端升级和客户端新包同时生效；
 旧客户端没有自动补出此前未记录事件的能力。
+
+只读统计工具（旧日志没有来源凭据时会排除，不追认旧 `traffic=user`）：
+
+```sh
+python3 tools/bridge/production_stats.py --server-log SERVER_LOG --bridge-log BRIDGE_LOG
+```
+
+只有两边均标明 `traffic=user source=production`、rid 一致的 `msg.end` 才进入首字样本；
+请求数与可用首字样本数分开，未验证流量另报。该工具不发任何 HTTP/模型请求。

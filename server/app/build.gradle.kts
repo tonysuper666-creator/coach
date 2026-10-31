@@ -40,7 +40,11 @@ tasks.register<Test>("liveTest") {
 }
 
 // All automated test traffic opts into the bridge test budget.
-tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }
+tasks.withType<Test>().configureEach {
+    environment("COACH_TRAFFIC", "test")
+    // Ledger-only child processes cannot accidentally fall back to the learner bridge.
+    environment("COACH_BRIDGE_URL", System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:1")
+}
 
 tasks.register<Test>("tutorLive") {
     group = "verification"

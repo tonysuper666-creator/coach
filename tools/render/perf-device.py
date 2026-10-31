@@ -7,7 +7,7 @@ recorded for every run instead, and nothing is dropped: every run goes to perf-d
 The phone must already have an APK that is paired with a NON-production server (build with -Pcoach.port=NNNN); the replay
 screen sits behind the pairing gate. Never pair a test device with the production port.
 
-  COACH_DEVICE=host:port  adb serial (required)      PERF_RUNS=3   runs per mode      ADB=path/to/adb      PERF_PACKAGE=com.coach.android.t1100
+  COACH_DEVICE=host:port  adb serial (required)      PERF_RUNS=3   runs per mode      ADB=path/to/adb      PERF_PACKAGE=<installed package, e.g. a -PcoachApplicationId build>
 """
 import json, os, re, subprocess, sys, time
 from pathlib import Path

@@ -60,6 +60,7 @@ fun runCoach() {
         packFor = { kpId -> File(packDir, "$kpId.md").takeIf { it.exists() }?.readText()?.take(40_000).orEmpty() },
         formatClock = { clock.format(Instant.ofEpochMilli(it)) },
         math = math,
+        course = com.coach.client.CourseHttp(baseUrl, deviceId, token, course),
     )
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

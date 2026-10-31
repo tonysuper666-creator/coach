@@ -102,4 +102,18 @@ class CourseViewTest {
         val v = view(listOf(outline("K1" to "A"), posed("a1", "g1", mapOf("o1" to "A", "o2" to "B"))))
         assertTrue(v.quizGroups("kp:K2").isEmpty())
     }
+
+    @Test fun courseContentGivesModuleNamesPrerequisitesAndTheReferencePage() {
+        val kp = { id: String, name: String, prereqs: List<String> -> JsonObject(mapOf(
+            "id" to JsonPrimitive(id), "name" to JsonPrimitive(name), "moduleId" to JsonPrimitive("m1"), "prerequisiteIds" to JsonArray(prereqs.map { JsonPrimitive(it) }),
+            "sourceAnchor" to JsonObject(mapOf("docId" to JsonPrimitive("textbook:7"), "pdfPage" to JsonPrimitive(172), "bookPage" to JsonPrimitive(141))))) }
+        val view = view(listOf(event("outline_revised", json(
+            "modules" to JsonArray(listOf(json("id" to "m1", "name" to "第二章 逆向选择"))),
+            "knowledgePoints" to JsonArray(listOf(kp("K1", "【W4·Ch8】基础", emptyList()), kp("K2", "【W4·Ch8】进阶", listOf("K1"))))))))
+        val k2 = view.kp("K2")!!
+        assertEquals("第二章 逆向选择", k2.module)
+        assertEquals(listOf("K1"), k2.prereqs)
+        assertEquals("textbook:7", k2.anchorDoc); assertEquals(172, k2.anchorPdfPage); assertEquals(141, k2.anchorBookPage)
+        assertEquals("教材 p.141", k2.reference)
+    }
 }

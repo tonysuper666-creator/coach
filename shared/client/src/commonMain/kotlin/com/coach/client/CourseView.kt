@@ -19,6 +19,14 @@ data class KpRow(
     val module: String = "",
     /** 备课教材页范围，如「教材 p.12–15」；锚点没有书页号就空。 */
     val reference: String = "",
+    /** 曾稳固后又没过合格情境（路线上写「曾稳固」，不是「稳固」）。 */
+    val formerlySolid: Boolean = false,
+    /** 稳固进度，如「2/2 条 · 构答 1 · 2 天 · 均 0.88」；还没有任何合格证据就空。 */
+    val solidProgress: String = "",
+    /** 前置知识点（软锁：只提示「建议先学 X」，不阻止打开）。 */
+    val prereqs: List<String> = emptyList(),
+    /** 备课教材页的文档与起止页（PDF 页），资料页用它跳到「本次参考」。 */
+    val anchorDoc: String = "", val anchorPdfPage: Int = 0, val anchorBookPage: Int = 0,
 )
 
 data class QuizCard(
@@ -40,7 +48,7 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 }
 
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
-class CourseView(private val events: List<Event>, val projection: Projection) {
+class CourseView(val events: List<Event>, val projection: Projection) {
 
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
@@ -49,17 +57,25 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
         val modules = HashMap<String, String>()
         val moduleOf = HashMap<String, String>()
         val references = HashMap<String, String>()
+        val prereqs = HashMap<String, List<String>>()
+        val anchorDocs = HashMap<String, Triple<String, Int, Int>>()
         for (e in events) when (e.type) {
             "outline_revised" -> {
             // 课程内容装载（TON-1127）把整份 CourseContent 放在事件里：知识点名、模块、概念、教材页锚点。
-            for (m in (e.payload["modules"] as? JsonArray).orEmpty()) (m as? JsonObject)?.let { modules[it.s("id")] = it.s("title") }
+            for (m in (e.payload["modules"] as? JsonArray).orEmpty()) (m as? JsonObject)?.let { modules[it.s("id")] = it.s("title").ifBlank { it.s("name") } }
             for (k in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
                 val o = k as? JsonObject ?: continue
                 val id = o.s("id"); if (id.isBlank()) continue
-                titles[id] = o.s("title").ifBlank { id }
+                titles[id] = o.s("title").ifBlank { o.s("name") }.ifBlank { id }
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
-                val pages = (o["anchors"] as? JsonArray).orEmpty().mapNotNull { a -> ((a as? JsonObject)?.get("bookPage") as? JsonPrimitive)?.intOrNull }
+                for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }
+                // 课程内容装载写的是单个 `sourceAnchor`（旧形态是 `anchors` 数组），两种都认。
+                val anchorObjects = listOfNotNull(o["sourceAnchor"] as? JsonObject) + (o["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+                anchorObjects.firstOrNull { it.s("docId").isNotBlank() }?.let { a ->
+                    anchorDocs[id] = Triple(a.s("docId"), (a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0, (a["bookPage"] as? JsonPrimitive)?.intOrNull ?: 0)
+                }
+                val pages = anchorObjects.mapNotNull { a -> (a["bookPage"] as? JsonPrimitive)?.intOrNull }
                 if (pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
             }
             for (op in (e.payload["ops"] as? JsonArray).orEmpty()) {
@@ -69,6 +85,7 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
                 val title = o.s("title").ifBlank { o.s("name") }
                 if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
+                (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
@@ -88,7 +105,11 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
                 id in explained || id in attempted || projection.position.current == id -> KpStatus.IN_PROGRESS
                 else -> KpStatus.NEW
             }
-            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty())
+            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳固进度 ${it.count}/2 条 · 构答 ${it.constructed} · ${it.days} 天 · 均 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
+            val anchor = anchorDocs[id]
+            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
+                formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
+                anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
         }
     }
 

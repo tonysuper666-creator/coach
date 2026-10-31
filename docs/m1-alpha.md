@@ -11,8 +11,8 @@ Observed evidence
 | Check | Observation |
 |---|---|
 | Three journeys | 3 explanations, 9 question_posed, 9 answer_submitted, 9 attempt_graded; Today 3/49 |
-| Prewarm | First three knowledge points: 7 / 6 / 6 VERIFIED questions and three prepared lessons; 19 physical CLI calls |
-| Call accounting | 19 prewarm calls plus 5 isolated follow-ups = 24 physical calls; cached delivery adds zero |
+| Prewarm | First five knowledge points: 7 / 6 / 6 / 8 / 6 VERIFIED questions and five prepared lessons; 31 physical CLI calls |
+| Call accounting | 31 prewarm calls plus 5 isolated follow-ups = 36 unique physical calls; the smoke DB contains a copied 19-call baseline plus 5 new calls (24), not another 24 calls; cached delivery adds zero |
 | Source loading | 49 names/order match, 49 resolved anchors, weights total 100, 49 packs; repeated seed changes no events or source bytes |
 | Reconnect | Network off 10.130 seconds; same message resumes with one snapshot revision and identical client/server SHA-256 |
 | Window changes | Ten outer/inner size switches retain draft and selected radio answer |
@@ -23,12 +23,12 @@ Observed evidence
 
 Validation executed locally
 
-- JVM results: domain 44, client 12, UI 16, store 13, core 15, AI 46, app 35; 181 total, no failure/error/skip. Tasks were executed in integration batches, with affected modules rerun after changes.
+- JVM results: domain 44, client 12, UI 16, store 13, core 15, AI 46, app 36; 182 total, no failure/error/skip. Tasks were executed in integration batches, with affected modules rerun after changes.
 - Final server batch: `./gradlew :server:store:test :server:ai:test :server:app:test :server:app:installDist --max-workers=6`.
 - Final Android batch: `./gradlew :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest --max-workers=6`.
 - `tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py`: 58/58. Includes official 429/rejected terminal, child reaping, unlimited test/user/default traffic, and exact model routing.
 - `tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py`: 2 tests pass. The authorized 2026-11-02 00:00–15:00 UTC interval blocks every enabled backend before dispatch, physical calls 0.
-- `tools/dev/check-pairing.py` supports `COACH_PAIRING_AVD` / `COACH_PAIRING_SERIAL` to give acceptance its own emulator. The dual-connection test runs SyncEngine and TutorClient together on two cores, exercising the Android IO dispatcher fix.
+- `tools/dev/check-pairing.py` supports `COACH_PAIRING_AVD` / `COACH_PAIRING_SERIAL` to give acceptance its own emulator. The full script passed pairing, fresh process/Keystore, HTTP+WS, both cleartext policy tests and revocation, with ai_calls=0. The dual-connection test runs SyncEngine and TutorClient together on two cores, exercising the Android IO dispatcher fix. A separate process test verifies that inherited managed-service settings do not redirect the CLI pairing code away from the terminal or into logs.
 
 Installation and service handoff
 

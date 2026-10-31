@@ -26,7 +26,8 @@ internal fun LearnerBubble(text: String) {
 internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("导师" + if (message.model.isNotBlank()) " · ${message.model}" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            // The model name matters only when someone other than the usual tutor answered (rate-limit fallback); otherwise it is internal detail.
+            Text("导师" + if (message.fallback && message.model.isNotBlank()) " · ${message.model}" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             if (message.fallback) StatusChip("兜底", MaterialTheme.colorScheme.tertiary)
             if (!message.done) TextButton(onClick = onStop, modifier = Modifier.heightIn(min = 32.dp)) { Text("停止") }
         }

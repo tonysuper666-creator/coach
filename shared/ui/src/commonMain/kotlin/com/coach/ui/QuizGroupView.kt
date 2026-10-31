@@ -63,22 +63,30 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
                 Surface(
                     shape = MaterialTheme.shapes.small,
                     border = BorderStroke(if (isMine) 2.dp else 1.dp, border),
-                    color = if (isMine) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .5f) else MaterialTheme.colorScheme.surface,
+                    color = if (isMine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
                     modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT).selectable(selected = isMine, enabled = !locked, role = Role.RadioButton) { onSelect(letter) },
                 ) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(letter, style = MaterialTheme.typography.titleMedium)
+                        Text(if (isMine && card.grade == null) "✓ $letter" else letter, style = MaterialTheme.typography.titleMedium)
                         Box(Modifier.weight(1f)) { Markdown(text, true, "o:${card.attemptId}:$letter", math) }
                     }
                 }
             }
             card.grade?.let { grade ->
                 Text(
-                    (if (grade.correct) "✓ 答对了" else "✗ 答错了") + if (grade.feedback.isNotBlank()) "：${grade.feedback}" else "",
+                    (if (grade.correct) "✓ 答对了" else "✗ 答错了") + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (grade.correct) successColor() else MaterialTheme.colorScheme.error,
                 )
             }
         }
     }
+}
+
+/** The verdict already says right or wrong; keep the server's feedback only when it adds something (not "回答正确（B）" again). */
+internal fun extraFeedback(feedback: String): String? {
+    val text = feedback.trim()
+    if (text.isEmpty()) return null
+    val bare = text.trimEnd('。', '.', '！', '!').replace(Regex("[（(][A-Za-z][)）]$"), "").trim()
+    return if (bare in setOf("回答正确", "回答错误", "正确", "错误", "答对了", "答错了")) null else text
 }

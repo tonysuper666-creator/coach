@@ -66,15 +66,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
+                // Back button and the title's first line sit on one row; the scope toggle lines up with the title's left edge.
                 if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
-                    Text(main, style = MaterialTheme.typography.titleMedium)
+                    Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
                     val sub = listOf(tag, kp.reference.takeIf { it.isNotBlank() }?.let { "本次参考：$it" }).filterNotNull().filter { it.isNotBlank() }.joinToString(" · ")
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = { showScope = !showScope }, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(0.dp)) {
                             Text(if (showScope) "收起学习范围" else sub.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾",
+                                Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Start,
                                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         }
                         StatusChip(kp.status.label, MaterialTheme.colorScheme.primary)
@@ -152,28 +154,24 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         HorizontalDivider()
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (pending != null) Text(
-                "现在问不影响已通过，但这题不算稳固证据",
-                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary,
-            )
-            // 键盘弹出时收起两个大按钮，把空间让给对话。
-            if (!imeOpen) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            // 答题时「下一步 / 出题」本来就点不了，不占高度，把空间让给题目；键盘弹出时同样收起。
+            if (!imeOpen && pending == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 // 服务端只在需要时给特殊文字（「换个例子再讲」）；还没讲过、线程里什么都没有时按钮就叫「开始讲解」。
                 val nextText = when {
                     tv.nextLabel == "换个例子再讲" -> "换个例子再讲"
                     !kp.explained && tv.items.isEmpty() && groups.isEmpty() -> "开始讲解"
                     else -> "下一步"
                 }
-                Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy && pending == null,
+                Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
-                OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy && pending == null,
+                OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
             // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。
             ComposerField(
                 value = draft, onValueChange = { draft = it }, onSend = { send(it) }, gate = enterGate,
-                placeholder = "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
+                placeholder = if (pending != null) "追问（不影响通过状态）…" else "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
             )
         }
     }

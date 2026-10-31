@@ -119,3 +119,12 @@ class CurrencyEmphasisTest {
         assertEquals("A $20, B $80, C $100", rendered("A $20, B $80, C $100").text)
     }
 }
+
+class VerdictCopyTest {
+    @Test fun feedbackThatRepeatsTheVerdictIsDropped() {
+        assertNull(com.coach.ui.extraFeedback("回答正确（B）"))
+        assertNull(com.coach.ui.extraFeedback("回答正确。"))
+        assertNull(com.coach.ui.extraFeedback("  "))
+        assertEquals("需求缺乏弹性，因为 |ε|<1", com.coach.ui.extraFeedback("需求缺乏弹性，因为 |ε|<1"))
+    }
+}

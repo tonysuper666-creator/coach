@@ -79,7 +79,7 @@ private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(if (tag.isBlank()) "继续" else "继续 · $tag", style = MaterialTheme.typography.labelLarge)
-            Text(main, style = MaterialTheme.typography.titleMedium)
+            Text(main, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
         }
     }
 }
@@ -109,13 +109,14 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(onClick = onClick),
     ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Tag and status share the first line, so the full first-anchor title gets the whole card width below them (no ellipsis, fewer wrapped lines).
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val (tag, main) = splitTitle(kp.title)
-            Column(Modifier.weight(1f)) {
-                if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(main, style = MaterialTheme.typography.bodyLarge)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(tag, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                StatusChip(kp.status.label, statusColor(kp.status))
             }
-            StatusChip(kp.status.label, statusColor(kp.status))
+            Text(main, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

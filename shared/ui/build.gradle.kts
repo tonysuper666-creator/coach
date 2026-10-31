@@ -25,4 +25,10 @@ kotlin {
         implementation(libs.navigationevent)
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
+    sourceSets.jvmTest.dependencies {
+        @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+        implementation(compose.uiTest)
+        implementation(compose.desktop.currentOs)
+        implementation(libs.coroutines.swing)
+    }
 }

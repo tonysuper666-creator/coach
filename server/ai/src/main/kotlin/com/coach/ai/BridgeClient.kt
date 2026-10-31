@@ -24,6 +24,7 @@ data class BridgeConfig(
     val baseUrl: String = System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:8791",
     val connectTimeout: Duration = Duration.ofSeconds(5),
     val requestTimeout: Duration = Duration.ofSeconds(240),
+    val testTraffic: Boolean = false,
 )
 
 /** 一次逻辑请求。`task` 只用于 `ai_calls` 归类，不发给模型。 */
@@ -153,29 +154,8 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         val requestId = UUID.randomUUID().toString()
         val startedAt = Instant.now().toString()
         val started = System.nanoTime()
-        val payload = buildJsonObject {
-            put("model", request.model)
-            putJsonArray("messages") {
-                addJsonObject {
-                    put("role", "system")
-                    put("content", request.system)
-                }
-                addJsonObject {
-                    put("role", "user")
-                    put("content", request.user)
-                }
-            }
-            put("stream", request.stream)
-            request.maxTokens?.let { put("max_tokens", it) }
-        }
-        val builder = HttpRequest.newBuilder(URI.create("${config.baseUrl}/v1/chat/completions"))
-            .timeout(config.requestTimeout)
-            .header("Content-Type", "application/json")
-            .header("X-Request-Id", requestId)
-            .header("X-Coach-Fallback", "off")
-            .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-        request.effort?.let { builder.header("X-Coach-Effort", it) }
-        if (request.background) builder.header("X-Coach-Background", "1")
+        val payload = payloadFor(request, request.stream)
+        val builder = builderFor(request, payload, requestId)
 
         val response = try {
             http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream())
@@ -220,6 +200,182 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
                 readWhole(body.readBytes().decodeToString(), request, callId, requestId, startedAt, started)
             }
         }
+    }
+
+    /**
+     * 真流式：正文一落地就交给 [sink]（首字口径 = 第一次 `onDelta`），返回与 [chat] 同形状的结果。
+     *
+     * 阻塞到流结束；[onHandle] 立刻拿到取消句柄——`cancel()` 断开 HTTP，桥看到断开就杀掉 CLI 整个进程组
+     * （ADR-0002 第 2 条、DESIGN §5.5），所以「取消」只有这一条路径。
+     */
+    fun streamChat(
+        request: ChatRequest,
+        sink: BridgeStreamSink,
+        onHandle: (BridgeStreamHandle) -> Unit = {},
+    ): BridgeResult {
+        val callId = UUID.randomUUID().toString()
+        val requestId = UUID.randomUUID().toString()
+        val startedAt = Instant.now().toString()
+        val started = System.nanoTime()
+        val handle = BridgeStreamHandle()
+        onHandle(handle)
+        val future = http.sendAsync(
+            builderFor(request, payloadFor(request, stream = true), requestId).build(),
+            HttpResponse.BodyHandlers.ofInputStream(),
+        )
+        handle.future = future
+        val response = try {
+            future.get()
+        } catch (error: Exception) {
+            val cancelled = handle.isCancelled
+            val result = BridgeResult.Failure(
+                reason = if (cancelled) "cancelled" else "transport: ${error.javaClass.simpleName}: ${error.message}",
+                terminal = null,
+                call = AiCall(
+                    callId = callId, task = request.task, requestedModel = request.model, servedBy = null,
+                    status = if (cancelled) "cancelled" else "failed", ttftMs = null,
+                    durMs = millisSince(started), queueMs = null, physicalCalls = 1, requestId = requestId,
+                    inChars = request.system.length + request.user.length, outChars = 0, startedAt = startedAt,
+                    error = if (cancelled) "cancelled" else error.message,
+                ),
+            )
+            sink.onTerminal(result)
+            return result
+        }
+        handle.body = response.body()
+        response.body().use { body ->
+            if (response.statusCode() != 200) {
+                val text = body.readBytes().decodeToString()
+                val terminal = runCatching {
+                    (json.parseToJsonElement(text).jsonObject["x_coach"] as? JsonObject)?.let { TerminalState.fromJson(it) }
+                }.getOrNull()
+                val result = BridgeResult.Failure(
+                    reason = "http_${response.statusCode()}: ${text.take(300)}",
+                    terminal = terminal,
+                    call = AiCall(
+                        callId = callId, task = request.task, requestedModel = request.model,
+                        servedBy = terminal?.servedBy, status = terminal?.status ?: "failed",
+                        ttftMs = null, durMs = millisSince(started), queueMs = terminal?.queueMs,
+                        physicalCalls = terminal?.physicalCalls ?: 1, requestId = terminal?.requestId ?: requestId,
+                        inChars = request.system.length + request.user.length, outChars = 0,
+                        startedAt = startedAt, error = "http_${response.statusCode()}",
+                    ),
+                )
+                sink.onTerminal(result)
+                return result
+            }
+            return readStreamIncremental(body, request, callId, requestId, startedAt, started, sink, handle)
+        }
+    }
+
+    /** 边读边发；取消（客户端取消 / 唤醒收尾）时按 `cancelled` 返回，不写成失败。 */
+    private fun readStreamIncremental(
+        body: java.io.InputStream,
+        request: ChatRequest,
+        callId: String,
+        requestId: String,
+        startedAt: String,
+        started: Long,
+        sink: BridgeStreamSink,
+        handle: BridgeStreamHandle,
+    ): BridgeResult {
+        val text = StringBuilder()
+        var terminal: TerminalState? = null
+        var ttft: Long? = null
+        var failure: String? = null
+        var served: String? = null
+        BufferedReader(InputStreamReader(body, Charsets.UTF_8)).use { reader ->
+            while (true) {
+                val line = try {
+                    reader.readLine() ?: break
+                } catch (error: Exception) {
+                    // 取消会主动关掉流：这里读到异常是预期路径，不是故障
+                    failure = if (handle.isCancelled) "cancelled" else "stream_read: ${error.javaClass.simpleName}"
+                    break
+                }
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty()) continue
+                if (payload == "[DONE]") break
+                val frame = try {
+                    json.parseToJsonElement(payload).jsonObject
+                } catch (error: Exception) {
+                    continue
+                }
+                (frame["x_coach"] as? JsonObject)?.let { terminal = TerminalState.fromJson(it) }
+                val model = frame.stringOrNull("model")
+                if (!model.isNullOrBlank() && model != served) {
+                    served = model
+                    sink.onMeta(model)
+                }
+                val delta = (frame["choices"] as? kotlinx.serialization.json.JsonArray)
+                    ?.firstOrNull()?.jsonObject
+                    ?.get("delta")?.jsonObject
+                    ?.stringOrNull("content")
+                if (!delta.isNullOrEmpty()) {
+                    if (ttft == null) ttft = millisSince(started)
+                    text.append(delta)
+                    sink.onDelta(delta, millisSince(started))
+                }
+            }
+        }
+        val resolved = terminal
+        val cancelled = handle.isCancelled
+        val status = when {
+            cancelled -> "cancelled"
+            resolved != null -> resolved.status
+            failure != null -> "failed"
+            else -> "truncated"
+        }
+        val call = AiCall(
+            callId = callId, task = request.task, requestedModel = request.model,
+            servedBy = resolved?.servedBy ?: served, status = status,
+            ttftMs = ttft ?: resolved?.ttftMs, durMs = millisSince(started), queueMs = resolved?.queueMs,
+            physicalCalls = resolved?.physicalCalls ?: 1, requestId = resolved?.requestId ?: requestId,
+            inChars = request.system.length + request.user.length, outChars = text.length,
+            startedAt = startedAt,
+            error = if (cancelled) "cancelled" else failure ?: if (resolved == null) "no_x_coach" else null,
+        )
+        val result: BridgeResult = when {
+            cancelled -> BridgeResult.Failure("cancelled", resolved, call)
+            failure != null -> BridgeResult.Failure(failure, resolved, call)
+            resolved == null -> BridgeResult.Failure("no_x_coach", null, call)
+            !resolved.complete -> BridgeResult.Failure("status_${resolved.status}", resolved, call)
+            else -> independenceProblem(request.model, resolved)?.let { problem ->
+                BridgeResult.Failure(problem, resolved, call)
+            } ?: BridgeResult.Success(text.toString(), resolved, call)
+        }
+        sink.onTerminal(result)
+        return result
+    }
+
+    private fun payloadFor(request: ChatRequest, stream: Boolean): JsonObject = buildJsonObject {
+        put("model", request.model)
+        putJsonArray("messages") {
+            addJsonObject {
+                put("role", "system")
+                put("content", request.system)
+            }
+            addJsonObject {
+                put("role", "user")
+                put("content", request.user)
+            }
+        }
+        put("stream", stream)
+        request.maxTokens?.let { put("max_tokens", it) }
+    }
+
+    private fun builderFor(request: ChatRequest, payload: JsonObject, requestId: String): HttpRequest.Builder {
+        val builder = HttpRequest.newBuilder(URI.create("${config.baseUrl}/v1/chat/completions"))
+            .timeout(config.requestTimeout)
+            .header("Content-Type", "application/json")
+            .header("X-Request-Id", requestId)
+            .header("X-Coach-Fallback", "off")
+            .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+        request.effort?.let { builder.header("X-Coach-Effort", it) }
+        if (config.testTraffic) builder.header("X-Coach-Traffic", "test")
+        if (request.background) builder.header("X-Coach-Background", "1")
+        return builder
     }
 
     private fun readWhole(

@@ -9,6 +9,23 @@ import java.nio.file.Path
 import kotlin.test.*
 
 class LedgerStoreTest {
+    @Test fun freshDatabaseReachesTheLatestSchemaOnFirstOpenAndDoesNotRemigrate() {
+        val dir = Files.createTempDirectory("coach-migration-order-")
+        try {
+            LedgerStore(dir).close()
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery("PRAGMA user_version").use { rows ->
+                        assertTrue(rows.next())
+                        assertEquals(3, rows.getInt(1))
+                    }
+                }
+            }
+            val backups = Files.list(dir.resolve("backups")).use { it.map { p -> p.fileName.toString() }.toList().toSet() }
+            LedgerStore(dir).close()
+            assertEquals(backups, Files.list(dir.resolve("backups")).use { it.map { p -> p.fileName.toString() }.toList().toSet() })
+        } finally { dir.toFile().deleteRecursively() }
+    }
     private val options = listOf(Option("one","First synthetic option"), Option("two","Second synthetic option"),
         Option("three","Third synthetic option"), Option("four","Fourth synthetic option"))
     private val frozenMap = kotlinx.serialization.json.JsonObject(

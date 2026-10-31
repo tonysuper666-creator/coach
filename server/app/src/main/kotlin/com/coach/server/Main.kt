@@ -48,19 +48,23 @@ fun main(args: Array<String>): Unit = runBlocking {
     store.enroll(device,token)
     val actor = LedgerActor(this,store)
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
+    // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
+    val chat = ChatService(actor, this)
     actor.execute { backupIfDue() }
     val maintenance = launch {
         val detector = SuspensionDetector()
         while(isActive) {
             delay(5000)
             if(detector.sample(System.currentTimeMillis(),System.nanoTime())) {
+                // 进行中的消息按 truncated(reason=suspended) 收尾（§4.7），先断开再落库
+                chat.abortAll("suspended")
                 actor.execute { recoverSuspension();backupIfDue() }
                 pushes.emit("wake")
                 println("COACH wake detected; messages truncated; running jobs requeued")
             } else actor.execute { backupIfDue() }
         }
     }
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes) }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

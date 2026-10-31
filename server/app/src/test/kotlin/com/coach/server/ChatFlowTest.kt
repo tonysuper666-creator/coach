@@ -312,6 +312,86 @@ class ChatFlowTest {
         }
     }
 
+    private suspend fun seedTutor(h: Harness) {
+        h.actor.execute {
+            repeat(3) { i ->
+                val options = listOf("opportunity cost $i","sunk expenditure $i","fixed payment $i","total revenue $i").mapIndexed { j,text -> com.coach.domain.Option("q$i-$j",text) }
+                registerQuestion("q$i","course-1","","SINGLE_CHOICE","Synthetic question $i","VERIFIED",options.first().optionId,options,listOf("kp-1"))
+            }
+        }
+    }
+
+    @Test
+    fun taughtContinueAndWholeGroupSubmissionGoThroughWsWithoutAnotherModelCall() {
+        Harness().use { h ->
+            runBlocking { seedTutor(h) }
+            h.tutor.stream(15,"机会成本是放弃的最佳替代。",StubTutor.terminal("complete"),StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+                assertEquals("IDLE",ws.await("tutor.state").str("state"))
+                ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","text":"继续"}""")
+                ws.await("msg.start")
+                ws.await("msg.end")
+                while (ws.await("tutor.state").str("state") != "AWAIT") Unit
+                ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","text":"继续"}""")
+                val group = ws.await("tutor.cards")
+                assertEquals(1,h.tutor.requests)
+                val cards = group.getValue("cards") as kotlinx.serialization.json.JsonArray
+                assertEquals(3,cards.size)
+                val answers = runBlocking { h.actor.execute {
+                    kotlinx.serialization.json.JsonObject(cards.associate { element ->
+                        val card = element.jsonObject
+                        val key = tutorChoiceKey(card.str("questionId"))
+                        card.str("attemptId") to card.getValue("letterMap").jsonObject.getValue(key.correctOptionId)
+                    })
+                } }
+                ws.send("""{"t":"tutor.answer","threadId":"thread-1","courseId":"course-1","groupId":"${group.str("groupId")}","submissionId":"ws-submit","answers":$answers}""")
+                ws.await("tutor.feedback")
+                val state = runBlocking { h.actor.execute { snapshot("course-1").projection } }
+                assertTrue(state.mastery.getValue("kp-1").passed)
+                assertEquals(3,state.mastery.getValue("kp-1").window.size)
+                assertTrue(h.tutor.requestBodies.none { it.contains("Student question: 继续") })
+            }
+        }
+    }
+
+    @Test
+    fun rawLeakIsDurableAfterSnapshotRemovesTheLetterSentence() {
+        Harness().use { h ->
+            runBlocking { seedTutor(h) }
+            h.tutor.stream(40,"先想一想，", "选 ", "B，opportunity ", "cost 0。",StubTutor.terminal("complete"),StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+                ws.await("tutor.state")
+                ws.send("""{"t":"tutor.test","threadId":"thread-1","courseId":"course-1"}""")
+                ws.await("tutor.cards")
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                val assembler = ChatStreamAssembler()
+                var end = false
+                var revised = false
+                while (!end) {
+                    val frame = ws.await("msg.delta","msg.snapshot","msg.end")
+                    if (frame.str("t") == "msg.snapshot") revised = true
+                    if (frame.str("t") == "msg.delta") assertTrue(!frame.str("text").contains("B"))
+                    assembler.handle(frame)
+                    end = frame.str("t") == "msg.end"
+                }
+                assertTrue(revised)
+                assertEquals("",assembler.text(id))
+                val facts = runBlocking { h.actor.execute { events("course-1") } }
+                val leak = facts.single { it.type == "hint_revealed" }
+                assertEquals("LEAK",leak.payload.str("cause"))
+                assertTrue(h.tutor.requestBodies.single().contains("Unordered option texts"))
+                assertTrue(!h.tutor.requestBodies.single().contains("letterMap"))
+                val callStatus = java.sql.DriverManager.getConnection("jdbc:sqlite:${h.store.directory.resolve("coach.sqlite")}").use { connection ->
+                    connection.createStatement().use { statement -> statement.executeQuery("SELECT status FROM ai_calls").use { rows -> rows.next(); rows.getString(1) } }
+                }
+                assertEquals("letter_ref_stripped",callStatus)
+            }
+        }
+    }
+
     private fun sha256(text: String): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
             .joinToString("") { "%02x".format(it) }

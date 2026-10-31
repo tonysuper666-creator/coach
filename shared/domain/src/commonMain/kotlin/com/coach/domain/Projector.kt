@@ -28,6 +28,8 @@ fun project(input: Iterable<Event>, zone: String = "Europe/London", upcasters: U
     val events = input.distinctBy { it.id }.sortedWith(compareBy<Event> { it.seq }.thenBy { it.id })
     require(events.map { it.courseId }.distinct().size <= 1) { "Project one course at a time" }
     require(events.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
+    val taughtConceptIds = sortedSetOf<String>()
+    val explainedKpIds = sortedSetOf<String>()
     val attempts = mutableMapOf<String, Attempt>()
     val byQuestion = mutableMapOf<String, MutableList<Attempt>>()
     val keys = mutableMapOf<String, String>()
@@ -215,7 +217,11 @@ fun project(input: Iterable<Event>, zone: String = "Europe/London", upcasters: U
                 if (p.str("via") !in setOf("REVIEW", "QUICK")) current = p.str("kpId")
                 updateJournal(day) { it.copy(opened = (it.opened + p.str("kpId")).distinct()) }
             }
-            "explanation_delivered" -> updateJournal(day) { it.copy(delivered = (it.delivered + p.str("kpId")).distinct()) }
+            "explanation_delivered" -> {
+                taughtConceptIds.addAll(p.strings("conceptIds"))
+                explainedKpIds.add(p.str("kpId"))
+                updateJournal(day) { it.copy(delivered = (it.delivered + p.str("kpId")).distinct()) }
+            }
             "question_posed", "legacy_attempt" -> {
                 if(p.num("policyVersion",1) != 1L) unsupported.add("policy:${p.num("policyVersion")}")
                 val a = Attempt(if (e.type == "legacy_attempt") e.copy(payload = JsonObject(p + ("origin" to JsonPrimitive("LEGACY")))) else e)
@@ -294,6 +300,7 @@ fun project(input: Iterable<Event>, zone: String = "Europe/London", upcasters: U
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     return Projection(lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.ordered(), journal = journal.ordered(),
+        taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())
 }

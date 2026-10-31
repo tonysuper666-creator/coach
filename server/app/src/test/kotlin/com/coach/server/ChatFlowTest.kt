@@ -13,6 +13,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.net.URI
@@ -38,6 +40,23 @@ private fun JsonObject.str(key: String): String =
  * 全程桩桥，不调用任何真实订阅 CLI（DESIGN §13.2 期中保护）。
  */
 class ChatFlowTest {
+
+    @Test
+    fun slowSubscribersCauseAnObservableDrop() = runBlocking {
+        val logs = mutableListOf<String>()
+        val hub = ChatHub { logs.add(it) }
+        val received = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val subscriber = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            hub.frames.collect { received.complete(Unit); release.await() }
+        }
+        try {
+            hub.emit(com.coach.domain.json("t" to "msg.delta", "msg" to "slow", "i" to 1))
+            received.await()
+            repeat(1100) { hub.emit(com.coach.domain.json("t" to "msg.delta", "msg" to "slow", "i" to it + 2)) }
+            assertTrue(logs.any { it.contains("chat-frame-drop") && it.contains("slow") && it.contains("buffer_full") })
+        } finally { subscriber.cancel(); release.complete(Unit) }
+    }
 
     @Test
     fun cancelBeforeTheStreamHandleExistsIsAppliedWhenItArrives() {
@@ -363,6 +382,84 @@ class ChatFlowTest {
                 assertTrue(h.logs.any { it.contains("visible-drop") }, "drops were not logged: ${h.logs}")
                 val stored = runBlocking { h.snapshot(messageId) }
                 assertEquals(visible, stored?.content)
+            }
+        }
+    }
+
+    @Test
+    fun filteredAndWhitespaceOnlyAnswersCannotComplete() {
+        for (raw in listOf("{\"answer\":\"internal\"}\n", "placeholder\n", "【需查原文:query】", "  \n")) Harness().use { h ->
+            h.tutor.stream(10, raw, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                val end = ws.await("msg.end")
+                assertEquals("failed", end.str("status"), raw)
+                assertEquals("empty_visible_body", end.str("reason"), raw)
+                val stored = runBlocking { h.snapshot(id) }!!
+                assertTrue(stored.content.isBlank())
+                assertEquals("failed", stored.status)
+                assertEquals("empty_visible_body", stored.reason)
+                assertTrue(h.logs.any { it.contains("empty_visible_body") })
+            }
+        }
+    }
+
+    @Test
+    fun internalDeltasDoNotSuppressThinkingOrTheFirstVisibleTokenDeadline() {
+        Harness(defaultTimings(firstTokenDeadlineMs = 600)).use { h ->
+            h.tutor.stream(100, *Array(20) { "placeholder\n" }, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                ws.await("msg.start")
+                assertEquals("thinking", ws.await("msg.progress").str("phase"))
+                val end = ws.await("msg.end")
+                assertEquals("failed", end.str("status"))
+                assertEquals("first_token_timeout", end.str("reason"))
+            }
+        }
+    }
+
+    @Test
+    fun aDroppedDeltaIsRecoveredThroughTheResumeCallbackAndWsSnapshot() {
+        Harness().use { h ->
+            h.tutor.stream(40, *Array(12) { "一段正文。" }, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                var requests = 0
+                val assembler = ChatStreamAssembler(onResumeRequired = { id, _ ->
+                    requests++
+                    ws.send("""{"t":"msg.resume","msg":"$id"}""")
+                })
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                while (assembler.status(id) != "complete") {
+                    val frame = ws.await("msg.delta", "msg.snapshot", "msg.end")
+                    if (frame.str("t") == "msg.delta" && frame.str("i") == "2") continue
+                    assembler.handle(frame)
+                }
+                assertTrue(requests > 0)
+                assertEquals("一段正文。".repeat(12), assembler.text(id))
+                assertEquals(runBlocking { h.snapshot(id) }!!.content, assembler.text(id))
+            }
+        }
+    }
+
+    @Test
+    fun resumeImmediatelyAfterConnectingIncludesTheFollowingDeltas() {
+        Harness().use { h ->
+            h.tutor.stream(80, *Array(12) { "正文。" }, StubTutor.terminal("complete"), StubTutor.DONE)
+            val id = runBlocking { h.chat.ask("thread-1", "course-1", "合成问题") }
+            Ws(h.port, h.token).use { ws ->
+                ws.send("""{"t":"msg.resume","msg":"$id"}""")
+                val assembler = ChatStreamAssembler()
+                assembler.handle(ws.await("msg.snapshot"))
+                while (true) {
+                    val frame = ws.await("msg.delta", "msg.end")
+                    assembler.handle(frame)
+                    if (frame.str("t") == "msg.end") break
+                }
+                assertEquals("正文。".repeat(12), assembler.text(id))
+                assertEquals(runBlocking { h.snapshot(id) }!!.content, assembler.text(id))
             }
         }
     }

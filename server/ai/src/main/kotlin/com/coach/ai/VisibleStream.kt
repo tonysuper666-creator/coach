@@ -48,11 +48,19 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
                 }
                 val candidate = s.substring(0, end)
                 if (runCatching { kotlinx.serialization.json.Json.parseToJsonElement(candidate) }.isSuccess) {
-                    buffer.delete(0, end)
-                    advanceLine(candidate)
-                    internalJsonLine = true
-                    drop("raw_json", candidate)
-                    continue
+                    // A closed JSON prefix can still be ordinary prose: "[1] Citation".
+                    // Wait for newline/EOF before discarding it; whitespace may arrive separately.
+                    val suffix = s.substring(end)
+                    val newline = suffix.indexOf('\n')
+                    val tail = if (newline < 0) suffix else suffix.substring(0, newline)
+                    if (tail.isBlank()) {
+                        if (newline < 0 && !final) return out
+                        buffer.delete(0, end)
+                        advanceLine(candidate)
+                        internalJsonLine = true
+                        drop("raw_json", candidate)
+                        continue
+                    }
                 }
             }
             val newline = s.indexOf('\n')

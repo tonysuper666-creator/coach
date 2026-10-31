@@ -15,6 +15,38 @@ class ChatStreamAssemblerTest {
         """{"t":"msg.delta","msg":"$id","i":$i,"text":"${text.replace("\"", "\\\"")}"}"""
 
     @Test
+    fun gapsInTextAndMathRequestResumeWithoutAdvancingTheCursor() {
+        val requests = mutableListOf<Pair<String, Int>>()
+        val assembler = ChatStreamAssembler(onResumeRequired = { id, index -> requests.add(id to index) })
+        assembler.feed(delta("m1", 1, "正文"))
+        assertTrue(assembler.feed("""{"t":"msg.math","msg":"m1","i":3,"tex":"x"}""").isEmpty())
+        assertEquals(listOf("m1" to 1), requests)
+        assertEquals("正文", assembler.text("m1"))
+        assertTrue(assembler.feed("""{"t":"msg.end","msg":"m1","status":"complete"}""").isEmpty())
+        assertTrue(assembler.status("m1") != "complete")
+        assembler.feed("""{"t":"msg.snapshot","msg":"m1","i":3,"text":"正文和公式","status":"streaming"}""")
+        assertTrue(assembler.feed(delta("m1", 3, "重复")).isEmpty())
+        assembler.feed(delta("m1", 4, "。"))
+        assembler.feed("""{"t":"msg.end","msg":"m1","status":"complete"}""")
+        assertEquals("正文和公式。", assembler.text("m1"))
+        assertEquals("complete", assembler.status("m1"))
+        assertTrue(assembler.feed(delta("m2", 2, "缺首帧")).isEmpty())
+        assertEquals("m2" to 0, requests.last())
+    }
+
+    @Test
+    fun missingLastDeltaIsDetectedByTerminalLength() {
+        val requests = mutableListOf<String>()
+        val assembler = ChatStreamAssembler(onResumeRequired = { id, _ -> requests.add(id) })
+        assembler.feed(delta("m1", 1, "半句"))
+        assertTrue(assembler.feed("""{"t":"msg.end","msg":"m1","status":"complete","chars":5}""").isEmpty())
+        assertEquals(listOf("m1"), requests)
+        assembler.feed("""{"t":"msg.snapshot","msg":"m1","i":2,"text":"完整的一句","status":"complete"}""")
+        assertEquals("完整的一句", assembler.text("m1"))
+        assertEquals("complete", assembler.status("m1"))
+    }
+
+    @Test
     fun duplicateIndicesAreDropped() {
         val assembler = ChatStreamAssembler()
         val first = assembler.feed(delta("m1", 1, "你"))
@@ -50,7 +82,7 @@ class ChatStreamAssemblerTest {
         assembler.feed("""{"t":"msg.start","msg":"m2","model":"claude-sonnet-5-5","fallback":false}""")
         assembler.feed(delta("m2", 1, "公式是 "))
         assembler.feed("""{"t":"msg.math","msg":"m2","i":2,"tex":"E = p \\cdot q","display":true}""")
-        val end = assembler.feed("""{"t":"msg.end","msg":"m2","status":"complete","reason":null,"chars":18}""")
+        val end = assembler.feed("""{"t":"msg.end","msg":"m2","status":"complete","reason":null,"chars":21}""")
 
         assertEquals("公式是 \$\$E = p \\cdot q\$\$", assembler.text("m2"))
         assertEquals("complete", assembler.status("m2"))

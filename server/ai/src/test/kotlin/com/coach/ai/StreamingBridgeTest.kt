@@ -85,6 +85,7 @@ class StreamingBridgeTest {
         assertEquals("failed", StreamStatus.fromBridge("failed", cancelled = false, hasText = false))
         assertEquals("truncated", StreamStatus.fromBridge("failed", cancelled = false, hasText = true))
         assertEquals("complete", StreamStatus.fromBridge("complete", cancelled = false, hasText = true))
+        assertEquals("failed", StreamStatus.fromBridge("complete", cancelled = false, hasText = false))
         assertEquals("cancelled", StreamStatus.fromBridge("complete", cancelled = true, hasText = true))
     }
 

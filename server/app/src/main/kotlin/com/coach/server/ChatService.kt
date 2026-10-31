@@ -29,10 +29,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** WS 上所有连接共享的导师帧流（同一账号的多台设备都看同一条回答）。 */
-class ChatHub {
+class ChatHub(private val log: (String) -> Unit = { println(it) }) {
     val frames = MutableSharedFlow<JsonObject>(extraBufferCapacity = 1024)
     fun emit(frame: JsonObject) {
-        frames.tryEmit(frame)
+        if (!frames.tryEmit(frame)) {
+            log("COACH chat-frame-drop msg=${frame["msg"]} type=${frame["t"]} index=${frame["i"]} reason=buffer_full")
+        }
     }
 }
 
@@ -45,7 +47,7 @@ data class ChatTimings(
     val thinkingAtMs: Long = 8_000,
     /** 首字截止 25 秒 → 主动断开并显式改走兜底。 */
     val firstTokenDeadlineMs: Long = 25_000,
-    /** 30 秒没有新 delta 判卡住。 */
+    /** 30 秒没有新可见正文判卡住。 */
     val stallMs: Long = 30_000,
     /** 流总时长 180 秒。 */
     val totalMs: Long = 180_000,
@@ -75,7 +77,7 @@ class ChatService(
         ?: java.io.File(System.getProperty("user.home"), "Coach/corpus/packs").path),
 ) {
 
-    val hub = ChatHub()
+    val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
     private val preparation = LessonPreparation(actor,bridge,packsDirectory)
@@ -259,15 +261,17 @@ class ChatService(
             delay(16)
         }
         for(segment in visible.finish()) emitSegment(session,segment,text)
-        val status=session.forcedStatus ?: StreamStatus.COMPLETE
+        val status=session.forcedStatus ?: StreamStatus.fromBridge(StreamStatus.COMPLETE, false, text.isNotBlank())
+        val reason=session.forcedReason ?: if (status == StreamStatus.FAILED) "empty_visible_body" else null
+        if (reason == "empty_visible_body") log("COACH msg.empty msg=${session.messageId} reason=$reason")
         val persist: com.coach.store.LedgerStore.() -> Unit = {
-            finishMessage(session.messageId,status,session.forcedReason,text.toString(),session.cursor.index)
+            finishMessage(session.messageId,status,reason,text.toString(),session.cursor.index)
             recordAiCall(UUID.randomUUID().toString(),"TEACH_CACHE",session.model,session.model,0,0,0,text.length,status,0,0)
         }
         val plan=checkNotNull(session.plan)
         publish(tutor.finish(plan,session.messageId,status==StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
         session.finished.set(true);sessions.remove(session.messageId)
-        hub.emit(endFrame(session,status,session.forcedReason,text.length))
+        hub.emit(endFrame(session,status,reason,text.length))
     }
 
     private suspend fun storedTeachingPack(threadId: String, courseId: String): String {
@@ -340,9 +344,12 @@ class ChatService(
         }
         val sink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
-                session.lastDeltaAtMs = maxOf(session.lastDeltaAtMs, atMs)
                 if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
+                val previous = session.cursor
                 acceptFiltered(guard.push(text))
+                if (session.cursor != previous && session.cursor.text.removePrefix(previous.text).isNotBlank()) {
+                    session.lastDeltaAtMs = elapsedMs()
+                }
                 val now = System.nanoTime()
                 if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
                     lastPersist = now
@@ -413,13 +420,17 @@ class ChatService(
         val forcedStatus = session.forcedStatus
         val terminal = result.terminal
         var status = forcedStatus ?: when {
-            terminal != null -> StreamStatus.fromBridge(terminal.status, false, visibleText.isNotEmpty())
-            visibleText.isEmpty() -> StreamStatus.FAILED
+            terminal != null -> StreamStatus.fromBridge(terminal.status, false, visibleText.isNotBlank())
+            visibleText.isBlank() -> StreamStatus.FAILED
             // ADR-0002：收不到终态帧按截断处理（已经出过字就一定不是「完整」）
             else -> StreamStatus.TRUNCATED
         }
         var reason = session.forcedReason ?: terminal?.reason ?: (result as? BridgeResult.Failure)
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
+
+        if (forcedStatus == null && terminal?.status == StreamStatus.COMPLETE && visibleText.isBlank()) {
+            reason = "empty_visible_body"
+        }
 
         val rateLimited = forcedStatus == null && (reason == "rate_limited" || (result as? BridgeResult.Failure)?.reason?.startsWith("http_429") == true)
         if (rateLimited) {
@@ -581,8 +592,9 @@ class ChatService(
         val segments = visible.push(guard.push(text) + guard.finish()) + visible.finish()
         val content = StringBuilder()
         for (segment in segments) emitSegment(session, segment, content)
-        val status = if (result is BridgeResult.Success && content.isNotEmpty()) StreamStatus.COMPLETE else StreamStatus.FAILED
-        val reason = (result as? BridgeResult.Failure)?.reason
+        val status = if (result is BridgeResult.Success && content.isNotBlank()) StreamStatus.COMPLETE else StreamStatus.FAILED
+        val reason = if (result is BridgeResult.Success && content.isBlank()) "empty_visible_body"
+            else (result as? BridgeResult.Failure)?.reason
         val persist: com.coach.store.LedgerStore.() -> Unit = {
             finishMessage(messageId, status, reason, content.toString(), session.cursor.index)
             if (isQuickThread(session.courseId,session.threadId)) append(session.courseId,"quick_ask_message",json("messageId" to messageId),thread=session.threadId)

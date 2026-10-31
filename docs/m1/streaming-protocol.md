@@ -40,7 +40,7 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 | `ton1087-builder-final-20261030`，运行时代码 `459fd96` | 14 | 首字只抽检 n=1：1385 ms；续传 10/10；取消进程退出 17/12 ms；中断流 truncated。真实四组通过，随后桩回放因注入顺序与桥已有的 tool-call 截止规则冲突而令整条命令退出 1 |
 | `ton1087-builder-replay-20261030`，只调整合成注入顺序 `a151b40` | 0 | `COACH_LIVE_STAGES=replay ./gradlew :liveTest` 退出 0；正常正文与结尾保留，协议及原始 JSON 泄漏 0 |
 
-累计真实 `ai_calls` **47**（账本 `physical_calls` 合计与桥日计数相同），保护参数仍为 **60 / 0.5**，当日余额 **13**。模块测试 **65 条，0 失败**。最终运行时的 n=20 首字分位数**未测**：不能用修复后 n=1 抽检代替，留待验收者在日额度恢复后独立复跑。未测 Compose 绘制或真机屏幕像素；本卡首字口径是共享客户端消费器交付的正文。
+该批累计真实 `ai_calls` **47**（账本 `physical_calls` 合计与桥日计数相同）。这是历史批次：其 n=1 抽检不代替 n=20 验收，最终 head 的补测见下文。未测 Compose 绘制或真机屏幕像素；首字口径是共享客户端消费器交付的正文。
 
 ### 2026-10-31 复核退回后的修复验证
 
@@ -50,7 +50,15 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 
 真实组只到 **9/20**：8 条 complete、第 9 条 truncated(cli_exit)，随后 health 连接被拒绝，命令退出 1；真实取消组尚未执行。00:33:41 测试复用的现役桥为 PID 40830，00:34:25 断开时未执行 stop，之后监听已变为 PID 77702。此前还出现过 PID 72912 被替换为 40830，启动校验拒绝旧 PID，0 次调用。两次外部换版打断验收，未再尝试真实组，也不计算不满 n=20 的达标分位数。
 
-本轮真实 `ai_calls=9`、账本 `physical_calls=9`，与桥测试计数 0→9 一致；本执行者累计 56（不含 Scout 独立实测）。数据在 `~/Coach/corpus/m1-stream/ton1087-reviewfix-live-20261031/results.jsonl`。待部署静默窗口中补齐首字 n≥20、真实取消和桩回放，再走 Scout → Architect 验收。
+上述中断批次真实 `ai_calls=9`、账本 `physical_calls=9`，不计算不满 n=20 的分位数。后续在最终 PR head `a40ffce` 上完成补测与独立验收（见 TON-1087 的 Builder-C、Scout、Architect 交付评论及 JSONL 附件）：
+
+| 验证者 / revision | 首字 | 取消 / 回放 |
+|---|---|---|
+| Builder-C，`a40ffce` | n=20，p50/p90 **1218/1387 ms**；20/20 complete、非空、客户端与落库 SHA-256 一致 | 真实取消 15/13 ms；回放 0 泄漏；early 取消 1015/1003 ms |
+| Scout 独立验收，`a40ffce` | n=20，p50/p90 **1241/1357 ms**，最大 10907 ms；20/20 complete、非空、散列一致 | 真实取消 13/12 ms；回放 0 泄漏；early 取消 1023/999 ms |
+| Architect，`a40ffce` | 模块测试 70/70，独立探针确认三处修复 | 读码复核通过，未重跑 live；PR #13 合并为 `0d41533` |
+
+Builder-C 的真实组与回放组分两条命令执行（22 次真实调用 + 0 次）；Scout 的 `first,cancel,replay,early` 在同一条命令退出 0（22 次真实调用）。续传 **10/10** 是在 `b9f4e06` 上独立跑出的证据，未在 `a40ffce` 重跑，不能写成最终 head 的新实测。
 
 ## 客户端 → 服务端（`/v1/ws`，与账本帧共用一条连接）
 
@@ -72,21 +80,25 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 | `msg.end` | `msg`、`status`、`reason`、`chars` | 终态 |
 | `msg.error` | `msg`、`error` | 请求字段缺失等客户端错误 |
 
-## `(msg, i)` 去重
+## `(msg, i)` 去重与缺号恢复
 
-`msg.delta` 与 `msg.math` 共用一条序号；客户端丢掉 `i <= 已收最大 i` 的帧。`msg.snapshot` 把游标重置为它带来的 `i`，所以重连后服务端重发的旧序号会被丢弃，正文不会重复也不会缺口。
+`msg.delta` 与 `msg.math` 共用一条从 1 开始的序号。`ChatStreamAssembler` 只追加 `i == lastIndex + 1`，丢弃 `i <= lastIndex` 的重复帧。遇到缺号时不追加该帧、不推进游标，调用 `onResumeRequired(messageId, lastIndex)`；调用方应立即发送 `{"t":"msg.resume","msg":messageId}`。回调可能重复，调用方可合并进行中的续传请求。当前 `TutorModel`/`TutorClient` 的在线回调接线由 TON-1134 承接（超出 TON-1129 文件范围）；本接口和桩端到端验证不代表真机已经自动续传。
+
+`msg.snapshot` 是权威全文，整体替换正文和游标，清除缺号状态；比当前连续游标更旧的快照仍忽略。缺号尚未恢复，或 `msg.end.chars` 与本地正文长度不符时，消费器请求续传并暂不交付 `Ended`，避免残缺正文被标成完成。终态快照可直接恢复最终正文和状态。
+
+服务端在开始处理 WS 入站命令前同步建立导师帧订阅，`msg.resume` 的快照生成与发送和该连接的 delta 共用互斥锁。`ChatHub.tryEmit` 缓冲满失败记 `COACH chat-frame-drop`（消息、类型、序号、原因，不含正文）。
 
 ## 终态
 
 `msg.end.status` ∈ `complete / truncated / failed / cancelled`，与桥 `x_coach.status` 一一对应（DESIGN §4.2、§6）：
 
-- 桥 `complete` → `complete`；
+- 桥 `complete` 且过滤后有非空白可见正文 → `complete`；空白正文 → `failed(reason=empty_visible_body)`，并写终态日志；缓存开讲与非流式兜底同样适用；
 - 桥 `truncated` → `truncated`；
 - 桥 `failed`（一个字都没出）→ `failed`；已经出过字再失败按 `truncated` 收（保留文字、给「重试」）；
 - 收不到终态帧 → `truncated`（ADR-0002）；一个字都没有 → `failed`；
 - 用户取消 → `cancelled`；唤醒收尾 → `truncated(reason=suspended)`。
 
-`reason` 透传桥的 `timeout / cli_exit / max_output_tokens / client_gone`，服务端自己判定的补充 `first_token_timeout`（25 秒）、`stall`（30 秒无 delta）、`total_timeout`（180 秒）、`cancelled`、`suspended`。
+`reason` 增加 `empty_visible_body`（过滤后无可见正文）；其余透传桥的 `timeout / cli_exit / max_output_tokens / client_gone`，服务端自己判定的补充 `first_token_timeout`（25 秒）、`stall`（30 秒无 delta）、`total_timeout`（180 秒）、`cancelled`、`suspended`。
 
 ## 超时（全部单调钟，DESIGN §4.7）
 
@@ -94,11 +106,15 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 |---|---|---|
 | 「还在想」 | 8 s | 发 `msg.progress`，不算首字 |
 | 首字截止 | 25 s | 断开桥，原消息 `failed(first_token_timeout)`，再显式调 Codex 非流式，新开一条 `fallback=true` 的消息写真名 |
-| 无新 delta | 30 s | `truncated(stall)` |
+| 无新可见正文 | 30 s | `truncated(stall)` |
 | 单条消息总时长 | 180 s | `truncated(total_timeout)` |
+
+「还在想」、首字截止和停滞计时以过滤后真正发布的非空白正文/公式为准；内部 JSON、协议行、查原文标记、纯空白不算首字，也不延后首字截止。桥侧 `ai_calls.ttft_ms` 保持桥原始 delta 口径，不用它冒充客户端首字。疑似 JSON 的行首要等到行尾或 EOF 才能判定，因此这类前缀会短暂缓冲。
 
 进行中的消息每秒把「已可见正文 + `i`」写进 `messages`（`status=streaming`，迁移 V003 加的 `delta_index`），所以重连时的 `msg.snapshot` 最多落后一秒，且在线的消息直接从内存取、不落后。
 
 ## 可见流过滤（§5.8 第 4 条）
 
 `server/ai/VisibleStream` 在落库前做确定性过滤：`【需查原文:…】` 标记剥掉；命中 `placeholder`、`malformed`、`tool_call`、`<tool_calls>`、`x_coach`、`finish_reason` 的整行丢弃并记 `COACH visible-drop` 日志；只有带类型的内容块（正文、公式）进入 `msg.delta` / `msg.math` 与 `messages.content_md`。过滤按「安全前缀」吐出，一个 token 跨 chunk 被切开也不会漏出。
+
+原始 JSON 只在行首识别，且整个 JSON 块闭合后直到行尾/EOF 只剩空白才丢弃（支持格式化多行 JSON）；`[0, 1] 是效用的取值范围。`、`[1] Drummond 2015。` 等后接正文的前缀完整保留。

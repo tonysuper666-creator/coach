@@ -8,7 +8,7 @@ import kotlinx.serialization.json.jsonPrimitive
 /**
  * 客户端最小流式消费端（Compose 之外，UI 卡直接可用）。
  *
- * 只做三件事：解析 WS 帧、按 `(msg, i)` 去重、把可见内容块拼成一条消息。
+ * 解析 WS 帧、按 `(msg, i)` 去重并检测缺号、把可见内容块拼成一条消息。
  * `msg.snapshot` 是重连后的权威状态：先用它整体替换，再接后续 delta（DESIGN §6）。
  */
 sealed interface ChatUpdate {
@@ -21,10 +21,15 @@ sealed interface ChatUpdate {
 }
 
 /** `msg.delta / msg.math` 共用一条 `(msg, i)` 序号；重复到达的序号直接丢弃。 */
-class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true }) {
+class ChatStreamAssembler(
+    private val json: Json = Json { ignoreUnknownKeys = true; isLenient = true },
+    /** 缺号时调用方发送 msg.resume(msg)；lastIndex 是最后连续接收的序号。 */
+    private val onResumeRequired: (messageId: String, lastIndex: Int) -> Unit = { _, _ -> },
+) {
 
     private val lastIndex = HashMap<String, Int>()
     private val bodies = HashMap<String, StringBuilder>()
+    private val needsResume = HashSet<String>()
     private val states = HashMap<String, String>()
 
     fun feed(frame: String): List<ChatUpdate> {
@@ -60,6 +65,7 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
                 // An earlier resume response can arrive after a newer cursor.
                 if (index < (lastIndex[messageId] ?: 0)) return emptyList()
                 val text = obj.str("text")
+                needsResume.remove(messageId)
                 lastIndex[messageId] = index
                 bodies[messageId] = StringBuilder(text)
                 states[messageId] = obj.str("status")
@@ -68,6 +74,12 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
             }
             "msg.progress" -> listOf(ChatUpdate.Progress(messageId, obj.str("phase"), obj.str("text")))
             "msg.end" -> {
+                val chars = obj.str("chars").toIntOrNull()
+                if (messageId in needsResume || (chars != null && chars != text(messageId).length)) {
+                    needsResume.add(messageId)
+                    onResumeRequired(messageId, lastIndex[messageId] ?: 0)
+                    return emptyList()
+                }
                 states[messageId] = obj.str("status")
                 listOf(
                     ChatUpdate.Ended(
@@ -92,6 +104,11 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
     private fun accept(messageId: String, index: Int): Boolean {
         val previous = lastIndex[messageId] ?: 0
         if (index <= previous) return false
+        if (index != previous + 1) {
+            needsResume.add(messageId)
+            onResumeRequired(messageId, previous)
+            return false
+        }
         lastIndex[messageId] = index
         return true
     }

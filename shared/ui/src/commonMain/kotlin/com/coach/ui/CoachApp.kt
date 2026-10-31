@@ -60,7 +60,8 @@ fun threadIdFor(kpId: String) = "kp:$kpId"
 val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null) {
+/** [initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -80,7 +81,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val current = view
                 val target = open?.let { (id, _) -> current?.kp(id) }
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
-                    key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack) }
+                    key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft) }
                 } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val totalWidth = maxWidth
@@ -128,9 +129,12 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     }
 }
 
+/** 标签底色 = 字色的这么多分之几：太深会把字色压成低对比，由 StudyChromeTest 守住 ≥4.5。 */
+internal const val CHIP_TINT = .12f
+
 @Composable
 internal fun StatusChip(text: String, color: Color) {
-    Surface(color = color.copy(alpha = .16f), shape = MaterialTheme.shapes.small) {
+    Surface(color = color.copy(alpha = CHIP_TINT), shape = MaterialTheme.shapes.small) {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = color, style = MaterialTheme.typography.labelMedium)
     }
 }

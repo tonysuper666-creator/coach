@@ -96,7 +96,7 @@ private fun ReviewCard(due: Int, onClick: () -> Unit) {
                 Text("到期复习", style = MaterialTheme.typography.titleMedium)
                 Text(if (due == 0) "今天没有到期的复习" else "$due 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.primary)
+            if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.secondary)
         }
     }
 }
@@ -121,10 +121,12 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun statusColor(status: KpStatus): Color = when (status) {
-    KpStatus.NEW -> MaterialTheme.colorScheme.onSurfaceVariant
-    KpStatus.IN_PROGRESS -> MaterialTheme.colorScheme.primary
-    KpStatus.PASSED -> successColor()
-    KpStatus.SOLID -> successColor()
-    KpStatus.NEEDS_REPAIR -> MaterialTheme.colorScheme.error
+internal fun statusColor(status: KpStatus): Color = kpStatusColor(status, MaterialTheme.colorScheme, successColor())
+
+/** 状态标签的字色。「未开始」用 onSurfaceVariant（outline 在深色下压在同色底上读不清）；「学习中」用 secondary（primary 在淡底上只有 4.1:1）。 */
+internal fun kpStatusColor(status: KpStatus, scheme: ColorScheme, success: Color): Color = when (status) {
+    KpStatus.NEW -> scheme.onSurfaceVariant
+    KpStatus.IN_PROGRESS -> scheme.secondary
+    KpStatus.PASSED, KpStatus.SOLID -> success
+    KpStatus.NEEDS_REPAIR -> scheme.error
 }

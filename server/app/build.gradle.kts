@@ -58,3 +58,11 @@ tasks.register<JavaExec>("progressReplay") {
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.server.ProgressReplayKt")
 }
+
+// Opt-in private-source replay; uses a stub bridge and never calls a subscription CLI.
+tasks.register<JavaExec>("sourceReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.SourceLookupReplayKt")
+}

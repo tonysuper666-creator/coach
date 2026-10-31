@@ -54,7 +54,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val actor = LedgerActor(this,store)
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
-    val chat = ChatService(actor, this)
+    val chat = ChatService(actor, this, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")
     chat.tutor.recoverInterruptedReplies()
     actor.execute { backupIfDue() }
     val maintenance = launch {

@@ -10,10 +10,14 @@ import io.ktor.server.netty.Netty
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -41,6 +45,77 @@ private fun JsonObject.str(key: String): String =
  * 全程桩桥，不调用任何真实订阅 CLI（DESIGN §13.2 期中保护）。
  */
 class ChatFlowTest {
+    @Test
+    fun clientFirstTokenReportIsLoggedWithKnowledgePointAndRequestKind() {
+        Harness().use { h ->
+            runBlocking {
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json(
+                        "knowledgePoints" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "id" to "kp-1", "moduleId" to "module-1", "order" to 1, "title" to "Essay topic",
+                            "kind" to null, "examFormats" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("ESSAY"))),
+                            "prerequisites" to emptyList<String>(), "anchors" to kotlinx.serialization.json.JsonArray(emptyList()),
+                            "retired" to false, "conceptIds" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("concept-1")))
+                        ))),
+                        "ops" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "op" to "add", "kpId" to "kp-1", "prereqs" to emptyList<String>()
+                        )))
+                    ))
+                    append("course-1", "kp_opened", com.coach.domain.json("kpId" to "kp-1"), thread = "thread-1")
+                }
+            }
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"client.ttft","courseId":"course-1","threadId":"thread-1","msg":"msg-1","kind":"next","ms":142,"model":"claude-sonnet-5-5","fallback":false}""")
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (h.logs.none { it.contains("client_ttft") } && System.nanoTime() < deadline) Thread.sleep(10)
+                assertTrue(h.logs.any { it.contains("kp=kp-1") && it.contains("kp_type=ESSAY") && it.contains("kind=next") && it.contains("ms=142") })
+            }
+        }
+    }
+
+    @Test
+    fun lessonPreparationSelectsRelevantSeedPageAfterFifteenThousandCharacters() {
+        val title = "RAND HIE Oregon CRHIE randomized experiment"
+        val metadata = com.coach.domain.json(
+            "name" to title,
+            "sourceAnchor" to com.coach.domain.json("pdfPage" to 10)
+        )
+        val header = "Knowledge point: $title\nReference: textbook\n\n"
+        val filler = "Unrelated chapter material without the target concepts. ".repeat(45)
+        val source = header + buildString {
+            for (page in 1..8) append("**〔PDF 第 $page 页 · 书第 $page 页〕**\n").appendLine(filler)
+            append("**〔PDF 第 9 页 · 书第 9 页〕**\n")
+            append("Late KP body: RAND HIE randomized experiment, Oregon Medicaid, and CRHIE compare insurance demand.\n")
+            append("**〔PDF 第 10 页 · 书第 10 页〕**\nSource anchor reference page.\n")
+            for (page in 11..14) append("**〔PDF 第 $page 页 · 书第 $page 页〕**\nUnrelated appendix.\n")
+        }
+
+        assertTrue(source.indexOf("Late KP body") > LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        val selected = LessonPreparation.boundedInput(source, metadata)
+
+        assertTrue(selected.startsWith(header))
+        assertTrue(selected.contains("Source anchor reference page."))
+        val sourceMarkers = Regex("(?m)^.*〔PDF 第 ([0-9]+) 页.*$").findAll(source).toList()
+        val sourcePageLengths = sourceMarkers.mapIndexed { index, marker ->
+            marker.groupValues[1] to (source.substring(marker.range.first, sourceMarkers.getOrNull(index + 1)?.range?.first ?: source.length).length)
+        }
+        assertTrue(selected.contains("Late KP body"), "Selected=${Regex("〔PDF 第 ([0-9]+) 页").findAll(selected).map { it.groupValues[1] }.toList()}, sourcePages=$sourcePageLengths, selectedChars=${selected.length}, title=${metadata.str("title")}")
+        assertTrue(selected.length <= LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        val selectedPages = Regex("〔PDF 第 ([0-9]+) 页").findAll(selected).map { it.groupValues[1].toInt() }.toList()
+        assertTrue(selectedPages.size <= 6)
+        assertEquals(selectedPages.sorted(), selectedPages)
+    }
+
+    @Test
+    fun longUnmarkedLessonPackFallsBackToBoundedPrefix() {
+        val source = "Introduction.\n\n" + "Unpaginated source text. ".repeat(900)
+        val selected = LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Synthetic KP"))
+
+        assertTrue(source.length > LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        assertTrue(selected.length <= LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        assertTrue(source.startsWith(selected))
+    }
+
 
     @Test
     fun slowSubscribersCauseAnObservableDrop() = runBlocking {
@@ -313,18 +388,20 @@ class ChatFlowTest {
         val root=Files.createTempDirectory("coach-prepared-")
         val packs=root.resolve("packs")
         Files.createDirectories(packs.resolve("course-1"))
-        val source="Synthetic source material."
+        val source="Synthetic source material.\n" + "Long course page content. ".repeat(2_000)
         Files.writeString(packs.resolve("course-1/kp-1.md"),source)
         val cache=root.resolve("prepared-lessons/course-1")
         Files.createDirectories(cache)
-        Files.writeString(cache.resolve("kp-1.json"),com.coach.domain.json("packHash" to com.coach.store.sha256(source.toByteArray()),
+        Files.writeString(cache.resolve("kp-1.json"),com.coach.domain.json("packHash" to LessonPreparation.cacheHash(source),
             "text" to "预备好的完整讲解。","model" to BridgeClient.CLAUDE).toString())
         try { Harness(packDir=packs).use { h ->
             Ws(h.port,h.token).use { ws ->
                 ws.send("""{"t":"tutor.open","courseId":"course-1","threadId":"thread-1","kpId":"kp-1","conceptIds":["c1"],"title":"机会成本"}""")
                 ws.await("tutor.state")
                 assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type=="explanation_delivered" } } })
-                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1","pack":${kotlinx.serialization.json.JsonPrimitive(source.take(40_000))}}""")
+                assertEquals("PREPARE", ws.await("tutor.state").str("state"))
+                assertEquals("TEACH", ws.await("tutor.state").str("state"))
                 val start=ws.await("msg.start")
                 assertEquals("complete",ws.await("msg.end").str("status"))
                 assertEquals("预备好的完整讲解。",runBlocking { h.snapshot(start.str("msg")) }!!.content)
@@ -332,6 +409,44 @@ class ChatFlowTest {
                 assertEquals(1,runBlocking { h.actor.execute { events("course-1").count { it.type=="explanation_delivered" } } })
             }
         } } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun prepareQuestionsUsesSeedNameAsTheQueuedObjective() = runBlocking {
+        val root = Files.createTempDirectory("coach-seed-objective-")
+        val packs = root.resolve("packs")
+        Files.createDirectories(packs.resolve("course-1"))
+        Files.writeString(packs.resolve("course-1/kp-1.md"), "Source material for a synthetic question.")
+        try {
+            Harness(packDir = packs).use { h ->
+                val name = "RAND HIE design and Oregon Medicaid"
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json(
+                        "knowledgePoints" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "id" to "kp-1", "name" to name,
+                            "sourceAnchor" to com.coach.domain.json("pdfPage" to 1)
+                        )))
+                    ))
+                }
+                h.tutor.stream(5_000, StubTutor.terminal("complete"), StubTutor.DONE)
+                val preparation = async { h.chat.prepareLessons("course-1", listOf("kp-1"), questionsOnly = true) }
+                try {
+                    val job = withTimeout(2_000) {
+                        while (true) {
+                            val pending = h.actor.execute { supplyJobs("course-1", "kp-1").firstOrNull() }
+                            if (pending != null) return@withTimeout pending
+                            delay(10)
+                        }
+                        error("unreachable")
+                    }
+                    assertEquals(name, job.subject.str("objective"))
+                } finally {
+                    preparation.cancelAndJoin()
+                }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test

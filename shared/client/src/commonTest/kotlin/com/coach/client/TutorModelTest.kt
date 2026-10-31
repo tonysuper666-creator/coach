@@ -70,15 +70,26 @@ class TutorModelTest {
         m.onFrame(delta("m1", 2, "第二段"))
         assertEquals(1, samples.size)
         assertEquals("next", samples.single().kind)
+        assertEquals("C", samples.single().courseId)
         assertFalse(m.tutorMessage("m1").thinking)
     }
 
-    @Test fun tutorStateDrivesButtonLabelAndBusy() {
+    @Test fun explanationPreparationStaysVisibleFromTapUntilFirstBodyText() {
         val m = model()
-        m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"TEACH","nextLabel":"换个例子再讲"}""")
+        m.onSent(thread, "next", null)
+        assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
+        m.onFrame("""{"t":"tutor.state","threadId":"$thread","courseId":"C","state":"PREPARE","nextLabel":"下一步"}""")
+        assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
+        m.onFrame("""{"t":"tutor.state","threadId":"$thread","courseId":"C","state":"TEACH","nextLabel":"换个例子再讲"}""")
         val view = m.state.value.threads.getValue(thread)
         assertEquals("换个例子再讲", view.nextLabel)
+        assertEquals("导师正在备课…", view.poolText)
         assertTrue(view.busy)
+        m.onFrame(start("m1"))
+        assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
+        m.onFrame(delta("m1", 1, "第一段正文"))
+        assertNull(m.state.value.threads.getValue(thread).poolText)
+        m.onFrame("""{"t":"msg.end","msg":"m1","status":"complete","chars":5}""")
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"AWAIT","nextLabel":"下一步"}""")
         assertFalse(m.state.value.threads.getValue(thread).busy)
     }
@@ -99,6 +110,16 @@ class TutorModelTest {
         assertFalse(m.state.value.threads.getValue(thread).busy)
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"AWAIT_ANSWER"}""")
         assertNull(m.state.value.threads.getValue(thread).poolText)
+    }
+
+    @Test fun completedPoolPreparationAllowsTutorActionsAgain() {
+        for (state in listOf("AWAIT", "AWAIT_ANSWER")) {
+            val m = model()
+            m.onFrame("""{"t":"tutor.progress","threadId":"$thread","phase":"pool_queued","text":"正在补题"}""")
+            assertTrue(m.state.value.threads.getValue(thread).busy)
+            m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"$state"}""")
+            assertFalse(m.state.value.threads.getValue(thread).busy)
+        }
     }
 
     @Test fun disconnectIsRecordedWithTheLastSeenTime() {

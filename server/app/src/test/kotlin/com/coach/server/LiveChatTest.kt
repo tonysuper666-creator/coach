@@ -35,6 +35,12 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
+private val isolatedLivePort: Int by lazy {
+    (System.getenv("COACH_LIVE_BRIDGE_PORT")?.toInt() ?: ServerSocket(0).use { it.localPort }).also {
+        require(it in 1..65535 && it !in setOf(8790,8791)) { "Live tests require a private bridge port" }
+    }
+}
+
 /** Opt-in acceptance. Production services, real CLI, local corpus; no mock in this path. */
 class LiveChatTest {
     private val home = Path.of(System.getProperty("user.home"))
@@ -61,7 +67,7 @@ class LiveChatTest {
             ?: files.joinToString("\n\n") { Files.readString(it) }.take(40_000)
     }
 
-    private fun health(url: String = "http://127.0.0.1:8791"): JsonObject = LedgerJson.parseToJsonElement(http.send(
+    private fun health(url: String = "http://127.0.0.1:$isolatedLivePort"): JsonObject = LedgerJson.parseToJsonElement(http.send(
         HttpRequest.newBuilder(URI.create("$url/health")).timeout(Duration.ofSeconds(5)).GET().build(),
         HttpResponse.BodyHandlers.ofString(),
     ).body()).jsonObject
@@ -76,7 +82,7 @@ class LiveChatTest {
     }
 
     private inner class Bridge(private val stub: Boolean = false, mode: String = "protocol") : AutoCloseable {
-        val port = if (stub) ServerSocket(0).use { it.localPort } else 8791
+        val port = if (stub) ServerSocket(0).use { it.localPort } else isolatedLivePort
         val url get() = "http://127.0.0.1:$port"
         private var process: Process? = null
         private val root: ProcessHandle
@@ -84,6 +90,7 @@ class LiveChatTest {
             Files.createDirectories(output)
             val attachPid = if (stub) null else System.getenv("COACH_LIVE_BRIDGE_PID")?.toLong()
             if (attachPid != null) {
+                require(System.getenv("COACH_LIVE_BRIDGE_PORT") != null) { "Attaching requires an explicit private bridge port" }
                 root = ProcessHandle.of(attachPid).orElseThrow()
                 require(root.isAlive && root.info().arguments().orElse(emptyArray()).any { it.endsWith("subscription_bridge.py") }) {
                     "COACH_LIVE_BRIDGE_PID 必须是现有桥进程"
@@ -107,7 +114,7 @@ class LiveChatTest {
                     environment()["BRIDGE_PORT"] = port.toString()
                     environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
                     environment()["BRIDGE_AGY_ENABLED"] = "0"
-                    environment()["COACH_BRIDGE_HOME"] = if (stub) output.resolve("stub-$mode-bridge").toString() else home.resolve("Coach/bridge").toString()
+                    environment()["COACH_BRIDGE_HOME"] = if (stub) output.resolve("stub-$mode-bridge").toString() else output.resolve("live-bridge").toString()
                     if (stub) {
                         environment()["BRIDGE_CHILD_PATH"] = stubDir.toString()
                         environment()["STUB_DIR"] = stubDir.toString()
@@ -170,7 +177,7 @@ class LiveChatTest {
         override fun close() { socket.abort() }
     }
 
-    private class Harness(baseUrl: String = "http://127.0.0.1:8791", directory: Path) : AutoCloseable {
+    private class Harness(baseUrl: String = "http://127.0.0.1:$isolatedLivePort", directory: Path) : AutoCloseable {
         val token = UUID.randomUUID().toString()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(directory).also { it.enroll("live-client", token) }
@@ -207,9 +214,9 @@ class LiveChatTest {
         init {
             server.createContext("/v1/chat/completions") { exchange ->
                 try {
-                    val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8791/v1/chat/completions"))
+                    val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:$isolatedLivePort/v1/chat/completions"))
                         .POST(HttpRequest.BodyPublishers.ofByteArray(exchange.requestBody.readBytes()))
-                    for (key in listOf("Content-Type", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id")) {
+                    for (key in listOf("Content-Type", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id", "X-Coach-Traffic")) {
                         exchange.requestHeaders.getFirst(key)?.let { request.header(key, it) }
                     }
                     val response = HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofInputStream())

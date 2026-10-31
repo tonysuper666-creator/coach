@@ -74,8 +74,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
     var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
     var reviewOpen by remember { mutableStateOf(false) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> reviewOpen = false; open = id to start }
-    val openReview: () -> Unit = { reviewOpen = true; open = null }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewOpen = false; open = id to start }
+    val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); reviewOpen = true; open = null }
+    LaunchedEffect(open, reviewOpen) {
+        c.tutor.telemetry?.record("screen", if (reviewOpen) "review" else if (open != null) "study" else "today")
+    }
     CoachTheme(dark ?: isSystemInDarkTheme()) {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
@@ -87,6 +90,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val totalWidth = maxWidth
+                    val wide = totalWidth >= WIDE_LAYOUT_MIN_WIDTH
+                    LaunchedEffect(wide) { c.tutor.telemetry?.record("screen", if (wide) "wide" else "compact") }
                     if (totalWidth >= WIDE_LAYOUT_MIN_WIDTH) {
                         // 宽屏：左边今天/知识点，右边学习线程；点「继续」直接在右栏开讲。
                         Row(Modifier.fillMaxSize()) {

@@ -32,6 +32,7 @@ class TutorClient(
     private val deviceId: String,
     private val token: String,
     val model: TutorModel,
+    val telemetry: UsageTelemetry? = null,
 ) {
     init { validateCoachBaseUrl(baseUrl); model.bindDevice(deviceId) }
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
@@ -46,41 +47,58 @@ class TutorClient(
     init { model.resumeSender = { id -> send(resumeFrame(id)) } }
     private fun resumeFrame(id: String) = buildJsonObject { put("t", "msg.resume"); put("msg", id) }
 
+    init {
+        model.addTtftReporter { sample -> send(buildJsonObject {
+            put("t", "client.ttft"); put("threadId", sample.threadId); put("msg", sample.messageId)
+            put("kind", sample.kind); put("ms", sample.ms); put("model", sample.model); put("fallback", sample.fallback)
+            put("courseId", sample.courseId)
+        }) }
+    }
+
     // Handshake nonce initialization can block; keep CPU workers free on two-core Android devices.
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
+        telemetry?.record("open")
+        val reporting = telemetry?.start(this)
         var backoff = 250L
-        while (isActive) {
-            val queue = Channel<String>(capacity = 64)
-            try {
-                http.webSocket(urlString = url) {
-                    live = queue
-                    model.onConnection(true)
-                    backoff = 250
-                    // The stream may have finished while the network was absent. Request its
-                    // authoritative snapshot before consuming new deltas on this connection.
-                    model.unfinishedMessageIds().forEach { id ->
-                        send(Frame.Text(resumeFrame(id).toString()))
-                        model.noteResumeSent(id)
+        try {
+            while (isActive) {
+                val queue = Channel<String>(capacity = 64)
+                try {
+                    http.webSocket(urlString = url) {
+                        live = queue
+                        telemetry?.record("reconnect", "connection")
+                        model.onConnection(true)
+                        backoff = 250
+                        // The stream may have finished while the network was absent. Request its
+                        // authoritative snapshot before consuming new deltas on this connection.
+                        model.unfinishedMessageIds().forEach { id ->
+                            send(Frame.Text(resumeFrame(id).toString()))
+                            model.noteResumeSent(id)
+                        }
+                        val sender = launch { for (text in queue) send(Frame.Text(text)) }
+                        // 补发没发出去/没等到快照的续传，并对长时间无帧的消息主动对一次快照。
+                        val ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
+                        try {
+                            for (frame in incoming) if (frame is Frame.Text) {
+                                model.onFrame(frame.readText())
+                            }
+                        } finally { sender.cancel(); ticker.cancel() }
                     }
-                    val sender = launch { for (text in queue) send(Frame.Text(text)) }
-                    // 补发没发出去/没等到快照的续传，并对长时间无帧的消息主动对一次快照。
-                    val ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
-                    try {
-                        for (frame in incoming) if (frame is Frame.Text) model.onFrame(frame.readText())
-                    } finally { sender.cancel(); ticker.cancel() }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    telemetry?.record("error", "network")
+                    // 下面统一标记离线并退避重连
+                } finally {
+                    live = null
+                    queue.close()
+                    telemetry?.record("disconnect", "connection")
+                    model.onConnection(false)
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // 下面统一标记离线并退避重连
-            } finally {
-                live = null
-                queue.close()
-                model.onConnection(false)
+                delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(3_000)
             }
-            delay(backoff)
-            backoff = (backoff * 2).coerceAtMost(3_000)
-        }
+        } finally { reporting?.cancel() }
     }
 
     fun close() { http.close() }
@@ -88,7 +106,18 @@ class TutorClient(
     private companion object { const val RESUME_TICK_MS = 1_000L }
 
     /** 发出一帧；没有在线连接返回 false。 */
-    fun send(frame: JsonObject): Boolean = live?.trySend(frame.toString())?.isSuccess == true
+    fun send(frame: JsonObject): Boolean {
+        val target = when ((frame["t"] as? JsonPrimitive)?.content) {
+            "tutor.open" -> "open_kp"; "tutor.next" -> "next"; "tutor.test" -> "test"
+            "msg.ask" -> "ask"; "tutor.answer" -> "answer"; "msg.cancel" -> "cancel"
+            "tutor.settings" -> "settings"; "tutor.explain" -> "explain"; "quick.ask" -> "quick_ask"
+            else -> "unknown"
+        }
+        if (target != "open_kp") telemetry?.record("tap", target)
+        val sent = live?.trySend(frame.toString())?.isSuccess == true
+        if (!sent) telemetry?.record("error", "connection")
+        return sent
+    }
 
     // ---- 协议帧（与 server `LedgerRoutes` 的 tutor.* / msg.* 对应） ----
 

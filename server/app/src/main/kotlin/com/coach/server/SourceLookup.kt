@@ -94,21 +94,33 @@ class SourceCitationGate(private val anchors: Map<String,String>) {
  * Unlike the general subscription-CLI profile this profile denies home, network and all writes.
  */
 class SourceReadSandbox {
-    fun read(pack: SourcePack): SourcePack {
+    fun read(pack: SourcePack, onProcess: (Process?) -> Unit = {}): SourcePack {
         check(System.getProperty("os.name").startsWith("Mac")) { "Source sandbox unavailable; lookup disabled" }
         val dir = Files.createTempDirectory("coach-source-").toRealPath()
+        val reader = java.util.concurrent.Executors.newSingleThreadExecutor()
         try {
             val files = pack.pages.mapIndexed { i, p -> dir.resolve("page-$i").also { Files.writeString(it,p.text) } }
             val read = files.map { file ->
                 val process = ProcessBuilder(command(listOf(file),listOf(file))).redirectError(ProcessBuilder.Redirect.DISCARD).start()
-                // Drain while cat writes; UTF-8 for one bounded page cannot exceed 160K bytes.
-                val bytes = process.inputStream.readNBytes(160_001)
-                if (!process.waitFor(2,TimeUnit.SECONDS)) { process.destroyForcibly(); error("Source read timeout") }
-                check(process.exitValue() == 0 && bytes.size <= 160_000) { "Source read denied" }
-                bytes.decodeToString()
+                onProcess(process)
+                val drain = reader.submit<ByteArray> { process.inputStream.readNBytes(160_001) }
+                try {
+                    // Drain concurrently, with a deadline covering both the pipe and process exit.
+                    val bytes = drain.get(1,TimeUnit.SECONDS)
+                    check(process.waitFor(1,TimeUnit.SECONDS) && process.exitValue() == 0 && bytes.size <= 160_000) { "Source read denied" }
+                    bytes.decodeToString()
+                } finally {
+                    if (process.isAlive) process.destroyForcibly()
+                    process.waitFor(1,TimeUnit.SECONDS)
+                    process.inputStream.close()
+                    drain.cancel(true)
+                    onProcess(null)
+                }
             }
             return SourcePack(pack.pages.zip(read) { p, text -> p.copy(text=text) })
         } finally {
+            reader.shutdownNow()
+            reader.awaitTermination(1,TimeUnit.SECONDS)
             Files.walk(dir).use { files -> files.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
         }
     }

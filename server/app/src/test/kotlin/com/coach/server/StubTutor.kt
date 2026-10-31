@@ -13,6 +13,7 @@ class StubTutor : AutoCloseable {
 
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     private val replies = ArrayDeque<Triple<String, Long, Int>>()
+    private val executor = java.util.concurrent.Executors.newCachedThreadPool()
     @Volatile var framesWritten = 0
     @Volatile var aborted = false
     @Volatile var requests = 0
@@ -25,7 +26,7 @@ class StubTutor : AutoCloseable {
             exchange.sendResponseHeaders(200, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }
-        server.executor = java.util.concurrent.Executors.newCachedThreadPool()
+        server.executor = executor
         server.start()
     }
 
@@ -74,6 +75,7 @@ class StubTutor : AutoCloseable {
 
     override fun close() {
         server.stop(0)
+        executor.shutdownNow()
     }
 
     companion object {

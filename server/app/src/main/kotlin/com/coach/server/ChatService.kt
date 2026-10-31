@@ -85,6 +85,7 @@ class ChatService(
     ) {
         @Volatile var phase: String = "teach"
         @Volatile var lookupAllowed: Boolean = false
+        @Volatile var sourceProcess: Process? = null
         @Volatile var handle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
         @Volatile var forcedReason: String? = null
@@ -100,6 +101,7 @@ class ChatService(
             forcedStatus = status
             forcedReason = reason
             handle?.cancel()
+            sourceProcess?.destroyForcibly()
         }
 
         fun attach(handle: BridgeStreamHandle) {
@@ -385,13 +387,16 @@ class ChatService(
         try {
             val health = bridge.health()
             val rate = health?.get("rate_limit") as? JsonObject
-            if (health == null || rate?.str("all_paused") == "true" || rate?.str("background_paused") == "true" ||
+            if (health == null || rate == null || rate.str("all_paused") == "true" || rate?.str("background_paused") == "true" ||
                 rate?.str("status")?.takeIf { it.isNotBlank() && it != "null" }?.let { it !in setOf("allowed","ok") } == true) {
                 failure = "source_quota_protected"
                 return
             }
             val hits = actor.execute { searchSourcePages(session.courseId,query) }
-            val pack = SourceReadSandbox().read(SourcePack.prepare("",hits))
+            val pack = SourceReadSandbox().read(SourcePack.prepare("",hits)) { process ->
+                session.sourceProcess = process
+                if (session.forcedStatus != null) process?.destroyForcibly()
+            }
             if (pack.pages.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
                 failure = "source_unavailable"
                 return

@@ -70,10 +70,14 @@ fun main(): Unit = runBlocking {
             if (enabled) for ((i,case) in questions.withIndex()) {
                 val (label,q,p)=case
                 val outside=i>=10
-                val hits=actor.execute { searchSourcePages("c",q) }
-                require(hits.isNotEmpty())
+                val hits=actor.execute { searchSourcePages("c",q.removePrefix("Explain ")) }
+                val (anchor,quote) = SourcePack.prepare("",hits).pages.mapIndexedNotNull { index,page ->
+                    Regex("[A-Za-z][A-Za-z ,;:()0-9-]{7,120}").findAll(page.text)
+                        .firstOrNull { !com.coach.core.TutorOutputGuard.referencesLetter(it.value) }
+                        ?.let { "S${index+1}" to it.value.trim() }
+                }.first()
                 stub.stream(1,"Initial." + if(outside) "【需查原文:${q.removePrefix("Explain ")}】" else "",StubTutor.terminal("complete"),StubTutor.DONE)
-                if(outside) stub.stream(1,"Verified source.【S1】\n\n","“invented quotation”【S1】\n\n",StubTutor.terminal("complete"),StubTutor.DONE)
+                if(outside) stub.stream(1,"“$quote”【$anchor】\n\n","“invented quotation”【S1】\n\n",StubTutor.terminal("complete"),StubTutor.DONE)
                 val text=await(chat.ask("mixed-$label","c",q,if(outside) "Unrelated preparation page." else p.text))
                 check(!text.contains("invented") && !text.contains("需查原文"))
                 check(text.contains("补充") == outside)

@@ -152,7 +152,7 @@ private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolea
             }
             // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
             if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
-                Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -165,7 +165,7 @@ internal const val FORMULA_FAILED_INLINE_NOTE = "句子里带 ⟦ ⟧ 的是没�
 @Composable
 private fun FailedFormula(tex: String) {
     Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(FORMULA_FAILED_BLOCK_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(FORMULA_FAILED_BLOCK_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             Text(tex.trim(), Modifier.background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small).padding(horizontal = 10.dp, vertical = 8.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
         }

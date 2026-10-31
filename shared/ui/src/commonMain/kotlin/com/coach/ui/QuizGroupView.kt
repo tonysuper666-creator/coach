@@ -55,26 +55,34 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             card.options.forEach { (letter, text) ->
                 val isMine = shown == letter
                 val cardGrade = card.grade
+                // After a wrong answer the right option is marked the same way a right answer is (green frame and ✓), so nobody has to hunt for it.
+                val isRight = cardGrade != null && !cardGrade.correct && correctLetterOf(cardGrade.feedback) == letter
+                val wrongPick = cardGrade != null && !cardGrade.correct && isMine
                 val border = when {
                     cardGrade != null && isMine -> if (cardGrade.correct) successColor() else MaterialTheme.colorScheme.error
+                    isRight -> successColor()
                     isMine -> MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.outlineVariant
                 }
                 Surface(
                     shape = MaterialTheme.shapes.small,
-                    border = BorderStroke(if (isMine) 2.dp else 1.dp, border),
-                    color = if (isMine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(if (isMine || isRight) 2.dp else 1.dp, border),
+                    color = when {
+                        wrongPick -> MaterialTheme.colorScheme.errorContainer
+                        isMine -> MaterialTheme.colorScheme.primaryContainer
+                        else -> MaterialTheme.colorScheme.surface
+                    },
                     modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT).selectable(selected = isMine, enabled = !locked, role = Role.RadioButton) { onSelect(letter) },
                 ) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if (isMine && card.grade == null) "✓ $letter" else letter, style = MaterialTheme.typography.titleMedium)
+                        Text(if ((isMine && card.grade == null) || isRight || (isMine && card.grade?.correct == true)) "✓ $letter" else if (wrongPick) "✗ $letter" else letter, style = MaterialTheme.typography.titleMedium)
                         Box(Modifier.weight(1f)) { Markdown(text, true, "o:${card.attemptId}:$letter", math) }
                     }
                 }
             }
             card.grade?.let { grade ->
                 Text(
-                    (if (grade.correct) "✓ 答对了" else "✗ 答错了") + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty(),
+                    verdictText(grade),
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (grade.correct) successColor() else MaterialTheme.colorScheme.error,
                 )
@@ -83,10 +91,16 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
     }
 }
 
-/** The verdict already says right or wrong; keep the server's feedback only when it adds something (not "回答正确（B）" again). */
-internal fun extraFeedback(feedback: String): String? {
-    val text = feedback.trim()
-    if (text.isEmpty()) return null
-    val bare = text.trimEnd('。', '.', '！', '!').replace(Regex("[（(][A-Za-z][)）]$"), "").trim()
-    return if (bare in setOf("回答正确", "回答错误", "正确", "错误", "答对了", "答错了")) null else text
+/** The server's stock wrong-answer sentence ("回答错误，正确答案是 B。", from `choiceFeedback`) names the right letter; the card uses it to mark that option. */
+internal fun correctLetterOf(feedback: String): String? = Regex("正确答案(?:是|为)\\s*([A-Za-z])").find(feedback)?.groupValues?.get(1)?.uppercase()
+
+/** One line, no repeats: "✓ 答对了", "✗ 答错了，正确答案是 B", plus the server's feedback only when it says something more. */
+internal fun verdictText(grade: CardGrade): String {
+    if (grade.correct) return "✓ 答对了" + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty()
+    val letter = correctLetterOf(grade.feedback)
+    return "✗ 答错了" + letter?.let { "，正确答案是 $it" }.orEmpty() + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty()
 }
+
+/** The verdict already says right or wrong; keep the server's feedback only when it adds something (not "回答正确（B）" or "回答错误，正确答案是 B。" again). */
+internal fun extraFeedback(feedback: String): String? =
+    feedback.trim().replace(Regex("^回答(?:正确（[A-Za-z]）|正确|错误)[，,]?\\s*(?:正确答案(?:是|为)\\s*[A-Za-z])?[。.！!]?\\s*"), "").trim().ifEmpty { null }

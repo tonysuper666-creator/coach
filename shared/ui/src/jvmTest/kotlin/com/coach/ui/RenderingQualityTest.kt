@@ -128,3 +128,19 @@ class VerdictCopyTest {
         assertEquals("需求缺乏弹性，因为 |ε|<1", com.coach.ui.extraFeedback("需求缺乏弹性，因为 |ε|<1"))
     }
 }
+
+class WrongAnswerCopyTest {
+    private val letters = mapOf("o1" to "A", "o2" to "B", "o3" to "C")
+
+    @Test fun theCardNamesTheRightOptionFromTheServerSentence() {
+        val feedback = com.coach.domain.choiceFeedback("o2", "A", letters)
+        assertEquals("B", com.coach.ui.correctLetterOf(feedback))
+        assertNull(com.coach.ui.correctLetterOf(com.coach.domain.choiceFeedback("o2", "B", letters)))
+        assertEquals("✗ 答错了，正确答案是 B", com.coach.ui.verdictText(com.coach.client.CardGrade(false, 0, 1, feedback)))
+        assertEquals("✓ 答对了", com.coach.ui.verdictText(com.coach.client.CardGrade(true, 1, 1, com.coach.domain.choiceFeedback("o2", "B", letters))))
+    }
+    @Test fun extraExplanationIsKeptAfterTheVerdict() {
+        val grade = com.coach.client.CardGrade(false, 0, 1, "回答错误，正确答案是 C。需求缺乏弹性，因为 |ε|<1")
+        assertEquals("✗ 答错了，正确答案是 C：需求缺乏弹性，因为 |ε|<1", com.coach.ui.verdictText(grade))
+    }
+}

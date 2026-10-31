@@ -34,19 +34,23 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
     /** Newest item key seen, and whether the reader was at the tail when a newer item arrived (the list keeps the old first item on screen, hiding the new one). */
     internal var newestKey: Any? = null
     internal var followNewest = false
+    internal var newestFirstKeys: List<Any> = emptyList()
 
     /** The reader sent something or asked for "回到最新": follow the tail again. */
     suspend fun scrollToTail() { anchor.pinned = true; list.scrollToItem(0, 0) }
 
     /**
      * Bring the top of the item with [key] to the top of the viewport (a new question group is read from question 1).
-     * Taller than the viewport: scroll past its bottom edge; shorter: it simply sits at the tail.
+     * The list is laid out from the bottom, so the item's offset is how far its bottom edge sits above (positive: below) the viewport bottom.
      */
     suspend fun scrollItemTopIntoView(key: Any) {
+        val index = newestFirstKeys.indexOf(key).takeIf { it >= 0 } ?: return
+        // The item may be far outside the measured window: bring it into view first, then read its real size.
+        list.scrollToItem(index, 0)
+        val size = androidx.compose.runtime.snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
         val info = list.layoutInfo
-        val item = info.visibleItemsInfo.firstOrNull { it.key == key } ?: return
         val viewport = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding
-        if (item.size > viewport) list.scrollToItem(item.index, item.size - viewport)
+        list.scrollToItem(index, size - viewport)
     }
 }
 
@@ -71,6 +75,7 @@ fun <T> AnchoredChatList(
     val list = state.list
     val anchor = state.anchor
     val newestFirst = remember(items) { items.asReversed() }
+    state.newestFirstKeys = remember(newestFirst) { newestFirst.map(key) }
     val currentItems by rememberUpdatedState(newestFirst)
     val currentKey by rememberUpdatedState(key)
     // A new item arrives at index 0. Lazy lists keep the previously first item on screen, so a reader at the tail would be left looking

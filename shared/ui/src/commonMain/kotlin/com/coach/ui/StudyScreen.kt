@@ -12,12 +12,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
-import com.coach.ui.input.EnterGate
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
+import com.coach.ui.input.EnterGate
 
 /** 阅读栏最大宽度：内屏/桌面宽窗口下正文不拉成一整行。 */
 private val READING_WIDTH = 760.dp
@@ -34,7 +34,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by remember(kp.id) { mutableStateOf(false) }
     var pinned by remember(kp.id) { mutableStateOf(true) }
-    var followingOutput by remember(kp.id) { mutableStateOf(false) }
+    val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
@@ -42,6 +42,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         pinned = true
         focus.clearFocus()
         if (!open()) return fail()
+        pinned = true
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
         if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
     }
@@ -49,6 +50,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         if (draft.composition != null || (fromIme && !enterGate.shouldSend(true, true, false, false))) return
         val text = draft.text.trim()
         if (text.isEmpty() || tv.busy || !ui.connected) return
+        // 发出后收起键盘：回答和「下一步 / 出题」按钮马上可见。
+        focus.clearFocus()
         if (!open()) return fail()
         pinned = true
         c.tutor.model.onSent(thread, "ask", text)
@@ -78,34 +81,34 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         HorizontalDivider()
 
         val listState = rememberLazyListState()
-        // 钉底：停在底部时，流式内容增长会跟着走；用户往上翻就松开，翻回底部再钉住。
-        LaunchedEffect(listState) {
-            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling && !followingOutput) pinned = !canForward }
-        }
-        val lastLength = (tv.items.lastOrNull() as? ChatItem.Tutor)?.message?.text?.length ?: 0
-        LaunchedEffect(tv.items.size, lastLength) {
-            if (pinned && tv.items.isNotEmpty()) {
-                // A follow-up can arrive after a graded group. Keep its text visible
-                // instead of scrolling past it into the older question cards.
-                followingOutput = true
-                try {
-                    androidx.compose.runtime.withFrameNanos { }
-                    val index = tv.items.lastIndex
-                    val layout = listState.layoutInfo
-                    val height = layout.viewportEndOffset - layout.viewportStartOffset
-                    val item = layout.visibleItemsInfo.firstOrNull { it.index == index }
-                    listState.scrollToItem(index, maxOf(0, (item?.size ?: 0) - height))
-                } finally { followingOutput = false }
+        // 讲解/追问消息和题组按「发生的先后」交错：消息出现时记下当时已有几组题，排在那几组之后。
+        val anchors = remember(kp.id) { HashMap<String, Int>() }
+        val rows = remember(tv.items, groups) {
+            val placed = tv.items.map { item -> item to anchors.getOrPut(item.key) { groups.size } }
+            buildList<StudyRow> {
+                for (g in 0..groups.size) {
+                    placed.filter { it.second == g }.forEach { add(StudyRow.Message(it.first)) }
+                    groups.getOrNull(g)?.let { add(StudyRow.Group(it)) }
+                }
             }
         }
-        LaunchedEffect(tv.poolText, tv.error, tv.notice) {
-            if (pinned && listOf(tv.poolText, tv.error, tv.notice).any { it != null } && listState.layoutInfo.totalItemsCount > 0) {
+        // 钉底：停在底部时，流式内容增长会跟着走；用户往上翻就松开，翻回底部再钉住。
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling) pinned = !canForward }
+        }
+        val lastLength = (tv.items.lastOrNull() as? ChatItem.Tutor)?.message?.text?.length ?: 0
+        LaunchedEffect(tv.items.size, lastLength, tv.poolText, tv.error, tv.notice, c.math.assets.size) {
+            // 刚打开且有待答题组时不要跳到底：让「新题组出现」那条把第 1 题放在最上面。
+            if (pinned && (tv.streaming || pending == null) && listState.layoutInfo.totalItemsCount > 0) {
+                androidx.compose.runtime.withFrameNanos { }
                 listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                listState.scrollBy(1_000_000f)
             }
         }
         // 新题组出现时把它的开头放在最上面，方便从第 1 题读起。
         LaunchedEffect(groups.size) {
-            if (groups.isNotEmpty()) listState.animateScrollToItem(tv.items.size + groups.size - 1)
+            val index = rows.indexOfLast { it is StudyRow.Group }
+            if (index >= 0) listState.animateScrollToItem(index)
         }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth().widthIn(max = READING_WIDTH),
@@ -117,14 +120,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            items(tv.items, key = { it.key }) { item ->
-                when (item) {
-                    is ChatItem.Learner -> LearnerBubble(item.text)
-                    is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
+            items(rows, key = { it.key }) { row ->
+                when (row) {
+                    is StudyRow.Message -> when (val item = row.item) {
+                        is ChatItem.Learner -> LearnerBubble(item.text)
+                        is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
+                    }
+                    is StudyRow.Group -> QuizGroupView(row.group, kp, c, view, thread) { c.tutor.model.onSent(thread, "answer", null) }
                 }
-            }
-            items(groups, key = { "g:${it.groupId}" }) { group ->
-                QuizGroupView(group, kp, c, view, thread) { c.tutor.model.onSent(thread, "answer", null) }
             }
             tv.notice?.let { text -> item { Text(text, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium) } }
             tv.poolText?.let { text -> item { ProgressLine(text) } }
@@ -137,12 +140,18 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary,
             )
             val sample = ui.ttft.lastOrNull { it.threadId == thread }
-            if (sample != null) Text(
+            if (sample != null && !imeOpen) Text(
                 "上一条首字 ${sample.ms / 100 / 10.0} 秒",
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                val nextText = tv.nextLabel ?: if (kp.explained || tv.items.isNotEmpty()) "下一步" else "开始讲解"
+            // 键盘弹出时收起两个大按钮，把空间让给对话。
+            if (!imeOpen) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                // 服务端只在需要时给特殊文字（「换个例子再讲」）；还没讲过、线程里什么都没有时按钮就叫「开始讲解」。
+                val nextText = when {
+                    tv.nextLabel == "换个例子再讲" -> "换个例子再讲"
+                    !kp.explained && tv.items.isEmpty() && groups.isEmpty() -> "开始讲解"
+                    else -> "下一步"
+                }
                 Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy && pending == null,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy && pending == null,
@@ -167,6 +176,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             }
         }
     }
+}
+
+private sealed interface StudyRow {
+    val key: String
+    data class Message(val item: ChatItem) : StudyRow { override val key get() = item.key }
+    data class Group(val group: QuizGroup) : StudyRow { override val key get() = "g:${group.groupId}" }
 }
 
 @Composable

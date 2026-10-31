@@ -146,7 +146,8 @@ class TutorModel(
             is ChatUpdate.Progress -> changeMessage(update.messageId) { copy(thinking = update.phase == "thinking" && text.isEmpty()) }
             is ChatUpdate.Ended -> {
                 val final = assembler.text(update.messageId)
-                changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, text = if (final.isNotEmpty()) final else text) }
+                // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
+                changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
                 if (update.reason != "rate_limited") messageThread[update.messageId]?.let { pendingSend.remove(it) }
             }
         }

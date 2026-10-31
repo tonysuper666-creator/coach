@@ -50,8 +50,8 @@ fun MathAssets(http: com.coach.client.MathHttp) = MathAssets { tex, display ->
 
 fun threadIdFor(kpId: String) = "kp:$kpId"
 
-/** 两栏布局的起点宽度：Fold8 内屏（约 960dp 宽）走两栏，外屏（约 624dp 宽）走单栏。 */
-val WIDE_LAYOUT_MIN_WIDTH = 840.dp
+/** 两栏布局的起点宽度（Material 的 medium/expanded 分界附近）：Fold8 内屏走两栏，外屏走单栏。 */
+val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 
 @Composable
 fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null) {
@@ -68,10 +68,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val current = view
                 val target = open?.let { (id, _) -> current?.kp(id) }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    if (maxWidth >= WIDE_LAYOUT_MIN_WIDTH) {
+                    val totalWidth = maxWidth
+                    if (totalWidth >= WIDE_LAYOUT_MIN_WIDTH) {
                         // 宽屏：左边今天/知识点，右边学习线程；点「继续」直接在右栏开讲。
                         Row(Modifier.fillMaxSize()) {
-                            Box(Modifier.width(380.dp).fillMaxHeight()) {
+                            Box(Modifier.width((totalWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) {
                                 TodayScreen(c, current, ui, selectedKpId = target?.id) { id, start -> open = id to start }
                             }
                             VerticalDivider()

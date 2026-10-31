@@ -9,10 +9,12 @@ import java.nio.file.*
 import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
+import java.util.logging.Logger
 import kotlin.random.Random
 
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 private val idRandom = java.security.SecureRandom()
+private val ledgerLogger = Logger.getLogger(LedgerStore::class.java.name)
 private fun uid() = ulid(System.currentTimeMillis(),ByteArray(10).also(idRandom::nextBytes))
 data class Fence(val epoch: String, val value: Long, val id: String)
 data class PairedDevice(val id: String, val name: String, val createdAt: Long, val revokedAt: Long?)
@@ -278,15 +280,34 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if(type=="question_key_changed") sql("UPDATE questions SET key_state=? WHERE question_id=? AND course_id=?",payload.str("keyState"),payload.str("questionId"),course)
         sql("DELETE FROM projection_cache WHERE course_id=?",course)
         if (type in setOf("attempt_graded","grade_reviewed","legacy_passed","kp_overridden")) {
-            // Learning facts and the resulting supply job commit together. Use only a previously supplied source pack.
+            // Validate/project the learning fact as before; only the optional supply work is best-effort.
             val passed=projection(course).mastery.filterValues { it.passed }.keys
+            enqueuePassedConstructedSupply(course,passed)
+        }
+        return e
+    }
+
+    private fun enqueuePassedConstructedSupply(course: String, passed: Set<String>) {
+        val savepoint=try { connection.setSavepoint() } catch (error: Exception) {
+            ledgerLogger.warning("Constructed supply skipped: savepoint unavailable (${error.javaClass.simpleName})")
+            return
+        }
+        try {
+            // Only previously supplied packs qualify. Skip invalid legacy packs before selecting the latest per KP.
             val sources=query("SELECT subject FROM jobs WHERE kind='gen_mcq' AND json_valid(subject) AND json_extract(subject,'$.course')=? ORDER BY created_at DESC,rowid DESC",course) {
                 LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
+            }.filter { source ->
+                val valid=source.str("kp").isNotBlank() && source.str("objective").isNotBlank() && source.str("excerpt").isNotBlank()
+                if (!valid) ledgerLogger.warning("Constructed supply skipped: invalid source")
+                valid
             }.distinctBy { it.str("kp") }
             for (source in sources) if (source.str("kp") in passed)
                 enqueueConstructedInTransaction(course,source.str("kp"),source.str("objective"),source.str("excerpt"))
-        }
-        return e
+        } catch (error: Exception) {
+            // A failed INSERT may already have made partial changes. Never commit those or undo the fact.
+            connection.rollback(savepoint)
+            ledgerLogger.warning("Constructed supply skipped: hook failed (${error.javaClass.simpleName})")
+        } finally { connection.releaseSavepoint(savepoint) }
     }
     fun registerQuestion(id: String, course: String, fingerprint: String, format: String, stem: String,
         keyState: String, correctOptionId: String? = null, options: List<Option> = emptyList(),
@@ -641,7 +662,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     /** All supply mutations use the same actor/connection as learning facts. */
     fun enqueueSupply(course: String, kp: String, objective: String, excerpt: String, background: Boolean = false): String = transaction {
-        require(course.isNotBlank() && course != "__system__" && kp.isNotBlank() && excerpt.isNotBlank())
+        require(course.isNotBlank() && course != "__system__" && kp.isNotBlank() && objective.isNotBlank() && excerpt.isNotBlank())
         val hash = sha256((objective + "\u0000" + excerpt).toByteArray(Charsets.UTF_8))
         val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash && it.kind in setOf("gen_mcq","blind_review") }
         active?.id ?: enqueueJob("gen_mcq", json("course" to course, "kp" to kp, "objective" to objective,

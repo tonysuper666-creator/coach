@@ -45,6 +45,23 @@ class LedgerStoreTest {
     private inner class JsonSnapshot(val attempt: String="attempt",val question: String="q") {
         fun payload()=json("attemptId" to attempt,"questionId" to question,"fingerprint" to questionFingerprint("Synthetic choice", options),"kpIds" to listOf("kp"),"purpose" to "PRACTICE","policyVersion" to 1,"groupId" to "synthetic-group", "letterMap" to frozenMap, "format" to "SINGLE_CHOICE")
     }
+    @Test fun invalidLegacySupplyCannotRollbackAnswerCommandOrItsGrade() {
+        val dir=Files.createTempDirectory("coach-command-invalid-supply-")
+        try {
+            LedgerStore(dir).use { db ->
+                db.registerQuestion("q","course","q","SINGLE_CHOICE","Synthetic choice","VERIFIED","one",options)
+                db.append("course","legacy_passed",json("kpId" to "kp"))
+                db.enqueueJob("gen_mcq",json("course" to "course","kp" to "kp","objective" to "","excerpt" to "source text").toString(),"legacy-pack")
+                assertEquals("OK",db.command(wire("with-invalid-supply")).status)
+                assertEquals("DUPLICATE",db.command(wire("with-invalid-supply")).status)
+            }
+            LedgerStore(dir).use { db ->
+                assertEquals(1,db.events("course").count { it.type=="answer_submitted" })
+                assertEquals(1,db.events("course").count { it.type=="attempt_graded" })
+                assertTrue(db.supplyJobs().none { it.kind=="gen_constructed" })
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
     @Test fun commandsAreAtomicIdempotentAndCrossDeviceConflictsRetainText() {
         val dir=Files.createTempDirectory("coach-command-")
         try { LedgerStore(dir).use { db ->

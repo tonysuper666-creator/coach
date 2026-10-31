@@ -4,6 +4,7 @@ import com.coach.domain.math.MathSegment
 
 private fun isCjk(c: Char?) = c != null && (c in '㐀'..'鿿' || c in '　'..'〿' || c in '＀'..'￯')
 private val sentenceEnd = "。！？：；.!?:;"
+private val closingPunctuation = "，。、；：！？,.;:!?)）】」』”"
 
 /**
  * Model text often puts a `$$…$$` formula in the middle of a sentence ("医疗支出为 $$5$$ 美元"). A display formula gets its own
@@ -20,7 +21,9 @@ internal fun layoutMathSegments(tokens: List<MathSegment>): List<MathSegment> {
         val after = out.getOrNull(i + 1)?.text?.trimStart(' ', '\t')
         val standsInSentence = !before.isNullOrEmpty() && !before.endsWith("\n") && before.last() !in sentenceEnd &&
             !after.isNullOrEmpty() && !after.startsWith("\n")
-        if (standsInSentence) out[i] = s.copy(display = false)
+        // A formula followed straight by punctuation ("…=250" then "。") keeps the punctuation on its line instead of orphaning it.
+        val punctuationFollows = out.getOrNull(i + 1)?.text?.trimStart()?.firstOrNull()?.let { it in closingPunctuation } == true
+        if (standsInSentence || punctuationFollows) out[i] = s.copy(display = false)
     }
     for (i in out.indices) {
         val s = out[i]
@@ -32,7 +35,8 @@ internal fun layoutMathSegments(tokens: List<MathSegment>): List<MathSegment> {
             val prevDisplay = out[i - 1].display
             val stripped = t.trimStart(' ', '\t')
             // Text after a display formula starts a fresh line; after an inline one only a space next to CJK is stray.
-            t = if (prevDisplay) t.trimStart() else if (isCjk(stripped.firstOrNull())) stripped else t
+            val closes = t.trimStart().firstOrNull()?.let { it in closingPunctuation } == true
+            t = if (prevDisplay || closes) t.trimStart() else if (isCjk(stripped.firstOrNull())) stripped else t
         }
         if (nextMath) {
             val nextDisplay = out[i + 1].display

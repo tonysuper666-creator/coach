@@ -31,6 +31,10 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
     /** True until the first restore has run, so the initial (0,0) position never overwrites a stored anchor. */
     internal var restoring = true
 
+    /** Newest item key seen, and whether the reader was at the tail when a newer item arrived (the list keeps the old first item on screen, hiding the new one). */
+    internal var newestKey: Any? = null
+    internal var followNewest = false
+
     /** The reader sent something or asked for "回到最新": follow the tail again. */
     suspend fun scrollToTail() { anchor.pinned = true; list.scrollToItem(0, 0) }
 
@@ -69,10 +73,26 @@ fun <T> AnchoredChatList(
     val newestFirst = remember(items) { items.asReversed() }
     val currentItems by rememberUpdatedState(newestFirst)
     val currentKey by rememberUpdatedState(key)
+    // A new item arrives at index 0. Lazy lists keep the previously first item on screen, so a reader at the tail would be left looking
+    // at the old item with the new one below the edge: remember that they were following, and bring the tail back after layout.
+    val newest = items.lastOrNull()?.let(key)
+    // Plain fields, set before the effect below starts and idempotent per key, so a repeated composition changes nothing.
+    if (newest != state.newestKey) {
+        state.followNewest = state.newestKey != null && anchor.pinned
+        state.newestKey = newest
+    }
+    LaunchedEffect(newest) {
+        if (state.followNewest) {
+            androidx.compose.runtime.withFrameNanos { }
+            list.scrollToItem(0, 0)
+            anchor.pinned = true
+            state.followNewest = false
+        }
+    }
     // Record the reading place. Any move that is not our own restore is the reader's (drag, fling, jump, "回到最新").
     LaunchedEffect(state) {
         snapshotFlow { list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset }.collect { (index, offset) ->
-            if (state.restoring) return@collect
+            if (state.restoring || state.followNewest) return@collect
             anchor.pinned = index == 0 && offset == 0
             // The first *visible* item: content padding can leave an extra measured item before it in visibleItemsInfo.
             val first = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }

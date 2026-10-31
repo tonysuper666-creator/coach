@@ -21,12 +21,12 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = 680.dp
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null) {
     val thread = threadIdFor(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
     val pending = groups.lastOrNull { !it.submitted }
-    var draft by remember(kp.id) { mutableStateOf(TextFieldValue("")) }
+    var draft by remember(kp.id) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
     val enterGate = remember(kp.id) { EnterGate() }
     val focus = LocalFocusManager.current
     var opened by remember(kp.id) { mutableStateOf(false) }
@@ -81,10 +81,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     // 发送、点「下一步/出题」后回到底部继续跟随。
     LaunchedEffect(pinned) { if (pinned) { chat.scrollToTail(); pinned = false } }
     // 新题组出现时把它的开头放在最上面，方便从第 1 题读起（组比屏幕矮时它就停在底部）。
-    var seenGroups by remember(kp.id) { mutableStateOf(groups.size) }
+    var seenGroups by remember(kp.id) { mutableStateOf(0) }
     LaunchedEffect(groups.size) {
-        if (groups.size > seenGroups) {
-            withFrameNanos { }
+        // 新出现的组，或刚打开线程时还没答完的那组：从第 1 题读起。
+        if (groups.size > seenGroups && (pending != null || seenGroups > 0)) {
+            repeat(3) { withFrameNanos { } }
             chat.scrollItemTopIntoView("g:${groups.last().groupId}")
         }
         seenGroups = groups.size

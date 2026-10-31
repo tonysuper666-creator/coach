@@ -47,6 +47,11 @@ class MarkdownStructureTest {
         assertEquals("公式如下：⟦D:a+b⟧其中 a 是收入。", joined("公式如下：\n\n\$\$a+b\$\$\n\n 其中 a 是收入。").replace("\n", ""))
     }
 
+    @Test fun punctuationAfterAFormulaStaysOnItsLine() {
+        assertEquals("生病时最终收入：\n⟦I:x=250⟧。", joined("生病时最终收入：\n\$\$x=250\$\$\n。"))
+        assertEquals("未覆盖：⟦I:800-300=500⟧，所以是部分保险。", joined("未覆盖：\$\$800-300=500\$\$，所以是部分保险。"))
+    }
+
     @Test fun currencyDollarsAreNotFormulas() {
         val tokens = MathDelimiters.tokenize("价格是 \$100，另一件 \$200。", true).segments
         assertTrue(tokens.none { it.math != null })

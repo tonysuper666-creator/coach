@@ -55,8 +55,9 @@ fun threadIdFor(kpId: String) = "kp:$kpId"
 /** 两栏布局的起点宽度（Material 的 medium/expanded 分界附近）：Fold8 内屏走两栏，外屏走单栏。 */
 val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 
+/** [initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -69,7 +70,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     // The three panes are movable: when the window changes shape (Fold8 fold/unfold, Pad rotation, Mac resize) a pane that moves between the
     // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
     val todayPane = remember(c) { movableContentOf<TodayArgs> { a -> TodayScreen(c, a.view, a.ui, a.selectedKpId, a.onOpenReview, a.onOpen) } }
-    val studyPane = remember(c) { movableContentOf<StudyArgs> { a -> key(a.kp.id) { StudyScreen(c, a.kp, a.view, a.ui, a.autoStart, a.onBack) } } }
+    val studyPane = remember(c) { movableContentOf<StudyArgs> { a -> key(a.kp.id) { StudyScreen(c, a.kp, a.view, a.ui, a.autoStart, a.onBack, initialDraft) } } }
     val reviewPane = remember(c) { movableContentOf<ReviewArgs> { a -> ReviewScreen(c, a.view, a.onOpenKp, a.onBack) } }
     CoachTheme(dark ?: isSystemInDarkTheme()) {
         Surface(Modifier.fillMaxSize()) {

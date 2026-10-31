@@ -24,6 +24,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -136,9 +137,17 @@ class ChatService(
     }
 
     /** 追问/问答：立刻返回 messageId，流在后台推进（每帧经 [hub] 广播）。 */
-    suspend fun ask(threadId: String, courseId: String, question: String, pack: String = ""): String {
+    suspend fun ask(threadId: String, courseId: String, question: String, pack: String = "",
+        clientMsgId: String = UUID.randomUUID().toString(), device: String = "server"): String {
+        val saved = actor.execute { saveChatInput(courseId,threadId,question,device,clientMsgId) }
+        val user = actor.execute { chatInputFrame(saved.messageId) }
+        if (!saved.inserted) {
+            // A replay acknowledges the original send; it must not advance the tutor or call AI again.
+            hub.emit(user)
+            hub.emit(history(courseId,threadId))
+            return ""
+        }
         val quick = actor.execute { requireChatThread(courseId,threadId); isQuickThread(courseId,threadId) }
-        if (quick) actor.execute { quickQuestion(courseId,threadId,question) }
         progressIntent(question)?.let { intent ->
             val (message, today) = actor.execute {
                 tutorTransaction {
@@ -151,13 +160,15 @@ class ChatService(
             }
             val session = Session(message,threadId,courseId,"",false)
             hub.emit(JsonObject(startFrame(session) + json("source" to "projection","fromSeq" to today.fromSeq)))
+            hub.emit(user)
             hub.emit(json("t" to "msg.delta","msg" to message,"threadId" to threadId,"i" to 1,"text" to today.answer(intent)))
             hub.emit(endFrame(session,"complete",null,today.answer(intent).length))
             return message
         }
+        hub.emit(user)
         if (quick) {
             val anchor = actor.execute { snapshot(courseId).projection.quickAsks.values.single { it.threadId == threadId } }
-            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null)
+            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null,saved.messageId)
         }
         when (tutorIntent(question)) {
             TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack,allowExample=false)
@@ -165,13 +176,27 @@ class ChatService(
             null -> Unit
         }
         val plan = if (tutor.hasThread(courseId,threadId)) tutor.followup(courseId,threadId) else null
-        return startReply(threadId,courseId,question,pack,plan)
+        return startReply(threadId,courseId,question,pack,plan,saved.messageId)
     }
 
-    suspend fun quickAsk(courseId: String, question: String, pack: String = ""): Pair<QuickAskThread, String> {
-        val thread = actor.execute { openQuickAsk(courseId) }
+    suspend fun quickAsk(courseId: String, question: String, pack: String = "",
+        clientMsgId: String = UUID.randomUUID().toString(), device: String = "server"): Pair<QuickAskThread, String> {
+        val thread = actor.execute { quickAskForInput(courseId,device,clientMsgId) }
         hub.emit(json("t" to "quick.thread","threadId" to thread.threadId,"courseId" to courseId,"day" to thread.day,"kpId" to thread.kpId))
-        return thread to ask(thread.threadId,courseId,question,pack)
+        return thread to ask(thread.threadId,courseId,question,pack,clientMsgId,device)
+    }
+
+    suspend fun history(courseId: String, threadId: String): JsonObject {
+        val stored = actor.execute { chatHistory(courseId,threadId) }
+        val messages = (stored["messages"] as JsonArray).map { item ->
+            val row = item.jsonObject
+            val live = sessions[row.str("msg")]
+            if (live == null) row else {
+                val cursor = live.cursor
+                JsonObject(row + json("text" to cursor.text,"i" to cursor.index,"status" to "streaming","phase" to live.phase))
+            }
+        }
+        return JsonObject(stored + ("messages" to JsonArray(messages)))
     }
 
     suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String) {
@@ -269,14 +294,14 @@ class ChatService(
             "phase" to "pool_queued","text" to (outcome.poolMessage ?: "题池暂空，补题尚未运行")))
     }
 
-    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?): String {
+    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null): String {
         val messageId = UUID.randomUUID().toString()
         val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan)
         sessions[messageId] = session
-        val recent = actor.execute { recentTurns(threadId) }
+        val recent = actor.execute { recentTurns(threadId,beforeMessage=userMessageId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
         if(prepared!=null) { scope.launch { deliverPrepared(session,prepared.text) };return messageId }

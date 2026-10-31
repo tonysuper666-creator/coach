@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlin.time.TimeSource
@@ -29,7 +30,7 @@ data class TutorMessage(
 sealed interface ChatItem {
     val key: String
     data class Tutor(val message: TutorMessage) : ChatItem { override val key get() = "t:${message.id}" }
-    data class Learner(override val key: String, val text: String) : ChatItem
+    data class Learner(override val key: String, val text: String, val clientMsgId: String? = null, val createdAt: Long? = null, val deviceId: String? = null) : ChatItem
 }
 
 /** 客户端首字时间：从点按发出到共享消费端交付第一个非空正文/公式，毫秒。进度帧不算。 */
@@ -46,6 +47,7 @@ data class ThreadView(
     val poolPreparing: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
+    val historyLoaded: Boolean = false,
 ) {
     val streaming: Boolean get() = items.any { it is ChatItem.Tutor && !it.message.done }
     val busy: Boolean get() = streaming || poolPreparing || tutorState in BUSY_STATES
@@ -87,6 +89,9 @@ class TutorModel(
     private val messageThread = HashMap<String, String>()
     private val pendingSend = HashMap<String, Pair<String, TimeSource.Monotonic.ValueTimeMark>>()
     private val sampled = HashSet<String>()
+    private var localDeviceId: String? = null
+
+    fun bindDevice(device: String) = synchronized(lock) { localDeviceId = device }
 
     fun unfinishedMessageIds(): List<String> = state.value.threads.values.flatMap { thread ->
         thread.items.mapNotNull { (it as? ChatItem.Tutor)?.message?.takeUnless { message -> message.done }?.id }
@@ -144,10 +149,12 @@ class TutorModel(
     }
 
     /** 学习者自己发出的一句话，立刻进线程；同时开始计首字。 */
-    fun onSent(threadId: String, kind: String, learnerText: String?) = synchronized(lock) {
+    fun onSent(threadId: String, kind: String, learnerText: String?, clientMsgId: String? = null) = synchronized(lock) {
         pendingSend[threadId] = kind to TimeSource.Monotonic.markNow()
         mutateThread(threadId) {
-            val items = if (learnerText == null) items else items + ChatItem.Learner("l:${items.size}:${wallClock()}", learnerText)
+            val key = clientMsgId?.let { "l:$it" } ?: "l:${items.size}:${wallClock()}"
+            val items = if (learnerText == null || items.any { it.key == key || (it is ChatItem.Learner && it.clientMsgId == clientMsgId && it.deviceId == localDeviceId && clientMsgId != null) }) items
+                else items + ChatItem.Learner(key, learnerText,clientMsgId,deviceId=localDeviceId)
             copy(items = items, error = null, poolText = null, notice = null)
         }
     }
@@ -155,6 +162,12 @@ class TutorModel(
     fun onFailure(threadId: String, error: String) = synchronized(lock) {
         pendingSend.remove(threadId)
         mutateThread(threadId) { copy(error = error) }
+    }
+
+    /** A full/closed transport queue never accepted this send; leave no duplicate optimistic row. */
+    fun onSendRejected(threadId: String, clientMsgId: String) = synchronized(lock) {
+        pendingSend.remove(threadId)
+        mutateThread(threadId) { copy(items = items.filterNot { it.key == "l:$clientMsgId" }) }
     }
 
     fun onFrame(frame: String) {
@@ -169,6 +182,18 @@ class TutorModel(
         val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return
         _state.value = _state.value.copy(lastSeenAtMs = wallClock())
         when (obj.str("t")) {
+            "msg.user" -> onUserFrame(obj)
+            "msg.history" -> {
+                val thread = obj.str("threadId")
+                val ordered = (obj["messages"] as? JsonArray).orEmpty().map { it as JsonObject }
+                for (row in ordered) if (row.str("role") == "user") onUserFrame(row) else onMessageFrame(row,restoring=true)
+                val keys = ordered.map { (if (it.str("role") == "user") "l:" else "t:") + it.str("msg") }
+                mutateThread(thread) {
+                    val byKey = items.associateBy { it.key }
+                    copy(items = keys.mapNotNull { byKey[it] } + items.filter { it.key !in keys }, historyLoaded = true,
+                        notice = if (obj.str("legacyHistoryUncovered") == "true") "早期对话未完整保存，缺失的提问无法恢复。" else notice)
+                }
+            }
             "tutor.state" -> mutateThread(obj.str("threadId")) {
                 copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, poolPreparing = false, error = null)
             }
@@ -184,8 +209,22 @@ class TutorModel(
         }
     }
 
-    private fun onMessageFrame(obj: JsonObject) {
-        obj.str("msg").takeIf { it.isNotBlank() }?.let { lastFrameAt[it] = wallClock(); stallProbed.remove(it) }
+    private fun onUserFrame(obj: JsonObject) {
+        val id = obj.str("msg")
+        if (id.isBlank()) return
+        val clientId = obj.str("clientMsgId").ifBlank { null }
+        val user = ChatItem.Learner("l:$id",obj.str("text"),clientId,obj.str("createdAt").toLongOrNull(),obj.str("deviceId").ifBlank { null })
+        mutateThread(obj.str("threadId")) {
+            val index = items.indexOfFirst { it.key == user.key || (clientId != null && it.key == "l:$clientId" && it is ChatItem.Learner && it.deviceId == user.deviceId) }
+            copy(items = if (index < 0) items + user else items.toMutableList().also { it[index] = user })
+        }
+    }
+
+    private fun onMessageFrame(obj: JsonObject, restoring: Boolean = false) {
+        // Snapshots register activity only after acceptance, and only while still streaming.
+        if (obj.str("t") != "msg.snapshot") obj.str("msg").takeIf { it.isNotBlank() }?.let {
+            lastFrameAt[it] = wallClock(); stallProbed.remove(it)
+        }
         val updates = assembler.handle(obj)
         for (update in updates) when (update) {
             is ChatUpdate.Started -> {
@@ -193,7 +232,8 @@ class TutorModel(
                 messageThread[update.messageId] = thread
                 if (update.fallback && pendingSend[thread] == null) pendingSend[thread] = "fallback" to TimeSource.Monotonic.markNow()
                 mutateThread(thread) {
-                    copy(items = items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)), poolText = null)
+                    copy(items = if (items.any { it is ChatItem.Tutor && it.message.id == update.messageId }) items
+                        else items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)), poolText = null)
                 }
             }
             is ChatUpdate.Text, is ChatUpdate.Math -> {
@@ -205,14 +245,18 @@ class TutorModel(
             is ChatUpdate.Snapshot -> {
                 // 重连后的权威状态：整体替换，渲染层按 epoch 重建。
                 if (messageThread[update.messageId] == null) obj.str("threadId").takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
-                ensureMessage(update.messageId, obj.str("threadId"))
-                if (update.text.isNotEmpty()) markFirstToken(update.messageId)
+                ensureMessage(update.messageId, obj.str("threadId"),obj.str("model"))
+                if (!restoring && update.text.isNotEmpty()) markFirstToken(update.messageId)
                 resumeSettled(update.messageId)
-                changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status }, thinking = false) }
+                changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status },
+                    model = obj.str("model").ifBlank { model },reason = obj.str("reason").ifBlank { reason },thinking = false) }
+                if (findMessage(update.messageId)?.done == true) lastFrameAt.remove(update.messageId)
+                else lastFrameAt[update.messageId] = wallClock()
             }
             is ChatUpdate.Progress -> changeMessage(update.messageId) { copy(thinking = update.phase == "thinking" && text.isEmpty()) }
             is ChatUpdate.Ended -> {
                 resumeSettled(update.messageId)
+                lastFrameAt.remove(update.messageId)
                 val final = assembler.text(update.messageId)
                 // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
@@ -227,11 +271,11 @@ class TutorModel(
         else -> error("unreachable")
     }
 
-    private fun ensureMessage(id: String, threadId: String) {
+    private fun ensureMessage(id: String, threadId: String, model: String = "") {
         val thread = messageThread[id] ?: threadId.takeIf { it.isNotBlank() } ?: return
         val view = _state.value.threads[thread]
         if (view?.items?.any { it is ChatItem.Tutor && it.message.id == id } == true) return
-        mutateThread(thread) { copy(items = items + ChatItem.Tutor(TutorMessage(id, "", false))) }
+        mutateThread(thread) { copy(items = items + ChatItem.Tutor(TutorMessage(id, model, false))) }
     }
 
     private fun markFirstToken(id: String) {

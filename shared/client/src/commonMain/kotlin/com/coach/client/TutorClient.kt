@@ -21,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.uuid.Uuid
 
 /**
  * 到 Mac 服务端 `/v1/ws` 的导师连接（与账本同步各用一条 socket，服务端按帧广播）。
@@ -32,7 +33,7 @@ class TutorClient(
     private val token: String,
     val model: TutorModel,
 ) {
-    init { validateCoachBaseUrl(baseUrl) }
+    init { validateCoachBaseUrl(baseUrl); model.bindDevice(deviceId) }
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
         followRedirects = false
@@ -101,9 +102,16 @@ class TutorClient(
         put("t", if (test) "tutor.test" else "tutor.next"); put("threadId", threadId); put("courseId", courseId); put("pack", pack)
     })
 
-    fun ask(threadId: String, courseId: String, text: String, pack: String) = send(buildJsonObject {
-        put("t", "msg.ask"); put("threadId", threadId); put("courseId", courseId); put("text", text); put("pack", pack)
-    })
+    fun ask(threadId: String, courseId: String, text: String, pack: String, clientMsgId: String = Uuid.random().toString()): Boolean {
+        if (live == null) return false
+        model.onSent(threadId,"ask",text,clientMsgId)
+        val sent = send(buildJsonObject {
+            put("t", "msg.ask"); put("threadId", threadId); put("courseId", courseId); put("text", text); put("pack", pack)
+            put("clientMsgId",clientMsgId)
+        })
+        if (!sent) model.onSendRejected(threadId,clientMsgId)
+        return sent
+    }
 
     fun cancel(messageId: String) = send(buildJsonObject { put("t", "msg.cancel"); put("msg", messageId) })
 

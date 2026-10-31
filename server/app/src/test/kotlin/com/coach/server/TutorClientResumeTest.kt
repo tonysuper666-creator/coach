@@ -104,6 +104,24 @@ class TutorClientResumeTest {
         }
     }
 
+    @Test fun streamingHistoryRecoversAGapOverTheSameConnectionAlongsideFinishedHistory() {
+        Stub { _, resumes ->
+            emit("""{"t":"msg.history","threadId":"$thread","messages":[${snapshot("old",1,"Saved answer","complete")},${snapshot("m1",1,"牛顿","streaming")}]}""")
+            emit(delta("m1",3,"合力等于"))
+            assertEquals("m1",resumes.receive(),"Only the streaming historical message needs resume")
+            emit(snapshot("m1",3,"牛顿第二定律：合力等于","streaming"))
+            emit(delta("m1",4,"质量乘加速度。"),end("m1",full.length))
+            delay(500)
+        }.use { stub ->
+            withClient(stub) { model ->
+                model.waitFor("history gap recovered") { messages -> messages.size == 2 && messages.all { it.done } }
+                assertEquals(listOf("Saved answer",full),model.messages().map { it.text })
+                assertEquals(1,stub.connections.get())
+                assertTrue(stub.resumes.tryReceive().isFailure,"Finished history must not enqueue a resume")
+            }
+        }
+    }
+
     @Test fun aMissingFormulaFrameInTheMiddleIsRecovered() {
         val body = "能量 \$\$E=mc^2\$\$。"
         Stub { _, resumes ->

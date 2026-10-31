@@ -5,7 +5,7 @@ import java.sql.DriverManager
 import kotlin.test.*
 
 class SourcePageStoreTest {
-    @Test fun openingTheDeployedAlphaV5RepairsAnEmptyIndexWithoutChangingItsSchema() {
+    @Test fun openingTheDeployedAlphaV5RepairsAnEmptyIndexAndMigratesChatHistory() {
         for (empty in listOf(true,false)) {
             val dir=Files.createTempDirectory("source-alpha-v5-")
             try {
@@ -30,7 +30,7 @@ class SourcePageStoreTest {
                         assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择").map { it.docId })
                         assertEquals(emptyList(),store.searchSourcePages("c","adverse selection"))
                         DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
-                            s.executeQuery("PRAGMA user_version").use { r -> assertTrue(r.next()); assertEquals(5,r.getInt(1)) }
+                            s.executeQuery("PRAGMA user_version").use { r -> assertTrue(r.next()); assertEquals(6,r.getInt(1)) }
                             s.executeQuery("SELECT count(*) FROM pool_details").use { r -> assertTrue(r.next()); assertEquals(0,r.getInt(1)) }
                         } }
                     }

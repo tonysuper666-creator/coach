@@ -214,7 +214,8 @@ class TutorModel(
                 mutateThread(thread) {
                     val nextState = obj.str("state")
                     copy(tutorState = nextState, nextLabel = obj.str("nextLabel").ifBlank { null },
-                        poolText = if (nextState == "PREPARE" || nextState == "TEACH") "导师正在备课…" else null, error = null)
+                        poolText = if (nextState == "PREPARE" || nextState == "TEACH") "导师正在备课…" else null,
+                        poolPreparing = false, error = null)
                 }
             }
             "tutor.progress" -> mutateThread(obj.str("threadId")) {

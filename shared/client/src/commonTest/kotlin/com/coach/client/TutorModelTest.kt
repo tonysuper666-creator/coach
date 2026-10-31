@@ -112,6 +112,16 @@ class TutorModelTest {
         assertNull(m.state.value.threads.getValue(thread).poolText)
     }
 
+    @Test fun completedPoolPreparationAllowsTutorActionsAgain() {
+        for (state in listOf("AWAIT", "AWAIT_ANSWER")) {
+            val m = model()
+            m.onFrame("""{"t":"tutor.progress","threadId":"$thread","phase":"pool_queued","text":"正在补题"}""")
+            assertTrue(m.state.value.threads.getValue(thread).busy)
+            m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"$state"}""")
+            assertFalse(m.state.value.threads.getValue(thread).busy)
+        }
+    }
+
     @Test fun disconnectIsRecordedWithTheLastSeenTime() {
         var now = 5_000L
         val m = TutorModel({ now })

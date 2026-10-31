@@ -68,6 +68,7 @@ $excerpt
 Write $count distinct single-answer multiple-choice questions (one correct text and three distractor texts) that test this knowledge point at midterm level.
 Rules: exactly one option is correct; distractors plausible; answerable from the excerpt alone; English.
 For each, include "source_quote": a verbatim sentence fragment (>= 8 words) copied from the excerpt that supports the key.$avoidBlock
+Copy ONE contiguous substring exactly, preserving spelling, punctuation, Markdown, HTML tags and LaTeX. Do not paraphrase, join fragments or replace notation with rendered symbols. Prefer a supporting fragment without mathematical markup when possible.
 Do not assign letters, positions, or option IDs. Explanations must refer to option text only.
 Return a JSON array: [{"stem":..., "correct_text":..., "distractors":[...,...,...], "explanation":..., "source_quote":...}]
         """.trim()

@@ -45,6 +45,36 @@ class PoolWorkerTest {
         dir.toFile().deleteRecursively()
     }
 
+    @Test fun mcqQuoteRepairCannotChangeTheQuestionOrAdmitUnsupportedQuotes() = runBlocking<Unit> {
+        for (mode in listOf("valid","unsupported","changed_key")) {
+            val dir=Files.createTempDirectory("mcq-quote-repair")
+            val actor=LedgerActor(this,LedgerStore(dir))
+            try { StubBridge().use { bridge ->
+                bridge.enqueue(200,StubBridge.completion(generated().replace(source,"A paraphrase absent from the actual source.")))
+                val repair=JsonArray((0..2).map { i -> json("id" to i,"source_quote" to if(mode=="unsupported") "Unsupported quote" else source).let {
+                    if(mode=="changed_key") JsonObject(it+("correctOptionId" to JsonPrimitive("changed"))) else it
+                } }).toString()
+                bridge.enqueue(200,StubBridge.completion(repair))
+                val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                worker.ensure("c","kp","Objective",source,3)
+                assertEquals(if(mode=="valid") "completed" else "failed",worker.runOne()!!.state)
+                assertEquals(2L,actor.execute { supplyCallCount() })
+                if(mode=="valid") {
+                    val queued=actor.execute { supplyJobs().single().subject.getValue("questions").jsonArray }
+                    val original=TaskParsing.mcqs(generated())
+                    queued.forEachIndexed { i,value ->
+                        val q=readStoredMcq(value.jsonObject)
+                        assertEquals(original[i].stem,q.stem)
+                        assertEquals(original[i].options.map { it.text }.toSet(),q.options.map { it.text }.toSet())
+                        assertEquals("Right result $i",q.options.single { it.optionId==q.correctOptionId }.text)
+                    }
+                    bridge.enqueue(200,StubBridge.completion(review()))
+                    assertEquals(3,worker.runOne()!!.inserted)
+                } else assertTrue(actor.execute { supplyJobs().isEmpty() })
+            } } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
+    }
+
     @Test fun fourFailureModesUseRealPoolAndEmptyPoolNeverFabricatesCards() = runBlocking<Unit> {
         for ((reason,status,body) in listOf(
             Triple("EMPTY",200,StubBridge.completion("[]")),

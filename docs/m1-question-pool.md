@@ -1,6 +1,6 @@
 # M1 question supply integration
 
-TON-1090's overnight slice provides persistent MCQ generation/review jobs, verified inventory, atomic groups, and an operator refill command. It does not install an application scheduler or UI. TON-1128 owns prewarming and presentation. The complete M1 card's explanation pregeneration, constructed-question supply and all-49-KP inventory rollout remain outside this slice.
+TON-1090 provides persistent MCQ and constructed-question generation/review jobs, verified inventory, atomic groups, and operator refill commands. TON-1128's application scheduling, lesson preparation/cache and UI are now merged through PR #15; this change preserves those integrations. See the closure evidence below for the actual 49-KP isolated validation and measured latency limits.
 
 ## Server integration
 
@@ -25,7 +25,7 @@ Return contract:
 - `REFILLING`: no cards; render `message` (“题池暂空，正在补题（约 20 秒）”) and the actual `(jobId, state)` entries in `jobs`. Queued means queued, not a completed percentage. A failed generation/review records a terminal job state and failure reason.
 - `EMPTY`: no cards and no active job; message says replenishment has not started. Call `ensure` and schedule the worker to start it. Do not pretend a job is running.
 
-A failed task followed by a pool take writes one `fallback_used(groupId, kpId, from=TASK, reason)` for the group. EMPTY/TEXT_ONLY/MALFORMED/TIMEOUT generation failures are distinguished. An empty pool also records fallback without creating placeholder cards. Job state, pool consumption and calls survive restart. `ai_calls` records actual served model (null stays null), physical calls and foreground/background classification; rejected stale results still retain their real call accounting.
+A successful reserve take after a real failed task writes `fallback_used(groupId, kpId, jobId, from=TASK, reason)`, once per failed job across group retries and restarts. EMPTY/TEXT_ONLY/MALFORMED/TIMEOUT generation failures are distinguished. Empty inventory and ordinary takes without failed work emit no fallback event and no placeholder cards. Job state, pool consumption and calls survive restart. `ai_calls` records actual served model (null stays null), physical calls and foreground/background classification; rejected stale results still retain their real call accounting.
 
 `GradePipeline.Outcome.evidenceSpans` contains rubric item IDs and original-answer UTF-16 `[start,end)` offsets. `persistConfirmedGrade` commits those spans with a confirmed grade under the existing job epoch/fence, question version and answer hash. Live-harness reports also include the offsets. This is the persistence adapter for the grading integrator; it is not a new grading endpoint.
 
@@ -34,44 +34,65 @@ A failed task followed by a pool take writes one `fallback_used(groupId, kpId, f
 Prepare a **private, external** JSON file with `course`, `kp`, `objective`, `excerpt` (source text). Do not commit course material. Stop the Coach server for that data directory, or use its worker instead. The command holds the same `server.lock` as the server.
 
 ```sh
-./gradlew :server:ai:refillPool \
+tools/dev/heavy ./gradlew :server:ai:refillPool \
   -PpoolArgs='/private/coach-test /private/kp-input.json 6 4' \
-  --max-workers=6 --console=plain
+  --max-workers=2 --console=plain
 ```
 
-Arguments are `DATA_DIRECTORY INPUT_JSON TARGET MAX_BATCHES`; the last defaults to 4. Paths with spaces can use the direct Java entry point after `:server:ai:installDist`:
+Arguments are `DATA_DIRECTORY INPUT_JSON TARGET [MAX_BATCHES=4] [mcq|constructed]`. The constructed mode requires a passed KP and TARGET=2. Paths with spaces can use the direct Java entry point after `:server:ai:installDist`:
 
 ```sh
 java -cp 'server/ai/build/install/ai/lib/*' com.coach.ai.PoolCommandKt \
   '/private/coach test' '/private/kp input.json' 6 4
 ```
 
-Set `COACH_BRIDGE_URL` to the Coach bridge (default loopback 8791). The CLI uses a 90-second JSON timeout and checks bridge availability before each call. Per the owner’s 2026-10-31 00:00 change, it imposes no daily call count or utilization threshold; it retains the explicit 2026-11-02 00:00–15:00 GMT stop window. A real upstream 429 fails the job without admitting unreviewed questions; the UI can use existing inventory. Preflight failure exits explicitly. The command is synchronous, bounded by MAX_BATCHES, reports inventory/calls/duration and exits nonzero if the target is unmet. Accepted content remains available for retry. An already satisfied target makes zero calls. A batch costs at most one Claude generation plus one Codex review; rejection can require more batches. The command records `request_type=dev_live`.
+Set `COACH_BRIDGE_URL` to the Coach bridge (default loopback 8791). The CLI uses a 90-second JSON timeout and checks bridge availability before each call. Per the owner’s 2026-10-31 00:00 change, it imposes no daily call count or utilization threshold; it retains the explicit 2026-11-02 00:00–15:00 GMT stop window. A real upstream 429 fails the job without admitting unreviewed questions; the UI can use existing inventory. Preflight failure exits explicitly. The command is synchronous, bounded by MAX_BATCHES, reports inventory/calls/duration and exits nonzero if the target is unmet. Accepted content remains available for retry. An already satisfied target makes zero calls. A newly generated MCQ batch uses one Claude generation plus one Codex review, with at most one additional Claude source-quote repair when needed; rejection can require more batches. For already-passed KPs, the worker can also drain queued constructed jobs, whose calls are included in the command total. The command records `request_type=dev_live`.
 
 The six-worker/no-nice build allowance expires 2026-10-31 08:00 GMT; thereafter invoke through `tools/dev/heavy` with `--max-workers=2`. No builds/live during 2026-11-02 00:00–15:00 GMT. Do not use port 8790 or DeepTutor runtime files.
 
-## Initial stub evidence (2026-10-31 00:06 GMT)
+## Constructed-question supply
 
-- `./gradlew :server:ai:test :server:store:test --max-workers=6 --console=plain`: exit 0; 42 AI tests + 9 store tests, zero failures/errors/skips.
-- Four injected generation failures: each yielded 3 existing cards and the matching fallback reason; empty inventory yielded 0 cards and actual queued job state.
-- Reclaimed/restored job tokens rejected; group retry/restart did not duplicate consumption; two available questions did not get consumed by a three-question request.
-- Confirmed grading with an emoji before the evidence persisted offset 3 and reopened to the exact original substring.
-- `:server:ai:installDist :server:app:compileKotlin`: exit 0.
-- Actual `PoolCommandKt` process against a local HTTP fixture: 3 VERIFIED questions persisted, 2 fixture calls; repeating the command made 0 calls. This is stub verification, **not** a live CLI latency measurement.
+A passed learning fact (`attempt_graded`, `grade_reviewed`, `legacy_passed`, or `kp_overridden`) queues constructed supply in the same ledger transaction, using the latest previously supplied MCQ source pack. `ensure` also checks passed KPs. If there is no source pack, the application must supply one with `ensureConstructed`; no invented source is used. The existing application worker drains these persistent jobs. Unseen inventory below two triggers refill; no job is created before mastery passes.
 
-Real subscription calls this delivery: **0**. PR #13 is still pending; the prior handoff requires its merge before live work. No claim of ≤25-second refill, 49-KP supply, UI rendering, automatic scheduling or zero-wait user experience is made by these tests. Independent acceptance must run from the final rebased PR head and the real protected bridge after the dependency merges.
+Claude generates two questions with reference answers and a frozen 3–5-item rubric totaling ten points. Every basis must be a contiguous verbatim source quotation. One source-only repair is permitted before freezing: stems, reference answers, rubric IDs, criteria and points must remain identical. Both physical calls are recorded. Each question then gets its own durable Codex review; only an independent `CONFIRM` admits it. The question, reference answer, rubric, fingerprint, source-pack hash and served models persist together under epoch/fence checks. `constructedQuestions` is a server-side key accessor, not a client response.
+
+```sh
+java -cp 'server/ai/build/install/ai/lib/*' com.coach.ai.PoolCommandKt \
+  '/private/coach test' '/private/kp input.json' 2 4 constructed
+```
+
+The merged bridge's exact-model policy remains enforced. Background routing additionally respects `X-Coach-Fallback: off`, including callers without the newer exact-model header. A reviewer cannot silently become the same vendor as the generator. Deploying this code is separate from changing the currently frozen APK or live service.
+
+## Schema and integration
+
+Rebased onto PR #15's merged V005 schema, retaining its pairing, source indexes and question thread linkage. Additional pool/constructed tables use capability checks with backups; reopening does not repeat migration. The source-page fixture's existing conditional table setup and column assertions remain intact. TON-1128 is done; its `LessonPreparation`, `ChatService` and UI are reused, not reimplemented. Its reported cached first-text samples were 35/16/14 ms; those are integration evidence, not new measurements in this run. Application-wide cache hit rate remains unmeasured.
+
+## Historical evidence
+
+The initial stub run used no real CLI calls. The 01:05 GMT run made four real calls on isolated bridge 18792, with two three-question batches at 14.680/16.876 seconds and six verified questions; shared 8791 then had a Codex environment failure. Those observations are superseded for current latency assessment by the larger closure sample below. Raw private course text and answer keys remain outside the repository.
+
+## Closure verification (2026-10-31, after PR #15)
+
+- Base: `397106a` (PR #15 merged; includes PR #13). Final local command: `tools/dev/heavy ./gradlew :server:ai:test :server:store:test :server:app:test :server:ai:installDist --max-workers=2 --console=plain` — BUILD SUCCESSFUL, AI **50**, store **19**, app **52**, zero failures/errors/skips. Bridge `fault_injection.py` with the service Python environment: **60/60**; `exam_protection.py`: **2/2**. The system Python lacked uvicorn; that invocation failed before running tests and is not counted as a passing check.
+- Fallback regression covers no failed job, empty inventory, one failure across three groups, and reopen. Existing four fault injections retain valid reserve cards and real job reasons. No tests were removed or skipped.
+- Constructed live sample on shared protected **8791**, using the final rebased runtime and a real copied source pack: Claude generation followed by separate Codex review for each question; two first-round reviews rejected, a second generation/review admitted **2 VERIFIED** questions. **6 physical calls, 136,339 ms** to fill. A separate JVM reopen retained identical reference answers, rubrics and fingerprints. Mastery was established only in an isolated database via three actual `submit_answer` commands with simulated correct answers; this is a replay, not the user's learning history.
+- Earlier constructed diagnostics remain in the audit: the pre-rebase client was rerouted by the old shared bridge and failed closed; three exact-source validation failures were retained; an isolated patched bridge admitted two questions in **37,365 ms / 3 calls**. On the final rebased code, another isolated sample needed **100,970 ms / 5 calls** for one admission, followed by a **10,766 ms / 1 call** review retry on shared 8791 to reach two. No failed sample is substituted with a fixture. All owned isolated bridges were stopped.
+- The one source-only repair has a regression proving unchanged criteria/points and rejection of a changed ten-point distribution. The successful live samples above did not require that repair; it is not claimed as a live-tested repair success.
+- No changes to the frozen APK, live learning database, shared service lifecycle or DeepTutor. All source material was read from copies; generated questions and answer keys remain private. The final rebased build used the heavy wrapper and two workers; earlier six-worker builds were within the pre-08:00 allowance.
+
+- A DESIGN/essay KP repeatedly failed admission because generated source quotes paraphrased text or rendered HTML mathematical notation. A separate real blind review confirmed the answers but the unchanged verbatim gate rejected all three quotes. The MCQ prompt now explicitly preserves contiguous original text, punctuation, HTML and LaTeX. A source-only repair can return only IDs and quotations; code retains stems, options and keys, rejects extra fields or unsupported quotes, then runs the normal independent blind review. Both repair paths have stub regressions; neither optional repair was invoked by the successful live samples in this audit. This is a generation fix, not a relaxed evidence check; all unsuccessful attempts remain in the timing/call audit.
 
 
-## Rebased live evidence (2026-10-31 01:05 GMT)
+### All-KP supply and timing
 
-PR #13 merged as `0d41533`; this branch now rebases onto it. Preserve the upstream V002 → V003 migration ordering before V004. The schema regression now expects V004 and still verifies that reopening does not migrate again. `PoolCommand` opts into the upstream `testTraffic` bridge marker.
+Real copied course content: **49/49 KPs**, including DESIGN/essay points; each input uses 17,090–19,481 characters from its actual anchored textbook pages. The first sweep used a frozen MCQ runtime before the final PR #15 rebase; the MCQ generation/review gate was unchanged by that rebase. Retries used the rebased runtime; the last two underfilled points were also retried after prompt hardening. No synthetic content was counted as live.
 
-- `./gradlew :server:ai:test :server:store:test :server:ai:installDist --max-workers=6 --console=plain`: exit 0, **45 AI + 10 store tests**, zero failures/errors/skips.
-- Real source: a private copy of KP `01-1-1` from the existing course corpus, 2,929 source characters. Dedicated local database, not the learning database.
-- Two real CLI batches, each Claude Sonnet 5.5 generates 3 and GPT-6.1 Sol independently reviews: **14,680 ms / 16,876 ms**, 3/3 VERIFIED each. These are two observations, not a percentile/SLA claim. Generation durations: 7,976 / 9,244 ms; review durations: 6,633 / 7,567 ms.
-- Inventory reached **6**. A separate Java process called `takePoolGroup`: **3 actual question_posed**, READY, 3 unseen remaining; repeated group ID returned identical events. Reopened database retained 3 unseen questions.
-- `ai_calls`: **4 real physical calls** (2 Claude, 2 Codex), all actual served model names present, all complete. No same-vendor substitute.
-- Shared port 8791 was already owned by the integration service. Its health reported Codex configuration permission failure from inherited task-local `CODEX_HOME`; the same account's ordinary Codex login worked. The measurements therefore used the repository's real bridge on **isolated loopback 18792**, with ordinary Codex home and separate bridge work directory. No daily call limit; no 0.5 utilization gate. This validates the pipeline, **not the shared 8791 service**.
-- Isolated bridge process lifetimes: 01:04:04–01:04:20 GMT (PID 85396), 01:04:39–01:04:58 GMT (PID 89629); both stopped. Shared 8791 and DeepTutor 8790 were neither restarted nor changed.
+- First sweep: **40/49** reached three verified questions within three attempts, **159 physical calls**. All nine underfilled outcomes are retained. Two required further diagnostics/retries after the first refill pass.
+- Final private validation inventory: **174 VERIFIED MCQs across 49/49 KPs**, each at least three. Current KP: **7**; an actual atomic three-card take left **4** unseen. This is an isolated validation database, not a deployment to the user's learning database.
+- Fresh backup replay: **147 actual question_posed events** and three correct `submit_answer` commands per KP; **49/49** reached SYSTEM passed and queued one constructed generation job. Answers were supplied by a simulated learner, explicitly not genuine user study records.
+- The **28 first-sweep single-batch successes** (exactly one Claude generation of three plus one Codex blind review): p50 **23.908 s**, nearest-rank p95 **34.859 s**, range **17.955–35.318 s**; **12/28 exceeded 25 s**. Selecting only these successes does not describe overall refill reliability.
+- All **49 bounded first attempts**, including underfilled results: p50 **30.363 s**, p95 **122.349 s**, max **141.893 s**. Summing active CLI time through necessary retries to reach three: p50 **30.363 s**, p95 **162.685 s**, max **292.502 s**; diagnostic/build/idle time is excluded. Full per-KP records are in the issue's sanitized evidence attachment.
+- Last previously underfilled DESIGN KP reached four in **17.883 s / 2 calls**, then the final installed binary added another three in **19.943 s / 2 calls**, reaching seven. These final samples did not invoke optional quote repair and do not replace the slow/rejected samples.
+- Real physical calls this run, deduplicated by call_id across database copies: **245** = 116 MCQ generation + 107 blind review (including one diagnostic review) + 11 constructed generation + 10 constructed review + 1 diagnostic constructed generation. The earlier 01:05 run adds **4**, giving **249 recorded real calls across these TON-1090 runs**. Fixtures are excluded. Actual served model names and failed/null-served calls remain in the audit.
 
-The overnight backend slice is ready for independent review. The complete card remains partial: 49-KP supply, automatic application scheduling/UI, explanation pregeneration and constructed-question supply are not validated by this isolated run. Integration must correct the shared bridge environment before prewarming through that service.
+Result remains **partially achieved**: all-KP supply and command replay pass, but the 25-second target is not reliable. The measured current-KP reserve exceeds the three-question fallback buffer; no universal zero-wait claim is made. Application-wide lesson cache hit rate and uncached first-text latency were not remeasured here. Review must run from the final PR head before merge/done; the existing application/UI integration is preserved.

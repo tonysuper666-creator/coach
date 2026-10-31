@@ -46,8 +46,34 @@ class PoolWorker(
                 val accepted = actor.execute { failSupply(token,generated.failureReason ?: "MALFORMED") }
                 return Step(job.id,job.kind,if(accepted) "failed" else "stale")
             }
+            var questions = generated.questions
+            if (questions.any { !QuestionGate.quotedVerbatim(it,input.str("excerpt")) }) {
+                // Repair quotations before review; the response cannot replace questions, options or keys.
+                val repair = try { withContext(Dispatchers.IO) {
+                    beforeCall(BridgeClient.CLAUDE)
+                    client.chat(ChatRequest("repair_mcq_sources",BridgeClient.CLAUDE,Prompts.GEN_SYSTEM,
+                        "Return ONLY [{\"id\":0,\"source_quote\":\"exact contiguous supporting source text\"}, ...] for every candidate. Copy at least eight words verbatim, including HTML/LaTeX/Markdown; do not render symbols, paraphrase or join fragments. Do not change any question or key.\nSource:\n"+
+                        input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
+                        false,background=background,maxTokens=2500))
+                } } catch (e: Exception) {
+                    actor.execute { failSupply(token,"MALFORMED") }
+                    throw e
+                }
+                actor.execute { recordAiCall(repair.call.toJson(),type) }
+                val quotes = (repair as? BridgeResult.Success)?.let { runCatching {
+                    JsonText.arrayOf(it.text).map { value -> value.jsonObject.also { row ->
+                        require(row.keys == setOf("id","source_quote"))
+                    } }.also { rows -> require(rows.map { row -> row.num("id").toInt() }.sorted() == questions.indices.toList()) }
+                        .associate { row -> row.num("id").toInt() to row.str("source_quote") }
+                }.getOrNull() }
+                if (quotes == null || questions.indices.any { !QuestionGate.sourceQuoteVerbatim(quotes[it].orEmpty(),input.str("excerpt")) }) {
+                    val failed=actor.execute { failSupply(token,"MALFORMED") }
+                    return Step(job.id,job.kind,if(failed) "failed" else "stale")
+                }
+                questions=questions.mapIndexed { i,q -> q.copy(sourceQuote=quotes.getValue(i)) }
+            }
             val queued = actor.execute { queueBlindReview(token,job,
-                JsonArray(generated.questions.map(::storedMcq)), requireNotNull(generated.call.servedBy)) }
+                JsonArray(questions.map(::storedMcq)), requireNotNull(generated.call.servedBy)) }
             return Step(job.id,job.kind,if(queued) "completed" else "stale")
         }
         val questions = (input.getValue("questions") as JsonArray).map { readStoredMcq(it.jsonObject) }

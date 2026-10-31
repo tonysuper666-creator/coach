@@ -16,7 +16,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.MaterialTheme
-import com.coach.ui.theme.CoachTheme
 import kotlin.time.TimeSource
 
 /** Desktop and hardware keyboards: Enter sends. Phones (soft keyboard): Enter is a newline. Each entry point provides its own answer. */
@@ -63,7 +62,8 @@ fun ComposerField(
     enterSends: Boolean = LocalEnterSends.current,
     gate: EnterGate = remember { EnterGate() },
 ) {
-    val colors = CoachTheme.colors
+    // The surrounding MaterialTheme decides the palette (the app theme or the lab's token theme maps into it), so the field matches in light and dark.
+    val colors = MaterialTheme.colorScheme
     val currentValue by rememberUpdatedState(value)
     fun send(): Boolean {
         val text = currentValue.text.trim()
@@ -71,15 +71,15 @@ fun ComposerField(
         onValueChange(TextFieldValue())
         return true
     }
-    Row(modifier.fillMaxWidth().background(colors.surface1, RoundedCornerShape(24.dp)).border(1.dp, colors.borderStrong, RoundedCornerShape(24.dp)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+    Row(modifier.fillMaxWidth().background(colors.surfaceVariant, RoundedCornerShape(24.dp)).border(1.dp, colors.outline, RoundedCornerShape(24.dp)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Box(Modifier.weight(1f).padding(vertical = 12.dp)) {
-            if (value.text.isEmpty() && placeholder.isNotEmpty()) Text(placeholder, color = colors.fgSecondary, style = MaterialTheme.typography.bodyLarge)
+            if (value.text.isEmpty() && placeholder.isNotEmpty()) Text(placeholder, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
             BasicTextField(
                 value = value,
                 onValueChange = { new -> gate.onEdit(currentValue.composition != null, new.composition != null); onValueChange(new) },
                 enabled = enabled,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fgPrimary),
-                cursorBrush = SolidColor(colors.actionPrimary),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+                cursorBrush = SolidColor(colors.primary),
                 maxLines = maxLines,
                 modifier = Modifier.fillMaxWidth().testTag("composer").onPreviewKeyEvent { event ->
                     if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false

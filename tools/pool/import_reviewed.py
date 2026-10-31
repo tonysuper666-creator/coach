@@ -64,8 +64,11 @@ def plan(source, target, course, packs):
         require(row['generator'].startswith('claude') and row['reviewer'].startswith('gpt'))
         require(row['reviewed_by'] == row['reviewer'] and row['reviewed_at'])
         # Exactly the same source-pack prefix/hash used by the application worker.
-        content = (packs / course / (row['kp_id'] + '.md')).read_text()[:40000]
-        pack_hash = hashlib.sha256((kps[row['kp_id']] + '\0' + content).encode()).hexdigest()
+        content = (packs / course / (row['kp_id'] + '.md')).read_bytes().decode('utf-8')
+        # Kotlin String.take counts UTF-16 code units; preserve CRLF too. Java's UTF-8
+        # encoder replaces a possible trailing unpaired surrogate with '?'.
+        content = content.encode('utf-16-le')[:80000].decode('utf-16-le', 'surrogatepass')
+        pack_hash = hashlib.sha256((kps[row['kp_id']] + '\0' + content).encode('utf-8', 'replace')).hexdigest()
         require(row['pack_hash'] == pack_hash, 'Source pack changed; re-review instead of importing stale material')
         quote = quote_text(row['source_quote'])
         require(len(quote) >= 8 and quote in quote_text(content), 'Unsupported source quotation')

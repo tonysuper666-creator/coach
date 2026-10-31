@@ -83,6 +83,17 @@ class ReviewedImportTest(unittest.TestCase):
         with sqlite3.connect(self.target / 'coach.sqlite') as db:
             self.assertEqual(db.execute('SELECT count(*) FROM questions').fetchone()[0], 0)
 
+    def test_unicode_source_uses_the_workers_utf16_boundary(self):
+        prefix = self.quote + '\r\n'
+        padding = 'x' * (40000 - len(prefix) - 2)
+        reviewed = prefix + padding + '🙂'
+        (self.packs / 'course/kp.md').write_bytes((reviewed + 'outside the reviewed prefix').encode())
+        with sqlite3.connect(self.source) as db:
+            db.execute('UPDATE pool_details SET pack_hash=?',
+                       (hashlib.sha256(('Title\0'+reviewed).encode()).hexdigest(),))
+        result = self.run_import(apply=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

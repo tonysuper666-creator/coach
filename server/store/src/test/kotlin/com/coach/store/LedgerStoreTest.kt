@@ -17,8 +17,13 @@ class LedgerStoreTest {
                 connection.createStatement().use { statement ->
                     statement.executeQuery("PRAGMA user_version").use { rows ->
                         assertTrue(rows.next())
-                        assertEquals(3, rows.getInt(1))
+                        assertEquals(5, rows.getInt(1))
                     }
+                    statement.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pool_details','pairing_code')").use { rows ->
+                        val tables = buildSet { while (rows.next()) add(rows.getString(1)) }
+                        assertEquals(setOf("pool_details", "pairing_code"), tables)
+                    }
+                    statement.executeQuery("SELECT delta_index FROM messages LIMIT 0").close()
                 }
             }
             val backups = Files.list(dir.resolve("backups")).use { it.map { p -> p.fileName.toString() }.toList().toSet() }

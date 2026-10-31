@@ -32,11 +32,13 @@ class PoolPreparationSmoke {
             for(kp in ids) {
                 context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-                val button=waitForText(instrumentation.uiAutomation,"出题",15_000)
+                val button=waitForText(instrumentation.uiAutomation,"出题",15_000,enabledButton=true)
                 instrumentation.waitForIdleSync()
                 val mark=SystemClock.elapsedRealtimeNanos()
                 click(button)
-                waitForText(instrumentation.uiAutomation,"选完 3 题后提交",15_000)
+                // Long options place the submit footer below the viewport. Measure the first
+                // displayed card; its 1/3 header also confirms a complete three-card group.
+                waitForText(instrumentation.uiAutomation,"第 1 / 3 题",15_000)
                 instrumentation.waitForIdleSync()
                 // Include compositor settling; accessibility appearance alone is not a displayed frame.
                 Thread.sleep(100)
@@ -55,7 +57,7 @@ class PoolPreparationSmoke {
         for(i in 0 until samples.length()) assertTrue("Sample $i exceeded one second: ${samples.getJSONObject(i)}",samples.getJSONObject(i).getDouble("tapToRenderedCardsMs")<=1000.0)
     }
 
-    private fun waitForText(ui: android.app.UiAutomation,text: String,timeout: Long): AccessibilityNodeInfo {
+    private fun waitForText(ui: android.app.UiAutomation,text: String,timeout: Long,enabledButton: Boolean=false): AccessibilityNodeInfo {
         fun find(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if(node==null) return null
             if(node.text?.toString()==text) return node
@@ -64,7 +66,12 @@ class PoolPreparationSmoke {
         }
         val end=SystemClock.elapsedRealtime()+timeout
         while(SystemClock.elapsedRealtime()<end) {
-            find(ui.rootInActiveWindow)?.let { return it }
+            find(ui.rootInActiveWindow)?.let { node ->
+                if(!enabledButton) return node
+                var button: AccessibilityNodeInfo?=node
+                while(button!=null && !button.isClickable) button=button.parent
+                if(button?.isEnabled==true) return node
+            }
             Thread.sleep(10)
         }
         throw AssertionError("Visible text did not appear: $text")

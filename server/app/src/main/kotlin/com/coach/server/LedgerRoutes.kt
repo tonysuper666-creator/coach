@@ -76,7 +76,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             val course=input.str("courseId")
             val kps=(input["kpIds"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content }
             require(kps.size in 1..5)
-            val result=checkNotNull(chat).prepareLessons(course,kps)
+            val result=checkNotNull(chat).prepareLessons(course,kps,input.flag("questionsOnly"))
             call.respondText(result.toString(),ContentType.Application.Json)
         }
         post("/v1/pair") {

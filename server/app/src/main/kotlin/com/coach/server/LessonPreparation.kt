@@ -39,6 +39,29 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         if(source.isNotBlank()) PoolWorker(actor,bridge).ensure(course,kp,meta.str("title"),source.take(40_000),target,background=true)
     }
 
+    /** Bounded pool-only prewarm through the running server's actor; no second DB writer. */
+    suspend fun prepareQuestions(course: String, kp: String): JsonObject {
+        val meta=metadata(course,kp)
+        val source=pack(course,kp)
+        require(source.isNotBlank()) { "教材备课包缺失" }
+        val worker=PoolWorker(actor,bridge)
+        val before=actor.execute { supplyCallCount() }
+        val started=System.nanoTime()
+        var batches=0
+        while(actor.execute { poolAvailable(course,kp) } < 6 && batches < 6) {
+            worker.ensure(course,kp,meta.str("title"),source.take(40_000),6,background=false)
+            while(true) {
+                val step=worker.runOne(course,kp) ?: break
+                if(step.state in setOf("failed","stale")) break
+            }
+            batches++
+        }
+        val available=actor.execute { poolAvailable(course,kp) }
+        return json("kpId" to kp,"available" to available,"target" to 6,"reached" to (available>=6),
+            "physicalCalls" to (actor.execute { supplyCallCount() }-before),
+            "wallMs" to (System.nanoTime()-started)/1_000_000)
+    }
+
     suspend fun prepare(course: String, kp: String): JsonObject {
         val meta=metadata(course,kp)
         val source=pack(course,kp)

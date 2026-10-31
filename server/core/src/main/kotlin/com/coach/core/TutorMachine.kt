@@ -92,6 +92,21 @@ class TutorMachine(private val actor: LedgerActor) {
         }
     }
 
+    suspend fun poolWaitActive(course: String, thread: String): Boolean = actor.execute {
+        val c=context(course,thread)
+        stateEvent(c)?.payload?.str("state")=="AWAIT" && pending(c).isEmpty() && activeTurn(c).isEmpty()
+    }
+
+    /** An asynchronous refill must not advance a teaching turn or pose a second pending group. */
+    suspend fun resumePool(course: String, thread: String): TutorOutcome? = actor.execute {
+        tutorTransaction {
+            val c = context(course,thread)
+            if (stateEvent(c)?.payload?.str("state") != "AWAIT" || pending(c).isNotEmpty() ||
+                activeTurn(c).isNotEmpty() || poolAvailable(course,c.kp) < groupSize(c)) null
+            else pose(c,untaught=!snapshot(course).projection.explainedKpIds.contains(c.kp))
+        }
+    }
+
     /** A deliberate mode action produces a recap; it never marks concepts fully taught twice. */
     suspend fun explain(course: String, thread: String, mode: TeachingMode): TutorOutcome = actor.execute {
         tutorTransaction {

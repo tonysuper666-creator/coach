@@ -502,11 +502,58 @@ class ChatFlowTest {
         }
     }
 
-    private suspend fun seedTutor(h: Harness) {
+    private suspend fun seedTutor(h: Harness, count: Int = 3) {
         h.actor.execute {
-            repeat(3) { i ->
+            repeat(count) { i ->
                 val options = listOf("opportunity cost $i","sunk expenditure $i","fixed payment $i","total revenue $i").mapIndexed { j,text -> com.coach.domain.Option("q$i-$j",text) }
                 registerQuestion("q$i","course-1","","SINGLE_CHOICE","Synthetic question $i","VERIFIED",options.first().optionId,options,listOf("kp-1"))
+            }
+        }
+    }
+
+    @Test
+    fun plainContinueAfterTwoErrorsPosesCardsWhileTheExampleButtonStillTeaches() {
+        Harness().use { h ->
+            runBlocking { seedTutor(h,9) }
+            h.tutor.stream(10,"机会成本是放弃的最佳替代。",StubTutor.terminal("complete"),StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+                ws.await("tutor.state")
+                ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","text":"继续"}""")
+                ws.await("msg.start")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                while (ws.await("tutor.state").str("state") != "AWAIT") Unit
+                val seen = mutableSetOf<String>()
+                repeat(3) { groupIndex ->
+                    val before = runBlocking { h.actor.execute { events("course-1").last().seq } }
+                    ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","text":"继续"}""")
+                    val group = ws.await("tutor.cards","msg.start")
+                    assertEquals("tutor.cards",group.str("t"),"Plain continue must display questions before any teaching stream")
+                    assertEquals(1,h.tutor.requests,"Continue must not call the bridge again")
+                    val cards = (group.getValue("cards") as kotlinx.serialization.json.JsonArray).map { it.jsonObject }
+                    assertEquals(3,cards.size)
+                    assertTrue(cards.all { seen.add(it.str("questionId")) },"The remaining pool must supply fresh cards")
+                    assertTrue(runBlocking { h.actor.execute { events("course-1").none {
+                        it.seq > before && (it.type == "explanation_delivered" ||
+                            it.type == "tutor_state_changed" && it.payload.str("state") in setOf("PREPARE","TEACH"))
+                    } } })
+                    val answers = runBlocking { h.actor.execute {
+                        JsonObject(cards.mapIndexed { i,card ->
+                            val map = card.getValue("letterMap").jsonObject
+                            val correct = map.getValue(tutorChoiceKey(card.str("questionId")).correctOptionId)
+                            card.str("attemptId") to if (groupIndex == 1 && i < 2) map.values.first { it != correct } else correct
+                        }.toMap())
+                    } }
+                    ws.send("""{"t":"tutor.answer","threadId":"thread-1","courseId":"course-1","groupId":"${group.str("groupId")}","submissionId":"errors-$groupIndex","answers":$answers}""")
+                    ws.await("tutor.feedback")
+                    while (ws.await("tutor.state").str("state") != "FEEDBACK") Unit
+                }
+                h.tutor.stream(10,"换一个例子来理解。",StubTutor.terminal("complete"),StubTutor.DONE)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                assertEquals(2,h.tutor.requests)
+                val recap = runBlocking { h.actor.execute { events("course-1").last { it.type == "explanation_delivered" } } }
+                assertEquals("EXAMPLE",recap.payload.str("mode"))
             }
         }
     }

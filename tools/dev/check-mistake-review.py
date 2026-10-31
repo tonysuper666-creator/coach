@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """OPPO acceptance on a copied production ledger plus reviewed inventory. No model calls.
-Build first with -PcoachApplicationId=com.coach.reviewtest. Required environment:
+Build first with -PcoachApplicationId=com.coach.ton1146 (or COACH_REVIEW_PACKAGE). Required environment:
 COACH_REVIEW_SNAPSHOT, COACH_REVIEW_INVENTORY, COACH_REVIEW_OUT, COACH_REVIEW_SERIAL,
 COACH_REVIEW_BRIDGE_PYTHON (an existing environment with FastAPI/uvicorn).
 All child processes are collected and stopped before this foreground command exits.
@@ -31,7 +31,8 @@ SERIAL = os.environ['COACH_REVIEW_SERIAL']
 ADB = Path(value('coach.sdkDir')).expanduser() / 'platform-tools/adb'
 HOST = value('coach.tailHost')
 COURSE = value('coach.course')
-PACKAGE = 'com.coach.reviewtest'
+PACKAGE = os.environ.get('COACH_REVIEW_PACKAGE', 'com.coach.ton1146')
+assert PACKAGE != 'com.coach.android'
 DATA = OUT / 'data'
 DATA.mkdir(mode=0o700)
 TOKEN = secrets.token_urlsafe(32)
@@ -128,7 +129,8 @@ try:
     for apk in ['androidApp/build/outputs/apk/debug/androidApp-debug.apk',
                 'androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk']:
         package = PACKAGE+'.test' if 'androidTest' in apk else PACKAGE
-        installed = run([ADB,'-s',SERIAL,'shell','pm','path',package]).strip().removeprefix('package:')
+        try: installed = run([ADB,'-s',SERIAL,'shell','pm','path',package]).strip().removeprefix('package:')
+        except subprocess.CalledProcessError: installed = ''  # first install of a per-card package
         same = False
         if installed:
             digest = run([ADB,'-s',SERIAL,'shell','sha256sum',installed]).split()[0]

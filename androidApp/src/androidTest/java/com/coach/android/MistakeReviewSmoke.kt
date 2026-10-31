@@ -33,7 +33,7 @@ class MistakeReviewSmoke {
     @Test fun wrongAnswersRetryAndClear() {
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
-        require(context.packageName == "com.coach.reviewtest")
+        require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
         base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         token = requireNotNull(args.getString("coachToken"))
         device = requireNotNull(args.getString("coachDevice"))
@@ -99,7 +99,7 @@ class MistakeReviewSmoke {
     }
 
     @Test fun cachedMistakesSurviveRestartWithoutMac() {
-        require(context.packageName == "com.coach.reviewtest")
+        require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
         val port=requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
         context.startActivity(Intent(context,CoachActivity::class.java)

@@ -34,7 +34,7 @@ data class QuizCard(
 /** 到期复习的一项：[overdueDays] 为 0 表示今天到期。 */
 data class DueReview(val kp: KpRow, val dueDay: Long, val overdueDays: Int)
 
-data class CardGrade(val correct: Boolean, val score: Int, val max: Int, val feedback: String)
+data class CardGrade(val correct: Boolean, val score: Int, val max: Int, val feedback: String, val note: String = "")
 data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
     val submitted: Boolean get() = cards.all { it.answer != null }
 }

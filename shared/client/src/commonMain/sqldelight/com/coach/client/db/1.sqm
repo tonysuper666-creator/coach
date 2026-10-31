@@ -1,0 +1,3 @@
+CREATE TABLE offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,expires_at INTEGER NOT NULL,epoch TEXT NOT NULL);
+CREATE TABLE offline_items(attempt_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,group_id TEXT NOT NULL,position INTEGER NOT NULL,posed_json TEXT NOT NULL,answer TEXT,command_id TEXT,local_correct INTEGER);
+CREATE TABLE offline_keys(attempt_id TEXT PRIMARY KEY,correct_option_id TEXT NOT NULL);

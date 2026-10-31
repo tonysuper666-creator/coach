@@ -92,6 +92,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
+        sql("CREATE TABLE IF NOT EXISTS offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,device_id TEXT NOT NULL,expires_at INTEGER NOT NULL,pack_json TEXT NOT NULL)")
+        sql("CREATE TABLE IF NOT EXISTS offline_reservations(question_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,expires_at INTEGER NOT NULL)")
+        sql("CREATE TABLE IF NOT EXISTS choice_allocations(id INTEGER PRIMARY KEY AUTOINCREMENT,course_id TEXT NOT NULL,correct_letter TEXT NOT NULL)")
         ensureSourceIndexes()
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
@@ -229,7 +232,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
 
     fun tutorQuestions(course: String, kp: String): List<String> = query(
-        "SELECT q.question_id FROM questions q JOIN question_kp k ON q.question_id=k.question_id WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format='SINGLE_CHOICE' ORDER BY q.question_id", course,kp
+        "SELECT q.question_id FROM questions q JOIN question_kp k ON q.question_id=k.question_id WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format='SINGLE_CHOICE' AND NOT EXISTS (SELECT 1 FROM offline_reservations r WHERE r.question_id=q.question_id AND r.expires_at>?) ORDER BY q.question_id", course,kp,clock()
     ) { it.getString(1) }.filter { choiceOptions(it).size == 4 }
 
     /** Server-only answer key, never included in a card or model prompt. */
@@ -314,7 +317,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         poseChoiceGroupInTransaction(course, groupId, requests, rng, device, offline, thread)
     }
     private fun poseChoiceGroupInTransaction(course: String, groupId: String, requests: List<JsonObject>,
-        rng: Random, device: String, offline: Boolean = true, thread: String? = null): List<Event> {
+        rng: Random, device: String, offline: Boolean = true, thread: String? = null, reserveOnly: Boolean = false): List<Event> {
         require(groupId.isNotBlank() && requests.isNotEmpty())
         require(requests.map { it.str("attemptId") }.distinct().size == requests.size)
         val existing = events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
@@ -330,9 +333,16 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             require(valid == "VERIFIED") { "Only verified choices can be posed" }
             ChoiceKey(choiceOptions(request.str("questionId")), requireNotNull(choiceId(request.str("questionId"))))
         }
-        val previous = events(course).lastOrNull { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" }
-            ?.payload?.let { letterMap(it)[choiceId(it.str("questionId"))] }
-        val maps = assignLetters(keys, previous, rng)
+        val recent = query("SELECT correct_letter FROM choice_allocations WHERE course_id=? ORDER BY id DESC LIMIT 2",course) { it.getString(1) }.reversed().toMutableList()
+        if (recent.isEmpty()) recent += events(course).filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" }.takeLast(2)
+            .mapNotNull { letterMap(it.payload)[choiceId(it.payload.str("questionId"))] }
+        val maps = keys.map { key ->
+            val correct = optionLetters(key.options.size).filter { it !in recent.takeLast(2) }.random(rng)
+            val rest = optionLetters(key.options.size).filter { it != correct }.shuffled(rng).iterator()
+            recent += correct
+            sql("INSERT INTO choice_allocations(course_id,correct_letter) VALUES(?,?)",course,correct)
+            key.options.associate { it.optionId to if (it.optionId == key.correctOptionId) correct else rest.next() }
+        }
         return requests.mapIndexed { index, request ->
             val qid = request.str("questionId")
             val content = query("SELECT stem_md,fingerprint FROM questions WHERE question_id=?",qid) { it.getString(1) to it.getString(2) }.single()
@@ -342,7 +352,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "fingerprint" to JsonPrimitive(content.second), "format" to JsonPrimitive("SINGLE_CHOICE"),
                 "keyState" to JsonPrimitive("VERIFIED"), "offlinePack" to JsonPrimitive(offline)
             ) - "correctOptionId")
-            append(course,"question_posed",payload,"attempt:${request.str("attemptId")}",device=device, thread=thread)
+            if (reserveOnly) Event(0,uid(),course,"question_posed",recordedAt=clock(),occurredAt=clock(),deviceId=device,
+                actor="SYSTEM",idemKey="attempt:${request.str("attemptId")}",payload=payload)
+            else append(course,"question_posed",payload,"attempt:${request.str("attemptId")}",device=device, thread=thread)
         }
     }
 
@@ -355,6 +367,41 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             poseChoiceGroupInTransaction(course, "$packId:$index", group, rng, device)
         }
         OfflineChoicePack(groups, groups.flatten().map { OfflineKey(it.payload.str("attemptId"), requireNotNull(choiceId(it.payload.str("questionId")))) })
+    }
+
+    /** Download is a reservation, not a learning fact. Retry returns the same unexpired pack. */
+    fun downloadOfflinePack(course: String, device: String, size: Int = 10, ttlMillis: Long = 86_400_000): OfflineChoicePack = transaction {
+        require(size in 1..30 && ttlMillis > 0 && course.isNotBlank() && course != "__system__")
+        query("SELECT pack_json FROM offline_packs WHERE course_id=? AND device_id=? AND expires_at>? ORDER BY rowid DESC LIMIT 1",course,device,clock()) {
+            LedgerJson.decodeFromString<OfflineChoicePack>(it.getString(1)).copy(epoch=hello().epoch)
+        }.singleOrNull()?.let { pack ->
+            val answered = events(course).filter { it.type in setOf("answer_submitted","answer_orphaned") }.map { it.payload.str("attemptId") }.toSet()
+            if (pack.groups.flatten().any { it.payload.str("attemptId") !in answered }) return@transaction pack
+        }
+        sql("DELETE FROM offline_reservations WHERE expires_at<=?",clock())
+        sql("DELETE FROM offline_packs WHERE expires_at<=?",clock())
+        val state = projection(course)
+        val due = state.review.entries.filter { it.value.dueDay <= logicalDay(clock(),state.timeZone) }.sortedBy { it.value.dueDay }.map { it.key }
+        val kps = (due + listOfNotNull(state.position.continueTarget, state.position.current) +
+            query("SELECT DISTINCT kp_id FROM question_kp JOIN questions USING(question_id) WHERE course_id=? ORDER BY question_kp.rowid",course) { it.getString(1) }).distinct()
+        val ids = kps.flatMap { kp -> unseenPoolIds(course,kp).map { it to kp } }.distinctBy { it.first }.take(size)
+        val expires = clock() + ttlMillis
+        val packId = uid()
+        val requests = ids.map { (qid,kp) -> json("questionId" to qid,"attemptId" to uid(),"kpIds" to listOf(kp),
+            "purpose" to "RECALL","review" to true,"policyVersion" to 1,"offlinePack" to true,"expiresAt" to expires) }
+        val groups = mutableListOf<List<Event>>()
+        var offset = 0
+        while (offset < requests.size) {
+            val count = if (requests.size-offset >= 3) 3 else 1
+            groups += poseChoiceGroupInTransaction(course,"$packId:${groups.size}",requests.subList(offset,offset+count),Random.Default,device,reserveOnly=true)
+            offset += count
+        }
+        val pack = OfflineChoicePack(groups,groups.flatten().map { OfflineKey(it.payload.str("attemptId"),requireNotNull(choiceId(it.payload.str("questionId")))) },packId,course,device,expires,hello().epoch)
+        if (ids.isNotEmpty()) {
+            sql("INSERT INTO offline_packs VALUES(?,?,?,?,?)",packId,course,device,expires,LedgerJson.encodeToString(pack))
+            ids.forEach { (qid,_) -> sql("INSERT INTO offline_reservations VALUES(?,?,?)",qid,packId,expires) }
+        }
+        pack
     }
 
     fun authorize(device: String, token: String): Boolean {
@@ -443,7 +490,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             val tutorGroupSize = if (tutorState == null) 0 else events(body.courseId).count {
                                 it.type == "question_posed" && it.payload.str("groupId") == posed?.payload?.str("groupId")
                             }
-                            if (activeReply) {
+                            val reserved = query("SELECT p.device_id,p.pack_json FROM offline_reservations r JOIN offline_packs p USING(pack_id) WHERE r.question_id=? AND r.expires_at>?",qid,clock()) { it.getString(1) to LedgerJson.decodeFromString<OfflineChoicePack>(it.getString(2)) }.singleOrNull()
+                            val reservedSnapshot = reserved?.second?.groups?.flatten()?.firstOrNull { it.payload.str("attemptId") == attemptId }?.payload
+                            if (reserved != null && (reserved.first != c.deviceId || reservedSnapshot != posedSnapshot)) {
+                                status="REJECTED"; error="OFFLINE_RESERVATION_MISMATCH"
+                            } else if (activeReply) {
                                 status="REJECTED"; error="TUTOR_BUSY"
                             } else if (!tutorGroup && tutorGroupSize > 1) {
                                 status="REJECTED"; error="GROUP_SUBMISSION_REQUIRED"
@@ -672,9 +723,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     private fun unseenPoolIds(course: String, kp: String): List<String> = query(
         """SELECT q.question_id FROM questions q JOIN question_kp k USING(question_id)
            WHERE q.course_id=? AND k.kp_id=? AND q.format='SINGLE_CHOICE' AND q.key_state='VERIFIED'
+           AND NOT EXISTS (SELECT 1 FROM offline_reservations r WHERE r.question_id=q.question_id AND r.expires_at>?)
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed'
                AND json_extract(e.payload,'$.questionId')=q.question_id)
-           ORDER BY q.rowid""",course,kp) { it.getString(1) }
+           ORDER BY q.rowid""",course,kp,clock()) { it.getString(1) }
     fun poolAvailable(course: String, kp: String): Int = unseenPoolIds(course,kp).size
     fun poolStems(course: String, kp: String): List<String> = query(
         "SELECT stem_md FROM questions JOIN question_kp USING(question_id) WHERE course_id=? AND kp_id=?",course,kp) { it.getString(1) }

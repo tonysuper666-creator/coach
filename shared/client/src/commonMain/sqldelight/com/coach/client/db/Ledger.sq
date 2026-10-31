@@ -34,3 +34,22 @@ putProjection:
 INSERT INTO projection_cache VALUES(?,?,?,?,?) ON CONFLICT(course_id) DO UPDATE SET version=excluded.version,last_seq=excluded.last_seq,epoch=excluded.epoch,projection_json=excluded.projection_json;
 clearProjections:
 DELETE FROM projection_cache;
+
+CREATE TABLE offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,expires_at INTEGER NOT NULL,epoch TEXT NOT NULL);
+CREATE TABLE offline_items(attempt_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,group_id TEXT NOT NULL,position INTEGER NOT NULL,posed_json TEXT NOT NULL,answer TEXT,command_id TEXT,local_correct INTEGER);
+CREATE TABLE offline_keys(attempt_id TEXT PRIMARY KEY,correct_option_id TEXT NOT NULL);
+
+putOfflinePack:
+INSERT INTO offline_packs VALUES(?,?,?,?) ON CONFLICT(pack_id) DO UPDATE SET expires_at=excluded.expires_at,epoch=excluded.epoch;
+putOfflineItem:
+INSERT OR IGNORE INTO offline_items(attempt_id,pack_id,group_id,position,posed_json) VALUES(?,?,?,?,?);
+putOfflineKey:
+INSERT OR IGNORE INTO offline_keys VALUES(?,?);
+offlineKeyAfterLock:
+SELECT k.correct_option_id FROM offline_keys k JOIN offline_items i USING(attempt_id) WHERE i.attempt_id=? AND i.command_id IS NOT NULL;
+lockOfflineAnswer:
+UPDATE offline_items SET answer=?,command_id=? WHERE attempt_id=? AND command_id IS NULL;
+putLocalGrade:
+UPDATE offline_items SET local_correct=? WHERE attempt_id=?;
+offlineItems:
+SELECT i.*,p.expires_at,p.epoch FROM offline_items i JOIN offline_packs p USING(pack_id) WHERE p.course_id=? ORDER BY p.rowid,i.position;

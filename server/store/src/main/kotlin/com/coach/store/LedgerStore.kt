@@ -92,6 +92,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         ensureSourceIndexes()
+        if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
+            rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
+            transaction {
+                sql("CREATE TABLE pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+            }
+        }
     }
 
     /** Capability repair is independent of version numbers used by other features or deployments. */

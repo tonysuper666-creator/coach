@@ -195,7 +195,7 @@ acceptance/                          验收脚本、语料、录屏（只有验�
 - 从备份恢复时生成新 `epoch` 并写 `server_restored`（`lastSeqBefore` = 所用备份里的最大 seq）。
 - 恢复时把所有非终态 job（queued/running）置为 cancelled 再按原 subject 重新排队，清空 `turn_leases`；之后的 fence 都在新 epoch 下比较（§4.2）〔评R3 I6〕。
 - 服务端在每条命令回执和 `hello` 里带 `backedUpThroughSeq`（最近一次成功备份覆盖到的 seq）。客户端发件箱保留两类命令：未确认的；已确认但 seq > `backedUpThroughSeq` 的——后者要等被备份覆盖才删。只靠「未确认的重放」不够：最近一次备份之后、回档之前已入账的作答，回档后哪里都没有。
-- 客户端 `hello` 带上自己记住的 epoch；不一致 → 丢弃本地账本副本、拉快照重建，并重放所有未确认命令，以及 seq 大于新库 `lastSeqBefore` 的自己的已确认命令；服务端照常按 commandId 去重。
+- 客户端 `hello` 带上自己记住的 epoch；不一致 → 丢弃本地账本副本、拉快照重建，并重放全部仍保留的、非 REJECTED 的自己的命令；服务端照常按 commandId 去重。旧确认 seq 属于旧 epoch，不能与新库 `lastSeqBefore` 比较；设备错过连续两次回档时，新库 seq 可能已超过旧确认 seq。当前发件箱只等备份水位覆盖再删；恢复更旧备份的额外保留期仍由 M1-08 补齐，不据此宣称可恢复任意历史备份。
 - `submit_answer` 命令自带出题快照（attemptId、questionId、fingerprint、kpIds、purpose、policyVersion、letterMap）。服务端遇到未知 attempt（例如备份早于离线包下载），按快照补写 `question_posed`（字母沿用快照里的 `letterMap`，不重新分配）；题目本身也不在库里，就写 `answer_orphaned`：保留原文、不计分、不进任何窗口，记录页可见（沿用 O §4.4「离线作答时题目已作废：作答保留、不计」）。
 - 边界：每台设备只重放自己的命令；某台设备在回档后再也不上线，它的那部分作答仍会缺。桌面端本地副本回灌其他设备事件不进 M0（§14 #8）。
 
@@ -205,7 +205,7 @@ acceptance/                          验收脚本、语料、录屏（只有验�
 
 ### 4.5 三个常驻进程的托管（决定）〔漏#3〕
 
-Ktor 服务是唯一的监督者：它以子进程启动桥副本（Coach 自己的 venv）和 mathsvc（Node），各自健康检查（`/health`，10 秒一次）、崩溃后指数退避重启（1 s → 60 s 封顶）、日志写 `~/Coach/logs/{server,bridge,mathsvc}.log`（按天轮转，保留 14 天）。服务端退出时杀掉整个子进程组。
+Ktor 服务是唯一的监督者：它以子进程启动桥副本（Coach 自己的 venv）和 mathsvc（Node），各自健康检查（桥 `/health?scope=process`、mathsvc JSONL ping/pong，10 秒一次）、崩溃后指数退避重启（1 s → 60 s 封顶）、日志写 `~/Coach/logs/{server,bridge,mathsvc}-YYYY-MM-DD.log`（按天轮转，保留 14 天）。服务端退出时杀掉整个子进程组；清理守卫覆盖 JVM 被 SIGKILL 后的子进程清理。安装与停止见 `tools/dev/service.md`。
 - M0：手动运行 `tools/dev/run-all.sh`（由账本卡 TON-1042 提供，它第一个需要三个进程一起跑）〔评R3 m9〕，不装任何 LaunchAgent。
 - M1：装一个用户级 LaunchAgent `local.coach.server`（KeepAlive），只管 Ktor；卸载 = `launchctl bootout gui/$UID/local.coach.server` 并删 plist。
 - 不做防休眠（`caffeinate`），离线体验靠 §1.4；唤醒后的收尾见 §4.7。

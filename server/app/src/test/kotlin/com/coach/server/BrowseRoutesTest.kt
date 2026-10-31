@@ -40,6 +40,8 @@ class BrowseRoutesTest {
             val docs=Json.parseToJsonElement(get("/v1/courses/c/sources").body()).jsonObject.getValue("docs").jsonArray.map { it.jsonObject }
             assertEquals(listOf("textbook:1"),docs.map { it.getValue("docId").jsonPrimitive.content })
             assertEquals(32,docs.single().getValue("firstPdfPage").jsonPrimitive.int); assertEquals(33,docs.single().getValue("lastPdfPage").jsonPrimitive.int)
+            // Book pages come from the pages themselves; the synthetic pages carry none, so none is invented.
+            assertTrue(docs.single().getValue("firstBookPage") is JsonNull)
             val page=Json.parseToJsonElement(get("/v1/courses/c/sources/textbook:1/pages/32").body()).jsonObject
             assertTrue("deductibles" in page.getValue("text").jsonPrimitive.content)
             // Hidden and foreign material is not found, not merely filtered from the list.

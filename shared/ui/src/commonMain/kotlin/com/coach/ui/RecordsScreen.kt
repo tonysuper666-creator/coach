@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -139,7 +140,7 @@ private fun ChangeDetail(c: CoachController, view: CourseView, data: RecordsView
         change.attemptIds.forEachIndexed { index, id ->
             val detail = remember(id, data) { data.attempt(id) }
             if (detail == null) Text("第 ${index + 1} 次作答（$id）在本机账本里找不到原题，请联网同步后再看。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
-            else AttemptCard(c, index + 1, change.attemptIds.size, detail)
+            else AttemptCard(c.math, c.course != null, { id -> c.course?.attemptRecord(id)?.let(::rubricFrom) }, index + 1, change.attemptIds.size, detail)
         }
     }
 }
@@ -158,12 +159,12 @@ private fun OrphanDetail(c: CoachController, o: OrphanedAnswer) {
 
 /** 一次作答的全部事实。构答题的评分标准联网向 Mac 取；离线时只有账本里已有的部分，并明说。 */
 @Composable
-private fun AttemptCard(c: CoachController, number: Int, total: Int, d: AttemptDetail) {
+internal fun AttemptCard(math: MathAssets, canAskMac: Boolean, loadRubric: suspend (attemptId: String) -> RubricView?, number: Int, total: Int, d: AttemptDetail) {
     val rubric by produceState<RubricView?>(null, d.attemptId) {
-        if (!d.isChoice) value = c.course?.attemptRecord(d.attemptId)?.let(::rubricFrom)
+        if (!d.isChoice) value = loadRubric(d.attemptId)
     }
     val grade = d.effectiveGrade
-    Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+    Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("attempt")) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("第 $number / $total 次作答 · ${formatLabel(d.format)}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
@@ -177,15 +178,15 @@ private fun AttemptCard(c: CoachController, number: Int, total: Int, d: AttemptD
             if (d.hinted) Text("答题前看过提示，这次不进已通过窗口。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
 
             Text("原题", style = MaterialTheme.typography.labelLarge)
-            Markdown(d.stem, true, "rec-stem:${d.attemptId}", c.math)
-            if (d.isChoice) ChoiceBlock(c, d) else ConstructedBlock(d, rubric, c.course != null)
+            Markdown(d.stem, true, "rec-stem:${d.attemptId}", math)
+            if (d.isChoice) ChoiceBlock(math, d) else ConstructedBlock(d, rubric, canAskMac)
             GradeBlock(d)
         }
     }
 }
 
 @Composable
-private fun ChoiceBlock(c: CoachController, d: AttemptDetail) {
+private fun ChoiceBlock(math: MathAssets, d: AttemptDetail) {
     val picked = d.answer.trim().uppercase()
     val correct = d.effectiveGrade?.let { it.score >= it.max }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -195,7 +196,7 @@ private fun ChoiceBlock(c: CoachController, d: AttemptDetail) {
             val color = when { mine && correct == true -> successColor(); mine && correct == false -> MaterialTheme.colorScheme.error; else -> MaterialTheme.colorScheme.onSurface }
             Row(Modifier.fillMaxWidth().background(if (mine) color.copy(alpha = .10f) else Color.Transparent, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(letter, style = MaterialTheme.typography.titleMedium, color = color)
-                Box(Modifier.weight(1f)) { Markdown(text, true, "rec-opt:${d.attemptId}:$letter", c.math) }
+                Box(Modifier.weight(1f)) { Markdown(text, true, "rec-opt:${d.attemptId}:$letter", math) }
                 if (mine) Text(if (correct == true) "你的选择 ✓" else if (correct == false) "你的选择 ✗" else "你的选择", style = MaterialTheme.typography.labelMedium, color = color)
             }
         }
@@ -241,6 +242,7 @@ private fun ConstructedBlock(d: AttemptDetail, rubric: RubricView?, canAskMac: B
                     append(id); if (spec != null && spec.text.isNotBlank()) append("  ").append(spec.text)
                     if (item != null) append("  ·  得 ${trimZero(item.points)}") ; if (spec != null) append(" / ${trimZero(spec.points)} 分")
                 }, style = MaterialTheme.typography.bodyMedium)
+                if (item == null) Text("批改记录里没有这一项的得分。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
                 if (item != null && item.reason.isNotBlank()) Text("批改理由：${item.reason}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (item != null && item.evidence.isNotBlank() && item.evidence != d.finalAnswer) Text("引用：「${item.evidence}」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (spec != null && spec.basis.isNotBlank()) Text("教材依据：${spec.basis}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

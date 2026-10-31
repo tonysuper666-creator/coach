@@ -1033,19 +1033,18 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
      * sealed material stay out of every learner-facing surface, so browsing cannot leak a first-answer key.
      */
     fun browsableSources(course: String): JsonArray = JsonArray(query(
-        """SELECT d.doc_id,d.title,d.kind,d.book_page_offset,min(p.pdf_page),max(p.pdf_page) FROM source_docs d
+        """SELECT d.doc_id,d.title,d.kind,min(p.pdf_page),max(p.pdf_page),min(p.book_page),max(p.book_page) FROM source_docs d
            JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.tutor_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
-        else json("docId" to it.getString(1),"title" to it.getString(2),"kind" to it.getString(3),
-            "bookPageOffset" to it.getObject(4)?.let { _ -> it.getInt(4) },"firstPdfPage" to it.getInt(5),"lastPdfPage" to it.getInt(6))
+        else json("docId" to it.getString(1),"title" to it.getString(2),"kind" to it.getString(3),"firstPdfPage" to it.getInt(4),"lastPdfPage" to it.getInt(5),
+            "firstBookPage" to it.getObject(6)?.let { _ -> it.getInt(6) },"lastBookPage" to it.getObject(7)?.let { _ -> it.getInt(7) })
     }.filterNotNull())
 
     fun browsablePage(course: String, doc: String, pdfPage: Int): JsonObject? = query(
-        """SELECT d.doc_id,d.title,d.kind,d.book_page_offset,p.book_page,p.text FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
+        """SELECT d.doc_id,d.title,d.kind,p.book_page,p.text FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
            WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.tutor_visible=1""",course,doc,pdfPage) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
-        else json("docId" to it.getString(1),"pdfPage" to pdfPage,
-            "bookPage" to (it.getObject(5)?.let { _ -> it.getInt(5) } ?: it.getObject(4)?.let { _ -> pdfPage - it.getInt(4) }),"text" to it.getString(6))
+        else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
 
     /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */

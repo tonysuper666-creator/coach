@@ -58,7 +58,7 @@ private fun DocList(docs: List<SourceDoc>, onOpen: (SourceDoc) -> Unit) {
             Surface(onClick = { onOpen(doc) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(doc.title.removeSuffix(".md"), style = MaterialTheme.typography.bodyLarge)
-                    Text("${doc.lastPdfPage - doc.firstPdfPage + 1} 页" + (doc.bookPageOffset?.let { " · 书页 p.${doc.firstPdfPage - it}–${doc.lastPdfPage - it}" } ?: ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${doc.lastPdfPage - doc.firstPdfPage + 1} 页" + (if (doc.firstBookPage != null && doc.lastBookPage != null) " · 书页 p.${doc.firstBookPage}–${doc.lastBookPage}" else ""), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -78,7 +78,7 @@ private fun PageReader(c: CoachController, docs: List<SourceDoc>, key: PageKey, 
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(doc?.title?.removeSuffix(".md") ?: "原文", style = MaterialTheme.typography.titleSmall)
-            val book = page?.bookPage ?: doc?.bookPageOffset?.let { key.pdfPage - it }
+            val book = page?.bookPage
             Text((book?.let { "书页 p.$it · " } ?: "") + "PDF 第 ${key.pdfPage} 页（${key.pdfPage - first + 1} / ${last - first + 1}）", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider()

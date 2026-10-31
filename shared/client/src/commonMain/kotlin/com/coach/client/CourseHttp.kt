@@ -17,8 +17,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 
-/** 课程原文的一个文档（教材一章）。页号是 PDF 页；[bookPageOffset] 把它换成书页（书页 = PDF 页 − 偏移）。 */
-data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int, val lastPdfPage: Int, val bookPageOffset: Int?)
+/** 课程原文的一个文档（教材一章）。页号是 PDF 页；书页范围来自各页自己的书页号（有的页没有）。 */
+data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int, val lastPdfPage: Int, val firstBookPage: Int?, val lastBookPage: Int?)
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
 
 /**
@@ -49,7 +49,7 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     suspend fun sources(): List<SourceDoc>? = getObject("sources")?.let { root ->
         (root["docs"] as? JsonArray)?.mapNotNull { v ->
             val o = v as? JsonObject ?: return@mapNotNull null
-            SourceDoc(o.s("docId"), o.s("title"), o.i("firstPdfPage"), o.i("lastPdfPage"), (o["bookPageOffset"] as? JsonPrimitive)?.intOrNull)
+            SourceDoc(o.s("docId"), o.s("title"), o.i("firstPdfPage"), o.i("lastPdfPage"), (o["firstBookPage"] as? JsonPrimitive)?.intOrNull, (o["lastBookPage"] as? JsonPrimitive)?.intOrNull)
         }
     }
 

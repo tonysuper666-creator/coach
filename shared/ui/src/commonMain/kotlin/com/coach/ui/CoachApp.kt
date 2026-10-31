@@ -13,6 +13,7 @@ import com.coach.client.TutorClient
 import com.coach.client.TutorUiState
 import com.coach.ui.markdown.MathAsset
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
 /** 界面依赖的一切外部能力，由各端（桌面/安卓）装配。 */
@@ -36,20 +37,21 @@ class MathAssets(private val fetch: (suspend (tex: String, display: Boolean) -> 
         if (key in assets || !asked.add(key)) return
         val display = key.substringBefore(':') == "true"
         val tex = key.substringAfter(':')
-        loader(tex, display)?.let { assets[key] = it }
+        // 请求方的 LaunchedEffect 会因别的公式到货而重启；已发出的请求必须跑完，否则这个公式永远停在源码 chip。
+        withContext(NonCancellable) { loader(tex, display)?.let { assets[key] = it } }
     }
 }
 
 fun threadIdFor(kpId: String) = "kp:$kpId"
 
 @Composable
-fun CoachApp(c: CoachController) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
         value = withContext(Dispatchers.Default) { CourseView(c.sync.localEvents(c.courseId), c.sync.projection(c.courseId)) }
     }
-    var open by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize()) {

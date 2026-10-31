@@ -1,5 +1,6 @@
 package com.coach.ui
 
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -45,9 +46,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         HorizontalDivider()
         val listState = rememberLazyListState()
         val lastLength = tv.items.lastOrNull().let { (it as? ChatItem.Tutor)?.message?.text?.length ?: 0 }
-        LaunchedEffect(tv.items.size, groups.size, lastLength) {
-            val count = tv.items.size + groups.size
-            if (count > 0) listState.animateScrollToItem(count)
+        // 讲解流式输出时跟到底；新题组出现时把它的开头放在最上面，方便从第 1 题读起。
+        LaunchedEffect(tv.items.size, lastLength) {
+            if (tv.streaming) { listState.scrollToItem(tv.items.lastIndex); listState.scrollBy(1_000_000f) }
+        }
+        LaunchedEffect(groups.size) {
+            if (groups.isNotEmpty()) listState.animateScrollToItem(tv.items.size + groups.size - 1)
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (tv.items.isEmpty() && groups.isEmpty()) item {

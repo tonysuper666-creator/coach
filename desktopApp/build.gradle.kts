@@ -30,5 +30,5 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 tasks.withType<JavaExec>().configureEach {
-    for (key in listOf("coach.exportFormulas", "coach.capturePath")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    for (key in listOf("coach.exportFormulas", "coach.capturePath", "coach.captures", "coach.captureDir")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
 }

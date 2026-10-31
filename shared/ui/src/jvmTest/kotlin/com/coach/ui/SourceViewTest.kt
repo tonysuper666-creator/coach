@@ -136,6 +136,8 @@ class SourceViewTest {
                 showResources(fake, SourceJump("textbook:2", 41))
                 waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这一页取不到", substring = true).fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("重试").assertExists()
+                // The header still names the requested page in this state, so a device check must not take it as proof the text arrived.
+                onNodeWithTag("source-page-label").assertTextContains("PDF 第 41 页", substring = true)
                 onNodeWithText("这是第", substring = true).assertDoesNotExist()
             }
         } finally { fake.stop() }

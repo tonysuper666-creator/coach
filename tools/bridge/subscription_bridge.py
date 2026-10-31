@@ -244,6 +244,10 @@ def write_log(**kw: Any) -> None:
             + (f" note={kw['note']}" if kw.get("note") else "")
             + "\n")
     try:
+        if os.environ.get("BRIDGE_LOG_STDOUT") == "1":
+            # Managed Ktor drains stdout into its daily, 14-day retained bridge log.
+            print(line, end="", flush=True)
+            return
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
@@ -1201,6 +1205,10 @@ async def health_payload() -> dict:
 
 @app.get("/health")
 async def health(request: Request):
+    if request.query_params.get("scope") == "process":
+        # Liveness must not wait for CLI auth probes (up to 20s), or depend on
+        # subscription availability. Full /health continues to report upstreams.
+        return {"ok": True, "service": "coach-bridge", "port": PORT}
     payload = await health_payload()
     payload["request_id"] = request.headers.get("x-request-id") or "-"
     return payload

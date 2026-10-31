@@ -41,6 +41,10 @@ class TutorClient(
     }
     @kotlin.concurrent.Volatile private var live: Channel<String>? = null
 
+    // 在线缺号由模型发现，续传帧走当前连接的发送队列（非阻塞 trySend，满了/断线返回 false 由模型重试）。
+    init { model.resumeSender = { id -> send(resumeFrame(id)) } }
+    private fun resumeFrame(id: String) = buildJsonObject { put("t", "msg.resume"); put("msg", id) }
+
     // Handshake nonce initialization can block; keep CPU workers free on two-core Android devices.
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         var backoff = 250L
@@ -54,12 +58,15 @@ class TutorClient(
                     // The stream may have finished while the network was absent. Request its
                     // authoritative snapshot before consuming new deltas on this connection.
                     model.unfinishedMessageIds().forEach { id ->
-                        send(Frame.Text(buildJsonObject { put("t", "msg.resume"); put("msg", id) }.toString()))
+                        send(Frame.Text(resumeFrame(id).toString()))
+                        model.noteResumeSent(id)
                     }
                     val sender = launch { for (text in queue) send(Frame.Text(text)) }
+                    // 补发没发出去/没等到快照的续传，并对长时间无帧的消息主动对一次快照。
+                    val ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
                     try {
                         for (frame in incoming) if (frame is Frame.Text) model.onFrame(frame.readText())
-                    } finally { sender.cancel() }
+                    } finally { sender.cancel(); ticker.cancel() }
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -76,6 +83,8 @@ class TutorClient(
     }
 
     fun close() { http.close() }
+
+    private companion object { const val RESUME_TICK_MS = 1_000L }
 
     /** 发出一帧；没有在线连接返回 false。 */
     fun send(frame: JsonObject): Boolean = live?.trySend(frame.toString())?.isSuccess == true

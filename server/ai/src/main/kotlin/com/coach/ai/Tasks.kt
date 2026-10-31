@@ -164,6 +164,8 @@ $excerpt
 Write $count constructed-response (short essay) exam questions at midterm level, in English, answerable in 3-6 sentences from the excerpt.
 For each question also write a reference answer and a frozen rubric: 3-5 rubric items, each with
 "id" (R1..), "text" (what a full-credit answer must contain), "points" (sum = 10) and "basis" (verbatim clue from the excerpt).
+For EVERY basis, copy ONE contiguous substring of the excerpt exactly. Do not paraphrase, combine fragments,
+insert ellipses, correct spelling, or rewrite punctuation/math. Keep the source's Markdown/LaTeX and escape it for JSON.
 Return a JSON array: [{"stem":..., "reference_answer":..., "rubric":[{"id":"R1","text":...,"points":3,"basis":...}]}]
     """.trim()
 

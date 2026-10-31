@@ -91,6 +91,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=5")
             }
         }
+        sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
         ensureSourceIndexes()
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
@@ -98,6 +99,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("CREATE TABLE pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
             }
         }
+        if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='constructed_details'") { it.getString(1) }.isEmpty()) {
+            rawBackup(directory.resolve("backups/pre-constructed-${uid()}"))
+            sql("CREATE TABLE constructed_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, reference_answer TEXT NOT NULL, rubric TEXT NOT NULL, rubric_fingerprint TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+        }
+
     }
 
     /** Capability repair is independent of version numbers used by other features or deployments. */
@@ -268,6 +274,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             e.seq,e.id,e.courseId,e.type,e.schema,e.recordedAt,e.occurredAt,e.deviceId,e.actor,e.commandId,e.effectIndex,e.idemKey,command?.payloadSha256,e.threadId,payload.toString(),LedgerJson.encodeToString(e))
         if(type=="question_key_changed") sql("UPDATE questions SET key_state=? WHERE question_id=? AND course_id=?",payload.str("keyState"),payload.str("questionId"),course)
         sql("DELETE FROM projection_cache WHERE course_id=?",course)
+        if (type in setOf("attempt_graded","grade_reviewed","legacy_passed","kp_overridden")) {
+            // Learning facts and the resulting supply job commit together. Use only a previously supplied source pack.
+            val passed=projection(course).mastery.filterValues { it.passed }.keys
+            val sources=query("SELECT subject FROM jobs WHERE kind='gen_mcq' AND json_valid(subject) AND json_extract(subject,'$.course')=? ORDER BY created_at DESC,rowid DESC",course) {
+                LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
+            }.distinctBy { it.str("kp") }
+            for (source in sources) if (source.str("kp") in passed)
+                enqueueConstructedInTransaction(course,source.str("kp"),source.str("objective"),source.str("excerpt"))
+        }
         return e
     }
     fun registerQuestion(id: String, course: String, fingerprint: String, format: String, stem: String,
@@ -577,12 +592,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun enqueueSupply(course: String, kp: String, objective: String, excerpt: String, background: Boolean = false): String = transaction {
         require(course.isNotBlank() && course != "__system__" && kp.isNotBlank() && excerpt.isNotBlank())
         val hash = sha256((objective + "\u0000" + excerpt).toByteArray(Charsets.UTF_8))
-        val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash }
+        val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash && it.kind in setOf("gen_mcq","blind_review") }
         active?.id ?: enqueueJob("gen_mcq", json("course" to course, "kp" to kp, "objective" to objective,
             "excerpt" to excerpt, "background" to background).toString(), hash)
     }
     fun supplyJobs(course: String? = null, kp: String? = null): List<SupplyJob> =
-        query("SELECT job_id,kind,subject,question_version FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('queued','running') AND json_valid(subject) ORDER BY created_at,job_id") {
+        query("SELECT job_id,kind,subject,question_version FROM jobs WHERE kind IN ('gen_mcq','blind_review','gen_constructed','review_constructed') AND json_valid(subject) AND state IN ('queued','running') ORDER BY created_at,job_id") {
             SupplyJob(it.getString(1), it.getString(2), LedgerJson.parseToJsonElement(it.getString(3)).jsonObject, it.getString(4))
         }.filter { (course == null || it.subject.str("course") == course) && (kp == null || it.subject.str("kp") == kp) }
 
@@ -622,6 +637,38 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         inserted
     }
+    fun constructedAvailable(course: String, kp: String): Int = query("SELECT count(*) FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed' AND json_extract(e.payload,'$.questionId')=q.question_id)",course,kp) { it.getInt(1) }.single()
+    fun constructedQuestions(course: String, kp: String): List<JsonObject> = query("SELECT q.question_id,q.stem_md,d.reference_answer,d.rubric,d.rubric_fingerprint FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED'",course,kp) {
+        json("questionId" to it.getString(1),"stem" to it.getString(2),"referenceAnswer" to it.getString(3),"rubric" to LedgerJson.parseToJsonElement(it.getString(4)),"rubricFingerprint" to it.getString(5))
+    }
+    fun enqueueConstructed(course: String, kp: String, objective: String, excerpt: String): String? = transaction {
+        enqueueConstructedInTransaction(course,kp,objective,excerpt)
+    }
+    private fun enqueueConstructedInTransaction(course: String, kp: String, objective: String, excerpt: String): String? {
+        require(excerpt.isNotBlank() && objective.isNotBlank())
+        if (projection(course).mastery[kp]?.passed != true || constructedAvailable(course,kp) >= 2) return null
+        val hash=sha256((objective+"\u0000"+excerpt).toByteArray(Charsets.UTF_8))
+        return supplyJobs(course,kp).firstOrNull { it.packHash==hash && it.kind in setOf("gen_constructed","review_constructed") }?.id
+            ?: enqueueJob("gen_constructed",json("course" to course,"kp" to kp,"objective" to objective,"excerpt" to excerpt,"background" to true).toString(),hash)
+    }
+    fun queueConstructedReviews(token: Fence, job: SupplyJob, questions: List<JsonObject>, generator: String): Boolean = transaction {
+        if (!completeJob(token,job.packHash,null)) return@transaction false
+        for (q in questions) enqueueJob("review_constructed",JsonObject(job.subject + mapOf("question" to q,"generator" to JsonPrimitive(generator))).toString(),job.packHash)
+        true
+    }
+    fun storeConstructed(token: Fence, job: SupplyJob, question: JsonObject, fingerprint: String, reviewer: String): Boolean = transaction {
+        if (!completeJob(token,job.packHash,null)) return@transaction false
+        val course=job.subject.str("course"); val kp=job.subject.str("kp"); val stem=question.str("stem")
+        val fp=sha256((stem+question.str("reference_answer")+fingerprint).toByteArray(Charsets.UTF_8))
+        if (query("SELECT 1 FROM questions WHERE course_id=? AND fingerprint=?",course,fp) { it.getInt(1) }.isNotEmpty()) return@transaction false
+        val id=uid()
+        sql("INSERT INTO questions(question_id,course_id,format,stem_md,origin,fingerprint,key_state) VALUES(?,?,'SHORT_ANSWER',?,'COACH',?,'VERIFIED')",id,course,stem,fp)
+        sql("INSERT INTO question_kp VALUES(?,?,1)",id,kp)
+        sql("INSERT INTO answer_keys(question_id,key_json,reviewed_by,reviewed_at) VALUES(?,?,?,?)",id,question.toString(),reviewer,clock())
+        sql("INSERT INTO constructed_details VALUES(?,?,?,?,?,?,?)",id,job.packHash,question.str("reference_answer"),question.getValue("rubric").toString(),fingerprint,job.subject.str("generator"),reviewer)
+        true
+    }
+
     private fun unseenPoolIds(course: String, kp: String): List<String> = query(
         """SELECT q.question_id FROM questions q JOIN question_kp k USING(question_id)
            WHERE q.course_id=? AND k.kp_id=? AND q.format='SINGLE_CHOICE' AND q.key_state='VERIFIED'
@@ -643,15 +690,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             return@transaction PoolTake(prior,"READY",poolAvailable(course,kp),emptyList(),null)
         }
         val ids=unseenPoolIds(course,kp)
-        val jobs=supplyJobs(course,kp).map { it.id to jobState(it.id)!!.first }
-        val failure=query("SELECT subject,last_error FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('failed','completed') ORDER BY updated_at DESC,rowid DESC") {
-            LedgerJson.parseToJsonElement(it.getString(1)).jsonObject to it.getString(2)
-        }.firstOrNull { it.first.str("course") == course && it.first.str("kp") == kp }?.second
-        val reason=failure ?: if(ids.size < size) "EMPTY" else null
-        if (reason != null && events(course).none { it.idemKey == "fallback:$groupId" })
-            append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,"from" to "TASK","reason" to reason),"fallback:$groupId")
+        val jobs=supplyJobs(course,kp).filter { it.kind in setOf("gen_mcq","blind_review") }.map { it.id to jobState(it.id)!!.first }
         if (ids.size < size) return@transaction PoolTake(emptyList(),if(jobs.isEmpty()) "EMPTY" else "REFILLING",ids.size,jobs,
             if(jobs.isEmpty()) "题池暂空，补题尚未运行" else "题池暂空，正在补题（约 20 秒）")
+        // A fallback is a successful reserve take caused by an actual, not-yet-consumed failure.
+        val failure=query("""SELECT j.job_id,j.last_error FROM jobs j
+            WHERE j.kind IN ('gen_mcq','blind_review') AND j.state='failed' AND json_valid(j.subject)
+            AND json_extract(j.subject,'$.course')=? AND json_extract(j.subject,'$.kp')=?
+            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=? AND e.idem_key='fallback-job:'||j.job_id)
+            ORDER BY j.updated_at DESC,j.rowid DESC LIMIT 1""",course,kp,course) { it.getString(1) to it.getString(2) }.singleOrNull()
+        if (failure != null) append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,
+            "jobId" to failure.first,"from" to "TASK","reason" to failure.second),"fallback-job:${failure.first}")
         val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
             "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught) }
         val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false,thread)

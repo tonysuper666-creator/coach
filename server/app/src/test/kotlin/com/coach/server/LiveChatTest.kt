@@ -61,8 +61,8 @@ class LiveChatTest {
             ?: files.joinToString("\n\n") { Files.readString(it) }.take(40_000)
     }
 
-    private fun health(): JsonObject = LedgerJson.parseToJsonElement(http.send(
-        HttpRequest.newBuilder(URI.create("http://127.0.0.1:8791/health")).timeout(Duration.ofSeconds(5)).GET().build(),
+    private fun health(url: String = "http://127.0.0.1:8791"): JsonObject = LedgerJson.parseToJsonElement(http.send(
+        HttpRequest.newBuilder(URI.create("$url/health")).timeout(Duration.ofSeconds(5)).GET().build(),
         HttpResponse.BodyHandlers.ofString(),
     ).body()).jsonObject
 
@@ -75,51 +75,72 @@ class LiveChatTest {
         return h
     }
 
-    private inner class Bridge(private val stub: Boolean = false) : AutoCloseable {
-        val process: Process
+    private inner class Bridge(private val stub: Boolean = false, mode: String = "protocol") : AutoCloseable {
+        val port = if (stub) ServerSocket(0).use { it.localPort } else 8791
+        val url get() = "http://127.0.0.1:$port"
+        private var process: Process? = null
+        private val root: ProcessHandle
         init {
-            // Refuse to adopt or stop another run's bridge, and never touch 8790.
-            ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1", 8791)) }
             Files.createDirectories(output)
-            val python = System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
-            val stubDir = output.resolve("stub-cli")
-            if (stub) {
-                Files.createDirectories(stubDir)
-                Files.copy(Path.of("tools/bridge/tests/stub_cli.py"), stubDir.resolve("claude"))
-                stubDir.resolve("claude").toFile().setExecutable(true)
-                Files.writeString(stubDir.resolve("mode"), "protocol")
-            }
-            process = ProcessBuilder(python, "tools/bridge/subscription_bridge.py").apply {
-                environment().remove("BRIDGE_CHILD_PATH")
-                environment()["BRIDGE_PORT"] = "8791"
-                environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
-                environment()["BRIDGE_AGY_ENABLED"] = "0"
-                environment()["COACH_BRIDGE_HOME"] = if (stub) output.resolve("stub-bridge").toString() else home.resolve("Coach/bridge").toString()
+            val attachPid = if (stub) null else System.getenv("COACH_LIVE_BRIDGE_PID")?.toLong()
+            if (attachPid != null) {
+                root = ProcessHandle.of(attachPid).orElseThrow()
+                require(root.isAlive && root.info().arguments().orElse(emptyArray()).any { it.endsWith("subscription_bridge.py") }) {
+                    "COACH_LIVE_BRIDGE_PID 必须是现有桥进程"
+                }
+                val h = health(url)
+                require(h.getValue("concurrency").jsonObject.getValue("claude").jsonObject.str("active") == "0") { "现有桥正在处理请求，本批未开始" }
+                record("stage" to "bridge", "event" to "attach", "pid" to root.pid(), "port" to port, "daily" to h["daily"], "rate_limit" to h["rate_limit"])
+            } else {
+                // Only a bridge started by this test may be stopped; never touch 8790.
+                ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1", port)) }
+                val python = System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
+                val stubDir = output.resolve("stub-$mode-cli")
                 if (stub) {
-                    environment()["BRIDGE_CHILD_PATH"] = stubDir.toString()
-                    environment()["STUB_DIR"] = stubDir.toString()
-                    environment()["STUB_SERVED"] = BridgeClient.CLAUDE
+                    Files.createDirectories(stubDir)
+                    Files.copy(Path.of("tools/bridge/tests/stub_cli.py"), stubDir.resolve("claude"), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    stubDir.resolve("claude").toFile().setExecutable(true)
+                    Files.writeString(stubDir.resolve("mode"), mode)
                 }
-                redirectOutput(output.resolve(if (stub) "stub.stdout.log" else "bridge.stdout.log").toFile())
-                redirectError(output.resolve(if (stub) "stub.stderr.log" else "bridge.stderr.log").toFile())
-            }.start()
-            record("stage" to "bridge", "event" to "start", "pid" to process.pid(), "port" to 8791, "stub" to stub)
-            try {
-                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
-                while (runCatching { health() }.getOrNull() == null) {
-                    check(process.isAlive && System.nanoTime() < deadline) { "8791 未就绪；见本地 bridge.stderr.log" }
-                    Thread.sleep(100)
-                }
-            } catch (t: Throwable) { close(); throw t }
-        }
-        fun descendants(): Set<Long> = process.descendants().use { stream -> stream.map { it.pid() }.toList().toSet() }
-        override fun close() {
-            process.destroy()
-            if (!process.waitFor(10, TimeUnit.SECONDS)) {
-                process.descendants().use { stream -> stream.forEach { it.destroy() } }
-                process.destroyForcibly().waitFor()
+                val owned = ProcessBuilder(python, "tools/bridge/subscription_bridge.py").apply {
+                    environment().remove("BRIDGE_CHILD_PATH")
+                    environment()["BRIDGE_PORT"] = port.toString()
+                    environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
+                    environment()["BRIDGE_AGY_ENABLED"] = "0"
+                    environment()["COACH_BRIDGE_HOME"] = if (stub) output.resolve("stub-$mode-bridge").toString() else home.resolve("Coach/bridge").toString()
+                    if (stub) {
+                        environment()["BRIDGE_CHILD_PATH"] = stubDir.toString()
+                        environment()["STUB_DIR"] = stubDir.toString()
+                        environment()["STUB_SERVED"] = BridgeClient.CLAUDE
+                    }
+                    redirectOutput(output.resolve(if (stub) "stub-$mode.stdout.log" else "bridge.stdout.log").toFile())
+                    redirectError(output.resolve(if (stub) "stub-$mode.stderr.log" else "bridge.stderr.log").toFile())
+                }.start()
+                process = owned
+                root = owned.toHandle()
+                record("stage" to "bridge", "event" to "start", "pid" to owned.pid(), "port" to port, "stub" to stub, "mode" to mode)
+                try {
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+                    while (runCatching { health(url) }.getOrNull() == null) {
+                        check(owned.isAlive && System.nanoTime() < deadline) { "桥未就绪；见本地 bridge.stderr.log" }
+                        Thread.sleep(100)
+                    }
+                } catch (t: Throwable) { close(); throw t }
             }
-            record("stage" to "bridge", "event" to "stop", "pid" to process.pid(), "exit" to process.exitValue(), "stub" to stub)
+        }
+        fun descendants(): Set<Long> = root.descendants().use { stream -> stream.map { it.pid() }.toList().toSet() }
+        override fun close() {
+            val owned = process
+            if (owned == null) {
+                record("stage" to "bridge", "event" to "detach", "pid" to root.pid(), "alive" to root.isAlive)
+                return
+            }
+            owned.destroy()
+            if (!owned.waitFor(10, TimeUnit.SECONDS)) {
+                owned.descendants().use { stream -> stream.forEach { it.destroy() } }
+                owned.destroyForcibly().waitFor()
+            }
+            record("stage" to "bridge", "event" to "stop", "pid" to owned.pid(), "exit" to owned.exitValue(), "stub" to stub)
         }
     }
 
@@ -155,7 +176,7 @@ class LiveChatTest {
         val store = LedgerStore(directory).also { it.enroll("live-client", token) }
         val actor = LedgerActor(scope, store)
         val logs: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl, testTraffic = true)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
+        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 64), chat)
         }.apply {
@@ -188,7 +209,7 @@ class LiveChatTest {
                 try {
                     val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:8791/v1/chat/completions"))
                         .POST(HttpRequest.BodyPublishers.ofByteArray(exchange.requestBody.readBytes()))
-                    for (key in listOf("Content-Type", "X-Coach-Traffic", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id")) {
+                    for (key in listOf("Content-Type", "X-Coach-Effort", "X-Coach-Fallback", "X-Request-Id")) {
                         exchange.requestHeaders.getFirst(key)?.let { request.header(key, it) }
                     }
                     val response = HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofInputStream())
@@ -253,8 +274,8 @@ class LiveChatTest {
     @Test
     fun realCliAcrossTheStreamingChain() {
         val pack = pack() // Missing local material is an explicit failure, never a skipped pass.
-        val stages = (System.getenv("COACH_LIVE_STAGES") ?: "first,resume,cancel,cut,replay").split(",").toMutableList()
-        require(stages.isNotEmpty() && stages.all { it in listOf("first", "resume", "cancel", "cut", "replay") }) { "Unknown live stage" }
+        val stages = (System.getenv("COACH_LIVE_STAGES") ?: "first,resume,cancel,cut,replay,early").split(",").toMutableList()
+        require(stages.isNotEmpty() && stages.all { it in listOf("first", "resume", "cancel", "cut", "replay", "early") }) { "Unknown live stage" }
         val n = System.getenv("COACH_LIVE_FIRST_N")?.toInt() ?: 20
         val resumeN = System.getenv("COACH_LIVE_RESUME_N")?.toInt() ?: 10
         require(n > 0 && resumeN > 0)
@@ -262,10 +283,11 @@ class LiveChatTest {
             (if ("cancel" in stages) 2 else 0) + (if ("cut" in stages) 1 else 0)
         Bridge().use { bridge ->
             val dailyBefore = preflight().getValue("daily").jsonObject
-            if (dailyBefore.str("remaining").toInt() < plannedCalls()) {
-                require("first" in stages && dailyBefore.str("remaining").toInt() >= n) { "额度不足完整首字组；未发起调用" }
+            val remaining = dailyBefore["remaining"]?.jsonPrimitive?.intOrNull
+            if (remaining != null && remaining < plannedCalls()) {
+                require("first" in stages && remaining >= n) { "额度不足完整首字组；未发起调用" }
                 record("stage" to "deferred", "reason" to "daily_budget", "stages" to stages.filter { it !in listOf("first", "replay") })
-                stages.retainAll(listOf("first", "replay"))
+                stages.retainAll(listOf("first", "replay", "early"))
             }
             val revision = ProcessBuilder("git", "rev-parse", "HEAD").start().inputStream.bufferedReader().use { it.readText().trim() }
             record("stage" to "preflight", "daily" to dailyBefore, "planned_calls" to plannedCalls(), "git_revision" to revision)
@@ -356,8 +378,8 @@ class LiveChatTest {
                 if (first.isNotEmpty()) record("stage" to "summary", "n" to first.size, "p50_ms" to percentile(first, 0.5), "p90_ms" to percentile(first, 0.9))
             }
         }
-        if ("replay" in stages) Bridge(stub = true).use {
-            Harness(directory = output.resolve("replay-ledger")).use { h ->
+        if ("replay" in stages) Bridge(stub = true).use { bridge ->
+            Harness(bridge.url, output.resolve("replay-ledger")).use { h ->
                 h.ws().use { ws ->
                     val assembler = ChatStreamAssembler()
                     ask(ws, "Synthetic course context", "合成协议回放，不调用真实订阅 CLI")
@@ -367,6 +389,32 @@ class LiveChatTest {
                     assertEquals("正常正文。\n正常结尾。\n", assembler.text(id))
                     assertEquals("complete", end.str("status"))
                     assertTrue(h.logs.any { it.startsWith("COACH visible-drop") })
+                }
+            }
+        }
+        if ("early" in stages) Bridge(stub = true, mode = "hang").use { bridge ->
+            Harness(bridge.url, output.resolve("early-ledger")).use { h ->
+                for (waitForSpawn in listOf(false, true)) h.ws().use { ws ->
+                    val baseline = bridge.descendants()
+                    ask(ws, "Synthetic context", "合成立即取消，不调用真实订阅")
+                    val id = ws.await("msg.start").str("msg")
+                    val spawnDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (waitForSpawn && (bridge.descendants() - baseline).isEmpty() && System.nanoTime() < spawnDeadline) Thread.sleep(5)
+                    val observed = bridge.descendants() - baseline
+                    if (waitForSpawn) assertTrue(observed.isNotEmpty(), "stub CLI did not spawn")
+                    val started = System.nanoTime()
+                    ws.send(json("t" to "msg.cancel", "msg" to id))
+                    val end = ws.await("msg.end", timeoutMs = 2_000)
+                    // Also allow a just-sent HTTP request time to expose any late CLI spawn.
+                    Thread.sleep(200)
+                    while ((bridge.descendants() - baseline).isNotEmpty() && System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2)) Thread.sleep(5)
+                    val elapsed = (System.nanoTime() - started) / 1_000_000
+                    val survivors = bridge.descendants() - baseline
+                    record("stage" to "early_cancel", "wait_for_spawn" to waitForSpawn, "status" to end.str("status"),
+                        "process_exit_ms" to elapsed, "observed_pids" to observed.joinToString(","), "survivors" to survivors.joinToString(","), "real_calls" to 0)
+                    assertEquals("cancelled", end.str("status"))
+                    assertEquals("cancelled", h.snapshot(id).status)
+                    assertTrue(survivors.isEmpty() && elapsed < 2_000)
                 }
             }
         }

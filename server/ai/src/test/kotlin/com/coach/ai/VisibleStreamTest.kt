@@ -11,6 +11,24 @@ import kotlin.test.assertTrue
  */
 class VisibleStreamTest {
 
+    @Test
+    fun proseIntervalsSetsAndCitationsSurviveEveryDeltaBoundary() {
+        for (answer in listOf("效用取值在区间 [0, 1] 之间。", "集合 {A, B} 是两种方案。", "参见文献[1]。", "上一行。\n区间 [0, 1] 与集合 {A, B}，参见文献[1]。")) {
+            for (boundary in 0..answer.length) {
+                val recorder = Recorder()
+                recorder.push(answer.take(boundary))
+                recorder.push(answer.drop(boundary))
+                recorder.finish()
+                assertEquals(answer, recorder.texts.toString(), "delta boundary $boundary in $answer")
+                assertTrue(recorder.drops.isEmpty())
+            }
+            val recorder = Recorder()
+            answer.forEach { recorder.push(it.toString()) }
+            recorder.finish()
+            assertEquals(answer, recorder.texts.toString(), "one-character deltas in $answer")
+        }
+    }
+
     private class Recorder {
         val drops = ArrayList<VisibleStream.Drop>()
         val texts = StringBuilder()

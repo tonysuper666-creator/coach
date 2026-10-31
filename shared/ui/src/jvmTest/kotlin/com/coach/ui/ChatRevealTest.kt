@@ -49,4 +49,31 @@ class ChatRevealTest {
         assertTrue(top("i9") >= listTop(), "last item stays inside the viewport")
         assertTrue(it.anchor.pinned, "reader is at the tail")
     }
+
+    private fun appendCase(atTail: Boolean, check: ComposeUiTest.(ChatListState) -> Unit) = runComposeUiTest {
+        val state = ChatListState()
+        val items = androidx.compose.runtime.mutableStateListOf<Int>().apply { addAll(0 until 10) }
+        setContent {
+            Box(Modifier.size(300.dp, 500.dp)) {
+                AnchoredChatList(items, { it }, state, 300, Modifier.testTag("list"), spacing = 0.dp) { i -> Box(Modifier.fillMaxWidth().height(200.dp).testTag("i$i")) }
+            }
+        }
+        waitForIdle()
+        if (!atTail) { runOnIdle { kotlinx.coroutines.runBlocking { state.list.scrollToItem(5, 40) } }; waitForIdle() }
+        val before = if (atTail) null else top("i4")
+        runOnIdle { items.add(10); items.add(11) }
+        waitForIdle(); mainClock.advanceTimeBy(300); waitForIdle()
+        if (!atTail) assertEquals(before, top("i4"), "a reader who scrolled up is not moved by new items")
+        check(state)
+    }
+
+    @Test fun readerAtTheTailFollowsNewItems() = appendCase(atTail = true) {
+        assertTrue(top("i11") + 200f <= listTop() + 500f + 1f, "newest item is fully on screen at the bottom")
+        assertTrue(it.anchor.pinned)
+    }
+
+    @Test fun readerAwayFromTheTailIsNotPulledByNewItems() = appendCase(atTail = false) {
+        assertFalse(it.anchor.pinned)
+        onNodeWithTag("i11").assertDoesNotExist()
+    }
 }

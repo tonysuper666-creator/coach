@@ -46,6 +46,7 @@ suspend fun ChatListState.jumpToTail() {
 suspend fun ChatListState.scrollItemToTop(index: Int, count: Int) {
     val target = count - 1 - index
     if (target < 0) return
+    anchor.pinned = false
     snapshotFlow { restoring }.first { !it }
     androidx.compose.runtime.withFrameNanos { }
     list.scrollToItem(target, 0)
@@ -53,6 +54,8 @@ suspend fun ChatListState.scrollItemToTop(index: Int, count: Int) {
     val info = list.layoutInfo
     val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
     if (room <= 0) list.scrollToItem(target, -room) else list.scrollBy(-room.toFloat())
+    // A position that did not change (clamped at the tail) emits nothing for the recorder, so settle the flag here.
+    anchor.pinned = list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0
 }
 
 /**
@@ -80,12 +83,26 @@ fun <T> AnchoredChatList(
     val currentKey by rememberUpdatedState(key)
     // Record the reading place. Any move that is not our own restore is the reader's (drag, fling, jump, "回到最新").
     LaunchedEffect(state) {
-        snapshotFlow { list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset }.collect { (index, offset) ->
-            if (state.restoring) return@collect
-            anchor.pinned = index == 0 && offset == 0
+        var lastKey: Any? = null
+        var lastIndex = -1
+        var lastOffset = -1
+        snapshotFlow {
+            val index = list.firstVisibleItemIndex
             // The first *visible* item: content padding can leave an extra measured item before it in visibleItemsInfo.
+            Triple(index, list.firstVisibleItemScrollOffset, list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.key)
+        }.collect { (index, offset, key) ->
+            if (state.restoring) { lastKey = key; lastIndex = index; lastOffset = offset; return@collect }
+            // Same item at the same offset but a different index: newer items were added at the tail and the list kept the reader on their item.
+            // That is not the reader moving. A reader following the tail must be carried to the new items; anyone else stays put.
+            if (key != null && key == lastKey && offset == lastOffset && index != lastIndex) {
+                lastIndex = index
+                if (anchor.pinned) list.scrollToItem(0, 0)
+                return@collect
+            }
+            anchor.pinned = index == 0 && offset == 0
             val first = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
             if (!anchor.pinned && first != null && first.size > 0) { anchor.key = first.key; anchor.fraction = offset.toFloat() / first.size }
+            lastKey = key; lastIndex = index; lastOffset = offset
         }
     }
     // Window reshaped (or first composition, possibly after a process restore): put the reader back where they were reading.

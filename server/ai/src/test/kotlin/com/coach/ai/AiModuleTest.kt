@@ -136,6 +136,17 @@ class BridgeClientTest {
     }
 
     @Test
+    fun testTrafficIsExplicitAndUserTrafficIsUnmarked() {
+        StubBridge().use { bridge ->
+            repeat(2) { bridge.enqueue(200, StubBridge.completion("ok")) }
+            BridgeClient(stubConfig(bridge).copy(testTraffic = true)).chat(request(stream = false))
+            BridgeClient(stubConfig(bridge).copy(testTraffic = false)).chat(request(stream = false))
+            assertEquals("test", bridge.requestedHeaders[0].entries.first { it.key.equals("X-Coach-Traffic", true) }.value.first())
+            assertTrue(bridge.requestedHeaders[1].keys.none { it.equals("X-Coach-Traffic", true) })
+        }
+    }
+
+    @Test
     fun healthReadsRateLimit() {
         StubBridge().use { bridge ->
             val rate = client(bridge).health()!!["rate_limit"]

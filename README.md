@@ -27,6 +27,8 @@ tools/dev/heavy ./gradlew :desktopApp:run --offline -Pcoach.autoExitSeconds=5 --
 
 ### 服务端与网络小样
 
+M1 常驻安装、停止/卸载、真实恢复复验见 [macOS 常驻服务](tools/dev/service.md)。LaunchAgent 安装后由 Ktor 托管桥副本与 mathsvc；`run-all.sh` 继续供 M0 手动隔离使用。
+
 ```sh
 tools/dev/heavy ./gradlew :server:app:installDist --max-workers=2
 python3 tools/dev/check-server.py

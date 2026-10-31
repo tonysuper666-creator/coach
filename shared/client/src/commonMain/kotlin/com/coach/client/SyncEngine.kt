@@ -100,7 +100,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         _connection.value = "online"
         _revision.value += 1
     }
-    fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.Default) {
+    fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         // Polling is a recovery path for missed WS frames; both paths use the same serialized sync transaction.
         val polling = launch {
             while(isActive) { try { syncOnce() } catch(e: CancellationException) { throw e } catch(e: Exception) { _connection.value="offline" };delay(2000) }

@@ -17,7 +17,7 @@ sealed interface ChatUpdate {
     data class Math(val messageId: String, val index: Int, val tex: String, val display: Boolean) : ChatUpdate
     data class Snapshot(val messageId: String, val index: Int, val text: String, val status: String) : ChatUpdate
     data class Progress(val messageId: String, val phase: String, val text: String = "") : ChatUpdate
-    data class Ended(val messageId: String, val status: String, val reason: String?, val chars: Int) : ChatUpdate
+    data class Ended(val messageId: String, val status: String, val reason: String?, val chars: Int, val model: String? = null) : ChatUpdate
 }
 
 /** `msg.delta / msg.math` 共用一条 `(msg, i)` 序号；重复到达的序号直接丢弃。 */
@@ -74,6 +74,7 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
                         messageId, obj.str("status"),
                         obj.str("reason").ifBlank { null },
                         obj.str("chars").toIntOrNull() ?: bodies[messageId]?.length ?: 0,
+                        obj.str("model").ifBlank { null },
                     ),
                 )
             }

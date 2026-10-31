@@ -36,7 +36,7 @@ cmp "$HOME/Coach/migrate-out/check-a/report.md" "$HOME/Coach/migrate-out/check-b
 
 ## M1 考前准备（TON-1095）
 
-仍然只接受 `--dry-run`。没有 Coach 数据库连接、正式导入开关或隐式写库路径。2026-11-03 之前只准备计划与确认草稿，不导入学习记录，也不提前请本人确认。
+本卡的学习记录处理只接受 `--dry-run`，仅产出计划，不连接 Coach 学习库。已有的 `seed-content` 负责 TON-1127 课程装载，本轮课程继续复用已有清单。2026-11-03 之前只准备计划与确认草稿，不导入学习记录，也不提前请本人确认。
 
 已装载课程的清单来自 TON-1127，不再次创建 Course、Module、KP、教材页或 `exam_weights_set`。把已有课程清单作为历史导入计划的前提：
 
@@ -46,7 +46,7 @@ cmp "$HOME/Coach/migrate-out/check-a/report.md" "$HOME/Coach/migrate-out/check-b
   --out "$HOME/Coach/corpus/ton-1095/baseline"
 ```
 
-先核对已有清单与本次快照的课程 ID、KP 集合、名称、顺序、模块归属，以及分值表总分。每 KP 分值原样引用已验收的课程清单，不重新分摊。清单有差异会拒绝生成计划。该核对针对清单；正式导入时还必须核对当前数据库与清单一致。
+先核对已有清单与本次快照的课程 ID、KP 集合、名称、顺序、模块归属，以及分值表总分。再用已有的纯读取 `prepareSeed` 核对逐 KP 分值，实际计划原样引用已验收的课程清单，不重复写入。清单有差异会拒绝生成计划。该核对针对清单；正式导入时还必须核对当前数据库与清单一致。
 
 额外输出（全部只放私有输出目录）：
 

@@ -95,11 +95,17 @@ class ChatService(
         val (kp, kpType) = actor.execute {
             val kpId = events(course).lastOrNull { it.type == "kp_opened" && it.threadId == thread }
                 ?.payload?.str("kpId") ?: return@execute null to null
-            val metadata = events(course).asReversed().filter { it.type == "outline_revised" }.flatMap {
-                (it.payload["ops"] as? kotlinx.serialization.json.JsonArray).orEmpty().map { op -> op.jsonObject }
-            }.firstOrNull { it.str("kpId") == kpId }
-            val type = metadata
-                ?.let { it.str("type").ifBlank { it.str("kind") } }.orEmpty()
+            val metadata = events(course).asReversed().firstNotNullOfOrNull { event ->
+                (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
+                    .mapNotNull { it as? JsonObject }
+                    .firstOrNull { it.str("id") == kpId }
+            }
+            val type = (metadata?.get("examFormats") as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.content }
+                .map { it.uppercase() }
+                .distinct()
+                .sorted()
+                .joinToString("+")
             kpId to type
         }
         if (kp.isNullOrBlank()) return
@@ -306,6 +312,10 @@ class ChatService(
     }
 
     private fun publish(outcome: TutorOutcome, thread: String, course: String) {
+        if (outcome.plan?.explanation == true) {
+            hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,
+                "state" to "PREPARE","nextLabel" to outcome.nextLabel))
+        }
         hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,"state" to outcome.state.name,"nextLabel" to outcome.nextLabel))
         if (outcome.cards.isNotEmpty()) hub.emit(json("t" to "tutor.cards","threadId" to thread,"courseId" to course,
             "groupId" to outcome.cards.first().payload.str("groupId"),"cards" to JsonArray(outcome.cards.map { it.payload })))

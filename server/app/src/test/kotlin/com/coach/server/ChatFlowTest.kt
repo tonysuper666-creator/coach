@@ -46,9 +46,17 @@ class ChatFlowTest {
         Harness().use { h ->
             runBlocking {
                 h.actor.execute {
-                    append("course-1", "outline_revised", com.coach.domain.json("ops" to kotlinx.serialization.json.JsonArray(listOf(
-                        com.coach.domain.json("kpId" to "kp-1", "type" to "essay")
-                    ))))
+                    append("course-1", "outline_revised", com.coach.domain.json(
+                        "knowledgePoints" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "id" to "kp-1", "moduleId" to "module-1", "order" to 1, "title" to "Essay topic",
+                            "kind" to null, "examFormats" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("ESSAY"))),
+                            "prerequisites" to emptyList<String>(), "anchors" to kotlinx.serialization.json.JsonArray(emptyList()),
+                            "retired" to false, "conceptIds" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive("concept-1")))
+                        ))),
+                        "ops" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "op" to "add", "kpId" to "kp-1", "prereqs" to emptyList<String>()
+                        )))
+                    ))
                     append("course-1", "kp_opened", com.coach.domain.json("kpId" to "kp-1"), thread = "thread-1")
                 }
             }
@@ -56,7 +64,7 @@ class ChatFlowTest {
                 ws.send("""{"t":"client.ttft","courseId":"course-1","threadId":"thread-1","msg":"msg-1","kind":"next","ms":142,"model":"claude-sonnet-5-5","fallback":false}""")
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
                 while (h.logs.none { it.contains("client_ttft") } && System.nanoTime() < deadline) Thread.sleep(10)
-                assertTrue(h.logs.any { it.contains("kp=kp-1") && it.contains("kp_type=essay") && it.contains("kind=next") && it.contains("ms=142") })
+                assertTrue(h.logs.any { it.contains("kp=kp-1") && it.contains("kp_type=ESSAY") && it.contains("kind=next") && it.contains("ms=142") })
             }
         }
     }
@@ -351,6 +359,8 @@ class ChatFlowTest {
                 ws.await("tutor.state")
                 assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type=="explanation_delivered" } } })
                 ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                assertEquals("PREPARE", ws.await("tutor.state").str("state"))
+                assertEquals("TEACH", ws.await("tutor.state").str("state"))
                 val start=ws.await("msg.start")
                 assertEquals("complete",ws.await("msg.end").str("status"))
                 assertEquals("预备好的完整讲解。",runBlocking { h.snapshot(start.str("msg")) }!!.content)

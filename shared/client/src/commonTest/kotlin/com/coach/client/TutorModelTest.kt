@@ -74,15 +74,21 @@ class TutorModelTest {
         assertFalse(m.tutorMessage("m1").thinking)
     }
 
-    @Test fun tutorStateDrivesButtonLabelAndBusy() {
+    @Test fun explanationPreparationStaysVisibleFromTapUntilFirstBodyText() {
         val m = model()
+        m.onSent(thread, "next", null)
+        assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","courseId":"C","state":"PREPARE","nextLabel":"下一步"}""")
         assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","courseId":"C","state":"TEACH","nextLabel":"换个例子再讲"}""")
         val view = m.state.value.threads.getValue(thread)
         assertEquals("换个例子再讲", view.nextLabel)
-        assertNull(view.poolText)
+        assertEquals("导师正在备课…", view.poolText)
         assertTrue(view.busy)
+        m.onFrame(start("m1"))
+        assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
+        m.onFrame(delta("m1", 1, "第一段正文"))
+        assertNull(m.state.value.threads.getValue(thread).poolText)
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"AWAIT","nextLabel":"下一步"}""")
         assertFalse(m.state.value.threads.getValue(thread).busy)
     }

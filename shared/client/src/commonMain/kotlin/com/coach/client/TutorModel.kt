@@ -165,14 +165,16 @@ class TutorModel(
             val key = clientMsgId?.let { "l:$it" } ?: "l:${items.size}:${wallClock()}"
             val items = if (learnerText == null || items.any { it.key == key || (it is ChatItem.Learner && it.clientMsgId == clientMsgId && it.deviceId == localDeviceId && clientMsgId != null) }) items
                 else items + ChatItem.Learner(key, learnerText,clientMsgId,deviceId=localDeviceId)
-            copy(items = items, error = null, poolText = null, notice = null)
+            copy(items = items, error = null,
+                poolText = if (kind == "next" || kind == "test") "导师正在备课…" else null,
+                notice = null)
         }
     }
 
     fun onFailure(threadId: String, error: String) = synchronized(lock) {
         telemetry?.record("error", "connection")
         pendingSend.remove(threadId)
-        mutateThread(threadId) { copy(error = error) }
+        mutateThread(threadId) { copy(error = error, poolText = null) }
     }
 
     /** A full/closed transport queue never accepted this send; leave no duplicate optimistic row. */
@@ -212,7 +214,7 @@ class TutorModel(
                 mutateThread(thread) {
                     val nextState = obj.str("state")
                     copy(tutorState = nextState, nextLabel = obj.str("nextLabel").ifBlank { null },
-                        poolText = if (nextState == "PREPARE") "导师正在备课…" else null, error = null)
+                        poolText = if (nextState == "PREPARE" || nextState == "TEACH") "导师正在备课…" else null, error = null)
                 }
             }
             "tutor.progress" -> mutateThread(obj.str("threadId")) {
@@ -223,7 +225,7 @@ class TutorModel(
                 telemetry?.record("error", "server")
                 val thread = obj.str("threadId")
                 obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
-                if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error")) }
+                if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error"), poolText = null) }
             }
             else -> if (obj.str("t").startsWith("msg.")) onMessageFrame(obj)
         }
@@ -254,13 +256,16 @@ class TutorModel(
                 if (update.fallback && pendingSend[thread] == null) pendingSend[thread] = "fallback" to TimeSource.Monotonic.markNow()
                 mutateThread(thread) {
                     copy(items = if (items.any { it is ChatItem.Tutor && it.message.id == update.messageId }) items
-                        else items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)), poolText = null)
+                        else items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)))
                 }
             }
             is ChatUpdate.Text, is ChatUpdate.Math -> {
                 val id = messageIdOf(update)
                 val text = assembler.text(id)
-                if (text.isNotEmpty()) markFirstToken(id)
+                if (text.isNotEmpty()) {
+                    markFirstToken(id)
+                    messageThread[id]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
+                }
                 changeMessage(id) { copy(text = text, thinking = false) }
             }
             is ChatUpdate.Snapshot -> {
@@ -269,7 +274,13 @@ class TutorModel(
                 obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
                 if (messageThread[update.messageId] == null) thread.takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
                 ensureMessage(update.messageId, thread, obj.str("model"))
-                if (!restoring && update.text.isNotEmpty()) markFirstToken(update.messageId)
+                if (!restoring && update.text.isNotEmpty()) {
+                    markFirstToken(update.messageId)
+                    messageThread[update.messageId]?.let { owner -> mutateThread(owner) { copy(poolText = null) } }
+                }
+                if (update.text.isNotEmpty()) {
+                    messageThread[update.messageId]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
+                }
                 resumeSettled(update.messageId)
                 changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status },
                     model = obj.str("model").ifBlank { model },reason = obj.str("reason").ifBlank { reason },thinking = false) }
@@ -282,6 +293,7 @@ class TutorModel(
                 lastFrameAt.remove(update.messageId)
                 if (update.status in setOf("failed", "truncated")) telemetry?.record("error", "server")
                 val final = assembler.text(update.messageId)
+                if (final.isEmpty()) messageThread[update.messageId]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
                 // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
                 if (update.reason != "rate_limited") messageThread[update.messageId]?.let { pendingSend.remove(it) }

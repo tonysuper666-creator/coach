@@ -32,3 +32,27 @@ tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor
 独立 Python/SQLite SQL 逐项核对全部主计数；直接抽 10 条源 interaction，与映射 source_record 逐字段一致。仓库内 `verify-counts.sql` 可独立复跑，实际计数通过 SQLite JSON 函数计算，不取迁移器的计数结果。
 
 物理 AI 调用数：0。PR 不包含真实课程内容、学习原文、目录清单或数据库。
+
+## TON-1095 考前 dry-run（2026-10-31）
+
+结果：部分达到；521 条历史计划记录重复模拟，第二次新增 0、修订 0。正式学习库写入 0；正式导入适配器、本人确认与 UI 对照尚未完成，不作为本阶段已通过的验收。
+
+新的空闲窗口快照实测：49 KP、108 题（60 单选/48 简答）、32 条作答（29 保留证据/3 重置）、9 个已通过/9 条复习、12 条笔记、242 条事件、108 条消息。源目录本轮实际 7,929 个条目的 size/mtime 前后一致；历史报告的 7,932 不是本轮实测数。拷贝内两库 integrity_check 均 ok，捕获时 DB/WAL stat 与 data 的 stat/ls 前后相同。
+
+模型提议由 GPT 起草，Claude Sonnet 5.5 两次物理调用异厂复核。按模型的明确修改建议整理最终文件，保存原始答复与修改说明；不把模型意见当本人确认或答案键验证。108 题逐题审查后，107 题有提议、1 题因现有纲要缺口保留未知；49 KP 有共享概念集合，62 条建议前置无环，确认数仍为 0。教材不同章节的两张 Oregon 原表本来数值不同，核对各原表后保留各自数值并注明，不改源题。
+
+历史数组选项和 `expected_answer` 已规范为 `optionId`。32 条历史作答全部永不进窗口；其中 2 条自由表达无法确定性转成选项，结构化答案 null、保留原回答文字。45 个原类型未知项逐项保留；108 条消息正文逐条与源副本一致，不带模型回合元数据。课程内容与分值引用 TON-1127 清单，内容新增 0；合入并发更新的 main 后复用其纯读取 `prepareSeed` 核对逐 KP 分值，仍只核对清单与快照，不宣称已对当前正式数据库完成迁移。
+
+本机命令：
+
+```sh
+tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist --offline --max-workers=2 --console=plain
+"$TOOLS" --dry-run --capture-only --weights docs/background/期中分值覆盖表.md
+"$TOOLS" --dry-run --snapshot "$SNAPSHOT" --seed-manifest "$SEED" --proposal "$PROPOSAL" --out "$OUT_A"
+"$TOOLS" --dry-run --snapshot "$SNAPSHOT" --seed-manifest "$SEED" --proposal "$PROPOSAL" --out "$OUT_B"
+nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py --snapshot "$SNAPSHOT" --seed "$SEED" --out "$OUT_A" --repeat "$OUT_B" --before-inventory "$BEFORE"
+```
+
+全部退出 0。Gradle：15 tests / 0 failures / 0 errors / 0 skipped。独立验证器直接读复制库与 JSON，对照全部 32 条作答、108 条正文、已通过/复习集合、45 个原类型缺失项；八份输出逐字节一致。完整快照、提议、确认草稿与复核答复留本机私有语料目录；计数及哈希报告随 Multica 交付。
+
+11 月 3 日之后仍需：新快照、把归属/前置与 10 道简答采分点合并向本人确认、正式写库适配器、备份与真实重导、5 个 KP 界面对照、切换/回退演练。不能因本工具 PR 合并而结束整张迁移卡。

@@ -104,8 +104,8 @@ class MigrationTest {
             val mastery=source.resolve("data/user/workspace/learning/mastery/mastery.sqlite3")
             mastery.parent.createDirectories()
             DriverManager.getConnection("jdbc:sqlite:$mastery").use { db -> db.createStatement().use { st ->
-                st.execute("CREATE TABLE mastery_paths(path_id TEXT PRIMARY KEY,state_json TEXT)")
-                db.prepareStatement("INSERT INTO mastery_paths VALUES (?,?)").use { ps -> ps.setString(1,MAIN_PATH);ps.setString(2,state.toString());ps.executeUpdate() }
+                st.execute("CREATE TABLE mastery_paths(path_id TEXT PRIMARY KEY,state_json TEXT,owner_session_id TEXT)")
+                db.prepareStatement("INSERT INTO mastery_paths VALUES (?,?,'session')").use { ps -> ps.setString(1,MAIN_PATH);ps.setString(2,state.toString());ps.executeUpdate() }
                 st.execute("CREATE TABLE mastery_interactions(interaction_id TEXT PRIMARY KEY,path_id TEXT,user_answer TEXT,question_json TEXT)")
                 st.execute("INSERT INTO mastery_interactions VALUES('i','$MAIN_PATH','synthetic','{\"question_id\":\"q\"}')")
                 st.execute("INSERT INTO mastery_interactions VALUES('group','$MAIN_PATH','synthetic','{\"question_id\":\"group\",\"question_type\":\"group\",\"questions\":[{\"question_id\":\"i\"}]}')")
@@ -115,7 +115,10 @@ class MigrationTest {
             } }
             val chat=source.resolve("data/user/chat_history.db")
             DriverManager.getConnection("jdbc:sqlite:$chat").use { db -> db.createStatement().use { st ->
-                for(table in listOf("sessions","messages","assessment_attempts")) st.execute("CREATE TABLE $table(id TEXT PRIMARY KEY)")
+                st.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY)")
+                st.execute("CREATE TABLE assessment_attempts(id TEXT PRIMARY KEY)")
+                st.execute("CREATE TABLE messages(id TEXT PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,metadata_json TEXT,events_json TEXT)")
+                st.execute("INSERT INTO messages VALUES('message','session','assistant','Visible body','hidden-model-turn','hidden-tool-event')")
             } }
             val weights=root.resolve("weights.md");weights.writeText("| 10 | synthetic | Ch1 | pending |")
             val before=inventory(source.resolve("data"))
@@ -135,6 +138,9 @@ class MigrationTest {
             assertEquals(JsonPrimitive(true),schedules.getValue("passed")["queue_eligible"])
             assertEquals("concept",a.mapping.array("knowledge_points").first().jsonObject.str("type"))
             assertFalse(canonical(a.mapping).contains("private.md"))
+            val message=a.mapping.obj("chat_archive").array("messages").single().jsonObject.obj("source_record")
+            assertEquals("Visible body",message.str("content"))
+            assertFalse(canonical(a.mapping).contains("hidden-model-turn"));assertFalse(canonical(a.mapping).contains("hidden-tool-event"))
             assertFalse(safeFiles(snap).any { it.name.endsWith("-shm") })
         } finally { root.toFile().deleteRecursively() }
     }

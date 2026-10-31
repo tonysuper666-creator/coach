@@ -7,5 +7,5 @@ data class SourcePage(val docId: String, val pdfPage: Int, val text: String, val
 
 fun tutorSourceAllowed(vararg fields: String): Boolean = fields.none {
     val value = java.text.Normalizer.normalize(it, java.text.Normalizer.Form.NFKC).lowercase()
-    value.contains("answer_keys") || value.contains("答案") || value.contains("sealed")
+    value.contains("answer") || value.contains("答案") || value.contains("sealed")
 }

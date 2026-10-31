@@ -39,7 +39,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 5) { "Database schema is newer than this server" }
+        // main supports V4; the deployed alpha used V5 for the additive pool/pairing tables.
+        // Recognize that known shape without reserving or rewriting its version number.
+        val deployedAlpha = version == 5 &&
+            query("PRAGMA table_info(pool_details)") { it.getString(2) }.containsAll(listOf("question_id","pack_hash","explanation","source_quote","generator","reviewer")) &&
+            query("PRAGMA table_info(pairing_code)") { it.getString(2) }.containsAll(listOf("singleton","code_sha256","expires_at","attempts"))
+        require(version <= 4 || deployedAlpha) { "Database schema is newer than this server" }
         if (version < 2) {
             rawBackup(directory.resolve("backups/pre-V002-${uid()}"))
             transaction {
@@ -85,18 +90,22 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=4")
             }
         }
-        if (version < 5) {
-            rawBackup(directory.resolve("backups/pre-V005-${uid()}"))
-            transaction {
-                // Also covers page imports that write through SQL rather than registerSourcePage.
-                for (table in listOf("fts_en","fts_zh")) {
-                    sql("DELETE FROM $table")
-                    sql("INSERT INTO $table(text,doc_id,pdf_page) SELECT text,doc_id,pdf_page FROM source_pages")
-                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_insert AFTER INSERT ON source_pages BEGIN INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
-                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_delete AFTER DELETE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; END")
-                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_update AFTER UPDATE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
-                }
-                sql("PRAGMA user_version=5")
+        ensureSourceIndexes()
+    }
+
+    /** Capability repair is independent of version numbers used by other features or deployments. */
+    private fun ensureSourceIndexes() = transaction {
+        val pages = query("SELECT count(*) FROM source_pages") { it.getLong(1) }.single()
+        for (table in listOf("fts_en","fts_zh")) {
+            sql("CREATE TRIGGER IF NOT EXISTS ${table}_insert AFTER INSERT ON source_pages BEGIN INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
+            sql("CREATE TRIGGER IF NOT EXISTS ${table}_delete AFTER DELETE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; END")
+            sql("CREATE TRIGGER IF NOT EXISTS ${table}_update AFTER UPDATE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
+            val indexed = query("SELECT count(*) FROM $table") { it.getLong(1) }.single()
+            // Equal counts can still hide an update made while the maintenance triggers were absent.
+            val stale = indexed != pages || query("SELECT EXISTS(SELECT doc_id,pdf_page,text FROM source_pages EXCEPT SELECT doc_id,pdf_page,text FROM $table)") { it.getInt(1) != 0 }.single()
+            if (stale) {
+                sql("DELETE FROM $table")
+                sql("INSERT INTO $table(text,doc_id,pdf_page) SELECT text,doc_id,pdf_page FROM source_pages")
             }
         }
     }

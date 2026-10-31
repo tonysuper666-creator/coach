@@ -65,5 +65,4 @@ tasks.register<JavaExec>("sourceReplay") {
     dependsOn(tasks.named("testClasses"))
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.server.SourceLookupReplayKt")
-
 }

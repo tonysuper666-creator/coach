@@ -48,6 +48,8 @@ class SourceLookupTest {
             store.registerSourcePage("c","private","Hidden",1,"Adverse selection",false)
             store.registerSourcePage("c","answer_keys/book","Keys",1,"Adverse selection")
             store.registerSourcePage("c","answers","答案",1,"Adverse selection")
+            store.registerSourcePage("c","Answers/book","Solutions",1,"Adverse selection")
+            store.registerSourcePage("c","answer-keys/book","Solutions",1,"Adverse selection")
             assertEquals(listOf("book"),store.searchSourcePages("c","adverse selection").map { it.docId })
             assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么").map { it.docId })
             store.registerSourcePage("c","book","Book",1,"Moral hazard is different.")

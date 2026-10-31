@@ -7,7 +7,7 @@ recorded for every run instead, and nothing is dropped: every run goes to perf-d
 The phone must already have an APK that is paired with a NON-production server (build with -Pcoach.port=NNNN); the replay
 screen sits behind the pairing gate. Never pair a test device with the production port.
 
-  COACH_DEVICE=host:port  adb serial (required)      PERF_RUNS=3   runs per mode      ADB=path/to/adb
+  COACH_DEVICE=host:port  adb serial (required)      PERF_RUNS=3   runs per mode      ADB=path/to/adb      PERF_PACKAGE=com.coach.android.t1100
 """
 import json, os, re, subprocess, sys, time
 from pathlib import Path
@@ -15,7 +15,7 @@ from pathlib import Path
 root = Path(os.environ.get('COACH_RENDER_CORPUS', str(Path.home() / 'Coach/corpus/render')))
 out = root / 'perf-device' / time.strftime('%Y%m%d-%H%M%S'); out.mkdir(parents=True)
 adb = os.environ.get('ADB', '/opt/homebrew/share/android-commandlinetools/platform-tools/adb')
-serial = os.environ['COACH_DEVICE']; runs_n = int(os.environ.get('PERF_RUNS', '3')); package = 'com.coach.android'
+serial = os.environ['COACH_DEVICE']; runs_n = int(os.environ.get('PERF_RUNS', '3')); package = os.environ.get('PERF_PACKAGE', 'com.coach.android')
 min_frames = 900
 records = []
 
@@ -37,7 +37,7 @@ for i in range(runs_n):
     for name, mode in (('pinned', 1), ('scrolled-away', 2)):
         r = {'platform': 'android-device', 'mode': name, 'index': i + 1, 'device': info, 'before': snapshot(), 't0': time.strftime('%H:%M:%S')}
         device('shell', 'am', 'force-stop', package); device('logcat', '-c')
-        device('shell', 'am', 'start', '-W', '-n', package + '/.MainActivity', '--ei', 'autoplay', str(mode), '--el', 'runId', str(time.time_ns()))
+        device('shell', 'am', 'start', '-W', '-n', package + '/com.coach.android.MainActivity', '--ei', 'autoplay', str(mode), '--el', 'runId', str(time.time_ns()))
         logs = ''
         for _ in range(900):
             logs = device('logcat', '-d', '-s', 'CoachRender:I', 'AndroidRuntime:E', '*:S')

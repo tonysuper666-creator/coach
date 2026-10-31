@@ -22,12 +22,13 @@ import java.util.Base64
 
 fun main(args: Array<String>): Unit = runBlocking {
     val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
-    if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
     if (args.firstOrNull() in setOf("pair-code", "devices", "revoke")) {
         pairingCommand(args, data)
         return@runBlocking
     }
+    // Management commands print their result to the invoking terminal, never service logs.
+    if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)
     val fileLock = FileChannel.open(data.resolve("server.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)
     val lock = fileLock.tryLock() ?: error("Another Coach server owns this data directory")

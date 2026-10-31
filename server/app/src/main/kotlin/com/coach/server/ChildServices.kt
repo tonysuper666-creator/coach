@@ -32,7 +32,8 @@ internal class ChildServices(private val scope: CoroutineScope, private val env:
     private fun supervise(name: String, command: List<String>, jsonLines: Boolean) = scope.launch(Dispatchers.IO) {
         var backoff = 1000L
         val state = run.resolve("$name.json")
-        val pidFile = run.resolve("$name.pid")
+        // A dying JVM's guard must never unlink its replacement JVM's PID file.
+        val pidFile = run.resolve("$name-${ProcessHandle.current().pid()}.pid")
         val log = ServiceLog(logs, name)
         try {
             while (isActive) {
@@ -66,20 +67,24 @@ internal class ChildServices(private val scope: CoroutineScope, private val env:
                     status(false)
                     val startup = System.nanoTime()
                     while (isActive && child.isAlive) {
+                        val servicePid = runCatching { Files.readString(pidFile).trim().toLong() }.getOrDefault(0)
                         val healthy = runCatching {
+                            check(servicePid > 0) { "Waiting for service PID" }
                             if (jsonLines) {
                                 val id = "health-${System.nanoTime()}"
                                 child.outputStream.write("{\"id\":\"$id\",\"type\":\"ping\"}\n".toByteArray())
                                 child.outputStream.flush()
                                 val reply = replies.poll(3, TimeUnit.SECONDS) ?: error("mathsvc ping timeout")
                                 val pong = Json.parseToJsonElement(reply).jsonObject
-                                pong["type"]?.jsonPrimitive?.content == "pong" && pong["id"]?.jsonPrimitive?.content == id
+                                pong["type"]?.jsonPrimitive?.content == "pong" && pong["id"]?.jsonPrimitive?.content == id &&
+                                    pong["pid"]?.jsonPrimitive?.long == servicePid
                             } else {
                                 val connection = URI("http://127.0.0.1:$bridgePort/health?scope=process").toURL().openConnection() as HttpURLConnection
                                 try {
                                     connection.connectTimeout = 2000; connection.readTimeout = 3000
                                     connection.responseCode == 200 && connection.inputStream.use {
-                                        Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject["ok"]?.jsonPrimitive?.boolean == true
+                                        val reply = Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject
+                                        reply["ok"]?.jsonPrimitive?.boolean == true && reply["pid"]?.jsonPrimitive?.long == servicePid
                                     }
                                 } finally { connection.disconnect() }
                             }

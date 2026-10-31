@@ -75,7 +75,10 @@ def ready(info):
     while time.monotonic() < deadline:
         try:
             states = [json.loads((Path(info['runDir']) / f'{name}.json').read_text()) for name in ('bridge', 'mathsvc')]
-            assert all(s['healthy'] and time.time() * 1000 - s['checkedAt'] < 15000 for s in states)
+            assert all(s['healthy'] and s['pid'] > 0 and time.time() * 1000 - s['checkedAt'] < 15000 for s in states)
+            job = subprocess.run(['launchctl', 'print', f'{DOMAIN}/{LABEL}'], capture_output=True, text=True)
+            owner = re.search(r'^\s*pid = (\d+)', job.stdout, re.MULTILINE)
+            assert owner and all(s['ownerPid'] == int(owner.group(1)) for s in states), 'Waiting for current JVM health'
             token = (Path(info['dataDir']) / 'device-token').read_text().strip()
             for host in ('127.0.0.1', info['tailHost']):
                 request = urllib.request.Request(f'http://{host}:{info["port"]}/v1/hello',

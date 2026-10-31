@@ -37,9 +37,12 @@ python3 "$HOME/Coach/service/control.py" uninstall
 launchctl print gui/$UID/local.coach.server
 python3 "$HOME/Coach/service/control.py" status
 python3 tools/dev/check-service.py
+python3 tools/dev/check-service-android.py
 ```
 
 复验脚本会中断 Coach：依次杀桥、杀 mathsvc、挂起 mathsvc 验证健康恢复，再 SIGKILL Ktor 验证 LaunchAgent 恢复与旧子进程清理，最后 stop/start 验证停止与重启。只操作当前安装记录指向的进程，失败不借用其他端口实例。结果写 `.service-evidence/service.json`，不包含令牌、实际 IP、课程内容。
+
+Android 复验先构建 debug 与 androidTest APK，再启动并清理自己拥有的 `emulator-5570`，让现有 `NetworkSecuritySmoke` 经已配置的 Tailscale IP 对常驻实例进行认证 HTTP/WS 检查。先完成恢复测试，再做 Android 测试，避免故障注入打断网络检查。它不启动替代服务，不修改 Tailscale。
 
 `~/Coach/run/{bridge,mathsvc}.json` 是当前 JVM、清理守卫、真实服务 PID、健康状态和检查时间；JSON 原子更新。每个服务的 Python 守卫只负责进程组和父进程死亡清理，重启由 Ktor 决定。桥 liveness 是 `GET /health?scope=process`，避免 CLI 登录状态命令迟缓导致错误重启；完整 `/health` 仍提供 CLI 状态。mathsvc 使用自己的 stdin/stdout JSONL ping/pong。每十秒检查一次；死亡立即进入 1→60 秒指数退避，持续健康一分钟后复位。JVM 正常退出时等待清理；JVM 被 SIGKILL 后守卫自行清理桥、公式服务及已观察到的 CLI 进程组。
 

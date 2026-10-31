@@ -3,6 +3,7 @@
 生产桥 8791 只接受 `traffic=user` 且带有效本机生产凭据的模型请求。
 未标记、冒充 user、伪造凭据、标记为 test 的请求在启动 CLI 前都被拒绝。
 凭据由托管服务/桥在 `COACH_BRIDGE_HOME/state/production-key` 首次启动时建立（0600），不进入日志、学习内容或客户端。
+仅托管的 `~/Coach/data`、18791 实例可自称生产；复制库/其他端口即便设置托管标记，也必须用 test。
 非托管服务默认 test，并在启动时要求显式指定 8790/8791 之外的桥 URL；不能通过单设 `COACH_TRAFFIC=user` 冒充生产。
 桥的未标记/未验证请求记为 `traffic=unknown source=unknown`。
 生产首字统计须将服务端 `COACH msg.end rid=...` 与桥日志同 rid 对上，只收 `traffic=user source=production`。

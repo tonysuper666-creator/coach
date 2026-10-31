@@ -18,6 +18,11 @@ internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
         }
         return
     }
+    val productionData = Path.of(System.getProperty("user.home"),"Coach/data").toAbsolutePath().normalize()
+    val data = Path.of(env["COACH_DATA_DIR"] ?: productionData.toString()).toAbsolutePath().normalize()
+    require((env["COACH_PORT"] ?: "18791") == "18791" && data == productionData) {
+        "Only the managed production data directory and port may claim learner traffic; preview copies must use test traffic"
+    }
     require(bridge.host in setOf("127.0.0.1","localhost","::1","[::1]") && bridge.port == 8791) {
         "Managed learner traffic must use the local production Coach bridge"
     }

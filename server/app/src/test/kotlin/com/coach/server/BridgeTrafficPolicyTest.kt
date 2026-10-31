@@ -14,6 +14,10 @@ class BridgeTrafficPolicyTest {
         val home=Files.createTempDirectory("coach-source-key-")
         try {
             val env=mapOf("COACH_BRIDGE_HOME" to home.toString())
+            assertFailsWith<IllegalArgumentException> {
+                configureBridgeTraffic(env + mapOf("COACH_DATA_DIR" to home.resolve("preview-data").toString(),"COACH_PORT" to "18799"),true)
+            }
+            assertFalse(Files.exists(home.resolve("state/production-key")))
             configureBridgeTraffic(env,true)
             val key=home.resolve("state/production-key")
             val first=Files.readString(key)

@@ -339,7 +339,7 @@ class ChatService(
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
             SourcePack.prepare(sourcePack,hits).render()
-        } else LessonPreparation.boundedInput(sourcePack)
+        } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,

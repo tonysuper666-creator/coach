@@ -16,12 +16,80 @@ import java.time.Instant
 class LessonPreparation(private val actor: LedgerActor, private val bridge: BridgeClient, private val packs: Path) {
     companion object {
         const val MAX_LESSON_INPUT_CHARS = 15_000
-        fun boundedInput(source: String): String {
-            if (source.length <= MAX_LESSON_INPUT_CHARS) return source
-            val limit = MAX_LESSON_INPUT_CHARS
-            val paragraphEnd = source.lastIndexOf("\n\n", limit)
-            val end = if (paragraphEnd >= limit * 3 / 4) paragraphEnd else limit
-            return source.substring(0, end).trimEnd()
+        private const val MAX_LESSON_PAGES = 6
+        private val pageMarker = Regex("(?m)^[ \\t]*(?:\\*\\*)?〔PDF 第 ([0-9]+) 页[^〕]*〕(?:\\*\\*)?[ \\t]*\\r?\\n")
+        private val stopWords = setOf("the", "and", "for", "with", "from", "that", "this", "what", "how", "why", "when", "where", "does", "are", "was", "were", "into", "their", "than", "then", "which", "while", "about", "using", "study", "chapter")
+
+        private data class LessonPage(val pdfPage: Int, val order: Int, val text: String)
+
+        /** Keep the unpaginated KP header, then select the most relevant complete PDF pages. */
+        fun boundedInput(source: String, knowledgePoint: JsonObject): String {
+            val markers = pageMarker.findAll(source).toList()
+            if (markers.isEmpty()) {
+                require(source.length <= MAX_LESSON_INPUT_CHARS) { "Long lesson pack has no PDF page markers" }
+                return source
+            }
+
+            val header = source.substring(0, markers.first().range.first)
+            require(header.length <= MAX_LESSON_INPUT_CHARS) { "Knowledge point header exceeds lesson input limit" }
+            val pages = markers.mapIndexed { index, marker ->
+                LessonPage(marker.groupValues[1].toInt(), index,
+                    source.substring(marker.range.first, markers.getOrNull(index + 1)?.range?.first ?: source.length))
+            }
+            val terms = lessonTerms(knowledgePoint)
+            val documentFrequency = terms.associateWith { term -> pages.count { countOccurrences(it.text, term) > 0 } }
+            val anchorPages = (knowledgePoint["anchors"] as? JsonArray).orEmpty().mapNotNull { anchor ->
+                (anchor as? JsonObject)?.get("pdfPage")?.jsonPrimitive?.intOrNull
+            }.toSet()
+            val ranked = pages.sortedWith(compareByDescending<LessonPage> { page ->
+                val body = page.text
+                val lexical = terms.sumOf { term ->
+                    val occurrences = countOccurrences(body, term).coerceAtMost(4)
+                    if (occurrences == 0) 0.0 else {
+                        val df = documentFrequency.getValue(term)
+                        val inverseFrequency = kotlin.math.ln(1.0 + pages.size.toDouble() / (df + 1.0))
+                        occurrences * inverseFrequency
+                    }
+                }
+                lexical + if (page.pdfPage in anchorPages) 3.0 else 0.0
+            }.thenBy { it.order })
+
+            var used = header.length
+            val selected = mutableListOf<LessonPage>()
+            for (page in ranked) {
+                if (selected.size == MAX_LESSON_PAGES) break
+                if (used + page.text.length > MAX_LESSON_INPUT_CHARS) continue
+                selected += page
+                used += page.text.length
+            }
+            return header + selected.sortedBy { it.order }.joinToString("") { it.text }
+        }
+
+        private fun lessonTerms(knowledgePoint: JsonObject): Set<String> {
+            val title = knowledgePoint.str("title")
+            val concepts = ((knowledgePoint["concepts"] as? JsonArray).orEmpty() +
+                (knowledgePoint["conceptIds"] as? JsonArray).orEmpty())
+                .mapNotNull { (it as? JsonPrimitive)?.content }
+                .filterNot { it.matches(Regex("[A-Za-z0-9_-]{16,}")) }
+            return Regex("[\\p{IsHan}]{2,}|[\\p{L}][\\p{L}\\p{N}]*").findAll((listOf(title) + concepts).joinToString(" "))
+                .flatMap { match ->
+                    val token = match.value.lowercase()
+                    if (token.first().code in 0x4e00..0x9fff) {
+                        if (token.length <= 3) sequenceOf(token) else token.windowed(3).asSequence()
+                    } else if (token !in stopWords) sequenceOf(token) else emptySequence()
+                }.toSet()
+        }
+
+        private fun countOccurrences(text: String, term: String): Int {
+            var count = 0
+            var offset = 0
+            while (offset < text.length) {
+                val found = text.indexOf(term, offset, ignoreCase = true)
+                if (found < 0) break
+                count++
+                offset = found + term.length.coerceAtLeast(1)
+            }
+            return count
         }
         // Preserve the existing full-pack digest so prewarmed caches remain importable.
         internal fun cacheHash(source: String): String = sha256(source.toByteArray())
@@ -40,9 +108,12 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
     }.getOrNull()
 
     private suspend fun metadata(course: String, kp: String): JsonObject = actor.execute {
-        events(course).asReversed().filter { it.type=="outline_revised" }.flatMap {
-            (it.payload["ops"] as? JsonArray).orEmpty()
-        }.map { it.jsonObject }.firstOrNull { it.str("kpId")==kp } ?: error("Unknown knowledge point")
+        events(course).asReversed().filter { it.type == "outline_revised" }.firstNotNullOfOrNull { event ->
+            val seededPoint = (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
+                .mapNotNull { it as? JsonObject }.firstOrNull { it.str("id") == kp }
+            seededPoint ?: (event.payload["ops"] as? JsonArray).orEmpty()
+                .mapNotNull { it as? JsonObject }.firstOrNull { it.str("kpId") == kp }
+        } ?: error("Unknown knowledge point")
     }
 
     suspend fun ensure(course: String, kp: String, target: Int = 6) {
@@ -78,7 +149,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         val meta=metadata(course,kp)
         val fullSource=pack(course,kp)
         require(fullSource.isNotBlank()) { "教材备课包缺失" }
-        val source=boundedInput(fullSource)
+        val source=boundedInput(fullSource,meta)
         val worker=PoolWorker(actor,bridge)
         var steps=0
         while(actor.execute { poolAvailable(course,kp) } < 6 && steps < 8) {

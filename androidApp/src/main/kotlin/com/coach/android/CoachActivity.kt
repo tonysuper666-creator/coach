@@ -29,6 +29,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import com.coach.client.ChatItem
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -47,7 +49,8 @@ class CoachActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val serverUrl="http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
+        // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
+        val serverUrl=intent.getStringExtra("coachUrl")?.takeIf { it.isNotBlank() } ?: "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
             val dark = isSystemInDarkTheme()
@@ -93,6 +96,8 @@ class CoachActivity : ComponentActivity() {
                 }
             }
         }
+        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源。
+        scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
         val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)
         math = mathHttp

@@ -97,6 +97,61 @@ class TutorModelTest {
         assertEquals(5_000L, m.state.value.lastSeenAtMs)
         assertNull(m.state.value.threads[thread])
     }
+
+    @Test fun serverConfirmationAndRepeatedHistoryMergeWithTheOptimisticLearnerMessage() {
+        val m = model()
+        m.onSent(thread,"ask","Synthetic question","client-1")
+        val user = """{"t":"msg.user","role":"user","msg":"saved-user","clientMsgId":"client-1","threadId":"$thread","createdAt":123,"text":"Synthetic question"}"""
+        m.onFrame(user); m.onFrame(user)
+        assertEquals(1,m.state.value.threads.getValue(thread).items.size)
+        m.onFrame(start("reply")); m.onFrame(start("reply"))
+        m.onFrame(delta("reply",1,"Synthetic answer"))
+        val reply = """{"t":"msg.snapshot","role":"assistant","msg":"reply","threadId":"$thread","model":"synthetic-model","i":1,"status":"complete","text":"Synthetic answer"}"""
+        val history = """{"t":"msg.history","threadId":"$thread","legacyHistoryUncovered":true,"messages":[$user,$reply]}"""
+        m.onFrame(history); m.onFrame(history)
+        val view = m.state.value.threads.getValue(thread)
+        assertEquals(listOf("l:saved-user","t:reply"),view.items.map { it.key })
+        assertEquals(123L,view.items.filterIsInstance<ChatItem.Learner>().single().createdAt)
+        assertEquals("synthetic-model",m.tutorMessage("reply").model)
+        assertTrue(view.historyLoaded)
+        assertTrue(view.notice!!.contains("缺失的提问无法恢复"))
+    }
+
+    @Test fun historyArrivingWhileANewSendIsPendingRetainsThatSend() {
+        val m = model()
+        m.onSent(thread,"ask","Still sending","pending-1")
+        m.onFrame("""{"t":"msg.history","threadId":"$thread","messages":[]}""")
+        assertEquals("Still sending",m.state.value.threads.getValue(thread).items.filterIsInstance<ChatItem.Learner>().single().text)
+    }
+
+    @Test fun clientMessageIdsAreScopedToTheSendingDevice() {
+        val m = model()
+        m.bindDevice("desktop")
+        m.onSent(thread,"ask","Desktop question","same-local-id")
+        m.onFrame("""{"t":"msg.user","msg":"phone-user","threadId":"$thread","clientMsgId":"same-local-id","deviceId":"phone","text":"Phone question"}""")
+        m.onFrame("""{"t":"msg.user","msg":"desktop-user","threadId":"$thread","clientMsgId":"same-local-id","deviceId":"desktop","text":"Desktop question"}""")
+        assertEquals(setOf("Desktop question","Phone question"),m.state.value.threads.getValue(thread).items.filterIsInstance<ChatItem.Learner>().map { it.text }.toSet())
+        assertEquals(2,m.state.value.threads.getValue(thread).items.size)
+    }
+
+    @Test fun restoringOldAnswersDoesNotConsumeTheFirstTokenMeasurementOfANewSend() {
+        val samples = mutableListOf<TtftSample>()
+        val m = model(samples)
+        m.onSent(thread,"ask","A new question","new-send")
+        m.onFrame("""{"t":"msg.history","threadId":"$thread","messages":[{"t":"msg.snapshot","role":"assistant","msg":"old","threadId":"$thread","i":1,"text":"Old answer","status":"complete"}]}""")
+        assertTrue(samples.isEmpty())
+        m.onFrame(start("new")); m.onFrame(delta("new",1,"New answer"))
+        assertEquals("new",samples.single().messageId)
+    }
+
+    @Test fun aTransportRejectedSendDoesNotLeaveAnExtraLearnerRowOnRetry() {
+        val m = model()
+        m.onSent(thread,"ask","Synthetic question","rejected")
+        m.onSendRejected(thread,"rejected")
+        assertTrue(m.state.value.threads.getValue(thread).items.isEmpty())
+        m.onSent(thread,"ask","Synthetic question","retry")
+        assertEquals(1,m.state.value.threads.getValue(thread).items.size)
+    }
 }
 
 /** 在线缺号：不断线也能自动找回（模型发现缺号 → 发送端发 msg.resume → 快照补齐）。 */
@@ -114,6 +169,39 @@ class TutorModelResumeTest {
     private fun snapshot(id: String, i: Int, text: String, status: String = "streaming") =
         model.onFrame("""{"t":"msg.snapshot","msg":"$id","threadId":"$thread","i":$i,"text":"$text","status":"$status"}""")
     private fun message(id: String) = model.state.value.threads.getValue(thread).items.filterIsInstance<ChatItem.Tutor>().single { it.message.id == id }.message
+
+    @Test fun finishedHistoryRestoresMetadataWithoutSchedulingResumes() {
+        for (status in listOf("complete","truncated","cancelled","failed")) {
+            model.onFrame("""{"t":"msg.history","threadId":"$thread","messages":[{"t":"msg.snapshot","role":"assistant","msg":"old-$status","threadId":"$thread","i":1,"text":"Saved answer","status":"$status","model":"saved-model","reason":"saved-reason"}]}""")
+            assertEquals(status,message("old-$status").status)
+            assertEquals("saved-model",message("old-$status").model)
+            assertEquals("saved-reason",message("old-$status").reason)
+        }
+        now += 21_000
+        model.resumeTick()
+        assertTrue(model.unfinishedMessageIds().isEmpty())
+        assertTrue(requests.isEmpty(),"Finished historical messages must never request resume")
+    }
+
+    @Test fun streamingHistoryRetainsStallProbesAndGapRecoveryWithoutDuplicatingRows() {
+        val history = """{"t":"msg.history","threadId":"$thread","messages":[{"t":"msg.user","role":"user","msg":"user-1","threadId":"$thread","text":"Synthetic question"},{"t":"msg.snapshot","role":"assistant","msg":"live","threadId":"$thread","model":"saved-model","i":1,"text":"甲","status":"streaming"}]}"""
+        model.onFrame(history); model.onFrame(history)
+        assertEquals(2,model.state.value.threads.getValue(thread).items.size)
+        assertEquals(1,message("live").epoch,"An unchanged history snapshot must not reset rendering")
+        now += 19_000; model.resumeTick()
+        assertTrue(requests.isEmpty())
+        now += 2_000; model.resumeTick()
+        assertEquals(listOf("live"),requests,"Restored streaming messages still need stall probes")
+        snapshot("live",1,"甲")
+        delta("live",3,"丙")
+        assertEquals(listOf("live","live"),requests,"A live gap still dispatches resume outside the model lock")
+        snapshot("live",3,"甲乙丙","complete")
+        now += 21_000; model.resumeTick()
+        assertEquals(listOf("live","live"),requests)
+        assertEquals("甲乙丙",message("live").text)
+        assertEquals("saved-model",message("live").model)
+        assertTrue(message("live").done)
+    }
 
     @Test fun aMissingMiddleDeltaAsksForResumeOnceAndTheSnapshotRestoresTheFullText() {
         start("m1"); delta("m1", 1, "甲"); delta("m1", 3, "丙"); delta("m1", 4, "丁"); delta("m1", 5, "戊")

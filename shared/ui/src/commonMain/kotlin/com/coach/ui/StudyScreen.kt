@@ -53,15 +53,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         focus.clearFocus()
         if (!open()) { fail(); return false }
         pinned = true
-        c.tutor.model.onSent(thread, "ask", text)
         return if (c.tutor.ask(thread, c.courseId, text, c.packFor(kp.id))) true else { fail(); false }
     }
 
     // 每次（重新）连上都声明一次线程；服务端按 kpId 幂等。
-    LaunchedEffect(kp.id, ui.connected) {
+    LaunchedEffect(kp.id, ui.connected, tv.historyLoaded) {
         if (!ui.connected) { opened = false; return@LaunchedEffect }
         if (!opened) opened = open()
-        if (autoStart && !started && opened && tv.items.isEmpty() && pending == null) { started = true; next(false) }
+        if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false) }
     }
 
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {

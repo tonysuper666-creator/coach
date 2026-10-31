@@ -42,7 +42,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         // V5 is the combined alpha schema. Validate the known additive tables before accepting it.
-        val deployedAlpha = version == 5 &&
+        val deployedAlpha = version in 5..6 &&
             query("PRAGMA table_info(pool_details)") { it.getString(2) }.containsAll(listOf("question_id","pack_hash","explanation","source_quote","generator","reviewer")) &&
             query("PRAGMA table_info(pairing_code)") { it.getString(2) }.containsAll(listOf("singleton","code_sha256","expires_at","attempts"))
         require(version <= 4 || deployedAlpha) { "Database schema is newer than this server" }
@@ -97,6 +97,20 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("CREATE TABLE IF NOT EXISTS offline_packs(pack_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,device_id TEXT NOT NULL,expires_at INTEGER NOT NULL,pack_json TEXT NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS offline_reservations(question_id TEXT PRIMARY KEY,pack_id TEXT NOT NULL,expires_at INTEGER NOT NULL)")
         sql("CREATE TABLE IF NOT EXISTS choice_allocations(id INTEGER PRIMARY KEY AUTOINCREMENT,course_id TEXT NOT NULL,correct_letter TEXT NOT NULL)")
+        if (version < 6) {
+            rawBackup(directory.resolve("backups/pre-V006-${uid()}"))
+            transaction {
+                // Keep the cutoff stable across restarts, without backfilling speech.
+                sql("CREATE TABLE IF NOT EXISTS chat_history_coverage(singleton INTEGER PRIMARY KEY CHECK(singleton=1),started_at INTEGER NOT NULL)")
+                sql("CREATE TABLE IF NOT EXISTS chat_history_legacy(thread_id TEXT PRIMARY KEY)")
+                if (sql("INSERT OR IGNORE INTO chat_history_coverage VALUES(1,?)",clock()) > 0) {
+                    // Thread IDs survive VACUUM/restore; events only identify uncovered history, never speech.
+                    sql("INSERT OR IGNORE INTO chat_history_legacy SELECT thread_id FROM messages UNION SELECT thread_id FROM events WHERE thread_id IS NOT NULL")
+                }
+                sql("CREATE TABLE IF NOT EXISTS chat_inputs(device_id TEXT NOT NULL,client_message_id TEXT NOT NULL,message_id TEXT NOT NULL UNIQUE REFERENCES messages(message_id),course_id TEXT NOT NULL,thread_id TEXT NOT NULL,PRIMARY KEY(device_id,client_message_id))")
+                sql("PRAGMA user_version=6")
+            }
+        }
         ensureSourceIndexes()
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
@@ -148,6 +162,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             Triple(it.getString(1), it.getString(2), it.getString(3))
         }.singleOrNull()
         if (row == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'KP','KP',?)", thread,course,kp)
+        else if (row == Triple(course,"CHAT",thread)) sql("UPDATE threads SET kind='KP',anchor_type='KP',anchor_id=? WHERE thread_id=?",kp,thread)
         else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
     }
 
@@ -189,6 +204,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return json("thread" to LedgerJson.encodeToJsonElement(thread),"messages" to JsonArray(messages))
     }
 
+    /** A retry after midnight still belongs to the original daily thread. */
+    fun quickAskForInput(course: String, device: String, clientMessageId: String): QuickAskThread {
+        val prior = query("SELECT course_id,thread_id FROM chat_inputs WHERE device_id=? AND client_message_id=?",device,clientMessageId) {
+            it.getString(1) to it.getString(2)
+        }.singleOrNull() ?: return openQuickAsk(course)
+        require(prior.first == course && isQuickThread(course,prior.second)) { "Client message ID payload mismatch" }
+        return projection(course).quickAsks.values.single { it.threadId == prior.second }
+    }
+
     /** Only migration code reading an immutable copy may call this; no client import command. */
     fun importLegacyJournal(course: String, day: Long, sourceId: String, text: String) {
         require(sourceId.isNotBlank())
@@ -204,6 +228,50 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         finishMessage(id,"complete",null,text,0)
         append(course,"quick_ask_message",json("messageId" to id),thread=thread,actor="LEARNER")
         id
+    }
+
+    data class SavedInput(val messageId: String, val inserted: Boolean)
+
+    fun chatInputFrame(message: String): JsonObject = query(
+        "SELECT m.thread_id,m.content_md,m.created_at,i.client_message_id,i.device_id FROM messages m JOIN chat_inputs i USING(message_id) WHERE m.message_id=?",message) {
+        json("t" to "msg.user","msg" to message,"role" to "user","status" to "complete","threadId" to it.getString(1),
+            "text" to it.getString(2),"createdAt" to it.getLong(3),"clientMsgId" to it.getString(4),"deviceId" to it.getString(5))
+    }.single()
+
+    /** The authenticated device and immutable client ID identify a send, including after a restart. */
+    fun saveChatInput(course: String, thread: String, text: String, device: String, clientMessageId: String): SavedInput = transaction {
+        require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && text.isNotBlank()) { "Missing chat fields" }
+        require(clientMessageId.isNotBlank() && clientMessageId.length <= 200) { "Invalid client message ID" }
+        requireChatThread(course,thread)
+        val prior = query("SELECT i.message_id,i.course_id,i.thread_id,m.content_md FROM chat_inputs i JOIN messages m USING(message_id) WHERE i.device_id=? AND i.client_message_id=?",device,clientMessageId) {
+            listOf(it.getString(1),it.getString(2),it.getString(3),it.getString(4))
+        }.singleOrNull()
+        if (prior != null) {
+            require(prior.drop(1) == listOf(course,thread,text)) { "Client message ID payload mismatch" }
+            return@transaction SavedInput(prior[0],false)
+        }
+        // Standalone chat can precede tutor.open; bind it so history cannot cross courses.
+        sql("INSERT OR IGNORE INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'CHAT','THREAD',?)",thread,course,thread)
+        val id = uid()
+        beginStreamingMessage(thread,id,"",role="user")
+        finishMessage(id,"complete",null,text,0)
+        sql("INSERT INTO chat_inputs VALUES(?,?,?,?,?)",device,clientMessageId,id,course,thread)
+        if (isQuickThread(course,thread)) append(course,"quick_ask_message",json("messageId" to id),thread=thread,actor="LEARNER")
+        SavedInput(id,true)
+    }
+
+    fun chatHistory(course: String, thread: String): JsonObject {
+        requireChatThread(course,thread)
+        val coverageSince = query("SELECT started_at FROM chat_history_coverage WHERE singleton=1") { it.getLong(1) }.single()
+        val legacy = query("SELECT EXISTS(SELECT 1 FROM chat_history_legacy WHERE thread_id=?)",thread) { it.getBoolean(1) }.single()
+        val messages = query("SELECT m.message_id,m.role,m.status,m.content_md,m.created_at,m.model,m.delta_index,m.reason,i.client_message_id,i.device_id FROM messages m LEFT JOIN chat_inputs i USING(message_id) WHERE m.thread_id=? ORDER BY m.mseq",thread) {
+            json("t" to if (it.getString(2)=="user") "msg.user" else "msg.snapshot",
+                "msg" to it.getString(1),"role" to it.getString(2),"status" to it.getString(3),"text" to it.getString(4),
+                "createdAt" to it.getLong(5),"model" to it.getString(6),"i" to it.getInt(7),"reason" to it.getString(8),
+                "clientMsgId" to it.getString(9),"deviceId" to it.getString(10),"threadId" to thread)
+        }
+        return json("t" to "msg.history","courseId" to course,"threadId" to thread,"messages" to JsonArray(messages),
+            "userTextCoverageSince" to coverageSince,"legacyHistoryUncovered" to legacy)
     }
 
     private fun fileQuickAsk(course: String, payload: JsonObject): JsonObject {
@@ -925,8 +993,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }.singleOrNull()
 
     /** 最近几轮对话（追问带最近 12 轮，§5.2）。只取已经写完的消息，流式中的一条不喂回模型。 */
-    fun recentTurns(thread: String, limit: Int = 12): List<Pair<String,String>> =
-        query("SELECT role,coalesce(content_md,'') FROM messages WHERE thread_id=? AND status IN ('complete','truncated') ORDER BY mseq DESC LIMIT ?",thread,limit) {
+    fun recentTurns(thread: String, limit: Int = 12, beforeMessage: String? = null): List<Pair<String,String>> =
+        query("SELECT role,coalesce(content_md,'') FROM messages WHERE thread_id=? AND status IN ('complete','truncated') AND (? IS NULL OR mseq<(SELECT mseq FROM messages WHERE message_id=?)) ORDER BY mseq DESC LIMIT ?",thread,beforeMessage,beforeMessage,limit) {
             (it.getString(1) ?: "assistant") to it.getString(2)
         }.reversed()
 

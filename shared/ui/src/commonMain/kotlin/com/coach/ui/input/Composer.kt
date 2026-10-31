@@ -72,8 +72,8 @@ fun ComposerField(
     val colors = CoachTheme.colors
     val currentValue by rememberUpdatedState(value)
     fun send(): Boolean {
-        val text = currentValue.text.trim()
-        if (!canSend || text.isEmpty() || !onSend(text)) return false
+        val text = currentValue.text
+        if (!canSend || text.isBlank() || !onSend(text)) return false
         onValueChange(TextFieldValue())
         return true
     }

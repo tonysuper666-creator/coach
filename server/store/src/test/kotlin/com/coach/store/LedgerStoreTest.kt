@@ -17,7 +17,7 @@ class LedgerStoreTest {
                 connection.createStatement().use { statement ->
                     statement.executeQuery("PRAGMA user_version").use { rows ->
                         assertTrue(rows.next())
-                        assertEquals(5, rows.getInt(1))
+                        assertEquals(6, rows.getInt(1))
                     }
                     statement.executeQuery("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pool_details','pairing_code')").use { rows ->
                         val tables = buildSet { while (rows.next()) add(rows.getString(1)) }

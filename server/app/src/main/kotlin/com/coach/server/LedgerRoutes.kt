@@ -212,17 +212,23 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         val service=chat
                         val threadId=message.str("threadId")
                         val courseId=message.str("courseId")
-                        val question=message.str("text").trim()
+                        val question=message.str("text")
                         if(service==null) Unit
-                        else if(threadId.isBlank()||courseId.isBlank()||question.isEmpty()) {
+                        else if(threadId.isBlank()||courseId.isBlank()||question.isBlank()) {
                             send(Frame.Text(LedgerJson.encodeToString(json("t" to "msg.error","msg" to message.str("clientMsgId"),"error" to "missing_field"))))
-                        } else service.ask(threadId,courseId,question,message.str("pack"))
+                        } else service.ask(threadId,courseId,question,message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device)
                     }
                     "quick.ask" -> {
                         require(message.str("courseId").isNotBlank() && message.str("text").isNotBlank()) { "Missing quick-ask fields" }
-                        chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"))
+                        chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device)
                     }
-                    "tutor.open" -> chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
+                    "tutor.open" -> {
+                        chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
+                        tutorSend.withLock { chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) } }
+                    }
+                    "msg.history" -> tutorSend.withLock {
+                        chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) }
+                    }
                     "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test")
                     "tutor.settings" -> chat?.configureTutor(message.str("threadId"),message.str("courseId"),
                         message["groupSize"]?.jsonPrimitive?.int, message["mode"]?.jsonPrimitive?.content?.let { TeachingMode.valueOf(it) })

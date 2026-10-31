@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
@@ -86,11 +87,12 @@ class ChatFlowTest {
         }
     }
 
-    private class Harness(timings: ChatTimings = defaultTimings(), packDir: java.nio.file.Path = Files.createTempDirectory("coach-packs-")) : AutoCloseable {
+    private class Harness(timings: ChatTimings = defaultTimings(), packDir: java.nio.file.Path = Files.createTempDirectory("coach-packs-"),
+        dataDir: java.nio.file.Path = Files.createTempDirectory("coach-chat-")) : AutoCloseable {
         val tutor = StubTutor()
         val token = "stream-test-token-32-characters-minimum"
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val store = LedgerStore(Files.createTempDirectory("coach-chat-")).also { it.enroll("desktop", token) }
+        val store = LedgerStore(dataDir).also { it.enroll("desktop", token) }
         val actor = LedgerActor(scope, store)
         val logs: MutableList<String> = Collections.synchronizedList(ArrayList())
         val chat = ChatService(
@@ -117,7 +119,7 @@ class ChatFlowTest {
         }
     }
 
-    private class Ws(port: Int, token: String) : AutoCloseable {
+    private class Ws(port: Int, token: String, device: String = "desktop") : AutoCloseable {
         private val queue = LinkedBlockingQueue<JsonObject>()
         private val pending = ArrayList<JsonObject>()
         private val socket: WebSocket
@@ -138,7 +140,7 @@ class ChatFlowTest {
             }
             socket = HttpClient.newHttpClient().newWebSocketBuilder()
                 .header("Authorization", "Bearer $token")
-                .header("X-Coach-Device", "desktop")
+                .header("X-Coach-Device", device)
                 .connectTimeout(Duration.ofSeconds(5))
                 .buildAsync(URI.create("ws://127.0.0.1:$port/v1/ws"), listener)
                 .get(5, TimeUnit.SECONDS)
@@ -172,6 +174,117 @@ class ChatFlowTest {
     private fun ask(ws: Ws, threadId: String = "thread-1") = ws.send(
         """{"t":"msg.ask","threadId":"$threadId","courseId":"course-1","text":"什么是机会成本？"}""",
     )
+
+    @Test
+    fun originalUserTextRestoresOnAnotherDeviceAndReplayAfterRestartDoesNotCallTheModel() {
+        val directory = Files.createTempDirectory("coach-persist-chat-")
+        val question = "  合成追问：why β?\n保留空白与原文  "
+        val request = com.coach.domain.json("t" to "msg.ask","threadId" to "thread-1","courseId" to "course-1",
+            "clientMsgId" to "stable-send-1","text" to question).toString()
+        var userId = ""
+        var createdAt = ""
+        try {
+            Harness(dataDir=directory).use { h ->
+                h.tutor.stream(5,"A synthetic response.",StubTutor.terminal("complete"),StubTutor.DONE)
+                Ws(h.port,h.token).use { ws ->
+                    ws.send(request)
+                    val user = ws.await("msg.user")
+                    userId = user.str("msg"); createdAt = user.str("createdAt")
+                    assertEquals(question,user.str("text"))
+                    assertTrue(createdAt.toLong() > 0)
+                    assertEquals("complete",ws.await("msg.end").str("status"))
+                    val body = com.coach.domain.LedgerJson.parseToJsonElement(h.tutor.requestBodies.single()).jsonObject
+                        .getValue("messages").jsonArray.last().jsonObject.str("content")
+                    assertEquals(1,Regex(Regex.escape(question.trim())).findAll(body).count(),"Current input must not appear twice in model context")
+                }
+            }
+            Harness(dataDir=directory).use { h ->
+                runBlocking { h.actor.execute { enroll("phone","synthetic-phone-token-long-enough") } }
+                Ws(h.port,"synthetic-phone-token-long-enough","phone").use { phone ->
+                    phone.send("""{"t":"msg.history","threadId":"thread-1","courseId":"course-1"}""")
+                    val history = phone.await("msg.history")
+                    val rows = history.getValue("messages").jsonArray.map { it.jsonObject }
+                    assertEquals(listOf("user","assistant"),rows.map { it.str("role") })
+                    assertEquals(question,rows.first().str("text"))
+                    assertEquals(userId,rows.first().str("msg"))
+                    assertEquals(createdAt,rows.first().str("createdAt"))
+                    assertEquals("false",history.str("legacyHistoryUncovered"))
+                    val restored = com.coach.client.TutorModel({ 1000L })
+                    restored.onFrame(history.toString()); restored.onFrame(history.toString())
+                    assertEquals(2,restored.state.value.threads.getValue("thread-1").items.size)
+                    assertEquals(question,restored.state.value.threads.getValue("thread-1").items.filterIsInstance<com.coach.client.ChatItem.Learner>().single().text)
+                }
+                Ws(h.port,h.token).use { ws ->
+                    ws.send(request)
+                    assertEquals(userId,ws.await("msg.user").str("msg"))
+                    assertEquals(2,ws.await("msg.history").getValue("messages").jsonArray.size)
+                    assertEquals(0,h.tutor.requests)
+                    ws.send(com.coach.domain.json("t" to "msg.ask","threadId" to "thread-1","courseId" to "course-1",
+                        "clientMsgId" to "stable-send-1","text" to "Changed payload").toString())
+                    assertTrue(ws.await("msg.error").str("error").contains("payload mismatch"))
+                    ws.send("""{"t":"msg.history","threadId":"thread-1","courseId":"other-course"}""")
+                    assertTrue(ws.await("msg.error").str("error").contains("another course"))
+                }
+                val backup = runBlocking { h.actor.execute { backup(directory.resolve("verification-copy")) } }
+                java.sql.DriverManager.getConnection("jdbc:sqlite:${backup.resolve("coach.sqlite")}").use { db ->
+                    db.createStatement().use { statement ->
+                        statement.executeQuery("SELECT role,content_md,thread_id,created_at FROM messages ORDER BY mseq").use { rows ->
+                            assertTrue(rows.next()); assertEquals("user",rows.getString(1)); assertEquals(question,rows.getString(2))
+                            assertEquals("thread-1",rows.getString(3)); assertEquals(createdAt.toLong(),rows.getLong(4))
+                            assertTrue(rows.next()); assertEquals("assistant",rows.getString(1)); assertTrue(!rows.next())
+                        }
+                    }
+                }
+            }
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun progressAndPlainContinueAreSavedAndDuplicateContinueDoesNotAdvanceOrCallAi() {
+        Harness().use { h ->
+            runBlocking { seedTutor(h,6) }
+            h.tutor.stream(5,"A synthetic lesson.",StubTutor.terminal("complete"),StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+                ws.await("msg.history")
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                ws.await("msg.end")
+                ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","clientMsgId":"progress-1","text":"  学了多少？  "}""")
+                ws.await("msg.user"); ws.await("msg.end")
+                val next = """{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","clientMsgId":"next-1","text":" 继续 "}"""
+                ws.send(next)
+                ws.await("msg.user"); ws.await("tutor.cards")
+                val before = runBlocking { h.actor.execute { events("course-1") } }
+                ws.send(next)
+                ws.await("msg.user")
+                val history = ws.await("msg.history")
+                assertEquals(before,runBlocking { h.actor.execute { events("course-1") } })
+                val users = history.getValue("messages").jsonArray.map { it.jsonObject }.filter { it.str("role")=="user" }
+                assertEquals(listOf("  学了多少？  "," 继续 "),users.map { it.str("text") })
+                assertEquals(1,h.tutor.requests,"Only the initial explicit teaching action calls AI")
+            }
+        }
+    }
+
+    @Test
+    fun quickAskSharesTheSamePersistenceAndRetryContract() {
+        Harness().use { h ->
+            h.tutor.stream(5,"A synthetic quick answer.",StubTutor.terminal("complete"),StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                val request = """{"t":"quick.ask","courseId":"course-1","clientMsgId":"quick-send","text":"Why synthetic flowers?"}"""
+                ws.send(request)
+                val thread = ws.await("quick.thread").str("threadId")
+                val user = ws.await("msg.user")
+                ws.await("msg.end")
+                ws.send(request)
+                assertEquals(thread,ws.await("quick.thread").str("threadId"))
+                assertEquals(user.str("msg"),ws.await("msg.user").str("msg"))
+                assertEquals(listOf("user","assistant"),ws.await("msg.history").getValue("messages").jsonArray.map { it.jsonObject.str("role") })
+                assertEquals(1,h.tutor.requests)
+                assertEquals(1,runBlocking { h.actor.execute { events("course-1").count { it.type=="quick_ask_message" && it.actor=="LEARNER" } } })
+            }
+        }
+    }
 
     @Test
     fun androidCanStartTeachingWithoutUploadingTheTextbookPack() {

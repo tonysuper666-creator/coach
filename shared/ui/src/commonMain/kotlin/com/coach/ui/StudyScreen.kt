@@ -16,6 +16,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
+import com.coach.ui.input.EnterGate
 
 /** 阅读栏最大宽度：内屏/桌面宽窗口下正文不拉成一整行。 */
 private val READING_WIDTH = 760.dp
@@ -27,6 +28,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val groups = view.quizGroups(thread)
     val pending = groups.lastOrNull { !it.submitted }
     var draft by remember(kp.id) { mutableStateOf(TextFieldValue("")) }
+    // 与 Composer 共用同一个回车门闩：组字中、以及组字刚上屏后的一小段时间内，回车都不发送。
+    val enterGate = remember(kp.id) { EnterGate() }
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by remember(kp.id) { mutableStateOf(false) }
     var pinned by remember(kp.id) { mutableStateOf(true) }
@@ -146,10 +149,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
                 OutlinedTextField(
-                    draft, { draft = it },
+                    draft, { new -> enterGate.onEdit(draft.composition != null, new.composition != null); draft = new },
                     Modifier.weight(1f).onPreviewKeyEvent { event ->
                         // 中文输入法组字时按回车是「上屏」，不是发送：此时 composition 非空，放行给输入法。
-                        if (event.key == Key.Enter && event.type == KeyEventType.KeyDown && !event.isShiftPressed && draft.composition == null) { send(); true } else false
+                        if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
+                        if (enterGate.shouldSend(true, event.type == KeyEventType.KeyDown, event.isShiftPressed, draft.composition != null)) { send(); true } else false
                     },
                     placeholder = { Text("追问…") }, maxLines = 4,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),

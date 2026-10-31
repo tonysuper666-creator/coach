@@ -36,6 +36,18 @@ class TutorModelTest {
         assertTrue(m.tutorMessage("m2").fallback)
     }
 
+    @Test fun endFrameCarriesTheModelTheBridgeActuallyUsed() {
+        val m = model()
+        m.onFrame(start("m1", "claude-opus"))
+        m.onFrame(delta("m1", 1, "答"))
+        assertEquals("claude-opus", m.tutorMessage("m1").model)
+        m.onFrame("""{"t":"msg.end","msg":"m1","status":"complete","chars":1,"model":"gpt-codex"}""")
+        assertEquals("gpt-codex", m.tutorMessage("m1").model)
+        // 终态帧没带模型名（旧服务端）时保持开头写的名字
+        m.onFrame(start("m2", "claude-opus")); m.onFrame("""{"t":"msg.end","msg":"m2","status":"complete","chars":0}""")
+        assertEquals("claude-opus", m.tutorMessage("m2").model)
+    }
+
     @Test fun snapshotReplacesTheBodyAndBumpsTheRenderEpoch() {
         val m = model()
         m.onFrame(start("m1")); m.onFrame(delta("m1", 1, "旧")); m.onFrame(delta("m1", 2, "文"))

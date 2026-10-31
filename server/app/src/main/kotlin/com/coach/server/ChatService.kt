@@ -394,7 +394,7 @@ class ChatService(
             publish(outcome,session.threadId,session.courseId)
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
-        hub.emit(endFrame(session, status, reason, content.length))
+        hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
         log("COACH msg.end msg=${session.messageId} model=${session.model} status=$status reason=$reason chars=${content.length} ttft=${result.call.ttftMs} terminal=${terminal?.status} failure=${(result as? BridgeResult.Failure)?.reason}")
         if (willFallback) fallback(session,question,pack)
     }
@@ -437,7 +437,7 @@ class ChatService(
         if (plan != null) publish(tutor.finish(plan,messageId,status == StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
         else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
-        hub.emit(endFrame(session, status, reason, content.length))
+        hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy))
         log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=$reason")
     }
 
@@ -476,8 +476,9 @@ class ChatService(
         "courseId" to session.courseId, "model" to session.model, "fallback" to session.fallback,
     )
 
-    private fun endFrame(session: Session, status: String, reason: String?, chars: Int): JsonObject = json(
+    /** `servedBy` 是桥在终态帧里报的实际出答模型；没有就退回请求模型。界面消息头以这里为准。 */
+    private fun endFrame(session: Session, status: String, reason: String?, chars: Int, servedBy: String? = null): JsonObject = json(
         "t" to "msg.end", "msg" to session.messageId, "status" to status, "reason" to reason,
-        "model" to (session.model), "fallback" to session.fallback, "chars" to chars,
+        "model" to (servedBy?.takeIf { it.isNotBlank() } ?: session.model), "fallback" to session.fallback, "chars" to chars,
     )
 }

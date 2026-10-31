@@ -244,8 +244,8 @@ class LiveChatTest {
         override fun close() { server.stop(0) }
     }
 
-    private fun ask(ws: Ws, pack: String, question: String): Long {
-        preflight()
+    private fun ask(ws: Ws, pack: String, question: String, real: Boolean = true): Long {
+        if (real) preflight()
         val started = System.nanoTime()
         ws.send(json("t" to "msg.ask", "threadId" to UUID.randomUUID().toString(), "courseId" to "live-course", "text" to question, "pack" to pack))
         return started
@@ -288,7 +288,7 @@ class LiveChatTest {
         require(n > 0 && resumeN > 0)
         fun plannedCalls() = (if ("first" in stages) n else 0) + (if ("resume" in stages) resumeN else 0) +
             (if ("cancel" in stages) 2 else 0) + (if ("cut" in stages) 1 else 0)
-        Bridge().use { bridge ->
+        if (plannedCalls() > 0) Bridge().use { bridge ->
             val dailyBefore = preflight().getValue("daily").jsonObject
             val remaining = dailyBefore["remaining"]?.jsonPrimitive?.intOrNull
             if (remaining != null && remaining < plannedCalls()) {
@@ -389,7 +389,7 @@ class LiveChatTest {
             Harness(bridge.url, output.resolve("replay-ledger")).use { h ->
                 h.ws().use { ws ->
                     val assembler = ChatStreamAssembler()
-                    ask(ws, "Synthetic course context", "合成协议回放，不调用真实订阅 CLI")
+                    ask(ws, "Synthetic course context", "合成协议回放，不调用真实订阅 CLI", real = false)
                     val id = ws.await("msg.start").str("msg")
                     val end = finish(ws, assembler, id)
                     verify(h, assembler, id, end, "protocol_replay", 0, "real_calls" to 0)
@@ -403,7 +403,7 @@ class LiveChatTest {
             Harness(bridge.url, output.resolve("early-ledger")).use { h ->
                 for (waitForSpawn in listOf(false, true)) h.ws().use { ws ->
                     val baseline = bridge.descendants()
-                    ask(ws, "Synthetic context", "合成立即取消，不调用真实订阅")
+                    ask(ws, "Synthetic context", "合成立即取消，不调用真实订阅", real = false)
                     val id = ws.await("msg.start").str("msg")
                     val spawnDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                     while (waitForSpawn && (bridge.descendants() - baseline).isEmpty() && System.nanoTime() < spawnDeadline) Thread.sleep(5)

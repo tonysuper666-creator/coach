@@ -371,6 +371,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             .header("Content-Type", "application/json")
             .header("X-Request-Id", requestId)
             .header("X-Coach-Fallback", "off")
+            .header("X-Coach-Model-Policy", "exact")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
         if (config.testTraffic) builder.header("X-Coach-Traffic", "test")
         request.effort?.let { builder.header("X-Coach-Effort", it) }

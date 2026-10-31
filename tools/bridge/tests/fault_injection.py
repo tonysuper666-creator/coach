@@ -294,6 +294,9 @@ def main() -> int:
         check("后台转派: 实际由 Codex 作答", oc and oc["served_by"] == "gpt-6.1-sol", str(oc and oc["served_by"]))
         check("后台转派: 头里写明原请求模型", r["headers"].get("x-coach-routed-from") == "claude-sonnet-5-5",
               str(r["headers"].get("x-coach-routed-from")))
+        r = b.ask("独立复核必须保持指定模型", headers={"X-Coach-Background": "1", "X-Coach-Model-Policy": "exact"})
+        check("exact model: 后台调用不被转派成同厂模型", r["x_coach"]["served_by"] == "claude-sonnet-5-5-stub" and not r["x_coach"]["fallback"], str(r["x_coach"]))
+
     finally:
         b.stop()
 

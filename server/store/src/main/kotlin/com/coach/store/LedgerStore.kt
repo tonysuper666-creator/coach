@@ -415,7 +415,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             "excerpt" to excerpt, "background" to background).toString(), hash)
     }
     fun supplyJobs(course: String? = null, kp: String? = null): List<SupplyJob> =
-        query("SELECT job_id,kind,subject,question_version FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('queued','running') ORDER BY created_at,job_id") {
+        query("SELECT job_id,kind,subject,question_version FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('queued','running') AND json_valid(subject) ORDER BY created_at,job_id") {
             SupplyJob(it.getString(1), it.getString(2), LedgerJson.parseToJsonElement(it.getString(3)).jsonObject, it.getString(4))
         }.filter { (course == null || it.subject.str("course") == course) && (kp == null || it.subject.str("kp") == kp) }
 
@@ -467,7 +467,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
     fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,
-        purpose: String = "PRACTICE", untaught: Boolean = false): PoolTake = transaction {
+        purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null): PoolTake = transaction {
         require(size in setOf(1,3) && groupId.isNotBlank())
         require(purpose in Purpose.entries.map { it.name })
         val prior=events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
@@ -487,7 +487,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             if(jobs.isEmpty()) "题池暂空，补题尚未运行" else "题池暂空，正在补题（约 20 秒）")
         val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
             "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught) }
-        val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false)
+        val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false,thread)
         PoolTake(posed,"READY",ids.size-size,jobs,null)
     }
 

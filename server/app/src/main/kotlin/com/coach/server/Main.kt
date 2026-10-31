@@ -50,7 +50,9 @@ fun main(args: Array<String>): Unit = runBlocking {
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
     val chat = ChatService(actor, this)
+    actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
+    val supplyWorker = chat.startSupplyWorker()
     actor.execute { backupIfDue() }
     val maintenance = launch {
         val detector = SuspensionDetector()
@@ -121,13 +123,13 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { supervisor.cancelAndJoin();maintenance.cancelAndJoin();actor.close() }
+        runBlocking { supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
         local.stop(100, 1000)
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
     try { awaitCancellation() } finally {
         supervisor.cancelAndJoin()
         local.stop(100, 1000)
-        maintenance.cancelAndJoin();actor.close();lock.release();fileLock.close()
+        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close();lock.release();fileLock.close()
     }
 }

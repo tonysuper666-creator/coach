@@ -37,6 +37,14 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         }
     }
     routing {
+        post("/v1/prewarm") {
+            val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
+            val course=input.str("courseId")
+            val kps=(input["kpIds"] as? JsonArray).orEmpty().map { it.jsonPrimitive.content }
+            require(kps.size in 1..5)
+            val result=checkNotNull(chat).prepareLessons(course,kps)
+            call.respondText(result.toString(),ContentType.Application.Json)
+        }
         get("/v1/hello") { call.respondText(LedgerJson.encodeToString(actor.execute { hello() }),ContentType.Application.Json) }
         get("/v1/courses/{course}/events") {
             val course=call.parameters["course"]!!

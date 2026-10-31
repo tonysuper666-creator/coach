@@ -491,6 +491,7 @@ class ReqCtx:
     effort: str | None
     t_req: float
     in_chars: int
+    exact_model: bool = False
     test_traffic: bool = False
     # 运行中更新
     served_by: str | None = None
@@ -1237,6 +1238,7 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     return ReqCtx(request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
                   stream=bool(body.get("stream")), background=background,
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
+                  exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
                   test_traffic=(headers.get("x-coach-traffic") or "").strip().lower() == "test",
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
@@ -1477,7 +1479,7 @@ async def chat(request: Request):
 
         # 期中保护：后台生成全部走 Codex（ADR-0002 裁决）
         target = req.model
-        if req.background and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
+        if req.background and not req.exact_model and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
             if BACKGROUND_MODEL in MODELS and MODELS[BACKGROUND_MODEL].backend == BACKGROUND_BACKEND:
                 target = BACKGROUND_MODEL
                 req.routed_from = req.model

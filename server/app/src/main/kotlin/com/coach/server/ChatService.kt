@@ -16,6 +16,8 @@ import com.coach.domain.json
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.isActive
@@ -71,6 +73,23 @@ class ChatService(
 
     val hub = ChatHub()
     val tutor = TutorMachine(actor)
+    private val preparation = LessonPreparation(actor,bridge,packsDirectory)
+    private val supplyLock = Mutex()
+    private val waitingPools = ConcurrentHashMap.newKeySet<String>()
+
+    suspend fun prepareLessons(course: String, kps: List<String>): JsonObject = supplyLock.withLock {
+        json("results" to JsonArray(kps.map { preparation.prepare(course,it) }))
+    }
+
+    fun startSupplyWorker(): Job = scope.launch {
+        val worker = com.coach.ai.PoolWorker(actor,bridge)
+        while(isActive) {
+            try { supplyLock.withLock { worker.runOne() } }
+            catch(e: kotlinx.coroutines.CancellationException) { throw e }
+            catch(e: Exception) { log("COACH supply failure=${e.javaClass.simpleName}") }
+            delay(500)
+        }
+    }
     private val sessions = ConcurrentHashMap<String, Session>()
 
     class Session(
@@ -115,7 +134,27 @@ class ChatService(
     }
 
     suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false): String {
-        val outcome = tutor.next(courseId,threadId,testUntaught)
+        var outcome = tutor.next(courseId,threadId,testUntaught)
+        if(outcome.waitingForPool) {
+            val kp = actor.execute { events(courseId).lastOrNull { it.type=="kp_opened" && it.threadId==threadId }?.payload?.str("kpId") }
+            if(kp!=null) {
+                runCatching { preparation.ensure(courseId,kp) }
+                outcome=tutor.next(courseId,threadId,testUntaught)
+                if(waitingPools.add(threadId)) scope.launch {
+                    try {
+                        repeat(360) {
+                            delay(500)
+                            val available=actor.execute { poolAvailable(courseId,kp) }
+                            if(available>=3) { publish(tutor.next(courseId,threadId,testUntaught),threadId,courseId);return@launch }
+                            if(actor.execute { supplyJobs(courseId,kp).isEmpty() }) {
+                                hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                                    "phase" to "pool_failed","text" to "题池暂空，补题未成功，可以重试。"));return@launch
+                            }
+                        }
+                    } finally { waitingPools.remove(threadId) }
+                }
+            }
+        }
         publish(outcome,threadId,courseId)
         return outcome.plan?.let { startReply(threadId,courseId,"请讲解当前知识点。",pack,it) }.orEmpty()
     }
@@ -141,21 +180,46 @@ class ChatService(
         if (outcome.grades.isNotEmpty()) hub.emit(json("t" to "tutor.feedback","threadId" to thread,"courseId" to course,
             "grades" to JsonArray(outcome.grades.map { it.payload })))
         if (outcome.waitingForPool) hub.emit(json("t" to "tutor.progress","threadId" to thread,"courseId" to course,
-            "phase" to "pool_queued","text" to "题池暂空，已排队补题"))
+            "phase" to "pool_queued","text" to (outcome.poolMessage ?: "题池暂空，补题尚未运行")))
     }
 
     private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?): String {
         val messageId = UUID.randomUUID().toString()
-        val session = Session(messageId, threadId, courseId, BridgeClient.CLAUDE, false, plan)
+        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mode==TeachingMode.CURRENT)
+            preparation.cached(courseId,plan.context.kp,sourcePack) else null
+        val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan)
         sessions[messageId] = session
         val recent = actor.execute { recentTurns(threadId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
-        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        if(prepared!=null) { scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val context = listOf(TutorOutputGuard.modelInput(sourcePack.take(40_000)), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
             recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
         return messageId
+    }
+
+    private suspend fun deliverPrepared(session: Session, raw: String) {
+        val guard=TutorOutputGuard(allowExamSection=true)
+        val visible=VisibleStream()
+        val text=StringBuilder()
+        val safe=guard.push(raw)+guard.finish()
+        for(chunk in safe.chunked(128)) {
+            if(session.forcedStatus!=null) break
+            for(segment in visible.push(chunk)) emitSegment(session,segment,text)
+            delay(16)
+        }
+        for(segment in visible.finish()) emitSegment(session,segment,text)
+        val status=session.forcedStatus ?: StreamStatus.COMPLETE
+        val persist: com.coach.store.LedgerStore.() -> Unit = {
+            finishMessage(session.messageId,status,session.forcedReason,text.toString(),session.cursor.index)
+            recordAiCall(UUID.randomUUID().toString(),"TEACH_CACHE",session.model,session.model,0,0,0,text.length,status,0,0)
+        }
+        val plan=checkNotNull(session.plan)
+        publish(tutor.finish(plan,session.messageId,status==StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
+        session.finished.set(true);sessions.remove(session.messageId)
+        hub.emit(endFrame(session,status,session.forcedReason,text.length))
     }
 
     private suspend fun storedTeachingPack(threadId: String, courseId: String): String {

@@ -5,6 +5,7 @@ The MCQ supply path retains a failed `MALFORMED` job and atomically queues one n
 An empty pool shows an estimated preparation time, then actual queued/generating/retrying/reviewing states and the number of verified questions. The estimate is not a countdown or promise. A partial review may trigger another batch (at most four batches in an interactive wait); after three minutes the UI reports the timeout explicitly. A full group is pushed automatically, respecting the selected group size. The asynchronous continuation cannot start a teaching turn or create a second unanswered group. While preparing, duplicate taps are disabled; terminal failure re-enables retry.
 
 The client coalesces the ledger/state/card notifications from one quiz into pending catch-ups instead of blocking the WebSocket reader on repeated HTTP reads. A notification received during an in-flight catch-up still schedules a follow-up; periodic recovery remains enabled. `PoolSyncBurstTest` checks that a burst does not block the socket and that facts committed during the stalled request still reach the replica.
+When the outbox is empty, pushed catch-up reads epoch-tagged event pages directly. A changed epoch falls back to full synchronization and snapshot replacement; polling still refreshes backup watermarks and sends pending answers. The restore replay also covers this path with an empty outbox.
 
 ## Pool-only prewarm
 

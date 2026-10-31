@@ -4,6 +4,7 @@ import com.coach.client.db.ClientDatabase
 import com.coach.domain.*
 import com.coach.protocol.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -168,6 +169,17 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         _revision.value += 1
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
+        // One quiz publishes several durable/state/card hints. Do not make the WS reader
+        // wait for a full HTTP catch-up for each hint. Keep one follow-up while a sync is
+        // in flight, so facts committed during that request are still fetched.
+        val hints=Channel<Unit>(Channel.CONFLATED)
+        val pushed=launch {
+            for(hint in hints) {
+                try { syncOnce() }
+                catch(e: CancellationException) { throw e }
+                catch(e: Exception) { _connection.value="offline" }
+            }
+        }
         // Polling is a recovery path for missed WS frames; both paths use the same serialized sync transaction.
         val polling = launch {
             while(isActive) { try { syncOnce() } catch(e: CancellationException) { throw e } catch(e: Exception) { _connection.value="offline" };delay(2000) }
@@ -175,11 +187,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         try {
             var backoff = 250L
             while(isActive) {
-                try { transport.watch { syncOnce() };backoff=250 }
+                try { transport.watch { hints.trySend(Unit) };backoff=250 }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
                 delay(backoff);backoff=(backoff*2).coerceAtMost(5000)
             }
-        } finally { polling.cancelAndJoin() }
+        } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }
     }
 }

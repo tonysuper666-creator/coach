@@ -10,6 +10,7 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -26,17 +27,74 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null) {
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop") {
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
-        val device = call.request.header("X-Coach-Device")
-        val token = call.request.header("Authorization")?.removePrefix("Bearer ")
-        if(device == null || token == null || !actor.execute { authorize(device,token) }) {
-            call.respondText("Unauthorized",status=HttpStatusCode.Unauthorized)
+        // Pairing is the only unauthenticated operation, and only this exact POST.
+        val pairing = call.request.path() == "/v1/pair" && call.request.httpMethod == HttpMethod.Post
+        if (call.request.queryParameters.names().any { it.lowercase() in setOf("token", "access_token", "authorization", "code") }) {
+            call.respondText("Unauthorized", status=HttpStatusCode.Unauthorized)
             finish()
+            return@intercept
+        }
+        if (!pairing) {
+            val device = call.request.header("X-Coach-Device")
+            val authorization = call.request.header("Authorization")
+            val token = authorization?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
+            if (device == null || token == null || call.request.headers.getAll("Authorization")?.size != 1 ||
+                !actor.execute { authorize(device,token) }) {
+                call.respondText("Unauthorized",status=HttpStatusCode.Unauthorized)
+                finish()
+                return@intercept
+            }
+
         }
     }
+
+    // Enforce management permission inside the matched route: encoded paths must
+    // not bypass a string-prefix check in the application interceptor.
+    suspend fun ApplicationCall.requireAdmin(): Boolean {
+        if (request.header("X-Coach-Device") == adminDevice) return true
+        respondText("Forbidden", status=HttpStatusCode.Forbidden)
+        return false
+    }
     routing {
+        post("/v1/pair") {
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            // Bound the unauthenticated body, including chunked requests.
+            val input = call.receiveChannel()
+            val buffer = ByteArray(1025)
+            var size = 0
+            while (size < buffer.size) {
+                val count = input.readAvailable(buffer, size, buffer.size-size)
+                if (count == -1) break
+                size += count
+            }
+            if (size > 1024) { call.respond(HttpStatusCode.PayloadTooLarge); return@post }
+            val body = runCatching { LedgerJson.parseToJsonElement(buffer.decodeToString(0,size)).jsonObject }.getOrNull()
+            val credential = actor.execute { pair(body?.str("code").orEmpty(), body?.str("name").orEmpty()) }
+            if (credential == null) call.respondText("Pairing rejected", status=HttpStatusCode.Unauthorized)
+            else call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token).toString(), ContentType.Application.Json)
+        }
+        post("/v1/pairing-code") {
+            if (!call.requireAdmin()) return@post
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            val code = actor.execute { createPairingCode() }
+            call.respondText(json("code" to code.code, "expiresAt" to code.expiresAt).toString(), ContentType.Application.Json)
+        }
+        get("/v1/devices") {
+            if (!call.requireAdmin()) return@get
+            val devices = actor.execute { pairedDevices() }.map { json("deviceId" to it.id, "name" to it.name, "createdAt" to it.createdAt, "revokedAt" to it.revokedAt) }
+            call.respondText(JsonArray(devices).toString(), ContentType.Application.Json)
+        }
+        delete("/v1/devices/{device}") {
+            if (!call.requireAdmin()) return@delete
+            val device = call.parameters["device"]!!
+            if (device == adminDevice) { call.respond(HttpStatusCode.Forbidden); return@delete }
+            actor.execute { revokeDevice(device) }
+            pushes.emit("revoked")
+            call.respond(HttpStatusCode.NoContent)
+        }
         get("/v1/hello") { call.respondText(LedgerJson.encodeToString(actor.execute { hello() }),ContentType.Application.Json) }
         get("/v1/courses/{course}/events") {
             val course=call.parameters["course"]!!
@@ -67,11 +125,16 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         webSocket("/v1/ws") {
             val device=call.request.header("X-Coach-Device")!!
             val token=call.request.header("Authorization")!!.removePrefix("Bearer ")
+            suspend fun stillAuthorized(): Boolean {
+                if (actor.execute { authorize(device,token) }) return true
+                close(CloseReason(CloseReason.Codes.VIOLATED_POLICY,"Unauthorized"))
+                return false
+            }
             val cursors=mutableMapOf<String,Long>()
             var epoch=""
             suspend fun catchUp() {
                 // Recheck revocation on established sockets before sending any learning data.
-                if(!actor.execute { authorize(device,token) }) { close(CloseReason(CloseReason.Codes.VIOLATED_POLICY,"revoked"));return }
+                if (!stillAuthorized()) return
                 val meta=actor.execute { hello() }
                 if(meta.epoch!=epoch) { epoch=meta.epoch;cursors.clear();send(Frame.Text(LedgerJson.encodeToString(meta))) }
                 for(course in actor.execute { courses() }) {
@@ -85,8 +148,10 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
             // Serialize resume snapshot creation + delivery against this socket's deltas.
             val tutorSend = Mutex()
-            val tutor=chat?.let { service -> launch { service.hub.frames.collect { frame -> tutorSend.withLock { send(Frame.Text(frame.toString())) } } } }
+            val tutor=chat?.let { service -> launch { service.hub.frames.collect { frame -> tutorSend.withLock { if (stillAuthorized()) send(Frame.Text(frame.toString())) } } } }
+            val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
             try { for(frame in incoming) if(frame is Frame.Text) {
+                if (!stillAuthorized()) break
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
                 try { when(message.str("t")) {
                     "hello" -> {
@@ -120,7 +185,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 } } catch (error: IllegalArgumentException) {
                     send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
                 }
-            } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin() }
+            } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
         }
     }
 }

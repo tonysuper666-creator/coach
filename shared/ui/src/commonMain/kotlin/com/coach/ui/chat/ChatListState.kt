@@ -1,5 +1,6 @@
 package com.coach.ui.chat
 
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,7 +30,29 @@ class ChatAnchor(pinned: Boolean = true, key: Any? = null, fraction: Float = 0f)
 @Stable
 class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatAnchor = ChatAnchor()) {
     /** True until the first restore has run, so the initial (0,0) position never overwrites a stored anchor. */
-    internal var restoring = true
+    internal var restoring by mutableStateOf(true)
+}
+
+/** Follow the tail again (the learner just sent something or asked for the next step). */
+suspend fun ChatListState.jumpToTail() {
+    anchor.pinned = true
+    list.scrollToItem(0, 0)
+}
+
+/**
+ * Put the item at chronological [index] (of [count] items) at the top edge of the viewport, with the newer items following it, so a new
+ * question group is read from question 1. An item taller than the viewport is shown from its own top. Clamped at the tail.
+ */
+suspend fun ChatListState.scrollItemToTop(index: Int, count: Int) {
+    val target = count - 1 - index
+    if (target < 0) return
+    snapshotFlow { restoring }.first { !it }
+    androidx.compose.runtime.withFrameNanos { }
+    list.scrollToItem(target, 0)
+    val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target }?.size }.filterNotNull().first()
+    val info = list.layoutInfo
+    val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
+    if (room <= 0) list.scrollToItem(target, -room) else list.scrollBy(-room.toFloat())
 }
 
 /**

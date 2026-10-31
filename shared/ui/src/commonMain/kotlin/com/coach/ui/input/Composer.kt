@@ -58,6 +58,7 @@ fun ComposerField(
     modifier: Modifier = Modifier,
     placeholder: String = "",
     enabled: Boolean = true,
+    sendEnabled: Boolean = true,
     maxLines: Int = 6,
     enterSends: Boolean = LocalEnterSends.current,
     gate: EnterGate = remember { EnterGate() },
@@ -87,6 +88,6 @@ fun ComposerField(
                 },
             )
         }
-        TextButton(onClick = { send() }, enabled = enabled && value.text.isNotBlank(), modifier = Modifier.heightIn(min = 48.dp).testTag("send")) { Text("发送") }
+        TextButton(onClick = { send() }, enabled = enabled && sendEnabled && value.text.isNotBlank(), modifier = Modifier.heightIn(min = 48.dp).testTag("send")) { Text("发送") }
     }
 }

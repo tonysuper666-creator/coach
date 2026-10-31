@@ -25,6 +25,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val thread = threadIdFor(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
+    SideEffect { if(groups.isNotEmpty()) PoolTrace.mark(thread,"composed") }
     val chosen = remember(kp.id) { mutableStateMapOf<String, String>() }
     val pending = groups.lastOrNull { !it.submitted }
     val additionalScope = remember(kp.title) { additionalTitleScope(kp.title) }
@@ -114,10 +115,19 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         LaunchedEffect(pinned) { if (pinned) { chat.scrollToTail(); pinned = false } }
         // 新题组出现，或刚打开线程时还没答完的那组：把第 1 题放在最上面，从头读起。
         var seenGroups by remember(kp.id) { mutableStateOf(0) }
+        val focusKey = if (groups.size > seenGroups && (pending != null || seenGroups > 0))
+            groups.last().cards.firstOrNull()?.let { "q:${it.attemptId}" } else null
+        SideEffect {
+            if (focusKey != null) {
+                val index = rows.indexOfFirst { it.key == focusKey }
+                if (index >= 0) chat.requestItemTop(focusKey, rows.lastIndex - index)
+            }
+        }
         LaunchedEffect(groups.size) {
             if (groups.size > seenGroups && (pending != null || seenGroups > 0)) {
-                repeat(3) { withFrameNanos { } }
+                PoolTrace.mark(thread,"focus_requested")
                 groups.last().cards.firstOrNull()?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
+                PoolTrace.mark(thread,"focus_settled")
             }
             seenGroups = groups.size
         }
@@ -136,7 +146,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                             is ChatItem.Learner -> LearnerBubble(item.text)
                             is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
                         }
-                        is StudyRow.Question -> QuizCardView(row.index + 1, row.group.cards.size, row.card, row.group.submitted, chosen[row.card.attemptId], c.math) { letter ->
+                        is StudyRow.Question -> QuizCardView(row.index + 1, row.group.cards.size, row.card, row.group.submitted, chosen[row.card.attemptId], c.math, onFirstDraw={ PoolTrace.mark(thread,"first_draw") }) { letter ->
                             if (!row.group.submitted) chosen[row.card.attemptId] = letter
                         }
                         is StudyRow.GroupFooter -> QuizGroupFooter(row.group, kp, c, view, thread, chosen) { c.tutor.model.onSent(thread, "answer", null); pinned = true }

@@ -145,6 +145,7 @@ class TutorModel(
 
     /** 学习者自己发出的一句话，立刻进线程；同时开始计首字。 */
     fun onSent(threadId: String, kind: String, learnerText: String?) = synchronized(lock) {
+        if(kind=="test") PoolTrace.begin(threadId)
         pendingSend[threadId] = kind to TimeSource.Monotonic.markNow()
         mutateThread(threadId) {
             val items = if (learnerText == null) items else items + ChatItem.Learner("l:${items.size}:${wallClock()}", learnerText)
@@ -167,6 +168,7 @@ class TutorModel(
 
     private fun handleFrame(frame: String) {
         val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return
+        if(obj.str("t")=="tutor.cards") PoolTrace.mark(obj.str("threadId"),"cards_received")
         _state.value = _state.value.copy(lastSeenAtMs = wallClock())
         when (obj.str("t")) {
             "tutor.state" -> mutateThread(obj.str("threadId")) {

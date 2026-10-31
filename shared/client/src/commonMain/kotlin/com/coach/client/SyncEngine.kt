@@ -176,7 +176,10 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             do {
                 val page = transport.events(course,cursor)
                 if(page.epoch != epoch) throw EpochChanged()
+                val quizThreads=if(PoolTrace.enabled) page.events.filter { it.type=="question_posed" }.mapNotNull { it.threadId }.distinct() else emptyList()
+                quizThreads.forEach { PoolTrace.mark(it,"events_read") }
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
+                quizThreads.forEach { PoolTrace.mark(it,"events_saved") }
                 cursor = page.throughSeq
             } while(page.hasMore)
             if(projection(course).requiresServerSnapshot) {

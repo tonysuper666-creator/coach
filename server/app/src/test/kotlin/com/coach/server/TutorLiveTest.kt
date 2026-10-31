@@ -54,12 +54,13 @@ class TutorLiveTest {
             if (bridge.health() == null) {
                 ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1",8791)) }
                 val python = System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
+                require(Files.isExecutable(Path.of(python))) { "缺少桥 Python 环境：请设置 COACH_BRIDGE_PYTHON，或先安装 tools/bridge/requirements.txt 到 tools/bridge/.venv" }
                 ownedBridge = ProcessBuilder(python,"tools/bridge/subscription_bridge.py").apply {
                     environment().remove("BRIDGE_CHILD_PATH")
                     environment()["BRIDGE_PORT"] = "8791"
                     environment()["COACH_BRIDGE_HOME"] = home.resolve("Coach/bridge").toString()
-                    environment()["BRIDGE_DAILY_CLAUDE_CAP"] = "60"
-                    environment()["BRIDGE_RATE_PAUSE_AT"] = "0.5"
+                    environment()["BRIDGE_DAILY_CLAUDE_CAP"] = System.getenv("BRIDGE_DAILY_CLAUDE_CAP") ?: "0"
+                    environment()["BRIDGE_RATE_PAUSE_AT"] = System.getenv("BRIDGE_RATE_PAUSE_AT") ?: "1.1"
                     environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
                     environment()["BRIDGE_AGY_ENABLED"] = "0"
                     redirectOutput(root.resolve("bridge.stdout.log").toFile())
@@ -74,9 +75,7 @@ class TutorLiveTest {
             }
             fun preflight(required: Int = 1): JsonObject {
                 val h = requireNotNull(bridge.health()) { "桥不可用" }
-                val daily = h.getValue("daily").jsonObject
-                val rate = h.getValue("rate_limit").jsonObject
-                require(daily.num("remaining") >= required && rate.str("all_paused") != "true") { "测试额度不足或使用率暂停" }
+                requireTutorLiveCapacity(h,required)
                 return h
             }
             val before = preflight(2)

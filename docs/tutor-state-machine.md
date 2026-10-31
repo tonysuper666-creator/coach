@@ -47,3 +47,5 @@ tools/dev/heavy ./gradlew :server:app:tutorLive --max-workers=2
 集成时先 `tutor.open` 绑定当前 KP，再 `msg.ask` 发“继续”以开讲；讲完后发“出题”。`tutor.cards.cards[]` 就是应绘制的账本题卡（按 letterMap 排选项，保留 groupId/attemptId）。整组提交 `tutor.answer`，消费 `tutor.feedback.grades[]`。先复用现有内容装载和 VERIFIED 题池；题池为空会返回 pool_queued，不会生成假题。通用课程列表和题池生成由对应模块提供。
 
 2026-10-31 00:01 GMT 的真实走查：课程备课包与三道已复核选择题来自本机 gradegen 材料，未使用桩。讲解首字 4229 ms、完整结束；“出题”到三题卡 27 ms，新增 AI 调用 0；待答追问首字 1544 ms、完整结束；三题 EXACT 得分均为 1，掌握窗口 3，passed=true，完整讲解事件 1 条，LEAK 0。两次真实物理调用，桥日计数从 0 到 2，余额 58/60。测试自己启动的桥正常回收。只有这一个 KP 做了真实走查；跨 KP 概念语义仍未作全量真实验证。此前一次走查因测试客户端的连接等待阻塞调度而退出，发生在任何模型调用前，修正独立调度后复跑通过。
+
+不限额桥的 health 会返回 `daily.remaining=null`；tutorLive 将明确的 JSON null 视为不限额，仍检查 `rate_limit.all_paused`。有限余额不足、暂停、余额字段缺失或格式错误均拒绝。复跑可直接使用已运行的 8791，测试不会停止借用的桥。端口空闲时才启动自有桥，默认与目前“不限调用次数”的政策一致，也允许显式环境变量配置；没有 Python 环境时给出设置 `COACH_BRIDGE_PYTHON` 或安装 `tools/bridge/requirements.txt` 的提示。

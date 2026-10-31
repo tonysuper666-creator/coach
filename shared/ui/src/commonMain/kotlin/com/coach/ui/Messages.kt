@@ -10,6 +10,7 @@ import com.coach.client.TutorMessage
 import com.coach.ui.markdown.MarkdownBlock
 import com.coach.ui.markdown.MarkdownContent
 import com.coach.ui.markdown.StreamingMarkdown
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun LearnerBubble(text: String) {
@@ -63,9 +64,11 @@ internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets
     val engine = remember(key) { IncrementalMarkdown() }
     val blocks = remember(key, text, done) { engine.update(text, done) }
     LaunchedEffectMath(blocks, math)
+    // The renderer reports every formula it has to draw as source because no SVG is cached yet: fetch exactly those (same key it looked up).
+    val scope = rememberCoroutineScope()
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
-            key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth()) }
+            key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
         }
     }
 }
@@ -73,7 +76,7 @@ internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets
 @Composable
 private fun LaunchedEffectMath(blocks: List<MarkdownBlock>, math: MathAssets) {
     val missing = remember(blocks, math.assets.size) {
-        blocks.filter { it.sealed }.flatMap { com.coach.domain.math.MathDelimiters.tokenize(it.source, true).segments }
+        blocks.filter { it.sealed }.flatMap { com.coach.ui.markdown.layoutMathSegments(com.coach.domain.math.MathDelimiters.tokenize(it.source, true).segments) }
             .mapNotNull { s -> s.math?.let { com.coach.ui.markdown.mathKey(it, s.display) } }.distinct().filter { it !in math.assets }
     }
     LaunchedEffect(missing) { missing.forEach { math.request(it) } }

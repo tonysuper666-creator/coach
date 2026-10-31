@@ -158,6 +158,7 @@ def install():
     RECORD.write_text(json.dumps(info, indent=2))
     os.chmod(RECORD, 0o600)
     shutil.copy2(__file__, BASE / 'control.py')
+    shutil.copy2(root / 'tools/dev/coach-pair.py', BASE / 'pair.py')
     try:
         start()
     except BaseException:

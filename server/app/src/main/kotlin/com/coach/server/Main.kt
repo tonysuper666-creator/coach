@@ -136,6 +136,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
     children?.start()
+    supplyWorker.start()
     try { awaitCancellation() } finally {
         withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()

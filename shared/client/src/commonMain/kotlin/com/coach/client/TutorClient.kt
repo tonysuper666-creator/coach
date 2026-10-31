@@ -31,8 +31,10 @@ class TutorClient(
     private val token: String,
     val model: TutorModel,
 ) {
+    init { validateCoachBaseUrl(baseUrl) }
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
+        followRedirects = false
         install(WebSockets) { pingIntervalMillis = 5_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }

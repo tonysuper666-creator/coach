@@ -81,7 +81,7 @@ class ChatService(
         json("results" to JsonArray(kps.map { preparation.prepare(course,it) }))
     }
 
-    fun startSupplyWorker(): Job = scope.launch {
+    fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
         val worker = com.coach.ai.PoolWorker(actor,bridge)
         while(isActive) {
             try { supplyLock.withLock { worker.runOne() } }

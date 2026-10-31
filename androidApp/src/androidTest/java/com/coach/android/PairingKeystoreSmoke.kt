@@ -44,6 +44,7 @@ class PairingKeystoreSmoke {
     }
 
     @Test fun sharedClientsRespectAndroidCleartextAllowlist() {
+        assertThrows(SecurityException::class.java) { TutorClient("http://10.0.2.2:18791","test","x".repeat(43),TutorModel(System::currentTimeMillis)) }
         assertThrows(SecurityException::class.java) { PairingClient("http://10.0.2.2:18791") }
         assertThrows(SecurityException::class.java) { HttpLedgerTransport("http://10.0.2.2:18791","test","x".repeat(43)) }
     }

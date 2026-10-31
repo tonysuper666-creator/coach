@@ -169,9 +169,9 @@ class MistakeReviewSmoke {
     private fun scroll(forward: Boolean): Boolean {
         fun target(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if(n==null) return null
-            if(n.isScrollable) return n
-            for(i in 0 until n.childCount) target(n.getChild(i))?.let { return it }
-            return null
+            var found: AccessibilityNodeInfo?=if(n.isScrollable) n else null
+            for(i in 0 until n.childCount) target(n.getChild(i))?.let { found=it }
+            return found
         }
         val list=target(ui.rootInActiveWindow) ?: return false
         val rect=android.graphics.Rect();list.getBoundsInScreen(rect)

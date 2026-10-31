@@ -52,7 +52,7 @@ class ChatFlowTest {
         }
     }
 
-    private class Harness(timings: ChatTimings = defaultTimings()) : AutoCloseable {
+    private class Harness(timings: ChatTimings = defaultTimings(), packDir: java.nio.file.Path = Files.createTempDirectory("coach-packs-")) : AutoCloseable {
         val tutor = StubTutor()
         val token = "stream-test-token-32-characters-minimum"
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -66,6 +66,7 @@ class ChatFlowTest {
             timings = timings,
             fallbackOnFirstTokenTimeout = false,
             log = { logs.add(it) },
+            packsDirectory = packDir,
         )
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), chat)
@@ -137,6 +138,23 @@ class ChatFlowTest {
     private fun ask(ws: Ws, threadId: String = "thread-1") = ws.send(
         """{"t":"msg.ask","threadId":"$threadId","courseId":"course-1","text":"什么是机会成本？"}""",
     )
+
+    @Test
+    fun androidCanStartTeachingWithoutUploadingTheTextbookPack() {
+        val packs=Files.createTempDirectory("coach-content-")
+        Files.createDirectories(packs.resolve("course-1"))
+        Files.writeString(packs.resolve("course-1/kp-1.md"), "Synthetic source: the cost is the next best alternative.")
+        Harness(packDir=packs).use { h ->
+            h.tutor.stream(10, "教材讲解。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","courseId":"course-1","threadId":"thread-1","kpId":"kp-1","conceptIds":["c1"],"title":"机会成本"}""")
+                ws.await("tutor.state")
+                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                assertTrue(h.tutor.requestBodies.single().contains("the cost is the next best alternative"))
+            }
+        }
+    }
 
     @Test
     fun official429FallsBackWithoutWaitingForFirstTokenDeadline() {

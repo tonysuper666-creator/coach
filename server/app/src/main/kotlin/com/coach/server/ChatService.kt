@@ -65,6 +65,8 @@ class ChatService(
     private val fallbackOnFirstTokenTimeout: Boolean = true,
     private val allowSourceLookup: Boolean = false,
     private val log: (String) -> Unit = { println(it) },
+    private val packsDirectory: java.nio.file.Path = java.nio.file.Path.of(System.getenv("COACH_PACKS_DIR")
+        ?: java.io.File(System.getProperty("user.home"), "Coach/corpus/packs").path),
 ) {
 
     val hub = ChatHub()
@@ -149,10 +151,20 @@ class ChatService(
         val recent = actor.execute { recentTurns(threadId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
-        val context = listOf(TutorOutputGuard.modelInput(pack.take(40_000)), plan?.instruction().orEmpty()).joinToString("\n")
+        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val context = listOf(TutorOutputGuard.modelInput(sourcePack.take(40_000)), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
             recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
         return messageId
+    }
+
+    private suspend fun storedTeachingPack(threadId: String, courseId: String): String {
+        val kp = actor.execute { events(courseId).lastOrNull { it.type == "kp_opened" && it.threadId == threadId }?.payload?.str("kpId") } ?: return ""
+        // IDs come from the ledger, but remain data, never unrestricted filesystem paths.
+        val id = Regex("[A-Za-z0-9_-]+")
+        if (!id.matches(courseId) || !id.matches(kp)) return ""
+        val path = packsDirectory.resolve(courseId).resolve("$kp.md")
+        return if (java.nio.file.Files.isRegularFile(path)) java.nio.file.Files.readString(path) else ""
     }
 
     fun cancel(messageId: String): Boolean {

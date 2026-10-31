@@ -26,12 +26,14 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         fun boundedInput(source: String, knowledgePoint: JsonObject): String {
             val markers = pageMarker.findAll(source).toList()
             if (markers.isEmpty()) {
-                require(source.length <= MAX_LESSON_INPUT_CHARS) { "Long lesson pack has no PDF page markers" }
-                return source
+                if (source.length <= MAX_LESSON_INPUT_CHARS) return source
+                val paragraphEnd = source.lastIndexOf("\n\n", MAX_LESSON_INPUT_CHARS)
+                val end = if (paragraphEnd >= MAX_LESSON_INPUT_CHARS * 3 / 4) paragraphEnd else MAX_LESSON_INPUT_CHARS
+                return source.substring(0, end).trimEnd()
             }
 
             val header = source.substring(0, markers.first().range.first)
-            require(header.length <= MAX_LESSON_INPUT_CHARS) { "Knowledge point header exceeds lesson input limit" }
+            if (header.length > MAX_LESSON_INPUT_CHARS) return source.take(MAX_LESSON_INPUT_CHARS)
             val pages = markers.mapIndexed { index, marker ->
                 LessonPage(marker.groupValues[1].toInt(), index,
                     source.substring(marker.range.first, markers.getOrNull(index + 1)?.range?.first ?: source.length))
@@ -140,7 +142,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         val started=System.nanoTime()
         var batches=0
         while(actor.execute { poolAvailable(course,kp) } < 6 && batches < 6) {
-            worker.ensure(course,kp,meta.str("title"),source.take(40_000),6,background=false)
+            worker.ensure(course,kp,meta.str("title").ifBlank { meta.str("name") },source.take(40_000),6,background=false)
             while(true) {
                 val step=worker.runOne(course,kp) ?: break
                 if(step.state in setOf("failed","stale")) break
@@ -161,7 +163,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         val worker=PoolWorker(actor,bridge)
         var steps=0
         while(actor.execute { poolAvailable(course,kp) } < 6 && steps < 8) {
-            worker.ensure(course,kp,meta.str("title"),fullSource.take(40_000),6,background=false)
+            worker.ensure(course,kp,meta.str("title").ifBlank { meta.str("name") },fullSource.take(40_000),6,background=false)
             val step=worker.runOne(course,kp) ?: break
             steps++
             if(step.state=="stale") break

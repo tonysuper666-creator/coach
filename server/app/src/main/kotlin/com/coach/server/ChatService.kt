@@ -327,7 +327,10 @@ class ChatService(
 
     private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null): String {
         val messageId = UUID.randomUUID().toString()
-        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val suppliedPack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val sourcePack = if (plan?.explanation == true) {
+            preparation.pack(courseId, plan.context.kp).ifBlank { suppliedPack }
+        } else suppliedPack
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan)

@@ -10,10 +10,14 @@ import io.ktor.server.netty.Netty
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -100,6 +104,16 @@ class ChatFlowTest {
         val selectedPages = Regex("〔PDF 第 ([0-9]+) 页").findAll(selected).map { it.groupValues[1].toInt() }.toList()
         assertTrue(selectedPages.size <= 6)
         assertEquals(selectedPages.sorted(), selectedPages)
+    }
+
+    @Test
+    fun longUnmarkedLessonPackFallsBackToBoundedPrefix() {
+        val source = "Introduction.\n\n" + "Unpaginated source text. ".repeat(900)
+        val selected = LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Synthetic KP"))
+
+        assertTrue(source.length > LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        assertTrue(selected.length <= LessonPreparation.MAX_LESSON_INPUT_CHARS)
+        assertTrue(source.startsWith(selected))
     }
 
 
@@ -374,7 +388,7 @@ class ChatFlowTest {
         val root=Files.createTempDirectory("coach-prepared-")
         val packs=root.resolve("packs")
         Files.createDirectories(packs.resolve("course-1"))
-        val source="Synthetic source material."
+        val source="Synthetic source material.\n" + "Long course page content. ".repeat(2_000)
         Files.writeString(packs.resolve("course-1/kp-1.md"),source)
         val cache=root.resolve("prepared-lessons/course-1")
         Files.createDirectories(cache)
@@ -385,7 +399,7 @@ class ChatFlowTest {
                 ws.send("""{"t":"tutor.open","courseId":"course-1","threadId":"thread-1","kpId":"kp-1","conceptIds":["c1"],"title":"机会成本"}""")
                 ws.await("tutor.state")
                 assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type=="explanation_delivered" } } })
-                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1","pack":${kotlinx.serialization.json.JsonPrimitive(source.take(40_000))}}""")
                 assertEquals("PREPARE", ws.await("tutor.state").str("state"))
                 assertEquals("TEACH", ws.await("tutor.state").str("state"))
                 val start=ws.await("msg.start")
@@ -395,6 +409,44 @@ class ChatFlowTest {
                 assertEquals(1,runBlocking { h.actor.execute { events("course-1").count { it.type=="explanation_delivered" } } })
             }
         } } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun prepareQuestionsUsesSeedNameAsTheQueuedObjective() = runBlocking {
+        val root = Files.createTempDirectory("coach-seed-objective-")
+        val packs = root.resolve("packs")
+        Files.createDirectories(packs.resolve("course-1"))
+        Files.writeString(packs.resolve("course-1/kp-1.md"), "Source material for a synthetic question.")
+        try {
+            Harness(packDir = packs).use { h ->
+                val name = "RAND HIE design and Oregon Medicaid"
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json(
+                        "knowledgePoints" to kotlinx.serialization.json.JsonArray(listOf(com.coach.domain.json(
+                            "id" to "kp-1", "name" to name,
+                            "sourceAnchor" to com.coach.domain.json("pdfPage" to 1)
+                        )))
+                    ))
+                }
+                h.tutor.stream(5_000, StubTutor.terminal("complete"), StubTutor.DONE)
+                val preparation = async { h.chat.prepareLessons("course-1", listOf("kp-1"), questionsOnly = true) }
+                try {
+                    val job = withTimeout(2_000) {
+                        while (true) {
+                            val pending = h.actor.execute { supplyJobs("course-1", "kp-1").firstOrNull() }
+                            if (pending != null) return@withTimeout pending
+                            delay(10)
+                        }
+                        error("unreachable")
+                    }
+                    assertEquals(name, job.subject.str("objective"))
+                } finally {
+                    preparation.cancelAndJoin()
+                }
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     @Test

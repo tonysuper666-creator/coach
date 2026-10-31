@@ -72,11 +72,12 @@ private fun OfflinePractice(c: CoachController) {
                 Button(onClick = { active = groups.firstOrNull { !it.submitted }?.groupId; chosen = emptyMap() },
                     enabled = groups.any { !it.submitted }, modifier = Modifier.heightIn(min = 56.dp)) { Text("复习 ${groups.firstOrNull { !it.submitted }?.cards?.size ?: 3} 题") }
                 OutlinedButton(onClick = {
+                    c.tutor.telemetry?.record("tap", "offline_pack")
                     downloading = true; error = null
                     scope.launch {
                         try { withContext(Dispatchers.IO) { c.sync.downloadOfflinePack(c.courseId) } }
                         catch (e: kotlinx.coroutines.CancellationException) { throw e }
-                        catch (_: Exception) { error = "Mac 未连接，下载未完成；已有题仍可练习。" }
+                        catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "Mac 未连接，下载未完成；已有题仍可练习。" }
                         finally { downloading = false }
                     }
                 },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在下载…" else "下载练习包") }
@@ -88,13 +89,15 @@ private fun OfflinePractice(c: CoachController) {
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp),verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(group.cards,key = { it.attemptId }) { card ->
                     QuizCardView(group.cards.indexOf(card)+1,group.cards.size,card,group.submitted,chosen[card.attemptId],c.math) {
+                        c.tutor.telemetry?.record("tap", "select_option")
                         chosen = chosen + (card.attemptId to it)
                     }
                 }
                 item {
                     if (!group.submitted) Button(onClick = {
+                        c.tutor.telemetry?.record("tap", "answer")
                         try { c.sync.submitOfflineGroup(c.courseId,group.groupId,chosen,c.nowMillis()); error = null }
-                        catch (_: IllegalArgumentException) { error = "题组已提交或已过期，请重新下载。" }
+                        catch (_: IllegalArgumentException) { c.tutor.telemetry?.record("error", "offline_pack"); error = "题组已提交或已过期，请重新下载。" }
                     },enabled = group.cards.all { chosen[it.attemptId] != null },modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
                     else TextButton(onClick = { active = null; chosen = emptyMap() }) { Text("返回练习队列") }
                 }

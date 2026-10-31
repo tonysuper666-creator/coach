@@ -28,7 +28,7 @@ tasks.test {
 // Opt-in: real CLI calls and local course material, never part of test/check.
 tasks.register<Test>("liveTest") {
     environment("COACH_TRAFFIC", "test")
-    description = "Real 8791 bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
+    description = "Real isolated bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
     group = "verification"
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
@@ -40,7 +40,11 @@ tasks.register<Test>("liveTest") {
 }
 
 // All automated test traffic opts into the bridge test budget.
-tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }
+tasks.withType<Test>().configureEach {
+    environment("COACH_TRAFFIC", "test")
+    // Ledger-only child processes cannot accidentally fall back to the learner bridge.
+    environment("COACH_BRIDGE_URL", System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:1")
+}
 
 tasks.register<Test>("tutorLive") {
     group = "verification"

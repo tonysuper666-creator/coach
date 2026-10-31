@@ -27,6 +27,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         pairingCommand(args, data)
         return@runBlocking
     }
+    configureBridgeTraffic(System.getenv(), managed)
     // Management commands print their result to the invoking terminal, never service logs.
     if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)
@@ -76,8 +77,17 @@ fun main(args: Array<String>): Unit = runBlocking {
             } else actor.execute { backupIfDue() }
         }
     }
+    val observation = UsageObservation(
+        Path.of(System.getenv("COACH_LOG_DIR") ?: (if (managed) data.parent else data).resolve("logs").toString()),
+        Path.of(System.getenv("COACH_STATE_DIR") ?: (if (managed) data.parent else data).resolve("state").toString()))
+    val usageSummary = launch(Dispatchers.IO) {
+        while (isActive) {
+            runCatching { observation.summarize() }.onFailure { println("COACH usage summary unavailable=${it.javaClass.simpleName}") }
+            delay(3_600_000)
+        }
+    }
     val math = MathProcess.locate()
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device); mathRoutes(math) }
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -133,7 +143,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
+        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close() }
         local.stop(100, 1000)
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
@@ -143,6 +153,6 @@ fun main(args: Array<String>): Unit = runBlocking {
         withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()
         local.stop(100, 1000)
-        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close();lock.release();fileLock.close()
+        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }
 }

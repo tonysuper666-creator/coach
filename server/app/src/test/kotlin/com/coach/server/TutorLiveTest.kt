@@ -45,20 +45,21 @@ class TutorLiveTest {
         val kpId = accepted.getValue("kp").let { if (it is JsonObject) it.str("id") else it.jsonPrimitive.content }
         val kp = LedgerJson.parseToJsonElement(Files.readString(corpus.resolve("inputs/kps.json"))).jsonArray.map { it.jsonObject }.single { it.str("id") == kpId }
         val choices = accepted.getValue("accepted").jsonArray.take(3).map { it.jsonObject }
-        val bridge = BridgeClient()
+        val bridgePort = ServerSocket(0).use { it.localPort }
+        val bridge = BridgeClient(BridgeConfig(baseUrl="http://127.0.0.1:$bridgePort",testTraffic=true))
         var ownedBridge: Process? = null
         var scope: CoroutineScope? = null
         var actor: LedgerActor? = null
         var stopServer: (suspend () -> Unit)? = null
         try {
             if (bridge.health() == null) {
-                ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1",8791)) }
+                ServerSocket().use { it.bind(InetSocketAddress("127.0.0.1",bridgePort)) }
                 val python = System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
                 require(Files.isExecutable(Path.of(python))) { "缺少桥 Python 环境：请设置 COACH_BRIDGE_PYTHON，或先安装 tools/bridge/requirements.txt 到 tools/bridge/.venv" }
                 ownedBridge = ProcessBuilder(python,"tools/bridge/subscription_bridge.py").apply {
                     environment().remove("BRIDGE_CHILD_PATH")
-                    environment()["BRIDGE_PORT"] = "8791"
-                    environment()["COACH_BRIDGE_HOME"] = home.resolve("Coach/bridge").toString()
+                    environment()["BRIDGE_PORT"] = bridgePort.toString()
+                    environment()["COACH_BRIDGE_HOME"] = root.resolve("bridge").toString()
                     environment()["BRIDGE_DAILY_CLAUDE_CAP"] = System.getenv("BRIDGE_DAILY_CLAUDE_CAP") ?: "0"
                     environment()["BRIDGE_RATE_PAUSE_AT"] = System.getenv("BRIDGE_RATE_PAUSE_AT") ?: "1.1"
                     environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"

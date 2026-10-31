@@ -94,7 +94,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         // 钉底：停在底部时，流式内容增长会跟着走；用户往上翻就松开，翻回底部再钉住。
         LaunchedEffect(listState) {
-            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling && !followingOutput) pinned = !canForward }
+            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling) pinned = !canForward }
         }
         val lastLength = (tv.items.lastOrNull() as? ChatItem.Tutor)?.message?.text?.length ?: 0
         LaunchedEffect(tv.items.size, lastLength, tv.poolText, tv.error, tv.notice, c.math.assets.size) {
@@ -102,6 +102,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             if (pinned && (tv.streaming || pending == null) && listState.layoutInfo.totalItemsCount > 0) {
                 androidx.compose.runtime.withFrameNanos { }
                 listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                listState.scrollBy(1_000_000f)
             }
         }
         // 新题组出现时把它的开头放在最上面，方便从第 1 题读起。

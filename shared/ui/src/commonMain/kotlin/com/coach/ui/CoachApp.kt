@@ -17,6 +17,7 @@ import com.coach.client.SyncEngine
 import com.coach.client.TutorClient
 import com.coach.client.TutorUiState
 import com.coach.ui.markdown.MathAsset
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -85,9 +86,16 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
     var tab by remember { mutableStateOf(initialTab) }
     var source by remember { mutableStateOf<SourceJump?>(null) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); source = null; open = id to start }
+    var reviewWeek by remember { mutableStateOf<Int?>(null) }
+    val actionScope = rememberCoroutineScope()
+    val weekActions = remember(c) { WeekActions(c, actionScope) }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewWeek = null; source = null; open = id to start }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
-    val select: (AppTab) -> Unit = { tab = it; open = null; source = null }
+    val select: (AppTab) -> Unit = { reviewWeek = null; tab = it; open = null; source = null }
+    SideEffect {
+        weekActions.onOpen = { id -> source = null; reviewWeek = null; tab = AppTab.TODAY; open = id?.let { it to true } }
+        weekActions.onReview = { week -> reviewWeek = week; open = null; source = null }
+    }
     // Closed telemetry vocabulary (TON-1140): only the screens it already names are reported.
     LaunchedEffect(open, tab, source) {
         val screen = when { open != null -> "study"; source != null -> null; tab == AppTab.TODAY -> "today"; tab == AppTab.REVIEW -> "review"; else -> null }
@@ -103,7 +111,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
                 // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
-                    key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference) }
+                    key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, weekActions) }
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -117,7 +125,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     val body: @Composable () -> Unit = {
                         val tabContent: @Composable () -> Unit = {
                             when (tab) {
-                                AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp)
+                                AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp)
                                 AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = openKp, onBack = null) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide) { id -> openKp(id, false) }
@@ -125,6 +133,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             }
                         }
                         when {
+                            reviewWeek != null && current != null -> WeekMistakesScreen(c, current, reviewWeek!!, onBack = { reviewWeek = null })
                             source != null -> ResourcesScreen(c, source, onBack = { source = null })
                             wide && paired -> Row(Modifier.fillMaxSize()) {
                                 Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
@@ -139,7 +148,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         }
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
-                    val navVisible = !(bottomBar && (open != null || source != null))
+                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null))
                     if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)

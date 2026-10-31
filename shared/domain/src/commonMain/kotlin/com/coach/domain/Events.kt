@@ -3,7 +3,7 @@ package com.coach.domain
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
-const val PROJECTION_VERSION = 4
+const val PROJECTION_VERSION = 5
 val LedgerJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 enum class Format { SINGLE_CHOICE, SHORT_ANSWER, ESSAY, CALCULATION }
@@ -18,7 +18,7 @@ enum class EventType {
     mock_started, mock_submitted, legacy_imported, legacy_attempt, legacy_schedule,
     legacy_passed, exam_weights_set, explanation_pregenerated, server_restored,
     question_key_changed, answer_orphaned, tutor_state_changed, tutor_settings_changed,
-    course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported
+    study_scope_set, study_scope_advanced, course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported
 }
 
 @Serializable

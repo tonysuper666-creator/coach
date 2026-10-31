@@ -1,5 +1,6 @@
 package com.coach.client
 
+import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
 import com.coach.domain.logicalDay
@@ -147,10 +148,22 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     /** 离考试还有几天；没设考试日、或已经考过返回 null。 */
     fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }
 
-    /** 「继续：<KP>」的目标：状态机定的目标优先，没有就取大纲里第一个未通过的。 */
-    val continueTarget: KpRow? by lazy {
-        projection.position.continueTarget?.let(::kp) ?: kps.firstOrNull { it.status != KpStatus.PASSED && it.status != KpStatus.SOLID }
+    val weekPoints by lazy { weekPoints(events) }
+    val weeks: List<Int> by lazy { weekPoints.flatMap { it.weeks }.distinct().sorted() }
+    fun weekKps(week: Int): List<KpRow> = weekPoints.filter { week in it.weeks }.mapNotNull { kp(it.id) }
+    val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, kps.map { it.id }.toSet())?.let(::kp)
+    fun weekProgress(kpId: String): String? = projection.studyScope?.let { s ->
+        s.kpIds.indexOf(kpId).takeIf { it >= s.cursor }?.let { "第 ${s.week} 周 · 第 ${it + 1} / ${s.kpIds.size} 个" }
     }
+
+    /** Pending work only wins while its KP is unfinished. A passed old thread cannot trap Continue. */
+    val continueTarget: KpRow? by lazy {
+        if (projection.studyScope != null) weekTarget else {
+            projection.position.continueTarget?.let(::kp)?.takeIf { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
+                ?: kps.firstOrNull { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
+        }
+    }
+    fun isResume(kp: KpRow): Boolean = kp.explained || events.any { it.type == "kp_opened" && it.payload.s("kpId") == kp.id }
 
     fun quizGroups(threadId: String): List<QuizGroup> {
         val posed = events.filter { it.type == "question_posed" && it.threadId == threadId && it.payload.s("format") == "SINGLE_CHOICE" }

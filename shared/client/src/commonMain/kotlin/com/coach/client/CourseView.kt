@@ -42,6 +42,8 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
 class CourseView(private val events: List<Event>, val projection: Projection) {
 
+    val mistakes: MistakeReview by lazy { mistakeReview(events) }
+
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()

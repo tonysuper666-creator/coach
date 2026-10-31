@@ -85,6 +85,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
                     key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft) }
                 } }
+                val reviewPane = remember(c) { movableContentOf<ReviewPaneArgs> { args ->
+                    ReviewScreen(c, args.view, openKp, args.onBack)
+                } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val totalWidth = maxWidth
                     if (totalWidth >= WIDE_LAYOUT_MIN_WIDTH) {
@@ -96,14 +99,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             VerticalDivider()
                             Box(Modifier.weight(1f).fillMaxHeight()) {
                                 if (reviewOpen && current != null) {
-                                    ReviewScreen(c, current, onOpenKp = openKp, onBack = null)
+                                    reviewPane(ReviewPaneArgs(current, null))
                                 } else if (target != null && current != null) {
                                     studyPane(StudyPaneArgs(target, current, ui, open?.second == true, null))
                                 } else CenterMessage("选一个知识点，或点「继续」。")
                             }
                         }
                     } else if (reviewOpen && current != null) {
-                        ReviewScreen(c, current, onOpenKp = openKp, onBack = { reviewOpen = false })
+                        reviewPane(ReviewPaneArgs(current, { reviewOpen = false }))
                     } else if (target != null && current != null) {
                         studyPane(StudyPaneArgs(target, current, ui, open?.second == true, { open = null }))
                     } else {
@@ -114,6 +117,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         }
     }
 }
+
+private data class ReviewPaneArgs(val view: CourseView, val onBack: (() -> Unit)?)
 
 private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?)
 

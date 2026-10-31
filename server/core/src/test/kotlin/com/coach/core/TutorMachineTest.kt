@@ -46,6 +46,25 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun mistakeRetryAlwaysTakesThreeUnseenQuestionsAndNeverStartsPreparation() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(count=6); f.open()
+            f.machine.settings("course","thread",groupSize=1)
+            val first=f.machine.retryMistakes("course","thread")
+            assertEquals(3,first.cards.size)
+            assertNull(first.plan)
+            assertFalse(first.waitingForPool)
+            assertEquals(first.cards,f.machine.retryMistakes("course","thread").cards)
+            f.submit(first.cards,setOf(0,1))
+            val next=f.machine.retryMistakes("course","thread")
+            assertEquals(3,next.cards.size)
+            assertTrue(next.cards.none { n -> first.cards.any { it.payload.str("questionId")==n.payload.str("questionId") } })
+            f.submit(next.cards,id="retry")
+            assertFailsWith<IllegalArgumentException> { f.machine.retryMistakes("course","thread") }
+            assertTrue(f.actor.execute { supplyJobs("course","kp-1") }.isEmpty())
+        }
+    }
+
     @Test fun continueAfterTwoErrorsUsesTheRemainingPoolWithoutRepeatingTheLesson() = runBlocking {
         TutorFixture().use { f ->
             f.seed(); f.open(); f.teach()

@@ -187,6 +187,9 @@ class ChatService(
                 runCatching { preparation.ensure(courseId,kp) }
                 // Do not call next twice: a fast refill could otherwise publish the same group twice.
                 tutor.resumePool(courseId,threadId)?.let { outcome=it }
+                if(outcome.waitingForPool && actor.execute {
+                    supplyJobs(courseId,kp).any { it.kind in setOf("gen_mcq","blind_review") }
+                }) outcome=outcome.copy(poolMessage="正在准备题目（约 30 秒，含独立复核；重试可能更久）")
                 if(outcome.waitingForPool && waitingPools.add(threadId)) scope.launch {
                     try {
                         var previous = ""

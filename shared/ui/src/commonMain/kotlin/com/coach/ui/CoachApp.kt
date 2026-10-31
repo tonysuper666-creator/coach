@@ -7,6 +7,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 import com.coach.ui.adaptive.LayoutRules
@@ -38,6 +41,8 @@ class CoachController(
 ) {
     // Keep arrival anchors as long as the tutor model, including a trip back to Today.
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
+    /** 看过（或预取过）的教材页，整个会话里留着：学习页的「看原文」多半不用再等 Mac。 */
+    internal val sourcePages = HashMap<PageKey, com.coach.client.SourcePage>()
 }
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */
@@ -66,14 +71,17 @@ fun threadIdFor(kpId: String) = "kp:$kpId"
 /** 两栏布局的起点宽度（Material 的 medium/expanded 分界附近）：Fold8 内屏走两栏，外屏走单栏。 */
 val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 
+/** 「看原文」左右并排（左讲解、右原文）的起点宽度：每栏至少约 420dp。Pad 横屏够，Fold8 内屏不够，那里原文盖在讲解上面。 */
+val SOURCE_SPLIT_MIN_WIDTH = 840.dp
+
 /** 底栏/侧轨的五个入口。「学习」不是入口：它是从「继续」或某个知识点打开的线程。 */
 enum class AppTab(val label: String, val glyph: String) {
     TODAY("今天", "◉"), ROUTE("路线", "☰"), REVIEW("复习", "↻"), RECORDS("记录", "✓"), RESOURCES("资料", "❖"),
 }
 
-/** [initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
+/** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -88,6 +96,12 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); source = null; open = id to start }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
     val select: (AppTab) -> Unit = { tab = it; open = null; source = null }
+    val focus = LocalFocusManager.current
+    // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
+    val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
+    LaunchedEffect(anchorOfOpen?.id, ui.connected) {
+        if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
+    }
     // Closed telemetry vocabulary (TON-1140): only the screens it already names are reported.
     LaunchedEffect(open, tab, source) {
         val screen = when { open != null -> "study"; source != null -> null; tab == AppTab.TODAY -> "today"; tab == AppTab.REVIEW -> "review"; else -> null }
@@ -105,7 +119,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
                     key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference) }
                 } }
-                val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) }
+                val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
+                var sourceShown by remember { mutableStateOf(false) }
+                LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value))
                     val bottomBar = layout.nav == NavStyle.BottomBar
@@ -124,19 +140,30 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
                         }
-                        when {
-                            source != null -> ResourcesScreen(c, source, onBack = { source = null })
-                            wide && paired -> Row(Modifier.fillMaxSize()) {
-                                Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
-                                VerticalDivider()
-                                Box(Modifier.weight(1f).fillMaxHeight()) {
-                                    if (target != null && current != null) studyPane(StudyPaneArgs(target, current, ui, open?.second == true, null, openReference))
-                                    else CenterMessage("选一个知识点，或点「继续」。")
+                        val reading = source
+                        // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
+                        val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
+                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference) } }
+                        if (split) SourceSplit(
+                            study = { studyPane(paneArgs!!) },
+                            source = { ResourcesScreen(c, reading, onBack = { source = null }, backLabel = "✕ 关闭原文") },
+                        ) else SourceOverlay(
+                            covered = reading != null,
+                            base = {
+                                when {
+                                    wide && paired -> Row(Modifier.fillMaxSize()) {
+                                        Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
+                                        VerticalDivider()
+                                        Box(Modifier.weight(1f).fillMaxHeight()) {
+                                            if (paneArgs != null) studyPane(paneArgs) else CenterMessage("选一个知识点，或点「继续」。")
+                                        }
+                                    }
+                                    paneArgs != null -> studyPane(paneArgs)
+                                    else -> tabContent()
                                 }
-                            }
-                            target != null && current != null -> studyPane(StudyPaneArgs(target, current, ui, open?.second == true, { open = null }, openReference))
-                            else -> tabContent()
-                        }
+                            },
+                            overlay = { ResourcesScreen(c, reading, onBack = { source = null }) },
+                        )
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
                     val navVisible = !(bottomBar && (open != null || source != null))
@@ -151,6 +178,28 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 }
             }
         }
+    }
+}
+
+/** Pad 横屏：左讲解、右原文并排。讲解窗格是同一个 movable 内容，从单栏/两栏布局挪过来时保留它的组合状态。 */
+@Composable
+internal fun SourceSplit(study: @Composable () -> Unit, source: @Composable () -> Unit) {
+    Row(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxHeight()) { study() }
+        VerticalDivider()
+        Box(Modifier.weight(1f).fillMaxHeight()) { source() }
+    }
+}
+
+/**
+ * 原文盖在页面上面（手机、Fold8 内屏）：下面的页面 [base] 一直留在组合里，输入、选项、滚动位置原样；
+ * 盖住时它不接收点击，也不对读屏可见。
+ */
+@Composable
+internal fun SourceOverlay(covered: Boolean, base: @Composable () -> Unit, overlay: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().then(if (covered) Modifier.clearAndSetSemantics { } else Modifier)) { base() }
+        if (covered) Surface(Modifier.fillMaxSize().pointerInput(Unit) {}) { overlay() }
     }
 }
 

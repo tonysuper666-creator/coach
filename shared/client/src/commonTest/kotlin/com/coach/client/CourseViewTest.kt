@@ -126,4 +126,24 @@ class CourseViewTest {
         assertEquals("textbook:7", k2.anchorDoc); assertEquals(172, k2.anchorPdfPage); assertEquals(141, k2.anchorBookPage)
         assertEquals("教材 p.141", k2.reference)
     }
+
+    @Test fun openSourceUsesTheFirstOpenableAnchorsEntryThenSourceAnchor() {
+        val anchor = { doc: String, pdf: Int, book: Int -> json("docId" to doc, "pdfPage" to pdf, "bookPage" to book) }
+        fun kp(id: String, anchors: JsonArray?, source: JsonObject?) = JsonObject(buildMap {
+            put("id", JsonPrimitive(id)); put("name", JsonPrimitive(id))
+            if (anchors != null) put("anchors", anchors)
+            if (source != null) put("sourceAnchor", source)
+        })
+        val view = view(listOf(event("outline_revised", json("knowledgePoints" to JsonArray(listOf(
+            // anchors[] wins over sourceAnchor, and an entry without a page or document is skipped.
+            kp("A", JsonArray(listOf(anchor("textbook:1", 0, 0), anchor("textbook:2", 40, 12), anchor("textbook:2", 41, 13))), anchor("textbook:9", 99, 98)),
+            kp("B", null, anchor("textbook:9", 99, 98)),
+            kp("C", JsonArray(emptyList()), null),
+            kp("D", JsonArray(listOf(anchor("", 5, 1))), anchor("textbook:3", 7, 2)),
+        ))))))
+        assertEquals(Triple("textbook:2", 40, 12), view.kp("A")!!.let { Triple(it.anchorDoc, it.anchorPdfPage, it.anchorBookPage) })
+        assertEquals("textbook:9", view.kp("B")!!.anchorDoc); assertEquals(99, view.kp("B")!!.anchorPdfPage)
+        assertEquals("", view.kp("C")!!.anchorDoc)
+        assertEquals("textbook:3", view.kp("D")!!.anchorDoc); assertEquals(7, view.kp("D")!!.anchorPdfPage)
+    }
 }

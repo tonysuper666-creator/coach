@@ -76,8 +76,10 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
                 for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }
                 // 课程内容装载写的是单个 `sourceAnchor`（旧形态是 `anchors` 数组），两种都认。
-                val anchorObjects = listOfNotNull(o["sourceAnchor"] as? JsonObject) + (o["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-                anchorObjects.firstOrNull { it.s("docId").isNotBlank() }?.let { a ->
+                // 「看原文」选页与备课选页同口径：先看 `anchors[]` 里第一个有文档和页码的，没有再用 `sourceAnchor`。
+                val anchorObjects = (o["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject } + listOfNotNull(o["sourceAnchor"] as? JsonObject)
+                val openable = { a: JsonObject -> a.s("docId").isNotBlank() && ((a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0) > 0 }
+                anchorObjects.firstOrNull(openable)?.let { a ->
                     anchorDocs[id] = Triple(a.s("docId"), (a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0, (a["bookPage"] as? JsonPrimitive)?.intOrNull ?: 0)
                 }
                 val pages = anchorObjects.mapNotNull { a -> (a["bookPage"] as? JsonPrimitive)?.intOrNull }

@@ -59,6 +59,18 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         return false
     }
     routing {
+        post("/v1/courses/{course}/constructed") {
+            val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
+            val course=call.parameters["course"]!!
+            val card=actor.execute { takeConstructed(course,input.str("kpId"),input.str("attemptId"),input.str("purpose","CLOSED_BOOK")) }
+            pushes.emit(course)
+            call.respondText(LedgerJson.encodeToString(card),ContentType.Application.Json)
+        }
+        get("/v1/courses/{course}/attempts/{attempt}") {
+            val record=actor.execute { constructedRecord(call.parameters["course"]!!,call.parameters["attempt"]!!) }
+            if(record==null) call.respond(HttpStatusCode.NotFound)
+            else call.respondText(record.toString(),ContentType.Application.Json)
+        }
         post("/v1/prewarm") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
             val course=input.str("courseId")

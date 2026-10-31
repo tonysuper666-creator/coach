@@ -512,7 +512,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     val snapshot = JsonObject(posedSnapshot + mapOf("format" to JsonPrimitive(question.first),"keyState" to JsonPrimitive(question.third)))
                                     emit("question_posed",snapshot,"attempt:$attemptId")
                                 }
-                                emit("answer_submitted",json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline")),"attempt:$attemptId:answer")
+                                emit("answer_submitted",json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer")),"attempt:$attemptId:answer")
                                 if (question.first == "SINGLE_CHOICE") {
                                     val correct = choiceId(qid)
                                     val frozenMap = letterMap(posed?.payload ?: posedSnapshot)
@@ -520,7 +520,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                         "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
                                         "max" to 1,"status" to "EXACT",
                                         "feedback" to choiceFeedback(correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
-                                }
+                                } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }
                     }
@@ -713,11 +713,109 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val fp=sha256((stem+question.str("reference_answer")+fingerprint).toByteArray(Charsets.UTF_8))
         if (query("SELECT 1 FROM questions WHERE course_id=? AND fingerprint=?",course,fp) { it.getInt(1) }.isNotEmpty()) return@transaction false
         val id=uid()
-        sql("INSERT INTO questions(question_id,course_id,format,stem_md,origin,fingerprint,key_state) VALUES(?,?,'SHORT_ANSWER',?,'COACH',?,'VERIFIED')",id,course,stem,fp)
+        sql("INSERT INTO questions(question_id,course_id,format,stem_md,origin,fingerprint,key_state) VALUES(?,?,?,?, 'COACH',?,'VERIFIED')",id,course,if(question["numeric_final"] is JsonObject) "CALCULATION" else "SHORT_ANSWER",stem,fp)
         sql("INSERT INTO question_kp VALUES(?,?,1)",id,kp)
         sql("INSERT INTO answer_keys(question_id,key_json,reviewed_by,reviewed_at) VALUES(?,?,?,?)",id,question.toString(),reviewer,clock())
         sql("INSERT INTO constructed_details VALUES(?,?,?,?,?,?,?)",id,job.packHash,question.str("reference_answer"),question.getValue("rubric").toString(),fingerprint,job.subject.str("generator"),reviewer)
         true
+    }
+
+    /** A constructed question is always posed from the reviewed pool, never a client-supplied rubric. */
+    fun takeConstructed(course: String, kp: String, attempt: String, purpose: String = "CLOSED_BOOK", thread: String? = null): Event = transaction {
+        require(attempt.isNotBlank() && purpose in setOf("PRACTICE","CLOSED_BOOK"))
+        events(course).firstOrNull { it.type=="question_posed" && it.payload.str("attemptId")==attempt }?.let {
+            require(kp in it.payload.strings("kpIds") && it.payload.str("format")!="SINGLE_CHOICE")
+            return@transaction it
+        }
+        val q=query("""SELECT q.question_id,q.stem_md,q.fingerprint,q.format,d.rubric_fingerprint
+            FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
+            WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED'
+            AND NOT EXISTS(SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed'
+                AND json_extract(e.payload,'$.questionId')=q.question_id) ORDER BY q.question_id LIMIT 1""",course,kp) {
+            json("questionId" to it.getString(1),"stem" to it.getString(2),"fingerprint" to it.getString(3),
+                "format" to it.getString(4),"rubricFingerprint" to it.getString(5))
+        }.singleOrNull() ?: throw IllegalArgumentException("构答题池暂空，正在补题")
+        append(course,"question_posed",JsonObject(q + json("attemptId" to attempt,"kpIds" to listOf(kp),
+            "purpose" to purpose,"keyState" to "VERIFIED","policyVersion" to 1,"posedAt" to clock(),"origin" to "COACH")),
+            "attempt:$attempt",thread=thread)
+    }
+
+    private fun enqueueConstructedGrade(course: String, attempt: String, question: String, answer: String, thread: String?, finalAnswer: String = "") {
+        val frozen=query("""SELECT q.stem_md,k.key_json,d.rubric_fingerprint FROM questions q
+            JOIN answer_keys k USING(question_id) JOIN constructed_details d USING(question_id)
+            WHERE q.question_id=? AND q.course_id=?""",question,course) {
+            val key=LedgerJson.parseToJsonElement(it.getString(2)).jsonObject
+            Triple(it.getString(1),key,it.getString(3))
+        }.singleOrNull() ?: return
+        val subject=json("course" to course,"attempt" to attempt,"questionId" to question,"thread" to thread,
+            "answer" to answer,"finalAnswer" to finalAnswer,"question" to JsonObject(frozen.second + ("stem" to JsonPrimitive(frozen.first))),
+            "rubricFingerprint" to frozen.third,"deadline" to (clock()+86_400_000))
+        enqueueJob("grade_attempt",subject.toString(),frozen.third,sha256(json("answer" to answer,"finalAnswer" to finalAnswer).toString().toByteArray(Charsets.UTF_8)))
+        gradeTransition(course,thread,"GRADE")
+    }
+
+    fun claimGradeWork(): GradeWork? = transaction {
+        // A wall-clock deadline survives shutdown, suspension and restart. Never promote expired drafts.
+        sql("UPDATE jobs SET state='failed',last_error='review_deadline_expired' WHERE kind='review_grade' AND state='queued' AND json_extract(subject,'$.deadline')<=?",clock())
+        val next=query("""SELECT job_id,kind,subject,question_version,answer_hash,attempts FROM jobs
+            WHERE kind IN ('grade_attempt','review_grade') AND state='queued' AND updated_at<=?
+            ORDER BY CASE kind WHEN 'grade_attempt' THEN 0 ELSE 1 END,created_at,job_id LIMIT 1""",clock()) {
+            GradeWork(it.getString(1),it.getString(2),LedgerJson.parseToJsonElement(it.getString(3)).jsonObject,
+                it.getString(4),it.getString(5),it.getInt(6)+1)
+        }.singleOrNull() ?: return@transaction null
+        claimJob(next.id)?.let { next.copy(token=it) }
+    }
+
+    fun persistGradeDraft(work: GradeWork, payload: JsonObject, grader: String): Boolean = transaction {
+        if(!completeJob(requireNotNull(work.token),work.fingerprint,work.answerHash)) return@transaction false
+        val input=work.subject; val course=input.str("course"); val attempt=input.str("attempt")
+        require(payload.str("status")=="AI_UNREVIEWED" && grader.isNotBlank())
+        append(course,"attempt_graded",JsonObject(payload + ("attemptId" to JsonPrimitive(attempt))),"attempt:$attempt:grade:draft",thread=input.str("thread").ifBlank { null })
+        val review=JsonObject(input + mapOf("draft" to payload,"grader" to JsonPrimitive(grader)))
+        enqueueJob("review_grade",review.toString(),work.fingerprint,work.answerHash)
+        gradeTransition(course,input.str("thread").ifBlank { null },"REVIEW")
+        true
+    }
+
+    fun persistGradeReview(work: GradeWork, payload: JsonObject): Boolean = transaction {
+        if(clock() >= work.subject.num("deadline")) return@transaction failGradeWork(work,"review_deadline_expired",false).let { false }
+        if(!completeJob(requireNotNull(work.token),work.fingerprint,work.answerHash)) return@transaction false
+        require(payload.str("decision") in setOf("CONFIRM","REVISE"))
+        val input=work.subject
+        append(input.str("course"),"grade_reviewed",JsonObject(payload + ("attemptId" to JsonPrimitive(input.str("attempt")))),
+            "attempt:${input.str("attempt")}:review",thread=input.str("thread").ifBlank { null })
+        gradeTransition(input.str("course"),input.str("thread").ifBlank { null },"FEEDBACK")
+        true
+    }
+
+    fun failGradeWork(work: GradeWork, reason: String, retry: Boolean = true): Boolean = transaction {
+        val token=requireNotNull(work.token)
+        if(token.epoch != hello().epoch) return@transaction false
+        val again=retry && work.kind=="review_grade" && work.attempt <= 3 && clock() < work.subject.num("deadline")
+        val delay=when(work.attempt) { 1 -> 60_000L; 2 -> 3_600_000L; else -> 21_600_000L }
+        sql("UPDATE jobs SET state=?,last_error=?,updated_at=? WHERE job_id=? AND state='running' AND fence=?",
+            if(again) "queued" else "failed",reason,if(again) minOf(clock()+delay,work.subject.num("deadline")) else clock(),work.id,token.value)==1
+    }
+
+    /** Full frozen question and all grading facts are returned only after an answer exists. */
+    fun constructedRecord(course: String, attempt: String): JsonObject? {
+        val es=events(course).filter { it.payload.str("attemptId")==attempt }
+        val answer=es.firstOrNull { it.type=="answer_submitted" } ?: return null
+        val posed=es.firstOrNull { it.type=="question_posed" } ?: return null
+        val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=?",course,attempt) {
+            LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
+        }.singleOrNull() ?: return null
+        return json("posed" to posed.payload,"answer" to answer.payload,"question" to job.getValue("question"),
+            "rubricFingerprint" to job.str("rubricFingerprint"),"deadline" to job.num("deadline"),
+            "jobs" to JsonArray(query("SELECT kind,state,attempts,last_error,updated_at FROM jobs WHERE kind IN ('grade_attempt','review_grade') AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at,job_id",course,attempt) {
+                json("kind" to it.getString(1),"state" to it.getString(2),"attempts" to it.getInt(3),"lastError" to it.getString(4),"updatedAt" to it.getLong(5))
+            }),"grades" to JsonArray(es.filter { it.type in setOf("attempt_graded","grade_reviewed") }.map { it.payload }))
+    }
+
+    private fun gradeTransition(course: String, thread: String?, state: String) {
+        if(thread==null) return
+        val previous=events(course).lastOrNull { it.threadId==thread && it.type=="tutor_state_changed" } ?: return
+        append(course,"tutor_state_changed",json("kpId" to previous.payload.str("kpId"),"from" to previous.payload.str("state"),"state" to state,"turnId" to ""),thread=thread)
     }
 
     private fun unseenPoolIds(course: String, kp: String): List<String> = query(

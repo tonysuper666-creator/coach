@@ -47,4 +47,16 @@ class NumericValueTest {
         assertFalse(NumericValue.matches("", "0"))
         assertFalse(NumericValue.matches("无", "0"))
     }
+    @Test fun chineseZerosLargeSectionsAndNonFiniteInputs() {
+        for((chinese,arabic) in listOf("一百零二" to "102", "一千零三十" to "1030", "二〇二六" to "2026",
+            "一亿二千万" to "120000000", "负0.25" to "-0.25", "负百分之二十五" to "-0.25", "负三点零五" to "-3.05", "十一分之负三" to "-3/11")) {
+            assertTrue(NumericValue.matches(chinese,arabic), chinese)
+        }
+        for(value in listOf("NaN","Infinity","1e309","零分之一","十百","一百百"))
+            assertFalse(NumericValue.matches(value,"1"),value)
+        assertFalse(NumericValue.close(Double.POSITIVE_INFINITY,1.0))
+        assertFalse(NumericValue.close(1.0,Double.POSITIVE_INFINITY))
+        assertFalse(NumericValue.close(1.0,1.0,relTolerance=-1.0))
+    }
+
 }

@@ -52,3 +52,11 @@ tasks.register<JavaExec>("refillPool") {
     mainClass.set("com.coach.ai.PoolCommandKt")
     args(providers.gradleProperty("poolArgs").orElse("").get().split(" ").filter { it.isNotBlank() })
 }
+
+/** Private, explicit live replay of a previously reviewed constructed fixture. */
+tasks.register<JavaExec>("gradeLedgerProbe") {
+    group = "verification"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.coach.ai.GradeLedgerProbeKt")
+    environment("COACH_TRAFFIC", "test")
+}

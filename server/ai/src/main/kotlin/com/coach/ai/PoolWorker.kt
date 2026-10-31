@@ -121,7 +121,10 @@ class PoolWorker(
         fun validShape(q: ConstructedQuestion): Boolean = q.stem.length >= 15 && q.referenceAnswer.isNotBlank() &&
             q.rubric.size in 3..5 && q.rubric.map { it.id }.distinct().size == q.rubric.size &&
             q.rubric.all { it.id.isNotBlank() && it.text.isNotBlank() && it.points.isFinite() && it.points > 0 } &&
-            kotlin.math.abs(q.rubric.sumOf { it.points }-10.0) < 0.00001
+            kotlin.math.abs(q.rubric.sumOf { it.points }-10.0) < 0.00001 &&
+            (q.numericFinal==null || (q.rubric.count { it.id==q.numericFinal.str("rubricItemId") }==1 &&
+                com.coach.domain.grade.NumericValue.parse(q.numericFinal.str("expected"))!=null &&
+                listOf("relTolerance","absTolerance").all { field -> q.numericFinal[field]?.jsonPrimitive?.doubleOrNull?.let { it.isFinite() && it>=0 } ?: (field !in q.numericFinal) }))
         fun valid(q: ConstructedQuestion): Boolean = validShape(q) &&
             q.rubric.all { QuestionGate.sourceQuoteVerbatim(it.basis,input.str("excerpt")) }
         val initial=(response as? BridgeResult.Success)?.let { runCatching { TaskParsing.constructed(it.text) }.getOrNull() }
@@ -183,15 +186,22 @@ suspend fun persistConfirmedGrade(actor: LedgerActor, token: Fence, questionVers
     require(outcome.written && outcome.crossReview?.verdict == "CONFIRM")
     val draft=requireNotNull(outcome.draft)
     return actor.execute {
-        commitJobResult(token,questionVersion,answerHash,course,"attempt_graded",json(
-            "attemptId" to attempt,"status" to "VERIFIED", "method" to "AI",
-            "score" to kotlin.math.round(requireNotNull(outcome.awarded)*100).toLong(),
-            "max" to kotlin.math.round(draft.total*100).toLong(),
-            "rubricFingerprint" to outcome.rubricFingerprint,
-            "evidence" to JsonArray(outcome.evidenceSpans.map { e -> json("rubricItemId" to e.rubricItemId,
-                "start" to e.span.start,"end" to e.span.end,"text" to e.span.text) })))
+        tutorTransaction {
+            if(!completeJob(token,questionVersion,answerHash)) return@tutorTransaction false
+            val payload=json("attemptId" to attempt,"status" to "AI_UNREVIEWED", "method" to "AI",
+                "score" to kotlin.math.round(requireNotNull(outcome.awarded)*100).toLong(),
+                "max" to kotlin.math.round(draft.total*100).toLong(),
+                "rubricFingerprint" to outcome.rubricFingerprint,
+                "evidence" to JsonArray(outcome.evidenceSpans.map { e -> json("rubricItemId" to e.rubricItemId,
+                    "start" to e.span.start,"end" to e.span.end,"text" to e.span.text) }))
+            append(course,"attempt_graded",payload,"job:${token.id}:draft")
+            append(course,"grade_reviewed",json("attemptId" to attempt,"decision" to "CONFIRM",
+                "graderModel" to outcome.calls.first().servedBy,"reviewerModel" to outcome.calls.last().servedBy),"job:${token.id}:review")
+            true
+        }
     }
 }
 
 internal fun storedConstructed(q: ConstructedQuestion): JsonObject = json("stem" to q.stem,
-    "reference_answer" to q.referenceAnswer,"rubric" to JsonText.json.parseToJsonElement(Prompts.rubricJson(q.rubric)))
+    "reference_answer" to q.referenceAnswer,"rubric" to JsonText.json.parseToJsonElement(Prompts.rubricJson(q.rubric)),
+    "numeric_final" to q.numericFinal)

@@ -5,6 +5,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -59,6 +62,10 @@ fun ComposerField(
     placeholder: String = "",
     enabled: Boolean = true,
     maxLines: Int = 6,
+    /** Send is disabled (offline, a reply is still streaming) while the field stays editable. */
+    canSend: Boolean = true,
+    /** Soft keyboard shows a send key (IME action) instead of a newline key. */
+    softSend: Boolean = false,
     enterSends: Boolean = LocalEnterSends.current,
     gate: EnterGate = remember { EnterGate() },
 ) {
@@ -66,7 +73,7 @@ fun ComposerField(
     val currentValue by rememberUpdatedState(value)
     fun send(): Boolean {
         val text = currentValue.text.trim()
-        if (text.isEmpty() || !onSend(text)) return false
+        if (!canSend || text.isEmpty() || !onSend(text)) return false
         onValueChange(TextFieldValue())
         return true
     }
@@ -80,6 +87,8 @@ fun ComposerField(
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fgPrimary),
                 cursorBrush = SolidColor(colors.actionPrimary),
                 maxLines = maxLines,
+                keyboardOptions = if (softSend) KeyboardOptions(imeAction = ImeAction.Send) else KeyboardOptions.Default,
+                keyboardActions = KeyboardActions(onSend = { if (gate.shouldSend(true, true, false, currentValue.composition != null)) send() }),
                 modifier = Modifier.fillMaxWidth().testTag("composer").onPreviewKeyEvent { event ->
                     if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
                     val sends = gate.shouldSend(enterSends, event.type == KeyEventType.KeyDown, event.isShiftPressed, currentValue.composition != null)
@@ -87,6 +96,6 @@ fun ComposerField(
                 },
             )
         }
-        TextButton(onClick = { send() }, enabled = enabled && value.text.isNotBlank(), modifier = Modifier.heightIn(min = 48.dp).testTag("send")) { Text("发送") }
+        TextButton(onClick = { send() }, enabled = enabled && canSend && value.text.isNotBlank(), modifier = Modifier.heightIn(min = 48.dp).testTag("send")) { Text("发送") }
     }
 }

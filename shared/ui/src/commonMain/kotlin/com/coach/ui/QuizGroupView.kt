@@ -40,7 +40,7 @@ internal fun QuizGroupView(group: QuizGroup, kp: KpRow, c: CoachController, view
         } else if (group.cards.all { it.grade != null }) {
             val right = group.cards.count { it.grade?.correct == true }
             Text(
-                "本组 $right / ${group.cards.size} 题正确 · 「${kp.title}」现在：${view.kp(kp.id)?.status?.label ?: kp.status.label}",
+                "本组 $right / ${group.cards.size} 题正确 · 「${splitTitle(kp.title).second}」现在：${view.kp(kp.id)?.status?.label ?: kp.status.label}",
                 style = MaterialTheme.typography.titleSmall,
             )
         } else {

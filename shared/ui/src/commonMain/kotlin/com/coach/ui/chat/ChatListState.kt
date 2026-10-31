@@ -30,6 +30,20 @@ class ChatAnchor(pinned: Boolean = true, key: Any? = null, fraction: Float = 0f)
 class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatAnchor = ChatAnchor()) {
     /** True until the first restore has run, so the initial (0,0) position never overwrites a stored anchor. */
     internal var restoring = true
+
+    /** The reader sent something or asked for "回到最新": follow the tail again. */
+    suspend fun scrollToTail() { anchor.pinned = true; list.scrollToItem(0, 0) }
+
+    /**
+     * Bring the top of the item with [key] to the top of the viewport (a new question group is read from question 1).
+     * Taller than the viewport: scroll past its bottom edge; shorter: it simply sits at the tail.
+     */
+    suspend fun scrollItemTopIntoView(key: Any) {
+        val info = list.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.key == key } ?: return
+        val viewport = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding
+        if (item.size > viewport) list.scrollToItem(item.index, item.size - viewport)
+    }
 }
 
 /**

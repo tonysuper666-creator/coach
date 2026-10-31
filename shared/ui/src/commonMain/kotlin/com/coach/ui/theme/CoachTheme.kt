@@ -15,12 +15,12 @@ object CoachTheme {
 /** Minimum touch target for answer options (DESIGN: 选择题选项点按区 ≥56dp). */
 val OptionMinHeight = 56.dp
 
-private fun CoachColors.toMaterial(): ColorScheme {
+internal fun CoachColors.toMaterial(): ColorScheme {
     val base = if (dark) darkColorScheme() else lightColorScheme()
     return base.copy(
         primary = actionPrimary, onPrimary = onAccent, primaryContainer = accentSoft, onPrimaryContainer = fgPrimary,
         secondary = accentDeep, onSecondary = onAccent, secondaryContainer = surface2, onSecondaryContainer = fgPrimary,
-        tertiary = infoFg, onTertiary = infoBg, tertiaryContainer = infoBg, onTertiaryContainer = infoFg,
+        tertiary = warningFg, onTertiary = warningBg, tertiaryContainer = warningBg, onTertiaryContainer = warningFg,
         background = bgCanvas, onBackground = fgPrimary,
         surface = surface1, onSurface = fgPrimary, surfaceVariant = surface2, onSurfaceVariant = fgSecondary,
         surfaceTint = Color.Transparent, surfaceContainerLowest = bgCanvas, surfaceContainerLow = bgCanvas, surfaceContainer = surface1,

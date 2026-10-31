@@ -58,11 +58,19 @@ fun TodayScreen(
     }
 }
 
-/** 知识点名常带「【W1·Ch1–2】」这样的课次标签：标签放小字，正文放主行。 */
+private val topicSeparator = Regex("\\s*｜\\s*")
+
+/**
+ * 知识点名常把几个并列要点用「｜」串起来，各带一个「【W1·Ch1–2】」课次标签。列表和学习页只显示第一个要点（标签放小字，正文放主行），
+ * 其余要点数用 [extraTopics] 提示，不再把整串挤进标题。
+ */
 internal fun splitTitle(title: String): Pair<String, String> {
-    val match = Regex("^【([^】]{1,24})】\\s*(.+)$", RegexOption.DOT_MATCHES_ALL).find(title.trim()) ?: return "" to title
+    val first = title.trim().split(topicSeparator).firstOrNull { it.isNotBlank() } ?: return "" to title
+    val match = Regex("^【([^】]{1,24})】\\s*(.+)$", RegexOption.DOT_MATCHES_ALL).find(first) ?: return "" to first
     return match.groupValues[1] to match.groupValues[2]
 }
+
+internal fun extraTopics(title: String): Int = (title.trim().split(topicSeparator).count { it.isNotBlank() } - 1).coerceAtLeast(0)
 
 @Composable
 private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
@@ -74,7 +82,7 @@ private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(if (tag.isBlank()) "继续" else "继续 · $tag", style = MaterialTheme.typography.labelLarge)
-            Text(main, style = MaterialTheme.typography.titleMedium, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(main, style = MaterialTheme.typography.titleMedium)
         }
     }
 }
@@ -91,7 +99,7 @@ private fun ReviewCard(due: Int, onClick: () -> Unit) {
                 Text("到期复习", style = MaterialTheme.typography.titleMedium)
                 Text(if (due == 0) "今天没有到期的复习" else "$due 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.primary)
+            if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.secondary)
         }
     }
 }
@@ -108,7 +116,8 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
             val (tag, main) = splitTitle(kp.title)
             Column(Modifier.weight(1f)) {
                 if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                Text(main, style = MaterialTheme.typography.bodyLarge)
+                extraTopics(kp.title).takeIf { it > 0 }?.let { Text("同组另有 $it 个要点", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             StatusChip(kp.status.label, statusColor(kp.status))
         }
@@ -116,10 +125,12 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun statusColor(status: KpStatus): Color = when (status) {
-    KpStatus.NEW -> MaterialTheme.colorScheme.outline
-    KpStatus.IN_PROGRESS -> MaterialTheme.colorScheme.primary
-    KpStatus.PASSED -> successColor()
-    KpStatus.SOLID -> successColor()
-    KpStatus.NEEDS_REPAIR -> MaterialTheme.colorScheme.error
+internal fun statusColor(status: KpStatus): Color = kpStatusColor(status, MaterialTheme.colorScheme, successColor())
+
+/** 状态标签的字色。「未开始」用 onSurfaceVariant 而不是 outline：outline 在深色下压在同色底上读不清。 */
+internal fun kpStatusColor(status: KpStatus, scheme: ColorScheme, success: Color): Color = when (status) {
+    KpStatus.NEW -> scheme.onSurfaceVariant
+    KpStatus.IN_PROGRESS -> scheme.secondary
+    KpStatus.PASSED, KpStatus.SOLID -> success
+    KpStatus.NEEDS_REPAIR -> scheme.error
 }

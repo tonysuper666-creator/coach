@@ -28,13 +28,10 @@ fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model:
     val kind = block.ast.children.firstOrNull { source.substring(it.startOffset, it.endOffset).isNotBlank() }?.type.toString()
     val horizontal = kind.contains("CODE") || kind.contains("TABLE")
     val scroll = if (horizontal) Modifier.horizontalScroll(rememberScrollState()) else Modifier
-    if (!block.sealed) {
-        // Delimiter repair and SVG layout happen only when the block seals.
-        Text(source, modifier.then(scroll), style = MaterialTheme.typography.bodyLarge)
-    } else if (kind.contains("CODE")) {
+    if (kind.contains("CODE")) {
         Text(source.removePrefix("```\n").removeSuffix("```"), modifier.then(scroll).padding(8.dp), fontFamily = FontFamily.Monospace)
     } else {
-        RichMarkdown(source, assets, model, modifier.then(scroll), onFailure)
+        RichMarkdown(block, assets, model, live = !block.sealed, modifier.then(scroll), onFailure)
     }
 }
 
@@ -55,10 +52,61 @@ fun ScrollableMath(document: MathSvgDocument, tex: String, emPx: Float, color: C
     }
 }
 
+/** Block-level structure: headings, bullet/numbered lists (nested), quotes and paragraphs; each paragraph text then goes through math + inline styles. */
 @Composable
-private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: Boolean, modifier: Modifier, onFailure: (String) -> Unit) {
-    val tokens = remember(source, model) { MathDelimiters.tokenize(source, model).segments }
-    // Display formulas get their own scrollable row; text and inline formulas between them flow and wrap as one paragraph.
+private fun RichMarkdown(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, modifier: Modifier, onFailure: (String) -> Unit) {
+    val nodes = block.ast.children.filter { block.source.substring(it.startOffset, it.endOffset).isNotBlank() }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        BlockNodes(block.source, nodes, assets, model, live, onFailure)
+    }
+}
+
+@Composable
+private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, onFailure: (String) -> Unit) {
+    val body = MaterialTheme.typography.bodyLarge
+    nodes.forEach { node ->
+        val type = node.type.name
+        when {
+            type.startsWith("ATX_") || type.startsWith("SETEXT_") -> {
+                val level = type.last().digitToIntOrNull() ?: 2
+                val content = node.children.firstOrNull { it.type.name.endsWith("_CONTENT") }
+                val text = content?.let { source.substring(it.startOffset, it.endOffset).trim() } ?: source.substring(node.startOffset, node.endOffset).trim('#', ' ')
+                val size = when (level) { 1 -> 22.sp; 2 -> 20.sp; 3 -> 18.sp; else -> 17.sp }
+                MathText(text, assets, model, live, body.copy(fontSize = size, lineHeight = size * 1.4f, fontWeight = FontWeight.Bold), onFailure, Modifier.padding(top = 6.dp))
+            }
+            type == "UNORDERED_LIST" || type == "ORDERED_LIST" -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                var number = 0
+                node.children.filter { it.type.name == "LIST_ITEM" }.forEach { item ->
+                    val marker = item.children.firstOrNull { it.type.name == "LIST_NUMBER" || it.type.name == "LIST_BULLET" }
+                    number++
+                    val label = if (type == "ORDERED_LIST") (marker?.let { source.substring(it.startOffset, it.endOffset).trim() } ?: "$number.") else "•"
+                    val inner = item.children.filter { it.type.name != "LIST_NUMBER" && it.type.name != "LIST_BULLET" && source.substring(it.startOffset, it.endOffset).isNotBlank() }
+                    Row(Modifier.fillMaxWidth()) {
+                        Text(label, Modifier.widthIn(min = 22.dp), style = body, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { BlockNodes(source, inner, assets, model, live, onFailure) }
+                    }
+                }
+            }
+            type == "BLOCK_QUOTE" -> Row(Modifier.fillMaxWidth().height(androidx.compose.foundation.layout.IntrinsicSize.Min)) {
+                Box(Modifier.width(3.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
+                Column(Modifier.padding(start = 10.dp).weight(1f)) {
+                    BlockNodes(source, node.children.filter { it.children.isNotEmpty() && source.substring(it.startOffset, it.endOffset).isNotBlank() }, assets, model, live, onFailure)
+                }
+            }
+            else -> MathText(source.substring(node.startOffset, node.endOffset), assets, model, live, body, onFailure)
+        }
+    }
+}
+
+/** One paragraph of text: display formulas on their own scrollable row, text and inline formulas flowing as one wrapped paragraph. */
+@Composable
+private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, style: TextStyle, onFailure: (String) -> Unit, modifier: Modifier = Modifier) {
+    if (live) {
+        // Still streaming: structure and emphasis are shown, formulas stay as written until the block seals (no half-typed LaTeX flicker).
+        Text(remember(text) { buildAnnotatedString { appendStyledMarkdown(text) } }, modifier.fillMaxWidth(), style = style)
+        return
+    }
+    val tokens = remember(text, model) { layoutMathSegments(MathDelimiters.tokenize(text, model).segments) }
     val runs = remember(tokens) {
         val out = mutableListOf<List<IndexedValue<MathSegment>>>(); var open = mutableListOf<IndexedValue<MathSegment>>()
         tokens.withIndex().forEach { t ->
@@ -67,26 +115,24 @@ private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: 
         if (open.isNotEmpty()) out += open
         out
     }
-    val style = MaterialTheme.typography.bodyLarge
     val density = androidx.compose.ui.platform.LocalDensity.current
     val em = with(density) { style.fontSize.toPx() }
     val foreground = LocalContentColor.current
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         runs.forEach { run ->
             val first = run.first().value
             val asset = if (first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
             val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
             if (document != null) ScrollableMath(document, first.math!!, em, foreground)
-            else InlineRun(run, assets, onFailure)
+            else InlineRun(run, assets, style, onFailure)
         }
     }
 }
 
 @Composable
-private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit) {
+private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, style: TextStyle, onFailure: (String) -> Unit) {
     val source = run.joinToString("") { it.index.toString() }
     val measurer = rememberTextMeasurer()
-    val style = MaterialTheme.typography.bodyLarge
     val density = androidx.compose.ui.platform.LocalDensity.current
     val foreground = LocalContentColor.current
     // Fixed line height keeps the line box constant, but the baseline inside it depends on whether the line holds CJK

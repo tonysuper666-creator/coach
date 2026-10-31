@@ -66,6 +66,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var reviewOpen by remember { mutableStateOf(false) }
     val openKp: (String, Boolean) -> Unit = { id, start -> reviewOpen = false; open = id to start }
     val openReview: () -> Unit = { reviewOpen = true; open = null }
+    // The three panes are movable: when the window changes shape (Fold8 fold/unfold, Pad rotation, Mac resize) a pane that moves between the
+    // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
+    val todayPane = remember(c) { movableContentOf<TodayArgs> { a -> TodayScreen(c, a.view, a.ui, a.selectedKpId, a.onOpenReview, a.onOpen) } }
+    val studyPane = remember(c) { movableContentOf<StudyArgs> { a -> key(a.kp.id) { StudyScreen(c, a.kp, a.view, a.ui, a.autoStart, a.onBack) } } }
+    val reviewPane = remember(c) { movableContentOf<ReviewArgs> { a -> ReviewScreen(c, a.view, a.onOpenKp, a.onBack) } }
     CoachTheme(dark ?: isSystemInDarkTheme()) {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
@@ -78,29 +83,33 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         // 宽屏：左边今天/知识点，右边学习线程；点「继续」直接在右栏开讲。
                         Row(Modifier.fillMaxSize()) {
                             Box(Modifier.width((totalWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) {
-                                TodayScreen(c, current, ui, selectedKpId = target?.id, onOpenReview = openReview, onOpen = openKp)
+                                todayPane(TodayArgs(current, ui, target?.id, openReview, openKp))
                             }
                             VerticalDivider()
                             Box(Modifier.weight(1f).fillMaxHeight()) {
                                 if (reviewOpen && current != null) {
-                                    ReviewScreen(c, current, onOpenKp = openKp, onBack = null)
+                                    reviewPane(ReviewArgs(current, openKp, null))
                                 } else if (target != null && current != null) {
-                                    key(target.id) { StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = null) }
+                                    studyPane(StudyArgs(target, current, ui, open?.second == true, null))
                                 } else CenterMessage("选一个知识点，或点「继续」。")
                             }
                         }
                     } else if (reviewOpen && current != null) {
-                        ReviewScreen(c, current, onOpenKp = openKp, onBack = { reviewOpen = false })
+                        reviewPane(ReviewArgs(current, openKp) { reviewOpen = false })
                     } else if (target != null && current != null) {
-                        StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = { open = null })
+                        studyPane(StudyArgs(target, current, ui, open?.second == true) { open = null })
                     } else {
-                        TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp)
+                        todayPane(TodayArgs(current, ui, null, openReview, openKp))
                     }
                 }
             }
         }
     }
 }
+
+private class TodayArgs(val view: CourseView?, val ui: TutorUiState, val selectedKpId: String?, val onOpenReview: () -> Unit, val onOpen: (String, Boolean) -> Unit)
+private class StudyArgs(val kp: com.coach.client.KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?)
+private class ReviewArgs(val view: CourseView, val onOpenKp: (String, Boolean) -> Unit, val onBack: (() -> Unit)?)
 
 @Composable
 private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
@@ -116,9 +125,12 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     }
 }
 
+/** 标签底色 = 字色的这么多分之几：太深会把字色压成低对比（浅色「未开始」曾是 4.4:1），由 StudyChromeTest 守住 ≥4.5。 */
+internal const val CHIP_TINT = .12f
+
 @Composable
 internal fun StatusChip(text: String, color: Color) {
-    Surface(color = color.copy(alpha = .16f), shape = MaterialTheme.shapes.small) {
+    Surface(color = color.copy(alpha = CHIP_TINT), shape = MaterialTheme.shapes.small) {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = color, style = MaterialTheme.typography.labelMedium)
     }
 }

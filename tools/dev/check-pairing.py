@@ -82,6 +82,27 @@ with tempfile.TemporaryDirectory(prefix="coach-pairing-") as tmp:
                 return result.stdout.strip() == "1"
 
             wait_until(booted, 180)
+
+            # sys.boot_completed arrives about three seconds before the emulated network does: right after it the guest has no route to the host
+            # ("Network is unreachable"), and a moment later the default network moves from eth0 to wlan0 (new source address).
+            # Wait until the guest can really reach the isolated server on the allowlisted interface, over one unchanged route for six
+            # seconds, before any assertion runs. The assertions themselves are unchanged.
+            tail_host = env["COACH_TAIL_HOST"]
+            stable = {"route": None, "since": 0.0}
+
+            def guest_reaches_server():
+                probe = subprocess.run([str(ADB), "-s", SERIAL, "shell", f"ip route get {tail_host}; nc -z -w 2 {tail_host} {port} && echo NC_OK"],
+                                       capture_output=True, text=True, timeout=15).stdout
+                match = re.search(r"dev (\S+).* src (\S+)", probe)
+                route = match.groups() if match and "NC_OK" in probe else None
+                if route != stable["route"]:
+                    stable["route"], stable["since"] = route, time.monotonic()
+                return route is not None and time.monotonic() - stable["since"] >= 6
+
+            try:
+                wait_until(guest_reaches_server, 90)
+            except TimeoutError:
+                raise RuntimeError("Emulator guest never got a stable route to the isolated server; see emulator.log") from None
             for apk in ["androidApp/build/outputs/apk/debug/androidApp-debug.apk",
                         "androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk"]:
                 run([ADB, "-s", SERIAL, "install", "-r", ROOT / apk])

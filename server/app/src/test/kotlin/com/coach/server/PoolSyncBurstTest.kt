@@ -15,6 +15,37 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 class PoolSyncBurstTest {
+    @Test fun pushAfterRestoreReplacesTheEpochEvenWithoutPendingAnswers() = runBlocking {
+        val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
+        val driver=JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val epoch=java.util.concurrent.atomic.AtomicReference("before-restore")
+        val ready=CompletableDeferred<suspend () -> Unit>()
+        val snapshots=java.util.Collections.synchronizedList(mutableListOf<String>())
+        val transport=object: LedgerTransport {
+            override suspend fun hello(previous: String?)=Hello(epoch.get(),0,0,0)
+            override suspend fun snapshot(course: String): Snapshot {
+                val current=hello(null);snapshots.add(current.epoch)
+                return Snapshot(current,course,emptyList(),Projection())
+            }
+            override suspend fun events(course: String,after: Long)=EventsPage(epoch.get(),emptyList(),0)
+            override suspend fun command(command: WireCommand): Receipt=error("No pending learner answer")
+            override suspend fun watch(onLedger: suspend () -> Unit) { ready.complete(onLedger);awaitCancellation() }
+        }
+        val client=SyncEngine(ClientDatabase(driver),"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256)
+        var loop: Job?=null
+        try {
+            client.syncOnce();loop=client.start(scope)
+            val notify=withTimeout(2_000) { ready.await() }
+            withTimeout(2_000) { while(client.revision.value<2) delay(10) }
+            epoch.set("after-restore");notify()
+            // Complete from the push, before the two-second recovery poll can mask a bug.
+            withTimeout(1_000) { while(client.epoch!="after-restore") delay(10) }
+            assertEquals("after-restore",snapshots.last())
+            assertTrue(client.localEvents("course").isEmpty())
+        } finally { loop?.cancelAndJoin();scope.cancel();driver.close() }
+    }
+
     @Test fun quizHintsDoNotBlockTheSocketAndFactsArrivingDuringCatchupAreNotLost() = runBlocking {
         val dir=Files.createTempDirectory("pool-sync-burst")
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)

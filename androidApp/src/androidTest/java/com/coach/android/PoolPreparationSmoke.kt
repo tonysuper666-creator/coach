@@ -36,14 +36,19 @@ class PoolPreparationSmoke {
                 instrumentation.waitForIdleSync()
                 val mark=SystemClock.elapsedRealtimeNanos()
                 click(button)
+                val clicked=SystemClock.elapsedRealtimeNanos()
                 // Long options place the submit footer below the viewport. Measure the first
                 // displayed card; its 1/3 header also confirms a complete three-card group.
                 waitForText(instrumentation.uiAutomation,"第 1 / 3 题",15_000)
+                val detected=SystemClock.elapsedRealtimeNanos()
                 instrumentation.waitForIdleSync()
                 // Include compositor settling; accessibility appearance alone is not a displayed frame.
                 Thread.sleep(100)
                 val millis=(SystemClock.elapsedRealtimeNanos()-mark)/1_000_000.0
-                samples.put(JSONObject().put("kp",kp).put("tapToRenderedCardsMs",millis).put("cards",3))
+                samples.put(JSONObject().put("kp",kp).put("tapToRenderedCardsMs",millis).put("cards",3)
+                    .put("clickActionMs",(clicked-mark)/1_000_000.0)
+                    .put("visibleDetectionMs",(detected-mark)/1_000_000.0)
+                    .put("idleAndPresentationMs",millis-(detected-mark)/1_000_000.0))
                 report.writeText(samples.toString(2))
                 android.util.Log.i("CoachPool","kp=$kp tapToRenderedCardsMs=$millis cards=3")
                 if(samples.length()==1) {

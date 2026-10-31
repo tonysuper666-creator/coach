@@ -147,26 +147,48 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             db.transaction { q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id);q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt)) }
             q.prune(receipt.backedUpThroughSeq)
         }
+        pullCourses(hello.epoch)
+        _connection.value = "online"
+        _revision.value += 1
+    }
+
+    /** Event pages carry their epoch. A push with no outbox work needs one read, not
+     * hello + events. Full polling still refreshes backup watermarks and uploads commands. */
+    private suspend fun syncHint() {
+        val caughtUp=mutex.withLock {
+            val epoch=meta("epoch") ?: return@withLock false
+            if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
+            try { pullCourses(epoch) }
+            catch(e: EpochChanged) { return@withLock false }
+            _connection.value="online"
+            _revision.value+=1
+            true
+        }
+        if(!caughtUp) syncOnce()
+    }
+
+    private class EpochChanged: IllegalStateException("Epoch changed during catch-up")
+
+    /** Caller holds mutex, for both full synchronization and push catch-up. */
+    private suspend fun pullCourses(epoch: String) {
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
                 val page = transport.events(course,cursor)
-                check(page.epoch == hello.epoch) { "Epoch changed during catch-up" }
+                if(page.epoch != epoch) throw EpochChanged()
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
                 cursor = page.throughSeq
             } while(page.hasMore)
             if(projection(course).requiresServerSnapshot) {
                 val snapshot=transport.snapshot(course)
-                check(snapshot.hello.epoch==hello.epoch)
+                if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
                     q.putMeta("serverProjection:$course",LedgerJson.encodeToString(snapshot.projection))
                     val seq=q.replicaSeq(course).executeAsOne()
-                    cache.put(course,hello.epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
+                    cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
             }
         }
-        _connection.value = "online"
-        _revision.value += 1
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         // One quiz publishes several durable/state/card hints. Do not make the WS reader
@@ -175,7 +197,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         val hints=Channel<Unit>(Channel.CONFLATED)
         val pushed=launch {
             for(hint in hints) {
-                try { syncOnce() }
+                try { syncHint() }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
             }

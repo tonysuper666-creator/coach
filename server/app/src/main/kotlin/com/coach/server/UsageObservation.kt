@@ -16,6 +16,14 @@ import java.time.format.DateTimeFormatter
 internal val observedDevice = AttributeKey<String>("observed-device")
 private val requestStart = AttributeKey<Long>("usage-request-start")
 private val responseReady = AttributeKey<Long>("usage-response-ready")
+private val usageLabels = mapOf(
+    "open" to "打开应用", "screen" to "切屏", "tap" to "点按", "error" to "错误", "disconnect" to "断线",
+    "reconnect" to "连接恢复", "first_word" to "首字", "app" to "应用", "today" to "今天页", "study" to "学习页",
+    "review" to "复习页", "compact" to "窄屏", "wide" to "宽屏", "connection" to "连接", "open_kp" to "打开知识点",
+    "next" to "讲解或下一步", "test" to "出题", "ask" to "追问", "answer" to "提交答案", "cancel" to "停止回答",
+    "settings" to "学习设置", "explain" to "换个方式讲解", "quick_ask" to "随手问", "select_option" to "选择选项",
+    "scope" to "学习范围", "offline_pack" to "离线练习包", "journal" to "学习日志", "network" to "网络", "server" to "服务端", "unknown" to "其他操作")
+private fun JsonObject.usageLabel(key: String): String = getValue(key).jsonPrimitive.content.let { usageLabels[it] ?: "其他操作" }
 
 /** One owner for both listeners. Metadata only, separate from learning facts and backups. */
 class UsageObservation(private val logs: Path, private val state: Path) : AutoCloseable {
@@ -81,9 +89,9 @@ class UsageObservation(private val logs: Path, private val state: Path) : AutoCl
                 append("## 设备 $device\n\nHTTP 错误 $errors 次；超过 5 秒请求 $slow 次；断线 ${events.count { it.getValue("kind").jsonPrimitive.content == "disconnect" }} 次；客户端错误 ${events.count { it.getValue("kind").jsonPrimitive.content == "error" }} 次。\n")
                 append(if (words.isEmpty()) "首字：无客户端样本。\n" else "首字 p95：${words[(kotlin.math.ceil(words.size*.95).toInt()-1).coerceAtLeast(0)]} ms（${words.size} 次）。\n")
                 val last = events.lastOrNull()
-                if (last != null) append("最后操作：${last.getValue("kind").jsonPrimitive.content} / ${last.getValue("target").jsonPrimitive.content}。\n")
+                if (last != null) append("最后操作：${last.usageLabel("kind")} / ${last.usageLabel("target")}。\n")
                 append("\n操作路径（设备时间）：\n\n")
-                events.forEach { e -> append("- ${Instant.ofEpochMilli(e.getValue("at").jsonPrimitive.long)} ${e.getValue("kind").jsonPrimitive.content} / ${e.getValue("target").jsonPrimitive.content}${e.getValue("ms").jsonPrimitive.long.takeIf { it>=0 }?.let { " (${it}ms)" }.orEmpty()}\n") }
+                events.forEach { e -> append("- ${Instant.ofEpochMilli(e.getValue("at").jsonPrimitive.long)} ${e.usageLabel("kind")} / ${e.usageLabel("target")}${e.getValue("ms").jsonPrimitive.long.takeIf { it>=0 }?.let { " (${it}ms)" }.orEmpty()}\n") }
                 http.filter { it.getValue("status").jsonPrimitive.int >= 400 }.forEach { r -> append("- ${r.getValue("at").jsonPrimitive.content} HTTP ${r.getValue("status")} ${r.getValue("route").jsonPrimitive.content}\n") }
                 append("\n")
             }

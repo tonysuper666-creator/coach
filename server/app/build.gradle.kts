@@ -28,7 +28,7 @@ tasks.test {
 // Opt-in: real CLI calls and local course material, never part of test/check.
 tasks.register<Test>("liveTest") {
     environment("COACH_TRAFFIC", "test")
-    description = "Real 8791 bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
+    description = "Real isolated bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
     group = "verification"
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath

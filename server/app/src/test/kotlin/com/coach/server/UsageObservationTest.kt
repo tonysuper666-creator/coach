@@ -69,22 +69,22 @@ class UsageObservationTest {
             assertTrue(db.ledgerQueries.usageBatch().executeAsList().isEmpty())
             val report=Files.readString(observer.summarize())
             assertTrue(report.contains("客户端事件 3 条"), report)
-            assertTrue(report.contains("tap / test"))
+            assertTrue(report.contains("点按 / 出题"))
             assertFalse(report.contains("PRIVATE ANSWER"))
         } finally { driver?.close();observer.close();root.toFile().deleteRecursively() }
     }
 
-    @Test fun authenticatedBoundedIngestionAccessTemplatesAndErrorSummary() = runBlocking {
+    @Test fun authenticatedBoundedIngestionAccessTemplatesAndErrorSummary() = runBlocking(Dispatchers.IO) {
         val root=Files.createTempDirectory("coach-usage-http-")
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default)
-        val token="private-token-do-not-log"
+        val token="private-token-do-not-log-32-characters-minimum"
         val actor=LedgerActor(scope,LedgerStore(root.resolve("data")).also { it.enroll("phone",token) })
         val observer=UsageObservation(root.resolve("logs"),root.resolve("state"))
         val engine=embeddedServer(Netty,host="127.0.0.1",port=0) { ledgerRoutes(actor,MutableSharedFlow(extraBufferCapacity=8),observation=observer) }.apply { start(false) }
         val base="http://127.0.0.1:${engine.engine.resolvedConnectors().single().port}"
         val http=HttpClient.newHttpClient()
         fun send(path: String, body: String?, auth: Boolean=true, chunked: Boolean=false): Int {
-            val b=HttpRequest.newBuilder(URI(base+path))
+            val b=HttpRequest.newBuilder(URI(base+path)).timeout(java.time.Duration.ofSeconds(10))
             if(auth) b.header("X-Coach-Device","phone").header("Authorization","Bearer $token")
             if(body!=null) b.POST(if (chunked) HttpRequest.BodyPublishers.ofInputStream { body.byteInputStream() } else HttpRequest.BodyPublishers.ofString(body))
             return http.send(b.build(),HttpResponse.BodyHandlers.ofString()).statusCode()

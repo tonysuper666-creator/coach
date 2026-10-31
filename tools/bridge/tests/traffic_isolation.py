@@ -5,9 +5,7 @@ Only stub CLIs and an OS-assigned private port; no production bridge or database
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-import statistics
 import tempfile
-import time
 from fault_injection import Bridge
 
 
@@ -22,7 +20,7 @@ def main():
         bridge = Bridge(stub, root / "bridge", {"BRIDGE_USER_ONLY": "1"})
         try:
             body = {"model":"claude-sonnet-5-5", "messages":[{"role":"user", "content":"synthetic"}], "stream":False}
-            # fault harness req always marks test traffic; user requests explicitly override it.
+            # The harness marks test traffic; learner-shaped requests explicitly override it.
             def test(_):
                 status, _, result = bridge.http("POST", "/v1/chat/completions", body)
                 result = json.loads(result)

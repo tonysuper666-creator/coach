@@ -131,8 +131,8 @@ sealed interface BridgeResult {
  */
 class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     private fun requireIsolatedTestBridge() {
-        require(!config.testTraffic || URI(config.baseUrl).port != 8791) {
-            "Test traffic requires an isolated bridge port (COACH_BRIDGE_URL); 8791 is reserved for the learner"
+        require(!config.testTraffic || URI(config.baseUrl).port !in setOf(8790,8791)) {
+            "Test traffic requires an isolated bridge port (COACH_BRIDGE_URL); 8790/8791 are reserved for the learner"
         }
     }
 

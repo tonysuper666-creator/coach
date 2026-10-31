@@ -129,6 +129,8 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 测试客户端 `BridgeConfig(testTraffic=true)` 也在发起模型请求前拒绝 8791。
 这不提供抢占已在执行的用户请求的保证；用户自身并发仍受后端槽位限制。
 
+旧 live 探针也禁止 8790/8791：`live_run.py` 默认分配端口及新目录；`live_probe.py` 必须显式指定测试端口。
+
 测试须同时设置自己的 `BRIDGE_PORT`、`COACH_BRIDGE_HOME`、`COACH_BRIDGE_URL`，
 服务端设置自己的 `COACH_DATA_DIR`（生产库 `VACUUM INTO` 的副本），避免仅改流量标签。
 在独立端口加 `BRIDGE_USER_ONLY=1` 可预演生产隔离策略；`/health` 的 `user_only` 显示生效状态。

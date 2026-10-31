@@ -1028,6 +1028,30 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("INSERT INTO source_pages(doc_id,pdf_page,text,text_sha256) VALUES(?,?,?,?) ON CONFLICT(doc_id,pdf_page) DO UPDATE SET text=excluded.text,text_sha256=excluded.text_sha256",doc,page,text,sha256(text.toByteArray()))
     }
 
+    /**
+     * Read-only course text for the learner's Resources screen. Only documents the tutor may also see are listed: answer keys and
+     * sealed material stay out of every learner-facing surface, so browsing cannot leak a first-answer key.
+     */
+    fun browsableSources(course: String): JsonArray = JsonArray(query(
+        """SELECT d.doc_id,d.title,d.kind,min(p.pdf_page),max(p.pdf_page),min(p.book_page),max(p.book_page) FROM source_docs d
+           JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.tutor_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
+        if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
+        else json("docId" to it.getString(1),"title" to it.getString(2),"kind" to it.getString(3),"firstPdfPage" to it.getInt(4),"lastPdfPage" to it.getInt(5),
+            "firstBookPage" to it.getObject(6)?.let { _ -> it.getInt(6) },"lastBookPage" to it.getObject(7)?.let { _ -> it.getInt(7) })
+    }.filterNotNull())
+
+    fun browsablePage(course: String, doc: String, pdfPage: Int): JsonObject? = query(
+        """SELECT d.doc_id,d.title,d.kind,p.book_page,p.text FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
+           WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.tutor_visible=1""",course,doc,pdfPage) {
+        if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
+        else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
+    }.singleOrNull()
+
+    /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */
+    fun constructedSupply(course: String): Map<String,Int> = query(
+        """SELECT k.kp_id,count(*) FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
+           WHERE q.course_id=? AND q.key_state='VERIFIED' GROUP BY k.kp_id""",course) { it.getString(1) to it.getInt(2) }.toMap()
+
     /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
     fun searchSourcePages(course: String, question: String): List<SourcePage> {
         val terms = Regex("[\\p{IsHan}]{3,}|[A-Za-z0-9]{2,}").findAll(question.take(2000))

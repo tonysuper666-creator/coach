@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = 600.dp
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null) {
     val thread = threadIdFor(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
@@ -72,14 +72,16 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
                     Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
-                    val sub = listOf(tag, kp.reference.takeIf { it.isNotBlank() }?.let { "本次参考：$it" }).filterNotNull().filter { it.isNotBlank() }.joinToString(" · ")
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(0.dp)) {
-                            Text(if (showScope) "收起学习范围" else sub.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾",
-                                Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Start,
-                                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                    // 范围、本次参考（点开就是教材原文那一页）、状态放在同一组里，放不下就换行，不压标题。
+                    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
+                        TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
+                            Text(if (showScope) "收起学习范围" else tag.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · 共 ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾", style = MaterialTheme.typography.labelMedium)
                         }
-                        StatusChip(kp.status.label, MaterialTheme.colorScheme.primary)
+                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
+                            Text("本次参考：${kp.reference.ifBlank { "教材" }} ›", style = MaterialTheme.typography.labelMedium)
+                        } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
+                        Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)

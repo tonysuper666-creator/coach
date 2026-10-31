@@ -66,7 +66,7 @@ class CoachActivity : ComponentActivity() {
                     if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                     else {
                         val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"))
+                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY))
                     }
                 }
             }
@@ -115,6 +115,7 @@ class CoachActivity : ComponentActivity() {
             courseId = BuildConfig.COACH_COURSE, sync = sync, tutor = client,
             formatClock = { clock.format(Date(it)) },
             math = com.coach.ui.MathAssets(mathHttp),
+            course = com.coach.client.CourseHttp(serverUrl, credentials.deviceId, credentials.token, BuildConfig.COACH_COURSE),
         )
         return controller
     }

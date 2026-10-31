@@ -38,6 +38,9 @@ class EnterGate(private val commitGraceMs: Long = 60L, private val now: () -> Lo
         if (composingBefore || composingAfter) lastComposingMs = now()
     }
 
+    /** True while a composition that just ended may still be confirmed by an Enter that arrives after the commit. */
+    fun withinGrace(): Boolean = now() - lastComposingMs <= commitGraceMs
+
     fun shouldSend(enterSends: Boolean, keyDown: Boolean, shift: Boolean, composingNow: Boolean): Boolean {
         if (composingNow) { lastComposingMs = now(); return false }
         if (!enterSends || !keyDown || shift) return false
@@ -91,8 +94,15 @@ fun ComposerField(
                 keyboardActions = KeyboardActions(onSend = { if (gate.shouldSend(true, true, false, currentValue.composition != null)) send() }),
                 modifier = Modifier.fillMaxWidth().testTag("composer").onPreviewKeyEvent { event ->
                     if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
-                    val sends = gate.shouldSend(enterSends, event.type == KeyEventType.KeyDown, event.isShiftPressed, currentValue.composition != null)
-                    if (sends) { send(); true } else false
+                    val down = event.type == KeyEventType.KeyDown
+                    val composing = currentValue.composition != null
+                    val sends = gate.shouldSend(enterSends, down, event.isShiftPressed, composing)
+                    when {
+                        sends -> { send(); true }
+                        // An Enter that confirms a composition only commits it: it neither sends nor inserts a newline into the half-typed text.
+                        enterSends && down && !event.isShiftPressed && (composing || gate.withinGrace()) -> true
+                        else -> false
+                    }
                 },
             )
         }

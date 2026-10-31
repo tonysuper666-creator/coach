@@ -158,6 +158,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** A KP has exactly one course-bound thread; reopening cannot move it to another course or KP. */
     fun bindTutorThread(course: String, thread: String, kp: String) {
         require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
+        val boundThread = query(
+            "SELECT thread_id FROM threads WHERE course_id=? AND kind='KP' AND anchor_type='KP' AND anchor_id=?",
+            course,kp
+        ) { it.getString(1) }.singleOrNull()
+        require(boundThread == null || boundThread == thread) {
+            "KP $kp in course $course is already bound to thread $boundThread; requested $thread"
+        }
         val row = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?", thread) {
             Triple(it.getString(1), it.getString(2), it.getString(3))
         }.singleOrNull()
@@ -285,7 +292,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (action == "MOVE") {
             val kp = requireNotNull(source.kpId) { "Quick ask has no anchored KP" }
             target = query("SELECT thread_id FROM threads WHERE course_id=? AND kind='KP' AND anchor_id=?",course,kp) { it.getString(1) }.singleOrNull()
-                ?: uid().also { bindTutorThread(course,it,kp) }
+                ?: "kp:$kp".also { bindTutorThread(course,it,kp) }
             val copy = uid()
             val metadata = query("SELECT role,model FROM messages WHERE message_id=?",payload.str("messageId")) { it.getString(1) to it.getString(2) }.single()
             beginStreamingMessage(target,copy,metadata.second.orEmpty(),role=metadata.first)

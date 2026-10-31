@@ -11,6 +11,67 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.nio.file.attribute.PosixFilePermissions
+import java.net.ServerSocket
+import java.net.InetAddress
+import java.net.URI
+import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
+
+/** One foreground run owns its bridge; no test traffic is sent to production 8791. */
+private class ReplayBridge(val client: BridgeClient, private val process: Process?, private val root: Path) : AutoCloseable {
+    override fun close() {
+        process?.let {
+            it.destroy()
+            if(!it.waitFor(5,TimeUnit.SECONDS)) { it.destroyForcibly(); it.waitFor(5,TimeUnit.SECONDS) }
+            Files.writeString(root.resolve("bridge-lifecycle.json"),json("owned_pid" to it.pid(),"stopped" to !it.isAlive).toString()+"\n")
+        }
+    }
+    companion object {
+        suspend fun open(root: Path, live: Boolean): ReplayBridge {
+            if(!live) return ReplayBridge(BridgeClient(BridgeConfig("http://127.0.0.1:1")),null,root)
+            System.getenv("COACH_BRIDGE_URL")?.let { url ->
+                val uri=URI(url)
+                require(uri.scheme=="http" && uri.host in setOf("127.0.0.1","localhost","::1") && uri.port>0 &&
+                    uri.port !in setOf(8790,8791,3790)) { "Live replay requires an isolated loopback bridge; production ports are forbidden" }
+                return ReplayBridge(BridgeClient(BridgeConfig(url)),null,root)
+            }
+            val python=System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
+            require(Files.isExecutable(Path.of(python))) { "缺少独立桥环境；设置 COACH_BRIDGE_PYTHON 或安装 tools/bridge/.venv" }
+            val port=ServerSocket(0,1,InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            val bridgeHome=root.resolve("bridge")
+            val child=ProcessBuilder(python,"tools/bridge/subscription_bridge.py").apply {
+                environment().remove("BRIDGE_CHILD_PATH")
+                environment()["BRIDGE_PORT"]=port.toString()
+                environment()["COACH_BRIDGE_HOME"]=bridgeHome.toString()
+                environment()["BRIDGE_AGY_ENABLED"]="0"
+                environment()["BRIDGE_CLAUDE_CONCURRENCY"]="1"
+                redirectOutput(root.resolve("bridge.stdout.log").toFile())
+                redirectError(root.resolve("bridge.stderr.log").toFile())
+            }.start()
+            val owned=ReplayBridge(BridgeClient(BridgeConfig("http://127.0.0.1:"+port)),child,root)
+            try {
+                withTimeout(20_000) {
+                    while(true) {
+                        check(child.isAlive) { "独立桥启动失败，见本机 bridge.stderr.log" }
+                        val health=owned.client.health()
+                        if(health!=null) {
+                            check(health.str("bridge_home")==bridgeHome.toString()) { "Bridge ownership mismatch" }
+                            break
+                        }
+                        delay(100)
+                    }
+                }
+                // The stock profile permits only the standard bridge work directory.
+                // Extend this private copy for this owned bridge's work directory alone.
+                val profile=bridgeHome.resolve("work/agent_sandbox.sb")
+                Files.writeString(profile,"\n(allow file-read* file-write* (subpath "+
+                    JsonPrimitive(bridgeHome.resolve("work").toString())+"))\n",java.nio.file.StandardOpenOption.APPEND)
+                Files.writeString(root.resolve("bridge-lifecycle.json"),json("owned_pid" to child.pid(),"port" to port,"stopped" to false).toString()+"\n")
+                return owned
+            } catch(e: Exception) { owned.close(); throw e }
+        }
+    }
+}
 
 private data class ReplayItem(val stem: String, val options: List<Option>, val key: String)
 private val replayAssertions = listOf("letters_balanced_1000","three_consecutive_correct_letters_distinct",
@@ -52,13 +113,6 @@ fun main() = runBlocking {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val store = LedgerStore(root.resolve("data"))
     val actor = LedgerActor(scope,store)
-    val bridge = BridgeClient()
-    val chat = ChatService(actor,scope,bridge,log={})
-    val frames = mutableListOf<JsonObject>()
-    val collector = scope.launch(start=CoroutineStart.UNDISPATCHED) {
-        chat.hub.frames.collect { frame -> synchronized(frames) { frames.add(frame) } }
-    }
-    fun snapshotFrames(): List<JsonObject> = synchronized(frames) { frames.toList() }
     val options = listOf("night flowering","day flowering","never flowering","underwater flowering").mapIndexed { i,s -> Option("o"+i,s) }
     var pack = "Moonflowers bloom at night. Sunflowers turn toward light. Starflowers have five petals."
     var title = "Synthetic flower facts"
@@ -96,6 +150,16 @@ fun main() = runBlocking {
             registerQuestion(kp+"-q"+i,"replay","", "SINGLE_CHOICE",q.stem,"VERIFIED",q.key,q.options,listOf(kp))
         }
     }
+    // Start only after corpus validation; failed startup cleans its own exact child PID.
+    val replayBridge = try { ReplayBridge.open(root,!structuralOnly) }
+        catch(e: Exception) { actor.close();scope.cancel();throw e }
+    val bridge=replayBridge.client
+    val chat = ChatService(actor,scope,bridge,log={})
+    val frames = mutableListOf<JsonObject>()
+    val collector = scope.launch(start=CoroutineStart.UNDISPATCHED) {
+        chat.hub.frames.collect { frame -> synchronized(frames) { frames.add(frame) } }
+    }
+    fun snapshotFrames(): List<JsonObject> = synchronized(frames) { frames.toList() }
     try {
         val letters = actor.execute {
             repeat(1002) { i -> registerQuestion("distribution-"+i,"distribution","","SINGLE_CHOICE","Synthetic distinct question "+i,"VERIFIED","o0",options,listOf("kp")) }
@@ -113,16 +177,12 @@ fun main() = runBlocking {
         }
         for (type in listOf("Essay","concept","design","calculation")) {
             val thread = "mastery-"+type
-            seed(thread,3)
+            seed(thread,7)
             chat.tutor.open("replay",thread,thread,setOf(thread),type)
             val plan = requireNotNull(chat.tutor.next("replay",thread).plan)
             chat.tutor.finish(plan,"synthetic-explanation-"+type,true)
             val cards = chat.tutor.next("replay",thread).cards
             checks.check("taught_continue_yields_question_only",cards.size==3 && cards.none { it.payload.flag("untaught") })
-            for(size in listOf(1,3)) {
-                chat.tutor.settings("replay",thread,size)
-                checks.check("group_size_one_or_three",true)
-            }
             for(size in listOf(0,2,4)) {
                 val rejected = try { chat.tutor.settings("replay",thread,size); false } catch(_: IllegalArgumentException) { true }
                 checks.check("group_size_one_or_three",rejected)
@@ -131,6 +191,16 @@ fun main() = runBlocking {
             val grades = chat.tutor.submit("replay",thread,cards.first().payload.str("groupId"),answers,"replay",thread).grades
             checks.check("mcq_only_"+type,actor.execute { snapshot("replay").projection.mastery[thread]?.passed == true })
             checks.check("feedback_matches_letter_map",grades.zip(cards).all { (g,c) -> g.payload.str("feedback").contains("（"+answers.getValue(c.payload.str("attemptId"))+"）") })
+            for(size in listOf(1,3)) {
+                chat.tutor.settings("replay",thread,size)
+                val next=chat.tutor.next("replay",thread)
+                checks.check("group_size_one_or_three",next.plan==null && next.cards.size==size)
+                if(next.cards.isNotEmpty()) {
+                    val choices=actor.execute { next.cards.associate { c -> c.payload.str("attemptId") to
+                        c.payload.getValue("letterMap").jsonObject.str(tutorChoiceKey(c.payload.str("questionId")).correctOptionId) } }
+                    chat.tutor.submit("replay",thread,next.cards.first().payload.str("groupId"),choices,"replay",thread+"-size-"+size)
+                }
+            }
         }
         for (withLetter in listOf(false,true)) {
             val thread = "leak-"+withLetter; seed(thread,3)
@@ -234,6 +304,11 @@ fun main() = runBlocking {
         sourceLetters.windowed(1000).forEach { window -> utteranceChecks.check("letters_balanced_1000",CHOICE_LETTERS.all { letter -> window.count { it==letter } in 200..300 }) }
         val report = json("synthetic_input" to synthetic,"live" to !structuralOnly,"input_utterances" to rows.size,
             "replayed" to replayed,"turn_errors" to errors,"structural" to checks.result(),"source_utterance_assertions" to utteranceChecks.result(),
+            "input_sha256" to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(input)).joinToString("") { "%02x".format(it) },
+            "isolated_bridge" to !structuralOnly,
+            "driver_revision" to ProcessBuilder("git","rev-parse","HEAD").start().let { p ->
+                val revision=p.inputStream.bufferedReader().readText().trim();check(p.waitFor()==0);revision
+            },
             "ai_calls" to actor.execute { supplyCallCount() },
             "limitation" to "Historical Coach initial state unavailable. Isolated new threads and local reviewed pool; structural probes are synthetic. Zero samples are uncovered.")
         Files.writeString(root.resolve("report.json"),report.toString()+"\n")
@@ -241,7 +316,9 @@ fun main() = runBlocking {
         println("ACCEPTANCE_REPLAY "+report)
         check(!checks.failed() && !utteranceChecks.failed() && errors==0) { "Replay failed; inspect private aggregate report" }
     } finally {
-        chat.abortAll("replay_finished")
-        collector.cancelAndJoin(); actor.close(); scope.cancel()
+        try {
+            chat.abortAll("replay_finished")
+            collector.cancelAndJoin(); actor.close(); scope.cancel()
+        } finally { replayBridge.close() }
     }
 }

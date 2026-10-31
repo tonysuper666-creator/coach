@@ -78,9 +78,9 @@ COACH_ACCEPTANCE_INPUT="$HOME/Coach/corpus/replay/synthetic/replay-input.jsonl" 
 COACH_ACCEPTANCE_INPUT="$HOME/Coach/corpus/replay/replay-input.jsonl" COACH_REPLAY_LIVE=1 tools/dev/heavy ./gradlew :server:app:acceptanceReplay --max-workers=2
 ~~~
 
-先确认 date 不在停跑窗口、uptime 与 8791 无在途请求。每轮顺序输入原始用户发言；真实 CLI 只走 8791，从不连接 8790。历史单选字母顺序累积成当前组答案，不把原来的字母改成正确答案；原题与 Coach 题池不同，因此不把历史正确率当作回放判分准确率。其他发言原样走 ChatService。无 CLI 时可显式使用 COACH_REPLAY_STRUCTURAL_ONLY=1，报告 live=false、replayed=0，不冒充 live 通过。
+先确认 date 不在停跑窗口并查看 uptime。默认由本轮在私有输出目录创建独立桥，随机选择 loopback 端口；结束时按自己启动的 PID 清理。桥 Python 默认 tools/bridge/.venv/bin/python，可通过 COACH_BRIDGE_PYTHON 指向已安装的 Coach 桥环境（仅复用解释器和依赖，不改该环境）。COACH_BRIDGE_URL 只能显式指定自有 loopback 测试桥，8790、生产 8791 与 3790 均拒绝。bridge-lifecycle.json 保留启动与退出证据。每轮顺序输入原始用户发言。历史单选字母顺序累积成当前组答案，不把原来的字母改成正确答案；原题与 Coach 题池不同，因此不把历史正确率当作回放判分准确率。其他发言原样走 ChatService。无 CLI 时可显式使用 COACH_REPLAY_STRUCTURAL_ONLY=1，报告 live=false、replayed=0，不冒充 live 通过。
 
-report.json 分开列出 source_utterance_assertions（原始用户发言触发）和 structural（合成状态与故障注入），逐项报 samples/failures，0 为未覆盖。任意失败使命令非零退出，仍先写完整报告。1002 道题经过真实持久化分配路径，检查所有滑动 1000 题窗口和连续 3 题（含跨组）；不是仅比较组内与相邻一题。故障原因注入账本层；真实模型空/纯文字/错格式/超时的完整解析路径另由 PoolWorkerTest 覆盖。真实回放的开场状态是隔离新线程和一个本机已复核 KP 题池，不声称重建了 DeepTutor 的历史 Coach 状态。四种 KP 标签的选择题通过探针只验证状态机不以类型阻塞通过，不代替各类型题池生成质量验收。
+report.json 分开列出 source_utterance_assertions（原始用户发言触发）和 structural（合成状态与故障注入），逐项报 samples/failures，0 为未覆盖，并记录输入文件 SHA-256 与当前驱动提交。组大小正向断言实际发题、核对张数并完成提交，不以 settings 未抛错代替效果检查。任意失败使命令非零退出，仍先写完整报告。1002 道题经过真实持久化分配路径，检查所有滑动 1000 题窗口和连续 3 题（含跨组）；不是仅比较组内与相邻一题。故障原因注入账本层；真实模型空/纯文字/错格式/超时的完整解析路径另由 PoolWorkerTest 覆盖。真实回放的开场状态是隔离新线程和一个本机已复核 KP 题池，不声称重建了 DeepTutor 的历史 Coach 状态。四种 KP 标签的选择题通过探针只验证状态机不以类型阻塞通过，不代替各类型题池生成质量验收。
 
 已有黄金用例的复跑入口：
 

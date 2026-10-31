@@ -18,7 +18,9 @@ data class RenderedMath(val sha: String, val svg: String)
 /** 服务端公式服务的客户端：失败（TeX 写错、服务不可用、断线）一律返回 null，界面显示源码 chip。 */
 class MathHttp(baseUrl: String, deviceId: String, token: String) {
     private val url = baseUrl.trimEnd('/') + "/v1/math"
+    init { validateCoachBaseUrl(baseUrl) }
     private val http = HttpClient(CIO) {
+        followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 3_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }

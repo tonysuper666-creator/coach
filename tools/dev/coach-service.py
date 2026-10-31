@@ -137,7 +137,7 @@ def install():
     environment = {
         'HOME': str(HOME), 'PATH': ':'.join(dict.fromkeys([str(Path(node).parent), str(HOME / '.local/bin'), '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'])),
         'JAVA_HOME': str(java), 'COACH_MANAGE_SERVICES': '1', 'COACH_SERVICE_ROOT': str(release),
-        'COACH_PYTHON': str(python), 'COACH_NODE': node, 'COACH_TAIL_HOST': tail, 'COACH_PORT': str(info['port']),
+        'COACH_PYTHON': str(python), 'COACH_NODE': node, 'COACH_MATHSVC': str(release / 'tools/mathsvc/src/server.mjs'), 'COACH_TAIL_HOST': tail, 'COACH_PORT': str(info['port']),
         'COACH_DATA_DIR': info['dataDir'], 'COACH_RUN_DIR': info['runDir'], 'COACH_LOG_DIR': str(logs),
         'COACH_BRIDGE_HOME': str(HOME / 'Coach/bridge'), 'BRIDGE_PORT': '8791',
         'BRIDGE_LOG_STDOUT': '1',

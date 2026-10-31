@@ -62,7 +62,7 @@ def main():
             image.write_bytes(pixels)
             frames = adb('shell', 'dumpsys', 'gfxinfo', 'com.coach.android', 'framestats')
             (out / (tag + '-frames.txt')).write_text(frames)
-            logs = adb('logcat', '-d', '-s', 'CoachStudy:I', 'CoachJank:I', 'CoachRender:I', '*:S')
+            logs = adb('logcat', '-d', '-s', 'CoachStudy:I', 'CoachTtft:I', 'CoachJank:I', 'CoachRender:I', '*:S')
             metrics = [line for line in logs.splitlines() if re.search(r'JANK|TTFT|first.?word|first.?token', line, re.I)]
             (out / (tag + '-metrics.txt')).write_text('\n'.join(metrics) + '\n')
             rows.append({'label': tag, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),

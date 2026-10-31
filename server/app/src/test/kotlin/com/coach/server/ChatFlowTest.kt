@@ -392,6 +392,39 @@ class ChatFlowTest {
         }
     }
 
+    @Test
+    fun progressAndQuickAskTravelThroughTheRealWebSocketRoutes() {
+        Harness().use { h ->
+            runBlocking {
+                seedTutor(h)
+                h.actor.execute { append("course-1","exam_weights_set",com.coach.domain.json("weights" to com.coach.domain.json("kp-1" to 30,"other" to 70))) }
+            }
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+                ws.await("tutor.state")
+                ws.send("""{"t":"tutor.test","threadId":"thread-1","courseId":"course-1"}""")
+                ws.await("tutor.cards")
+                val before = runBlocking { h.actor.execute { snapshot("course-1").projection } }
+                ws.send("""{"t":"msg.ask","threadId":"thread-1","courseId":"course-1","text":"学了多少"}""")
+                assertEquals("projection",ws.await("msg.start").str("source"))
+                val delta = ws.await("msg.delta")
+                assertEquals(runBlocking { h.actor.execute { todayProgress("course-1").coverageText } },delta.str("text"))
+                ws.await("msg.end")
+                assertEquals(0,h.tutor.requests)
+                h.tutor.stream(5,"A quick answer.",StubTutor.terminal("complete"),StubTutor.DONE)
+                ws.send("""{"t":"quick.ask","courseId":"course-1","text":"继续"}""")
+                val thread = ws.await("quick.thread").str("threadId")
+                ws.await("msg.start"); ws.await("msg.end")
+                val after = runBlocking { h.actor.execute { snapshot("course-1").projection } }
+                assertEquals(before.position,after.position)
+                assertEquals(before.mastery,after.mastery)
+                assertEquals(before.review,after.review)
+                assertEquals(1,h.tutor.requests)
+                assertTrue(thread.isNotBlank())
+            }
+        }
+    }
+
     private fun sha256(text: String): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
             .joinToString("") { "%02x".format(it) }

@@ -50,3 +50,11 @@ tasks.register<Test>("tutorLive") {
     workingDir(rootProject.projectDir)
     testLogging { showStandardStreams = true }
 }
+
+// Explicit private progress-utterance replay; requires separately inspected local labels.
+tasks.register<JavaExec>("progressReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.ProgressReplayKt")
+}

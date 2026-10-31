@@ -12,7 +12,7 @@ import java.util.ArrayDeque
 class StubTutor : AutoCloseable {
 
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    private val replies = ArrayDeque<Pair<String, Long>>()
+    private val replies = ArrayDeque<Triple<String, Long, Int>>()
     @Volatile var framesWritten = 0
     @Volatile var aborted = false
     @Volatile var requests = 0
@@ -33,22 +33,24 @@ class StubTutor : AutoCloseable {
 
     /** 逐帧下发，帧间停顿 [delayMs]；以 `data:` 开头的参数按原样当 SSE 帧（终态帧、`[DONE]` 用）。 */
     fun stream(delayMs: Long, vararg chunks: String) {
-        replies.addLast(chunks.joinToString("") { if (it.startsWith("data:")) it else frame(it) } to delayMs)
+        replies.addLast(Triple(chunks.joinToString("") { if (it.startsWith("data:")) it else frame(it) }, delayMs, 200))
     }
 
     /** 整段非流式回包（兜底路径）。 */
-    fun completion(text: String) {
-        replies.addLast(completionBody(text) to -1L)
+    fun completion(text: String, model: String = "claude-sonnet-5-5") {
+        replies.addLast(Triple(completionBody(text,model), -1L, 200))
     }
+
+    fun httpError(status: Int) { replies.addLast(Triple("{}",-1L,status)) }
 
     private fun handle(exchange: HttpExchange) {
         requests++
         requestBodies.add(exchange.requestBody.readBytes().decodeToString())
-        val (body, delay) = replies.pollFirst() ?: ("""{"error":"no stub reply"}""" to -1L)
+        val (body, delay, status) = replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
         if (delay < 0) {
             val bytes = body.toByteArray()
             exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.sendResponseHeaders(status, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
             return
         }
@@ -127,11 +129,11 @@ class StubTutor : AutoCloseable {
 
         private fun sse(obj: kotlinx.serialization.json.JsonObject): String = "data: $obj\n\n"
 
-        private fun completionBody(text: String): String =
-            """{"model":"claude-sonnet-5-5","choices":[{"index":0,"message":{"role":"assistant","content":""" +
+        private fun completionBody(text: String, model: String): String =
+            """{"model":"$model","choices":[{"index":0,"message":{"role":"assistant","content":""" +
                 "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"" +
                 """}}],"x_coach":{"status":"complete","reason":null,"finish_reason":"stop",""" +
-                """"served_by":"claude-sonnet-5-5","fallback":false,"physical_calls":1,""" +
+                """"served_by":"$model","fallback":false,"physical_calls":1,""" +
                 """"request_id":"rid-stub","queue_ms":1,"ttft_ms":800,"elapsed_ms":2100}}"""
     }
 }

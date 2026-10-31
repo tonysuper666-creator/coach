@@ -105,6 +105,27 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         get("/v1/courses/{course}/snapshot") {
             call.respondText(LedgerJson.encodeToString(actor.execute { snapshot(call.parameters["course"]!!) }),ContentType.Application.Json)
         }
+        get("/v1/courses/{course}/today") {
+            call.respondText(LedgerJson.encodeToString(actor.execute { todayProgress(call.parameters["course"]!!) }),ContentType.Application.Json)
+        }
+        get("/v1/courses/{course}/quick/{day}") {
+            val day = call.parameters["day"]?.toLongOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest)
+            call.respondText(actor.execute { quickHistory(call.parameters["course"]!!,day) }.toString(),ContentType.Application.Json)
+        }
+        get("/v1/courses/{course}/journal/{day}") {
+            val day = call.parameters["day"]?.toLongOrNull() ?: return@get call.respond(HttpStatusCode.BadRequest)
+            call.respondText(LedgerJson.encodeToString(actor.execute { journalDay(call.parameters["course"]!!,day) }),ContentType.Application.Json)
+        }
+        post("/v1/courses/{course}/journal/{day}/summary") {
+            val day = call.parameters["day"]?.toLongOrNull() ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val service = chat ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
+            val result = service.journals.summarize(call.parameters["course"]!!,day)
+            if (result == null) call.respond(HttpStatusCode.BadGateway)
+            else {
+                pushes.emit(call.parameters["course"]!!)
+                call.respondText(LedgerJson.encodeToString(result),ContentType.Application.Json)
+            }
+        }
         post("/v1/commands") {
             if((call.request.header("Content-Length")?.toLongOrNull() ?: 0)>1_048_576) { call.respond(HttpStatusCode.PayloadTooLarge);return@post }
             val text=call.receiveText()
@@ -167,6 +188,10 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         else if(threadId.isBlank()||courseId.isBlank()||question.isEmpty()) {
                             send(Frame.Text(LedgerJson.encodeToString(json("t" to "msg.error","msg" to message.str("clientMsgId"),"error" to "missing_field"))))
                         } else service.ask(threadId,courseId,question,message.str("pack"))
+                    }
+                    "quick.ask" -> {
+                        require(message.str("courseId").isNotBlank() && message.str("text").isNotBlank()) { "Missing quick-ask fields" }
+                        chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"))
                     }
                     "tutor.open" -> chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
                     "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test")

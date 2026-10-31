@@ -69,6 +69,7 @@ class ChatService(
 
     val hub = ChatHub()
     val tutor = TutorMachine(actor)
+    val journals = JournalService(actor, bridge)
     private val sessions = ConcurrentHashMap<String, Session>()
 
     class Session(
@@ -104,6 +105,28 @@ class ChatService(
 
     /** 追问/问答：立刻返回 messageId，流在后台推进（每帧经 [hub] 广播）。 */
     suspend fun ask(threadId: String, courseId: String, question: String, pack: String = ""): String {
+        val quick = actor.execute { requireChatThread(courseId,threadId); isQuickThread(courseId,threadId) }
+        if (quick) actor.execute { quickQuestion(courseId,threadId,question) }
+        progressIntent(question)?.let { intent ->
+            val (message, today) = actor.execute {
+                tutorTransaction {
+                    val today = todayProgress(courseId,threadId)
+                    val message = UUID.randomUUID().toString()
+                    beginStreamingMessage(threadId,message,"")
+                    finishMessage(message,"complete",null,today.answer(intent),1)
+                    message to today
+                }
+            }
+            val session = Session(message,threadId,courseId,"",false)
+            hub.emit(JsonObject(startFrame(session) + json("source" to "projection","fromSeq" to today.fromSeq)))
+            hub.emit(json("t" to "msg.delta","msg" to message,"threadId" to threadId,"i" to 1,"text" to today.answer(intent)))
+            hub.emit(endFrame(session,"complete",null,today.answer(intent).length))
+            return message
+        }
+        if (quick) {
+            val anchor = actor.execute { snapshot(courseId).projection.quickAsks.values.single { it.threadId == threadId } }
+            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null)
+        }
         when (tutorIntent(question)) {
             TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack)
             TutorIntent.TEST_ME -> return nextStep(threadId,courseId,pack,true)
@@ -111,6 +134,12 @@ class ChatService(
         }
         val plan = if (tutor.hasThread(courseId,threadId)) tutor.followup(courseId,threadId) else null
         return startReply(threadId,courseId,question,pack,plan)
+    }
+
+    suspend fun quickAsk(courseId: String, question: String, pack: String = ""): Pair<QuickAskThread, String> {
+        val thread = actor.execute { openQuickAsk(courseId) }
+        hub.emit(json("t" to "quick.thread","threadId" to thread.threadId,"courseId" to courseId,"day" to thread.day,"kpId" to thread.kpId))
+        return thread to ask(thread.threadId,courseId,question,pack)
     }
 
     suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String) {
@@ -297,9 +326,13 @@ class ChatService(
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
 
         val content = visibleText.toString()
-        val willFallback = status == StreamStatus.FAILED && reason == "first_token_timeout" && fallbackOnFirstTokenTimeout
+        val rateLimited = result.call.error == "http_429"
+        val willFallback = status == StreamStatus.FAILED && (rateLimited || (reason == "first_token_timeout" && fallbackOnFirstTokenTimeout))
+        if (rateLimited) hub.emit(json("t" to "msg.progress","msg" to session.messageId,"phase" to "rate_limited",
+            "text" to "Claude 暂时限流，已切换到 $fallbackModel。"))
         val persist: com.coach.store.LedgerStore.() -> Unit = {
             finishMessage(session.messageId, status, reason, content, session.cursor.index)
+            if (isQuickThread(session.courseId,session.threadId)) append(session.courseId,"quick_ask_message",json("messageId" to session.messageId),thread=session.threadId)
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
                 servedBy = result.call.servedBy ?: session.model, ttftMs = result.call.ttftMs,
@@ -345,6 +378,7 @@ class ChatService(
         val reason = (result as? BridgeResult.Failure)?.reason
         val persist: com.coach.store.LedgerStore.() -> Unit = {
             finishMessage(messageId, status, reason, content.toString(), session.cursor.index)
+            if (isQuickThread(session.courseId,session.threadId)) append(session.courseId,"quick_ask_message",json("messageId" to messageId),thread=session.threadId)
             recordAiCall(
                 callId = result.call.callId, task = result.call.task, requestedModel = result.call.requestedModel,
                 servedBy = result.call.servedBy ?: fallbackModel, ttftMs = result.call.ttftMs,

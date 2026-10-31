@@ -38,6 +38,8 @@ The replay enables opt-in `PoolTrace` checkpoints for card receipt, event read/s
 
 New question groups request their first row before lazy-list measurement, then align its top after the row is ready. Explicit focus cancels an older automatic follow-tail request. The regression test covers rows created inside `BoxWithConstraints`, where a parent effect can run before the child list updates its keys; fixed frame sleeps are not a readiness condition.
 
+If a later restore/tail request replaces the pre-layout request and the row is still absent after two frames, focus falls back to `scrollToItem(index, 0)`. The entire focus operation (row availability, restore and visible-size wait) is bounded to 1500 ms and returns false on timeout, without throwing into composition. This defensive bound does not change the phone's per-sample 1000 ms acceptance limit. Regressions cover an overwritten request and a removed row.
+
 The historical 2026-10-31 14:44:09 output was not retained: the bridge disables session persistence and logs metadata rather than model text. Its exact malformed cause therefore remains unverified. Reproduction with the same stored source pack is evidence about current behavior, not recovery of the historical output.
 
 ## Import the already reviewed inventory

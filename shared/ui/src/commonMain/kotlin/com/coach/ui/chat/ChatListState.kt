@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Where the reader is, in terms that survive a window change (fold/unfold, Pad rotation, Mac resize) and a process restore.
@@ -56,20 +57,30 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
      * Bring the top of the item with [key] to the top of the viewport (a new question group is read from question 1).
      * The list is laid out from the bottom, so the item's offset is how far its bottom edge sits above (positive: below) the viewport bottom.
      */
-    suspend fun scrollItemTopIntoView(key: Any) {
+    suspend fun scrollItemTopIntoView(key: Any): Boolean = withTimeoutOrNull(1_500) {
         val index = snapshotFlow { newestFirstKeys.indexOf(key) }.first { it >= 0 }
         focusRequest++
         followNewest = false
         anchor.pinned = false
         snapshotFlow { restoring }.first { !it }
-        if (requestedKey != key) list.scrollToItem(index, 0)
+        if (requestedKey == key) {
+            // A restore or tail scroll can replace requestScrollToItem before measurement.
+            // Give the cheap request two frames, then actively recover a missing row.
+            repeat(2) {
+                if (list.layoutInfo.visibleItemsInfo.none { it.key == key }) withFrameNanos { }
+            }
+        }
+        if (requestedKey != key || list.layoutInfo.visibleItemsInfo.none { it.key == key }) {
+            list.scrollToItem(index, 0)
+        }
         val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
         val info = list.layoutInfo
         val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
         if (room <= 0) list.scrollToItem(index, -room) else list.scrollBy(-room.toFloat())
         // A clamped no-op emits no scroll update; settle the tail flag explicitly (04e9695).
         anchor.pinned = list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0
-    }
+        true
+    } ?: false
 }
 
 /**

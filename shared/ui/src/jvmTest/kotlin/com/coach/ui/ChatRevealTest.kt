@@ -18,6 +18,46 @@ import kotlin.test.*
 /** A new question group must open at question 1, whatever the viewport and item sizes are. */
 @OptIn(ExperimentalTestApi::class)
 class ChatRevealTest {
+    @Test fun overwrittenPrelayoutRequestFallsBackToFirstQuestion() = runComposeUiTest {
+        val state = ChatListState()
+        var reveal by androidx.compose.runtime.mutableStateOf(false)
+        var result: Boolean? = null
+        setContent {
+            Box(Modifier.size(300.dp, 500.dp)) {
+                AnchoredChatList((0..9).toList(), { it }, state, 300, Modifier.testTag("list"), spacing = 0.dp) { i ->
+                    Box(Modifier.fillMaxWidth().height(600.dp).testTag("i$i"))
+                }
+            }
+            LaunchedEffect(reveal) {
+                if (reveal) {
+                    state.requestItemTop(1, 8)
+                    // Reproduce a later restore/tail request winning the next measurement.
+                    state.list.requestScrollToItem(0, 0)
+                    androidx.compose.runtime.withFrameNanos { }
+                    result = state.scrollItemTopIntoView(1)
+                }
+            }
+        }
+        waitForIdle()
+        runOnIdle { reveal = true }
+        waitUntil(timeoutMillis = 5_000) { result != null }
+        assertEquals(true, result)
+        assertTrue(kotlin.math.abs(listTop() - top("i1")) <= 1f)
+    }
+
+    @Test fun removedQuestionEndsTheFocusWait() = runComposeUiTest {
+        val state = ChatListState()
+        var result: Boolean? = null
+        setContent {
+            Box(Modifier.size(300.dp, 500.dp)) {
+                AnchoredChatList(listOf(0), { it }, state, 300) { Box(Modifier.height(100.dp)) }
+            }
+            LaunchedEffect(Unit) { result = state.scrollItemTopIntoView("removed") }
+        }
+        waitUntil(timeoutMillis = 5_000) { result != null }
+        assertEquals(false, result)
+    }
+
     @Test fun newGroupFocusWaitsForSubcomposedRows() = runComposeUiTest {
         val state = ChatListState()
         var rows by androidx.compose.runtime.mutableStateOf(listOf(0))

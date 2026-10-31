@@ -67,7 +67,7 @@ class ChatFlowTest {
         }
     }
 
-    private class Harness(timings: ChatTimings = defaultTimings()) : AutoCloseable {
+    private class Harness(timings: ChatTimings = defaultTimings(), packDir: java.nio.file.Path = Files.createTempDirectory("coach-packs-")) : AutoCloseable {
         val tutor = StubTutor()
         val token = "stream-test-token-32-characters-minimum"
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -81,6 +81,7 @@ class ChatFlowTest {
             timings = timings,
             fallbackOnFirstTokenTimeout = false,
             log = { logs.add(it) },
+            packsDirectory = packDir,
         )
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8), chat)
@@ -152,6 +153,98 @@ class ChatFlowTest {
     private fun ask(ws: Ws, threadId: String = "thread-1") = ws.send(
         """{"t":"msg.ask","threadId":"$threadId","courseId":"course-1","text":"什么是机会成本？"}""",
     )
+
+    @Test
+    fun androidCanStartTeachingWithoutUploadingTheTextbookPack() {
+        val packs=Files.createTempDirectory("coach-content-")
+        Files.createDirectories(packs.resolve("course-1"))
+        Files.writeString(packs.resolve("course-1/kp-1.md"), "Synthetic source: the cost is the next best alternative.")
+        Harness(packDir=packs).use { h ->
+            h.tutor.stream(10, "教材讲解。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","courseId":"course-1","threadId":"thread-1","kpId":"kp-1","conceptIds":["c1"],"title":"机会成本"}""")
+                ws.await("tutor.state")
+                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                assertTrue(h.tutor.requestBodies.single().contains("the cost is the next best alternative"))
+                h.tutor.stream(10, "追问解释。", StubTutor.terminal("complete"), StubTutor.DONE)
+                ws.send("""{"t":"msg.ask","courseId":"course-1","threadId":"thread-1","text":"How does the alternative affect a decision?"}""")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                assertEquals(2,h.tutor.requestBodies.size)
+                assertTrue(h.tutor.requestBodies.last().contains("the cost is the next best alternative"))
+            }
+        }
+    }
+
+    @Test
+    fun preparedLessonUsesRealCachedTextAndOnlyMarksTeachingWhenDisplayed() {
+        val root=Files.createTempDirectory("coach-prepared-")
+        val packs=root.resolve("packs")
+        Files.createDirectories(packs.resolve("course-1"))
+        val source="Synthetic source material."
+        Files.writeString(packs.resolve("course-1/kp-1.md"),source)
+        val cache=root.resolve("prepared-lessons/course-1")
+        Files.createDirectories(cache)
+        Files.writeString(cache.resolve("kp-1.json"),com.coach.domain.json("packHash" to com.coach.store.sha256(source.toByteArray()),
+            "text" to "预备好的完整讲解。","model" to BridgeClient.CLAUDE).toString())
+        try { Harness(packDir=packs).use { h ->
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","courseId":"course-1","threadId":"thread-1","kpId":"kp-1","conceptIds":["c1"],"title":"机会成本"}""")
+                ws.await("tutor.state")
+                assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type=="explanation_delivered" } } })
+                ws.send("""{"t":"tutor.next","courseId":"course-1","threadId":"thread-1"}""")
+                val start=ws.await("msg.start")
+                assertEquals("complete",ws.await("msg.end").str("status"))
+                assertEquals("预备好的完整讲解。",runBlocking { h.snapshot(start.str("msg")) }!!.content)
+                assertEquals(0,h.tutor.requests)
+                assertEquals(1,runBlocking { h.actor.execute { events("course-1").count { it.type=="explanation_delivered" } } })
+            }
+        } } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun official429FallsBackWithoutWaitingForFirstTokenDeadline() {
+        Harness().use { h ->
+            h.tutor.rateLimit()
+            h.tutor.completion("兜底的完整回答。", BridgeClient.CODEX)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                ws.await("msg.start")
+                val notice = ws.await("tutor.progress")
+                assertEquals("Claude 暂时限流，已换 ${BridgeClient.CODEX} 回答", notice.str("text"))
+                val replacement = ws.await("msg.snapshot")
+                assertEquals("", replacement.str("text"))
+                ws.await("msg.end")
+                val fallback = ws.await("msg.start")
+                assertEquals(BridgeClient.CODEX, fallback.str("model"))
+                val end = ws.await("msg.end")
+                assertEquals("complete", end.str("status"))
+                val row = runBlocking { h.snapshot(fallback.str("msg")) }!!
+                assertEquals("兜底的完整回答。", row.content)
+                assertEquals(2, h.tutor.requests)
+            }
+        }
+    }
+
+    @Test
+    fun officialRateLimitAfterPartialTextReplacesTheIncompleteAnswer() {
+        Harness().use { h ->
+            h.tutor.stream(10, "未写完的解释。", StubTutor.terminal("truncated", "rate_limited"), StubTutor.DONE)
+            h.tutor.completion("换模型后的完整解释。", BridgeClient.CODEX)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val original = ws.await("msg.start")
+                ws.await("tutor.progress")
+                val replacement = ws.await("msg.snapshot")
+                assertEquals("", replacement.str("text"))
+                ws.await("msg.end")
+                val fallback = ws.await("msg.start")
+                assertEquals("complete", ws.await("msg.end").str("status"))
+                assertEquals("", runBlocking { h.snapshot(original.str("msg")) }!!.content)
+                assertEquals("换模型后的完整解释。", runBlocking { h.snapshot(fallback.str("msg")) }!!.content)
+            }
+        }
+    }
 
     @Test
     fun streamedAnswerReachesTheClientAndLandsComplete() {

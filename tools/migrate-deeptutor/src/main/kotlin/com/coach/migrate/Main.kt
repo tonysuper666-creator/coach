@@ -5,8 +5,10 @@ import kotlin.io.path.*
 
 private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only | --snapshot DIR]
     [--source DIR] [--staging DIR] [--out DIR] [--weights FILE]
+       migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
-No formal import, network access, or AI calls. See README for independent verification.
+seed-content defaults: data ~/Coach/data, corpus ~/Coach/corpus/ECNM10119-健康经济学/教材.
+No learning history is imported. See README for independent verification.
 """
 fun resolvedDestination(path: Path): Path {
     val absolute=path.toAbsolutePath().normalize()
@@ -22,6 +24,28 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 }
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
+    if(args.firstOrNull()=="seed-content") {
+        val options=mutableMapOf<String,String>();var i=1
+        while(i<args.size) {
+            val key=args[i++]
+            require(key in setOf("--snapshot","--data","--corpus")) { "Unknown seed-content option: $key\n$USAGE" }
+            require(key !in options) { "Duplicate option: $key" }
+            options[key]=args.getOrElse(i++) { error("Missing value for $key\n$USAGE") }
+        }
+        val home=Path.of(System.getProperty("user.home"))
+        val snap=Path.of(options["--snapshot"] ?: error("seed-content requires --snapshot DIR\n$USAGE")).toRealPath()
+        val data=resolvedDestination(options["--data"]?.let(Path::of) ?: home.resolve("Coach/data"))
+        val corpus=resolvedDestination(options["--corpus"]?.let(Path::of) ?: home.resolve("Coach/corpus"))
+        val protectedSources=listOf(resolvedDestination(home.resolve("DeepTutor")))
+        requirePrivateDestination(data,protectedSources);requirePrivateDestination(corpus,protectedSources)
+        require(!snap.startsWith(resolvedDestination(home.resolve("DeepTutor")))) { "Snapshot must be a read-only staging copy, never DeepTutor" }
+        val prepared=prepareSeed(snap)
+        val written=seedContent(prepared,data,corpus)
+        println("Seeded course=${prepared.courseId} modules=${prepared.modules.size} knowledge_points=${prepared.knowledgePoints.size} anchors=${prepared.knowledgePoints.size} exam_weight_total=${prepared.weights.values.sum()} events_added=${written.eventsAdded}")
+        println("manifest_sha256=${prepared.sha256} manifest_bytes=${prepared.manifestBytes.size} idempotent=${written.idempotent}")
+        println("Textbook pages are stored in local Coach data/blobs and corpus; no learning records were imported.")
+        return
+    }
     val options = mutableMapOf<String, String>()
     var i=0
     while(i<args.size) {

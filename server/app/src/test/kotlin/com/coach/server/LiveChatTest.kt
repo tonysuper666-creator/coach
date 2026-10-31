@@ -72,11 +72,6 @@ class LiveChatTest {
             "复习保护时段：不运行 live"
         }
         val h = health()
-        val daily = h.getValue("daily").jsonObject
-        val rate = h.getValue("rate_limit").jsonObject
-        require(rate.str("all_paused") != "true") { "桥因订阅使用率暂停；本批停止，不重试" }
-        val remaining = daily["remaining"]?.jsonPrimitive?.intOrNull
-        require(remaining == null || remaining >= requiredCalls) { "今日额度不足 $requiredCalls；停止本批" }
         return h
     }
 
@@ -110,8 +105,6 @@ class LiveChatTest {
                 val owned = ProcessBuilder(python, "tools/bridge/subscription_bridge.py").apply {
                     environment().remove("BRIDGE_CHILD_PATH")
                     environment()["BRIDGE_PORT"] = port.toString()
-                    environment()["BRIDGE_DAILY_CLAUDE_CAP"] = "0"
-                    environment()["BRIDGE_RATE_PAUSE_AT"] = "1.1"
                     environment()["BRIDGE_CLAUDE_CONCURRENCY"] = "1"
                     environment()["BRIDGE_AGY_ENABLED"] = "0"
                     environment()["COACH_BRIDGE_HOME"] = if (stub) output.resolve("stub-$mode-bridge").toString() else home.resolve("Coach/bridge").toString()

@@ -50,6 +50,28 @@ class PairingSecurityTest {
         }
     }
 
+    @Test fun managementCodeStaysInTheTerminalWithManagedEnvironment() = Harness().use { h ->
+        val token = h.root.resolve("device-token")
+        Files.writeString(token, h.admin)
+        val logs = h.root.resolve("command-logs")
+        val process = ProcessBuilder(System.getProperty("coach.serverBinary"), "pair-code").apply {
+            environment()["COACH_MANAGE_SERVICES"] = "1"
+            environment()["COACH_LOG_DIR"] = logs.toString()
+            environment()["COACH_DATA_DIR"] = h.root.toString()
+            environment()["COACH_TOKEN_FILE"] = token.toString()
+            environment()["COACH_PORT"] = h.port.toString()
+            environment()["COACH_DEVICE_ID"] = "desktop"
+            redirectErrorStream(true)
+        }.start()
+        try {
+            assertTrue(process.waitFor(20, TimeUnit.SECONDS), "Pairing command timed out")
+            assertEquals(0, process.exitValue())
+            val output = process.inputStream.bufferedReader().readText()
+            assertTrue(Regex("Pairing code: [0-9]{6} ").containsMatchIn(output))
+            assertFalse(Files.exists(logs), "Management output must not create a service log")
+        } finally { if (process.isAlive) { process.destroyForcibly(); process.waitFor() } }
+    }
+
     @Test fun pairsThenUsesHeadersForHttpAndWsAndRejectsReplay() = Harness().use { h ->
         val code=h.code()
         val response=h.request("/v1/pair","POST",body=json("code" to code,"name" to "test phone").toString())

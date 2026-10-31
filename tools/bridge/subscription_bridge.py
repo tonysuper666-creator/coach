@@ -14,7 +14,7 @@
 (5) 回显 X-Request-Id 并写日志；按请求设推理强度（X-Coach-Effort / reasoning_effort）。
 (6) 超时从拿到信号量之后起算；排队时长（queue_ms）单独记录。
 (7) 并发：Claude 上限可配（BRIDGE_CLAUDE_CONCURRENCY，期中前默认 1），后台最多 1；
-    读 rate_limit_event，utilization≥0.8 或 status≠allowed 时暂停后台生成（429）。
+    rate_limit_event 仅作可观察信号，不以本地阈值拦截。
 (8) /v1/models 标 true_stream；Codex 为 false（exec --json 没有 delta）；agy 默认关；Grok 未注册。
 (9) 桩 CLI 故障注入回归见 tests/fault_injection.py，live 探针见 tests/live_probe.py。
 
@@ -34,7 +34,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -85,10 +85,7 @@ BACKGROUND_BACKEND = os.environ.get("BRIDGE_BACKGROUND_BACKEND", "codex")
 BACKGROUND_MODEL = os.environ.get("BRIDGE_BACKGROUND_MODEL", "gpt-6.1-sol")
 AGY_ENABLED = os.environ.get("BRIDGE_AGY_ENABLED", "0") == "1"     # agy 默认关（条款风险）
 HEALTH_CACHE_SEC = float(os.environ.get("BRIDGE_HEALTH_CACHE_SEC", "60"))
-# 期中保护（TON-1036 评审 I8，2026-10-29 收紧）：Coach 的 Claude 物理调用每天硬上限，
-# 与 TON-1041 合计 60 次；同一天还有别的卡在跑时把这里调成剩余额度。
-DAILY_CLAUDE_CAP = int(os.environ.get("BRIDGE_DAILY_CLAUDE_CAP", "60"))
-RATE_PAUSE_AT = float(os.environ.get("BRIDGE_RATE_PAUSE_AT", "0.5"))   # utilization ≥ 这个值就暂停全部调用
+# Test-only budget (TON-1128); unmarked learner traffic is always counted but never capped.
 STATE_DIR = BRIDGE_HOME / "state"
 DAILY_FILE = STATE_DIR / "daily.json"
 SANDBOX_TEMPLATE = BRIDGE_DIR / "sandbox" / "agent_sandbox.sb.in"
@@ -168,27 +165,21 @@ def read_daily() -> dict:
 
 
 def daily_used() -> int:
-    return int(read_daily().get("claude_calls") or 0)
+    return int(read_daily().get("test_claude_calls") or 0)
 
 
-def reserve_claude_call() -> None:
-    """每次真的 spawn claude 之前先占用今日额度；超了就不 spawn（硬上限，不是建议值）。"""
-    if DAILY_CLAUDE_CAP <= 0:
-        return
+def reserve_claude_call(test_traffic: bool = False) -> None:
+    """Count every physical call; only explicitly marked tests consume the test budget."""
     data = read_daily()
-    used = int(data.get("claude_calls") or 0)
-    if used >= DAILY_CLAUDE_CAP:
-        raise BridgeError(429, f"今日 Claude 物理调用已达上限 {DAILY_CLAUDE_CAP} 次"
-                               "（期中保护，与 TON-1041 合计），今天不再调用 Claude",
-                          "rate_limit_error", "daily_claude_cap")
-    data["claude_calls"] = used + 1
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = DAILY_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(DAILY_FILE)
-    except OSError:
-        pass
+    used = int(data.get("test_claude_calls") or 0)
+    data["claude_calls"] = int(data.get("claude_calls") or 0) + 1
+    if test_traffic:
+        data["test_claude_calls"] = used + 1
+    # A failed accounting write must not silently permit uncounted test calls.
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = DAILY_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(DAILY_FILE)
 
 
 # ---------- 错误与终态 ----------
@@ -212,14 +203,6 @@ class ClientGone(Exception):
     """调用方在等待期间断开了连接。"""
 
 
-class BackgroundPaused(Exception):
-    """额度紧张，后台生成暂停。"""
-
-
-class RatePaused(Exception):
-    """utilization 太高，全部调用暂停（期中保护）。"""
-
-
 def err_response(e: BridgeError, *, x_coach: dict | None = None, headers: dict | None = None) -> JSONResponse:
     body: dict[str, Any] = {"error": {"message": e.message, "type": e.etype,
                                       "param": e.param, "code": e.code}}
@@ -235,7 +218,7 @@ def write_log(**kw: Any) -> None:
     line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
             f"rid={kw.get('request_id') or '-'} model={str(kw.get('model'))[:48]} "
             f"served={str(kw.get('served_by') or '-')[:48]} stream={int(bool(kw.get('stream')))} "
-            f"bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
+            f"traffic={kw.get('traffic', 'user')} bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
             f"in={kw.get('in_chars', 0)} out={kw.get('out_chars', 0)} "
             f"queue={kw.get('queue_ms', 0)}ms ttft={kw.get('ttft_ms') if kw.get('ttft_ms') is not None else '-'}ms "
             f"total={kw.get('total_ms', 0)}ms status={kw.get('status')} reason={kw.get('reason') or '-'} "
@@ -244,6 +227,10 @@ def write_log(**kw: Any) -> None:
             + (f" note={kw['note']}" if kw.get("note") else "")
             + "\n")
     try:
+        if os.environ.get("BRIDGE_LOG_STDOUT") == "1":
+            # Managed Ktor drains stdout into its daily, 14-day retained bridge log.
+            print(line, end="", flush=True)
+            return
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
@@ -454,25 +441,11 @@ class RateLimit:
     resets_at: Any = None
     at: float | None = None
 
-    def blocked(self) -> bool:
-        """后台生成的暂停阈值（utilization≥0.8 或状态不允许）。"""
-        if self.status and self.status.lower() not in ("allowed", "ok"):
-            return True
-        return self.utilization is not None and self.utilization >= 0.8
-
-    def paused_all(self) -> bool:
-        """期中保护：utilization≥0.5 或状态不允许时，前台后台都不再调用。"""
-        if self.status and self.status.lower() not in ("allowed", "ok"):
-            return True
-        return self.utilization is not None and self.utilization >= RATE_PAUSE_AT
-
     def snapshot(self) -> dict:
         return {"utilization": self.utilization, "status": self.status,
                 "resets_at": self.resets_at,
                 "at": datetime.fromtimestamp(self.at).astimezone().isoformat(timespec="seconds") if self.at else None,
-                "background_paused": self.blocked(),
-                "all_paused": self.paused_all(),
-                "pause_at": RATE_PAUSE_AT}
+                "background_paused": False, "all_paused": False, "pause_at": None}
 
 
 RATE_LIMIT = RateLimit()
@@ -522,6 +495,8 @@ class ReqCtx:
     effort: str | None
     t_req: float
     in_chars: int
+    exact_model: bool = False
+    test_traffic: bool = False
     # 运行中更新
     served_by: str | None = None
     t_acq: float | None = None
@@ -570,6 +545,10 @@ def child_env(backend: str) -> dict[str, str]:
     env["LANG"] = "en_US.UTF-8"
     env["TMPDIR"] = str(TMP_DIR)
     env["COACH_SANDBOX_PROFILE"] = str(SANDBOX_PROFILE)
+    if backend == "codex":
+        # Agent runtimes inherit task-local config outside the bridge sandbox.
+        # The bridge uses the user's subscription config already allowed there.
+        env["CODEX_HOME"] = str(Path.home() / ".codex")
     if backend == "claude":
         # 只走订阅登录：从别处（如 Claude Code 桌面端）继承来的 ANTHROPIC_* / CLAUDE_* 会改线路或改模式，一律去掉。
         for k in list(env):
@@ -663,6 +642,17 @@ def served_from_result(result: dict | None, fallback: str) -> str:
     return fallback
 
 
+def official_rate_limit(event: dict) -> bool:
+    """Only upstream error/rejection events trigger recovery; utilization never does."""
+    kind = event.get("type")
+    if kind == "rate_limit_event":
+        info = event.get("rate_limit_info") or {}
+        return str(info.get("status") or "").lower() in {"rejected", "rate_limited"}
+    if kind != "error" and not event.get("is_error"):
+        return False
+    return bool(re.search(r"\b429\b|rate.?limit|usage.?limit|quota.exceeded|too many requests", json.dumps(event).lower()))
+
+
 def judge_result(result: dict | None, rc: int, started: bool, served: str, text_hint: str = "") -> Outcome:
     """按 is_error / terminal_reason / api_error 判定终态；不再看 stop_reason=="max_tokens"。
 
@@ -680,6 +670,9 @@ def judge_result(result: dict | None, rc: int, started: bool, served: str, text_
     # 已经发出去的文字以流里的为准；CLI 的 result.result 在错误分支里往往是错误说明，不能顶替正文
     text = (text_hint or raw_text).strip() if started and text_hint else raw_text
     if result.get("is_error"):
+        if official_rate_limit(result):
+            return Outcome("truncated" if started else "failed", "rate_limited", "error", served, text, usage, started,
+                           detail="official upstream rate limit")
         if "max_output_tokens" in api_error or "max_output_tokens" in terminal:
             return Outcome("truncated" if (started or text) else "failed", "max_output_tokens",
                            "length", served, text, usage, started or bool(text),
@@ -724,7 +717,7 @@ async def call_claude(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     """非流式 Claude：--output-format json。"""
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
-        reserve_claude_call()
+        reserve_claude_call(req.test_traffic)
         req.physical_calls += 1
         argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=False)
         budget = CLAUDE_TIMEOUT + STREAM_TOTAL_TIMEOUT   # 非流式：整段等回来
@@ -789,7 +782,7 @@ async def claude_stream(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
     argv, sysfile = claude_argv(model, req.spec_data.system, effort, stream=True)
     async with slot(req, "claude") as t_acq:
         req.t_acq = t_acq
-        reserve_claude_call()
+        reserve_claude_call(req.test_traffic)
         proc = await spawn(argv, CLAUDE_CWD, child_env("claude"), stdin_pipe=True)
         req.physical_calls += 1
 
@@ -825,6 +818,13 @@ async def claude_stream(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                 except ValueError:
                     continue
                 kind = ev.get("type")
+                if official_rate_limit(ev):
+                    if kind == "rate_limit_event":
+                        update_rate_limit(ev)
+                    await reap(proc)
+                    failure = Outcome("truncated" if started else "failed", "rate_limited", "error", served, s, {}, started,
+                                      detail="official upstream rate limit")
+                    break
                 if kind == "system" and isinstance(ev.get("model"), str) and ev["model"]:
                     served = ev["model"]                      # system/init.model
                     yield {"kind": "meta", "served_by": served}
@@ -991,11 +991,7 @@ async def call_codex(req: ReqCtx, model: str, effort: str | None) -> Outcome:
 async def slot(req: ReqCtx, backend: str):
     """拿到槽之后把 t_acq 交出去；后台请求额外占一个后台槽，额度紧张时直接拒。"""
     global BG_ACTIVE
-    if RATE_LIMIT.paused_all():
-        raise RatePaused()
     if req.background:
-        if RATE_LIMIT.blocked():
-            raise BackgroundPaused()
         await BG_SLOTS.acquire()
         BG_ACTIVE += 1
     try:
@@ -1192,8 +1188,8 @@ async def health_payload() -> dict:
         "concurrency": {name: gate.snapshot() for name, gate in GATES.items()}
                        | {"background": {"limit": BACKGROUND_SLOTS, "active": BG_ACTIVE}},
         "background_backend": BACKGROUND_BACKEND or None,
-        "daily": {"date": _today(), "claude_calls": daily_used(), "claude_cap": DAILY_CLAUDE_CAP,
-                  "remaining": max(0, DAILY_CLAUDE_CAP - daily_used()) if DAILY_CLAUDE_CAP > 0 else None},
+        "daily": {"date": _today(), "scope": "test", "total_claude_calls": int(read_daily().get("claude_calls") or 0),
+                  "claude_calls": daily_used(), "claude_cap": None, "remaining": None},
         "rate_limit": RATE_LIMIT.snapshot(),
         "fallback_default": "off",
     }
@@ -1201,6 +1197,10 @@ async def health_payload() -> dict:
 
 @app.get("/health")
 async def health(request: Request):
+    if request.query_params.get("scope") == "process":
+        # Liveness must not wait for CLI auth probes (up to 20s), or depend on
+        # subscription availability. Full /health continues to report upstreams.
+        return {"ok": True, "service": "coach-bridge", "port": PORT, "pid": os.getpid()}
     payload = await health_payload()
     payload["request_id"] = request.headers.get("x-request-id") or "-"
     return payload
@@ -1250,6 +1250,8 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
     return ReqCtx(request_id=rid, model=model, spec=mspec, body=body, spec_data=spec_data,
                   stream=bool(body.get("stream")), background=background,
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
+                  exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
+                  test_traffic=(headers.get("x-coach-traffic") or "").strip().lower() == "test",
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
 
@@ -1304,7 +1306,7 @@ def terminal_frames(req: ReqCtx, cid: str, created: int, oc: Outcome, want_usage
 
 def log_req(req: ReqCtx, oc: Outcome) -> None:
     write_log(request_id=req.request_id, model=req.model, served_by=oc.served_by or req.served_by,
-              stream=req.stream, background=req.background, effort=req.effort,
+              stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
               in_chars=req.in_chars, out_chars=req.out_chars, queue_ms=req.queue_ms(),
               ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status=oc.status, reason=oc.reason,
               finish_reason=oc.finish_reason, physical_calls=req.physical_calls,
@@ -1474,6 +1476,12 @@ async def fallback_call(req: ReqCtx, first_error: BridgeError | None) -> Outcome
     raise BridgeError(502, "兜底失败", reason="cli_exit")
 
 
+def exam_protection_active(now: float | None = None) -> bool:
+    current = time.time() if now is None else now
+    return (datetime(2026, 11, 2, tzinfo=timezone.utc).timestamp() <= current
+            < datetime(2026, 11, 2, 15, tzinfo=timezone.utc).timestamp())
+
+
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat(request: Request):
@@ -1486,10 +1494,12 @@ async def chat(request: Request):
         if not isinstance(body, dict):
             raise BridgeError(400, "请求体必须是 JSON 对象", "invalid_request_error")
         req = build_req(body, request.headers)
+        if exam_protection_active():
+            raise BridgeError(503, "考前保护：11 月 2 日 00:00–15:00 GMT 暂停模型调用", reason="exam_protection")
 
         # 期中保护：后台生成全部走 Codex（ADR-0002 裁决）
         target = req.model
-        if req.background and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
+        if req.background and not req.exact_model and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
             if BACKGROUND_MODEL in MODELS and MODELS[BACKGROUND_MODEL].backend == BACKGROUND_BACKEND:
                 target = BACKGROUND_MODEL
                 req.routed_from = req.model
@@ -1518,9 +1528,6 @@ async def chat(request: Request):
             except StopAsyncIteration:
                 end_ev = None
             except ClientGone:
-                await events.aclose()
-                raise
-            except (BackgroundPaused, RatePaused):
                 await events.aclose()
                 raise
             except BridgeError as e:
@@ -1585,17 +1592,6 @@ async def chat(request: Request):
                              "usage": oc.usage,
                              "x_coach": oc.x_coach(req)}, headers=headers)
 
-    except BackgroundPaused:
-        rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
-        return err_response(BridgeError(429, "额度紧张（rate_limit utilization≥0.8 或 status≠allowed），后台生成暂停",
-                                        "rate_limit_error", "background_paused"),
-                            headers={"X-Request-Id": rid, "Retry-After": "900"})
-    except RatePaused:
-        rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
-        return err_response(BridgeError(429, f"额度 usage 已达 {RATE_LIMIT.utilization}（阈值 {RATE_PAUSE_AT}），"
-                                               "期中保护：全部调用暂停，等他复习完再跑",
-                                        "rate_limit_error", "rate_limit_paused"),
-                            headers={"X-Request-Id": rid, "Retry-After": "900"})
     except BridgeError as e:
         rid = req.request_id if req else (request.headers.get("x-request-id") or secrets.token_hex(8))
         headers = {"X-Request-Id": rid, "X-Coach-Fallback": "on" if (req and req.fallback_enabled) else "off"}
@@ -1610,7 +1606,7 @@ async def chat(request: Request):
         rid = req.request_id if req else (request.headers.get("x-request-id") or "-")
         if req:
             write_log(request_id=req.request_id, model=req.model, served_by=req.served_by,
-                      stream=req.stream, background=req.background, effort=req.effort,
+                      stream=req.stream, background=req.background, effort=req.effort, traffic="test" if req.test_traffic else "user",
                       in_chars=req.in_chars, out_chars=0, queue_ms=req.queue_ms(),
                       ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status="failed",
                       reason="cli_exit", finish_reason="error",

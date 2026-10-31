@@ -10,6 +10,29 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class RenderingQualityTest {
+    @Test fun sentenceFractionsFlowWithCurrencyWhileWideMathKeepsItsRow() {
+        val mark = '$'.toString().repeat(2)
+        val tokens = MathDelimiters.tokenize("金额为 " + mark + "x" + mark + " 美元",true).segments
+        val inline = com.coach.ui.markdown.groupMathRuns(tokens) { true }
+        assertEquals(1,inline.size)
+        assertTrue(inline.single().any { it.value.text?.contains("美元") == true })
+        assertEquals(3,com.coach.ui.markdown.groupMathRuns(tokens) { false }.size)
+        val standalone = MathDelimiters.tokenize(mark + "x" + mark,true).segments
+        assertEquals(1,com.coach.ui.markdown.groupMathRuns(standalone) { true }.size)
+    }
+    @Test fun compoundLearningTitleKeepsOtherAnchorsInDetails() {
+        val title = "【W1】First objective ｜ 【W2】Second objective ｜ 【W3】Third objective"
+        assertEquals("W1" to "First objective", splitTitle(title))
+        assertEquals(listOf("【W2】Second objective", "【W3】Third objective"), additionalTitleScope(title))
+        assertEquals("" to "P(A|B)", splitTitle("P(A|B)"))
+        assertEquals("" to "P(A | B)", splitTitle("P(A | B)"))
+    }
+    @Test fun completedMarkdownListsAndEmphasisRenderWithoutSourceMarkers() {
+        val rendered = com.coach.ui.markdown.renderMarkdownText("- **First** item\n- Second item")
+        assertEquals("• First item\n• Second item", rendered.text.trim())
+        assertTrue(rendered.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold })
+    }
+
     @Test fun blocksStayImmutableAsDeltasArrive() {
         val source = "# Title\n\nFirst **paragraph**.\n\n- one\n\n  continued\n- two\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```kotlin\nval dollar = \"$\"\n\n// code\n```\n\nFinal\nheading\n=======\n\n[late]: https://example.org\n"
         val engine = StreamingMarkdown()
@@ -74,5 +97,50 @@ class RenderingQualityTest {
         }
         println("REAL replay=${corpus.messages.size} formulas=$formulas currencyLines=${lines.size} delimiterMismatches=$mismatches")
         assertEquals(0, mismatches)
+    }
+}
+
+class CurrencyEmphasisTest {
+    private fun rendered(source: String) = com.coach.ui.markdown.renderMarkdownText(source)
+
+    @Test fun boldCurrencyShowsNoAsterisks() {
+        val out = rendered("你应该付 **$20**，保险付 $80。")
+        assertEquals("你应该付 $20，保险付 $80。", out.text)
+        assertTrue(out.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold && out.text.substring(it.start, it.end) == "$20" })
+    }
+    @Test fun boldCurrencyThroughTheMathTokenizer() {
+        val tokens = com.coach.domain.math.MathDelimiters.tokenize("你应该付 **$20**，保险付 $80。", true).segments
+        val shown = tokens.joinToString("") { it.text?.let { t -> rendered(t).text } ?: "⟦${it.math}⟧" }
+        assertEquals("你应该付 $20，保险付 $80。", shown)
+    }
+    @Test fun dollarsStayLiteralWhateverSurroundsThem() {
+        assertEquals("先付 $20，再付 $80", rendered("先付 \\$20，再付 \\$80").text)
+        assertEquals("price = $5", rendered("`price = $5`").text)
+        assertEquals("A $20, B $80, C $100", rendered("A $20, B $80, C $100").text)
+    }
+}
+
+class VerdictCopyTest {
+    @Test fun feedbackThatRepeatsTheVerdictIsDropped() {
+        assertNull(com.coach.ui.extraFeedback("回答正确（B）"))
+        assertNull(com.coach.ui.extraFeedback("回答正确。"))
+        assertNull(com.coach.ui.extraFeedback("  "))
+        assertEquals("需求缺乏弹性，因为 |ε|<1", com.coach.ui.extraFeedback("需求缺乏弹性，因为 |ε|<1"))
+    }
+}
+
+class WrongAnswerCopyTest {
+    private val letters = mapOf("o1" to "A", "o2" to "B", "o3" to "C")
+
+    @Test fun theCardNamesTheRightOptionFromTheServerSentence() {
+        val feedback = com.coach.domain.choiceFeedback("o2", "A", letters)
+        assertEquals("B", com.coach.ui.correctLetterOf(feedback))
+        assertNull(com.coach.ui.correctLetterOf(com.coach.domain.choiceFeedback("o2", "B", letters)))
+        assertEquals("✗ 答错了，正确答案是 B", com.coach.ui.verdictText(com.coach.client.CardGrade(false, 0, 1, feedback)))
+        assertEquals("✓ 答对了", com.coach.ui.verdictText(com.coach.client.CardGrade(true, 1, 1, com.coach.domain.choiceFeedback("o2", "B", letters))))
+    }
+    @Test fun extraExplanationIsKeptAfterTheVerdict() {
+        val grade = com.coach.client.CardGrade(false, 0, 1, "回答错误，正确答案是 C。需求缺乏弹性，因为 |ε|<1")
+        assertEquals("✗ 答错了，正确答案是 C：需求缺乏弹性，因为 |ε|<1", com.coach.ui.verdictText(grade))
     }
 }

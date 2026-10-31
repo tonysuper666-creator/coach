@@ -47,6 +47,7 @@ android {
         applicationId = "com.coach.android"
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
         buildConfigField("int", "COACH_PORT", localConfig.getProperty("coach.port", "18791"))
+        buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
         minSdk = 34
         targetSdk = 35
         versionCode = 1
@@ -64,6 +65,7 @@ dependencies {
     implementation(project(":shared:ui"))
     implementation(project(":shared:client"))
     implementation(libs.material3)
+    implementation("app.cash.sqldelight:android-driver:2.4.0")
     implementation("androidx.activity:activity-compose:1.12.0")
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)

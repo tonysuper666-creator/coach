@@ -51,7 +51,7 @@ def abort_after(port: int, body: dict, delay: float) -> None:
     s = socket.create_connection(("127.0.0.1", port), timeout=30)
     payload = json.dumps(body, ensure_ascii=False).encode()
     head = ("POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
-            "Content-Type: application/json\r\n"
+            "Content-Type: application/json\r\nX-Coach-Traffic: test\r\n"
             f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n")
     s.sendall(head.encode() + payload)
     time.sleep(delay)
@@ -114,7 +114,7 @@ class Bridge:
     def http(self, method: str, path: str, body: dict | None = None,
              headers: dict | None = None, timeout: float = 30):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Content-Type": "application/json"}
+        h = {"Content-Type": "application/json", "X-Coach-Traffic": "test"}
         h.update(headers or {})
         payload = json.dumps(body).encode() if body is not None else None
         conn.request(method, path, body=payload, headers=h)
@@ -294,6 +294,9 @@ def main() -> int:
         check("后台转派: 实际由 Codex 作答", oc and oc["served_by"] == "gpt-6.1-sol", str(oc and oc["served_by"]))
         check("后台转派: 头里写明原请求模型", r["headers"].get("x-coach-routed-from") == "claude-sonnet-5-5",
               str(r["headers"].get("x-coach-routed-from")))
+        r = b.ask("独立复核必须保持指定模型", headers={"X-Coach-Background": "1", "X-Coach-Model-Policy": "exact"})
+        check("exact model: 后台调用不被转派成同厂模型", r["x_coach"]["served_by"] == "claude-sonnet-5-5-stub" and not r["x_coach"]["fallback"], str(r["x_coach"]))
+
     finally:
         b.stop()
 
@@ -329,43 +332,26 @@ def main() -> int:
     finally:
         b2.stop()
 
-    # ---- 额度紧张时暂停后台（rate_limit_event utilization 0.95）----
-    b3 = Bridge(stub_dir, run_dir / "home-c", {"BRIDGE_BACKGROUND_BACKEND": ""})
+    # Utilization and obsolete cap settings must never block learning or tests.
+    b3 = Bridge(stub_dir, run_dir / "home-c", {"BRIDGE_BACKGROUND_BACKEND": "", "BRIDGE_DAILY_CLAUDE_CAP": "1", "BRIDGE_RATE_PAUSE_AT": "0.01"})
     try:
         b3.set_mode("rate")
-        r = b3.ask("前台把额度用到 0.95")
-        check("rate: 前台的 rate_limit_event 被记录",
-              json.loads(b3.http("GET", "/health")[2])["rate_limit"]["utilization"] == 0.95)
-        r = b3.ask("后台请求应被拒", headers={"X-Coach-Background": "1"})
-        check("rate: 后台请求 429", r["status"] == 429, str(r["status"]))
-        r = b3.ask("前台也应被拒")          # 期中保护：utilization≥0.5 暂停全部调用
-        check("rate: 前台请求也 429（≥0.5 全停）", r["status"] == 429, str(r["status"]))
+        for traffic in ("test", "user", ""):
+            r = b3.ask("额度信号不应拦截", headers={"X-Coach-Traffic": traffic})
+            check(f"unlimited: {traffic or 'default'} 流量继续放行", r["status"] == 200, str(r["status"]))
         h = json.loads(b3.http("GET", "/health")[2])
-        check("rate: /health 报 all_paused 与阈值 0.5",
-              h["rate_limit"]["all_paused"] is True and h["rate_limit"]["pause_at"] == 0.5)
-        calls_before = stub_procs(stub_dir)
-        check("rate: 暂停后没有新的桩进程", calls_before == 0, str(calls_before))
+        check("unlimited: 物理调用照常记账", h["daily"]["total_claude_calls"] == 3, str(h["daily"]))
+        check("unlimited: 无每日上限和暂停线", h["daily"]["claude_cap"] is None and not h["rate_limit"]["all_paused"])
+        b3.set_mode("rate429")
+        r = b3.ask("官方 429 必须告诉应用")
+        check("official 429: 终态明确 rate_limited", r["x_coach"]["reason"] == "rate_limited", str(r["x_coach"]))
+        b3.set_mode("rate429event")
+        started = time.monotonic()
+        r = b3.ask("官方拒绝后不等待 CLI 重试")
+        check("official rejection: 立即终态而非等超时", r["x_coach"]["reason"] == "rate_limited" and time.monotonic() - started < 2, str(r["x_coach"]))
+        check("official rejection: CLI 已回收", stub_procs(stub_dir) == 0)
     finally:
         b3.stop()
-
-    # ---- 每天 Claude 物理调用硬上限 ----
-    b4 = Bridge(stub_dir, run_dir / "home-d", {"BRIDGE_DAILY_CLAUDE_CAP": "2"})
-    try:
-        b4.set_mode("ok")
-        h = json.loads(b4.http("GET", "/health")[2])
-        check("daily: /health 报当天已用/上限", h["daily"]["claude_cap"] == 2 and h["daily"]["claude_calls"] == 0,
-              str(h["daily"]))
-        codes = [b4.ask(f"额度第 {i} 次")["status"] for i in range(3)]
-        check("daily: 前 2 次放行、第 3 次 429", codes[:2] == [200, 200] and codes[2] == 429, str(codes))
-        r = b4.ask("超出后再来一次")
-        check("daily: 超上限后仍 429", r["status"] == 429 and (r["error"] or {}).get("code") == "daily_claude_cap",
-              str((r["error"] or {}).get("code")))
-        h = json.loads(b4.http("GET", "/health")[2])
-        check("daily: 计数停在 2", h["daily"]["claude_calls"] == 2 and h["daily"]["remaining"] == 0, str(h["daily"]))
-        r = b4.ask("Codex 不受 Claude 额度限制", model="gpt-6.1-sol", stream=False)
-        check("daily: Codex 照常可用", r["status"] == 200, str(r["status"]))
-    finally:
-        b4.stop()
 
     shutil.rmtree(run_dir, ignore_errors=True)
 

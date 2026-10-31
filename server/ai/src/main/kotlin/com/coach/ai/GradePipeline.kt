@@ -1,14 +1,11 @@
 package com.coach.ai
 
 import com.coach.domain.grade.NumericValue
+import com.coach.domain.grade.EvidenceCheck
+import com.coach.domain.grade.EvidenceSpan
+import com.coach.domain.grade.VerbatimEvidence
 
-/**
- * 题池：生成（默认 Codex 一次 3 道）+ 异厂盲复核（默认 Claude，不看键自己作答再比对）。
- * 只有「结构合格 + 原文引句逐字 + 盲复核一致且无缺陷」才算 VERIFIED（ADR-0003 决定 4）。
- *
- * 期中前（d2 裁决 d）批量出题一律「Codex 出、Claude 复核」，且 Claude 每日硬上限 60 次，
- * 所以复核支持一次看多个 KP 的题（每批 4 个 KP），生成仍按 KP 各一次。
- */
+/** Claude generates text-only choices; Codex independently solves them before VERIFIED admission. */
 class QuestionPool(private val client: BridgeClient) {
 
     data class Rejected(val mcq: Mcq, val reasons: List<String>, val reviewerAnswer: String?)
@@ -19,6 +16,7 @@ class QuestionPool(private val client: BridgeClient) {
         val call: AiCall,
         val parsed: Boolean,
         val wallMs: Long,
+        val failureReason: String? = null,
     )
 
     data class ReviewEntry(
@@ -32,6 +30,7 @@ class QuestionPool(private val client: BridgeClient) {
         val verdicts: Map<Int, ReviewVerdict>,
         val call: AiCall?,
         val wallMs: Long,
+        val failureReason: String? = null,
     )
 
     data class PoolResult(
@@ -42,6 +41,7 @@ class QuestionPool(private val client: BridgeClient) {
         val wallMs: Long,
         val parsed: Boolean,
         val reviewWallMs: Long = 0,
+        val failureReason: String? = null,
     ) {
         val physicalCalls: Int get() = calls.sumOf { it.physicalCalls }
     }
@@ -51,7 +51,7 @@ class QuestionPool(private val client: BridgeClient) {
         objective: String,
         excerpt: String,
         count: Int,
-        generatorModel: String = BridgeClient.CODEX,
+        generatorModel: String = BridgeClient.CLAUDE,
         avoid: List<String> = emptyList(),
         background: Boolean = false,
     ): GenBatch {
@@ -75,14 +75,21 @@ class QuestionPool(private val client: BridgeClient) {
             kpId = kpId,
             questions = questions,
             call = generation.call,
-            parsed = generation is BridgeResult.Success,
+            parsed = generation is BridgeResult.Success && questions.isNotEmpty(),
+            failureReason = when {
+                generation is BridgeResult.Failure -> if (generation.reason.contains("timeout", true) || generation.terminal?.reason?.contains("timeout", true) == true) "TIMEOUT" else if (generation.reason == "empty_content") "EMPTY" else "MALFORMED"
+                questions.isNotEmpty() -> null
+                (generation as BridgeResult.Success).text.trim() == "[]" -> "EMPTY"
+                !generation.text.contains("[") && !generation.text.contains("{") -> "TEXT_ONLY"
+                else -> "MALFORMED"
+            },
             wallMs = (System.nanoTime() - started) / 1_000_000,
         )
     }
 
     fun reviewGroup(
         entries: List<ReviewEntry>,
-        reviewerModel: String = BridgeClient.CLAUDE,
+        reviewerModel: String = BridgeClient.CODEX,
         background: Boolean = false,
     ): ReviewBatch {
         if (entries.isEmpty()) return ReviewBatch(emptyMap(), null, 0)
@@ -110,7 +117,9 @@ class QuestionPool(private val client: BridgeClient) {
             }.associateBy { it.id } }
                 .getOrDefault(emptyMap())
         }
-        return ReviewBatch(verdicts, response.call, (System.nanoTime() - started) / 1_000_000)
+        return ReviewBatch(verdicts, response.call, (System.nanoTime() - started) / 1_000_000,
+            if (response is BridgeResult.Failure && (response.reason.contains("timeout",true) || response.terminal?.reason?.contains("timeout",true) == true)) "TIMEOUT"
+            else if (verdicts.isEmpty()) "MALFORMED" else null)
     }
 
     /** 一道题是否 VERIFIED：结构 + 原文引句 + 盲复核一致且无缺陷。返回拒绝原因（空 = 通过）。 */
@@ -133,15 +142,16 @@ class QuestionPool(private val client: BridgeClient) {
         objective: String,
         excerpt: String,
         count: Int,
-        generatorModel: String = BridgeClient.CODEX,
-        reviewerModel: String = BridgeClient.CLAUDE,
+        generatorModel: String = BridgeClient.CLAUDE,
+        reviewerModel: String = BridgeClient.CODEX,
         avoid: List<String> = emptyList(),
         background: Boolean = false,
     ): PoolResult {
+        require(modelVendor(generatorModel) != modelVendor(reviewerModel)) { "Review must use a different vendor" }
         val started = System.nanoTime()
         val generated = generateFor(kpId, objective, excerpt, count, generatorModel, avoid, background)
         if (generated.questions.isEmpty()) {
-            return PoolResult(kpId, emptyList(), emptyList(), listOf(generated.call), generated.wallMs, generated.parsed)
+            return PoolResult(kpId, emptyList(), emptyList(), listOf(generated.call), generated.wallMs, generated.parsed, failureReason = generated.failureReason)
         }
         val review = reviewGroup(listOf(ReviewEntry(kpId, excerpt, generated.questions, 0)), reviewerModel, background)
         val accepted = ArrayList<Mcq>()
@@ -160,6 +170,7 @@ class QuestionPool(private val client: BridgeClient) {
             wallMs = (System.nanoTime() - started) / 1_000_000,
             parsed = generated.parsed,
             reviewWallMs = review.wallMs,
+            failureReason = if (accepted.isEmpty()) "MALFORMED" else null,
         )
     }
 }
@@ -180,6 +191,7 @@ class GradePipeline(private val client: BridgeClient) {
         val rubricFingerprint: String,
         /** 草稿逐条（含模型给的引文）——不为通过，只为失败时能看清是模型引错了还是校验器误拒。 */
         val draft: DraftGrade? = null,
+        val evidenceSpans: List<GradedEvidence> = emptyList(),
     )
 
     fun gradeConstructed(
@@ -190,6 +202,7 @@ class GradePipeline(private val client: BridgeClient) {
         reviewerModel: String = BridgeClient.CODEX,
         background: Boolean = false,
     ): Outcome {
+        require(modelVendor(graderModel) != modelVendor(reviewerModel)) { "Review must use a different vendor" }
         val calls = ArrayList<AiCall>()
         val fingerprint = GradeGate.rubricFingerprint(question.rubric)
         if (fingerprint != expectedFingerprint) {
@@ -269,7 +282,10 @@ class GradePipeline(private val client: BridgeClient) {
         if (verdict.verdict != "CONFIRM") {
             return Outcome(false, null, listOf("review_${verdict.verdict.lowercase()}"), calls, verdict, spans, fingerprint, draft)
         }
-        return Outcome(true, current.awarded, emptyList(), calls, verdict, spans, fingerprint, current)
+        val located = current.items.mapNotNull { item ->
+            (VerbatimEvidence.verify(answer, item.evidence) as? EvidenceCheck.Accepted)?.let { GradedEvidence(item.id, it.span) }
+        }
+        return Outcome(true, current.awarded, emptyList(), calls, verdict, spans, fingerprint, current, located)
     }
 
     companion object {
@@ -285,3 +301,12 @@ class GradePipeline(private val client: BridgeClient) {
         }
     }
 }
+
+/** Vendor identity is checked both before dispatch and against bridge served_by. */
+internal fun modelVendor(model: String): String = when {
+    model.startsWith("claude") -> "anthropic"
+    model.startsWith("gpt") -> "openai"
+    else -> model.substringBefore("-")
+}
+
+data class GradedEvidence(val rubricItemId: String, val span: EvidenceSpan)

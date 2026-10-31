@@ -44,6 +44,8 @@ class StubTutor : AutoCloseable {
 
     fun httpError(status: Int) { replies.addLast(Triple("{}",-1L,status)) }
 
+    fun rateLimit() { replies.addLast(Triple("""{"error":{"code":"rate_limit_error","message":"429 Too many requests"}}""", -1L, 429)) }
+
     private fun handle(exchange: HttpExchange) {
         requests++
         requestBodies.add(exchange.requestBody.readBytes().decodeToString())

@@ -16,6 +16,7 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
+    parser.add_argument('--display-id', help='Physical SurfaceFlinger display ID (required for unambiguous multi-display captures)')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--label', required=True)
     parser.add_argument('--matrix', action='store_true', help='Outer/inner screen, light/dark')
@@ -55,7 +56,10 @@ def main():
                 for _ in range(3):
                     adb('shell', 'input', 'swipe', width//2, height*3//4, width//2, height//3, 500)
                     adb('shell', 'input', 'swipe', width//2, height//3, width//2, height*3//4, 500)
-            pixels = adb('exec-out', 'screencap', '-p', binary=True)
+            capture = ['exec-out', 'screencap', '-p']
+            if args.display_id:
+                capture += ['-d', args.display_id]
+            pixels = adb(*capture, binary=True)
             if not pixels.startswith(b'\x89PNG\r\n\x1a\n'):
                 raise RuntimeError('Screen capture was not a PNG')
             image = out / (tag + '.png')
@@ -66,7 +70,7 @@ def main():
             metrics = [line for line in logs.splitlines() if re.search(r'JANK|TTFT|first.?word|first.?token', line, re.I)]
             (out / (tag + '-metrics.txt')).write_text('\n'.join(metrics) + '\n')
             rows.append({'label': tag, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                         'screenshot': image.name, 'sha256': hashlib.sha256(pixels).hexdigest(),
+                         'screenshot': image.name, 'display_id': args.display_id, 'sha256': hashlib.sha256(pixels).hexdigest(),
                          'jankstats_log_lines': len([line for line in metrics if 'JANK' in line.upper()])})
     finally:
         if args.matrix:

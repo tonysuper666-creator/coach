@@ -1,55 +1,49 @@
 Coach M1-alpha Android integration
 
-Result: partial. Three knowledge points completed the learning loop with nine server-graded questions. Cached teaching first word: 35 / 16 / 14 ms. The original five real CLI follow-ups: 5704 / 4221 / 1275 / 6695 / 4514 ms; two exceed the 5 second target. These are all observed samples, with no slow sample removed.
+Result: partial. Builder-C's UI head b2a40a9 is integrated. Three knowledge points were repeated in a fresh isolated ledger: three explanations, nine question events, nine actual submissions and nine server grades; Today shows 3/49. After pairing, one tap on Continue starts the cached lesson. The current APK uses the shared ComposerField and AnchoredChatList.
 
-The application opens Today, starts the selected knowledge point, streams the actual model's teaching, consumes three independently reviewed questions, grades the selected server letters, and derives mastery from ledger facts. After pairing, one tap on Continue starts teaching. Synthetic answers and test devices live in an isolated acceptance directory; the installed user service retains its own untouched learning ledger.
+The UI renders headings, hanging lists, quotes, inline emphasis and math. Titles keep the complete first anchor and expose additional scope in details. Reading is bounded to 600dp, with two panes at 640dp. Status contrast is checked in both themes. Timing stays in developer logs. Reply metadata preserves the actual serving model, including fallback. Subsequent UI polish remains owned by Builder-C.
 
-Integrated inputs include streaming PR #13 through its merge into main, tutor state, verified question pool, Android screens and themes, six-digit device pairing, persistent service supervision, and read-only course loading. The integration adds bounded pool/preparation workers, source-hashed prepared lessons, the prewarm endpoint, a compatible combined schema v5, exact-model blind review, CLI rate-limit fallback, and course order preservation. The bridge has no daily call cap or local utilization pause. Real official Claude rate rejection explicitly switches interactive teaching to Codex and replaces the incomplete prefix. Pool review still rejects an unexpected vendor/model.
+Current observations
 
-Observed evidence
+- Cached first word in the latest three journeys: 36 / 65 / 35 ms.
+- All seven Builder-R live follow-ups: 5704 / 4221 / 1275 / 6695 / 4514 / 3449 / 5050 ms; 3 of 7 exceed five seconds. No slow sample is removed.
+- Latest real Chinese currency question: first word 5050 ms, network off 10.337 seconds, same message resumes with one snapshot and identical client/server UTF-8 SHA-256.
+- Ten actual single/two-pane switches preserve the Chinese draft and visible selected radio choice. Reading-anchor behavior also has shared UI tests; the latest manual run does not claim a separately quantified pixel anchor.
+- Actual Gboard Chinese Simplified Pinyin, default floating preedit: on-screen n i h a o, then first IME Enter, commits nihao to the draft; followup events remain 1 to 1. This is a real IME run, separate from unit tests.
+- JankStats learning/stream/resize: 2455 frames, 53 jank, p95 24.3ms, max 636.5ms. The later scroll segment is 202/1, UI-thread p95 5.2ms, max 73.1ms. gfxinfo measures the full frame separately: 185 frames, 12 janky, p95 21ms. Raw results remain in the evidence; these are different metrics.
+- Earlier delivery/review evidence remains historical, with its own APK hashes and phases. The latest screenshot set uses the current b2 UI, both 1248x1972 and 1848x2448, density 420, light/dark. A Pixel Fold emulator exposes multiple physical displays, so the capture tool accepts an explicit SurfaceFlinger display ID instead of silently choosing one.
 
-| Check | Observation |
-|---|---|
-| Three journeys | 3 explanations, 9 question_posed, 9 answer_submitted, 9 attempt_graded; Today 3/49 |
-| Prewarm | First five knowledge points: 7 / 6 / 6 / 8 / 6 VERIFIED questions and five prepared lessons; 31 physical CLI calls |
-| Call accounting | 31 prewarm calls plus 5 isolated follow-ups = 36 unique physical calls; the smoke DB contains a copied 19-call baseline plus 5 new calls (24), not another 24 calls; cached delivery adds zero |
-| Source loading | 49 names/order match, 49 resolved anchors, weights total 100, 49 packs; repeated seed changes no events or source bytes |
-| Reconnect | Network off 10.130 seconds; same message resumes with one snapshot revision and identical client/server SHA-256 |
-| Window changes | Ten outer/inner size switches retain draft and selected radio answer |
-| IME | Real Gboard Simplified Chinese Pinyin: on-screen n i h a o, then IME Enter; draft retained and no follow-up event created |
-| JankStats | Journey/stream/resize: 3416 frames, 9 jank, p50 2.4 ms, p95 7.0 ms, p99 27.2 ms, max 422.9 ms |
-| Scroll sample | 176 frames, 0 jank, p95 5.0 ms, max 7.3 ms |
-| Rendering | Actual formula and literal currency screenshots; 1248×1972 and 1848×2448, light and dark |
+Call accounting and course coverage
 
-Validation executed locally
+Deduplicating physical call IDs across the formal preparation ledger and the three Builder-R smoke ledgers gives 38 model calls: 31 preparation, five original follow-ups, one f5 follow-up, one b2 follow-up. Copied baselines are not added again. Separate Builder-C upstream acceptance calls are not included in this Builder-R count.
 
-- JVM results: domain 48, client 15, UI 19, store 17, core 15, AI 46, app 52; 212 total, no failure/error/skip. Tasks were executed in integration batches, with affected modules rerun after changes.
-- Final server batch: `./gradlew :server:store:test :server:ai:test :server:app:test :server:app:installDist --max-workers=6`.
-- Final Android batch: `./gradlew :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest --max-workers=6`.
-- `tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py`: 58/58. Includes official 429/rejected terminal, child reaping, unlimited test/user/default traffic, and exact model routing.
-- `tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py`: 2 tests pass. The authorized 2026-11-02 00:00–15:00 UTC interval blocks every enabled backend before dispatch, physical calls 0.
-- `tools/dev/check-pairing.py` supports `COACH_PAIRING_AVD` / `COACH_PAIRING_SERIAL` to give acceptance its own emulator. The full script passed pairing, fresh process/Keystore, HTTP+WS, both cleartext policy tests and revocation, with ai_calls=0. The dual-connection test runs SyncEngine and TutorClient together on two cores, exercising the Android IO dispatcher fix. A separate process test verifies that inherited managed-service settings do not redirect the CLI pairing code away from the terminal or into logs.
+There are five prepared records and 33 VERIFIED questions, stocked 7/6/6/8/6 in the formal service. This is not proof that all five objectives are fully covered: the fourth cached lesson explicitly says its excerpt lacks the named coinsurance/copayment/deductible definitions. First-three learning loops pass; broader source coverage remains incomplete. Formal learning data stays separate from test ledgers. No old learning history is migrated.
 
-Installation and service handoff
+Integration and validation
 
-The debug APK is copied to the Mac Desktop as Coach.apk. The Mac Desktop also has Coach pairing/start/stop command launchers; the pairing helper starts the service if needed and produces a fresh six-digit, single-use code. Both devices must be connected to the tailnet. The server uses a LaunchAgent and a durable release copy outside task checkouts; its installation record and logs are under the user's Coach service/log directories. Closing the Android app leaves that supervised service available. Stop/start launchers retain its data.
+The branch is based on main 11ec183 after #13/#14/#17/#21/#22 merged. It preserves study-companion routes and independent source-index repair. The integration adds prepared lessons, actor-owned supply, compatible schema v5, course ordering, exact-model blind review, persistent service supervision and the Codex subscription-config fix.
 
-Unfinished acceptance and boundaries
+Current unique JVM results: domain48, client15, UI27, store17, core15, AI46, app52 = 220; zero failure/error/skip. Unchanged backend/client gates were executed in earlier integration batches; after the UI merge, the following passed again:
 
-- Real CLI follow-up first word does not consistently meet 5 seconds.
-- Physical Fold8 installation, screen shape and keyboard still need device acceptance.
-- Completed chat history is stored on the server but is not yet rehydrated into the Android conversation after a fresh process; mastery and question/grade cards do restore.
-- A failed formula displays a source chip. The earlier real source-chip sample is accepted by the current math service (HTTP 200); its original cause is not established, so it is not evidence of malformed model TeX. A deliberately invalid command is separately rejected with HTTP 422 and replayed in the existing M0 shared renderer as an explicitly labelled fault fixture. Live fractions and currency rendered correctly; this does not prove arbitrary generated formulas always render.
-- The raw screenshot sets identify their capture stage. The final Today set includes the system bar contrast fix; the earlier math set uses the same renderer before that status bar adjustment.
-- No old learning history migration was performed. DeepTutor remains the fallback. No files or service on port 8790 were changed.
-- Rebased onto main 11ec183 after PRs #13, #14, #17, #21 and #22 merged. Main's replay/preflight tests, study-companion routes and independent source-index repair are preserved. The subsequent QA revision limits reading width, puts extra title anchors behind scope details, shows complete first-anchor titles, renders list bullets, retains paragraph boundaries, keeps short in-sentence formulas inline, trims display-math continuation indentation and removes timing metrics from the learner screen. A movable study pane retains draft and choices across the single/two-pane boundary; each question has a stable lazy-list key, so resizing does not move from question two back into question one. The served model propagates to reply metadata. Codex subprocesses use the subscription configuration already allowed by the bridge sandbox, including when launched from a task runtime.
+    ./gradlew :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest --max-workers=6
 
-QA handoff, 2026-10-31 03:05 UTC
+The original full shared/server gate and APK build commands are preserved in the issue evidence. The current delivery also reruns the full check-pairing.py script against the exact APK, covering fresh-process Keystore, HTTP/WS, allowlist enforcement, dual clients and revocation, with ai_calls=0.
 
-Items 1–6 of the screenshot review were already implemented and checked before the ownership change: paragraph/list rendering, contextual inline math, complete first-anchor titles, bounded/two-pane reading, stronger unstarted contrast and a separate status row. Timing is retained in logs and hidden from learners. The three knowledge points were repeated in a fresh isolated ledger: nine actual submissions and nine server grades; the refreshed APK restores Today 3/49. Ten actual one/two-pane switches retained a Chinese draft and checked radio choice. Scope details preserve the additional title anchors. Each question owns a stable list key, and message arrival anchors live as long as the controller across a trip back to Today.
+Unchanged bridge code was verified with fault_injection.py (58/58) and exam_protection.py (2/2); those were not needlessly repeated for UI-only changes. There is no daily call cap or utilization pause. Official Claude rejection switches interactive teaching to Codex, replaces the partial prefix and explains the switch. Pool blind reviews still reject a changed vendor/model. November 2 00:00-15:00 UTC rejects model calls before CLI dispatch.
 
-Builder-C owns subsequent UI work in TON-1099, including the ComposerField/AnchoredChatList integration. This snapshot is the integration input for that work, rather than the final 07:30 acceptance of the forthcoming UI head. Evidence captures distinguish the original delivery, the reviewed layout and the refreshed package. The original five live latency samples above remain all reported samples from that stage; any further samples belong to the issue's later evidence attachment.
+Remaining limits
 
-Content coverage caveat: five prepared records and verified stock exist, but the fourth cached lesson explicitly says its chapter excerpt lacks the coinsurance/copayment/deductible definitions named in that objective. The first three full learning journeys pass; do not describe all five objectives as fully covered. A later grounded Chinese follow-up supplied the contract terms explicitly and received a real explanation of the $100 / 20% split. Formal learning data remained separate from all these checks.
+- Live first word is not consistently within five seconds; streaming/resize also contains jank outliers.
+- A real response containing the line below exposes the emphasis markers around the currency amount. This is a new observed case for Builder-C, with the raw image retained; the existing 27 UI tests do not cover it.
 
-The additional Chinese contract question used one real Claude call and reached first word in 3449 ms; the new cached lesson reached first word in 76 ms. Across the original five and this one live follow-up, 2 of 6 exceed five seconds. Unique task accounting is 31 preparation calls + 5 original isolated follow-ups + 1 later follow-up = 37; copied DB baselines are excluded.
+    你应该付 **$20**，保险付 $80。
+
+- QA-C's prior snapshot passed visual review without blockers, but suggested more answer space, stronger light selected state, better left-pane/header alignment and less internal wording. These are follow-up UI work, not an approval of every pixel in the new snapshot. Keep the user's complete-title requirement when addressing the left pane.
+- Completed chat history is stored server-side but is not yet rehydrated into a fresh Android process. Mastery and question/grade cards restore.
+- Physical Fold8 acceptance is still outstanding.
+- A formula failure preserves source text. The earlier real source-chip sample now receives HTTP200 from math service; its original cause is not established. Explicit invalid-TeX screenshots use a labelled M0 shared-renderer fault fixture, with HTTP422 confirmed and no model call. They are not invented live tutor output.
+
+Installation
+
+Coach.apk and a plain-language installation guide are copied to the Mac Desktop. Pairing/start/stop launchers control a durable user LaunchAgent release outside task checkouts. Its record and logs live under the user's Coach service/log directories. Pairing produces a fresh six-digit single-use code in the invoking terminal. Both devices need the tailnet; the Mac must be awake, online and logged in. The service data survives stop/start. DeepTutor remains the fallback.

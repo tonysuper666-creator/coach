@@ -75,7 +75,7 @@ fun runCoach() {
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
         Window(onCloseRequest = { tutor.close(); reporter.close(); scope.cancel(); mathHttp.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
-            CoachApp(controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1")
+            CoachApp(controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", initialSource = System.getenv("COACH_OPEN_SOURCE") == "1")
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(controller, it) } }
             LaunchedEffect(Unit) {

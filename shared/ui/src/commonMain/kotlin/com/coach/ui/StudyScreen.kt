@@ -6,6 +6,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
@@ -72,14 +73,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
                     Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
-                    // 范围、本次参考（点开就是教材原文那一页）、状态放在同一组里，放不下就换行，不压标题。
+                    // 范围、看原文（点开就是本知识点锚点所在的教材页）、状态放在同一组里，放不下就换行，不压标题。
                     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
                     FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Text(if (showScope) "收起学习范围" else tag.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · 共 ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾", style = MaterialTheme.typography.labelMedium)
                         }
-                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
-                            Text("本次参考：${kp.reference.ifBlank { "教材" }} ›", style = MaterialTheme.typography.labelMedium)
+                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) OutlinedButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                            Text("看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
                         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }

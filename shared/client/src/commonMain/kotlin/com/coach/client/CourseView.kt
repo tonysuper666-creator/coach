@@ -11,7 +11,13 @@ import kotlinx.serialization.json.jsonObject
 
 enum class KpStatus(val label: String) { NEW("未开始"), IN_PROGRESS("学习中"), PASSED("已通过"), SOLID("稳固"), NEEDS_REPAIR("需修复") }
 
-data class KpRow(val id: String, val title: String, val status: KpStatus, val explained: Boolean, val conceptIds: List<String>)
+data class KpRow(
+    val id: String, val title: String, val status: KpStatus, val explained: Boolean, val conceptIds: List<String>,
+    /** 课程模块（章）名；没有就空。 */
+    val module: String = "",
+    /** 备课教材页范围，如「教材 p.12–15」；锚点没有书页号就空。 */
+    val reference: String = "",
+)
 
 data class QuizCard(
     val attemptId: String,
@@ -35,14 +41,30 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()
         val explained = HashSet<String>()
+        val modules = HashMap<String, String>()
+        val moduleOf = HashMap<String, String>()
+        val references = HashMap<String, String>()
         for (e in events) when (e.type) {
-            "outline_revised" -> for (op in (e.payload["ops"] as? JsonArray).orEmpty()) {
+            "outline_revised" -> {
+            // 课程内容装载（TON-1127）把整份 CourseContent 放在事件里：知识点名、模块、概念、教材页锚点。
+            for (m in (e.payload["modules"] as? JsonArray).orEmpty()) (m as? JsonObject)?.let { modules[it.s("id")] = it.s("title") }
+            for (k in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
+                val o = k as? JsonObject ?: continue
+                val id = o.s("id"); if (id.isBlank()) continue
+                titles[id] = o.s("title").ifBlank { id }
+                moduleOf[id] = o.s("moduleId")
+                (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
+                val pages = (o["anchors"] as? JsonArray).orEmpty().mapNotNull { a -> ((a as? JsonObject)?.get("bookPage") as? JsonPrimitive)?.intOrNull }
+                if (pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
+            }
+            for (op in (e.payload["ops"] as? JsonArray).orEmpty()) {
                 val o = op as? JsonObject ?: continue
                 val id = o.s("kpId").ifBlank { o.s("id") }
                 if (id.isBlank()) continue
                 val title = o.s("title").ifBlank { o.s("name") }
                 if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
+            }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
             "explanation_delivered" -> explained += e.payload.s("kpId")
@@ -61,7 +83,7 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
                 id in explained || id in attempted || projection.position.current == id -> KpStatus.IN_PROGRESS
                 else -> KpStatus.NEW
             }
-            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id))
+            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty())
         }
     }
 

@@ -62,7 +62,7 @@ private fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolea
                 val isMine = shown == letter
                 val cardGrade = card.grade
                 val border = when {
-                    cardGrade != null && isMine -> if (cardGrade.correct) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                    cardGrade != null && isMine -> if (cardGrade.correct) successColor() else MaterialTheme.colorScheme.error
                     isMine -> MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.outlineVariant
                 }
@@ -82,7 +82,7 @@ private fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolea
                 Text(
                     (if (grade.correct) "✓ 答对了" else "✗ 答错了") + if (grade.feedback.isNotBlank()) "：${grade.feedback}" else "",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (grade.correct) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                    color = if (grade.correct) successColor() else MaterialTheme.colorScheme.error,
                 )
             }
         }

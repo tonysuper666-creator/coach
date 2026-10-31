@@ -1196,7 +1196,7 @@ async def health(request: Request):
     if request.query_params.get("scope") == "process":
         # Liveness must not wait for CLI auth probes (up to 20s), or depend on
         # subscription availability. Full /health continues to report upstreams.
-        return {"ok": True, "service": "coach-bridge", "port": PORT}
+        return {"ok": True, "service": "coach-bridge", "port": PORT, "pid": os.getpid()}
     payload = await health_payload()
     payload["request_id"] = request.headers.get("x-request-id") or "-"
     return payload

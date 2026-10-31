@@ -36,7 +36,9 @@ def wait_ready(predicate=lambda _: True, timeout=60):
     while time.monotonic() < deadline:
         try:
             current = states()
-            assert all(s['healthy'] and time.time() * 1000 - s['checkedAt'] < 15000 for s in current.values())
+            assert all(s['healthy'] and s['pid'] > 0 and time.time() * 1000 - s['checkedAt'] < 15000 for s in current.values())
+            assert len({s['ownerPid'] for s in current.values()}) == 1
+            assert all(INFO['root'] in (identity(s['ownerPid']) or '') for s in current.values())
             assert predicate(current)
             hello()
             return current
@@ -83,7 +85,8 @@ def main():
     tracked = {s[k]: identity(s[k]) for s in before.values() for k in ('pid', 'guardPid', 'ownerPid')}
     subprocess.run(['python3', str(BASE / 'control.py'), 'stop'], check=True)
     try:
-        assert all(identity(pid) != previous for pid, previous in tracked.items()), 'Stop left a service process alive'
+        remaining = [pid for pid, previous in tracked.items() if identity(pid) == previous]
+        assert not remaining, f'Stop left service processes alive: {remaining}'
         for host in ('127.0.0.1', INFO['tailHost']):
             try:
                 urllib.request.urlopen(f'http://{host}:{INFO["port"]}/v1/hello', timeout=1)

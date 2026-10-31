@@ -47,11 +47,11 @@ object StreamStatus {
     const val FAILED = "failed"
     const val CANCELLED = "cancelled"
 
-    /** 桥的 `x_coach.status` 一一映射；没有终态帧 = 截断（ADR-0002）。 */
+    /** 桥的终态映射；complete 必须有可见正文；没有终态帧 = 截断（ADR-0002）。 */
     fun fromBridge(status: String?, cancelled: Boolean, hasText: Boolean): String = when {
         cancelled -> CANCELLED
         status == null -> TRUNCATED
-        status == COMPLETE -> COMPLETE
+        status == COMPLETE -> if (hasText) COMPLETE else FAILED
         status == CANCELLED -> CANCELLED
         status == TRUNCATED -> TRUNCATED
         status == "failed" -> if (hasText) TRUNCATED else FAILED

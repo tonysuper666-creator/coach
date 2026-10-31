@@ -13,7 +13,7 @@ class VisibleStreamTest {
 
     @Test
     fun proseIntervalsSetsAndCitationsSurviveEveryDeltaBoundary() {
-        for (answer in listOf("效用取值在区间 [0, 1] 之间。", "集合 {A, B} 是两种方案。", "参见文献[1]。", "上一行。\n区间 [0, 1] 与集合 {A, B}，参见文献[1]。")) {
+        for (answer in listOf("[0, 1] 是效用的取值范围。", "[1] Drummond 2015。", "  [1]  引文。\n下一行", "{\"a\":1} 是一个对象示例。", "第一行\n[1] Drummond 2015。", "效用取值在区间 [0, 1] 之间。", "集合 {A, B} 是两种方案。", "参见文献[1]。", "上一行。\n区间 [0, 1] 与集合 {A, B}，参见文献[1]。")) {
             for (boundary in 0..answer.length) {
                 val recorder = Recorder()
                 recorder.push(answer.take(boundary))
@@ -26,6 +26,24 @@ class VisibleStreamTest {
             answer.forEach { recorder.push(it.toString()) }
             recorder.finish()
             assertEquals(answer, recorder.texts.toString(), "one-character deltas in $answer")
+        }
+    }
+
+    @Test
+    fun standaloneJsonWaitsForLineEndAndNeverLeaksAcrossAnyBoundary() {
+        for (raw in listOf("[0, 1]", "{\"answer\":1}", "{\n\"answer\": [1]\n}")) {
+            for (suffix in listOf("", "   ", " \n正文。\n")) {
+                val answer = raw + suffix
+                for (boundary in 0..answer.length) {
+                    val recorder = Recorder()
+                    recorder.push(answer.take(boundary))
+                    assertEquals("", recorder.texts.toString().takeIf { boundary <= raw.length }.orEmpty())
+                    recorder.push(answer.drop(boundary))
+                    recorder.finish()
+                    assertEquals(if ('\n' in suffix) "正文。\n" else "", recorder.texts.toString())
+                    assertTrue(recorder.drops.any { it.reason == "raw_json" })
+                }
+            }
         }
     }
 

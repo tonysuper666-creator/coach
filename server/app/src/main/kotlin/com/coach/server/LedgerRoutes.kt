@@ -198,7 +198,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
             // Serialize resume snapshot creation + delivery against this socket's deltas.
             val tutorSend = Mutex()
-            val tutor=chat?.let { service -> launch { service.hub.frames.collect { frame -> tutorSend.withLock { if (stillAuthorized()) send(Frame.Text(frame.toString())) } } } }
+            val tutor=chat?.let { service -> launch(start = CoroutineStart.UNDISPATCHED) { service.hub.frames.collect { frame -> tutorSend.withLock { if (stillAuthorized()) send(Frame.Text(frame.toString())) } } } }
             val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
             try { for(frame in incoming) if(frame is Frame.Text) {
                 if (!stillAuthorized()) break

@@ -7,7 +7,7 @@
 ;     这样导师绕开备课包自己去翻整本教材的路也就断了。
 ;   - 去掉 ~/DeepTutor/sealed 的单列规则（已不在视野内，保留会给出错误暗示）。
 ;   - ~/Coach 默认全禁，只放行桥自己的工作目录 ~/Coach/bridge/work（CLI 的 cwd 与临时输出）。
-;     课程库、事件账本、备份（~/Coach/data、~/Coach/backups）对 CLI 一律不可读。
+;     实际工作路径由 @@WORK_DIR@@ 渲染；课程库、事件账本、备份对 CLI 一律不可读。
 ;   - 其余白名单与 DeepTutor 版一致：CLI 自己的程序、配置、登录状态、缓存、工具链与 shell 启动文件。
 ; Claude 不走这个沙箱（与 8790 现役行为一致：--tools "" + --strict-mcp-config + 无 MCP，天然没有工具面）。
 (allow default)
@@ -35,9 +35,9 @@
   (home ".zsh") (home ".cargo") (home ".nvm") (home ".bun") (home ".rustup"))
 (allow file-read* file-write* (regex #"^@@HOME@@/\.zcompdump"))
 
-; 桥自己的工作目录（CLI 的 cwd、codex 的 -o 输出文件）。
-(allow file-read* file-write* (home "Coach/bridge/work"))
+; 仅当前桥实例的工作目录（CLI 的 cwd、codex 的 -o 输出文件），支持隔离副本。
+(allow file-read* file-write* (subpath "@@WORK_DIR@@"))
 
 ; 课程库与运行数据：写在最后，优先于上面的放行规则。
 (deny file-read* file-write* (home "Coach"))
-(allow file-read* file-write* (home "Coach/bridge/work"))
+(allow file-read* file-write* (subpath "@@WORK_DIR@@"))

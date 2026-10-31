@@ -8,3 +8,5 @@ __pycache__/
 
 /.ledger-evidence/
 /tools/bridge/.venv/
+/.service-evidence/
+/.service-build.log

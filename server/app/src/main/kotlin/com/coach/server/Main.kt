@@ -21,6 +21,8 @@ import java.util.Base64
 
 
 fun main(args: Array<String>): Unit = runBlocking {
+    val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
+    if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
     if (args.firstOrNull() in setOf("pair-code", "devices", "revoke")) {
         pairingCommand(args, data)
@@ -52,6 +54,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val token = Files.readString(tokenPath).trim()
     store.enroll(device,token)
     val actor = LedgerActor(this,store)
+    val children = if (managed) ChildServices(this) else null
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
     val chat = ChatService(actor, this)
@@ -128,11 +131,13 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
+        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
         local.stop(100, 1000)
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
+    children?.start()
     try { awaitCancellation() } finally {
+        withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()
         local.stop(100, 1000)
         maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close();lock.release();fileLock.close()

@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.domain.today
 import com.coach.client.KpRow
 import com.coach.client.KpStatus
 import com.coach.client.TutorUiState
@@ -34,6 +35,8 @@ fun TodayScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("今天", style = MaterialTheme.typography.headlineMedium)
+                    // 分值口径的「学了多少」：和聊天里问「我学了多少」得到的是同一个数（TON-1092）。
+                    Text(view.projection.today(c.nowMillis()).coverageText, style = MaterialTheme.typography.titleMedium)
                     Text("已通过 $passed / ${kps.size} 个知识点", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (target != null) {
                         ContinueCard(target) { onOpen(target.id, true) }

@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = 600.dp
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null) {
     val thread = threadIdFor(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
@@ -80,6 +80,9 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                         }
                         StatusChip(kp.status.label, MaterialTheme.colorScheme.primary)
+                    }
+                    if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(0.dp)) {
+                        Text("打开教材第 ${if (kp.anchorBookPage > 0) "${kp.anchorBookPage} 页（书页）" else "${kp.anchorPdfPage} 页"} ›", style = MaterialTheme.typography.labelLarge)
                     }
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)

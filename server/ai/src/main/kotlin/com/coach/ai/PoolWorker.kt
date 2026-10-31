@@ -35,7 +35,7 @@ class PoolWorker(
                 withContext(Dispatchers.IO) {
                     beforeCall(BridgeClient.CLAUDE)
                     pool.generateFor(input.str("kp"),input.str("objective"),input.str("excerpt"),3,
-                        avoid=avoid,background=background)
+                        avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"))
                 }
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
@@ -43,8 +43,7 @@ class PoolWorker(
             }
             actor.execute { recordAiCall(generated.call.toJson(),type) }
             if (generated.questions.size != 3) {
-                val accepted = actor.execute { failSupply(token,generated.failureReason ?: "MALFORMED") }
-                return Step(job.id,job.kind,if(accepted) "failed" else "stale")
+                return failureStep(job,token,generated.failureReason ?: "MALFORMED")
             }
             var questions = generated.questions
             if (questions.any { !QuestionGate.quotedVerbatim(it,input.str("excerpt")) }) {
@@ -67,8 +66,7 @@ class PoolWorker(
                         .associate { row -> row.num("id").toInt() to row.str("source_quote") }
                 }.getOrNull() }
                 if (quotes == null || questions.indices.any { !QuestionGate.sourceQuoteVerbatim(quotes[it].orEmpty(),input.str("excerpt")) }) {
-                    val failed=actor.execute { failSupply(token,"MALFORMED") }
-                    return Step(job.id,job.kind,if(failed) "failed" else "stale")
+                    return failureStep(job,token,"MALFORMED")
                 }
                 questions=questions.mapIndexed { i,q -> q.copy(sourceQuote=quotes.getValue(i)) }
             }
@@ -97,12 +95,18 @@ class PoolWorker(
             else VerifiedPoolQuestion(q.stem,q.options,q.correctOptionId,q.explanation,q.sourceQuote,generator,reviewer)
         }
         if (accepted.isEmpty()) {
-            val committed=actor.execute { failSupply(token,review.failureReason ?: "MALFORMED") }
-            return Step(job.id,job.kind,if(committed) "failed" else "stale")
+            return failureStep(job,token,review.failureReason ?: "MALFORMED")
         }
         val inserted=actor.execute { storeVerifiedBatch(token,job,accepted) }
         val state=actor.execute { jobState(job.id)?.first ?: "stale" }
         return Step(job.id,job.kind,state,inserted)
+    }
+
+    private suspend fun failureStep(job: SupplyJob, token: Fence, reason: String): Step {
+        if(reason=="MALFORMED" && actor.execute { retryMalformedSupply(token,job) })
+            return Step(job.id,job.kind,"retrying")
+        val failed=actor.execute { jobState(job.id)?.first=="failed" || failSupply(token,reason) }
+        return Step(job.id,job.kind,if(failed) "failed" else "stale")
     }
 
     private suspend fun runConstructed(job: SupplyJob, token: Fence, type: String): Step {

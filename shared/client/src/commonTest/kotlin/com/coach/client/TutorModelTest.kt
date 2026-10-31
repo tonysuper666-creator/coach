@@ -89,6 +89,18 @@ class TutorModelTest {
         assertEquals("正在补题（约 20 秒）", m.state.value.threads.getValue(thread).poolText)
     }
 
+    @Test fun poolPreparationDisablesDuplicateTapsAndFailureAllowsRetry() {
+        val m=model()
+        for(phase in listOf("pool_queued","pool_generating","pool_retrying","pool_reviewing")) {
+            m.onFrame("""{"t":"tutor.progress","threadId":"$thread","phase":"$phase","text":"正在准备题目"}""")
+            assertTrue(m.state.value.threads.getValue(thread).busy)
+        }
+        m.onFrame("""{"t":"tutor.progress","threadId":"$thread","phase":"pool_failed","text":"请重试"}""")
+        assertFalse(m.state.value.threads.getValue(thread).busy)
+        m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"AWAIT_ANSWER"}""")
+        assertNull(m.state.value.threads.getValue(thread).poolText)
+    }
+
     @Test fun disconnectIsRecordedWithTheLastSeenTime() {
         var now = 5_000L
         val m = TutorModel({ now })

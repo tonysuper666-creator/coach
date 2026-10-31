@@ -45,6 +45,8 @@ android {
     buildToolsVersion = "37.0.0"
     defaultConfig {
         applicationId = "com.coach.android"
+        // `-Pcoach.appIdSuffix=.t1100` installs next to another build on a shared test phone instead of overwriting it.
+        providers.gradleProperty("coach.appIdSuffix").orNull?.let { suffix -> require(suffix.matches(Regex("\\.[a-z0-9]{1,16}"))); applicationId = "com.coach.android$suffix" }
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
         // `-Pcoach.port=NNNN` builds against a non-production test server (real-device measurements must never pair with 18791).
         buildConfigField("int", "COACH_PORT", (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) })

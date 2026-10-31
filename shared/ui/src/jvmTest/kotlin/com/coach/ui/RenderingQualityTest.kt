@@ -99,3 +99,23 @@ class RenderingQualityTest {
         assertEquals(0, mismatches)
     }
 }
+
+class CurrencyEmphasisTest {
+    private fun rendered(source: String) = com.coach.ui.markdown.renderMarkdownText(source)
+
+    @Test fun boldCurrencyShowsNoAsterisks() {
+        val out = rendered("你应该付 **$20**，保险付 $80。")
+        assertEquals("你应该付 $20，保险付 $80。", out.text)
+        assertTrue(out.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold && out.text.substring(it.start, it.end) == "$20" })
+    }
+    @Test fun boldCurrencyThroughTheMathTokenizer() {
+        val tokens = com.coach.domain.math.MathDelimiters.tokenize("你应该付 **$20**，保险付 $80。", true).segments
+        val shown = tokens.joinToString("") { it.text?.let { t -> rendered(t).text } ?: "⟦${it.math}⟧" }
+        assertEquals("你应该付 $20，保险付 $80。", shown)
+    }
+    @Test fun dollarsStayLiteralWhateverSurroundsThem() {
+        assertEquals("先付 $20，再付 $80", rendered("先付 \\$20，再付 \\$80").text)
+        assertEquals("price = $5", rendered("`price = $5`").text)
+        assertEquals("A $20, B $80, C $100", rendered("A $20, B $80, C $100").text)
+    }
+}

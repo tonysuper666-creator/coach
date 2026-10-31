@@ -206,7 +206,10 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
 internal fun renderMarkdownText(source: String): AnnotatedString = buildAnnotatedString { appendStyledMarkdown(source) }
 
 /** Render inline AST styles; reference definitions/links and raw HTML stay literal. */
-private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
+private fun AnnotatedString.Builder.appendStyledMarkdown(raw: String) {
+    // Math is handled before this point (MathDelimiters), so every `$` that arrives here is a plain character, usually currency.
+    // The GFM parser would pair two of them as inline LaTeX and swallow the emphasis between them (`**$20**，… $80` showed its asterisks).
+    val source = escapeDollars(raw)
     val root = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(source)
     fun visit(node: ASTNode) {
         val type = node.type.name
@@ -216,7 +219,7 @@ private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
             type == "LINK_DEFINITION" || type.contains("REFERENCE_LINK") -> append(value)
             type == "STRONG" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { node.children.filterNot { it.type.name in setOf("EMPH", "STRONG") && it.children.isEmpty() }.forEach(::visit) }
             type == "EMPH" && node.children.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { node.children.filterNot { it.type.name == "EMPH" && it.children.isEmpty() }.forEach(::visit) }
-            type == "CODE_SPAN" -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(value.trim('`')) }
+            type == "CODE_SPAN" -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(value.trim('`').replace("\\$", "$")) }
             type == "ATX_CONTENT" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontSize = 22.sp)) { node.children.forEach(::visit) }
             type == "INLINE_LINK" -> {
                 val label = node.children.find { it.type.name == "LINK_TEXT" }
@@ -228,6 +231,19 @@ private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
         }
     }
     visit(root)
+}
+
+/** Backslash-escape every `$` that is not already escaped, so the parser never reads a dollar pair as a formula. */
+private fun escapeDollars(text: String): String {
+    if ('$' !in text) return text
+    val out = StringBuilder(text.length + 4)
+    var backslashes = 0
+    for (ch in text) {
+        if (ch == '$' && backslashes % 2 == 0) out.append('\\')
+        out.append(ch)
+        backslashes = if (ch == '\\') backslashes + 1 else 0
+    }
+    return out.toString()
 }
 
 /** CommonMark backslash escapes: a backslash before ASCII punctuation is dropped. Plain loop, no regex (ICU rejects `{` in classes). */

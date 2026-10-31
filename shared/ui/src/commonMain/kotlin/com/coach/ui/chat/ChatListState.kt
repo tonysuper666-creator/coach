@@ -35,19 +35,7 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
     /** Newest item key seen, and whether the reader was at the tail when a newer item arrived (the list keeps the old first item on screen, hiding the new one). */
     internal var newestKey: Any? = null
     internal var followNewest = false
-    internal var newestFirstKeys: List<Any> by mutableStateOf(emptyList())
-    internal var focusRequest = 0L
-    private var requestedKey: Any? = null
-
-    /** Select the new group's first card before LazyColumn measures the old tail. */
-    fun requestItemTop(key: Any, newestFirstIndex: Int) {
-        if (requestedKey == key) return
-        requestedKey = key
-        focusRequest++
-        followNewest = false
-        anchor.pinned = false
-        list.requestScrollToItem(newestFirstIndex, 0)
-    }
+    internal var newestFirstKeys: List<Any> = emptyList()
 
     /** The reader sent something or asked for "回到最新": follow the tail again. */
     suspend fun scrollToTail() { anchor.pinned = true; list.scrollToItem(0, 0) }
@@ -57,12 +45,11 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
      * The list is laid out from the bottom, so the item's offset is how far its bottom edge sits above (positive: below) the viewport bottom.
      */
     suspend fun scrollItemTopIntoView(key: Any) {
-        val index = snapshotFlow { newestFirstKeys.indexOf(key) }.first { it >= 0 }
-        focusRequest++
-        followNewest = false
+        val index = newestFirstKeys.indexOf(key).takeIf { it >= 0 } ?: return
         anchor.pinned = false
         snapshotFlow { restoring }.first { !it }
-        if (requestedKey != key) list.scrollToItem(index, 0)
+        androidx.compose.runtime.withFrameNanos { }
+        list.scrollToItem(index, 0)
         val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
         val info = list.layoutInfo
         val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
@@ -106,13 +93,9 @@ fun <T> AnchoredChatList(
     }
     LaunchedEffect(newest) {
         if (state.followNewest) {
-            val focusRequest=state.focusRequest
             androidx.compose.runtime.withFrameNanos { }
-            // An explicit new-question focus supersedes the earlier follow-tail request.
-            if(focusRequest==state.focusRequest) {
-                list.scrollToItem(0, 0)
-                anchor.pinned = true
-            }
+            list.scrollToItem(0, 0)
+            anchor.pinned = true
             state.followNewest = false
         }
     }

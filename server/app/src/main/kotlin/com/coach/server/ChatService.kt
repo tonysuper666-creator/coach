@@ -180,9 +180,7 @@ class ChatService(
 
     /** Button actions retain §2.6's recap; text intents pass allowExample=false (§5.8). */
     suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false, allowExample: Boolean = true): String {
-        val traceStarted=System.nanoTime()
         var outcome = tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
-        if(System.getenv("COACH_POOL_TRACE")=="1") log("COACH_POOL thread=$threadId stage=posed elapsed_ms=${(System.nanoTime()-traceStarted)/1_000_000.0} cards=${outcome.cards.size}")
         if(outcome.waitingForPool) {
             val kp = actor.execute { events(courseId).lastOrNull { it.type=="kp_opened" && it.threadId==threadId }?.payload?.str("kpId") }
             if(kp!=null) {
@@ -244,7 +242,6 @@ class ChatService(
             }
         }
         publish(outcome,threadId,courseId)
-        if(System.getenv("COACH_POOL_TRACE")=="1") log("COACH_POOL thread=$threadId stage=emitted elapsed_ms=${(System.nanoTime()-traceStarted)/1_000_000.0}")
         return outcome.plan?.let { startReply(threadId,courseId,"请讲解当前知识点。",pack,it) }.orEmpty()
     }
 

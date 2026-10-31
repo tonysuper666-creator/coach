@@ -6,7 +6,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.PairedCredentials
-import com.coach.client.PoolTrace
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -28,12 +27,9 @@ class PoolPreparationSmoke {
         KeystoreCredentials(context,base).save(PairedCredentials(requireNotNull(args.getString("coachDevice")),requireNotNull(args.getString("coachToken"))))
         context.deleteDatabase("coach-client.db")
         val samples=JSONArray()
-        PoolTrace.enabled=true
         val report=java.io.File(context.cacheDir,"pool-latency.json")
-        var currentKp=""
         try {
             for(kp in ids) {
-                currentKp=kp
                 context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
                 val button=waitForText(instrumentation.uiAutomation,"出题",15_000,enabledButton=true)
@@ -53,7 +49,6 @@ class PoolPreparationSmoke {
                     .put("clickActionMs",(clicked-mark)/1_000_000.0)
                     .put("visibleDetectionMs",(detected-mark)/1_000_000.0)
                     .put("idleAndPresentationMs",millis-(detected-mark)/1_000_000.0))
-                samples.getJSONObject(samples.length()-1).put("stagesMs",JSONObject(PoolTrace.snapshot("kp:$kp")))
                 report.writeText(samples.toString(2))
                 android.util.Log.i("CoachPool","kp=$kp tapToRenderedCardsMs=$millis cards=3")
                 if(samples.length()==1) {
@@ -62,15 +57,7 @@ class PoolPreparationSmoke {
                     screenshot.recycle()
                 }
             }
-        } catch(error: Throwable) {
-            java.io.File(context.cacheDir,"pool-failure.json").writeText(JSONObject()
-                .put("kp",currentKp).put("foregroundPackage",runCatching { instrumentation.uiAutomation.rootInActiveWindow?.packageName }.getOrNull())
-                .put("stagesMs",JSONObject(PoolTrace.snapshot("kp:$currentKp"))).put("error",error.toString()).toString(2))
-            runCatching { instrumentation.uiAutomation.takeScreenshot() }.getOrNull()?.let { shot ->
-                java.io.File(context.cacheDir,"pool-failure.png").outputStream().use { shot.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) };shot.recycle()
-            }
-            throw error
-        } finally { report.writeText(samples.toString(2));PoolTrace.enabled=false }
+        } finally { report.writeText(samples.toString(2)) }
         assertEquals(ids.size,samples.length())
         for(i in 0 until samples.length()) assertTrue("Sample $i exceeded one second: ${samples.getJSONObject(i)}",samples.getJSONObject(i).getDouble("tapToRenderedCardsMs")<=1000.0)
     }

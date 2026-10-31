@@ -20,6 +20,8 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 
 8791 已有服务时，先只读核对 PID、健康和空闲状态，再显式传 `COACH_LIVE_BRIDGE_PID=<现役桥PID>`。测试复用现役桥，结束仅记 `detach`，不会停止或重启该进程；未指定 PID 则仍要求 8791 空闲并自行起停。桩 CLI 回放及取消探针用本次测试拥有的随机回环端口与独立数据目录，不占用现役 8791。
 
+验收客户端显式使用 `BridgeConfig(testTraffic = true)`，发送 `X-Coach-Traffic: test`，匹配现役桥独立的测试调用记账。普通客户端默认不带该标记；不把全局的交互调用差额算作本卡用量。
+
 默认预计 **33 次真实 Claude 物理调用**：首字 20 次；关闭客户端 socket 10 秒后重连 10 次（回答可能仍在流式，也可能已结束）；流中取消 2 次（记录真实 CLI 及其子进程 PID，并检查 2 秒内退出）；真实 SSE 转发至首个正文 delta 后切断上游 1 次。首字从 `msg.ask` 发出计至共享消费器交付首个非空正文/公式，排除进度帧。续传逐条比较客户端与账本的 SHA-256。正常结束时逐条比较 `msg.end.status`（离线期间已结束则读完成快照）与 `BridgeClient` 从真实 `x_coach` 解析并记录的终态；主动取消/断流没有 `x_coach`，单独报告预期的 `cancelled/truncated`，不充当终态映射样本。
 
 最后另起一次隔离端口的**桩 CLI 回放**（`replay`，不消耗真实订阅）：隔离账本与桩桥目录，注入协议关键词、跨 delta 的 `tool_` + `call`、无协议关键词的原始 JSON、查原文标记。断言共享客户端与落库正文都只留下合成的正常回答，丢弃内容写内部日志。桩计数与真实桥日计数分离；真实测试不覆盖 `BRIDGE_CHILD_PATH`。
@@ -39,6 +41,16 @@ Gradle 的不带项目路径的同名任务选择器也会执行既有 `server:a
 | `ton1087-builder-replay-20261030`，只调整合成注入顺序 `a151b40` | 0 | `COACH_LIVE_STAGES=replay ./gradlew :liveTest` 退出 0；正常正文与结尾保留，协议及原始 JSON 泄漏 0 |
 
 累计真实 `ai_calls` **47**（账本 `physical_calls` 合计与桥日计数相同），保护参数仍为 **60 / 0.5**，当日余额 **13**。模块测试 **65 条，0 失败**。最终运行时的 n=20 首字分位数**未测**：不能用修复后 n=1 抽检代替，留待验收者在日额度恢复后独立复跑。未测 Compose 绘制或真机屏幕像素；本卡首字口径是共享客户端消费器交付的正文。
+
+### 2026-10-31 复核退回后的修复验证
+
+运行时代码 `b1433ed` 修复正文按 delta 边界误判为 JSON、取消先于句柄/future/body 发布的竞态，以及 V003 提前于 V002 的迁移顺序。新回归在旧代码上先复现 4 项失败；修复后模块测试 **70 条，0 失败**（ai 41、store 8、app 21）。输入原文的区间、集合、文献序号逐个切分位置及逐字分块都保持完整；fresh DB 首次打开即为 schema 3，重新打开不再迁移。
+
+`COACH_LIVE_STAGES=replay,early tools/dev/heavy ./gradlew :liveTest --max-workers=2` 退出 0：协议/原始 JSON 泄漏 0，正常正文和结尾保留；`msg.start` 后立即取消、桩进程生成后但未出正文时取消分别在 **1016/999 ms** 确认无残留。该组 0 次真实调用，逐条数据在 `~/Coach/corpus/m1-stream/ton1087-reviewfix-final-stub-20261031/results.jsonl`。
+
+真实组只到 **9/20**：8 条 complete、第 9 条 truncated(cli_exit)，随后 health 连接被拒绝，命令退出 1；真实取消组尚未执行。00:33:41 测试复用的现役桥为 PID 40830，00:34:25 断开时未执行 stop，之后监听已变为 PID 77702。此前还出现过 PID 72912 被替换为 40830，启动校验拒绝旧 PID，0 次调用。两次外部换版打断验收，未再尝试真实组，也不计算不满 n=20 的达标分位数。
+
+本轮真实 `ai_calls=9`、账本 `physical_calls=9`，与桥测试计数 0→9 一致；本执行者累计 56（不含 Scout 独立实测）。数据在 `~/Coach/corpus/m1-stream/ton1087-reviewfix-live-20261031/results.jsonl`。待部署静默窗口中补齐首字 n≥20、真实取消和桩回放，再走 Scout → Architect 验收。
 
 ## 客户端 → 服务端（`/v1/ws`，与账本帧共用一条连接）
 

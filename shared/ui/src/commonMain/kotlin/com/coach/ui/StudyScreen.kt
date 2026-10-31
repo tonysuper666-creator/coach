@@ -11,6 +11,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import com.coach.ui.input.EnterGate
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
@@ -27,17 +29,21 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val groups = view.quizGroups(thread)
     val pending = groups.lastOrNull { !it.submitted }
     var draft by remember(kp.id) { mutableStateOf(TextFieldValue("")) }
+    val enterGate = remember(kp.id) { EnterGate() }
+    val focus = LocalFocusManager.current
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by remember(kp.id) { mutableStateOf(false) }
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
     fun next(test: Boolean) {
+        focus.clearFocus()
         if (!open()) return fail()
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
         if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
     }
-    fun send() {
+    fun send(fromIme: Boolean = false) {
+        if (draft.composition != null || (fromIme && !enterGate.shouldSend(true, true, false, false))) return
         val text = draft.text.trim()
         if (text.isEmpty() || tv.busy || !ui.connected) return
         if (!open()) return fail()
@@ -129,14 +135,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
                 OutlinedTextField(
-                    draft, { draft = it },
+                    draft, { value ->
+                        enterGate.onEdit(draft.composition != null, value.composition != null)
+                        draft = value
+                    },
                     Modifier.weight(1f).onPreviewKeyEvent { event ->
                         // 中文输入法组字时按回车是「上屏」，不是发送：此时 composition 非空，放行给输入法。
-                        if (event.key == Key.Enter && event.type == KeyEventType.KeyDown && !event.isShiftPressed && draft.composition == null) { send(); true } else false
+                        if (event.key == Key.Enter && enterGate.shouldSend(true, event.type == KeyEventType.KeyDown, event.isShiftPressed, draft.composition != null)) { send(); true } else false
                     },
                     placeholder = { Text("追问…") }, maxLines = 4,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { send() }),
+                    keyboardActions = KeyboardActions(onSend = { send(fromIme = true) }),
                 )
                 Button(onClick = { send() }, enabled = ui.connected && !tv.busy && draft.text.isNotBlank(), modifier = Modifier.heightIn(min = 56.dp)) { Text("发送") }
             }

@@ -6,6 +6,9 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.core.view.WindowCompat
 import com.coach.client.PairedCredentials
 import androidx.activity.enableEdgeToEdge
 import androidx.metrics.performance.JankStats
@@ -47,7 +50,14 @@ class CoachActivity : ComponentActivity() {
         val serverUrl="http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
-            CoachTheme {
+            val dark = isSystemInDarkTheme()
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }
+            CoachTheme(dark) {
                 PairingGate(store,serverUrl) { credentials ->
                     if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                     else {

@@ -108,7 +108,8 @@ def install():
     settings = HOME / 'Coach/config/local.properties'
     config = dict(line.split('=', 1) for line in settings.read_text().splitlines() if '=' in line and not line.lstrip().startswith('#'))
     tail = os.environ.get('COACH_TAIL_HOST', config.get('coach.tailHost', '')).strip()
-    assert ipaddress.ip_address(tail) in ipaddress.ip_network('100.64.0.0/10'), 'Set the actual Tailscale IPv4 in local.properties'
+    tailnet_range = ipaddress.IPv4Network((0x64400000, 10))  # Tailscale's CGNAT range
+    assert ipaddress.ip_address(tail) in tailnet_range, 'Set the actual Tailscale IPv4 in local.properties'
     node = shutil.which('node')
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
     assert node and (java / 'bin/java').is_file(), 'Node and JDK 17 are required'

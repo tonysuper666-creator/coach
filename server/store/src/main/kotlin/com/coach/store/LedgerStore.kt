@@ -110,6 +110,82 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
     }
 
+    fun todayProgress(course: String, thread: String? = null): TodayProgress {
+        val state = projection(course)
+        val quick = state.quickAsks.values.firstOrNull { it.threadId == thread }
+        val kp = thread?.let { query("SELECT anchor_id FROM threads WHERE thread_id=? AND course_id=? AND kind='KP'",it,course) { row -> row.getString(1) }.singleOrNull() }
+        return state.today(clock(), if(quick != null) quick.kpId else kp ?: state.position.current)
+    }
+
+    fun requireChatThread(course: String, thread: String) {
+        val bound = query("SELECT course_id FROM threads WHERE thread_id=?",thread) { it.getString(1) }.singleOrNull()
+        require(bound == null || bound == course) { "Thread belongs to another course" }
+    }
+
+    fun journalDay(course: String, day: Long): JournalDay = projection(course).journal[day] ?: JournalDay()
+
+    fun isQuickThread(course: String, thread: String): Boolean = query(
+        "SELECT 1 FROM threads WHERE thread_id=? AND course_id=? AND kind='QUICK'", thread, course) { true }.isNotEmpty()
+
+    /** The anchor is course + logical day; opening it never changes Position or a tutor turn. */
+    fun openQuickAsk(course: String): QuickAskThread = transaction {
+        require(course.isNotBlank() && course != "__system__")
+        val state = projection(course)
+        val day = logicalDay(clock(), state.timeZone)
+        state.quickAsks[day]?.let { return@transaction it }
+        val thread = uid()
+        sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'QUICK','DAY',?)", thread,course,"$course:$day")
+        val value = QuickAskThread(thread, course, day, state.position.current)
+        append(course,"quick_ask_opened",json("day" to day,"kpId" to value.kpId),"quick:$course:$day",thread=thread)
+        value
+    }
+
+    fun quickHistory(course: String, day: Long): JsonObject {
+        val thread = projection(course).quickAsks[day] ?: return json()
+        val messages = query("SELECT message_id,role,status,content_md FROM messages WHERE thread_id=? ORDER BY mseq",thread.threadId) {
+            json("messageId" to it.getString(1),"role" to it.getString(2),"status" to it.getString(3),"text" to it.getString(4))
+        }
+        return json("thread" to LedgerJson.encodeToJsonElement(thread),"messages" to JsonArray(messages))
+    }
+
+    /** Only migration code reading an immutable copy may call this; no client import command. */
+    fun importLegacyJournal(course: String, day: Long, sourceId: String, text: String) {
+        require(sourceId.isNotBlank())
+        if (events(course).none { it.type == "legacy_journal_imported" && it.payload.str("sourceId") == sourceId }) {
+            append(course,"legacy_journal_imported",json("day" to day,"sourceId" to sourceId,"text" to text),"legacy-journal:$sourceId")
+        }
+    }
+
+    fun quickQuestion(course: String, thread: String, text: String): String = transaction {
+        require(isQuickThread(course,thread)) { "Not a quick-ask thread" }
+        val id = uid()
+        beginStreamingMessage(thread,id,"",role="user")
+        finishMessage(id,"complete",null,text,0)
+        append(course,"quick_ask_message",json("messageId" to id),thread=thread,actor="LEARNER")
+        id
+    }
+
+    private fun fileQuickAsk(course: String, payload: JsonObject): JsonObject {
+        val source = projection(course).quickAsks.values.singleOrNull { it.threadId == payload.str("threadId") }
+            ?: throw IllegalArgumentException("Not a quick-ask thread")
+        val message = messageSnapshot(payload.str("messageId")) ?: throw IllegalArgumentException("Missing message")
+        require(message.threadId == source.threadId && message.status in setOf("complete","truncated")) { "Message not ready" }
+        val action = payload.str("action")
+        require(action in setOf("NOTE","MOVE")) { "Only NOTE and MOVE are supported" }
+        var target: String? = null
+        if (action == "MOVE") {
+            val kp = requireNotNull(source.kpId) { "Quick ask has no anchored KP" }
+            target = query("SELECT thread_id FROM threads WHERE course_id=? AND kind='KP' AND anchor_id=?",course,kp) { it.getString(1) }.singleOrNull()
+                ?: uid().also { bindTutorThread(course,it,kp) }
+            val copy = uid()
+            val metadata = query("SELECT role,model FROM messages WHERE message_id=?",payload.str("messageId")) { it.getString(1) to it.getString(2) }.single()
+            beginStreamingMessage(target,copy,metadata.second.orEmpty(),role=metadata.first)
+            finishMessage(copy,message.status,null,message.content,0)
+        }
+        return json("sourceMessageId" to payload.str("messageId"),"kpId" to source.kpId,
+            "content" to message.content,"action" to action,"targetThreadId" to target)
+    }
+
     fun ensureTutorPoolJob(course: String, kp: String): String {
         val subject = "$course:$kp"
         return query("SELECT job_id FROM jobs WHERE kind='gen_mcq' AND subject=? AND state IN ('queued','running') ORDER BY created_at LIMIT 1", subject) { it.getString(1) }
@@ -294,7 +370,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             var result = json()
             var status = "OK"
             var error: String? = null
-            when(body.type) {
+            val quickReadOnly = isQuickThread(body.courseId,p.str("threadId")) && body.type !in setOf("file_quick_ask","save_note")
+            when {
+                quickReadOnly -> { status="REJECTED"; error="QUICK_READ_ONLY" }
+                else -> when(body.type) {
                 "submit_answer" -> {
                     val posedSnapshot = p["posedSnapshot"] as? JsonObject
                     val attemptId = p.str("attemptId")
@@ -356,17 +435,39 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "override_kp" -> emit("kp_overridden",p)
                 "clear_override" -> emit("override_cleared",p)
                 "set_exam" -> emit("exam_set",p)
+                "configure_course" -> {
+                    if (runCatching { java.time.ZoneId.of(p.str("timeZone")) }.isFailure) { status="REJECTED"; error="INVALID_TIME_ZONE" }
+                    else emit("course_configured",p)
+                }
+                "set_exam_weights" -> {
+                    val weights = p["examWeights"] as? JsonObject
+                    val values = weights?.values?.map { (it as? JsonPrimitive)?.intOrNull }
+                    if (weights == null || weights.keys.any { it.isBlank() } || values!!.any { it == null || it < 0 } ||
+                        values.filterNotNull().sumOf { it.toLong() } > Int.MAX_VALUE) { status="REJECTED"; error="INVALID_EXAM_WEIGHTS" }
+                    else emit("exam_weights_set",json("weights" to weights))
+                }
+                "file_quick_ask" -> {
+                    val filed = runCatching { fileQuickAsk(body.courseId,p) }
+                    if (filed.isFailure) { status="REJECTED"; error=filed.exceptionOrNull()?.message }
+                    else {
+                        result = filed.getOrThrow()
+                        if (p.str("action") == "NOTE") emit("note_saved",result)
+                        emit("quick_ask_filed",result)
+                    }
+                }
                 "save_note" -> emit("note_saved",p)
                 "edit_journal" -> {
                     val revision = query("SELECT rev FROM journal_revisions WHERE course_id=? AND day=?",body.courseId,p.num("day")) { it.getLong(1) }.singleOrNull() ?: 0
-                    if (revision != p.num("expectedRev")) { status="CONFLICT"; error="REV_MISMATCH"; result=json("currentRev" to revision) }
+                    if (revision != p.num("expectedRev")) { status="CONFLICT"; error="REV_MISMATCH"; result=json("currentRev" to revision,"content" to journalDay(body.courseId,p.num("day")).manual) }
                     else {
                         val rev = revision+1
                         sql("INSERT INTO journal_revisions(course_id,day,rev,content_sha) VALUES(?,?,?,?) ON CONFLICT(course_id,day) DO UPDATE SET rev=excluded.rev,content_sha=excluded.content_sha",body.courseId,p.num("day"),rev,p.str("contentSha"))
                         emit("journal_edited",JsonObject(p + ("rev" to JsonPrimitive(rev))))
+                        result=json("currentRev" to rev)
                     }
                 }
                 else -> { status="REJECTED"; error="UNSUPPORTED_COMMAND" }
+            }
             }
             if(effects.isNotEmpty()) projection(body.courseId)
             val r = receipt(status,effects,result,error)

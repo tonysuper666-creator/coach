@@ -1,5 +1,6 @@
 package com.coach.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -42,26 +43,49 @@ class MathAssets(private val fetch: (suspend (tex: String, display: Boolean) -> 
     }
 }
 
+/** 公式从服务端 `/v1/math` 取（手机没有 Node）；取不到的公式显示源码 chip。 */
+fun MathAssets(http: com.coach.client.MathHttp) = MathAssets { tex, display ->
+    http.render(tex, display)?.let { MathAsset(tex, display, it.sha, it.svg) }
+}
+
 fun threadIdFor(kpId: String) = "kp:$kpId"
 
+/** 两栏布局的起点宽度：Fold8 内屏（约 960dp 宽）走两栏，外屏（约 624dp 宽）走单栏。 */
+val WIDE_LAYOUT_MIN_WIDTH = 840.dp
+
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
         value = withContext(Dispatchers.Default) { CourseView(c.sync.localEvents(c.courseId), c.sync.projection(c.courseId)) }
     }
     var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
-    MaterialTheme {
+    CoachTheme(dark ?: isSystemInDarkTheme()) {
         Surface(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 OfflineBanner(ui, c)
                 val current = view
                 val target = open?.let { (id, _) -> current?.kp(id) }
-                if (target != null && current != null) {
-                    StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = { open = null })
-                } else {
-                    TodayScreen(c, current, ui) { id, start -> open = id to start }
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    if (maxWidth >= WIDE_LAYOUT_MIN_WIDTH) {
+                        // 宽屏：左边今天/知识点，右边学习线程；点「继续」直接在右栏开讲。
+                        Row(Modifier.fillMaxSize()) {
+                            Box(Modifier.width(380.dp).fillMaxHeight()) {
+                                TodayScreen(c, current, ui, selectedKpId = target?.id) { id, start -> open = id to start }
+                            }
+                            VerticalDivider()
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                if (target != null && current != null) {
+                                    key(target.id) { StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = null) }
+                                } else CenterMessage("选一个知识点，或点「继续」。")
+                            }
+                        }
+                    } else if (target != null && current != null) {
+                        StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = { open = null })
+                    } else {
+                        TodayScreen(c, current, ui, selectedKpId = null) { id, start -> open = id to start }
+                    }
                 }
             }
         }
@@ -88,6 +112,10 @@ internal fun StatusChip(text: String, color: Color) {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = color, style = MaterialTheme.typography.labelMedium)
     }
 }
+
+/** 整屏居中的一句说明（未配对、缺课程号这类进不了主界面的情况）。 */
+@Composable
+fun CoachNotice(text: String) = Surface(Modifier.fillMaxSize()) { CenterMessage(text) }
 
 @Composable
 internal fun CenterMessage(text: String) {

@@ -65,7 +65,8 @@ fun main(args: Array<String>): Unit = runBlocking {
             } else actor.execute { backupIfDue() }
         }
     }
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat) }
+    val math = MathProcess.locate()
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat); mathRoutes(math) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

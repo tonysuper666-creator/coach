@@ -53,11 +53,8 @@ fun runCoach() {
     val tutor = TutorClient(baseUrl, deviceId, token, model)
     val clock = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
     val packDir = File(env("COACH_PACK_DIR", File(home, "Coach/corpus/packs/$course").path))
-    val mathService = MathService.locate()
-    val fetch: (suspend (String, Boolean) -> com.coach.ui.markdown.MathAsset?)? = mathService?.let { service ->
-        { tex, display -> kotlinx.coroutines.withContext(Dispatchers.IO) { service.render(tex, display) } }
-    }
-    val math = MathAssets(fetch)
+    val mathHttp = com.coach.client.MathHttp(baseUrl, deviceId, token)
+    val math = MathAssets(mathHttp)
     val controller = CoachController(
         courseId = course, sync = sync, tutor = tutor,
         packFor = { kpId -> File(packDir, "$kpId.md").takeIf { it.exists() }?.readText()?.take(40_000).orEmpty() },
@@ -72,7 +69,7 @@ fun runCoach() {
     // COACH_WINDOW=宽x高（dp），用来在桌面上模拟 Fold8 外屏等窄屏。
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
-        Window(onCloseRequest = { tutor.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = { tutor.close(); mathHttp.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             CoachApp(controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1")
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(controller, it) } }

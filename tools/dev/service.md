@@ -16,7 +16,7 @@ python3 "$HOME/Coach/service/control.py" status
 
 安装器将构建产物、桥源码和 mathsvc 拷贝到 `~/Coach/service/releases/时间戳/`，在副本中建立独立 venv 和安装 Node 锁定依赖，才加载 LaunchAgent。临时 worktree 消失不会影响服务。安装失败时恢复上一个安装；历史 release 保留，供回滚。重新安装新 head 时先构建再执行同一 install 命令；安装不会覆盖数据。`installation.json` 记录当前 release；plist 保存实际运行环境。登录自启动由 LaunchAgent 管理，不能以手动 bootstrap 实测代替注销/重登录证据。
 
-数据在 `~/Coach/data/`，备份在其 `backups/`；桥自己的工作目录在 `~/Coach/bridge/`。桥继续使用期中保护默认值（每天 Claude 60 次，rate pause 0.5）；本卡恢复检查不调用 AI。服务只绑定回环和所配置的 Tailscale IPv4，端口 18791；桥只绑定回环 8791。所有账本 HTTP/WS 请求仍需要设备令牌。
+数据在 `~/Coach/data/`，备份在其 `backups/`；桥自己的工作目录在 `~/Coach/bridge/`。按照今晚「调用次数不设上限」，安装环境默认 `BRIDGE_DAILY_CLAUDE_CAP=0`、`BRIDGE_RATE_PAUSE_AT=1.1`，不再把旧的每日 60 次和 0.5 阈值写死进 plist；若另有授权，可在 install 前通过同名环境变量指定。本卡恢复检查不调用 AI；官方限流的兜底由 TON-1128 集成，当前源码既有的后台 0.8 保护仍在。服务只绑定回环和所配置的 Tailscale IPv4，端口 18791；桥只绑定回环 8791。所有账本 HTTP/WS 请求仍需要设备令牌。
 
 ## 停止、恢复和卸载
 

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -30,26 +31,38 @@ def loaded():
 
 
 def stop():
+    # bootout can return before the JVM and its children have exited. Capture
+    # identities first: Ktor removes its child health files before its own exit.
+    tracked = {}
+    def remember(pid):
+        result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True)
+        if result.returncode == 0:
+            tracked[pid] = result.stdout.strip()
+    job = subprocess.run(['launchctl', 'print', f'{DOMAIN}/{LABEL}'], capture_output=True, text=True)
+    match = re.search(r'^\s*pid = (\d+)', job.stdout, re.MULTILINE)
+    if match:
+        remember(int(match.group(1)))
+    if RECORD.exists():
+        info = json.loads(RECORD.read_text())
+        for name in ('bridge', 'mathsvc'):
+            try:
+                state = json.loads((Path(info['runDir']) / f'{name}.json').read_text())
+                for key in ('ownerPid', 'guardPid', 'pid'):
+                    if state.get(key):
+                        remember(state[key])
+            except FileNotFoundError:
+                pass
     run('launchctl', 'disable', f'{DOMAIN}/{LABEL}')
     if loaded():
         run('launchctl', 'bootout', f'{DOMAIN}/{LABEL}')
     # JVM shutdown/parent-death guard cleanup is bounded; bootout may return first.
-    deadline = time.monotonic() + 15
-    while RECORD.exists():
-        info = json.loads(RECORD.read_text())
-        alive = []
-        for name in ('bridge', 'mathsvc'):
-            state = Path(info['runDir']) / f'{name}.json'
-            if state.exists():
-                for key in ('ownerPid', 'guardPid', 'pid'):
-                    pid = json.loads(state.read_text()).get(key, 0)
-                    if pid:
-                        try:
-                            os.kill(pid, 0)
-                            alive.append(pid)
-                        except ProcessLookupError:
-                            pass
-        if not alive:
+    deadline = time.monotonic() + 30
+    while True:
+        alive = False
+        for pid, started in tracked.items():
+            result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True)
+            alive |= result.returncode == 0 and result.stdout.strip() == started
+        if not alive and not loaded():
             break
         if time.monotonic() >= deadline:
             raise RuntimeError('Stop timed out; inspect service logs. No unrelated processes were signalled.')
@@ -115,7 +128,8 @@ def install():
     logs = HOME / 'Coach/logs'
     logs.mkdir(parents=True, exist_ok=True)
     info = {'root': str(release), 'dataDir': str(HOME / 'Coach/data'), 'runDir': str(HOME / 'Coach/run'),
-        'tailHost': tail, 'port': 18791}
+        'tailHost': tail, 'port': 18791,
+        'sourceHead': subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()}
     environment = {
         'HOME': str(HOME), 'PATH': ':'.join(dict.fromkeys([str(Path(node).parent), str(HOME / '.local/bin'), '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'])),
         'JAVA_HOME': str(java), 'COACH_MANAGE_SERVICES': '1', 'COACH_SERVICE_ROOT': str(release),

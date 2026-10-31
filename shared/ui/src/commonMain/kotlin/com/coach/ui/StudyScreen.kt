@@ -22,7 +22,7 @@ private val READING_WIDTH = 600.dp
 
 @Composable
 fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null) {
-    val thread = threadIdFor(kp.id)
+    val thread = view.tutorThreadId(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
     SideEffect { if(groups.isNotEmpty()) PoolTrace.mark(thread,"composed") }

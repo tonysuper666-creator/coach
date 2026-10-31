@@ -173,9 +173,21 @@ class MistakeReviewSmoke {
             for(i in 0 until n.childCount) target(n.getChild(i))?.let { return it }
             return null
         }
-        return target(ui.rootInActiveWindow)?.performAction(if(forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)==true
+        val list=target(ui.rootInActiveWindow) ?: return false
+        val rect=android.graphics.Rect();list.getBoundsInScreen(rect)
+        val x=rect.centerX()
+        val high=rect.top+rect.height()*3/4
+        val low=rect.top+rect.height()/3
+        // Half-viewport gestures keep long options in overlapping frames; accessibility's
+        // asynchronous full-page action can skip them while its animation is still running.
+        val from=if(forward) high else low
+        val to=if(forward) low else high
+        ui.executeShellCommand("input swipe $x $from $x $to 350").use { descriptor ->
+            java.io.FileInputStream(descriptor.fileDescriptor).use { it.readBytes() }
+        }
+        instrumentation.waitForIdleSync()
+        return true
     }
-    private fun scrollTop() { repeat(20) { if(!scroll(false)) return;Thread.sleep(100) } }
     private fun scrollTo(text: String,substring: Boolean=false): AccessibilityNodeInfo {
         repeat(30) { find(text,substring)?.let { return it };scroll(true);Thread.sleep(150) }
         throw AssertionError("Cannot scroll to: $text")

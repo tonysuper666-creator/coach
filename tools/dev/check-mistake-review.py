@@ -126,7 +126,13 @@ try:
         raise RuntimeError('OPPO is already under instrumentation; retry after its owner finishes')
     for apk in ['androidApp/build/outputs/apk/debug/androidApp-debug.apk',
                 'androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk']:
-        run([ADB, '-s', SERIAL, 'install', '-r', ROOT/apk])
+        package = PACKAGE+'.test' if 'androidTest' in apk else PACKAGE
+        installed = run([ADB,'-s',SERIAL,'shell','pm','path',package]).strip().removeprefix('package:')
+        same = False
+        if installed:
+            digest = run([ADB,'-s',SERIAL,'shell','sha256sum',installed]).split()[0]
+            same = digest == hashlib.sha256((ROOT/apk).read_bytes()).hexdigest()
+        if not same: run([ADB, '-s', SERIAL, 'install', '-r', ROOT/apk])
     run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'mkdir', '-p', 'cache'])
     run([ADB, '-s', SERIAL, 'shell', f"run-as {PACKAGE} sh -c 'cat > cache/review-keys.json'"], input=json.dumps(keys))
     bridge = spawn('bridge', [os.environ['COACH_REVIEW_BRIDGE_PYTHON'], ROOT/'tools/bridge/subscription_bridge.py'])

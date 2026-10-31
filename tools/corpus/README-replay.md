@@ -68,7 +68,7 @@ PY
 python3 tools/corpus/prepare-replay.py --coach-copy ~/Coach/corpus/replay/source/coach-<UTC>/coach.snapshot.sqlite --since 2026-10-31T13:59:00Z
 ~~~
 
-Coach 单独输出 coach-sessions / coach-replay-input / coach-events / coach-summary 和 coach-SOURCE，不覆盖 DeepTutor 的文件。复用相同意图标注及相邻助手上下文算法，保留原始毫秒时间与消息行。若库里没存用户文本，不从 kp_opened、followup_asked 等事件推测他说了什么；0 条就是未覆盖。
+Coach 单独输出 coach-sessions / coach-replay-input / coach-events / coach-summary 和 coach-SOURCE，不覆盖 DeepTutor 的文件。复用相同意图标注及相邻助手上下文算法，保留原始毫秒时间与消息行。Coach 内部课程 ID 不要求包含课程代码；从最新 outline_revised 的显式课程名称解析内部课程 ID，再按线程的 course_id 筛选，不根据对话内容猜课程。若库里没存用户文本，不从 kp_opened、followup_asked 等事件推测他说了什么；0 条就是未覆盖。
 
 显式总验入口（不属于默认 test/check），所有输出留在私有 replay/runs 下：
 

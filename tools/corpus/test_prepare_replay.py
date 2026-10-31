@@ -28,7 +28,7 @@ class ReplayTest(unittest.TestCase):
             with sqlite3.connect(path) as db:
                 db.execute('CREATE TABLE threads(thread_id TEXT,course_id TEXT)')
                 db.execute('CREATE TABLE messages(thread_id TEXT,mseq INTEGER,message_id TEXT,role TEXT,content_md TEXT,created_at INTEGER)')
-                db.execute('CREATE TABLE events(seq INTEGER,event_json TEXT,occurred_at INTEGER)')
+                db.execute('CREATE TABLE events(seq INTEGER,event_json TEXT,occurred_at INTEGER,course_id TEXT,payload TEXT,type TEXT)')
                 db.execute("INSERT INTO threads VALUES ('thread','ECNM10119')")
                 db.executemany('INSERT INTO messages VALUES (?,?,?,?,?,?)',[
                     ('thread',1,'old','user','Before cutoff',cutoff-1),
@@ -43,6 +43,19 @@ class ReplayTest(unittest.TestCase):
                 self.assertEqual(cutoff,rows[0]['user']['coach_row']['created_at'])
                 self.assertEqual('Invented card',rows[0]['assistant_after'][0]['content'])
                 self.assertTrue(rows[0]['id'].startswith('coach:'))
+                with sqlite3.connect(path) as db:
+                    db.execute("UPDATE threads SET course_id='opaque-course'")
+                    outline={'course': {'id': 'opaque-course', 'name': 'ECNM10119 Synthetic Health Economics'}}
+                    event={'type': 'outline_revised', 'payload': outline}
+                    db.execute('INSERT INTO events VALUES (?,?,?,?,?,?)',
+                               (1,json.dumps(event),cutoff-1000,'opaque-course',json.dumps(outline),'outline_revised'))
+                    ops={'ops': []}
+                    db.execute('INSERT INTO events VALUES (?,?,?,?,?,?)',
+                               (2,json.dumps({'type':'outline_revised','payload':ops}),cutoff+1,
+                                'opaque-course',json.dumps(ops),'outline_revised'))
+                replay.export_coach(args,'synthetic opaque course ID test')
+                rows=[json.loads(line) for line in (args.output/'coach-replay-input.jsonl').read_text().splitlines()]
+                self.assertEqual(['继续'],[r['user']['content'] for r in rows])
                 with sqlite3.connect(path) as db:
                     db.execute("DELETE FROM messages WHERE role='user'")
                 replay.export_coach(args,'synthetic Coach copy test')

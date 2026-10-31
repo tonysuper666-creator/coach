@@ -308,6 +308,15 @@ def export_coach(args, command):
         raise ValueError("Coach 输入必须是 replay/source 下预先 VACUUM INTO 的副本")
     since = datetime.fromisoformat(args.since).timestamp() * 1000
     with closing(open_copy(source)) as db:
+        # Coach course IDs are opaque; use the latest explicit outline metadata,
+        # exactly as DeepTutor export resolves IDs through courses.json.
+        names = {}
+        for row in db.execute("SELECT course_id,payload FROM events WHERE type='outline_revised' ORDER BY seq"):
+            course = json.loads(row['payload']).get('course', {})
+            if isinstance(course, dict) and isinstance(course.get('name'), str):
+                names[row['course_id']] = course['name']
+        course_ids = {cid for cid, name in names.items()
+                      if course_match({'knowledge_bases': [name]}, args.course, set())[1]}
         sessions = []
         for thread in db.execute("SELECT * FROM threads ORDER BY thread_id"):
             messages = []
@@ -320,7 +329,7 @@ def export_coach(args, command):
                              'messages': messages})
         events = [json.loads(row['event_json']) for row in db.execute(
             "SELECT event_json FROM events WHERE occurred_at>=? ORDER BY seq", (since,))]
-        selected, replay = prepare(sessions, args.course, set(), since / 1000)
+        selected, replay = prepare(sessions, args.course, course_ids, since / 1000)
         for row in replay:
             row['id'] = 'coach:messages:' + str(row['user']['id'])
             row['course_evidence'] = 'coach_thread'

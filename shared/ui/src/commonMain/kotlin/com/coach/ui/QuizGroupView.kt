@@ -8,6 +8,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
@@ -43,11 +46,15 @@ internal fun QuizGroupFooter(group: QuizGroup, kp: KpRow, c: CoachController, vi
 }
 
 @Composable
-internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolean, selected: String?, math: MathAssets, onSelect: (String) -> Unit) {
+internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolean, selected: String?, math: MathAssets, onFirstDraw: () -> Unit = {}, onSelect: (String) -> Unit) {
+    var headerVisible by remember(card.attemptId) { mutableStateOf(false) }
+    val trace=if(PoolTrace.enabled && number==1) Modifier.onGloballyPositioned {
+        val bounds=it.boundsInWindow();headerVisible=bounds.width>0 && bounds.height>0
+    }.drawWithContent { drawContent();if(headerVisible) onFirstDraw() } else Modifier
     Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("第 $number / $total 题", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text("第 $number / $total 题", modifier=trace, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (card.untaught) StatusChip("这点还没讲过", MaterialTheme.colorScheme.tertiary)
             }
             Markdown(card.stem, true, "q:${card.attemptId}", math)

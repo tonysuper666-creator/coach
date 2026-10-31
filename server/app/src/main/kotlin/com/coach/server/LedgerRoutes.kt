@@ -47,16 +47,17 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 finish()
                 return@intercept
             }
-            // A phone token cannot mint codes, enumerate devices, or revoke another phone.
-            if (call.request.path().startsWith("/v1/devices") || call.request.path() == "/v1/pairing-code") {
-                if (device != adminDevice) {
-                    call.respondText("Forbidden", status=HttpStatusCode.Forbidden)
-                    finish()
-                }
-            }
+
         }
     }
 
+    // Enforce management permission inside the matched route: encoded paths must
+    // not bypass a string-prefix check in the application interceptor.
+    suspend fun ApplicationCall.requireAdmin(): Boolean {
+        if (request.header("X-Coach-Device") == adminDevice) return true
+        respondText("Forbidden", status=HttpStatusCode.Forbidden)
+        return false
+    }
     routing {
         post("/v1/pair") {
             call.response.headers.append(HttpHeaders.CacheControl, "no-store")
@@ -76,15 +77,18 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             else call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token).toString(), ContentType.Application.Json)
         }
         post("/v1/pairing-code") {
+            if (!call.requireAdmin()) return@post
             call.response.headers.append(HttpHeaders.CacheControl, "no-store")
             val code = actor.execute { createPairingCode() }
             call.respondText(json("code" to code.code, "expiresAt" to code.expiresAt).toString(), ContentType.Application.Json)
         }
         get("/v1/devices") {
+            if (!call.requireAdmin()) return@get
             val devices = actor.execute { pairedDevices() }.map { json("deviceId" to it.id, "name" to it.name, "createdAt" to it.createdAt, "revokedAt" to it.revokedAt) }
             call.respondText(JsonArray(devices).toString(), ContentType.Application.Json)
         }
         delete("/v1/devices/{device}") {
+            if (!call.requireAdmin()) return@delete
             val device = call.parameters["device"]!!
             if (device == adminDevice) { call.respond(HttpStatusCode.Forbidden); return@delete }
             actor.execute { revokeDevice(device) }

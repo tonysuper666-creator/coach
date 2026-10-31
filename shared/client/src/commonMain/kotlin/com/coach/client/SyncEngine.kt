@@ -4,6 +4,7 @@ import com.coach.client.db.ClientDatabase
 import com.coach.domain.*
 import com.coach.protocol.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -146,28 +147,61 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             db.transaction { q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id);q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt)) }
             q.prune(receipt.backedUpThroughSeq)
         }
+        pullCourses(hello.epoch)
+        _connection.value = "online"
+        _revision.value += 1
+    }
+
+    /** Event pages carry their epoch. A push with no outbox work needs one read, not
+     * hello + events. Full polling still refreshes backup watermarks and uploads commands. */
+    private suspend fun syncHint() {
+        val caughtUp=mutex.withLock {
+            val epoch=meta("epoch") ?: return@withLock false
+            if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
+            try { pullCourses(epoch) }
+            catch(e: EpochChanged) { return@withLock false }
+            _connection.value="online"
+            _revision.value+=1
+            true
+        }
+        if(!caughtUp) syncOnce()
+    }
+
+    private class EpochChanged: IllegalStateException("Epoch changed during catch-up")
+
+    /** Caller holds mutex, for both full synchronization and push catch-up. */
+    private suspend fun pullCourses(epoch: String) {
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
                 val page = transport.events(course,cursor)
-                check(page.epoch == hello.epoch) { "Epoch changed during catch-up" }
+                if(page.epoch != epoch) throw EpochChanged()
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
                 cursor = page.throughSeq
             } while(page.hasMore)
             if(projection(course).requiresServerSnapshot) {
                 val snapshot=transport.snapshot(course)
-                check(snapshot.hello.epoch==hello.epoch)
+                if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
                     q.putMeta("serverProjection:$course",LedgerJson.encodeToString(snapshot.projection))
                     val seq=q.replicaSeq(course).executeAsOne()
-                    cache.put(course,hello.epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
+                    cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
             }
         }
-        _connection.value = "online"
-        _revision.value += 1
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
+        // One quiz publishes several durable/state/card hints. Do not make the WS reader
+        // wait for a full HTTP catch-up for each hint. Keep one follow-up while a sync is
+        // in flight, so facts committed during that request are still fetched.
+        val hints=Channel<Unit>(Channel.CONFLATED)
+        val pushed=launch {
+            for(hint in hints) {
+                try { syncHint() }
+                catch(e: CancellationException) { throw e }
+                catch(e: Exception) { _connection.value="offline" }
+            }
+        }
         // Polling is a recovery path for missed WS frames; both paths use the same serialized sync transaction.
         val polling = launch {
             while(isActive) { try { syncOnce() } catch(e: CancellationException) { throw e } catch(e: Exception) { _connection.value="offline" };delay(2000) }
@@ -175,11 +209,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         try {
             var backoff = 250L
             while(isActive) {
-                try { transport.watch { syncOnce() };backoff=250 }
+                try { transport.watch { hints.trySend(Unit) };backoff=250 }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
                 delay(backoff);backoff=(backoff*2).coerceAtMost(5000)
             }
-        } finally { polling.cancelAndJoin() }
+        } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }
     }
 }

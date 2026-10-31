@@ -44,7 +44,8 @@ android {
     compileSdk = 37
     buildToolsVersion = "37.0.0"
     defaultConfig {
-        applicationId = "com.coach.android"
+        // Separate package for concurrent, isolated acceptance on the shared OPPO.
+        applicationId = providers.gradleProperty("coachApplicationId").orElse("com.coach.android").get()
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
         buildConfigField("int", "COACH_PORT", localConfig.getProperty("coach.port", "18791"))
         buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")

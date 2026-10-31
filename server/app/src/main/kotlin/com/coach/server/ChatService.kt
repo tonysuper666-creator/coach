@@ -221,9 +221,8 @@ class ChatService(
                 if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
                     lastPersist = now
                     // 每秒落库（§6）：写的是过滤后的可见正文与 (msg, i)
-                    val content = session.cursor.text
-                    val index = session.cursor.index
-                    scope.launch { actor.execute { updateStreamingMessage(session.messageId, content, index) } }
+                    val cursor = session.cursor
+                    scope.launch { actor.execute { updateStreamingMessage(session.messageId, cursor.text, cursor.index) } }
                 }
             }
         }

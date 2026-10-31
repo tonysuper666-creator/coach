@@ -43,7 +43,8 @@ class MathService private constructor(private val process: Process) {
             val home = System.getProperty("user.home")
             val script = File(System.getenv("COACH_MATHSVC") ?: File(home, "dev/coach/tools/mathsvc/src/server.mjs").path)
             if (!script.exists()) return null
-            val node = listOfNotNull(System.getenv("COACH_NODE"), "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
+            val onPath = System.getenv("PATH").orEmpty().split(File.pathSeparator).filter { it.isNotBlank() }.map { "$it/node" }
+            val node = (listOfNotNull(System.getenv("COACH_NODE"), "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node") + onPath)
                 .map(::File).firstOrNull { it.canExecute() } ?: return null
             return runCatching {
                 val process = ProcessBuilder(node.path, script.path).directory(script.parentFile.parentFile)

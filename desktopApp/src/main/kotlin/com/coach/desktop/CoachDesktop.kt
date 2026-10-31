@@ -37,7 +37,7 @@ fun runCoach() {
     val tokenFile = File(env("COACH_TOKEN_FILE", File(home, "Coach/data/device-token").path))
     val token = tokenFile.takeIf { it.exists() }?.readText()?.trim().orEmpty()
 
-    val clientDir = File(home, "Coach/client").also { it.mkdirs() }
+    val clientDir = File(env("COACH_CLIENT_DIR", File(home, "Coach/client").path)).also { it.mkdirs() }
     val db = ClientDatabase(JdbcSqliteDriver("jdbc:sqlite:${File(clientDir, "ledger.sqlite").path}", Properties(), ClientDatabase.Schema))
     val sync = SyncEngine(
         db, deviceId, HttpLedgerTransport(baseUrl, deviceId, token), listOf(course),
@@ -69,9 +69,13 @@ fun runCoach() {
     sync.start(scope)
     tutor.start(scope)
 
+    // COACH_WINDOW=宽x高（dp），用来在桌面上模拟 Fold8 外屏等窄屏。
+    val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
-        Window(onCloseRequest = { tutor.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = 900.dp, height = 700.dp)) {
-            CoachApp(controller)
+        Window(onCloseRequest = { tutor.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+            CoachApp(controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1")
+            LaunchedEffect(Unit) { VerifyHooks.captures(window) }
+            LaunchedEffect(Unit) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(controller, it) } }
             LaunchedEffect(Unit) {
                 System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { kotlinx.coroutines.delay(it * 1000); exitApplication() }
             }

@@ -12,17 +12,18 @@ import java.nio.file.StandardOpenOption.*
 
 /** Input file: {course,kp,objective,excerpt}. Original material remains outside the repository. */
 fun main(args: Array<String>): Unit = runBlocking {
-    require(args.size in 3..4) { "refillPool: DATA_DIRECTORY INPUT_JSON TARGET [MAX_BATCHES=4] (stop server first)" }
+    require(args.size in 3..5) { "refillPool: DATA_DIRECTORY INPUT_JSON TARGET [MAX_BATCHES=4] [mcq|constructed] (stop server first)" }
     val data=Path.of(args[0]); val input=JsonText.objectOf(Files.readString(Path.of(args[1])))
     val target=args[2].toInt(); val maxBatches=args.getOrNull(3)?.toInt() ?: 4
-    require(target > 0 && maxBatches > 0)
+    val constructed=args.getOrNull(4)=="constructed"
+    require(target > 0 && maxBatches > 0 && (!constructed || target==2))
     Files.createDirectories(data)
     FileChannel.open(data.resolve("server.lock"),CREATE,WRITE).use { channel ->
         val lock=channel.tryLock() ?: error("Coach server owns this data directory; use its PoolWorker")
         lock.use {
             val actor=LedgerActor(this,LedgerStore(data))
             try {
-                val client=BridgeClient(BridgeConfig(requestTimeout=java.time.Duration.ofSeconds(90)))
+                val client=BridgeClient(BridgeConfig(requestTimeout=java.time.Duration.ofSeconds(90), testTraffic=true))
                 val worker=PoolWorker(actor,client,beforeCall={
                     // Owner removed local call-count/rate thresholds on 2026-10-31.
                     // Keep only the explicit examination stop window; upstream 429 remains a real failure.
@@ -33,10 +34,12 @@ fun main(args: Array<String>): Unit = runBlocking {
                 },requestType="dev_live")
                 val course=input.str("course"); val kp=input.str("kp")
                 val before=actor.execute { supplyCallCount() }
+                suspend fun available()=actor.execute { if(constructed) constructedAvailable(course,kp) else poolAvailable(course,kp) }
                 val start=System.nanoTime()
                 var batches=0
-                while (actor.execute { poolAvailable(course,kp) } < target && batches < maxBatches) {
-                    worker.ensure(course,kp,input.str("objective"),input.str("excerpt"),target)
+                while (available() < target && batches < maxBatches) {
+                    if(constructed) checkNotNull(worker.ensureConstructed(course,kp,input.str("objective"),input.str("excerpt"))) { "Constructed supply requires a passed KP" }
+                    else worker.ensure(course,kp,input.str("objective"),input.str("excerpt"),target)
                     // A generation plus its independently claimed review. Existing review resumes directly.
                     while(true) {
                         val step=worker.runOne(course,kp) ?: break
@@ -45,7 +48,7 @@ fun main(args: Array<String>): Unit = runBlocking {
                     }
                     batches++
                 }
-                val available=actor.execute { poolAvailable(course,kp) }
+                val available=available()
                 println("available=$available target=$target batches=$batches physical_calls=${actor.execute { supplyCallCount() }-before} wall_ms=${(System.nanoTime()-start)/1_000_000}")
                 check(available >= target) { "Target not reached; verified content retained, no fabricated questions" }
             } finally { actor.close() }

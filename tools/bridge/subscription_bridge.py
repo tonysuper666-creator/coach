@@ -1497,9 +1497,9 @@ async def chat(request: Request):
         if exam_protection_active():
             raise BridgeError(503, "考前保护：11 月 2 日 00:00–15:00 GMT 暂停模型调用", reason="exam_protection")
 
-        # 期中保护：后台生成全部走 Codex（ADR-0002 裁决）
+        # Optional background routing must honor the caller's no-fallback independence contract.
         target = req.model
-        if req.background and not req.exact_model and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
+        if req.background and not req.exact_model and req.fallback_enabled and BACKGROUND_BACKEND and req.spec.backend != BACKGROUND_BACKEND:
             if BACKGROUND_MODEL in MODELS and MODELS[BACKGROUND_MODEL].backend == BACKGROUND_BACKEND:
                 target = BACKGROUND_MODEL
                 req.routed_from = req.model

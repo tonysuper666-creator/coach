@@ -288,8 +288,14 @@ def main() -> int:
               str(r["headers"].get("x-served-model")))
         check("codex 非流式: 正文来自 Codex", "codex 桩" in r["content"], r["content"][:20])
 
-        # ---- 后台转派：后台请求落到 Codex（期中保护）----
-        r = b.ask("后台预生成", headers={"X-Coach-Background": "1", "X-Coach-Fallback": "off"})
+        # Independent generation/review callers disable fallback: background is a scheduling class, not vendor consent.
+        r = b.ask("后台独立出题", headers={"X-Coach-Background": "1", "X-Coach-Fallback": "off"})
+        oc = r["x_coach"]
+        check("后台独立性: 禁止兜底保留 Claude", oc and oc["served_by"] == "claude-sonnet-5-5-stub" and oc["status"] == "complete" and oc["physical_calls"] == 1, str(oc and oc["served_by"]))
+        check("后台独立性: 不写转派来源", not r["headers"].get("x-coach-routed-from"), str(r["headers"].get("x-coach-routed-from")))
+
+        # ---- Explicitly opted-in background routing retains the existing Codex policy. ----
+        r = b.ask("后台预生成", headers={"X-Coach-Background": "1", "X-Coach-Fallback": "on"})
         oc = r["x_coach"]
         check("后台转派: 实际由 Codex 作答", oc and oc["served_by"] == "gpt-6.1-sol", str(oc and oc["served_by"]))
         check("后台转派: 头里写明原请求模型", r["headers"].get("x-coach-routed-from") == "claude-sonnet-5-5",

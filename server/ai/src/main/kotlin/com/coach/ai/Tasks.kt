@@ -68,6 +68,7 @@ $excerpt
 Write $count distinct single-answer multiple-choice questions (one correct text and three distractor texts) that test this knowledge point at midterm level.
 Rules: exactly one option is correct; distractors plausible; answerable from the excerpt alone; English.
 For each, include "source_quote": a verbatim sentence fragment (>= 8 words) copied from the excerpt that supports the key.$avoidBlock
+Copy ONE contiguous substring exactly, preserving spelling, punctuation, Markdown, HTML tags and LaTeX. Do not paraphrase, join fragments or replace notation with rendered symbols. Prefer a supporting fragment without mathematical markup when possible.
 Do not assign letters, positions, or option IDs. Explanations must refer to option text only.
 Return a JSON array: [{"stem":..., "correct_text":..., "distractors":[...,...,...], "explanation":..., "source_quote":...}]
         """.trim()
@@ -164,6 +165,8 @@ $excerpt
 Write $count constructed-response (short essay) exam questions at midterm level, in English, answerable in 3-6 sentences from the excerpt.
 For each question also write a reference answer and a frozen rubric: 3-5 rubric items, each with
 "id" (R1..), "text" (what a full-credit answer must contain), "points" (sum = 10) and "basis" (verbatim clue from the excerpt).
+For EVERY basis, copy ONE contiguous substring of the excerpt exactly. Do not paraphrase, combine fragments,
+insert ellipses, correct spelling, or rewrite punctuation/math. Keep the source's Markdown/LaTeX and escape it for JSON.
 Return a JSON array: [{"stem":..., "reference_answer":..., "rubric":[{"id":"R1","text":...,"points":3,"basis":...}]}]
     """.trim()
 

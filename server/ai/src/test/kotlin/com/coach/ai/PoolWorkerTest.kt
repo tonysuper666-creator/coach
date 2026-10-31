@@ -45,6 +45,36 @@ class PoolWorkerTest {
         dir.toFile().deleteRecursively()
     }
 
+    @Test fun mcqQuoteRepairCannotChangeTheQuestionOrAdmitUnsupportedQuotes() = runBlocking<Unit> {
+        for (mode in listOf("valid","unsupported","changed_key")) {
+            val dir=Files.createTempDirectory("mcq-quote-repair")
+            val actor=LedgerActor(this,LedgerStore(dir))
+            try { StubBridge().use { bridge ->
+                bridge.enqueue(200,StubBridge.completion(generated().replace(source,"A paraphrase absent from the actual source.")))
+                val repair=JsonArray((0..2).map { i -> json("id" to i,"source_quote" to if(mode=="unsupported") "Unsupported quote" else source).let {
+                    if(mode=="changed_key") JsonObject(it+("correctOptionId" to JsonPrimitive("changed"))) else it
+                } }).toString()
+                bridge.enqueue(200,StubBridge.completion(repair))
+                val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                worker.ensure("c","kp","Objective",source,3)
+                assertEquals(if(mode=="valid") "completed" else "failed",worker.runOne()!!.state)
+                assertEquals(2L,actor.execute { supplyCallCount() })
+                if(mode=="valid") {
+                    val queued=actor.execute { supplyJobs().single().subject.getValue("questions").jsonArray }
+                    val original=TaskParsing.mcqs(generated())
+                    queued.forEachIndexed { i,value ->
+                        val q=readStoredMcq(value.jsonObject)
+                        assertEquals(original[i].stem,q.stem)
+                        assertEquals(original[i].options.map { it.text }.toSet(),q.options.map { it.text }.toSet())
+                        assertEquals("Right result $i",q.options.single { it.optionId==q.correctOptionId }.text)
+                    }
+                    bridge.enqueue(200,StubBridge.completion(review()))
+                    assertEquals(3,worker.runOne()!!.inserted)
+                } else assertTrue(actor.execute { supplyJobs().isEmpty() })
+            } } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
+    }
+
     @Test fun fourFailureModesUseRealPoolAndEmptyPoolNeverFabricatesCards() = runBlocking<Unit> {
         for ((reason,status,body) in listOf(
             Triple("EMPTY",200,StubBridge.completion("[]")),
@@ -109,6 +139,72 @@ class PoolWorkerTest {
             assertEquals(quote,evidence.str("text"));assertEquals("R1",evidence.str("rubricItemId"))
         }
         dir.toFile().deleteRecursively()
+    }
+
+    private fun constructed()=JsonArray((0..1).map { i -> json("stem" to "Explain the source supported result for case $i.",
+        "reference_answer" to "The selected text is the uniquely correct result.","rubric" to JsonArray((1..3).map { r ->
+            json("id" to "R$r","text" to "Explains supported factor $r","points" to if(r==3) 4 else 3,"basis" to source)
+        })) }).toString()
+
+    @Test fun constructedSupplyRequiresPassedKpAndIndependentFrozenKeyReview() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("constructed-pool")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            assertNull(worker.ensureConstructed("c","kp","Objective",source))
+            actor.execute { append("c","legacy_passed",json("kpId" to "kp")) }
+            bridge.enqueue(200,StubBridge.completion(constructed()))
+            repeat(2) { bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM","note":"Reference and all rubric items supported"}""")) }
+            assertNotNull(worker.ensureConstructed("c","kp","Objective",source))
+            worker.runOne()
+            assertEquals(0,actor.execute { constructedAvailable("c","kp") })
+            repeat(2) { assertEquals(1,worker.runOne()!!.inserted) }
+            val qs=actor.execute { constructedQuestions("c","kp") }
+            assertEquals(2,qs.size)
+            for(q in qs) {
+                val parsed=TaskParsing.constructed(JsonArray(listOf(json("stem" to q.str("stem"),"reference_answer" to q.str("referenceAnswer"),"rubric" to q.getValue("rubric")))).toString()).single()
+                assertEquals(GradeGate.rubricFingerprint(parsed.rubric),q.str("rubricFingerprint"))
+            }
+            assertNull(worker.ensureConstructed("c","kp","Objective",source))
+            actor.execute { append("c","question_posed",json("questionId" to qs.first().str("questionId"),"attemptId" to "constructed-used","format" to "SHORT_ANSWER","kpIds" to listOf("kp"),"keyState" to "VERIFIED","fingerprint" to "constructed-test","policyVersion" to 1,"purpose" to "PRACTICE")) }
+            assertEquals(1,actor.execute { constructedAvailable("c","kp") })
+            assertNotNull(worker.ensureConstructed("c","kp","Objective",source))
+        } } finally { actor.close() }
+        LedgerStore(dir).use { assertEquals(1,it.constructedAvailable("c","kp")); assertEquals(2,it.constructedQuestions("c","kp").size) }
+        dir.toFile().deleteRecursively()
+    }
+
+    @Test fun rejectedConstructedReviewDoesNotEnterPool() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("constructed-reject")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            actor.execute { append("c","legacy_passed",json("kpId" to "kp")) }
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            bridge.enqueue(200,StubBridge.completion(constructed()))
+            bridge.enqueue(200,StubBridge.completion("""{"verdict":"REVISE","note":"Unsupported answer"}"""))
+            bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM","note":"Wrong vendor"}""",served=BridgeClient.CLAUDE))
+            worker.ensureConstructed("c","kp","Objective",source);worker.runOne()
+            repeat(2) { assertEquals("failed",worker.runOne()!!.state) }
+            assertEquals(0,actor.execute { constructedAvailable("c","kp") })
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun sourceQuoteRepairKeepsFrozenCriteriaAndRejectsPointChanges() = runBlocking<Unit> {
+        for (changePoints in listOf(false,true)) {
+            val dir=Files.createTempDirectory("constructed-repair")
+            val actor=LedgerActor(this,LedgerStore(dir))
+            try { StubBridge().use { bridge ->
+                actor.execute { append("c","legacy_passed",json("kpId" to "kp")) }
+                val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                bridge.enqueue(200,StubBridge.completion(constructed().replace(source,"A paraphrase that is absent from the source.")))
+                val fixed=if(changePoints) constructed().replaceFirst("\"points\":3","\"points\":2").replaceFirst("\"points\":4","\"points\":5") else constructed()
+                bridge.enqueue(200,StubBridge.completion(fixed))
+                worker.ensureConstructed("c","kp","Objective",source)
+                assertEquals(if(changePoints) "failed" else "completed",worker.runOne()!!.state)
+                assertEquals(if(changePoints) 0 else 2,actor.execute { supplyJobs().count { it.kind=="review_constructed" } })
+                assertEquals(2L,actor.execute { supplyCallCount() })
+            } } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
     }
 
 }

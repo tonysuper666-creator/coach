@@ -46,6 +46,22 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun continueAfterTwoErrorsUsesTheRemainingPoolWithoutRepeatingTheLesson() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(); f.open(); f.teach()
+            f.submit(f.machine.next("course","thread").cards)
+            assertEquals("换个例子再讲",f.submit(f.machine.next("course","thread").cards,setOf(0,1),"second").nextLabel)
+            val after = f.events().last().seq
+            val next = f.machine.next("course","thread")
+            assertNull(next.plan)
+            assertEquals(3,next.cards.size)
+            assertEquals(TutorState.AWAIT_ANSWER,next.state)
+            assertTrue(f.events().filter { it.seq > after }.none {
+                it.type == "tutor_state_changed" && it.payload.str("state") in setOf("PREPARE","TEACH")
+            })
+        }
+    }
+
     @Test fun taughtContinueProducesCardsWithoutAnExplanationCall() = runBlocking {
         TutorFixture().use { f ->
             f.seed(); f.open(); f.teach()
@@ -147,7 +163,7 @@ class TutorMachineTest {
             assertTrue(f.state().mastery.getValue("kp-1").passed)
             val second = f.machine.next("course","thread").cards
             assertEquals("换个例子再讲",f.submit(second,setOf(0,1),"second").nextLabel)
-            val example = assertNotNull(f.machine.next("course","thread").plan)
+            val example = assertNotNull(f.machine.next("course","thread",allowExample=true).plan)
             assertEquals(TeachingMode.EXAMPLE,example.mode)
             assertTrue(example.conceptIds.isEmpty())
             f.machine.finish(example,"example",true)

@@ -80,14 +80,15 @@ class TutorMachine(private val actor: LedgerActor) {
         }
     }
 
-    suspend fun next(course: String, thread: String, testUntaught: Boolean = false): TutorOutcome = actor.execute {
+    /** Plain continuation practices a taught KP; only the explicit button may start an example recap. */
+    suspend fun next(course: String, thread: String, testUntaught: Boolean = false, allowExample: Boolean = false): TutorOutcome = actor.execute {
         tutorTransaction {
             val c = context(course,thread)
             requireNotBusy(c)
             val pending = pending(c)
             if (pending.isNotEmpty()) return@tutorTransaction outcome(c, cards=pending)
             val explained = snapshot(course).projection.explainedKpIds.contains(c.kp)
-            if (!testUntaught && (!explained || needsExample(c))) return@tutorTransaction beginExplanation(c, explained)
+            if (!testUntaught && (!explained || allowExample && needsExample(c))) return@tutorTransaction beginExplanation(c, explained)
             pose(c, untaught=!explained)
         }
     }

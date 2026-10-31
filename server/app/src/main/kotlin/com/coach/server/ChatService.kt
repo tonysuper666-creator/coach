@@ -160,7 +160,7 @@ class ChatService(
             return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null)
         }
         when (tutorIntent(question)) {
-            TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack)
+            TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack,allowExample=false)
             TutorIntent.TEST_ME -> return nextStep(threadId,courseId,pack,true)
             null -> Unit
         }
@@ -178,19 +178,20 @@ class ChatService(
         publish(tutor.open(courseId,threadId,kpId,concepts,title),threadId,courseId)
     }
 
-    suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false): String {
-        var outcome = tutor.next(courseId,threadId,testUntaught)
+    /** Button actions retain §2.6's recap; text intents pass allowExample=false (§5.8). */
+    suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false, allowExample: Boolean = true): String {
+        var outcome = tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
         if(outcome.waitingForPool) {
             val kp = actor.execute { events(courseId).lastOrNull { it.type=="kp_opened" && it.threadId==threadId }?.payload?.str("kpId") }
             if(kp!=null) {
                 runCatching { preparation.ensure(courseId,kp) }
-                outcome=tutor.next(courseId,threadId,testUntaught)
+                outcome=tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
                 if(waitingPools.add(threadId)) scope.launch {
                     try {
                         repeat(360) {
                             delay(500)
                             val available=actor.execute { poolAvailable(courseId,kp) }
-                            if(available>=3) { publish(tutor.next(courseId,threadId,testUntaught),threadId,courseId);return@launch }
+                            if(available>=3) { publish(tutor.next(courseId,threadId,testUntaught,allowExample=allowExample),threadId,courseId);return@launch }
                             if(actor.execute { supplyJobs(courseId,kp).isEmpty() }) {
                                 hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
                                     "phase" to "pool_failed","text" to "题池暂空，补题未成功，可以重试。"));return@launch

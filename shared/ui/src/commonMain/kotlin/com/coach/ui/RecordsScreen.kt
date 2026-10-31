@@ -40,9 +40,11 @@ fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenKp
         value = withContext(Dispatchers.Default) { RecordsView(view.events).also { it.changes; it.orphans } }
     }
     val data = records ?: return CenterMessage("正在整理记录…")
-    var selected by remember { mutableStateOf<RecordSelection?>(null) }
+    var picked by remember { mutableStateOf<RecordSelection?>(null) }
+    // 宽屏右栏默认就是最新一条变化，不留一块空白；窄屏停在列表。
+    val selected = picked ?: if (wide) data.changes.maxByOrNull { it.seq }?.let { RecordSelection.Change(it) } else null
     val list: @Composable (Modifier) -> Unit = { modifier ->
-        RecordsList(c, view, data, selected, modifier) { selected = it }
+        RecordsList(c, view, data, selected, modifier) { picked = it }
     }
     if (wide) {
         Row(Modifier.fillMaxSize()) {
@@ -53,7 +55,7 @@ fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenKp
             }
         }
     } else if (selected != null) {
-        RecordDetail(c, view, data, selected, onBack = { selected = null }, onOpenKp = onOpenKp)
+        RecordDetail(c, view, data, selected, onBack = { picked = null }, onOpenKp = onOpenKp)
     } else list(Modifier.fillMaxSize())
 }
 

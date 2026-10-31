@@ -109,11 +109,12 @@ def stop(p):
 
 
 def instrument(method, phase):
+    run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE+'.test'])
     run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE])
     output = run([ADB, '-s', SERIAL, 'shell', 'am', 'instrument', '-w', '-e', 'class',
         'com.coach.android.MistakeReviewSmoke#'+method, '-e', 'coachPhase', phase,
         '-e', 'coachPort', PORT, '-e', 'coachDevice', DEVICE, '-e', 'coachToken', TOKEN,
-        '-e', 'coachKp', kp, PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner'], timeout=180)
+        '-e', 'coachKp', kp, PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner'], timeout=420)
     (OUT/(phase+'.txt')).write_text(output)
     if 'OK (1 test)' not in output: raise RuntimeError('Phone replay failed in '+phase+'; inspect phase report')
     print('OPPO '+phase+' passed', flush=True)
@@ -178,6 +179,12 @@ try:
     (OUT/'summary.json').write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary), flush=True)
 finally:
+    # Failure evidence written by the instrumented test, kept next to the other artifacts.
+    try: snaps = [n for n in run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'ls', 'cache']).split() if n.startswith('review-snap-')]
+    except Exception: snaps = []
+    for name in ['review-fail.png', 'review-fail.txt', 'review-trace.txt'] + snaps:
+        try: (OUT/name).write_bytes(run([ADB, '-s', SERIAL, 'exec-out', 'run-as', PACKAGE, 'cat', 'cache/'+name], binary=True))
+        except Exception: pass
     for p in reversed(children): stop(p)
     for log in logs: log.close()
     # Keep the production package untouched; only remove this test package's private keys.

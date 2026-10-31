@@ -69,7 +69,7 @@ internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets
     val scope = rememberCoroutineScope()
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
-            key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
+            key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), failed = math.failed.keys, onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
         }
     }
 }

@@ -106,12 +106,36 @@ class CoachActivity : ComponentActivity() {
         sync.start(scope)
         client.start(scope)
         val clock = SimpleDateFormat("HH:mm", Locale.getDefault())
+        injectFormulaFaultSample(model)
         val controller = CoachController(
             courseId = BuildConfig.COACH_COURSE, sync = sync, tutor = client,
             formatClock = { clock.format(Date(it)) },
             math = com.coach.ui.MathAssets(mathHttp),
         )
         return controller
+    }
+
+    /**
+     * Debug builds only, `--ez faultSample true --es openKp <kp>`: shows a clearly labelled sample message with invalid TeX on the real study page,
+     * to check how a formula the server cannot draw looks to the learner. It is never a tutor answer and is not stored anywhere.
+     */
+    private fun injectFormulaFaultSample(model: TutorModel) {
+        val kp = intent.getStringExtra("openKp") ?: return
+        if (!BuildConfig.DEBUG || !intent.getBooleanExtra("faultSample", false)) return
+        val thread = "kp:$kp"
+        val id = "fault-sample-1"
+        val text = "**【故障注入样本 · 不是导师的真实回答】** 下面故意写了两个错误的公式，用来检查界面怎么提示。\n\n" +
+            "先看一个正确的：弹性 \$\\varepsilon=-0.17\$ 表示价格上升 1%，需求下降 0.17%。\n\n" +
+            "句子里的错误公式：这里把 \$\\frac{\\Delta Q\$ 少写了一半括号，后面的文字还要接着读。\n\n" +
+            "单独一行的错误公式：\n\n\$\$\\varepsilon=\\frac{\\Delta Q}{\$\$\n\n" +
+            "这行文字在公式后面，不应该被挤走。"
+        fun frame(vararg pairs: Pair<String, String>) = kotlinx.serialization.json.buildJsonObject { pairs.forEach { (k, v) -> put(k, kotlinx.serialization.json.JsonPrimitive(v)) } }.toString()
+        scope.launch {
+            kotlinx.coroutines.delay(4_000)
+            model.onFrame(frame("t" to "msg.start", "msg" to id, "threadId" to thread, "model" to "故障注入样本"))
+            model.onFrame(frame("t" to "msg.snapshot", "msg" to id, "threadId" to thread, "i" to "1", "text" to text, "status" to "complete"))
+            model.onFrame(frame("t" to "msg.end", "msg" to id, "threadId" to thread, "status" to "complete"))
+        }
     }
 
     override fun onPause() {

@@ -6,6 +6,7 @@ import androidx.compose.foundation.text.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.*
@@ -24,7 +25,7 @@ data class MathAsset(val tex: String, val display: Boolean, val sha: String, val
 fun mathKey(tex: String, display: Boolean) = "$display:$tex"
 
 @Composable
-fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean = true, modifier: Modifier = Modifier, onFailure: (String) -> Unit = {}) {
+fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean = true, modifier: Modifier = Modifier, onFailure: (String) -> Unit = {}, failed: Set<String> = emptySet()) {
     val source = block.source
     val kind = block.ast.children.firstOrNull { source.substring(it.startOffset, it.endOffset).isNotBlank() }?.type.toString()
     val horizontal = kind.contains("CODE") || kind.contains("TABLE")
@@ -33,7 +34,7 @@ fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model:
         Text(source.removePrefix("```\n").removeSuffix("```"), modifier.then(scroll).padding(8.dp), fontFamily = FontFamily.Monospace)
     } else {
         // Structure (headings, lists, quotes) is drawn from the first moment, also while the block is still arriving; formulas wait for the seal.
-        RichMarkdown(block, assets, model, live = !block.sealed, modifier.then(scroll), onFailure)
+        RichMarkdown(block, assets, model, live = !block.sealed, modifier.then(scroll), onFailure, failed)
     }
 }
 
@@ -74,15 +75,15 @@ internal fun groupMathRuns(tokens: List<MathSegment>, canInline: (MathSegment) -
 
 /** Block-level structure: headings, bullet/numbered lists (nested), quotes and paragraphs; each paragraph text then goes through math + inline styles. */
 @Composable
-private fun RichMarkdown(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, modifier: Modifier, onFailure: (String) -> Unit) {
+private fun RichMarkdown(block: MarkdownBlock, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, modifier: Modifier, onFailure: (String) -> Unit, failed: Set<String>) {
     val nodes = block.ast.children.filter { block.source.substring(it.startOffset, it.endOffset).isNotBlank() }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        BlockNodes(block.source, nodes, assets, model, live, onFailure)
+        BlockNodes(block.source, nodes, assets, model, live, onFailure, failed)
     }
 }
 
 @Composable
-private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, onFailure: (String) -> Unit) {
+private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, onFailure: (String) -> Unit, failed: Set<String>) {
     val body = MaterialTheme.typography.bodyLarge
     nodes.forEach { node ->
         val type = node.type.name
@@ -92,7 +93,7 @@ private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String,
                 val content = node.children.firstOrNull { it.type.name.endsWith("_CONTENT") }
                 val text = content?.let { source.substring(it.startOffset, it.endOffset).trim() } ?: source.substring(node.startOffset, node.endOffset).trim('#', ' ')
                 val size = when (level) { 1 -> 22.sp; 2 -> 20.sp; 3 -> 18.sp; else -> 17.sp }
-                MathText(text, assets, model, live, body.copy(fontSize = size, lineHeight = size * 1.4f, fontWeight = FontWeight.Bold), onFailure, Modifier.padding(top = 6.dp))
+                MathText(text, assets, model, live, body.copy(fontSize = size, lineHeight = size * 1.4f, fontWeight = FontWeight.Bold), onFailure, Modifier.padding(top = 6.dp), failed)
             }
             type == "UNORDERED_LIST" || type == "ORDERED_LIST" -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 var number = 0
@@ -103,7 +104,7 @@ private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String,
                     val inner = item.children.filter { it.type.name != "LIST_NUMBER" && it.type.name != "LIST_BULLET" && source.substring(it.startOffset, it.endOffset).isNotBlank() }
                     Row(Modifier.fillMaxWidth()) {
                         Text(label, Modifier.widthIn(min = 22.dp), style = body, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { BlockNodes(source, inner, assets, model, live, onFailure) }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { BlockNodes(source, inner, assets, model, live, onFailure, failed) }
                     }
                 }
             }
@@ -111,17 +112,17 @@ private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String,
                 val bar = MaterialTheme.colorScheme.outlineVariant
                 // A bar drawn behind the column (no intrinsic measurement: the paragraphs inside use BoxWithConstraints).
                 Column(Modifier.fillMaxWidth().drawBehind { drawRect(bar, size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)) }.padding(start = 13.dp)) {
-                    BlockNodes(source, node.children.filter { it.children.isNotEmpty() && source.substring(it.startOffset, it.endOffset).isNotBlank() }, assets, model, live, onFailure)
+                    BlockNodes(source, node.children.filter { it.children.isNotEmpty() && source.substring(it.startOffset, it.endOffset).isNotBlank() }, assets, model, live, onFailure, failed)
                 }
             }
-            else -> MathText(source.substring(node.startOffset, node.endOffset), assets, model, live, body, onFailure)
+            else -> MathText(source.substring(node.startOffset, node.endOffset), assets, model, live, body, onFailure, failed = failed)
         }
     }
 }
 
 /** One paragraph of text: display formulas on their own scrollable row, text and inline formulas flowing as one wrapped paragraph. */
 @Composable
-private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, style: TextStyle, onFailure: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, style: TextStyle, onFailure: (String) -> Unit, modifier: Modifier = Modifier, failed: Set<String> = emptySet()) {
     if (live) {
         // Still streaming: structure and emphasis are shown, formulas stay as written until the block seals (no half-typed LaTeX flicker).
         Text(remember(text) { renderMarkdownText(text) }, modifier.fillMaxWidth(), style = style)
@@ -146,8 +147,27 @@ private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolea
                 val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
                 val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
                 if (document != null) ScrollableMath(document, first.math!!, em, foreground)
+                else if (run.size == 1 && first.math != null && first.display && mathKey(first.math!!, true) in failed) FailedFormula(first.math!!)
                 else InlineRun(run, assets, onFailure, style, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
             }
+            // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
+            if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
+                Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+internal const val FORMULA_FAILED_BLOCK_NOTE = "这个公式没能显示，下面是它的原始写法："
+internal const val FORMULA_FAILED_INLINE_NOTE = "句子里带 ⟦ ⟧ 的是没能显示的公式，已保留原始写法。"
+
+/** A display formula the server could not render (bad TeX, service down): say so in plain words and keep the source readable and scrollable. */
+@Composable
+private fun FailedFormula(tex: String) {
+    Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(FORMULA_FAILED_BLOCK_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+            Text(tex.trim(), Modifier.background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small).padding(horizontal = 10.dp, vertical = 8.dp), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

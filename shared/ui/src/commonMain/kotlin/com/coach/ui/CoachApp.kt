@@ -38,6 +38,8 @@ class CoachController(
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */
 class MathAssets(private val fetch: (suspend (tex: String, display: Boolean) -> MathAsset?)? = null) {
     val assets = mutableStateMapOf<String, MathAsset>()
+    /** Formulas the server could not draw (bad TeX, service down). Distinct from "not fetched yet": the reader gets an explanation, not a spinner-less chip. */
+    val failed = mutableStateMapOf<String, Boolean>()
     private val asked = HashSet<String>()
     suspend fun request(key: String) {
         val loader = fetch ?: return
@@ -45,7 +47,7 @@ class MathAssets(private val fetch: (suspend (tex: String, display: Boolean) -> 
         val display = key.substringBefore(':') == "true"
         val tex = key.substringAfter(':')
         // 请求方的 LaunchedEffect 会因别的公式到货而重启；已发出的请求必须跑完，否则这个公式永远停在源码 chip。
-        withContext(NonCancellable) { loader(tex, display)?.let { assets[key] = it } }
+        withContext(NonCancellable) { val asset = runCatching { loader(tex, display) }.getOrNull(); if (asset != null) assets[key] = asset else failed[key] = true }
     }
 }
 

@@ -24,6 +24,12 @@ private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
 
 fun main() {
     if (System.getProperty("coach.exportFormulas") != null) { exportFormulas(); return }
+    if (System.getenv("COACH_MODE") != "spike") { runCoach(); return }
+    runRenderSpike()
+}
+
+/** M0 渲染 spike（`COACH_MODE=spike`）：保留给渲染回放与截图验收。 */
+fun runRenderSpike() {
     val stateFile = File(System.getenv("COACH_RENDER_STATE") ?: File(System.getProperty("user.home"), "Coach/state/render-spike.json").path)
     val state = ReplayState(stateFile.takeIf { it.exists() }?.readText())
     val corpusFile = File(System.getenv("COACH_REPLAY_FILE") ?: File(System.getProperty("user.home"), "Coach/corpus/render/replay.json").path)

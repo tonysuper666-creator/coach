@@ -55,35 +55,54 @@ fun ScrollableMath(document: MathSvgDocument, tex: String, emPx: Float, color: C
     }
 }
 
+internal fun groupMathRuns(tokens: List<MathSegment>, canInline: (MathSegment) -> Boolean): List<List<IndexedValue<MathSegment>>> {
+    val out = mutableListOf<List<IndexedValue<MathSegment>>>()
+    var open = mutableListOf<IndexedValue<MathSegment>>()
+    tokens.withIndex().forEach { token ->
+        val value = token.value
+        val before = tokens.getOrNull(token.index - 1)?.text.orEmpty().substringAfterLast('\n')
+        val after = tokens.getOrNull(token.index + 1)?.text.orEmpty().substringBefore('\n')
+        val ownLine = before.isBlank() && after.isBlank()
+        if (value.math != null && value.display && (ownLine || !canInline(value))) {
+            if (open.isNotEmpty()) out += open
+            out += listOf(token)
+            open = mutableListOf()
+        } else open += token
+    }
+    if (open.isNotEmpty()) out += open
+    return out
+}
+
 @Composable
 private fun RichMarkdown(source: String, assets: Map<String, MathAsset>, model: Boolean, modifier: Modifier, onFailure: (String) -> Unit) {
     val tokens = remember(source, model) { MathDelimiters.tokenize(source, model).segments }
-    // Display formulas get their own scrollable row; text and inline formulas between them flow and wrap as one paragraph.
-    val runs = remember(tokens) {
-        val out = mutableListOf<List<IndexedValue<MathSegment>>>(); var open = mutableListOf<IndexedValue<MathSegment>>()
-        tokens.withIndex().forEach { t ->
-            if (t.value.math != null && t.value.display) { if (open.isNotEmpty()) out += open; out += listOf(t); open = mutableListOf() } else open += t
-        }
-        if (open.isNotEmpty()) out += open
-        out
-    }
     val style = MaterialTheme.typography.bodyLarge
     val density = androidx.compose.ui.platform.LocalDensity.current
     val em = with(density) { style.fontSize.toPx() }
     val foreground = LocalContentColor.current
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        runs.forEach { run ->
-            val first = run.first().value
-            val asset = if (first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
-            val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
-            if (document != null) ScrollableMath(document, first.math!!, em, foreground)
-            else InlineRun(run, assets, onFailure)
+    val widths = remember { HashMap<String, Float>() }
+    BoxWithConstraints(modifier) {
+        val available = with(density) { maxWidth.toPx() }
+        val runs = groupMathRuns(tokens) { segment ->
+            val asset = assets[mathKey(segment.math!!, segment.display)]
+            if (asset == null) false else widths.getOrPut(asset.sha) {
+                runCatching { MathSvgDocument.parse(asset.sha, asset.svg).widthEm }.getOrDefault(Float.POSITIVE_INFINITY)
+            } * em <= available
+        }
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            runs.forEachIndexed { runIndex, run ->
+                val first = run.first().value
+                val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
+                val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
+                if (document != null) ScrollableMath(document, first.math!!, em, foreground)
+                else InlineRun(run, assets, onFailure, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
+            }
         }
     }
 }
 
 @Composable
-private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit) {
+private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit, trimLeadingSpace: Boolean = false) {
     val source = run.joinToString("") { it.index.toString() }
     val measurer = rememberTextMeasurer()
     val style = MaterialTheme.typography.bodyLarge
@@ -98,8 +117,8 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     val em = with(density) { style.fontSize.toPx() }
     val inline = mutableMapOf<String, InlineTextContent>()
     val text = buildAnnotatedString {
-        run.forEach { (index, token) ->
-            if (token.text != null) appendStyledMarkdown(token.text!!)
+        run.forEachIndexed { part, (index, token) ->
+            if (token.text != null) append(renderMarkdownText(if (trimLeadingSpace && part == 0) token.text!!.trimStart(' ', '\t') else token.text!!))
             else {
                 val tex = token.math!!
                 val asset = assets[mathKey(tex, token.display)]
@@ -134,6 +153,8 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     })
 }
 
+internal fun renderMarkdownText(source: String): AnnotatedString = buildAnnotatedString { appendStyledMarkdown(source) }
+
 /** Render inline AST styles; reference definitions/links and raw HTML stay literal. */
 private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
     val root = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(source)
@@ -141,6 +162,7 @@ private fun AnnotatedString.Builder.appendStyledMarkdown(source: String) {
         val type = node.type.name
         val value = source.substring(node.startOffset, node.endOffset)
         when {
+            type == "LIST_BULLET" -> append("• ")
             type == "LINK_DEFINITION" || type.contains("REFERENCE_LINK") -> append(value)
             type == "STRONG" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { node.children.filterNot { it.type.name in setOf("EMPH", "STRONG") && it.children.isEmpty() }.forEach(::visit) }
             type == "EMPH" && node.children.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { node.children.filterNot { it.type.name == "EMPH" && it.children.isEmpty() }.forEach(::visit) }

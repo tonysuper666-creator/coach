@@ -21,11 +21,14 @@ import java.util.Base64
 
 
 fun main(args: Array<String>): Unit = runBlocking {
+    val managed = System.getenv("COACH_MANAGE_SERVICES") == "1"
     val data = Path.of(System.getenv("COACH_DATA_DIR") ?: File(System.getProperty("user.home"),"Coach/data").path)
     if (args.firstOrNull() in setOf("pair-code", "devices", "revoke")) {
         pairingCommand(args, data)
         return@runBlocking
     }
+    // Management commands print their result to the invoking terminal, never service logs.
+    if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)
     val fileLock = FileChannel.open(data.resolve("server.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)
     val lock = fileLock.tryLock() ?: error("Another Coach server owns this data directory")
@@ -52,10 +55,13 @@ fun main(args: Array<String>): Unit = runBlocking {
     val token = Files.readString(tokenPath).trim()
     store.enroll(device,token)
     val actor = LedgerActor(this,store)
+    val children = if (managed) ChildServices(this) else null
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
     val chat = ChatService(actor, this, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")
+    actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
+    val supplyWorker = chat.startSupplyWorker()
     actor.execute { backupIfDue() }
     val maintenance = launch {
         val detector = SuspensionDetector()
@@ -70,7 +76,8 @@ fun main(args: Array<String>): Unit = runBlocking {
             } else actor.execute { backupIfDue() }
         }
     }
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device) }
+    val math = MathProcess.locate()
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device); mathRoutes(math) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -126,13 +133,16 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { supervisor.cancelAndJoin();maintenance.cancelAndJoin();actor.close() }
+        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
         local.stop(100, 1000)
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
+    children?.start()
+    supplyWorker.start()
     try { awaitCancellation() } finally {
+        withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()
         local.stop(100, 1000)
-        maintenance.cancelAndJoin();actor.close();lock.release();fileLock.close()
+        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close();lock.release();fileLock.close()
     }
 }

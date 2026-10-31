@@ -18,7 +18,8 @@ from local_config import value
 ROOT = Path(__file__).resolve().parents[2]
 SDK = Path(value("coach.sdkDir")).expanduser()
 ADB = SDK / "platform-tools/adb"
-SERIAL = "emulator-5586"
+SERIAL = os.environ.get("COACH_PAIRING_SERIAL", "emulator-5586")
+AVD = os.environ.get("COACH_PAIRING_AVD", "sable-api35")
 BINARY = ROOT / "server/app/build/install/app/bin/app"
 
 
@@ -67,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="coach-pairing-") as tmp:
 
             wait_until(server_ready, 30)
             assert (work / "desktop-token").stat().st_mode & 0o777 == 0o600
-            emulator = subprocess.Popen([SDK / "emulator/emulator", "-avd", "sable-api35", "-port", "5586",
+            emulator = subprocess.Popen([SDK / "emulator/emulator", "-avd", AVD, "-port", SERIAL.removeprefix("emulator-"),
                                          "-read-only", "-no-snapshot-save", "-no-boot-anim", "-no-audio",
                                          "-no-window", "-gpu", "host", "-cores", "2"],
                                         env=dict(os.environ, ANDROID_HOME=str(SDK), ANDROID_SDK_ROOT=str(SDK)),

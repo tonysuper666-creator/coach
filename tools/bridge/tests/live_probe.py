@@ -85,7 +85,7 @@ class Abort(Exception):
     """触发期中保护：整批中止（不是重试）。"""
 
 
-BLACKOUT_START = datetime(2026, 11, 1, 18, 0)     # 11-01 18:00 起
+BLACKOUT_START = datetime(2026, 11, 2, 0, 0)     # 11-01 18:00 起
 BLACKOUT_END = datetime(2026, 11, 2, 15, 0)       # 到 11-02 15:00 不跑任何 Claude live
 
 
@@ -127,7 +127,7 @@ class SSE:
     def __init__(self, port: int, body: dict, headers: dict | None = None, timeout: float = 240):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
         payload = json.dumps(body, ensure_ascii=False).encode()
-        h = {"Host": "127.0.0.1", "Content-Type": "application/json",
+        h = {"Host": "127.0.0.1", "Content-Type": "application/json", "X-Coach-Traffic": "test",
              "Content-Length": str(len(payload)), "Connection": "close"}
         h.update(headers or {})
         head = "POST /v1/chat/completions HTTP/1.0\r\n" + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n"

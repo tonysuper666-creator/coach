@@ -10,6 +10,29 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class RenderingQualityTest {
+    @Test fun sentenceFractionsFlowWithCurrencyWhileWideMathKeepsItsRow() {
+        val mark = '$'.toString().repeat(2)
+        val tokens = MathDelimiters.tokenize("金额为 " + mark + "x" + mark + " 美元",true).segments
+        val inline = com.coach.ui.markdown.groupMathRuns(tokens) { true }
+        assertEquals(1,inline.size)
+        assertTrue(inline.single().any { it.value.text?.contains("美元") == true })
+        assertEquals(3,com.coach.ui.markdown.groupMathRuns(tokens) { false }.size)
+        val standalone = MathDelimiters.tokenize(mark + "x" + mark,true).segments
+        assertEquals(1,com.coach.ui.markdown.groupMathRuns(standalone) { true }.size)
+    }
+    @Test fun compoundLearningTitleKeepsOtherAnchorsInDetails() {
+        val title = "【W1】First objective ｜ 【W2】Second objective ｜ 【W3】Third objective"
+        assertEquals("W1" to "First objective", splitTitle(title))
+        assertEquals(listOf("【W2】Second objective", "【W3】Third objective"), additionalTitleScope(title))
+        assertEquals("" to "P(A|B)", splitTitle("P(A|B)"))
+        assertEquals("" to "P(A | B)", splitTitle("P(A | B)"))
+    }
+    @Test fun completedMarkdownListsAndEmphasisRenderWithoutSourceMarkers() {
+        val rendered = com.coach.ui.markdown.renderMarkdownText("- **First** item\n- Second item")
+        assertEquals("• First item\n• Second item", rendered.text.trim())
+        assertTrue(rendered.spanStyles.any { it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold })
+    }
+
     @Test fun blocksStayImmutableAsDeltasArrive() {
         val source = "# Title\n\nFirst **paragraph**.\n\n- one\n\n  continued\n- two\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```kotlin\nval dollar = \"$\"\n\n// code\n```\n\nFinal\nheading\n=======\n\n[late]: https://example.org\n"
         val engine = StreamingMarkdown()

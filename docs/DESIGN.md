@@ -195,7 +195,7 @@ acceptance/                          验收脚本、语料、录屏（只有验�
 - 从备份恢复时生成新 `epoch` 并写 `server_restored`（`lastSeqBefore` = 所用备份里的最大 seq）。
 - 恢复时把所有非终态 job（queued/running）置为 cancelled 再按原 subject 重新排队，清空 `turn_leases`；之后的 fence 都在新 epoch 下比较（§4.2）〔评R3 I6〕。
 - 服务端在每条命令回执和 `hello` 里带 `backedUpThroughSeq`（最近一次成功备份覆盖到的 seq）。客户端发件箱保留两类命令：未确认的；已确认但 seq > `backedUpThroughSeq` 的——后者要等被备份覆盖才删。只靠「未确认的重放」不够：最近一次备份之后、回档之前已入账的作答，回档后哪里都没有。
-- 客户端 `hello` 带上自己记住的 epoch；不一致 → 丢弃本地账本副本、拉快照重建，并重放所有未确认命令，以及 seq 大于新库 `lastSeqBefore` 的自己的已确认命令；服务端照常按 commandId 去重。
+- 客户端 `hello` 带上自己记住的 epoch；不一致 → 丢弃本地账本副本、拉快照重建，并重放全部仍保留的、非 REJECTED 的自己的命令；服务端照常按 commandId 去重。旧确认 seq 属于旧 epoch，不能与新库 `lastSeqBefore` 比较；设备错过连续两次回档时，新库 seq 可能已超过旧确认 seq。当前发件箱只等备份水位覆盖再删；恢复更旧备份的额外保留期仍由 M1-08 补齐，不据此宣称可恢复任意历史备份。
 - `submit_answer` 命令自带出题快照（attemptId、questionId、fingerprint、kpIds、purpose、policyVersion、letterMap）。服务端遇到未知 attempt（例如备份早于离线包下载），按快照补写 `question_posed`（字母沿用快照里的 `letterMap`，不重新分配）；题目本身也不在库里，就写 `answer_orphaned`：保留原文、不计分、不进任何窗口，记录页可见（沿用 O §4.4「离线作答时题目已作废：作答保留、不计」）。
 - 边界：每台设备只重放自己的命令；某台设备在回档后再也不上线，它的那部分作答仍会缺。桌面端本地副本回灌其他设备事件不进 M0（§14 #8）。
 
@@ -205,7 +205,7 @@ acceptance/                          验收脚本、语料、录屏（只有验�
 
 ### 4.5 三个常驻进程的托管（决定）〔漏#3〕
 
-Ktor 服务是唯一的监督者：它以子进程启动桥副本（Coach 自己的 venv）和 mathsvc（Node），各自健康检查（`/health`，10 秒一次）、崩溃后指数退避重启（1 s → 60 s 封顶）、日志写 `~/Coach/logs/{server,bridge,mathsvc}.log`（按天轮转，保留 14 天）。服务端退出时杀掉整个子进程组。
+Ktor 服务是唯一的监督者：它以子进程启动桥副本（Coach 自己的 venv）和 mathsvc（Node），各自健康检查（桥 `/health?scope=process`、mathsvc JSONL ping/pong，10 秒一次）、崩溃后指数退避重启（1 s → 60 s 封顶）、日志写 `~/Coach/logs/{server,bridge,mathsvc}-YYYY-MM-DD.log`（按天轮转，保留 14 天）。服务端退出时杀掉整个子进程组；清理守卫覆盖 JVM 被 SIGKILL 后的子进程清理。安装与停止见 `tools/dev/service.md`。
 - M0：手动运行 `tools/dev/run-all.sh`（由账本卡 TON-1042 提供，它第一个需要三个进程一起跑）〔评R3 m9〕，不装任何 LaunchAgent。
 - M1：装一个用户级 LaunchAgent `local.coach.server`（KeepAlive），只管 Ktor；卸载 = `launchctl bootout gui/$UID/local.coach.server` 并删 plist。
 - 不做防休眠（`caffeinate`），离线体验靠 §1.4；唤醒后的收尾见 §4.7。
@@ -273,13 +273,7 @@ Mac 小时在线率只有 11–38%，休眠是常态，不是异常。
 
 Coach 仓库 `tools/bridge/` 放 `~DT/tools/subscription_bridge.py` 的副本，跑 8791，必改九项（路径迁出、`x_coach` 显式终态、`served_by`、`X-Coach-Fallback: off`、`X-Request-Id` 与按请求推理强度、计时从拿到信号量起算、并发协调、能力表 `true_stream`、故障注入回归）。Coach 只把 `status==complete` 记为讲解完成；收不到终态帧按截断处理。
 
-**并发与额度保护**：副本 Claude 并发上限 2，后台任务最多占 1；读 `rate_limit_event`，utilization ≥0.8 或 status≠allowed 时暂停后台生成。**期中前保护**〔d2 裁决，评R3 I8〕：
-- 至 2026-11-02 14:25，副本 Claude 并发上限 1。
-- (a) **每个** live 请求发出前只读检查 `~DT/data/user/runtime/bridge.log` 最后一行时间（UTC），10 分钟内有活动就中止整批，不只在每批开始前看一次。
-- (b) 已知局限：bridge.log 在请求结束时才写一行，只能挡住「他正在问模型」，挡不住「他在复习但没调模型」。真正要护的是两份桥共用的订阅额度窗口，靠 (c)；CPU 靠 `nice`（§13.2）。
-- (c) 至 2026-11-02 15:00：Coach 的 Claude 物理调用每日硬上限 60 次（按 `ai_calls` 计，含复核与 `dev_live`）；`rate_limit_event` utilization ≥0.5 或 status≠allowed 时暂停 Coach 的**全部**调用（不只后台）；2026-11-01 18:00 至 11-02 15:00 不跑任何 Claude live。
-- (d) 批量出题一律「Codex 出、Claude 复核」（满足异厂盲复核），复核计入 (c) 的上限；超出上限就推迟到期中后，不降为同厂复核。
-- (e) 8791 只在测试时段手动起，测完按 PID 停；每张卡交付里报告起停时间。
+**并发与调用规则（李政 2026-10-31 授权）**：副本 Claude 并发上限 1，后台最多占 1。移除每日调用数上限及本地 utilization 暂停线；`rate_limit_event` 继续观测和记账。只有官方实际限流时，交互讲解才显式切换 Codex、清除半截回答并显示实际模型。题池继续要求异厂盲复核，不用兜底结果冒充 VERIFIED。8791 由 Coach 常驻服务管理。2026-11-02 00:00–15:00 GMT 不启动任何 Coach CLI 调用，构建与模拟器同样全停；其余资源约束见 §13.2。
 
 Antigravity 默认关。
 
@@ -427,7 +421,7 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 
 - 不动 DeepTutor 的运行文件（8790 桥、数据库、补丁）。期中 2026-11-02 14:25 前它必须稳定。
 - CPU：大构建与模拟器 `nice -n 15`；Gradle `--max-workers=2`；全机同一时间最多一个重构建（`tools/dev/heavy` 锁，S0 提供）；11-02 当天 00:00–15:00 不跑模拟器、Gradle 全量构建与 live AI 测试。
-- 额度：不新增花钱；Claude 订阅也供他本人用 → 工程主力 Codex/CodeBuddy；Expert、Sage 只点名；Antigravity 不进 M0。期中前 Coach 的 Claude 物理调用每日 ≤60 次、11-01 18:00 至 11-02 15:00 不跑 Claude live、8791 测完按 PID 停（§5.4）〔评R3 I8〕。
+- 额度：不新增花钱；Claude 订阅也供他本人用 → 工程主力 Codex/CodeBuddy；Expert、Sage 只点名；Antigravity 不进 M0。Coach 不设本地调用次数上限，ai_calls 照常记账；Claude 官方限流时显式切换 Codex 并显示实际模型。11-02 00:00–15:00 GMT 全停。8791 由 Coach 服务端常驻管理。
 - 交付走 GitHub PR（§13.3），公开仓库纪律见 §12.1。
 - 每张卡交付首行「结果：达到/部分达到/未达到 + 数字证据」，附本卡 `ai_calls` 调用数。
 

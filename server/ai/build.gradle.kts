@@ -6,6 +6,8 @@ plugins {
 
 dependencies {
     implementation(project(":shared:domain"))
+    implementation(project(":server:core"))
+    implementation(libs.coroutines.core)
     implementation(libs.serialization.json)
     testImplementation(kotlin("test"))
 }
@@ -21,6 +23,7 @@ application {
  * 结果与 `ai_calls` 也写回那里。桥不在、DeepTutor 正在用订阅、或命中期中黑名单时段时整批直接退出。
  */
 tasks.register<JavaExec>("liveTest") {
+    environment("COACH_TRAFFIC", "test")
     group = "verification"
     description = "live 出题/批改子集：1 个 KP（生成 + 盲复核）、植入错键题、真实作答逐字校验"
     classpath = sourceSets["main"].runtimeClasspath
@@ -39,4 +42,13 @@ tasks.register<JavaExec>("plantedReplay") {
     dependsOn(tasks.named("testClasses"))
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.ai.PlantedReplayKt")
+}
+
+// Mark automated traffic for call accounting.
+tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }
+/** Synchronous operator prewarm; never starts a hidden background process. */
+tasks.register<JavaExec>("refillPool") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.coach.ai.PoolCommandKt")
+    args(providers.gradleProperty("poolArgs").orElse("").get().split(" ").filter { it.isNotBlank() })
 }

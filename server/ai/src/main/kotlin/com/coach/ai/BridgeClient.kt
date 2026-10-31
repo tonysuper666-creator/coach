@@ -24,7 +24,7 @@ data class BridgeConfig(
     val baseUrl: String = System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:8791",
     val connectTimeout: Duration = Duration.ofSeconds(5),
     val requestTimeout: Duration = Duration.ofSeconds(240),
-    val testTraffic: Boolean = false,
+    val testTraffic: Boolean = System.getenv("COACH_TRAFFIC") == "test",
 )
 
 /** 一次逻辑请求。`task` 只用于 `ai_calls` 归类，不发给模型。 */
@@ -92,7 +92,7 @@ data class AiCall(
         put("task", task)
         put("request_type", "dev_live")
         put("requested_model", requestedModel)
-        put("served_by", servedBy ?: requestedModel)
+        put("served_by", servedBy?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
         put("status", status)
         put("ttft_ms", ttftMs ?: -1)
         put("dur_ms", durMs)
@@ -371,9 +371,10 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             .header("Content-Type", "application/json")
             .header("X-Request-Id", requestId)
             .header("X-Coach-Fallback", "off")
+            .header("X-Coach-Model-Policy", "exact")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
-        request.effort?.let { builder.header("X-Coach-Effort", it) }
         if (config.testTraffic) builder.header("X-Coach-Traffic", "test")
+        request.effort?.let { builder.header("X-Coach-Effort", it) }
         if (request.background) builder.header("X-Coach-Background", "1")
         return builder
     }
@@ -406,7 +407,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             ?: ""
         if (terminal != null && terminal.complete) {
             independenceProblem(request.model, terminal)?.let { problem ->
-                return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length))
+                return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length).copy(status="failed",error=problem))
             }
         }
         val call = AiCall(
@@ -479,7 +480,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         val streamError = failure
         if (resolved != null && resolved.complete) {
             independenceProblem(request.model, resolved)?.let { problem ->
-                return BridgeResult.Failure(problem, resolved, call)
+                return BridgeResult.Failure(problem, resolved, call.copy(status="failed",error=problem))
             }
         }
         return when {
@@ -499,7 +500,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
      */
     private fun independenceProblem(requested: String, terminal: TerminalState): String? {
         if (terminal.fallback) return "served_by_mismatch:fallback"
-        val served = terminal.servedBy ?: return null
+        val served = terminal.servedBy?.takeIf { it.isNotBlank() } ?: return "served_by_missing"
         if (vendorOf(served) != vendorOf(requested)) return "served_by_mismatch:$served"
         return null
     }

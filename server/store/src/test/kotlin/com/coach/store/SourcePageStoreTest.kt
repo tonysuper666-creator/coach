@@ -11,7 +11,11 @@ class SourcePageStoreTest {
             try {
                 LedgerStore(dir).use { it.registerSourcePage("c","book","Synthetic book",1,"Adverse selection") }
                 DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
-                    s.execute("CREATE TABLE pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+                    s.execute("CREATE TABLE IF NOT EXISTS pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+                    s.executeQuery("PRAGMA table_info(pool_details)").use { columns ->
+                        val names = buildSet { while (columns.next()) add(columns.getString(2)) }
+                        assertEquals(setOf("question_id","pack_hash","explanation","source_quote","generator","reviewer"),names)
+                    }
                     for(table in listOf("fts_en","fts_zh")) {
                         for(kind in listOf("insert","delete","update")) s.execute("DROP TRIGGER ${table}_$kind")
                         if (empty) s.execute("DELETE FROM $table")

@@ -39,6 +39,7 @@ data class TutorReplyPlan(
 data class TutorOutcome(
     val state: TutorState, val nextLabel: String, val plan: TutorReplyPlan? = null,
     val cards: List<Event> = emptyList(), val grades: List<Event> = emptyList(), val waitingForPool: Boolean = false,
+    val poolMessage: String? = null,
 )
 
 /** The ledger is the state. Every decision runs through the single writer, including after restart. */
@@ -193,15 +194,12 @@ class TutorMachine(private val actor: LedgerActor) {
 
     private fun LedgerStore.pose(c: TutorThread, untaught: Boolean): TutorOutcome {
         transition(c,TutorState.POSE)
-        val used = events(c.course).filter { it.type == "question_posed" }.groupingBy { it.payload.str("questionId") }.eachCount()
-        val size = groupSize(c)
-        val ids = tutorQuestions(c.course,c.kp).sortedBy { used[it] ?: 0 }.take(size)
-        if (ids.size < size) {
-            ensureTutorPoolJob(c.course,c.kp)
-            return outcome(c,waitingForPool=true)
+        val take = takePoolGroup(c.course,c.kp,uid(),groupSize(c),untaught=untaught,thread=c.thread)
+        if (take.status != "READY") {
+            transition(c,TutorState.AWAIT)
+            return outcome(c,waitingForPool=true).copy(poolMessage=take.message)
         }
-        val cards = poseChoiceGroup(c.course,uid(),ids.map { id -> json("attemptId" to uid(),"questionId" to id,
-            "kpIds" to listOf(c.kp),"purpose" to "PRACTICE","policyVersion" to 1,"untaught" to untaught) },thread=c.thread)
+        val cards = take.events
         transition(c,TutorState.AWAIT_ANSWER)
         return outcome(c,cards=cards)
     }

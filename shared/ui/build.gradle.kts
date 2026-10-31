@@ -14,6 +14,7 @@ kotlin {
     jvmToolchain(17)
     sourceSets.commonMain.dependencies {
         implementation(project(":shared:domain"))
+        api(project(":shared:client"))
         implementation("org.jetbrains:markdown:0.7.3")
         implementation(libs.coroutines.core)
         implementation(compose.runtime)
@@ -24,4 +25,10 @@ kotlin {
         implementation(libs.navigationevent)
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
+    sourceSets.jvmTest.dependencies {
+        @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+        implementation(compose.uiTest)
+        implementation(compose.desktop.currentOs)
+        implementation(libs.coroutines.swing)
+    }
 }

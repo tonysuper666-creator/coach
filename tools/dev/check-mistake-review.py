@@ -19,6 +19,10 @@ import urllib.request
 from local_config import value
 
 ROOT = Path(__file__).resolve().parents[2]
+# Refresh server/client gates after any main rebase; the phone must exercise this checkout.
+subprocess.run([ROOT/'tools/dev/heavy', ROOT/'gradlew', ':server:app:test', ':server:app:installDist',
+                ':shared:client:jvmTest', '--max-workers=2'], check=True,
+               env=dict(os.environ, JAVA_HOME='/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home'))
 OUT = Path(os.environ['COACH_REVIEW_OUT']).resolve()
 OUT.mkdir(parents=True, exist_ok=False, mode=0o700)
 SNAPSHOT = Path(os.environ['COACH_REVIEW_SNAPSHOT']).resolve()

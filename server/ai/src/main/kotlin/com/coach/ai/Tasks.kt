@@ -485,7 +485,7 @@ object QuestionGate {
     fun structural(mcq: Mcq): List<String> {
         val defects = ArrayList<String>()
         if (mcq.stem.length < 15) defects.add("stem_too_short")
-        if (mcq.options.size < 4) defects.add("needs_four_options")
+        if (mcq.options.size != 4) defects.add("needs_four_options")
         if (mcq.options.none { it.optionId == mcq.correctOptionId }) defects.add("key_not_an_option")
         if (mcq.options.map { normalizeChoiceText(it.text) }.toSet().size != mcq.options.size) defects.add("duplicate_options")
         if (mcq.options.any { it.text.isBlank() }) defects.add("blank_option")

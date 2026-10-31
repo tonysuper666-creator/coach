@@ -35,7 +35,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 3) { "Database schema is newer than this server" }
+        require(version <= 4) { "Database schema is newer than this server" }
         if (version < 3) {
             rawBackup(directory.resolve("backups/pre-V003-${uid()}"))
             transaction {
@@ -75,6 +75,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=2")
             }
         }
+        if (version < 4) {
+            rawBackup(directory.resolve("backups/pre-V004-${uid()}"))
+            transaction {
+                sql("CREATE TABLE IF NOT EXISTS pool_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, explanation TEXT NOT NULL, source_quote TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+                sql("PRAGMA user_version=4")
+            }
+        }
+
     }
     private fun sql(statement: String, vararg values: Any?) = connection.prepareStatement(statement).use { ps ->
         values.forEachIndexed { i,v -> ps.setObject(i+1,v) }; ps.execute(); ps.updateCount.coerceAtLeast(0)
@@ -398,6 +406,91 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         append(course,type,payload,"job:${token.id}:${token.epoch}:${token.value}")
         true
     }
+    /** All supply mutations use the same actor/connection as learning facts. */
+    fun enqueueSupply(course: String, kp: String, objective: String, excerpt: String, background: Boolean = false): String = transaction {
+        require(course.isNotBlank() && course != "__system__" && kp.isNotBlank() && excerpt.isNotBlank())
+        val hash = sha256((objective + "\u0000" + excerpt).toByteArray(Charsets.UTF_8))
+        val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash }
+        active?.id ?: enqueueJob("gen_mcq", json("course" to course, "kp" to kp, "objective" to objective,
+            "excerpt" to excerpt, "background" to background).toString(), hash)
+    }
+    fun supplyJobs(course: String? = null, kp: String? = null): List<SupplyJob> =
+        query("SELECT job_id,kind,subject,question_version FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('queued','running') ORDER BY created_at,job_id") {
+            SupplyJob(it.getString(1), it.getString(2), LedgerJson.parseToJsonElement(it.getString(3)).jsonObject, it.getString(4))
+        }.filter { (course == null || it.subject.str("course") == course) && (kp == null || it.subject.str("kp") == kp) }
+
+    fun recordAiCall(call: JsonObject, requestType: String = "background") {
+        sql("INSERT OR IGNORE INTO ai_calls(call_id,task,requested_model,served_by,ttft_ms,dur_ms,in_chars,out_chars,status,request_type,queue_ms,physical_calls) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            call.str("call_id"),call.str("task"),call.str("requested_model"),
+            (call["served_by"] as? JsonPrimitive)?.contentOrNull,call.num("ttft_ms"),call.num("dur_ms"),
+            call.num("in_chars"),call.num("out_chars"),call.str("status"),requestType,call.num("queue_ms"),call.num("physical_calls"))
+    }
+    fun supplyCallCount(): Long = query("SELECT coalesce(sum(physical_calls),0) FROM ai_calls") { it.getLong(1) }.single()
+    fun failSupply(token: Fence, reason: String): Boolean {
+        require(reason in setOf("EMPTY", "TEXT_ONLY", "MALFORMED", "TIMEOUT"))
+        if (token.epoch != hello().epoch) return false
+        return sql("UPDATE jobs SET state='failed',last_error=?,updated_at=? WHERE job_id=? AND fence=? AND state='running'",
+            reason,clock(),token.id,token.value) == 1
+    }
+    fun queueBlindReview(token: Fence, job: SupplyJob, questions: JsonArray, generator: String): Boolean = transaction {
+        if (!completeJob(token,job.packHash,null)) return@transaction false
+        enqueueJob("blind_review", JsonObject(job.subject + mapOf("questions" to questions, "generator" to JsonPrimitive(generator))).toString(),job.packHash)
+        true
+    }
+    fun storeVerifiedBatch(token: Fence, job: SupplyJob, questions: List<VerifiedPoolQuestion>): Int = transaction {
+        if (!completeJob(token,job.packHash,null)) return@transaction 0
+        val course=job.subject.str("course"); val kp=job.subject.str("kp")
+        var inserted=0
+        for (q in questions) {
+            ChoiceKey(q.options,q.correctOptionId)
+            require(q.options.size == 4 && q.generator.isNotBlank() && q.reviewer.isNotBlank())
+            val fp=questionFingerprint(q.stem,q.options)
+            if (query("SELECT 1 FROM questions WHERE course_id=? AND fingerprint=?",course,fp) { it.getInt(1) }.isNotEmpty()) continue
+            val id=uid()
+            sql("INSERT INTO questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state) VALUES(?,?,'SINGLE_CHOICE',?,?,'COACH',?,'VERIFIED')",id,course,q.stem,LedgerJson.encodeToString(q.options),fp)
+            sql("INSERT INTO question_kp(question_id,kp_id,is_primary) VALUES(?,?,1)",id,kp)
+            sql("INSERT INTO answer_keys(question_id,key_json,reviewed_by,reviewed_at) VALUES(?,?,?,?)",id,json("correctOptionId" to q.correctOptionId).toString(),q.reviewer,clock())
+            sql("INSERT INTO pool_details VALUES(?,?,?,?,?,?)",id,job.packHash,q.explanation,q.sourceQuote,q.generator,q.reviewer)
+            inserted++
+        }
+        inserted
+    }
+    private fun unseenPoolIds(course: String, kp: String): List<String> = query(
+        """SELECT q.question_id FROM questions q JOIN question_kp k USING(question_id)
+           WHERE q.course_id=? AND k.kp_id=? AND q.format='SINGLE_CHOICE' AND q.key_state='VERIFIED'
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed'
+               AND json_extract(e.payload,'$.questionId')=q.question_id)
+           ORDER BY q.rowid""",course,kp) { it.getString(1) }
+    fun poolAvailable(course: String, kp: String): Int = unseenPoolIds(course,kp).size
+    fun poolStems(course: String, kp: String): List<String> = query(
+        "SELECT stem_md FROM questions JOIN question_kp USING(question_id) WHERE course_id=? AND kp_id=?",course,kp) { it.getString(1) }
+
+    /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
+    fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,
+        purpose: String = "PRACTICE", untaught: Boolean = false): PoolTake = transaction {
+        require(size in setOf(1,3) && groupId.isNotBlank())
+        require(purpose in Purpose.entries.map { it.name })
+        val prior=events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
+        if (prior.isNotEmpty()) {
+            require(prior.size == size && prior.all { it.payload.strings("kpIds") == listOf(kp) }) { "Group identity mismatch" }
+            return@transaction PoolTake(prior,"READY",poolAvailable(course,kp),emptyList(),null)
+        }
+        val ids=unseenPoolIds(course,kp)
+        val jobs=supplyJobs(course,kp).map { it.id to jobState(it.id)!!.first }
+        val failure=query("SELECT subject,last_error FROM jobs WHERE kind IN ('gen_mcq','blind_review') AND state IN ('failed','completed') ORDER BY updated_at DESC,rowid DESC") {
+            LedgerJson.parseToJsonElement(it.getString(1)).jsonObject to it.getString(2)
+        }.firstOrNull { it.first.str("course") == course && it.first.str("kp") == kp }?.second
+        val reason=failure ?: if(ids.size < size) "EMPTY" else null
+        if (reason != null && events(course).none { it.idemKey == "fallback:$groupId" })
+            append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,"from" to "TASK","reason" to reason),"fallback:$groupId")
+        if (ids.size < size) return@transaction PoolTake(emptyList(),if(jobs.isEmpty()) "EMPTY" else "REFILLING",ids.size,jobs,
+            if(jobs.isEmpty()) "题池暂空，补题尚未运行" else "题池暂空，正在补题（约 20 秒）")
+        val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
+            "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught) }
+        val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false)
+        PoolTake(posed,"READY",ids.size-size,jobs,null)
+    }
+
     fun acquireLease(thread: String, device: String, ttlMillis: Long = 120000): Fence? = transaction {
         val active = query("SELECT device_id,fence FROM turn_leases WHERE thread_id=? AND expires_at>?",thread,clock()) { it.getString(1) to it.getLong(2) }.singleOrNull()
         if (active != null) return@transaction if (active.first == device) Fence(hello().epoch,active.second,thread) else null

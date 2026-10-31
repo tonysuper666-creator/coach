@@ -92,7 +92,7 @@ data class AiCall(
         put("task", task)
         put("request_type", "dev_live")
         put("requested_model", requestedModel)
-        put("served_by", servedBy ?: requestedModel)
+        put("served_by", servedBy?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)
         put("status", status)
         put("ttft_ms", ttftMs ?: -1)
         put("dur_ms", durMs)
@@ -406,7 +406,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             ?: ""
         if (terminal != null && terminal.complete) {
             independenceProblem(request.model, terminal)?.let { problem ->
-                return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length))
+                return BridgeResult.Failure(problem, terminal, callFor(request, callId, requestId, startedAt, started, terminal, content.length).copy(status="failed",error=problem))
             }
         }
         val call = AiCall(
@@ -479,7 +479,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         val streamError = failure
         if (resolved != null && resolved.complete) {
             independenceProblem(request.model, resolved)?.let { problem ->
-                return BridgeResult.Failure(problem, resolved, call)
+                return BridgeResult.Failure(problem, resolved, call.copy(status="failed",error=problem))
             }
         }
         return when {
@@ -499,7 +499,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
      */
     private fun independenceProblem(requested: String, terminal: TerminalState): String? {
         if (terminal.fallback) return "served_by_mismatch:fallback"
-        val served = terminal.servedBy ?: return null
+        val served = terminal.servedBy?.takeIf { it.isNotBlank() } ?: return "served_by_missing"
         if (vendorOf(served) != vendorOf(requested)) return "served_by_mismatch:$served"
         return null
     }

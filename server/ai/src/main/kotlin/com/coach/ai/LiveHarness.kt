@@ -624,6 +624,9 @@ class LiveHarness(
         put("defects", buildJsonArray { outcome.defects.forEach { add(it) } })
         put("review_verdict", outcome.crossReview?.verdict ?: "MISSING")
         put("evidence", buildJsonArray { outcome.evidence.forEach { add(it) } })
+        put("evidence_spans", buildJsonArray { outcome.evidenceSpans.forEach { e ->
+            add(buildJsonObject { put("rubric_item_id",e.rubricItemId);put("start",e.span.start);put("end",e.span.end);put("text",e.span.text) })
+        } })
         put("physical_calls", outcome.calls.sumOf { it.physicalCalls })
         outcome.draft?.let { draft ->
             put("draft", buildJsonArray {

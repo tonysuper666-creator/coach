@@ -6,6 +6,8 @@ plugins {
 
 dependencies {
     implementation(project(":shared:domain"))
+    implementation(project(":server:core"))
+    implementation(libs.coroutines.core)
     implementation(libs.serialization.json)
     testImplementation(kotlin("test"))
 }
@@ -42,5 +44,11 @@ tasks.register<JavaExec>("plantedReplay") {
     mainClass.set("com.coach.ai.PlantedReplayKt")
 }
 
-// All automated test traffic opts into the bridge test budget.
+// Mark automated traffic for call accounting.
 tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }
+/** Synchronous operator prewarm; never starts a hidden background process. */
+tasks.register<JavaExec>("refillPool") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.coach.ai.PoolCommandKt")
+    args(providers.gradleProperty("poolArgs").orElse("").get().split(" ").filter { it.isNotBlank() })
+}

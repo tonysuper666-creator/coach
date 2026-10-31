@@ -24,6 +24,7 @@ data class BridgeConfig(
     val baseUrl: String = System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:8791",
     val connectTimeout: Duration = Duration.ofSeconds(5),
     val requestTimeout: Duration = Duration.ofSeconds(240),
+    val testTraffic: Boolean = false,
 )
 
 /** 一次逻辑请求。`task` 只用于 `ai_calls` 归类，不发给模型。 */
@@ -372,6 +373,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             .header("X-Coach-Fallback", "off")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
         request.effort?.let { builder.header("X-Coach-Effort", it) }
+        if (config.testTraffic) builder.header("X-Coach-Traffic", "test")
         if (request.background) builder.header("X-Coach-Background", "1")
         return builder
     }

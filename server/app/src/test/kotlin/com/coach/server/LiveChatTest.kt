@@ -183,7 +183,7 @@ class LiveChatTest {
         val store = LedgerStore(directory).also { it.enroll("live-client", token) }
         val actor = LedgerActor(scope, store)
         val logs: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
+        val chat = ChatService(actor, scope, BridgeClient(BridgeConfig(baseUrl, testTraffic = true)), fallbackOnFirstTokenTimeout = false, log = { logs.add(it) })
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 64), chat)
         }.apply {

@@ -85,7 +85,7 @@ The initial stub run used no real CLI calls. The 01:05 GMT run made four real ca
 
 ### All-KP supply and timing
 
-Real copied course content: **49/49 KPs**, including DESIGN/essay points; each input uses 17,090–19,481 characters from its actual anchored textbook pages. The first sweep used a frozen MCQ runtime before the final PR #15 rebase; the MCQ generation/review gate was unchanged by that rebase. Retries used the rebased runtime; the last two underfilled points were also retried after prompt hardening. No synthetic content was counted as live.
+Real copied course content: **49/49 KPs**, including DESIGN/essay points; each input uses 17,098–19,493 Unicode characters from its actual anchored textbook pages. The first sweep used a frozen MCQ runtime before the final PR #15 rebase; the MCQ generation/review gate was unchanged by that rebase. Retries used the rebased runtime; the last two underfilled points were also retried after prompt hardening. No synthetic content was counted as live.
 
 - First sweep: **40/49** reached three verified questions within three attempts, **159 physical calls**. All nine underfilled outcomes are retained. Two required further diagnostics/retries after the first refill pass.
 - Final private validation inventory: **174 VERIFIED MCQs across 49/49 KPs**, each at least three. Current KP: **7**; an actual atomic three-card take left **4** unseen. This is an isolated validation database, not a deployment to the user's learning database.

@@ -23,6 +23,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -41,7 +44,8 @@ class CoachActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val serverUrl="http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
+        // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
+        val serverUrl=intent.getStringExtra("coachUrl")?.takeIf { it.isNotBlank() } ?: "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
             CoachTheme {
@@ -67,6 +71,8 @@ class CoachActivity : ComponentActivity() {
         val model = TutorModel(System::currentTimeMillis) { s ->
             Log.i("CoachTtft", """{"thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""")
         }
+        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源。
+        scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
         val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)
         math = mathHttp

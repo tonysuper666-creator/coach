@@ -43,9 +43,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
         if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
     }
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
     fun send() {
         val text = draft.text.trim()
         if (text.isEmpty() || tv.busy || !ui.connected) return
+        // 发出后收起键盘：回答和「下一步 / 出题」按钮马上可见。
+        focus.clearFocus()
         if (!open()) return fail()
         pinned = true
         c.tutor.model.onSent(thread, "ask", text)
@@ -140,7 +143,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             )
             // 键盘弹出时收起两个大按钮，把空间让给对话。
             if (!imeOpen) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                val nextText = tv.nextLabel ?: if (kp.explained || tv.items.isNotEmpty()) "下一步" else "开始讲解"
+                // 服务端只在需要时给特殊文字（「换个例子再讲」）；还没讲过、线程里什么都没有时按钮就叫「开始讲解」。
+                val nextText = when {
+                    tv.nextLabel == "换个例子再讲" -> "换个例子再讲"
+                    !kp.explained && tv.items.isEmpty() && groups.isEmpty() -> "开始讲解"
+                    else -> "下一步"
+                }
                 Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy && pending == null,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy && pending == null,

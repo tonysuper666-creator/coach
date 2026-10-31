@@ -89,6 +89,7 @@ class TutorModelTest {
         assertEquals("导师正在备课…", m.state.value.threads.getValue(thread).poolText)
         m.onFrame(delta("m1", 1, "第一段正文"))
         assertNull(m.state.value.threads.getValue(thread).poolText)
+        m.onFrame("""{"t":"msg.end","msg":"m1","status":"complete","chars":5}""")
         m.onFrame("""{"t":"tutor.state","threadId":"$thread","state":"AWAIT","nextLabel":"下一步"}""")
         assertFalse(m.state.value.threads.getValue(thread).busy)
     }

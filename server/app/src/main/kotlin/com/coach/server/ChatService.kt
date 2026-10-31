@@ -89,6 +89,11 @@ class ChatService(
             forcedReason = reason
             handle?.cancel()
         }
+
+        fun attach(handle: BridgeStreamHandle) {
+            this.handle = handle
+            if (forcedStatus != null) handle.cancel()
+        }
     }
 
     /** 追问/问答：立刻返回 messageId，流在后台推进（每帧经 [hub] 广播）。 */
@@ -185,7 +190,7 @@ class ChatService(
         val result = try {
             withContext(Dispatchers.IO) {
                 bridge.streamChat(teachRequest(question, pack, recent, session.model, allowSourceLookup), sink) { handle ->
-                    session.handle = handle
+                    session.attach(handle)
                 }
             }
         } catch (error: Exception) {

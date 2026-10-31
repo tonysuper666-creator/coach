@@ -10,7 +10,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class BridgeStreamHandle internal constructor() {
     @Volatile internal var future: Future<*>? = null
+        set(value) {
+            field = value
+            if (isCancelled) runCatching { value?.cancel(true) }
+        }
     @Volatile internal var body: InputStream? = null
+        set(value) {
+            field = value
+            if (isCancelled) runCatching { value?.close() }
+        }
     private val cancelled = AtomicBoolean(false)
 
     val isCancelled: Boolean get() = cancelled.get()

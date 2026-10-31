@@ -40,6 +40,21 @@ private fun JsonObject.str(key: String): String =
 class ChatFlowTest {
 
     @Test
+    fun cancelBeforeTheStreamHandleExistsIsAppliedWhenItArrives() {
+        Harness().use { h ->
+            h.tutor.stream(600, "迟到的正文", "不应读完整条流", StubTutor.terminal("complete"), StubTutor.DONE)
+            val session = ChatService.Session("cancel-before-handle", "thread", "course", BridgeClient.CLAUDE, false)
+            session.abort("cancelled", "cancelled")
+            val started = System.nanoTime()
+            val result = BridgeClient(BridgeConfig(h.tutor.baseUrl)).streamChat(
+                com.coach.ai.teachRequest("合成问题", ""), object : com.coach.ai.BridgeStreamSink {},
+            ) { session.attach(it) }
+            assertEquals("cancelled", result.call.status)
+            assertTrue((System.nanoTime() - started) / 1_000_000 < 2_000)
+        }
+    }
+
+    @Test
     fun everyBridgeTerminalStatusReachesTheClientUnchanged() {
         for (status in listOf("complete", "truncated", "failed", "cancelled")) Harness().use { h ->
             val frames = if (status == "failed") emptyArray() else arrayOf("导师回答。")

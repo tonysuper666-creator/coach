@@ -19,6 +19,8 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
 
     private val buffer = StringBuilder()
     private var drops = 0
+    private var atLineStart = true
+    private var internalJsonLine = false
 
     /** 已被判定为内部文本而丢弃的段落数（回放断言用）。 */
     val droppedCount: Int get() = drops
@@ -37,36 +39,51 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
             // A model can return raw JSON without any of the named protocol tokens.
             // Keep that structured block internal, including pretty-printed / split chunks.
             val leading = s.trimStart()
-            if (leading.startsWith("{") || (leading.startsWith("[") &&
-                    (leading.length == 1 || leading[1] in "\"{[]0123456789-"))) {
+            if (atLineStart && (leading.startsWith("{") || (leading.startsWith("[") &&
+                    (leading.length == 1 || leading[1] in "\"{[]0123456789-")))) {
                 val end = structuredEnd(s)
                 if (end == null) {
                     if (final) { buffer.setLength(0); drop("raw_json", s) }
                     return out
                 }
-                buffer.delete(0, end)
-                drop("raw_json", s.substring(0, end))
-                continue
+                val candidate = s.substring(0, end)
+                if (runCatching { kotlinx.serialization.json.Json.parseToJsonElement(candidate) }.isSuccess) {
+                    buffer.delete(0, end)
+                    advanceLine(candidate)
+                    internalJsonLine = true
+                    drop("raw_json", candidate)
+                    continue
+                }
             }
             val newline = s.indexOf('\n')
             if (newline < 0) break
             buffer.delete(0, newline + 1)
-            emit(s.substring(0, newline + 1), out)
+            emitConsumed(s.substring(0, newline + 1), out)
         }
         if (buffer.isNotEmpty()) {
             val s = buffer.toString()
             if (final) {
                 buffer.setLength(0)
-                emit(s, out)
+                emitConsumed(s, out)
             } else {
                 val cut = safeCut(s)
                 if (cut > 0) {
                     buffer.delete(0, cut)
-                    emit(s.substring(0, cut), out)
+                    emitConsumed(s.substring(0, cut), out)
                 }
             }
         }
         return out
+    }
+
+    private fun advanceLine(text: String) {
+        for (c in text) atLineStart = if (c == '\n') true else atLineStart && c.isWhitespace()
+    }
+
+    private fun emitConsumed(text: String, out: MutableList<Segment>) {
+        if (!(internalJsonLine && text.isBlank())) emit(text, out)
+        advanceLine(text)
+        if ('\n' in text) internalJsonLine = false
     }
 
     /**
@@ -134,7 +151,8 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
             drop("source_lookup_marker", line.substring(start, close + 1))
             line = line.substring(0, start) + line.substring(close + 1)
         }
-        if (line.isBlank()) return
+        // Ordinary whitespace is part of the answer, even when it is its own delta.
+        if (line.isBlank() && line != text) return
         // 2. 协议字样：整行丢弃（落库前过滤，回放断言 0 条漏出）
         val hit = TOKENS.firstOrNull { line.lowercase().contains(it) }
         if (hit != null) {

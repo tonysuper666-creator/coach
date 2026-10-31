@@ -36,16 +36,6 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         require(version <= 3) { "Database schema is newer than this server" }
-        if (version < 3) {
-            rawBackup(directory.resolve("backups/pre-V003-${uid()}"))
-            transaction {
-                // 断线续传按 (msg, i) 去重：i 必须随正文一起落库，重连才能接着往下发。
-                // 老库可能已经被手工改回过 user_version（回档演练），列存在就不再 ALTER。
-                val columns = query("PRAGMA table_info(messages)") { it.getString(2) }
-                if ("delta_index" !in columns) sql("ALTER TABLE messages ADD COLUMN delta_index INTEGER NOT NULL DEFAULT 0")
-                sql("PRAGMA user_version=3")
-            }
-        }
         if (version < 2) {
             rawBackup(directory.resolve("backups/pre-V002-${uid()}"))
             transaction {
@@ -73,6 +63,16 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     } else sql("UPDATE answer_keys SET key_json=? WHERE question_id=?", json("correctOptionId" to correct).toString(), id)
                 }
                 sql("PRAGMA user_version=2")
+            }
+        }
+        if (version < 3) {
+            rawBackup(directory.resolve("backups/pre-V003-${uid()}"))
+            transaction {
+                // 断线续传按 (msg, i) 去重：i 必须随正文一起落库，重连才能接着往下发。
+                // 老库可能已经被手工改回过 user_version（回档演练），列存在就不再 ALTER。
+                val columns = query("PRAGMA table_info(messages)") { it.getString(2) }
+                if ("delta_index" !in columns) sql("ALTER TABLE messages ADD COLUMN delta_index INTEGER NOT NULL DEFAULT 0")
+                sql("PRAGMA user_version=3")
             }
         }
     }

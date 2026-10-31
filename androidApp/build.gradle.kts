@@ -46,7 +46,8 @@ android {
     defaultConfig {
         applicationId = "com.coach.android"
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
-        buildConfigField("int", "COACH_PORT", localConfig.getProperty("coach.port", "18791"))
+        // `-Pcoach.port=NNNN` builds against a non-production test server (real-device measurements must never pair with 18791).
+        buildConfigField("int", "COACH_PORT", (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) })
         buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
         minSdk = 34
         targetSdk = 35

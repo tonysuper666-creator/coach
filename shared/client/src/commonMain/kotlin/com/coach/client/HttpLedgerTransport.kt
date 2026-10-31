@@ -14,8 +14,9 @@ import kotlinx.serialization.decodeFromString
 
 class DeviceAuthorizationException : IllegalStateException("Device pairing required")
 
-class HttpLedgerTransport(private val baseUrl: String, private val deviceId: String,
+class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     private val token: String) : LedgerTransport {
+    private val baseUrl = baseUrl.trimEnd('/')
     init { validateCoachBaseUrl(baseUrl) }
     private val client = HttpClient(CIO) {
         followRedirects = false

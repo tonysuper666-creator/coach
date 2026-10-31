@@ -104,9 +104,44 @@ with tempfile.TemporaryDirectory(prefix="coach-pairing-") as tmp:
             phone = next(device for device in devices if device["name"] == "synthetic emulator")
             run([BINARY, "revoke", phone["deviceId"]], env=env)
             instrumentation(test, ["-e", "phase", "revoked"])
+            # Independent curl probes: no token in argv; headers travel through stdin.
+            desktop_token = (work / "desktop-token").read_text().strip()
+            def curl_status(path, device=None, token=None, ws=False):
+                config = ""
+                if device is not None:
+                    config += f'header = "X-Coach-Device: {device}"\n'
+                if token is not None:
+                    config += f'header = "Authorization: Bearer {token}"\n'
+                if ws:
+                    config += ('header = "Connection: Upgrade"\nheader = "Upgrade: websocket"\n'
+                               'header = "Sec-WebSocket-Version: 13"\n'
+                               'header = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="\n')
+                return run(["curl", "--silent", "--show-error", "--max-time", "5", "--output", os.devnull,
+                            "--write-out", "%{http_code}", "--config", "-", f"http://127.0.0.1:{port}{path}"], input=config)
+            for path, ws in [("/v1/hello", False), ("/v1/ws", True)]:
+                assert curl_status(path, ws=ws) == "401"
+                assert curl_status(path, "desktop", "incorrect-token-32-characters-minimum", ws) == "401"
+                assert curl_status(path+"?token=invalid", ws=ws) == "401"
+            assert curl_status("/v1/hello", "desktop", desktop_token) == "200"
+            probe_code = re.search(r"Pairing code: (\d{6})", run([BINARY, "pair-code"], env=env)).group(1)
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/pair",
+                data=json.dumps({"code": probe_code, "name": "synthetic curl"}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                probe = json.load(response)
+            assert curl_status("/v1/hello", probe["deviceId"], probe["token"]) == "200"
+            run([BINARY, "revoke", probe["deviceId"]], env=env)
+            for path, ws in [("/v1/hello", False), ("/v1/ws", True)]:
+                assert curl_status(path, probe["deviceId"], probe["token"], ws) == "401"
             with sqlite3.connect(work / "data/coach.sqlite") as db:
                 assert db.execute("SELECT count(*) FROM ai_calls").fetchone()[0] == 0
                 assert db.execute("SELECT revoked_at FROM devices WHERE device_id=?", (phone["deviceId"],)).fetchone()[0] is not None
+                dump = "\n".join(db.iterdump())
+                assert desktop_token not in dump and probe["token"] not in dump
+            server_log.flush()
+            logs = (work / "server.log").read_text()
+            assert desktop_token not in logs and probe["token"] not in logs
+            print("CURL missing/wrong/URL/revoked token HTTP+WS=401 valid-header=200 log+DB-plaintext-scan=clean", flush=True)
             print("ANDROID pair=pass fresh-process=pass HTTP+WS=pass Keystore=pass no-plaintext=pass", flush=True)
             print("ANDROID non-allowlisted HTTP+WS=blocked CIO-policy=blocked CLI-revoke=pass revokedHTTP=401 ai_calls=0", flush=True)
         finally:

@@ -58,7 +58,7 @@ class PairingSecurityTest {
         val device=credential.str("deviceId"); val token=credential.str("token")
         assertEquals(401,h.request("/v1/pair","POST",body=json("code" to code,"name" to "replay").toString()).statusCode())
         runBlocking {
-            val transport=HttpLedgerTransport(h.base,device,token)
+            val transport=HttpLedgerTransport(h.base+"/",device,token)
             try { assertTrue(transport.hello(null).epoch.isNotBlank()) } finally { transport.close() }
         }
         val socket=h.client.newWebSocketBuilder().header("X-Coach-Device",device).header("Authorization","Bearer $token")
@@ -88,7 +88,7 @@ class PairingSecurityTest {
 
     @Test fun phoneCannotManageDevicesAndRevokedOpenSocketStopsTutorFrames() = Harness().use { h ->
         val phone=h.pair()
-        for ((path,method) in listOf("/v1/pairing-code" to "POST","/v1/devices" to "GET","/v1/devices/desktop" to "DELETE"))
+        for ((path,method) in listOf("/v1/pairing-code" to "POST","/v1/devices" to "GET","/v1/devices/desktop" to "DELETE", "/v1/%64evices" to "GET", "/v1/%70airing-code" to "POST", "/v1/%64evices/desktop" to "DELETE"))
             assertEquals(403,h.request(path,method,phone.deviceId,"Bearer ${phone.token}").statusCode())
         val closed=CompletableFuture<Int>()
         val frames=LinkedBlockingQueue<String>()
@@ -104,6 +104,12 @@ class PairingSecurityTest {
             assertEquals(1008,closed.get(5,TimeUnit.SECONDS))
             assertFalse(frames.any { it.contains("private-after-revoke") })
         } finally { socket.abort() }
+    }
+
+    @Test fun concurrentPairingOnlyIssuesOneCredential() = Harness().use { h ->
+        val body=json("code" to h.code(),"name" to "racing phone").toString()
+        val requests=(1..2).map { CompletableFuture.supplyAsync { h.request("/v1/pair","POST",body=body).statusCode() } }
+        assertEquals(listOf(200,401),requests.map { it.get(5,TimeUnit.SECONDS) }.sorted())
     }
 
     @Test fun boundsUnauthenticatedBodiesAndHidesFailureReasons() = Harness().use { h ->

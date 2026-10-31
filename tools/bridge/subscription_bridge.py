@@ -570,6 +570,10 @@ def child_env(backend: str) -> dict[str, str]:
     env["LANG"] = "en_US.UTF-8"
     env["TMPDIR"] = str(TMP_DIR)
     env["COACH_SANDBOX_PROFILE"] = str(SANDBOX_PROFILE)
+    if backend == "codex":
+        # Agent runtimes inherit task-local config outside the bridge sandbox.
+        # The bridge uses the user's subscription config already allowed there.
+        env["CODEX_HOME"] = str(Path.home() / ".codex")
     if backend == "claude":
         # 只走订阅登录：从别处（如 Claude Code 桌面端）继承来的 ANTHROPIC_* / CLAUDE_* 会改线路或改模式，一律去掉。
         for k in list(env):

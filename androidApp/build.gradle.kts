@@ -47,7 +47,11 @@ android {
         // Separate package for concurrent, isolated acceptance on the shared OPPO.
         applicationId = providers.gradleProperty("coachApplicationId").orElse("com.coach.android").get()
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
-        buildConfigField("int", "COACH_PORT", localConfig.getProperty("coach.port", "18791"))
+        // `-Pcoach.port=NNNN` builds against a non-production test server (real-device measurements must never pair with 18791).
+        // The port is also written to the manifest (meta-data `coach.port`) so a script can read it back from an installed package.
+        val coachPort = (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) }
+        buildConfigField("int", "COACH_PORT", coachPort)
+        manifestPlaceholders["coachPort"] = coachPort
         buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
         minSdk = 34
         targetSdk = 35

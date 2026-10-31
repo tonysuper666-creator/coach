@@ -65,6 +65,9 @@ class ChatService(
     private val fallbackOnFirstTokenTimeout: Boolean = true,
     private val allowSourceLookup: Boolean = false,
     private val log: (String) -> Unit = { println(it) },
+    private val sourceLookupProtected: () -> Boolean = { java.time.Instant.now() < java.time.Instant.parse("2026-11-02T15:00:00Z") },
+    private val sourceLookupTimeoutMs: Long = 90_000,
+    private val enrichSourcePages: Boolean = true,
 ) {
 
     val hub = ChatHub()
@@ -80,6 +83,8 @@ class ChatService(
         val fallback: Boolean,
         val plan: TutorReplyPlan? = null,
     ) {
+        @Volatile var phase: String = "teach"
+        @Volatile var lookupAllowed: Boolean = false
         @Volatile var handle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
         @Volatile var forcedReason: String? = null
@@ -183,7 +188,12 @@ class ChatService(
         val recent = actor.execute { recentTurns(threadId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
-        val context = listOf(TutorOutputGuard.modelInput(pack.take(40_000)), plan?.instruction().orEmpty()).joinToString("\n")
+        val enriched = if (plan?.explanation != true && enrichSourcePages) {
+            val hits = actor.execute { searchSourcePages(courseId,question) }
+            SourcePack.prepare(pack,hits).render()
+        } else pack.take(40_000)
+        session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
+        val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
             recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
         return messageId
@@ -207,7 +217,7 @@ class ChatService(
             val cursor = live.cursor
             return json(
                 "t" to "msg.snapshot", "msg" to messageId, "threadId" to live.threadId,
-                "i" to cursor.index, "text" to cursor.text, "status" to "streaming", "reason" to null,
+                "i" to cursor.index, "text" to cursor.text, "status" to "streaming", "reason" to null, "phase" to live.phase,
             )
         }
         val row = actor.execute { messageSnapshot(messageId) } ?: return null
@@ -219,6 +229,7 @@ class ChatService(
 
     private suspend fun run(session: Session, question: String, pack: String, recent: List<Pair<String, String>>) {
         val visibleText = StringBuilder()
+        val rawAnswer = StringBuilder()
         val started = System.nanoTime()
         var lastPersist = started
         var visible = VisibleStream { drop ->
@@ -251,6 +262,7 @@ class ChatService(
         val sink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
                 session.lastDeltaAtMs = maxOf(session.lastDeltaAtMs, atMs)
+                if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
                 acceptFiltered(guard.push(text))
                 val now = System.nanoTime()
                 if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
@@ -291,7 +303,7 @@ class ChatService(
 
         val result = try {
             withContext(Dispatchers.IO) {
-                bridge.streamChat(teachRequest(question, pack, recent, session.model, allowSourceLookup), sink) { handle ->
+                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed), sink) { handle ->
                     session.attach(handle)
                 }
             }
@@ -308,12 +320,17 @@ class ChatService(
             )
         } finally {
             watchdog.cancel()
-            session.finished.set(true)
         }
 
         acceptFiltered(guard.finish())
         for (segment in visible.finish()) emitSegment(session, segment, visibleText)
 
+        if (result is BridgeResult.Success && session.forcedStatus == null && session.lookupAllowed && !sourceLookupProtected()) {
+            sourceLookupQuery(rawAnswer.toString())?.let { query ->
+                appendSourceLookup(session,question,query,visibleText)
+            }
+        }
+        session.finished.set(true)
         val forcedStatus = session.forcedStatus
         val terminal = result.terminal
         val status = forcedStatus ?: when {
@@ -351,6 +368,104 @@ class ChatService(
         if (willFallback) fallback(session,question,pack)
     }
 
+    /** At most one invocation per original answer; the supplement cannot ask for another lookup. */
+    private suspend fun appendSourceLookup(session: Session, question: String, query: String, content: StringBuilder) {
+        val started = System.nanoTime()
+        var lookupResult: BridgeResult? = null
+        var checked = 0
+        var accepted = 0
+        var failure: String? = null
+        val callId = UUID.randomUUID().toString()
+        session.phase = "source_lookup"
+        hub.emit(json("t" to "msg.progress","msg" to session.messageId,"phase" to "source_lookup","text" to "导师去翻原文了"))
+        val deadline = scope.launch {
+            delay(sourceLookupTimeoutMs.coerceAtMost(90_000))
+            session.abort(StreamStatus.TRUNCATED,"source_lookup_timeout")
+        }
+        try {
+            val health = bridge.health()
+            val rate = health?.get("rate_limit") as? JsonObject
+            if (health == null || rate?.str("all_paused") == "true" || rate?.str("background_paused") == "true" ||
+                rate?.str("status")?.takeIf { it.isNotBlank() && it != "null" }?.let { it !in setOf("allowed","ok") } == true) {
+                failure = "source_quota_protected"
+                return
+            }
+            val hits = actor.execute { searchSourcePages(session.courseId,query) }
+            val pack = SourceReadSandbox().read(SourcePack.prepare("",hits))
+            if (pack.pages.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
+                failure = "source_unavailable"
+                return
+            }
+            val gate = SourceCitationGate(pack.anchors)
+            val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false) { attempt ->
+                session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
+            }
+            val visible = VisibleStream()
+            var heading = false
+            fun publishParagraph(paragraph: String) {
+                val publisher = VisibleStream()
+                val segments = publisher.push(paragraph) + publisher.finish()
+                if (segments.isEmpty()) return
+                if (!heading) {
+                    emitSegment(session,VisibleStream.Segment.Text("\n\n补充：\n"),content)
+                    heading = true
+                }
+                segments.forEach { emitSegment(session,it,content) }
+                val cursor = session.cursor
+                runBlocking { actor.execute { updateStreamingMessage(session.messageId,cursor.text,cursor.index) } }
+            }
+            fun acceptSource(text: String) {
+                val filtered = visible.push(text).joinToString("") { segment -> when(segment) {
+                    is VisibleStream.Segment.Text -> segment.text
+                    is VisibleStream.Segment.Math -> "\$\$${segment.tex}\$\$"
+                } }
+                gate.push(filtered).forEach(::publishParagraph)
+            }
+            val request = com.coach.ai.ChatRequest(
+                task="SOURCE_LOOKUP",model=session.model,system=com.coach.ai.TeachPrompt.SYSTEM,
+                user="""Read only the supplied textbook pages. Answer the student's question using this source lookup.
+                    |Write ONLY supplement paragraphs, separated by a blank line. End EVERY paragraph with its source anchor, e.g. 【S1】.
+                    |Every quotation must be copied verbatim from the anchored page. No unsupported claims. No questions, grading, tools, JSON or lookup markers.
+                    |Student question: ${TutorOutputGuard.modelInput(question)}
+                    |Lookup request: ${TutorOutputGuard.modelInput(query)}
+                    |${TutorOutputGuard.modelInput(pack.render())}
+                """.trimMargin(),stream=true,effort="medium")
+            lookupResult = withContext(Dispatchers.IO) {
+                bridge.streamChat(request,object : BridgeStreamSink {
+                    override fun onDelta(text: String, atMs: Long) {
+                        if (session.forcedStatus == null) acceptSource(guard.push(text))
+                    }
+                }) { session.attach(it) }
+            }
+            if (lookupResult is BridgeResult.Success && session.forcedStatus == null) {
+                acceptSource(guard.finish())
+                val tail = visible.finish().joinToString("") { segment -> when(segment) {
+                    is VisibleStream.Segment.Text -> segment.text
+                    is VisibleStream.Segment.Math -> "\$\$${segment.tex}\$\$"
+                } }
+                gate.push(tail).forEach(::publishParagraph)
+            }
+            gate.finish(lookupResult is BridgeResult.Success && session.forcedStatus == null).forEach(::publishParagraph)
+            checked = gate.checked
+            accepted = gate.accepted
+            if (lookupResult !is BridgeResult.Success) failure = "source_lookup_failed"
+        } catch (e: Exception) {
+            failure = "source_lookup_unavailable"
+            log("COACH source-lookup unavailable msg=${session.messageId} error=${e.javaClass.simpleName}")
+        } finally {
+            deadline.cancel()
+            val call = lookupResult?.call
+            actor.execute { recordAiCall(
+                callId=call?.callId ?: callId,task="SOURCE_LOOKUP",requestedModel=session.model,
+                servedBy=call?.servedBy ?: session.model,ttftMs=call?.ttftMs,
+                durMs=(System.nanoTime()-started)/1_000_000,inChars=call?.inChars ?: 0,outChars=call?.outChars ?: 0,
+                status=session.forcedReason ?: failure ?: if (accepted > 0) "complete" else "citation_rejected",
+                queueMs=call?.queueMs,physicalCalls=call?.physicalCalls ?: 0,requestType="source_lookup") }
+            log("COACH source-lookup msg=${session.messageId} durationMs=${(System.nanoTime()-started)/1_000_000} checked=$checked accepted=$accepted status=${session.forcedReason ?: failure ?: "complete"}")
+            session.phase = "teach"
+        }
+    }
+
     /**
      * §5.5：首字 25 秒没到 → 主动断开（已在上面的 watchdog 里做）→ 显式调 Codex 非流式，
      * 新开一条消息，消息头写真实模型名，界面显示等待而不是「打字」。
@@ -361,7 +476,7 @@ class ChatService(
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
         hub.emit(startFrame(session))
-        val request = teachRequest(question, pack, emptyList(), fallbackModel, allowSourceLookup, effort = null)
+        val request = teachRequest(question, pack, emptyList(), fallbackModel, false, effort = null)
             .copy(stream = false)
         val result = withContext(Dispatchers.IO) { bridge.chat(request) }
         val text = (result as? BridgeResult.Success)?.text.orEmpty()

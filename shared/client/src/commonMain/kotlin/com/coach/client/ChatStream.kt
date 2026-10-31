@@ -16,7 +16,7 @@ sealed interface ChatUpdate {
     data class Text(val messageId: String, val index: Int, val text: String) : ChatUpdate
     data class Math(val messageId: String, val index: Int, val tex: String, val display: Boolean) : ChatUpdate
     data class Snapshot(val messageId: String, val index: Int, val text: String, val status: String) : ChatUpdate
-    data class Progress(val messageId: String, val phase: String) : ChatUpdate
+    data class Progress(val messageId: String, val phase: String, val text: String = "") : ChatUpdate
     data class Ended(val messageId: String, val status: String, val reason: String?, val chars: Int) : ChatUpdate
 }
 
@@ -63,9 +63,10 @@ class ChatStreamAssembler(private val json: Json = Json { ignoreUnknownKeys = tr
                 lastIndex[messageId] = index
                 bodies[messageId] = StringBuilder(text)
                 states[messageId] = obj.str("status")
-                listOf(ChatUpdate.Snapshot(messageId, index, text, obj.str("status")))
+                listOf(ChatUpdate.Snapshot(messageId, index, text, obj.str("status"))) +
+                    if (obj.str("phase") == "source_lookup") listOf(ChatUpdate.Progress(messageId,"source_lookup","导师去翻原文了")) else emptyList()
             }
-            "msg.progress" -> listOf(ChatUpdate.Progress(messageId, obj.str("phase")))
+            "msg.progress" -> listOf(ChatUpdate.Progress(messageId, obj.str("phase"), obj.str("text")))
             "msg.end" -> {
                 states[messageId] = obj.str("status")
                 listOf(

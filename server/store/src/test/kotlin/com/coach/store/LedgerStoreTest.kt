@@ -17,7 +17,7 @@ class LedgerStoreTest {
                 connection.createStatement().use { statement ->
                     statement.executeQuery("PRAGMA user_version").use { rows ->
                         assertTrue(rows.next())
-                        assertEquals(4, rows.getInt(1)) // V4 adds the pairing-code table.
+                        assertEquals(5, rows.getInt(1)) // V5 maintains the course source indexes.
                     }
                 }
             }

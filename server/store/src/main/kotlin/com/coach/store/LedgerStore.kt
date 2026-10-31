@@ -39,7 +39,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=1")
             }
         }
-        require(version <= 4) { "Database schema is newer than this server" }
+        require(version <= 5) { "Database schema is newer than this server" }
         if (version < 2) {
             rawBackup(directory.resolve("backups/pre-V002-${uid()}"))
             transaction {
@@ -83,6 +83,20 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             transaction {
                 sql("CREATE TABLE IF NOT EXISTS pairing_code(singleton INTEGER PRIMARY KEY CHECK(singleton=1), code_sha256 TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)")
                 sql("PRAGMA user_version=4")
+            }
+        }
+        if (version < 5) {
+            rawBackup(directory.resolve("backups/pre-V005-${uid()}"))
+            transaction {
+                // Also covers page imports that write through SQL rather than registerSourcePage.
+                for (table in listOf("fts_en","fts_zh")) {
+                    sql("DELETE FROM $table")
+                    sql("INSERT INTO $table(text,doc_id,pdf_page) SELECT text,doc_id,pdf_page FROM source_pages")
+                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_insert AFTER INSERT ON source_pages BEGIN INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
+                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_delete AFTER DELETE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; END")
+                    sql("CREATE TRIGGER IF NOT EXISTS ${table}_update AFTER UPDATE ON source_pages BEGIN DELETE FROM $table WHERE doc_id=old.doc_id AND pdf_page=old.pdf_page; INSERT INTO $table(text,doc_id,pdf_page) VALUES(new.text,new.doc_id,new.pdf_page); END")
+                }
+                sql("PRAGMA user_version=5")
             }
         }
     }
@@ -588,10 +602,42 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** `ai_calls`（§5.7）：只记长度与耗时，不记内容。 */
     fun recordAiCall(callId: String, task: String, requestedModel: String, servedBy: String?, ttftMs: Long?,
-        durMs: Long, inChars: Int, outChars: Int, status: String, queueMs: Long?, physicalCalls: Int) {
+        durMs: Long, inChars: Int, outChars: Int, status: String, queueMs: Long?, physicalCalls: Int,
+        requestType: String = "dev_live") {
         sql("INSERT OR REPLACE INTO ai_calls(call_id,task,requested_model,served_by,ttft_ms,dur_ms,in_chars,out_chars,status,request_type,effort,pack_chars,queue_ms,physical_calls,cache_read,cache_create) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             callId,task,requestedModel,servedBy,ttftMs,durMs,inChars,outChars,status,
-            "dev_live",null,null,queueMs,physicalCalls,null,null)
+            requestType,null,null,queueMs,physicalCalls,null,null)
+    }
+
+    /** Import API keeps both language indexes in the same transaction as the source page. */
+    fun registerSourcePage(course: String, doc: String, title: String, page: Int, text: String,
+        tutorVisible: Boolean = true, kind: String = "textbook") = transaction {
+        require(page > 0 && doc.isNotBlank())
+        val owner = query("SELECT course_id FROM source_docs WHERE doc_id=?",doc) { it.getString(1) }.singleOrNull()
+        require(owner == null || owner == course) { "Source belongs to another course" }
+        sql("INSERT INTO source_docs(doc_id,course_id,kind,title,tutor_visible) VALUES(?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET title=excluded.title,kind=excluded.kind,tutor_visible=excluded.tutor_visible",
+            doc,course,kind,title,if(tutorVisible) 1 else 0)
+        sql("INSERT INTO source_pages(doc_id,pdf_page,text,text_sha256) VALUES(?,?,?,?) ON CONFLICT(doc_id,pdf_page) DO UPDATE SET text=excluded.text,text_sha256=excluded.text_sha256",doc,page,text,sha256(text.toByteArray()))
+    }
+
+    /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
+    fun searchSourcePages(course: String, question: String): List<SourcePage> {
+        val terms = Regex("[\\p{IsHan}]{3,}|[A-Za-z0-9]{2,}").findAll(question.take(2000))
+            .flatMap { match ->
+                val value = match.value
+                if (value.first().code in 0x4e00..0x9fff) value.windowed(3).asSequence() else sequenceOf(value)
+            }.filter { it.lowercase() !in setOf("the","is","of","a","an","what","how","in","to","and","does","why") }.distinct().take(32).toList()
+        if (terms.isEmpty()) return emptyList()
+        val found = mutableListOf<SourcePage>()
+        for (table in listOf("fts_en","fts_zh")) {
+            val expression = terms.filter { table == "fts_en" || it.length >= 3 }.joinToString(" OR ") { "\"$it\"" }
+            if (expression.isBlank()) continue
+            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
+                if (tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
+                    SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4)) else null
+            }.filterNotNull()
+        }
+        return found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }.sortedByDescending { it.score }.take(6)
     }
 
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()

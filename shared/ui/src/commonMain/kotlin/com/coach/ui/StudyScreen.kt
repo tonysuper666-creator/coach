@@ -33,10 +33,13 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val focus = LocalFocusManager.current
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by remember(kp.id) { mutableStateOf(false) }
+    var pinned by remember(kp.id) { mutableStateOf(true) }
+    var followingOutput by remember(kp.id) { mutableStateOf(false) }
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
     fun next(test: Boolean) {
+        pinned = true
         focus.clearFocus()
         if (!open()) return fail()
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
@@ -47,6 +50,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         val text = draft.text.trim()
         if (text.isEmpty() || tv.busy || !ui.connected) return
         if (!open()) return fail()
+        pinned = true
         c.tutor.model.onSent(thread, "ask", text)
         if (c.tutor.ask(thread, c.courseId, text, c.packFor(kp.id))) draft = TextFieldValue("") else fail()
     }
@@ -75,16 +79,28 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
         val listState = rememberLazyListState()
         // 钉底：停在底部时，流式内容增长会跟着走；用户往上翻就松开，翻回底部再钉住。
-        var pinned by remember(kp.id) { mutableStateOf(true) }
         LaunchedEffect(listState) {
-            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling) pinned = !canForward }
+            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling && !followingOutput) pinned = !canForward }
         }
         val lastLength = (tv.items.lastOrNull() as? ChatItem.Tutor)?.message?.text?.length ?: 0
-        LaunchedEffect(tv.items.size, lastLength, tv.poolText, tv.error, tv.notice) {
-            if (pinned && listState.layoutInfo.totalItemsCount > 0) {
-                androidx.compose.runtime.withFrameNanos { }
+        LaunchedEffect(tv.items.size, lastLength) {
+            if (pinned && tv.items.isNotEmpty()) {
+                // A follow-up can arrive after a graded group. Keep its text visible
+                // instead of scrolling past it into the older question cards.
+                followingOutput = true
+                try {
+                    androidx.compose.runtime.withFrameNanos { }
+                    val index = tv.items.lastIndex
+                    val layout = listState.layoutInfo
+                    val height = layout.viewportEndOffset - layout.viewportStartOffset
+                    val item = layout.visibleItemsInfo.firstOrNull { it.index == index }
+                    listState.scrollToItem(index, maxOf(0, (item?.size ?: 0) - height))
+                } finally { followingOutput = false }
+            }
+        }
+        LaunchedEffect(tv.poolText, tv.error, tv.notice) {
+            if (pinned && listOf(tv.poolText, tv.error, tv.notice).any { it != null } && listState.layoutInfo.totalItemsCount > 0) {
                 listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
-                listState.scrollBy(1_000_000f)
             }
         }
         // 新题组出现时把它的开头放在最上面，方便从第 1 题读起。

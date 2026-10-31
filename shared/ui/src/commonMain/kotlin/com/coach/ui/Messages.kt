@@ -44,6 +44,7 @@ internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> 
 private fun Notice(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
 private fun reasonText(reason: String?) = when (reason) {
+    "rate_limited" -> "Claude 暂时限流，正在换模型回答"
     "first_token_timeout" -> "25 秒没有出字"
     "stall" -> "30 秒没有新内容"
     "total_timeout" -> "超过 180 秒"

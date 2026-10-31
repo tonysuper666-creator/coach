@@ -43,6 +43,7 @@ data class ThreadView(
     val nextLabel: String? = null,
     /** 题池暂空时服务端给的真实进度文字。 */
     val poolText: String? = null,
+    val notice: String? = null,
     val error: String? = null,
 ) {
     val streaming: Boolean get() = items.any { it is ChatItem.Tutor && !it.message.done }
@@ -77,6 +78,10 @@ class TutorModel(
     private val pendingSend = HashMap<String, Pair<String, TimeSource.Monotonic.ValueTimeMark>>()
     private val sampled = HashSet<String>()
 
+    fun unfinishedMessageIds(): List<String> = state.value.threads.values.flatMap { thread ->
+        thread.items.mapNotNull { (it as? ChatItem.Tutor)?.message?.takeUnless { message -> message.done }?.id }
+    }.distinct()
+
     fun onConnection(connected: Boolean) = update {
         copy(connected = connected, lastSeenAtMs = if (connected) wallClock() else lastSeenAtMs)
     }
@@ -86,7 +91,7 @@ class TutorModel(
         pendingSend[threadId] = kind to TimeSource.Monotonic.markNow()
         mutateThread(threadId) {
             val items = if (learnerText == null) items else items + ChatItem.Learner("l:${items.size}:${wallClock()}", learnerText)
-            copy(items = items, error = null, poolText = null)
+            copy(items = items, error = null, poolText = null, notice = null)
         }
     }
 
@@ -102,7 +107,10 @@ class TutorModel(
             "tutor.state" -> mutateThread(obj.str("threadId")) {
                 copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, error = null)
             }
-            "tutor.progress" -> mutateThread(obj.str("threadId")) { copy(poolText = obj.str("text").ifBlank { null }) }
+            "tutor.progress" -> mutateThread(obj.str("threadId")) {
+                if (obj.str("phase") == "fallback") copy(notice = obj.str("text").ifBlank { null }, poolText = null)
+                else copy(poolText = obj.str("text").ifBlank { null })
+            }
             "msg.error" -> {
                 val thread = obj.str("threadId")
                 if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error")) }
@@ -117,6 +125,7 @@ class TutorModel(
             is ChatUpdate.Started -> {
                 val thread = obj.str("threadId")
                 messageThread[update.messageId] = thread
+                if (update.fallback && pendingSend[thread] == null) pendingSend[thread] = "fallback" to TimeSource.Monotonic.markNow()
                 mutateThread(thread) {
                     copy(items = items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)), poolText = null)
                 }
@@ -138,7 +147,7 @@ class TutorModel(
             is ChatUpdate.Ended -> {
                 val final = assembler.text(update.messageId)
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, text = if (final.isNotEmpty()) final else text) }
-                messageThread[update.messageId]?.let { pendingSend.remove(it) }
+                if (update.reason != "rate_limited") messageThread[update.messageId]?.let { pendingSend.remove(it) }
             }
         }
     }

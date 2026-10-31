@@ -67,6 +67,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     c.tutor.model.onSent(thread, "answer", null)
                 }
             }
+            tv.notice?.let { text -> item { Text(text, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium) } }
             tv.poolText?.let { text -> item { ProgressLine(text) } }
             tv.error?.let { text -> item { Text(text, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) } }
         }

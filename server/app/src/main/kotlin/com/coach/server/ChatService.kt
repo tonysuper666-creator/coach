@@ -299,11 +299,12 @@ class ChatService(
             // ADR-0002：收不到终态帧按截断处理（已经出过字就一定不是「完整」）
             else -> StreamStatus.TRUNCATED
         }
-        val reason = session.forcedReason ?: terminal?.reason ?: (result as? BridgeResult.Failure)
+        var reason = session.forcedReason ?: terminal?.reason ?: (result as? BridgeResult.Failure)
             ?.reason?.takeIf { it.isNotBlank() && it != "no_x_coach" }
 
         val rateLimited = forcedStatus == null && (reason == "rate_limited" || (result as? BridgeResult.Failure)?.reason?.startsWith("http_429") == true)
         if (rateLimited) {
+            reason = "rate_limited"
             status = StreamStatus.FAILED
             visibleText.setLength(0)
             session.cursor = Session.Cursor("", session.cursor.index + 1)

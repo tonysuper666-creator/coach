@@ -47,6 +47,11 @@ class TutorClient(
                     live = queue
                     model.onConnection(true)
                     backoff = 250
+                    // The stream may have finished while the network was absent. Request its
+                    // authoritative snapshot before consuming new deltas on this connection.
+                    model.unfinishedMessageIds().forEach { id ->
+                        send(Frame.Text(buildJsonObject { put("t", "msg.resume"); put("msg", id) }.toString()))
+                    }
                     val sender = launch { for (text in queue) send(Frame.Text(text)) }
                     try {
                         for (frame in incoming) if (frame is Frame.Text) model.onFrame(frame.readText())

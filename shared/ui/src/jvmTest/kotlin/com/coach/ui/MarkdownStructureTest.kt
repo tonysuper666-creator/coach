@@ -11,6 +11,27 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class MarkdownStructureTest {
+    @Test fun quizTextKeepsPlainContentAndRendersStructuredContent() = runComposeUiTest {
+        val math = MathAssets()
+        setContent {
+            MaterialTheme { Column {
+                QuizText("医疗支出为 50%，请选择合理解释。", "plain", math)
+                QuizText("It's a single-choice question, worth 1.5 marks.", "english", math)
+                QuizText("**重点**：保留格式", "bold", math)
+                QuizText("1. 先比较\n2. 再计算", "list", math)
+                QuizText("1. 单行列表", "single-list", math)
+            } }
+        }
+        onNodeWithText("医疗支出为 50%，请选择合理解释。").assertExists()
+        onNodeWithText("It's a single-choice question, worth 1.5 marks.").assertExists()
+        onNodeWithText("重点：保留格式").assertExists()
+        onAllNodes(hasText("**", substring = true)).assertCountEquals(0)
+        onAllNodesWithText("1.").assertCountEquals(2)
+        onNodeWithText("单行列表").assertExists()
+        onNodeWithText("先比较").assertExists()
+        onNodeWithText("再计算").assertExists()
+    }
+
     private val sample = "## 先估算再检验\n\n- 第一步：**算人均**医疗支出\n- 第二步：与 GDP 比较\n  - 注意单位\n\n1. 先写公式\n2. 再代入\n\n> 提示：别漏掉人口\n\n结论放在最后。"
 
     @Test fun listsAndHeadingsAreRenderedNotShownAsMarkdownSource() = runComposeUiTest {

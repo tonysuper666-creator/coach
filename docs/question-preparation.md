@@ -40,6 +40,8 @@ New question groups request their first row before lazy-list measurement, then a
 
 If a later restore/tail request replaces the pre-layout request and the row is still absent after two frames, focus falls back to `scrollToItem(index, 0)`. The entire focus operation (row availability, restore and visible-size wait) is bounded to 1500 ms and returns false on timeout, without throwing into composition. This defensive bound does not change the phone's per-sample 1000 ms acceptance limit. Regressions cover an overwritten request and a removed row.
 
+Quiz paragraphs containing only letters, digits and a conservative set of ordinary punctuation render directly with the existing bodyLarge style and full-width layout. This avoids repeated Markdown parsing of plain stems/options during lazy-list measurement. Potential formatting, formulas, entities, URLs, indentation, list markers and punctuation-only lines retain the existing Markdown renderer. The whole question still renders immediately; no content is deferred to move the measurement marker earlier.
+
 The historical 2026-10-31 14:44:09 output was not retained: the bridge disables session persistence and logs metadata rather than model text. Its exact malformed cause therefore remains unverified. Reproduction with the same stored source pack is evidence about current behavior, not recovery of the historical output.
 
 ## Import the already reviewed inventory

@@ -57,7 +57,7 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
                 Text("第 $number / $total 题", modifier=trace, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (card.untaught) StatusChip("这点还没讲过", MaterialTheme.colorScheme.tertiary)
             }
-            Markdown(card.stem, true, "q:${card.attemptId}", math)
+            QuizText(card.stem, "q:${card.attemptId}", math)
             val shown = card.answer ?: selected
             if (card.options.isEmpty()) {
                 OutlinedTextField(value = shown.orEmpty(), onValueChange = onSelect, readOnly = locked,
@@ -88,7 +88,7 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
                 ) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(if ((isMine && card.grade == null) || isRight || (isMine && card.grade?.correct == true)) "✓ $letter" else if (wrongPick) "✗ $letter" else letter, style = MaterialTheme.typography.titleMedium)
-                        Box(Modifier.weight(1f)) { Markdown(text, true, "o:${card.attemptId}:$letter", math) }
+                        Box(Modifier.weight(1f)) { QuizText(text, "o:${card.attemptId}:$letter", math) }
                     }
                 }
             }
@@ -101,6 +101,23 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             }
         }
     }
+}
+
+private val QUIZ_ORDERED_PREFIX = Regex("^\\d+[.)]\\s")
+
+/** Plain question paragraphs need no Markdown parser or formula effects on their first frame. */
+@Composable
+internal fun QuizText(text: String, key: String, math: MathAssets) {
+    // Deliberately conservative: any potential Markdown, math, URL, entity or indentation
+    // goes through the existing renderer. Keep its exact body style and full-width layout.
+    val plain = remember(text) {
+        text.isNotEmpty() && !text.first().isWhitespace() && text.any { it.isLetterOrDigit() } &&
+            !text.startsWith("- ") && !QUIZ_ORDERED_PREFIX.containsMatchIn(text) &&
+            !text.contains("www.", ignoreCase = true) &&
+            text.all { it.isLetterOrDigit() || it in " ，。；：？！、（）“”‘’％%,;=/.'?!-()" }
+    }
+    if (plain) Text(text, Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge)
+    else Markdown(text, true, key, math)
 }
 
 /** The server's stock wrong-answer sentence ("回答错误，正确答案是 B。", from `choiceFeedback`) names the right letter; the card uses it to mark that option. */

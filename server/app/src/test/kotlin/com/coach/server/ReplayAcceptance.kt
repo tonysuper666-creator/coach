@@ -18,12 +18,12 @@ import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
 
 /** One foreground run owns its bridge; no test traffic is sent to production 8791. */
-private class ReplayBridge(val client: BridgeClient, private val process: Process?, private val root: Path) : AutoCloseable {
+private class ReplayBridge(val client: BridgeClient, private val process: Process?, private val root: Path, val port: Int? = null) : AutoCloseable {
     override fun close() {
         process?.let {
             it.destroy()
             if(!it.waitFor(5,TimeUnit.SECONDS)) { it.destroyForcibly(); it.waitFor(5,TimeUnit.SECONDS) }
-            Files.writeString(root.resolve("bridge-lifecycle.json"),json("owned_pid" to it.pid(),"stopped" to !it.isAlive).toString()+"\n")
+            Files.writeString(root.resolve("bridge-lifecycle.json"),json("owned_pid" to it.pid(),"port" to port,"stopped" to !it.isAlive).toString()+"\n")
         }
     }
     companion object {
@@ -33,7 +33,7 @@ private class ReplayBridge(val client: BridgeClient, private val process: Proces
                 val uri=URI(url)
                 require(uri.scheme=="http" && uri.host in setOf("127.0.0.1","localhost","::1") && uri.port>0 &&
                     uri.port !in setOf(8790,8791,3790)) { "Live replay requires an isolated loopback bridge; production ports are forbidden" }
-                return ReplayBridge(BridgeClient(BridgeConfig(url)),null,root)
+                return ReplayBridge(BridgeClient(BridgeConfig(url)),null,root,uri.port)
             }
             val python=System.getenv("COACH_BRIDGE_PYTHON") ?: "tools/bridge/.venv/bin/python"
             require(Files.isExecutable(Path.of(python))) { "缺少独立桥环境；设置 COACH_BRIDGE_PYTHON 或安装 tools/bridge/.venv" }
@@ -48,7 +48,7 @@ private class ReplayBridge(val client: BridgeClient, private val process: Proces
                 redirectOutput(root.resolve("bridge.stdout.log").toFile())
                 redirectError(root.resolve("bridge.stderr.log").toFile())
             }.start()
-            val owned=ReplayBridge(BridgeClient(BridgeConfig("http://127.0.0.1:"+port)),child,root)
+            val owned=ReplayBridge(BridgeClient(BridgeConfig("http://127.0.0.1:"+port)),child,root,port)
             try {
                 withTimeout(20_000) {
                     while(true) {
@@ -306,6 +306,7 @@ fun main() = runBlocking {
             "replayed" to replayed,"turn_errors" to errors,"structural" to checks.result(),"source_utterance_assertions" to utteranceChecks.result(),
             "input_sha256" to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(input)).joinToString("") { "%02x".format(it) },
             "isolated_bridge" to !structuralOnly,
+            "bridge_port" to replayBridge.port,
             "driver_revision" to ProcessBuilder("git","rev-parse","HEAD").start().let { p ->
                 val revision=p.inputStream.bufferedReader().readText().trim();check(p.waitFor()==0);revision
             },

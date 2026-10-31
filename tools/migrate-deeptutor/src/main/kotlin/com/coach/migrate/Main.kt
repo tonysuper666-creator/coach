@@ -8,6 +8,7 @@ private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only 
     [--source DIR] [--staging DIR] [--out DIR] [--weights FILE]
     [--seed-manifest FILE [--proposal FILE]]
        migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
+       migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
 seed-content defaults: data ~/Coach/data, corpus ~/Coach/corpus/ECNM10119-健康经济学/教材.
 No learning history is imported. See README for independent verification.
@@ -26,6 +27,11 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 }
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
+    // Keep the established corpus/manifest entry point used by TON-1095 and integration.
+    // Explicit --database selects the structured CourseContent/blobs variant.
+    if(args.firstOrNull()=="seed-content" && "--database" in args) {
+        seedContentCommand(args.drop(1).toTypedArray()); return
+    }
     if(args.firstOrNull()=="seed-content") {
         val options=mutableMapOf<String,String>();var i=1
         while(i<args.size) {

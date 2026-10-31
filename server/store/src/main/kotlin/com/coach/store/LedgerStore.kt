@@ -244,6 +244,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     private fun lastSeq(): Long = query("SELECT coalesce(max(seq),0) FROM events") { it.getLong(1) }.single()
     fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? ORDER BY seq LIMIT ?",course,after,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
+    private val contentStore by lazy { CourseContentStore(connection) }
+    /** Offline CLI or server actor only: one transaction installs content and its two events. */
+    fun seedContent(seed: ContentSeed): Boolean {
+        val content = contentStore
+        return transaction { content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob) }
+    }
+    fun courseContent(course: String): CourseContent? = contentStore.course(course)
+    fun teachingPages(course: String, kp: String): List<Pair<SourceAnchor, String>> = contentStore.teachingPages(course, kp)
     fun snapshot(course: String): Snapshot {
         val events = events(course)
         return Snapshot(hello(),course,events,projection(course,events))

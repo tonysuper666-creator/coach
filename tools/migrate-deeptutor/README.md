@@ -1,5 +1,55 @@
 # DeepTutor 迁移只读对账
 
+## M1-α：只装课程内容（TON-1127）
+
+`seed-content` 是独立于正式迁移的子命令。不导入学习位置、作答、掌握度、复习、笔记、对话、题目或含历史进度的旧课程指令。真实输入和输出必须在仓库、DeepTutor 目录之外。
+
+本节的结构化装载入口以显式 `--database DIR` 选择。main 已有的 `--data` / `--corpus` 入口及仅带 `--snapshot` 的默认路径保持原样，继续生成集成版使用的 packs 和 TON-1095 引用的 `seed-content-manifest.json`。两条路径分别使用自己的输出目录，不在同一已装载库中混用。
+
+```sh
+# 今晚至 2026-10-31 08:00 GMT：先确认 pgrep -f GradleWrapperMain | wc -l 小于 2。
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 ./gradlew :tools:migrate-deeptutor:test :server:store:test :shared:domain:jvmTest :tools:migrate-deeptutor:installDist --offline --max-workers=6 --console=plain
+TOOLS=tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor
+# 空闲检查、DB/WAL 拷贝、前后 stat/ls 与 integrity_check 沿用 M0。
+"$TOOLS" --dry-run --capture-only --weights docs/background/期中分值覆盖表.md
+# SNAPSHOT 设为上一条打印的 Captured 目录。不得对 DeepTutor 原库开连接。
+# COACH_DATA_DIR 设为集成服务端的数据目录；默认 ~/Coach/data。必须先停止这个 Coach 服务端。
+"$TOOLS" seed-content --snapshot "$SNAPSHOT" --database "${COACH_DATA_DIR:-$HOME/Coach/data}" --weights docs/background/期中分值覆盖表.md
+```
+
+08:00 GMT 后构建恢复 `tools/dev/heavy`（nice 15、一次一个），`--max-workers=2`。
+
+数据落在标准的 `coach.sqlite`、`blobs/`，共享服务端 `server.lock`；服务端运行时 CLI 拒绝写入。默认输出为 `~/Coach/seed-content-out/content.json` 与 `report.md`，可用 `--out` 改位置。相同内容哈希跳过，内容修改则在同一事务更新课程和两条内容事件。已有学习事实保持不变。全新库的事件只有 `outline_revised`、`exam_weights_set`。
+
+服务端集成接口：
+
+```kotlin
+actor.execute { courseContent(courseId) } // CourseContent：课程、按源顺序的模块与 KP
+actor.execute { teachingPages(courseId, kpId) } // List<Pair<SourceAnchor, String>>，备课包原文
+```
+
+`outline_revised` 同时携带 `course`、`modules`、`knowledgePoints` 和既有投影支持的 `ops`；客户端同步后可读取标题与结构。教材 Ch1–12 的正文、页号和 FTS 留在本机 SQLite，完整 Markdown 用内容寻址 blobs 保存，不进入事件或仓库。原类型备份缺失的 KP `kind=null`，不把当前松绑后的类型冒充原类型。
+
+锚点优先沿用备课证据中的**教材**坐标（`page_index+1`，校对书页）；其余按 KP 明示章节关联全部章节页。没有章号的 KP 只收至少两个英文标题词在页内命中的页。`basis` 分别为 `SOURCE_REFERENCE` / `CHAPTER_RANGE` / `TEXT_MATCH`，按来源引用与标题词匹配度排序。章节关联是备课上下文，不能当成逐段引用已验证；无锚点逐条写报告。不索引资料、答案、sealed、讲义或 Ch13 以后内容。
+
+分值表本身是估计，有跨 KP 的题目，未给每个 KP 独立权重。保留 `examWeightGroups` 的原始题名、分值、成员和分摊；`examWeights` 按每行成员均分为整数，余数按表中先后分配。RS 30 分在 6 KP 上各 5；联合 Essay 的 15 分为 RAND/Oregon 8、因果识别 7。每行总分不变，总计 100；不是声称原表规定了 8/7。修改表导致归属无法唯一确定会在写库前失败，不猜映射。
+
+验收者在新的离线数据目录自行装两次，再核对：
+
+```sh
+"$TOOLS" seed-content --snapshot "$SNAPSHOT" --database "$HOME/Coach/content-check" --out "$HOME/Coach/content-check-a" --weights docs/background/期中分值覆盖表.md
+shasum -a 256 "$HOME/Coach/content-check/coach.sqlite"
+"$TOOLS" seed-content --snapshot "$SNAPSHOT" --database "$HOME/Coach/content-check" --out "$HOME/Coach/content-check-b" --weights docs/background/期中分值覆盖表.md
+shasum -a 256 "$HOME/Coach/content-check/coach.sqlite" # 重装前后相同
+cmp "$HOME/Coach/content-check-a/content.json" "$HOME/Coach/content-check-b/content.json"
+cmp "$HOME/Coach/content-check-a/report.md" "$HOME/Coach/content-check-b/report.md"
+python3 tools/migrate-deeptutor/verify-content.py --snapshot "$SNAPSHOT" --database "$HOME/Coach/content-check" --weights docs/background/期中分值覆盖表.md
+```
+
+最后仍需验收者在 DeepTutor 界面和 Coach 抽查 5 KP；CLI 验证不能替代界面对照。
+
+## M0：只读对账
+
 M0 只生成本机映射候选和 Markdown 对账报告，不创建 Coach 学习库。原目录不打开 SQLite 连接；全部连接只指向拷贝。无需 AI 调用。
 
 ```sh

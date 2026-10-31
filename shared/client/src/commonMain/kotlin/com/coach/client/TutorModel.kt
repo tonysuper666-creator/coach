@@ -70,8 +70,17 @@ class TutorModel(
     private val wallClock: () -> Long,
     private val onTtft: (TtftSample) -> Unit = {},
 ) {
-    private val assembler = ChatStreamAssembler()
+    // 缺号回调在 [lock] 内触发：只记下要续传的消息，等锁放开后再交给发送端，避免在锁里做 I/O 或重入。
+    private val assembler = ChatStreamAssembler(onResumeRequired = { id, _ -> resumeNeeded.add(id); resumeWanted.add(id) })
     private val lock = Any()
+    private val resumeNeeded = LinkedHashSet<String>()
+    private val resumeWanted = ArrayList<String>()
+    private val resumeSentAt = HashMap<String, Long>()
+    private val lastFrameAt = HashMap<String, Long>()
+    private val stallProbed = HashSet<String>()
+
+    /** 把 msg.resume 放进当前连接的发送队列；没连上或队列满返回 false（模型随后重试）。由 [TutorClient] 挂接。 */
+    @kotlin.concurrent.Volatile internal var resumeSender: ((messageId: String) -> Boolean)? = null
     private val _state = MutableStateFlow(TutorUiState())
     val state: StateFlow<TutorUiState> = _state.asStateFlow()
 
@@ -83,8 +92,55 @@ class TutorModel(
         thread.items.mapNotNull { (it as? ChatItem.Tutor)?.message?.takeUnless { message -> message.done }?.id }
     }.distinct()
 
-    fun onConnection(connected: Boolean) = update {
-        copy(connected = connected, lastSeenAtMs = if (connected) wallClock() else lastSeenAtMs)
+    fun onConnection(connected: Boolean) {
+        synchronized(lock) {
+            // 旧连接上发出的续传随连接作废；新连接首先靠 [TutorClient] 的重连续传，再靠缺号重新触发。
+            resumeSentAt.clear()
+            stallProbed.clear()
+            _state.value = _state.value.copy(connected = connected, lastSeenAtMs = if (connected) wallClock() else _state.value.lastSeenAtMs)
+        }
+    }
+
+    /** 重连时由客户端直接发出续传后登记，避免紧接着的缺号再发一遍。 */
+    internal fun noteResumeSent(messageId: String) = synchronized(lock) { resumeSentAt[messageId] = wallClock() }
+
+    /**
+     * 周期调用（约 1 秒）：补发没发出去或没等到快照的续传；
+     * 生成中的消息很久没有任何新帧（可能连终态帧都丢了）时，主动对一次快照。
+     */
+    fun resumeTick() {
+        val ids = synchronized(lock) {
+            val now = wallClock()
+            for (id in unfinishedMessageIds()) {
+                val quiet = lastFrameAt[id]?.let { now - it } ?: continue
+                if (quiet >= STALL_MS && stallProbed.add(id)) resumeNeeded.add(id)
+            }
+            claimResumes(resumeNeeded.toList())
+        }
+        dispatchResumes(ids)
+    }
+
+    private fun claimResumes(ids: Collection<String>): List<String> {
+        val now = wallClock()
+        return ids.distinct().filter { id ->
+            val sentAt = resumeSentAt[id]
+            (sentAt == null || now - sentAt >= RESUME_RETRY_MS).also { if (it) resumeSentAt[id] = now }
+        }
+    }
+
+    private fun dispatchResumes(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val sender = resumeSender
+        for (id in ids) {
+            val sent = sender != null && runCatching { sender(id) }.getOrDefault(false)
+            if (!sent) synchronized(lock) { resumeSentAt.remove(id) }
+        }
+    }
+
+    private fun resumeSettled(id: String) {
+        resumeNeeded.remove(id)
+        resumeSentAt.remove(id)
+        stallProbed.remove(id)
     }
 
     /** 学习者自己发出的一句话，立刻进线程；同时开始计首字。 */
@@ -101,8 +157,16 @@ class TutorModel(
         mutateThread(threadId) { copy(error = error) }
     }
 
-    fun onFrame(frame: String) = synchronized(lock) {
-        val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return@synchronized
+    fun onFrame(frame: String) {
+        val ids = synchronized(lock) {
+            handleFrame(frame)
+            claimResumes(resumeWanted).also { resumeWanted.clear() }
+        }
+        dispatchResumes(ids)
+    }
+
+    private fun handleFrame(frame: String) {
+        val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return
         _state.value = _state.value.copy(lastSeenAtMs = wallClock())
         when (obj.str("t")) {
             "tutor.state" -> mutateThread(obj.str("threadId")) {
@@ -121,6 +185,7 @@ class TutorModel(
     }
 
     private fun onMessageFrame(obj: JsonObject) {
+        obj.str("msg").takeIf { it.isNotBlank() }?.let { lastFrameAt[it] = wallClock(); stallProbed.remove(it) }
         val updates = assembler.handle(obj)
         for (update in updates) when (update) {
             is ChatUpdate.Started -> {
@@ -142,10 +207,12 @@ class TutorModel(
                 if (messageThread[update.messageId] == null) obj.str("threadId").takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
                 ensureMessage(update.messageId, obj.str("threadId"))
                 if (update.text.isNotEmpty()) markFirstToken(update.messageId)
-                changeMessage(update.messageId) { copy(text = update.text, epoch = epoch + 1, status = update.status.ifBlank { status }, thinking = false) }
+                resumeSettled(update.messageId)
+                changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status }, thinking = false) }
             }
             is ChatUpdate.Progress -> changeMessage(update.messageId) { copy(thinking = update.phase == "thinking" && text.isEmpty()) }
             is ChatUpdate.Ended -> {
+                resumeSettled(update.messageId)
                 val final = assembler.text(update.messageId)
                 // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
@@ -198,5 +265,11 @@ class TutorModel(
 
     private fun JsonObject.str(key: String): String = (this[key] as? JsonPrimitive)?.content.orEmpty().let { if (it == "null") "" else it }
 
-    private companion object { val json = Json { ignoreUnknownKeys = true; isLenient = true } }
+    private companion object {
+        /** 同一条消息的续传在这段时间内只发一次；到点还没等到快照就再发。 */
+        const val RESUME_RETRY_MS = 3_000L
+        /** 生成中的消息这么久没有任何帧，就主动对一次快照（可能丢了终态帧）。 */
+        const val STALL_MS = 20_000L
+        val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
 }

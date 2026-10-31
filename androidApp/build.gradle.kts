@@ -49,7 +49,10 @@ android {
         providers.gradleProperty("coach.appIdSuffix").orNull?.let { suffix -> require(suffix.matches(Regex("\\.[a-z0-9]{1,16}"))); applicationId = "com.coach.android$suffix" }
         buildConfigField("String", "COACH_TAIL_HOST", "\"$coachTailHost\"")
         // `-Pcoach.port=NNNN` builds against a non-production test server (real-device measurements must never pair with 18791).
-        buildConfigField("int", "COACH_PORT", (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) })
+        // The port is also written to the manifest (meta-data `coach.port`) so a script can read it back from an installed package.
+        val coachPort = (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) }
+        buildConfigField("int", "COACH_PORT", coachPort)
+        manifestPlaceholders["coachPort"] = coachPort
         buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
         minSdk = 34
         targetSdk = 35

@@ -17,6 +17,8 @@ out = root / 'perf-device' / time.strftime('%Y%m%d-%H%M%S'); out.mkdir(parents=T
 adb = os.environ.get('ADB', '/opt/homebrew/share/android-commandlinetools/platform-tools/adb')
 serial = os.environ['COACH_DEVICE']; runs_n = int(os.environ.get('PERF_RUNS', '3')); package = os.environ.get('PERF_PACKAGE', 'com.coach.android')
 min_frames = 900
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import devicecheck
+installed_port = devicecheck.require_test_port(adb, serial, package)
 records = []
 
 def device(*a, timeout=30): return subprocess.run([adb, '-s', serial, *[str(x) for x in a]], capture_output=True, text=True, timeout=timeout).stdout
@@ -29,7 +31,7 @@ def snapshot():
             'thermal_status': thermal[0] if thermal else None, 'phone_top': cpu}
 def save(): (out / 'runs.json').write_text(json.dumps(records, indent=1, ensure_ascii=False))
 
-info = {'model': shell('getprop ro.product.model').strip(), 'android': shell('getprop ro.build.version.release').strip(), 'size': shell('wm size').strip(),
+info = {'installed_port': installed_port, 'package': package, 'model': shell('getprop ro.product.model').strip(), 'android': shell('getprop ro.build.version.release').strip(), 'size': shell('wm size').strip(),
         'density': shell('wm density').strip(), 'refresh': re.findall(r'renderFrameRate (\d+\.?\d*)', device('shell', 'dumpsys display'))[:1]}
 print(json.dumps(info, ensure_ascii=False))
 device('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'); device('shell', 'wm', 'dismiss-keyguard')

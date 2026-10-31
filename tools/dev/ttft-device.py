@@ -6,6 +6,8 @@ Results append to ~/Coach/corpus/render/ttft-1100.jsonl; rerunning resumes after
 import json, os, re, subprocess, sys, time
 A = os.environ.get('ADB', '/opt/homebrew/share/android-commandlinetools/platform-tools/adb'); S = os.environ['COACH_DEVICE']; P = os.environ.get('PERF_PACKAGE', 'com.coach.android')
 KP = os.environ['COACH_KP']  # a knowledge point id of the test server's course
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../render')); import devicecheck
+devicecheck.require_test_port(A, S, P)
 out = os.path.expanduser('~/Coach/corpus/render/ttft-1100.jsonl')
 Q = ['用一句话说说为什么医疗市场有信息不对称', '什么是 adverse selection？举个保险的例子', 'moral hazard 和 adverse selection 的区别是什么', 'Arrow 1963 的核心论点是什么', '为什么说医疗有 uncertainty', '竞争市场有效率需要哪些条件', 'normative 和 positive 的区别，各举一例', '医疗支出占 GDP 的比例为什么上升', '外部性在医疗里有什么例子', '用两句话解释道德风险', '保险公司为什么担心逆向选择', '为什么医疗需求缺乏弹性', '第三方支付会怎样影响价格敏感度', 'deductible 是什么', '解释一下 experience good', '为什么病人比医生更不了解治疗', '什么是 supplier-induced demand', '医疗市场里 agency 问题指什么', '为什么政府要介入医疗保险', '风险厌恶如何推动人们买保险', '用一句话概括这一节的重点', '这一节最容易混淆的地方是什么']
 def adb(*a, t=30): return subprocess.run([A, '-s', S, *a], capture_output=True, text=True, timeout=t).stdout

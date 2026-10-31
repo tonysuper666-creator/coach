@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <application android:label="Coach" android:theme="@style/Theme.Coach" android:networkSecurityConfig="@xml/network_security_config" android:allowBackup="false">
+        <meta-data android:name="coach.port" android:value="${coachPort}" />
         <!-- 今天 / 学习：日常使用的入口 -->
         <activity android:name=".CoachActivity" android:exported="true" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|uiMode">
             <intent-filter>

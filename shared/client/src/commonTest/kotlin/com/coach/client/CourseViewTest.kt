@@ -47,6 +47,16 @@ class CourseViewTest {
         assertEquals("K1", v.continueTarget?.id)
     }
 
+    @Test fun tutorThreadUsesPersistedKpBindingAndFallsBackForNewKnowledgePoints() {
+        val events = listOf(
+            outline("K1" to "信息不对称", "K2" to "逆向选择"),
+            event("kp_opened", json("kpId" to "K1", "title" to "信息不对称"), thread = "legacy-thread-for-K1"),
+        )
+        val v = view(events)
+        assertEquals("legacy-thread-for-K1", v.tutorThreadId("K1"))
+        assertEquals("kp:K2", v.tutorThreadId("K2"))
+    }
+
     @Test fun cardsShowTheServerAssignedLettersInOrder() {
         val v = view(listOf(outline("K1" to "A"), posed("a1", "g1", mapOf("o1" to "C", "o2" to "A", "o3" to "B", "o4" to "D"), untaught = true)))
         val card = v.quizGroups("kp:K1").single().cards.single()

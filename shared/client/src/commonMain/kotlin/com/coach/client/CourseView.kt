@@ -50,6 +50,11 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
 class CourseView(val events: List<Event>, val projection: Projection) {
 
+    /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
+    fun tutorThreadId(kpId: String): String = events.lastOrNull {
+        it.type == "kp_opened" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
+    }?.threadId ?: "kp:$kpId"
+
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()

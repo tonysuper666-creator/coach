@@ -46,6 +46,18 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun reopeningPersistedKpThreadDoesNotCreateAnotherBinding() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed()
+            val first = f.open(thread = "persisted-thread-for-kp-1")
+            val eventsAfterOpen = f.events()
+            val reopened = f.open(thread = "persisted-thread-for-kp-1")
+            assertEquals(first.state, reopened.state)
+            assertEquals(eventsAfterOpen, f.events())
+            assertEquals(1, f.events().count { it.type == "kp_opened" })
+        }
+    }
+
     @Test fun continueAfterTwoErrorsUsesTheRemainingPoolWithoutRepeatingTheLesson() = runBlocking {
         TutorFixture().use { f ->
             f.seed(); f.open(); f.teach()

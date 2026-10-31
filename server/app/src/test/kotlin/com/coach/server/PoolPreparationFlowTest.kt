@@ -35,15 +35,19 @@ class PoolPreparationFlowTest {
                 stub.completion(JsonArray((0..2).map { i -> json("id" to i,"answer_text" to "Right result $i",
                     "defects" to emptyList<String>(),"note" to "Supported") }).toString(),BridgeClient.CODEX)
                 chat.nextStep("thread","course",testUntaught=true)
+                withTimeout(2_000) { while(frames.none { it.str("t")=="tutor.progress" }) delay(10) }
+                assertTrue(frames.first { it.str("t")=="tutor.progress" }.str("text").startsWith("正在准备题目（约"))
                 delay(600)
                 assertTrue(frames.any { it.str("t")=="tutor.progress" && it.str("phase")=="pool_queued" })
-                val worker=PoolWorker(actor,BridgeClient(BridgeConfig(stub.baseUrl)))
+                val worker=PoolWorker(actor,BridgeClient(BridgeConfig(stub.baseUrl)),beforeCall={ Thread.sleep(650) })
                 assertEquals("retrying",worker.runOne()!!.state)
                 delay(600)
                 assertTrue(frames.any { it.str("phase")=="pool_retrying" })
                 assertEquals("completed",worker.runOne()!!.state)
                 assertTrue(frames.none { it.str("t")=="tutor.cards" })
                 assertEquals(3,worker.runOne()!!.inserted)
+                assertTrue(frames.any { it.str("phase")=="pool_generating" })
+                assertTrue(frames.any { it.str("phase")=="pool_reviewing" })
                 withTimeout(5_000) { while(frames.none { it.str("t")=="tutor.cards" }) delay(20) }
                 val cards=frames.single { it.str("t")=="tutor.cards" }.getValue("cards").jsonArray
                 assertEquals(3,cards.size)

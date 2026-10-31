@@ -115,6 +115,10 @@ class TutorClient(
 
     fun cancel(messageId: String) = send(buildJsonObject { put("t", "msg.cancel"); put("msg", messageId) })
 
+    fun retryMistakes(threadId: String, courseId: String) = send(buildJsonObject {
+        put("t", "tutor.retryMistakes"); put("threadId", threadId); put("courseId", courseId)
+    })
+
     /** 一次提交整组；answers: attemptId → 字母。 */
     fun answer(threadId: String, courseId: String, groupId: String, answers: Map<String, String>, submissionId: String) = send(buildJsonObject {
         put("t", "tutor.answer"); put("threadId", threadId); put("courseId", courseId); put("groupId", groupId); put("submissionId", submissionId)

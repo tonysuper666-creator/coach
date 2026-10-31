@@ -25,7 +25,7 @@ fun AdaptiveScaffold(
     aside: @Composable () -> Unit = {},
     outline: @Composable () -> Unit = {},
 ) {
-    BoxWithConstraints(modifier.fillMaxSize().background(CoachTheme.colors.bgCanvas)) {
+    BoxWithConstraints(modifier.fillMaxSize().background(CoachTheme.colors.bgCanvas).windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
         val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value, hinge))
         AdaptiveScaffoldLayout(layout, asideOpen, onAsideDismiss, nav, conversation, aside, outline)
     }
@@ -65,7 +65,7 @@ fun AdaptiveScaffoldLayout(
                 }
             }
         }
-        else -> Row(Modifier.fillMaxSize()) {
+        else -> Row(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))) {
             nav(layout.nav)
             if (layout.outlineDocked) Box(Modifier.width(layout.outlineWidthDp.dp).fillMaxHeight().background(colors.surface1)) { movableOutline() }
             Box(Modifier.weight(1f).fillMaxHeight()) {

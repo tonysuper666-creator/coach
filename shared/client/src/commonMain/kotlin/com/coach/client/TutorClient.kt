@@ -47,6 +47,14 @@ class TutorClient(
     init { model.resumeSender = { id -> send(resumeFrame(id)) } }
     private fun resumeFrame(id: String) = buildJsonObject { put("t", "msg.resume"); put("msg", id) }
 
+    init {
+        model.addTtftReporter { sample -> send(buildJsonObject {
+            put("t", "client.ttft"); put("threadId", sample.threadId); put("msg", sample.messageId)
+            put("kind", sample.kind); put("ms", sample.ms); put("model", sample.model); put("fallback", sample.fallback)
+            put("courseId", sample.courseId)
+        }) }
+    }
+
     // Handshake nonce initialization can block; keep CPU workers free on two-core Android devices.
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         telemetry?.record("open")

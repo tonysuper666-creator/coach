@@ -89,6 +89,30 @@ class ChatService(
         json("results" to JsonArray(kps.map { if(questionsOnly) preparation.prepareQuestions(course,it) else preparation.prepare(course,it) }))
     }
 
+    suspend fun reportClientTtft(device: String, course: String, thread: String,
+        kind: String, milliseconds: Long, model: String, fallback: Boolean) {
+        if (course.isBlank() || thread.isBlank() || kind !in setOf("next", "test", "ask", "answer", "fallback") || milliseconds !in 0..600_000) return
+        val (kp, kpType) = actor.execute {
+            val kpId = events(course).lastOrNull { it.type == "kp_opened" && it.threadId == thread }
+                ?.payload?.str("kpId") ?: return@execute null to null
+            val metadata = events(course).asReversed().firstNotNullOfOrNull { event ->
+                (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
+                    .mapNotNull { it as? JsonObject }
+                    .firstOrNull { it.str("id") == kpId }
+            }
+            val type = (metadata?.get("examFormats") as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.content }
+                .map { it.uppercase() }
+                .distinct()
+                .sorted()
+                .joinToString("+")
+            kpId to type
+        }
+        if (kp.isNullOrBlank()) return
+        fun safe(value: String) = value.replace(Regex("[^A-Za-z0-9_.:-]"), "_").take(80)
+        log("COACH client_ttft device=${safe(device)} course=${safe(course)} kp=${safe(kp)} kp_type=${safe(kpType.orEmpty())} kind=$kind ms=$milliseconds model=${safe(model)} fallback=$fallback")
+    }
+
     fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
         val worker = com.coach.ai.PoolWorker(actor,bridge)
         val grades = com.coach.ai.ConstructedGradeWorker(actor,bridge,ledgerChanged)
@@ -288,6 +312,10 @@ class ChatService(
     }
 
     private fun publish(outcome: TutorOutcome, thread: String, course: String) {
+        if (outcome.plan?.explanation == true) {
+            hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,
+                "state" to "PREPARE","nextLabel" to outcome.nextLabel))
+        }
         hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,"state" to outcome.state.name,"nextLabel" to outcome.nextLabel))
         if (outcome.cards.isNotEmpty()) hub.emit(json("t" to "tutor.cards","threadId" to thread,"courseId" to course,
             "groupId" to outcome.cards.first().payload.str("groupId"),"cards" to JsonArray(outcome.cards.map { it.payload })))
@@ -299,7 +327,10 @@ class ChatService(
 
     private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null): String {
         val messageId = UUID.randomUUID().toString()
-        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val suppliedPack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val sourcePack = if (plan?.explanation == true) {
+            preparation.pack(courseId, plan.context.kp).ifBlank { suppliedPack }
+        } else suppliedPack
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan)
@@ -311,7 +342,10 @@ class ChatService(
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
             SourcePack.prepare(sourcePack,hits).render()
-        } else sourcePack.take(40_000)
+        } else if (plan?.explanation == true) {
+            val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
+            preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
+        } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,

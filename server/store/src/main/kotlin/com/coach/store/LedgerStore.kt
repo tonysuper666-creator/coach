@@ -694,6 +694,16 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return sql("UPDATE jobs SET state='failed',last_error=?,updated_at=? WHERE job_id=? AND fence=? AND state='running'",
             reason,clock(),token.id,token.value) == 1
     }
+    /** Retain the failed job, and atomically queue one fresh schema-constrained attempt. */
+    fun retryMalformedSupply(token: Fence, job: SupplyJob): Boolean = transaction {
+        if (!failSupply(token,"MALFORMED")) return@transaction false
+        if (job.subject.flag("retryMalformed")) return@transaction false
+        enqueueJob("gen_mcq", JsonObject(job.subject + mapOf(
+            "retryMalformed" to JsonPrimitive(true), "retryOf" to JsonPrimitive(job.id)
+        )).toString(), job.packHash)
+        true
+    }
+
     fun queueBlindReview(token: Fence, job: SupplyJob, questions: JsonArray, generator: String): Boolean = transaction {
         if (!completeJob(token,job.packHash,null)) return@transaction false
         enqueueJob("blind_review", JsonObject(job.subject + mapOf("questions" to questions, "generator" to JsonPrimitive(generator))).toString(),job.packHash)
@@ -871,7 +881,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val ids=unseenPoolIds(course,kp)
         val jobs=supplyJobs(course,kp).filter { it.kind in setOf("gen_mcq","blind_review") }.map { it.id to jobState(it.id)!!.first }
         if (ids.size < size) return@transaction PoolTake(emptyList(),if(jobs.isEmpty()) "EMPTY" else "REFILLING",ids.size,jobs,
-            if(jobs.isEmpty()) "题池暂空，补题尚未运行" else "题池暂空，正在补题（约 20 秒）")
+            if(jobs.isEmpty()) "题池暂空，补题尚未运行" else "正在准备题目（约 30 秒，含独立复核；重试可能更久）")
         // A fallback is a successful reserve take caused by an actual, not-yet-consumed failure.
         val failure=query("""SELECT j.job_id,j.last_error FROM jobs j
             WHERE j.kind IN ('gen_mcq','blind_review') AND j.state='failed' AND json_valid(j.subject)

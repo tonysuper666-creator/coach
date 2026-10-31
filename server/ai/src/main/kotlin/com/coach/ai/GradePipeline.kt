@@ -54,6 +54,7 @@ class QuestionPool(private val client: BridgeClient) {
         generatorModel: String = BridgeClient.CLAUDE,
         avoid: List<String> = emptyList(),
         background: Boolean = false,
+        retryMalformed: Boolean = false,
     ): GenBatch {
         val started = System.nanoTime()
         val generation = client.chat(
@@ -61,7 +62,7 @@ class QuestionPool(private val client: BridgeClient) {
                 task = "gen_mcq",
                 model = generatorModel,
                 system = Prompts.GEN_SYSTEM,
-                user = Prompts.genMcq(objective, excerpt, count, avoid),
+                user = Prompts.genMcq(objective, excerpt, count, avoid) + if (retryMalformed) "\nYour previous response failed validation. Start over with a plain JSON array of exactly $count objects. Each object must have ONLY stem, correct_text, distractors (exactly three strings), explanation, source_quote. Use short plain sentences, escape quotes/backslashes correctly, no code fences, no option labels and no extra fields." else "",
                 stream = false,
                 background = background,
                 maxTokens = 4000,

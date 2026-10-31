@@ -84,8 +84,8 @@ class ChatService(
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()
 
-    suspend fun prepareLessons(course: String, kps: List<String>): JsonObject = supplyLock.withLock {
-        json("results" to JsonArray(kps.map { preparation.prepare(course,it) }))
+    suspend fun prepareLessons(course: String, kps: List<String>, questionsOnly: Boolean = false): JsonObject = supplyLock.withLock {
+        json("results" to JsonArray(kps.map { if(questionsOnly) preparation.prepareQuestions(course,it) else preparation.prepare(course,it) }))
     }
 
     fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
@@ -185,18 +185,55 @@ class ChatService(
             val kp = actor.execute { events(courseId).lastOrNull { it.type=="kp_opened" && it.threadId==threadId }?.payload?.str("kpId") }
             if(kp!=null) {
                 runCatching { preparation.ensure(courseId,kp) }
-                outcome=tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
-                if(waitingPools.add(threadId)) scope.launch {
+                // Do not call next twice: a fast refill could otherwise publish the same group twice.
+                tutor.resumePool(courseId,threadId)?.let { outcome=it }
+                if(outcome.waitingForPool && waitingPools.add(threadId)) scope.launch {
                     try {
+                        var previous = ""
+                        var batches = 1
                         repeat(360) {
                             delay(500)
-                            val available=actor.execute { poolAvailable(courseId,kp) }
-                            if(available>=3) { publish(tutor.next(courseId,threadId,testUntaught,allowExample=allowExample),threadId,courseId);return@launch }
-                            if(actor.execute { supplyJobs(courseId,kp).isEmpty() }) {
+                            tutor.resumePool(courseId,threadId)?.let {
+                                publish(it,threadId,courseId); return@launch
+                            }
+                            if(!tutor.poolWaitActive(courseId,threadId)) return@launch
+                            val jobs=actor.execute { supplyJobs(courseId,kp).filter { it.kind in setOf("gen_mcq","blind_review") } }
+                            if(jobs.isEmpty()) {
+                                // A partial blind review can leave fewer than one full group.
+                                if(batches < 4) {
+                                    batches++
+                                    preparation.ensure(courseId,kp)
+                                    if(actor.execute { supplyJobs(courseId,kp).isNotEmpty() }) return@repeat
+                                }
                                 hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
-                                    "phase" to "pool_failed","text" to "题池暂空，补题未成功，可以重试。"));return@launch
+                                    "phase" to "pool_failed","text" to "题目准备未成功，请重试。已通过复核的题目会保留。"));return@launch
+                            }
+                            val states=actor.execute { jobs.map { it to jobState(it.id)?.first } }
+                            val phase=when {
+                                states.any { it.first.kind=="blind_review" && it.second=="running" } -> "pool_reviewing"
+                                states.any { it.first.subject.flag("retryMalformed") } -> "pool_retrying"
+                                states.any { it.second=="running" } -> "pool_generating"
+                                else -> "pool_queued"
+                            }
+                            val available=actor.execute { poolAvailable(courseId,kp) }
+                            val text=when(phase) {
+                                "pool_reviewing" -> "正在独立复核题目"
+                                "pool_retrying" -> "上一轮未通过检查，正在换一种方式重新出题"
+                                "pool_generating" -> "正在生成题目"
+                                else -> "正在排队准备题目"
+                            } + "（已有 $available 道通过复核）"
+                            if(previous!=text) {
+                                hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                                    "phase" to phase,"text" to text));previous=text
                             }
                         }
+                        hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                            "phase" to "pool_failed","text" to "准备题目用时较长，请稍后重试。已通过复核的题目会保留。"))
+                    } catch(e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch(e: Exception) {
+                        log("COACH pool wait failure=${e.javaClass.simpleName}")
+                        hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                            "phase" to "pool_failed","text" to "准备题目中断，请重试。"))
                     } finally { waitingPools.remove(threadId) }
                 }
             }

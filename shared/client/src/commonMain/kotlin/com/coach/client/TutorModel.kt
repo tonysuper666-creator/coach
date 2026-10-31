@@ -43,11 +43,12 @@ data class ThreadView(
     val nextLabel: String? = null,
     /** 题池暂空时服务端给的真实进度文字。 */
     val poolText: String? = null,
+    val poolPreparing: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
 ) {
     val streaming: Boolean get() = items.any { it is ChatItem.Tutor && !it.message.done }
-    val busy: Boolean get() = streaming || tutorState in BUSY_STATES
+    val busy: Boolean get() = streaming || poolPreparing || tutorState in BUSY_STATES
     companion object { val BUSY_STATES = setOf("PREPARE", "TEACH", "POSE", "GRADE", "REVIEW") }
 }
 
@@ -105,11 +106,11 @@ class TutorModel(
         _state.value = _state.value.copy(lastSeenAtMs = wallClock())
         when (obj.str("t")) {
             "tutor.state" -> mutateThread(obj.str("threadId")) {
-                copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, error = null)
+                copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, poolPreparing = false, error = null)
             }
             "tutor.progress" -> mutateThread(obj.str("threadId")) {
                 if (obj.str("phase") == "fallback") copy(notice = obj.str("text").ifBlank { null }, poolText = null)
-                else copy(poolText = obj.str("text").ifBlank { null })
+                else copy(poolText = obj.str("text").ifBlank { null }, poolPreparing = obj.str("phase") in setOf("pool_queued","pool_generating","pool_reviewing","pool_retrying"))
             }
             "msg.error" -> {
                 val thread = obj.str("threadId")

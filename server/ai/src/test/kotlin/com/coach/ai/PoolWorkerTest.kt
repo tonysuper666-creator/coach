@@ -45,6 +45,30 @@ class PoolWorkerTest {
         dir.toFile().deleteRecursively()
     }
 
+    @Test fun malformedRetriesOnceWithNewPromptAndSurvivesReopen() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("pool-retry")
+        StubBridge().use { bridge ->
+            var actor=LedgerActor(this,LedgerStore(dir))
+            try {
+                var worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                bridge.enqueue(200,StubBridge.completion("[{broken]"))
+                val failed=worker.ensure("c","kp","Objective",source,3)!!
+                assertEquals("retrying",worker.runOne()!!.state)
+                assertEquals("failed",actor.execute { jobState(failed)?.first })
+                actor.close();actor=LedgerActor(this,LedgerStore(dir))
+                worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                bridge.enqueue(200,StubBridge.completion(generated()))
+                bridge.enqueue(200,StubBridge.completion(review()))
+                assertEquals("completed",worker.runOne()!!.state)
+                assertEquals(0,actor.execute { poolAvailable("c","kp") })
+                assertEquals(3,worker.runOne()!!.inserted)
+                assertEquals(3,actor.execute { supplyCallCount() })
+                assertTrue(bridge.requests[1].contains("previous response failed validation"))
+                assertFalse(bridge.requests[0].contains("previous response failed validation"))
+            } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
+    }
+
     @Test fun mcqQuoteRepairCannotChangeTheQuestionOrAdmitUnsupportedQuotes() = runBlocking<Unit> {
         for (mode in listOf("valid","unsupported","changed_key")) {
             val dir=Files.createTempDirectory("mcq-quote-repair")
@@ -57,7 +81,7 @@ class PoolWorkerTest {
                 bridge.enqueue(200,StubBridge.completion(repair))
                 val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
                 worker.ensure("c","kp","Objective",source,3)
-                assertEquals(if(mode=="valid") "completed" else "failed",worker.runOne()!!.state)
+                assertEquals(if(mode=="valid") "completed" else "retrying",worker.runOne()!!.state)
                 assertEquals(2L,actor.execute { supplyCallCount() })
                 if(mode=="valid") {
                     val queued=actor.execute { supplyJobs().single().subject.getValue("questions").jsonArray }
@@ -70,7 +94,13 @@ class PoolWorkerTest {
                     }
                     bridge.enqueue(200,StubBridge.completion(review()))
                     assertEquals(3,worker.runOne()!!.inserted)
-                } else assertTrue(actor.execute { supplyJobs().isEmpty() })
+                } else {
+                    assertEquals(0,actor.execute { poolAvailable("c","kp") })
+                    assertTrue(actor.execute { supplyJobs().single().subject.flag("retryMalformed") })
+                    bridge.enqueue(200,StubBridge.completion("[{broken]"))
+                    assertEquals("failed",worker.runOne()!!.state)
+                    assertTrue(actor.execute { supplyJobs().isEmpty() })
+                }
             } } finally { actor.close();dir.toFile().deleteRecursively() }
         }
     }
@@ -91,6 +121,10 @@ class PoolWorkerTest {
                 worker.ensure("c","kp","Objective",source,3);worker.runOne();worker.runOne()
                 bridge.enqueue(status,body)
                 worker.ensure("c","kp","Objective",source,6)
+                if(reason=="MALFORMED") {
+                    assertEquals("retrying",worker.runOne()!!.state)
+                    bridge.enqueue(status,body)
+                }
                 assertEquals("failed",worker.runOne()!!.state)
                 val group=actor.execute { takePoolGroup("c","kp","fallback") }
                 assertEquals(3,group.events.size)
@@ -99,7 +133,7 @@ class PoolWorkerTest {
                 worker.ensure("c","kp","Objective",source,3)
                 val empty=actor.execute { takePoolGroup("c","kp","empty") }
                 assertTrue(empty.events.isEmpty());assertEquals("REFILLING",empty.status)
-                assertEquals(1,empty.jobs.size);assertEquals("题池暂空，正在补题（约 20 秒）",empty.message)
+                assertEquals(1,empty.jobs.size);assertEquals("正在准备题目（约 30 秒，含独立复核；重试可能更久）",empty.message)
                 assertEquals(3,actor.execute { events("c").count { it.type == "question_posed" } })
                 println("POOL_FAILURE reason=$reason reserveCards=${group.events.size} emptyCards=${empty.events.size} progress=${empty.jobs.single().second}")
             } } finally { actor.close();dir.toFile().deleteRecursively() }

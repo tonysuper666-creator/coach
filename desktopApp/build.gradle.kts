@@ -7,6 +7,9 @@ plugins {
 }
 dependencies {
     implementation(project(":shared:ui"))
+    implementation(project(":shared:client"))
+    implementation(libs.sqldelight.driver)
+    implementation(libs.sqlite.jdbc)
     implementation(libs.serialization.json)
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)

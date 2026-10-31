@@ -14,6 +14,7 @@ kotlin {
     jvmToolchain(17)
     sourceSets.commonMain.dependencies {
         implementation(project(":shared:domain"))
+        api(project(":shared:client"))
         implementation("org.jetbrains:markdown:0.7.3")
         implementation(libs.coroutines.core)
         implementation(compose.runtime)

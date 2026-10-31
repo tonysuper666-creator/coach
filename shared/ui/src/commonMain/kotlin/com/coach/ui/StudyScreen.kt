@@ -29,11 +29,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     var draft by remember(kp.id) { mutableStateOf(TextFieldValue("")) }
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by remember(kp.id) { mutableStateOf(false) }
+    var pinned by remember(kp.id) { mutableStateOf(true) }
+    val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
     fun next(test: Boolean) {
         if (!open()) return fail()
+        pinned = true
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
         if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
     }
@@ -41,6 +44,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         val text = draft.text.trim()
         if (text.isEmpty() || tv.busy || !ui.connected) return
         if (!open()) return fail()
+        pinned = true
         c.tutor.model.onSent(thread, "ask", text)
         if (c.tutor.ask(thread, c.courseId, text, c.packFor(kp.id))) draft = TextFieldValue("") else fail()
     }
@@ -68,14 +72,25 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         HorizontalDivider()
 
         val listState = rememberLazyListState()
+        // 讲解/追问消息和题组按「发生的先后」交错：消息出现时记下当时已有几组题，排在那几组之后。
+        val anchors = remember(kp.id) { HashMap<String, Int>() }
+        val rows = remember(tv.items, groups) {
+            val placed = tv.items.map { item -> item to anchors.getOrPut(item.key) { groups.size } }
+            buildList<StudyRow> {
+                for (g in 0..groups.size) {
+                    placed.filter { it.second == g }.forEach { add(StudyRow.Message(it.first)) }
+                    groups.getOrNull(g)?.let { add(StudyRow.Group(it)) }
+                }
+            }
+        }
         // 钉底：停在底部时，流式内容增长会跟着走；用户往上翻就松开，翻回底部再钉住。
-        var pinned by remember(kp.id) { mutableStateOf(true) }
         LaunchedEffect(listState) {
             snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canForward) -> if (scrolling) pinned = !canForward }
         }
         val lastLength = (tv.items.lastOrNull() as? ChatItem.Tutor)?.message?.text?.length ?: 0
-        LaunchedEffect(tv.items.size, lastLength, tv.poolText, tv.error, tv.notice) {
-            if (pinned && listState.layoutInfo.totalItemsCount > 0) {
+        LaunchedEffect(tv.items.size, lastLength, tv.poolText, tv.error, tv.notice, c.math.assets.size) {
+            // 刚打开且有待答题组时不要跳到底：让「新题组出现」那条把第 1 题放在最上面。
+            if (pinned && (tv.streaming || pending == null) && listState.layoutInfo.totalItemsCount > 0) {
                 androidx.compose.runtime.withFrameNanos { }
                 listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
                 listState.scrollBy(1_000_000f)
@@ -83,7 +98,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         // 新题组出现时把它的开头放在最上面，方便从第 1 题读起。
         LaunchedEffect(groups.size) {
-            if (groups.isNotEmpty()) listState.animateScrollToItem(tv.items.size + groups.size - 1)
+            val index = rows.indexOfLast { it is StudyRow.Group }
+            if (index >= 0) listState.animateScrollToItem(index)
         }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth().widthIn(max = READING_WIDTH),
@@ -95,14 +111,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            items(tv.items, key = { it.key }) { item ->
-                when (item) {
-                    is ChatItem.Learner -> LearnerBubble(item.text)
-                    is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
+            items(rows, key = { it.key }) { row ->
+                when (row) {
+                    is StudyRow.Message -> when (val item = row.item) {
+                        is ChatItem.Learner -> LearnerBubble(item.text)
+                        is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
+                    }
+                    is StudyRow.Group -> QuizGroupView(row.group, kp, c, view, thread) { c.tutor.model.onSent(thread, "answer", null) }
                 }
-            }
-            items(groups, key = { "g:${it.groupId}" }) { group ->
-                QuizGroupView(group, kp, c, view, thread) { c.tutor.model.onSent(thread, "answer", null) }
             }
             tv.notice?.let { text -> item { Text(text, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium) } }
             tv.poolText?.let { text -> item { ProgressLine(text) } }
@@ -115,11 +131,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary,
             )
             val sample = ui.ttft.lastOrNull { it.threadId == thread }
-            if (sample != null) Text(
+            if (sample != null && !imeOpen) Text(
                 "上一条首字 ${sample.ms / 100 / 10.0} 秒",
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            // 键盘弹出时收起两个大按钮，把空间让给对话。
+            if (!imeOpen) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 val nextText = tv.nextLabel ?: if (kp.explained || tv.items.isNotEmpty()) "下一步" else "开始讲解"
                 Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy && pending == null,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
@@ -142,6 +159,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             }
         }
     }
+}
+
+private sealed interface StudyRow {
+    val key: String
+    data class Message(val item: ChatItem) : StudyRow { override val key get() = item.key }
+    data class Group(val group: QuizGroup) : StudyRow { override val key get() = "g:${group.groupId}" }
 }
 
 @Composable

@@ -2,11 +2,13 @@ package com.coach.client
 
 import com.coach.domain.Event
 import com.coach.domain.Projection
+import com.coach.domain.logicalDay
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 
 enum class KpStatus(val label: String) { NEW("未开始"), IN_PROGRESS("学习中"), PASSED("已通过"), SOLID("稳固"), NEEDS_REPAIR("需修复") }
@@ -28,6 +30,9 @@ data class QuizCard(
     val answer: String? = null,
     val grade: CardGrade? = null,
 )
+
+/** 到期复习的一项：[overdueDays] 为 0 表示今天到期。 */
+data class DueReview(val kp: KpRow, val dueDay: Long, val overdueDays: Int)
 
 data class CardGrade(val correct: Boolean, val score: Int, val max: Int, val feedback: String)
 data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
@@ -88,6 +93,33 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
     }
 
     fun kp(id: String): KpRow? = kps.firstOrNull { it.id == id }
+
+    /** 课程所在时区（装载内容里带），决定「今天」的逻辑日界线。 */
+    val zone: String by lazy {
+        events.firstOrNull { it.type == "outline_revised" }?.payload?.let { ((it["course"] as? JsonObject)?.get("tz") as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() } ?: "Europe/London"
+    }
+
+    fun logicalToday(nowMillis: Long): Long = logicalDay(nowMillis, zone)
+
+    /** 到期（含逾期）的复习，最久逾期的在前；只列大纲里有的知识点。 */
+    fun dueReviews(nowMillis: Long): List<DueReview> {
+        val today = logicalToday(nowMillis)
+        val order = kps.withIndex().associate { it.value.id to it.index }
+        return projection.review.mapNotNull { (id, review) ->
+            val kp = kp(id) ?: return@mapNotNull null
+            if (review.dueDay > today) null else DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
+        }.sortedWith(compareBy({ it.dueDay }, { order[it.kp.id] ?: Int.MAX_VALUE }))
+    }
+
+    /** 考试日（最近一次 `exam_set`）；没设就是 null。 */
+    val examDay: Long? by lazy {
+        events.lastOrNull { it.type == "exam_set" }?.payload?.let { p ->
+            (p["examDay"] as? JsonPrimitive)?.longOrNull ?: (p["examAt"] as? JsonPrimitive)?.longOrNull?.let { logicalDay(it, zone) }
+        }
+    }
+
+    /** 离考试还有几天；没设考试日、或已经考过返回 null。 */
+    fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }
 
     /** 「继续：<KP>」的目标：状态机定的目标优先，没有就取大纲里第一个未通过的。 */
     val continueTarget: KpRow? by lazy {

@@ -27,6 +27,8 @@ class CoachController(
     /** epoch 毫秒 → "hh:mm"。 */
     val formatClock: (Long) -> String,
     val math: MathAssets = MathAssets(),
+    /** 当前时刻（epoch 毫秒），决定「今天」的复习到期与考试倒计时；测试可注入。 */
+    val nowMillis: () -> Long = { @OptIn(kotlin.time.ExperimentalTime::class) kotlin.time.Clock.System.now().toEpochMilliseconds() },
 )
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */
@@ -61,6 +63,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         value = withContext(Dispatchers.Default) { CourseView(c.sync.localEvents(c.courseId), c.sync.projection(c.courseId)) }
     }
     var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
+    var reviewOpen by remember { mutableStateOf(false) }
+    val openKp: (String, Boolean) -> Unit = { id, start -> reviewOpen = false; open = id to start }
+    val openReview: () -> Unit = { reviewOpen = true; open = null }
     CoachTheme(dark ?: isSystemInDarkTheme()) {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
@@ -73,19 +78,23 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         // 宽屏：左边今天/知识点，右边学习线程；点「继续」直接在右栏开讲。
                         Row(Modifier.fillMaxSize()) {
                             Box(Modifier.width((totalWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) {
-                                TodayScreen(c, current, ui, selectedKpId = target?.id) { id, start -> open = id to start }
+                                TodayScreen(c, current, ui, selectedKpId = target?.id, onOpenReview = openReview, onOpen = openKp)
                             }
                             VerticalDivider()
                             Box(Modifier.weight(1f).fillMaxHeight()) {
-                                if (target != null && current != null) {
+                                if (reviewOpen && current != null) {
+                                    ReviewScreen(c, current, onOpenKp = openKp, onBack = null)
+                                } else if (target != null && current != null) {
                                     key(target.id) { StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = null) }
                                 } else CenterMessage("选一个知识点，或点「继续」。")
                             }
                         }
+                    } else if (reviewOpen && current != null) {
+                        ReviewScreen(c, current, onOpenKp = openKp, onBack = { reviewOpen = false })
                     } else if (target != null && current != null) {
                         StudyScreen(c, target, current, ui, autoStart = open?.second == true, onBack = { open = null })
                     } else {
-                        TodayScreen(c, current, ui, selectedKpId = null) { id, start -> open = id to start }
+                        TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp)
                     }
                 }
             }

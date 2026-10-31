@@ -16,7 +16,10 @@ import com.coach.client.KpStatus
 import com.coach.client.TutorUiState
 
 @Composable
-fun TodayScreen(c: CoachController, view: CourseView?, ui: TutorUiState, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit) {
+fun TodayScreen(
+    c: CoachController, view: CourseView?, ui: TutorUiState, selectedKpId: String?,
+    onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit,
+) {
     if (view == null) return CenterMessage("正在读取本地账本…")
     val kps = view.kps
     if (kps.isEmpty()) {
@@ -35,6 +38,12 @@ fun TodayScreen(c: CoachController, view: CourseView?, ui: TutorUiState, selecte
                     ContinueCard(target) { onOpen(target.id, true) }
                 } else {
                     Text("所有知识点都已通过。", style = MaterialTheme.typography.titleMedium)
+                }
+                val now = c.nowMillis()
+                ReviewCard(view.dueReviews(now).size, onOpenReview)
+                // 考前 7 天内显示倒计时；没设考试日就不显示（不猜日期）。
+                view.daysToExam(now)?.takeIf { it <= 7 }?.let { days ->
+                    Text(if (days == 0) "今天考试" else "距考试还有 $days 天", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
                 }
                 Spacer(Modifier.height(4.dp))
                 Text("全部知识点", style = MaterialTheme.typography.titleSmall)
@@ -66,6 +75,23 @@ private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(if (tag.isBlank()) "继续" else "继续 · $tag", style = MaterialTheme.typography.labelLarge)
             Text(main, style = MaterialTheme.typography.titleMedium, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** 今天页的第二张卡：到期复习。没有到期时如实写没有，点进去也只是空队列。 */
+@Composable
+private fun ReviewCard(due: Int, onClick: () -> Unit) {
+    Surface(
+        tonalElevation = 2.dp, shape = MaterialTheme.shapes.large, onClick = onClick,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("到期复习", style = MaterialTheme.typography.titleMedium)
+                Text(if (due == 0) "今天没有到期的复习" else "$due 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.primary)
         }
     }
 }

@@ -73,6 +73,31 @@ class CourseViewTest {
         assertNull(view(events).pendingGroup("kp:K1"))
     }
 
+    private val now = 1_793_448_000_000L // 2026-10-31 12:00 UTC，伦敦逻辑日内
+
+    @Test fun dueReviewsListOverdueFirstAndSkipFutureOnes() {
+        val events = listOf(outline("K1" to "甲", "K2" to "乙", "K3" to "丙"))
+        val today = com.coach.domain.logicalDay(now, "Europe/London")
+        val projection = project(events).copy(review = mapOf(
+            "K1" to com.coach.domain.Review(dueDay = today),
+            "K2" to com.coach.domain.Review(dueDay = today - 3),
+            "K3" to com.coach.domain.Review(dueDay = today + 2),
+        ))
+        val due = CourseView(events, projection).dueReviews(now)
+        assertEquals(listOf("K2", "K1"), due.map { it.kp.id })
+        assertEquals(listOf(3, 0), due.map { it.overdueDays })
+    }
+
+    @Test fun examCountdownOnlyWhenAnExamDayIsSetAndNotPast() {
+        val today = com.coach.domain.logicalDay(now, "Europe/London")
+        val none = view(listOf(outline("K1" to "甲")))
+        assertNull(none.daysToExam(now))
+        val soon = view(listOf(outline("K1" to "甲"), event("exam_set", json("examDay" to today + 5))))
+        assertEquals(5, soon.daysToExam(now))
+        val past = view(listOf(outline("K1" to "甲"), event("exam_set", json("examDay" to today - 1))))
+        assertNull(past.daysToExam(now))
+    }
+
     @Test fun otherThreadsDoNotLeakIntoThisKp() {
         val v = view(listOf(outline("K1" to "A"), posed("a1", "g1", mapOf("o1" to "A", "o2" to "B"))))
         assertTrue(v.quizGroups("kp:K2").isEmpty())

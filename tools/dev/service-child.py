@@ -28,9 +28,9 @@ def main():
     groups = {}
 
     def collect_groups():
-        rows = subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,lstart='], text=True, timeout=3)
-        table = [row.split(maxsplit=3) for row in rows.splitlines()]
-        table = [(int(pid), int(ppid), int(pgid), started) for pid, ppid, pgid, started in table]
+        rows = subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,stat=,lstart='], text=True, timeout=3)
+        table = [row.split(maxsplit=4) for row in rows.splitlines()]
+        table = [(int(pid), int(ppid), int(pgid), started) for pid, ppid, pgid, stat, started in table if not stat.startswith('Z')]
         # A long-lived bridge can launch thousands of CLI groups. Forget dead
         # groups and verify a live member's start time before signalling a PGID,
         # so PID/PGID reuse cannot target an unrelated process days later.
@@ -51,11 +51,17 @@ def main():
 
     def signal_groups(sig):
         collect_groups()
-        for group in groups:
+        for group in list(groups):
             try:
                 os.killpg(group, sig)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # Darwin returns EPERM for a group containing only zombies.
+                # Ignore that race only after proving it has no live members.
+                collect_groups()
+                if group in groups:
+                    raise
 
     try:
         while not stopping and os.getppid() == parent and child.poll() is None:
@@ -63,9 +69,9 @@ def main():
             time.sleep(.5)
     finally:
         collect_groups()
-        signal_groups(signal.SIGTERM)
-        # SIGCONT allows a suspended process to receive TERM and exit cleanly.
+        # Continue before TERM, so stopped services can perform cleanup too.
         signal_groups(signal.SIGCONT)
+        signal_groups(signal.SIGTERM)
         deadline = time.monotonic() + 3
         while child.poll() is None and time.monotonic() < deadline:
             time.sleep(.05)

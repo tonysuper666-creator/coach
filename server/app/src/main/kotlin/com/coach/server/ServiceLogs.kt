@@ -7,12 +7,13 @@ import java.nio.file.Path
 import java.time.LocalDate
 
 /** Switch files on the next write after midnight; never rotate an open pipe. */
-internal class ServiceLog(private val directory: Path, private val name: String) : OutputStream() {
+internal class ServiceLog(private val directory: Path, private val name: String,
+    private val currentDay: () -> LocalDate = { LocalDate.now() }) : OutputStream() {
     private var day: LocalDate? = null
     private var output: OutputStream? = null
 
     @Synchronized override fun write(bytes: ByteArray, offset: Int, length: Int) {
-        val today = LocalDate.now()
+        val today = currentDay()
         if (day != today) {
             output?.close()
             Files.createDirectories(directory)

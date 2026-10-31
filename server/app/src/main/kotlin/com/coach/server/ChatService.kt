@@ -339,6 +339,9 @@ class ChatService(
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
             SourcePack.prepare(sourcePack,hits).render()
+        } else if (plan?.explanation == true) {
+            val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
+            preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
         } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")

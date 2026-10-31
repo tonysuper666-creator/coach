@@ -71,28 +71,26 @@ class ChatFlowTest {
 
     @Test
     fun lessonPreparationSelectsRelevantSeedPageAfterFifteenThousandCharacters() {
-        val seededKp = com.coach.domain.KnowledgePoint(
-            id = "kp-rand", moduleId = "module-1", order = 1,
-            title = "RAND HIE Oregon CRHIE randomized experiment",
-            conceptIds = setOf("health care demand")
+        val title = "RAND HIE Oregon CRHIE randomized experiment"
+        val metadata = com.coach.domain.json(
+            "name" to title,
+            "sourceAnchor" to com.coach.domain.json("pdfPage" to 10)
         )
-        val metadata = com.coach.domain.LedgerJson.encodeToJsonElement(
-            com.coach.domain.KnowledgePoint.serializer(), seededKp
-        ).jsonObject
-        val header = "Knowledge point: ${seededKp.title}\nReference: textbook\n\n"
-        val filler = "Unrelated chapter material without the target concepts. ".repeat(350)
+        val header = "Knowledge point: $title\nReference: textbook\n\n"
+        val filler = "Unrelated chapter material without the target concepts. ".repeat(45)
         val source = header + buildString {
-            append("**〔PDF 第 1 页 · 书第 1 页〕**\n").appendLine(filler)
-            append("**〔PDF 第 2 页 · 书第 2 页〕**\n").appendLine(filler)
-            append("**〔PDF 第 3 页 · 书第 3 页〕**\n")
+            for (page in 1..8) append("**〔PDF 第 $page 页 · 书第 $page 页〕**\n").appendLine(filler)
+            append("**〔PDF 第 9 页 · 书第 9 页〕**\n")
             append("Late KP body: RAND HIE randomized experiment, Oregon Medicaid, and CRHIE compare insurance demand.\n")
-            for (page in 4..9) append("**〔PDF 第 $page 页 · 书第 $page 页〕**\nUnrelated appendix.\n")
+            append("**〔PDF 第 10 页 · 书第 10 页〕**\nSource anchor reference page.\n")
+            for (page in 11..14) append("**〔PDF 第 $page 页 · 书第 $page 页〕**\nUnrelated appendix.\n")
         }
 
         assertTrue(source.indexOf("Late KP body") > LessonPreparation.MAX_LESSON_INPUT_CHARS)
         val selected = LessonPreparation.boundedInput(source, metadata)
 
         assertTrue(selected.startsWith(header))
+        assertTrue(selected.contains("Source anchor reference page."))
         val sourceMarkers = Regex("(?m)^.*〔PDF 第 ([0-9]+) 页.*$").findAll(source).toList()
         val sourcePageLengths = sourceMarkers.mapIndexed { index, marker ->
             marker.groupValues[1] to (source.substring(marker.range.first, sourceMarkers.getOrNull(index + 1)?.range?.first ?: source.length).length)

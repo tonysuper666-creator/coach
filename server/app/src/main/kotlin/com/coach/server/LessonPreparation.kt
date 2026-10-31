@@ -38,8 +38,10 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
             }
             val terms = lessonTerms(knowledgePoint)
             val documentFrequency = terms.associateWith { term -> pages.count { countOccurrences(it.text, term) > 0 } }
-            val anchorPages = (knowledgePoint["anchors"] as? JsonArray).orEmpty().mapNotNull { anchor ->
-                (anchor as? JsonObject)?.get("pdfPage")?.jsonPrimitive?.intOrNull
+            val anchors = (knowledgePoint["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+            val sourceAnchor = (knowledgePoint["sourceAnchor"] as? JsonObject)?.let(::listOf).orEmpty()
+            val anchorPages = (anchors + sourceAnchor).mapNotNull { anchor ->
+                anchor["pdfPage"]?.jsonPrimitive?.intOrNull
             }.toSet()
             val ranked = pages.sortedWith(compareByDescending<LessonPage> { page ->
                 val body = page.text
@@ -66,7 +68,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         }
 
         private fun lessonTerms(knowledgePoint: JsonObject): Set<String> {
-            val title = knowledgePoint.str("title")
+            val title = knowledgePoint.str("title").ifBlank { knowledgePoint.str("name") }
             val concepts = ((knowledgePoint["concepts"] as? JsonArray).orEmpty() +
                 (knowledgePoint["conceptIds"] as? JsonArray).orEmpty())
                 .mapNotNull { (it as? JsonPrimitive)?.content }
@@ -107,19 +109,25 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         else Prepared(row.str("text"),row.str("model"))
     }.getOrNull()
 
-    private suspend fun metadata(course: String, kp: String): JsonObject = actor.execute {
+    private suspend fun metadataOrNull(course: String, kp: String): JsonObject? = actor.execute {
         events(course).asReversed().filter { it.type == "outline_revised" }.firstNotNullOfOrNull { event ->
             val seededPoint = (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
                 .mapNotNull { it as? JsonObject }.firstOrNull { it.str("id") == kp }
             seededPoint ?: (event.payload["ops"] as? JsonArray).orEmpty()
                 .mapNotNull { it as? JsonObject }.firstOrNull { it.str("kpId") == kp }
-        } ?: error("Unknown knowledge point")
+        }
     }
+
+    private suspend fun metadata(course: String, kp: String): JsonObject =
+        metadataOrNull(course, kp) ?: error("Unknown knowledge point")
+
+    suspend fun boundedInput(course: String, kp: String, source: String, fallback: JsonObject): String =
+        boundedInput(source, metadataOrNull(course, kp) ?: fallback)
 
     suspend fun ensure(course: String, kp: String, target: Int = 6) {
         val meta=metadata(course,kp)
         val source=pack(course,kp)
-        if(source.isNotBlank()) PoolWorker(actor,bridge).ensure(course,kp,meta.str("title"),source.take(40_000),target,background=true)
+        if(source.isNotBlank()) PoolWorker(actor,bridge).ensure(course,kp,meta.str("title").ifBlank { meta.str("name") },source.take(40_000),target,background=true)
     }
 
     /** Bounded pool-only prewarm through the running server's actor; no second DB writer. */
@@ -160,7 +168,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         }
         if(cached(course,kp,fullSource)==null) {
             val concepts=(meta["conceptIds"] as? JsonArray)?.map { it.jsonPrimitive.content }?.toSet() ?: setOf(kp)
-            val plan=TutorReplyPlan(TutorThread(course,"kp:$kp",kp,concepts,meta.str("title")),"preparation",true,concepts,emptySet(),true,TeachingMode.CURRENT)
+            val plan=TutorReplyPlan(TutorThread(course,"kp:$kp",kp,concepts,meta.str("title").ifBlank { meta.str("name") }),"preparation",true,concepts,emptySet(),true,TeachingMode.CURRENT)
             val context=TutorOutputGuard.modelInput(source) + "\n" + plan.instruction()
             val result=withContext(Dispatchers.IO) { bridge.chat(teachRequest("请讲解当前知识点。",context).copy(task="PREPARE_TEACH",stream=false)) }
             actor.execute { recordAiCall(result.call.toJson(),"foreground") }

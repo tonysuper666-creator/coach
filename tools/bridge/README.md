@@ -121,3 +121,22 @@ live 结果逐条写 `--out`（默认 `/tmp/coach-bridge-live.jsonl`）。
 
 本卡物理调用：Claude 20+20+2（取消）+1（改完再验一次）=43，Codex 5+3=8，合计 **51**。
 （`bridge.log` 里有 3 行 codex-stream 重复，是 7477290 修掉的双记日志，不是多出来的调用。）
+
+### 用户桥与测试隔离（TON-1140）
+
+8791 固定只接用户流量：`X-Coach-Traffic: test` 在占并发槽、启动 CLI 之前返回
+403 / `test_traffic_forbidden` / `physical_calls=0`。该端口不能用环境变量取消保护。
+测试客户端 `BridgeConfig(testTraffic=true)` 也在发起模型请求前拒绝 8791。
+这不提供抢占已在执行的用户请求的保证；用户自身并发仍受后端槽位限制。
+
+测试须同时设置自己的 `BRIDGE_PORT`、`COACH_BRIDGE_HOME`、`COACH_BRIDGE_URL`，
+服务端设置自己的 `COACH_DATA_DIR`（生产库 `VACUUM INTO` 的副本），避免仅改流量标签。
+在独立端口加 `BRIDGE_USER_ONLY=1` 可预演生产隔离策略；`/health` 的 `user_only` 显示生效状态。
+
+无真实 CLI、无生产端口的验收：
+
+```sh
+tools/bridge/.venv/bin/python tools/bridge/tests/traffic_isolation.py
+tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py
+tools/bridge/.venv/bin/python tools/bridge/tests/exam_protection.py
+```

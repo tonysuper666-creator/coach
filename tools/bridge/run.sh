@@ -19,5 +19,5 @@ export BRIDGE_BACKGROUND_BACKEND=${BRIDGE_BACKGROUND_BACKEND:-codex}
 export BRIDGE_AGY_ENABLED=${BRIDGE_AGY_ENABLED:-0}
 
 mkdir -p "$COACH_BRIDGE_HOME/logs"
-print "coach-bridge 8791 → COACH_BRIDGE_HOME=$COACH_BRIDGE_HOME  log=$COACH_BRIDGE_HOME/logs/bridge.log"
+print "coach-bridge $BRIDGE_PORT → COACH_BRIDGE_HOME=$COACH_BRIDGE_HOME  log=$COACH_BRIDGE_HOME/logs/bridge.log"
 exec "$PY" "$HERE/subscription_bridge.py"

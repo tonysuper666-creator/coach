@@ -39,6 +39,7 @@ import java.util.UUID
 
 class CoachActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var usageReporter: com.coach.client.UsageReporter? = null
     private var transport: HttpLedgerTransport? = null
     private var tutor: TutorClient? = null
     private var jank: JankStats? = null
@@ -77,10 +78,13 @@ class CoachActivity : ComponentActivity() {
 
     private fun createController(serverUrl: String, credentials: PairedCredentials): CoachController {
         val db = ClientDatabase(AndroidSqliteDriver(ClientDatabase.Schema, this, "coach-client.db"))
+        val reporter = com.coach.client.UsageReporter(serverUrl, credentials.deviceId, credentials.token)
+        usageReporter = reporter
+        val telemetry = com.coach.client.UsageTelemetry(db, System::currentTimeMillis, reporter::send)
         val http = HttpLedgerTransport(serverUrl, credentials.deviceId, credentials.token)
         val sync = SyncEngine(db, credentials.deviceId, http, listOf(BuildConfig.COACH_COURSE), { UUID.randomUUID().toString() }, ::sha256Hex)
         // 首字样本进 logcat（tag CoachTtft），总验收按它算 p50。
-        val model = TutorModel(System::currentTimeMillis) { s ->
+        val model = TutorModel(System::currentTimeMillis, telemetry) { s ->
             Log.i("CoachTtft", """{"thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""")
         }
         // Content-free end/snapshot hashes let acceptance compare reconnect output with the ledger.
@@ -98,7 +102,7 @@ class CoachActivity : ComponentActivity() {
         }
         // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源。
         scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
-        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model)
+        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model, telemetry)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)
         math = mathHttp
         transport = http
@@ -138,6 +142,11 @@ class CoachActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        tutor?.telemetry?.record("open")
+    }
+
     override fun onPause() {
         reportJank()
         super.onPause()
@@ -154,6 +163,7 @@ class CoachActivity : ComponentActivity() {
 
     override fun onDestroy() {
         jank?.isTrackingEnabled = false
+        usageReporter?.close()
         tutor?.close()
         math?.close()
         transport?.close()

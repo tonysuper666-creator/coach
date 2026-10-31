@@ -70,6 +70,7 @@ data class TutorUiState(
  */
 class TutorModel(
     private val wallClock: () -> Long,
+    private val telemetry: UsageTelemetry? = null,
     private val onTtft: (TtftSample) -> Unit = {},
 ) {
     // 缺号回调在 [lock] 内触发：只记下要续传的消息，等锁放开后再交给发送端，避免在锁里做 I/O 或重入。
@@ -161,6 +162,7 @@ class TutorModel(
     }
 
     fun onFailure(threadId: String, error: String) = synchronized(lock) {
+        telemetry?.record("error", "connection")
         pendingSend.remove(threadId)
         mutateThread(threadId) { copy(error = error) }
     }
@@ -204,6 +206,7 @@ class TutorModel(
                 else copy(poolText = obj.str("text").ifBlank { null }, poolPreparing = obj.str("phase") in setOf("pool_queued","pool_generating","pool_reviewing","pool_retrying"))
             }
             "msg.error" -> {
+                telemetry?.record("error", "server")
                 val thread = obj.str("threadId")
                 if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error")) }
             }
@@ -259,6 +262,7 @@ class TutorModel(
             is ChatUpdate.Ended -> {
                 resumeSettled(update.messageId)
                 lastFrameAt.remove(update.messageId)
+                if (update.status in setOf("failed", "truncated")) telemetry?.record("error", "server")
                 val final = assembler.text(update.messageId)
                 // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
@@ -287,6 +291,7 @@ class TutorModel(
         val message = findMessage(id)
         val sample = TtftSample(thread, id, kind, mark.elapsedNow().inWholeMilliseconds, message?.model.orEmpty(), message?.fallback == true)
         _state.value = _state.value.copy(ttft = _state.value.ttft + sample)
+        telemetry?.record("first_word", if (kind == "test") "test" else if (kind == "ask") "ask" else "next", sample.ms)
         onTtft(sample)
     }
 

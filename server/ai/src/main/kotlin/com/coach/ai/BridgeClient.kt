@@ -130,6 +130,11 @@ sealed interface BridgeResult {
  * 收不到终态帧 = 截断；`status != complete` = 不完整。两种都不当成功交给上层。
  */
 class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
+    private fun requireIsolatedTestBridge() {
+        require(!config.testTraffic || URI(config.baseUrl).port != 8791) {
+            "Test traffic requires an isolated bridge port (COACH_BRIDGE_URL); 8791 is reserved for the learner"
+        }
+    }
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -366,6 +371,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     }
 
     private fun builderFor(request: ChatRequest, payload: JsonObject, requestId: String): HttpRequest.Builder {
+        requireIsolatedTestBridge()
         val builder = HttpRequest.newBuilder(URI.create("${config.baseUrl}/v1/chat/completions"))
             .timeout(config.requestTimeout)
             .header("Content-Type", "application/json")

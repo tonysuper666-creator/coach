@@ -74,7 +74,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
                     val sub = listOf(tag, kp.reference.takeIf { it.isNotBlank() }?.let { "本次参考：$it" }).filterNotNull().filter { it.isNotBlank() }.joinToString(" · ")
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { showScope = !showScope }, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(0.dp)) {
+                        TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.weight(1f).heightIn(min = 48.dp), contentPadding = PaddingValues(0.dp)) {
                             Text(if (showScope) "收起学习范围" else sub.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾",
                                 Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Start,
                                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
@@ -146,7 +146,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                             is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
                         }
                         is StudyRow.Question -> QuizCardView(row.index + 1, row.group.cards.size, row.card, row.group.submitted, chosen[row.card.attemptId], c.math, onFirstDraw={ PoolTrace.mark(thread,"first_draw") }) { letter ->
-                            if (!row.group.submitted) chosen[row.card.attemptId] = letter
+                            if (!row.group.submitted) { c.tutor.telemetry?.record("tap", "select_option"); chosen[row.card.attemptId] = letter }
                         }
                         is StudyRow.GroupFooter -> QuizGroupFooter(row.group, kp, c, view, thread, chosen) { c.tutor.model.onSent(thread, "answer", null); pinned = true }
                         is StudyRow.Note -> when (row.kind) {

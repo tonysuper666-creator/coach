@@ -27,7 +27,8 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop") {
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) {
+    if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
         // Pairing is the only unauthenticated operation, and only this exact POST.
@@ -47,7 +48,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 finish()
                 return@intercept
             }
-
+            call.attributes.put(observedDevice, device)
         }
     }
 
@@ -59,6 +60,23 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         return false
     }
     routing {
+        post("/v1/usage") {
+            val observer = observation ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
+            // Bound streamed/chunked bodies as well as Content-Length before parsing.
+            val channel = call.receiveChannel()
+            val bytes = ByteArray(32_769)
+            var size = 0
+            while (size < bytes.size) {
+                val n = channel.readAvailable(bytes,size,bytes.size-size)
+                if (n == -1) break
+                size += n
+            }
+            if (size > 32_768) return@post call.respond(HttpStatusCode.PayloadTooLarge)
+            val events = runCatching { LedgerJson.parseToJsonElement(bytes.decodeToString(0,size)).jsonArray.map { it.jsonObject } }.getOrNull()
+            if (events == null || events.size !in 1..50 || !events.all(com.coach.client.UsageVocabulary::valid)) return@post call.respond(HttpStatusCode.BadRequest)
+            observer.accept(call.attributes[observedDevice], events)
+            call.respond(HttpStatusCode.NoContent)
+        }
         post("/v1/courses/{course}/constructed") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
             val course=call.parameters["course"]!!
@@ -197,12 +215,18 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             val sender=launch { pushes.collect { catchUp() } }
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
             // Serialize resume snapshot creation + delivery against this socket's deltas.
+            val firstWords = WsFirstWords(device, observation)
             val tutorSend = Mutex()
-            val tutor=chat?.let { service -> launch(start = CoroutineStart.UNDISPATCHED) { service.hub.frames.collect { frame -> tutorSend.withLock { if (stillAuthorized()) send(Frame.Text(frame.toString())) } } } }
+            val tutor=chat?.let { service -> launch(start = CoroutineStart.UNDISPATCHED) {
+                service.hub.frames.collect { frame -> tutorSend.withLock {
+                    if (stillAuthorized()) { send(Frame.Text(frame.toString())); firstWords.sent(frame) }
+                } }
+            } }
             val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
             try { for(frame in incoming) if(frame is Frame.Text) {
                 if (!stillAuthorized()) break
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
+                firstWords.received(message)
                 try { when(message.str("t")) {
                     "hello" -> {
                         for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) cursors[course]=seq.jsonPrimitive.long

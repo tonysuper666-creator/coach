@@ -46,6 +46,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("BRIDGE_PORT", "8791"))
+# 8791 is reserved for the learner. Isolation is enforced before any CLI/gate.
+# The mode override lets an acceptance copy exercise production policy on a private port.
+USER_ONLY = PORT == 8791 or os.environ.get("BRIDGE_USER_ONLY") == "1"
 BRIDGE_HOME = Path(os.environ.get("COACH_BRIDGE_HOME", str(Path.home() / "Coach" / "bridge"))).expanduser()
 WORK_DIR = BRIDGE_HOME / "work"
 TMP_DIR = WORK_DIR / "tmp"
@@ -1187,6 +1190,7 @@ async def health_payload() -> dict:
         "models": {m.id: {"backend": m.backend, "true_stream": m.true_stream} for m in MODELS.values()},
         "concurrency": {name: gate.snapshot() for name, gate in GATES.items()}
                        | {"background": {"limit": BACKGROUND_SLOTS, "active": BG_ACTIVE}},
+        "user_only": USER_ONLY,
         "background_backend": BACKGROUND_BACKEND or None,
         "daily": {"date": _today(), "scope": "test", "total_claude_calls": int(read_daily().get("claude_calls") or 0),
                   "claude_calls": daily_used(), "claude_cap": None, "remaining": None},
@@ -1200,7 +1204,7 @@ async def health(request: Request):
     if request.query_params.get("scope") == "process":
         # Liveness must not wait for CLI auth probes (up to 20s), or depend on
         # subscription availability. Full /health continues to report upstreams.
-        return {"ok": True, "service": "coach-bridge", "port": PORT, "pid": os.getpid()}
+        return {"ok": True, "service": "coach-bridge", "port": PORT, "pid": os.getpid(), "user_only": USER_ONLY}
     payload = await health_payload()
     payload["request_id"] = request.headers.get("x-request-id") or "-"
     return payload
@@ -1494,6 +1498,8 @@ async def chat(request: Request):
         if not isinstance(body, dict):
             raise BridgeError(400, "请求体必须是 JSON 对象", "invalid_request_error")
         req = build_req(body, request.headers)
+        if USER_ONLY and req.test_traffic:
+            raise BridgeError(403, "测试流量请使用独立桥端口", reason="test_traffic_forbidden")
         if exam_protection_active():
             raise BridgeError(503, "考前保护：11 月 2 日 00:00–15:00 GMT 暂停模型调用", reason="exam_protection")
 

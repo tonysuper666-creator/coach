@@ -1,5 +1,7 @@
 package com.coach.desktop
 
+import kotlinx.coroutines.cancel
+
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -45,12 +47,14 @@ fun runCoach() {
         { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } },
     )
 
+    val reporter = com.coach.client.UsageReporter(baseUrl, deviceId, token)
+    val telemetry = com.coach.client.UsageTelemetry(db, System::currentTimeMillis, reporter::send)
     // 客户端首字样本：界面内可见，同时逐行追加到本地文件供总验收算 p50。
     val ttftFile = File(home, "Coach/state/client-ttft.jsonl").also { it.parentFile.mkdirs() }
-    val model = TutorModel(System::currentTimeMillis) { s: TtftSample ->
+    val model = TutorModel(System::currentTimeMillis, telemetry) { s: TtftSample ->
         ttftFile.appendText("""{"at":"${Instant.now()}","thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""" + "\n")
     }
-    val tutor = TutorClient(baseUrl, deviceId, token, model)
+    val tutor = TutorClient(baseUrl, deviceId, token, model, telemetry)
     val clock = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
     val packDir = File(env("COACH_PACK_DIR", File(home, "Coach/corpus/packs/$course").path))
     val mathHttp = com.coach.client.MathHttp(baseUrl, deviceId, token)
@@ -69,7 +73,7 @@ fun runCoach() {
     // COACH_WINDOW=宽x高（dp），用来在桌面上模拟 Fold8 外屏等窄屏。
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
-        Window(onCloseRequest = { tutor.close(); mathHttp.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = { tutor.close(); reporter.close(); scope.cancel(); mathHttp.close(); exitApplication() }, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             CoachApp(controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1")
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(controller, it) } }

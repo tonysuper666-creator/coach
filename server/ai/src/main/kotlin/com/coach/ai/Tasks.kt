@@ -42,13 +42,14 @@ data class ConstructedQuestion(
     val stem: String,
     val referenceAnswer: String,
     val rubric: List<RubricItem>,
+    val numericFinal: JsonObject? = null,
 )
 
 data class GradeItem(val id: String, val points: Double, val reason: String, val evidence: String)
 
 data class DraftGrade(val items: List<GradeItem>, val total: Double, val awarded: Double)
 
-data class CrossReview(val verdict: String, val note: String, val revisedTotal: Double?)
+data class CrossReview(val verdict: String, val note: String, val revisedTotal: Double?, val revisedGrade: DraftGrade? = null)
 
 object Prompts {
 
@@ -167,6 +168,10 @@ For each question also write a reference answer and a frozen rubric: 3-5 rubric 
 "id" (R1..), "text" (what a full-credit answer must contain), "points" (sum = 10) and "basis" (verbatim clue from the excerpt).
 For EVERY basis, copy ONE contiguous substring of the excerpt exactly. Do not paraphrase, combine fragments,
 insert ellipses, correct spelling, or rewrite punctuation/math. Keep the source's Markdown/LaTeX and escape it for JSON.
+For calculation questions, reserve one rubric item for the numeric final and also return
+"numeric_final":{"rubricItemId":"R4","expected":"0.25","relTolerance":0.000001,"absTolerance":0.000000001}.
+Use a single parseable number or fraction for expected. The server alone scores this item; other items grade the process.
+For non-calculation questions omit numeric_final.
 Return a JSON array: [{"stem":..., "reference_answer":..., "rubric":[{"id":"R1","text":...,"points":3,"basis":...}]}]
     """.trim()
 
@@ -320,6 +325,9 @@ $evidence
 Decide: does each awarded point follow from the student's own words under the rubric?
 Return JSON only: {"verdict":"CONFIRM"|"REVISE","note":"...","revised_total":<number or null>}
 Use CONFIRM only if every item's points are right; use REVISE if any item is over- or under-credited.
+For REVISE also include "revised_grade": {"items":[{"id":"R1","points":0,"reason":"...","evidence":""}],"total":10,"awarded":0}.
+Include EVERY frozen rubric item with its corrected points and verbatim evidence. Empty evidence is allowed only for zero points.
+A revised total alone is insufficient. Do not alter the rubric or copy evidence from the reference answer.
         """.trim()
     }
 
@@ -341,6 +349,9 @@ ${question.referenceAnswer}
 
 Rubric:
 ${rubricJson(question.rubric)}
+
+Numeric final specification (if present, verify its expected value and tolerance too):
+${question.numericFinal}
 
 Return JSON only: {"verdict":"CONFIRM"|"REVISE","note":"...","rubric_fix":[{"id":"R1","text":...}],"reference_fix":"..."}
 CONFIRM only if the reference answer is correct per the excerpt and every rubric item is checkable and worth its points.
@@ -436,6 +447,7 @@ object TaskParsing {
                     basis = entry["basis"]?.jsonPrimitive?.content ?: "",
                 )
             } ?: emptyList(),
+            numericFinal = obj["numeric_final"] as? JsonObject,
         )
     }
 
@@ -463,6 +475,7 @@ object TaskParsing {
             verdict = obj["verdict"]?.jsonPrimitive?.content?.trim()?.uppercase() ?: "REVISE",
             note = obj["note"]?.jsonPrimitive?.content ?: "",
             revisedTotal = (obj["revised_total"] as? JsonPrimitive)?.content?.toDoubleOrNull(),
+            revisedGrade = (obj["revised_grade"] as? JsonObject)?.let { grade(it.toString()) },
         )
     }
 }
@@ -512,11 +525,12 @@ object GradeGate {
     fun arithmetic(draft: DraftGrade, rubric: List<RubricItem>): List<String> {
         val defects = ArrayList<String>()
         val byId = rubric.associateBy { it.id }
-        if (draft.items.map { it.id }.toSet() != byId.keys) defects.add("rubric_items_changed")
+        if (draft.items.map { it.id }.toSet() != byId.keys || draft.items.size != rubric.size || byId.size != rubric.size) defects.add("rubric_items_changed")
         for (item in draft.items) {
             val reference = byId[item.id] ?: continue
-            if (item.points < 0 || item.points > reference.points) defects.add("points_out_of_range:${item.id}")
+            if (!item.points.isFinite() || !reference.points.isFinite() || item.points < 0 || item.points > reference.points) defects.add("points_out_of_range:${item.id}")
         }
+        if (!draft.total.isFinite() || draft.total <= 0 || !draft.awarded.isFinite()) defects.add("invalid_grade_number")
         val sum = draft.items.sumOf { it.points }
         if (kotlin.math.abs(sum - draft.awarded) > 1e-6) defects.add("awarded_not_sum_of_items")
         val max = rubric.sumOf { it.points }

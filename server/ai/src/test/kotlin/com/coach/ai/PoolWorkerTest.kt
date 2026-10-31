@@ -134,7 +134,7 @@ class PoolWorkerTest {
             assertFalse(persistConfirmedGrade(actor,token,"v1",hash,"c","attempt",outcome))
         } } finally { actor.close() }
         LedgerStore(dir).use { store ->
-            val evidence=store.events("c").single().payload.getValue("evidence").jsonArray.single().jsonObject
+            val evidence=store.events("c").single { it.type=="attempt_graded" }.payload.getValue("evidence").jsonArray.single().jsonObject
             assertEquals(quote,answer.substring(evidence.num("start").toInt(),evidence.num("end").toInt()))
             assertEquals(quote,evidence.str("text"));assertEquals("R1",evidence.str("rubricItemId"))
         }

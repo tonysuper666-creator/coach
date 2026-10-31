@@ -17,7 +17,7 @@ object NumericValue {
         if (body.isEmpty()) return null
         while (body.isNotEmpty() && body.last() in TRAILING_JUNK) body = body.dropLast(1)
         if (body.isEmpty()) return null
-        return parseValue(body)
+        return parseValue(body)?.takeIf { it.isFinite() }
     }
 
     fun matches(
@@ -37,7 +37,7 @@ object NumericValue {
         relTolerance: Double = DEFAULT_REL_TOLERANCE,
         absTolerance: Double = DEFAULT_ABS_TOLERANCE,
     ): Boolean {
-        if (a.isNaN() || b.isNaN()) return false
+        if (!a.isFinite() || !b.isFinite() || !relTolerance.isFinite() || !absTolerance.isFinite() || relTolerance < 0 || absTolerance < 0) return false
         val tolerance = maxOf(absTolerance, relTolerance * kotlin.math.abs(b))
         return kotlin.math.abs(a - b) <= tolerance
     }
@@ -45,6 +45,7 @@ object NumericValue {
     private fun parseValue(raw: String): Double? {
         val body = raw.trim()
         if (body.isEmpty()) return null
+        if (body.startsWith("负")) return parseValue(body.drop(1))?.let { -it }
         if (body.startsWith("百分之")) {
             val part = parseValue(body.removePrefix("百分之")) ?: return null
             return part / 100.0
@@ -67,15 +68,15 @@ object NumericValue {
             if (denominator == 0.0) return null
             return numerator / denominator
         }
-        if (body.endsWith("万")) {
-            val part = parseValue(body.dropLast(1)) ?: return null
-            return part * 10_000.0
+        body.toDoubleOrNull()?.let { return it.takeIf { n -> n.isFinite() } }
+        if (body.last() in "万亿") {
+            // Scale decimal/Arabic coefficients only; Chinese sections must be parsed together.
+            val prefix=body.dropLast(1)
+            if (prefix.toDoubleOrNull()!=null || prefix.contains('点')) {
+                val part=parseValue(prefix) ?: return null
+                return part * if(body.last()=='万') 10_000.0 else 100_000_000.0
+            }
         }
-        if (body.endsWith("亿")) {
-            val part = parseValue(body.dropLast(1)) ?: return null
-            return part * 100_000_000.0
-        }
-        body.toDoubleOrNull()?.let { return it }
         return parseChinese(body)
     }
 
@@ -111,6 +112,9 @@ object NumericValue {
 
     private fun parseChineseInteger(body: String): Double? {
         if (body.isEmpty()) return null
+        if(body.all { it in CHINESE_DIGITS })
+            return body.map { CHINESE_DIGITS.getValue(it).toInt() }.joinToString("").toDoubleOrNull()
+        var lastUnit=10_000.0
         var total = 0.0
         var section = 0.0
         var number = 0.0
@@ -119,7 +123,7 @@ object NumericValue {
         for (ch in body) {
             val digit = CHINESE_DIGITS[ch]
             if (digit != null) {
-                if (sawNumber) return null // 「一二」这种连写只在纯数字串里合法
+                if (sawNumber && number != 0.0) return null // 零是占位；连续数字仅在纯数字串中接受
                 number = digit
                 sawNumber = true
                 continue
@@ -134,14 +138,19 @@ object NumericValue {
                     } else {
                         total += section * scale
                     }
+                    lastUnit=10_000.0
                     section = 0.0
                     number = 0.0
                     sawNumber = false
                     sawUnit = true
                 }
                 unit != null -> {
-                    if (unit <= 0.0) return null
-                    if (!sawNumber) number = 1.0 // 「十一」= 11
+                    if (unit >= lastUnit) return null
+                    if (!sawNumber) {
+                        if(unit!=10.0 || section!=0.0) return null
+                        number=1.0 // 「十一」= 11
+                    }
+                    lastUnit=unit
                     section += number * unit
                     number = 0.0
                     sawNumber = false

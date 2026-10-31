@@ -27,7 +27,7 @@ Return contract:
 
 A successful reserve take after a real failed task writes `fallback_used(groupId, kpId, jobId, from=TASK, reason)`, once per failed job across group retries and restarts. EMPTY/TEXT_ONLY/MALFORMED/TIMEOUT generation failures are distinguished. Empty inventory and ordinary takes without failed work emit no fallback event and no placeholder cards. Job state, pool consumption and calls survive restart. `ai_calls` records actual served model (null stays null), physical calls and foreground/background classification; rejected stale results still retain their real call accounting.
 
-`GradePipeline.Outcome.evidenceSpans` contains rubric item IDs and original-answer UTF-16 `[start,end)` offsets. `persistConfirmedGrade` commits those spans with a confirmed grade under the existing job epoch/fence, question version and answer hash. Live-harness reports also include the offsets. This is the persistence adapter for the grading integrator; it is not a new grading endpoint.
+`GradePipeline.Outcome.evidenceSpans` contains rubric item IDs and original-answer UTF-16 `[start,end)` offsets. `persistConfirmedGrade` commits a draft (`AI_UNREVIEWED`) and its separate CONFIRM event under the existing job epoch/fence, question version and answer hash. The durable grading worker now persists the draft before dispatching review; see `docs/m1-constructed-grading.md`. Live-harness reports also include the offsets. This is the persistence adapter for the grading integrator; it is not a new grading endpoint.
 
 ## Refill a specified KP
 

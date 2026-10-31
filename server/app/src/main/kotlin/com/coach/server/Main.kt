@@ -58,7 +58,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val children = if (managed) ChildServices(this) else null
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
-    val chat = ChatService(actor, this, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")
+    val chat = ChatService(actor, this, ledgerChanged={ pushes.emit(it) }, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")
     actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
     val supplyWorker = chat.startSupplyWorker()

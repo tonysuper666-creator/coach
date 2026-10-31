@@ -66,6 +66,7 @@ class ChatService(
     private val fallbackModel: String = BridgeClient.CODEX,
     private val fallbackOnFirstTokenTimeout: Boolean = true,
     private val allowSourceLookup: Boolean = false,
+    private val ledgerChanged: suspend (String) -> Unit = {},
     private val log: (String) -> Unit = { println(it) },
     private val sourceLookupProtected: () -> Boolean = { java.time.Instant.now() < java.time.Instant.parse("2026-11-02T15:00:00Z") },
     private val sourceLookupTimeoutMs: Long = 90_000,
@@ -87,8 +88,9 @@ class ChatService(
 
     fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
         val worker = com.coach.ai.PoolWorker(actor,bridge)
+        val grades = com.coach.ai.ConstructedGradeWorker(actor,bridge,ledgerChanged)
         while(isActive) {
-            try { supplyLock.withLock { worker.runOne() } }
+            try { if (!grades.runOne()) supplyLock.withLock { worker.runOne() } }
             catch(e: kotlinx.coroutines.CancellationException) { throw e }
             catch(e: Exception) { log("COACH supply failure=${e.javaClass.simpleName}") }
             delay(500)

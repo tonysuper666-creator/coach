@@ -177,7 +177,7 @@ class QuestionPool(private val client: BridgeClient) {
 
 /**
  * 批改：先得到草稿，再让不同厂商复核；复核 CONFIRM 之后才算数。
- * 任何一步不成立都不写任何结果（fail closed，ADR-0003 决定 8）。
+ * 草稿与复核可分开执行；只有通过确定性检查和异厂复核的分数才计入。
  */
 class GradePipeline(private val client: BridgeClient) {
 
@@ -201,6 +201,7 @@ class GradePipeline(private val client: BridgeClient) {
         graderModel: String = BridgeClient.CLAUDE,
         reviewerModel: String = BridgeClient.CODEX,
         background: Boolean = false,
+        draftOnly: Boolean = false,
     ): Outcome {
         require(modelVendor(graderModel) != modelVendor(reviewerModel)) { "Review must use a different vendor" }
         val calls = ArrayList<AiCall>()
@@ -259,33 +260,40 @@ class GradePipeline(private val client: BridgeClient) {
         if (defects.isNotEmpty()) {
             return Outcome(false, null, defects, calls, null, spans, fingerprint, current)
         }
-        val reviewed = client.chat(
-            ChatRequest(
-                task = "cross_review_grade",
-                model = reviewerModel,
-                system = Prompts.CROSS_REVIEW_SYSTEM,
-                user = Prompts.crossReviewGrade(question, answer, current, spans),
-                stream = false,
-                background = background,
-                maxTokens = 1500,
-            ),
-        )
-        calls.add(reviewed.call)
-        if (reviewed is BridgeResult.Failure) {
-            return Outcome(false, null, listOf("review_call_${reviewed.reason}"), calls, null, spans, fingerprint)
+        val located = locate(answer, current)
+        val prepared = Outcome(false, current.awarded, emptyList(), calls, null, spans, fingerprint, current, located)
+        if (draftOnly) return prepared
+        return reviewDraft(question, answer, prepared, reviewerModel, background)
+    }
+
+    /** Durable workers restore this input from the ledger; no second grading call is needed. */
+    fun reviewDraft(question: ConstructedQuestion, answer: String, prepared: Outcome,
+        reviewerModel: String = BridgeClient.CODEX, background: Boolean = true): Outcome {
+        val current = requireNotNull(prepared.draft)
+        if (prepared.rubricFingerprint != GradeGate.rubricFingerprint(question.rubric))
+            return prepared.copy(defects=listOf("rubric_changed"))
+        val defects = GradeGate.arithmetic(current, question.rubric) + GradeGate.evidence(answer,current).first
+        if (defects.isNotEmpty()) return prepared.copy(defects=defects)
+        val reviewed = client.chat(ChatRequest("cross_review_grade", reviewerModel, Prompts.CROSS_REVIEW_SYSTEM,
+            Prompts.crossReviewGrade(question, answer, current, prepared.evidence), false,
+            background=background, maxTokens=2500))
+        val calls=prepared.calls + reviewed.call
+        if (reviewed is BridgeResult.Failure) return prepared.copy(calls=calls,defects=listOf("review_call_${reviewed.reason}"))
+        val verdict=runCatching { TaskParsing.crossReview((reviewed as BridgeResult.Success).text) }.getOrNull()
+            ?: return prepared.copy(calls=calls,defects=listOf("review_unparsable"))
+        val final = when(verdict.verdict) {
+            "CONFIRM" -> current
+            "REVISE" -> verdict.revisedGrade ?: return prepared.copy(calls=calls,crossReview=verdict,defects=listOf("review_revise"))
+            else -> return prepared.copy(calls=calls,defects=listOf("review_unknown_verdict"))
         }
-        val verdict = try {
-            TaskParsing.crossReview((reviewed as BridgeResult.Success).text)
-        } catch (error: Exception) {
-            return Outcome(false, null, listOf("review_unparsable"), calls, null, spans, fingerprint)
-        }
-        if (verdict.verdict != "CONFIRM") {
-            return Outcome(false, null, listOf("review_${verdict.verdict.lowercase()}"), calls, verdict, spans, fingerprint, draft)
-        }
-        val located = current.items.mapNotNull { item ->
-            (VerbatimEvidence.verify(answer, item.evidence) as? EvidenceCheck.Accepted)?.let { GradedEvidence(item.id, it.span) }
-        }
-        return Outcome(true, current.awarded, emptyList(), calls, verdict, spans, fingerprint, current, located)
+        val invalid=GradeGate.arithmetic(final,question.rubric) + GradeGate.evidence(answer,final).first
+        if(invalid.isNotEmpty()) return prepared.copy(calls=calls,crossReview=verdict,defects=invalid)
+        return prepared.copy(written=true,awarded=final.awarded,calls=calls,crossReview=verdict,draft=final,
+            evidence=GradeGate.evidence(answer,final).second,evidenceSpans=locate(answer,final),defects=emptyList())
+    }
+
+    private fun locate(answer: String, grade: DraftGrade) = grade.items.mapNotNull { item ->
+        (VerbatimEvidence.verify(answer,item.evidence) as? EvidenceCheck.Accepted)?.let { GradedEvidence(item.id,it.span) }
     }
 
     companion object {

@@ -1,6 +1,6 @@
 Coach M1-alpha Android integration
 
-Result: partial. Builder-C's UI heads b2a40a9, 04e9695 and 35cc060 are integrated. The b2 theme/Markdown/composer API is retained; the incoming viewport-reveal logic and all five assertion cases are integrated through the key-based API. The restoration flag is observable so lifecycle waits actually resume. Three knowledge points were repeated in a fresh isolated ledger at the b2 stage: three explanations, nine question events, nine actual submissions and nine server grades; Today shows 3/49. The 35 stage separately rechecks the changed quiz/selected/submit/grade UI with a fresh single-KP group and new screenshots. After pairing, one tap on Continue starts the cached lesson. The current APK uses the shared ComposerField and AnchoredChatList. Phone Enter inserts a newline and the Send button submits; a new regression checks that no message is sent on Enter.
+Result: partial. Builder-C's UI heads b2a40a9, 04e9695, 35cc060 and c70f23d are integrated. The b2 theme/Markdown/composer API is retained; the incoming viewport-reveal logic and all five assertion cases are integrated through the key-based API. The restoration flag is observable so lifecycle waits actually resume. Three knowledge points were repeated in a fresh isolated ledger at the b2 stage: three explanations, nine question events, nine actual submissions and nine server grades; Today shows 3/49. The 35 stage separately rechecks the changed quiz/selected/submit/grade UI with a fresh single-KP group and new screenshots. After pairing, one tap on Continue starts the cached lesson. The current APK uses the shared ComposerField and AnchoredChatList. Phone Enter inserts a newline and the Send button submits; a new regression checks that no message is sent on Enter.
 
 The UI renders headings, hanging lists, quotes, inline emphasis and math. Titles keep the complete first anchor and expose additional scope in details. Reading is bounded to 600dp, with two panes at 640dp. Status contrast is checked in both themes. Timing stays in developer logs. Reply metadata preserves the actual serving model, including fallback. Subsequent UI polish remains owned by Builder-C.
 
@@ -24,7 +24,7 @@ Integration and validation
 
 The branch is based on main 11ec183 after #13/#14/#17/#21/#22 merged. It preserves study-companion routes and independent source-index repair. The integration adds prepared lessons, actor-owned supply, compatible schema v5, course ordering, exact-model blind review, persistent service supervision and the Codex subscription-config fix.
 
-Current unique JVM results: domain48, client15, UI37, store17, core15, AI46, app52 = 230; zero failure/error/skip. Unchanged backend/client gates were executed in earlier integration batches; after the UI merge, the following passed again:
+Current unique JVM results: domain48, client15, UI40, store17, core15, AI46, app52 = 233; zero failure/error/skip. Unchanged backend/client gates were executed in earlier integration batches; after the UI merge, the following passed again:
 
     ./gradlew :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest --max-workers=6
 
@@ -36,13 +36,15 @@ Builder-C's 35cc060 fixes literal currency emphasis and the five QA layout/copy 
 
     你应该付 **$20**，保险付 $80。
 
+Builder-C's c70f23d adds learner-facing formula failure guidance through the same shared renderer: inline source stays in the sentence with one explanatory note; failed display formulas show a plain-language note and scrollable source. Three FormulaFailureTest cases raise the UI suite to 40. A debug-only, explicitly labelled fault sample on the real study page checks one valid formula (HTTP200), two malformed formulas (HTTP422), and the surrounding text in both forms and themes. The injected message is not persisted and triggers no model call. This is fault injection, not an observed invalid live tutor answer. A separate isolated three-question group was deliberately answered incorrectly to capture actual wrong-answer colour/verdict states; it does not establish acceptance of a detailed explanation flow.
+
 Remaining limits
 
 - Live first word is not consistently within five seconds; streaming/resize also contains jank outliers.
-- QA-C's f5 snapshot passed visual review. The later b2 review rejected the currency markers and cramped outer quiz viewport. The 35 fixes and new screenshots require a fresh visual review; they do not inherit approval from an older snapshot. The palette is static semantic light/dark tokens, with dynamic wallpaper colour disabled.
+- QA-C's f5 snapshot passed visual review. The later b2 review rejected the currency markers and cramped outer quiz viewport. QA-C passed the 35 visual revision at 04:57 UTC; the c70 formula guidance and wrong-answer screenshots need their own visual review. The palette is static semantic light/dark tokens, with dynamic wallpaper colour disabled.
 - Completed chat history is stored server-side but is not yet rehydrated into a fresh Android process. Mastery and question/grade cards restore.
 - Physical Fold8 acceptance is still outstanding.
-- A formula failure preserves source text. The earlier real source-chip sample now receives HTTP200 from math service; its original cause is not established. Explicit invalid-TeX screenshots use a labelled M0 shared-renderer fault fixture, with HTTP422 confirmed and no model call. They are not invented live tutor output.
+- A formula failure preserves source text. The earlier real source-chip sample now receives HTTP200 from math service; its original cause is not established. The newer c70 fault screenshots use the actual learning page with a clearly labelled debug sample and learner-facing notes. Actual invalid live tutor output remains unverified. Visual acceptance of this new guidance and wrong-answer state is pending; older M0 component fixtures remain historical evidence only.
 
 Installation
 

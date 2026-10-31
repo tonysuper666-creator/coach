@@ -41,6 +41,32 @@ private fun JsonObject.str(key: String): String =
  * 全程桩桥，不调用任何真实订阅 CLI（DESIGN §13.2 期中保护）。
  */
 class ChatFlowTest {
+    @Test
+    fun clientFirstTokenReportIsLoggedWithKnowledgePointAndRequestKind() {
+        Harness().use { h ->
+            runBlocking {
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json("ops" to kotlinx.serialization.json.JsonArray(listOf(
+                        com.coach.domain.json("kpId" to "kp-1", "type" to "essay")
+                    ))))
+                    append("course-1", "kp_opened", com.coach.domain.json("kpId" to "kp-1"), thread = "thread-1")
+                }
+            }
+            Ws(h.port,h.token).use { ws ->
+                ws.send("""{"t":"client.ttft","courseId":"course-1","threadId":"thread-1","msg":"msg-1","kind":"next","ms":142,"model":"claude-sonnet-5-5","fallback":false}""")
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                while (h.logs.none { it.contains("client_ttft") } && System.nanoTime() < deadline) Thread.sleep(10)
+                assertTrue(h.logs.any { it.contains("kp=kp-1") && it.contains("kp_type=essay") && it.contains("kind=next") && it.contains("ms=142") })
+            }
+        }
+    }
+
+    @Test
+    fun lessonPreparationCapsModelInputAtFifteenThousandCharacters() {
+        val source = "x".repeat(20_000)
+        assertEquals(15_000, LessonPreparation.boundedInput(source).length)
+    }
+
 
     @Test
     fun slowSubscribersCauseAnObservableDrop() = runBlocking {
@@ -317,7 +343,7 @@ class ChatFlowTest {
         Files.writeString(packs.resolve("course-1/kp-1.md"),source)
         val cache=root.resolve("prepared-lessons/course-1")
         Files.createDirectories(cache)
-        Files.writeString(cache.resolve("kp-1.json"),com.coach.domain.json("packHash" to com.coach.store.sha256(source.toByteArray()),
+        Files.writeString(cache.resolve("kp-1.json"),com.coach.domain.json("packHash" to LessonPreparation.cacheHash(source),
             "text" to "预备好的完整讲解。","model" to BridgeClient.CLAUDE).toString())
         try { Harness(packDir=packs).use { h ->
             Ws(h.port,h.token).use { ws ->

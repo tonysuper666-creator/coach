@@ -34,7 +34,8 @@ sealed interface ChatItem {
 }
 
 /** 客户端首字时间：从点按发出到共享消费端交付第一个非空正文/公式，毫秒。进度帧不算。 */
-data class TtftSample(val threadId: String, val messageId: String, val kind: String, val ms: Long, val model: String, val fallback: Boolean)
+data class TtftSample(val threadId: String, val messageId: String, val kind: String, val ms: Long,
+    val model: String, val fallback: Boolean, val courseId: String)
 
 data class ThreadView(
     val items: List<ChatItem> = emptyList(),
@@ -73,6 +74,7 @@ class TutorModel(
     private val telemetry: UsageTelemetry? = null,
     private val onTtft: (TtftSample) -> Unit = {},
 ) {
+    @kotlin.concurrent.Volatile private var ttftReporter: (TtftSample) -> Unit = onTtft
     // 缺号回调在 [lock] 内触发：只记下要续传的消息，等锁放开后再交给发送端，避免在锁里做 I/O 或重入。
     private val assembler = ChatStreamAssembler(onResumeRequired = { id, _ -> resumeNeeded.add(id); resumeWanted.add(id) })
     private val lock = Any()
@@ -88,11 +90,17 @@ class TutorModel(
     val state: StateFlow<TutorUiState> = _state.asStateFlow()
 
     private val messageThread = HashMap<String, String>()
+    private val threadCourse = HashMap<String, String>()
     private val pendingSend = HashMap<String, Pair<String, TimeSource.Monotonic.ValueTimeMark>>()
     private val sampled = HashSet<String>()
     private var localDeviceId: String? = null
 
     fun bindDevice(device: String) = synchronized(lock) { localDeviceId = device }
+
+    fun addTtftReporter(reporter: (TtftSample) -> Unit) {
+        val previous = ttftReporter
+        ttftReporter = { sample -> previous(sample); reporter(sample) }
+    }
 
     fun unfinishedMessageIds(): List<String> = state.value.threads.values.flatMap { thread ->
         thread.items.mapNotNull { (it as? ChatItem.Tutor)?.message?.takeUnless { message -> message.done }?.id }
@@ -198,8 +206,14 @@ class TutorModel(
                         notice = if (obj.str("legacyHistoryUncovered") == "true") "早期对话未完整保存，缺失的提问无法恢复。" else notice)
                 }
             }
-            "tutor.state" -> mutateThread(obj.str("threadId")) {
-                copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, poolPreparing = false, error = null)
+            "tutor.state" -> {
+                val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
+                mutateThread(thread) {
+                    val nextState = obj.str("state")
+                    copy(tutorState = nextState, nextLabel = obj.str("nextLabel").ifBlank { null },
+                        poolText = if (nextState == "PREPARE") "导师正在备课…" else null, error = null)
+                }
             }
             "tutor.progress" -> mutateThread(obj.str("threadId")) {
                 if (obj.str("phase") == "fallback") copy(notice = obj.str("text").ifBlank { null }, poolText = null)
@@ -208,6 +222,7 @@ class TutorModel(
             "msg.error" -> {
                 telemetry?.record("error", "server")
                 val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
                 if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error")) }
             }
             else -> if (obj.str("t").startsWith("msg.")) onMessageFrame(obj)
@@ -234,6 +249,7 @@ class TutorModel(
         for (update in updates) when (update) {
             is ChatUpdate.Started -> {
                 val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
                 messageThread[update.messageId] = thread
                 if (update.fallback && pendingSend[thread] == null) pendingSend[thread] = "fallback" to TimeSource.Monotonic.markNow()
                 mutateThread(thread) {
@@ -249,8 +265,10 @@ class TutorModel(
             }
             is ChatUpdate.Snapshot -> {
                 // 重连后的权威状态：整体替换，渲染层按 epoch 重建。
-                if (messageThread[update.messageId] == null) obj.str("threadId").takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
-                ensureMessage(update.messageId, obj.str("threadId"),obj.str("model"))
+                val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
+                if (messageThread[update.messageId] == null) thread.takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
+                ensureMessage(update.messageId, thread, obj.str("model"))
                 if (!restoring && update.text.isNotEmpty()) markFirstToken(update.messageId)
                 resumeSettled(update.messageId)
                 changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status },
@@ -289,10 +307,11 @@ class TutorModel(
         val thread = messageThread[id] ?: return
         val (kind, mark) = pendingSend.remove(thread) ?: return
         val message = findMessage(id)
-        val sample = TtftSample(thread, id, kind, mark.elapsedNow().inWholeMilliseconds, message?.model.orEmpty(), message?.fallback == true)
+        val sample = TtftSample(thread, id, kind, mark.elapsedNow().inWholeMilliseconds,
+            message?.model.orEmpty(), message?.fallback == true, threadCourse[thread].orEmpty())
         _state.value = _state.value.copy(ttft = _state.value.ttft + sample)
         telemetry?.record("first_word", if (kind == "test") "test" else if (kind == "ask") "ask" else "next", sample.ms)
-        onTtft(sample)
+        ttftReporter(sample)
     }
 
     private fun findMessage(id: String): TutorMessage? =

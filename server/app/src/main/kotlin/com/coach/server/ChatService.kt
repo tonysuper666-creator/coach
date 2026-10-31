@@ -89,6 +89,24 @@ class ChatService(
         json("results" to JsonArray(kps.map { if(questionsOnly) preparation.prepareQuestions(course,it) else preparation.prepare(course,it) }))
     }
 
+    suspend fun reportClientTtft(device: String, course: String, thread: String,
+        kind: String, milliseconds: Long, model: String, fallback: Boolean) {
+        if (course.isBlank() || thread.isBlank() || kind !in setOf("next", "test", "ask", "answer", "fallback") || milliseconds !in 0..600_000) return
+        val (kp, kpType) = actor.execute {
+            val kpId = events(course).lastOrNull { it.type == "kp_opened" && it.threadId == thread }
+                ?.payload?.str("kpId") ?: return@execute null to null
+            val metadata = events(course).asReversed().filter { it.type == "outline_revised" }.flatMap {
+                (it.payload["ops"] as? kotlinx.serialization.json.JsonArray).orEmpty().map { op -> op.jsonObject }
+            }.firstOrNull { it.str("kpId") == kpId }
+            val type = metadata
+                ?.let { it.str("type").ifBlank { it.str("kind") } }.orEmpty()
+            kpId to type
+        }
+        if (kp.isNullOrBlank()) return
+        fun safe(value: String) = value.replace(Regex("[^A-Za-z0-9_.:-]"), "_").take(80)
+        log("COACH client_ttft device=${safe(device)} course=${safe(course)} kp=${safe(kp)} kp_type=${safe(kpType.orEmpty())} kind=$kind ms=$milliseconds model=${safe(model)} fallback=$fallback")
+    }
+
     fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
         val worker = com.coach.ai.PoolWorker(actor,bridge)
         val grades = com.coach.ai.ConstructedGradeWorker(actor,bridge,ledgerChanged)
@@ -311,7 +329,7 @@ class ChatService(
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
             SourcePack.prepare(sourcePack,hits).render()
-        } else sourcePack.take(40_000)
+        } else LessonPreparation.boundedInput(sourcePack)
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,

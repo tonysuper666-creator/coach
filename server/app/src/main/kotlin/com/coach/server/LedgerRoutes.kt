@@ -259,6 +259,9 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"))
                     "tutor.answer" -> chat?.submitGroup(message.str("threadId"),message.str("courseId"),message.str("groupId"),
                         (message["answers"] as? JsonObject).orEmpty().mapValues { it.value.jsonPrimitive.content },device,message.str("submissionId"))
+                    "client.ttft" -> chat?.reportClientTtft(device,message.str("courseId"),message.str("threadId"),
+                        message.str("kind"),message["ms"]?.jsonPrimitive?.long ?: -1,
+                        message.str("model"),message["fallback"]?.jsonPrimitive?.content == "true")
                     "msg.cancel" -> chat?.cancel(message.str("msg"))
                     "msg.resume" -> {
                         tutorSend.withLock {

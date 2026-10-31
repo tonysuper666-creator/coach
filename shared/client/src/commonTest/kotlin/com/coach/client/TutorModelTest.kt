@@ -98,3 +98,106 @@ class TutorModelTest {
         assertNull(m.state.value.threads[thread])
     }
 }
+
+/** 在线缺号：不断线也能自动找回（模型发现缺号 → 发送端发 msg.resume → 快照补齐）。 */
+class TutorModelResumeTest {
+    private val thread = "kp:K1"
+    private var now = 1_000L
+    private val requests = mutableListOf<String>()
+    private var accept = true
+    private val model = TutorModel({ now }).also { m -> m.resumeSender = { id -> requests += id; accept } }
+
+    private fun start(id: String) = model.onFrame("""{"t":"msg.start","msg":"$id","threadId":"$thread","courseId":"C","model":"claude-opus","fallback":false}""")
+    private fun delta(id: String, i: Int, text: String) = model.onFrame("""{"t":"msg.delta","msg":"$id","i":$i,"text":"$text"}""")
+    private fun math(id: String, i: Int, tex: String) = model.onFrame("""{"t":"msg.math","msg":"$id","i":$i,"tex":"$tex","display":true}""")
+    private fun end(id: String, chars: Int) = model.onFrame("""{"t":"msg.end","msg":"$id","status":"complete","chars":$chars}""")
+    private fun snapshot(id: String, i: Int, text: String, status: String = "streaming") =
+        model.onFrame("""{"t":"msg.snapshot","msg":"$id","threadId":"$thread","i":$i,"text":"$text","status":"$status"}""")
+    private fun message(id: String) = model.state.value.threads.getValue(thread).items.filterIsInstance<ChatItem.Tutor>().single { it.message.id == id }.message
+
+    @Test fun aMissingMiddleDeltaAsksForResumeOnceAndTheSnapshotRestoresTheFullText() {
+        start("m1"); delta("m1", 1, "甲"); delta("m1", 3, "丙"); delta("m1", 4, "丁"); delta("m1", 5, "戊")
+        assertEquals(listOf("m1"), requests, "连续多帧越过缺口只发一次 msg.resume")
+        assertEquals("甲", message("m1").text)
+        snapshot("m1", 5, "甲乙丙丁戊")
+        delta("m1", 5, "戊"); delta("m1", 6, "己")
+        assertEquals("甲乙丙丁戊己", message("m1").text, "快照之后继续接帧，重复帧不重复追加")
+        end("m1", 6)
+        assertEquals("complete", message("m1").status)
+        assertEquals(listOf("m1"), requests)
+    }
+
+    @Test fun aMissingFormulaFrameIsRecoveredToo() {
+        start("m1"); delta("m1", 1, "能量 "); math("m1", 3, "E=mc^2")
+        assertEquals(listOf("m1"), requests)
+        snapshot("m1", 3, "能量 $$"+"E=mc^2"+"$$")
+        math("m1", 3, "E=mc^2"); delta("m1", 4, "。")
+        assertEquals("能量 $$"+"E=mc^2"+"$$。", message("m1").text)
+    }
+
+    @Test fun aLostLastFrameKeepsTheMessageOpenUntilTheSnapshotArrives() {
+        start("m1"); delta("m1", 1, "甲"); delta("m1", 2, "乙")
+        end("m1", 3)   // 第 3 帧（末段正文）丢了，终态帧到达
+        assertEquals(listOf("m1"), requests)
+        assertEquals("streaming", message("m1").status, "全文不完整前不标完成")
+        assertFalse(message("m1").done)
+        snapshot("m1", 3, "甲乙丙")   // 服务端此刻仍视为生成中，终态帧已被暂扣
+        assertEquals("甲乙丙", message("m1").text)
+        assertEquals("complete", message("m1").status)
+    }
+
+    @Test fun aSnapshotOfAFinishedMessageClosesIt() {
+        start("m1"); delta("m1", 1, "甲"); delta("m1", 3, "丙"); end("m1", 3)
+        snapshot("m1", 3, "甲乙丙", "complete")
+        assertEquals("甲乙丙", message("m1").text)
+        assertEquals("complete", message("m1").status)
+    }
+
+    @Test fun aRejectedSendIsRetriedOnTheNextTickAndAnUnansweredOneAfterTheWindow() {
+        accept = false
+        start("m1"); delta("m1", 1, "甲"); delta("m1", 3, "丙")
+        assertEquals(listOf("m1"), requests)
+        accept = true
+        model.resumeTick()
+        assertEquals(listOf("m1", "m1"), requests, "队列满/断线没发出去，下一次就补发")
+        model.resumeTick()
+        assertEquals(2, requests.size, "已发出且还在等快照时不重复发")
+        now += 3_000
+        model.resumeTick()
+        assertEquals(3, requests.size, "快照迟迟不到，过了窗口再发")
+        snapshot("m1", 3, "甲乙丙")
+        now += 10_000
+        model.resumeTick()
+        assertEquals(3, requests.size, "快照到了就不再发")
+    }
+
+    @Test fun aSenderThatDeliversTheSnapshotSynchronouslyDoesNotDeadlock() {
+        val m = TutorModel({ now })
+        m.resumeSender = { id ->
+            requests += id
+            m.onFrame("""{"t":"msg.snapshot","msg":"$id","threadId":"$thread","i":3,"text":"甲乙丙","status":"streaming"}""")
+            true
+        }
+        m.onFrame("""{"t":"msg.start","msg":"m1","threadId":"$thread","courseId":"C","model":"x","fallback":false}""")
+        m.onFrame("""{"t":"msg.delta","msg":"m1","i":1,"text":"甲"}""")
+        m.onFrame("""{"t":"msg.delta","msg":"m1","i":3,"text":"丙"}""")
+        assertEquals("甲乙丙", m.state.value.threads.getValue(thread).items.filterIsInstance<ChatItem.Tutor>().single().message.text)
+    }
+
+    @Test fun aLostTerminalFrameIsFoundByTheStallProbe() {
+        start("m1"); delta("m1", 1, "甲")
+        now += 19_000; model.resumeTick()
+        assertTrue(requests.isEmpty(), "还没安静够久，正常思考不打扰")
+        now += 2_000; model.resumeTick()
+        assertEquals(listOf("m1"), requests)
+        snapshot("m1", 1, "甲", "complete")
+        assertEquals("complete", message("m1").status)
+    }
+
+    @Test fun reconnectingForgetsTheOldConnectionsPendingResume() {
+        start("m1"); delta("m1", 1, "甲"); delta("m1", 3, "丙")
+        model.onConnection(false); model.onConnection(true)
+        delta("m1", 4, "丁")
+        assertEquals(listOf("m1", "m1"), requests)
+    }
+}

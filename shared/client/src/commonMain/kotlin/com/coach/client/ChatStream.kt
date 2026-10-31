@@ -30,6 +30,8 @@ class ChatStreamAssembler(
     private val lastIndex = HashMap<String, Int>()
     private val bodies = HashMap<String, StringBuilder>()
     private val needsResume = HashSet<String>()
+    /** 因缺字被暂扣的终态帧；快照补齐后若字数对得上，用它收尾（否则消息会停在「生成中」）。 */
+    private val deferredEnd = HashMap<String, JsonObject>()
     private val states = HashMap<String, String>()
 
     fun feed(frame: String): List<ChatUpdate> {
@@ -69,26 +71,24 @@ class ChatStreamAssembler(
                 lastIndex[messageId] = index
                 bodies[messageId] = StringBuilder(text)
                 states[messageId] = obj.str("status")
+                val held = deferredEnd.remove(messageId)
+                val snapshotIsLive = obj.str("status") == "streaming"
+                val closing = held?.takeIf { snapshotIsLive && it.str("chars").toIntOrNull() == text.length }
                 listOf(ChatUpdate.Snapshot(messageId, index, text, obj.str("status"))) +
-                    if (obj.str("phase") == "source_lookup") listOf(ChatUpdate.Progress(messageId,"source_lookup","导师去翻原文了")) else emptyList()
+                    (if (obj.str("phase") == "source_lookup") listOf(ChatUpdate.Progress(messageId,"source_lookup","导师去翻原文了")) else emptyList()) +
+                    (closing?.let { listOf(ended(messageId, it)) } ?: emptyList())
             }
             "msg.progress" -> listOf(ChatUpdate.Progress(messageId, obj.str("phase"), obj.str("text")))
             "msg.end" -> {
                 val chars = obj.str("chars").toIntOrNull()
                 if (messageId in needsResume || (chars != null && chars != text(messageId).length)) {
                     needsResume.add(messageId)
+                    deferredEnd[messageId] = obj
                     onResumeRequired(messageId, lastIndex[messageId] ?: 0)
                     return emptyList()
                 }
-                states[messageId] = obj.str("status")
-                listOf(
-                    ChatUpdate.Ended(
-                        messageId, obj.str("status"),
-                        obj.str("reason").ifBlank { null },
-                        obj.str("chars").toIntOrNull() ?: bodies[messageId]?.length ?: 0,
-                        obj.str("model").ifBlank { null },
-                    ),
-                )
+                deferredEnd.remove(messageId)
+                listOf(ended(messageId, obj))
             }
             else -> emptyList()
         }
@@ -100,6 +100,16 @@ class ChatStreamAssembler(
     fun text(messageId: String): String = bodies[messageId]?.toString().orEmpty()
 
     fun status(messageId: String): String? = states[messageId]
+
+    private fun ended(messageId: String, obj: JsonObject): ChatUpdate.Ended {
+        states[messageId] = obj.str("status")
+        return ChatUpdate.Ended(
+            messageId, obj.str("status"),
+            obj.str("reason").ifBlank { null },
+            obj.str("chars").toIntOrNull() ?: bodies[messageId]?.length ?: 0,
+            obj.str("model").ifBlank { null },
+        )
+    }
 
     private fun accept(messageId: String, index: Int): Boolean {
         val previous = lastIndex[messageId] ?: 0

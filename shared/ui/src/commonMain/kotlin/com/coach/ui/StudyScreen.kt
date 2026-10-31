@@ -18,6 +18,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
+import com.coach.ui.input.EnterGate
 
 /** 阅读栏最大宽度：内屏/桌面宽窗口下正文不拉成一整行。 */
 private val READING_WIDTH = 760.dp

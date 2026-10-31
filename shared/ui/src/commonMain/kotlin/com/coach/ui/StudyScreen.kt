@@ -170,10 +170,10 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
-            // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机软键盘用「发送」键（§7.6）。
+            // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。
             ComposerField(
                 value = draft, onValueChange = { draft = it }, onSend = { send(it) }, gate = enterGate,
-                placeholder = "追问…", maxLines = 4, canSend = ui.connected && !tv.busy, softSend = true, enterSends = true,
+                placeholder = "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
             )
         }
     }

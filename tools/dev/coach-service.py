@@ -142,10 +142,7 @@ def install():
         'COACH_DATA_DIR': info['dataDir'], 'COACH_RUN_DIR': info['runDir'], 'COACH_LOG_DIR': str(logs),
         'COACH_BRIDGE_HOME': str(HOME / 'Coach/bridge'), 'BRIDGE_PORT': '8791',
         'BRIDGE_LOG_STDOUT': '1',
-        # Tonight's explicit no-count-limit instruction overrides the older
-        # issue defaults. Let an operator choose stricter values if requested.
-        'BRIDGE_DAILY_CLAUDE_CAP': os.environ.get('BRIDGE_DAILY_CLAUDE_CAP', '0'),
-        'BRIDGE_RATE_PAUSE_AT': os.environ.get('BRIDGE_RATE_PAUSE_AT', '1.1'),
+
     }
     plist = {'Label': LABEL, 'ProgramArguments': [str(release / 'app/bin/app')], 'WorkingDirectory': str(release),
         'EnvironmentVariables': environment, 'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 5,

@@ -34,7 +34,7 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -1472,6 +1472,12 @@ async def fallback_call(req: ReqCtx, first_error: BridgeError | None) -> Outcome
     raise BridgeError(502, "兜底失败", reason="cli_exit")
 
 
+def exam_protection_active(now: float | None = None) -> bool:
+    current = time.time() if now is None else now
+    return (datetime(2026, 11, 2, tzinfo=timezone.utc).timestamp() <= current
+            < datetime(2026, 11, 2, 15, tzinfo=timezone.utc).timestamp())
+
+
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat(request: Request):
@@ -1484,6 +1490,8 @@ async def chat(request: Request):
         if not isinstance(body, dict):
             raise BridgeError(400, "请求体必须是 JSON 对象", "invalid_request_error")
         req = build_req(body, request.headers)
+        if exam_protection_active():
+            raise BridgeError(503, "考前保护：11 月 2 日 00:00–15:00 GMT 暂停模型调用", reason="exam_protection")
 
         # 期中保护：后台生成全部走 Codex（ADR-0002 裁决）
         target = req.model

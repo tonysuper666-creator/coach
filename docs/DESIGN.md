@@ -273,13 +273,7 @@ Mac 小时在线率只有 11–38%，休眠是常态，不是异常。
 
 Coach 仓库 `tools/bridge/` 放 `~DT/tools/subscription_bridge.py` 的副本，跑 8791，必改九项（路径迁出、`x_coach` 显式终态、`served_by`、`X-Coach-Fallback: off`、`X-Request-Id` 与按请求推理强度、计时从拿到信号量起算、并发协调、能力表 `true_stream`、故障注入回归）。Coach 只把 `status==complete` 记为讲解完成；收不到终态帧按截断处理。
 
-**并发与额度保护**：副本 Claude 并发上限 2，后台任务最多占 1；读 `rate_limit_event`，utilization ≥0.8 或 status≠allowed 时暂停后台生成。**期中前保护**〔d2 裁决，评R3 I8〕：
-- 至 2026-11-02 14:25，副本 Claude 并发上限 1。
-- (a) **每个** live 请求发出前只读检查 `~DT/data/user/runtime/bridge.log` 最后一行时间（UTC），10 分钟内有活动就中止整批，不只在每批开始前看一次。
-- (b) 已知局限：bridge.log 在请求结束时才写一行，只能挡住「他正在问模型」，挡不住「他在复习但没调模型」。真正要护的是两份桥共用的订阅额度窗口，靠 (c)；CPU 靠 `nice`（§13.2）。
-- (c) 至 2026-11-02 15:00：Coach 的 Claude 物理调用每日硬上限 60 次（按 `ai_calls` 计，含复核与 `dev_live`）；`rate_limit_event` utilization ≥0.5 或 status≠allowed 时暂停 Coach 的**全部**调用（不只后台）；2026-11-01 18:00 至 11-02 15:00 不跑任何 Claude live。
-- (d) 批量出题一律「Codex 出、Claude 复核」（满足异厂盲复核），复核计入 (c) 的上限；超出上限就推迟到期中后，不降为同厂复核。
-- (e) 8791 只在测试时段手动起，测完按 PID 停；每张卡交付里报告起停时间。
+**并发与调用规则（李政 2026-10-31 授权）**：副本 Claude 并发上限 1，后台最多占 1。移除每日调用数上限及本地 utilization 暂停线；`rate_limit_event` 继续观测和记账。只有官方实际限流时，交互讲解才显式切换 Codex、清除半截回答并显示实际模型。题池继续要求异厂盲复核，不用兜底结果冒充 VERIFIED。8791 由 Coach 常驻服务管理。2026-11-02 00:00–15:00 GMT 不启动任何 Coach CLI 调用，构建与模拟器同样全停；其余资源约束见 §13.2。
 
 Antigravity 默认关。
 

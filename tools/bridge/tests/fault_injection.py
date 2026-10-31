@@ -342,6 +342,11 @@ def main() -> int:
         b3.set_mode("rate429")
         r = b3.ask("官方 429 必须告诉应用")
         check("official 429: 终态明确 rate_limited", r["x_coach"]["reason"] == "rate_limited", str(r["x_coach"]))
+        b3.set_mode("rate429event")
+        started = time.monotonic()
+        r = b3.ask("官方拒绝后不等待 CLI 重试")
+        check("official rejection: 立即终态而非等超时", r["x_coach"]["reason"] == "rate_limited" and time.monotonic() - started < 2, str(r["x_coach"]))
+        check("official rejection: CLI 已回收", stub_procs(stub_dir) == 0)
     finally:
         b3.stop()
 

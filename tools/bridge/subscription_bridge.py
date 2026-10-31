@@ -633,6 +633,17 @@ def served_from_result(result: dict | None, fallback: str) -> str:
     return fallback
 
 
+def official_rate_limit(event: dict) -> bool:
+    """Only upstream error/rejection events trigger recovery; utilization never does."""
+    kind = event.get("type")
+    if kind == "rate_limit_event":
+        info = event.get("rate_limit_info") or {}
+        return str(info.get("status") or "").lower() in {"rejected", "rate_limited"}
+    if kind != "error" and not event.get("is_error"):
+        return False
+    return bool(re.search(r"\b429\b|rate.?limit|usage.?limit|quota.exceeded|too many requests", json.dumps(event).lower()))
+
+
 def judge_result(result: dict | None, rc: int, started: bool, served: str, text_hint: str = "") -> Outcome:
     """按 is_error / terminal_reason / api_error 判定终态；不再看 stop_reason=="max_tokens"。
 
@@ -650,8 +661,7 @@ def judge_result(result: dict | None, rc: int, started: bool, served: str, text_
     # 已经发出去的文字以流里的为准；CLI 的 result.result 在错误分支里往往是错误说明，不能顶替正文
     text = (text_hint or raw_text).strip() if started and text_hint else raw_text
     if result.get("is_error"):
-        error_text = " ".join([terminal, api_error, raw_text, json.dumps(result)]).lower()
-        if re.search(r"\b429\b|rate.?limit|usage.?limit|quota.exceeded|too many requests", error_text):
+        if official_rate_limit(result):
             return Outcome("truncated" if started else "failed", "rate_limited", "error", served, text, usage, started,
                            detail="official upstream rate limit")
         if "max_output_tokens" in api_error or "max_output_tokens" in terminal:
@@ -799,6 +809,13 @@ async def claude_stream(req: ReqCtx, model: str, effort: str | None) -> AsyncIte
                 except ValueError:
                     continue
                 kind = ev.get("type")
+                if official_rate_limit(ev):
+                    if kind == "rate_limit_event":
+                        update_rate_limit(ev)
+                    await reap(proc)
+                    failure = Outcome("truncated" if started else "failed", "rate_limited", "error", served, s, {}, started,
+                                      detail="official upstream rate limit")
+                    break
                 if kind == "system" and isinstance(ev.get("model"), str) and ev["model"]:
                     served = ev["model"]                      # system/init.model
                     yield {"kind": "meta", "served_by": served}

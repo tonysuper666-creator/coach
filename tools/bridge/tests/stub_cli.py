@@ -54,6 +54,10 @@ def claude_prompt() -> str:
 def claude(m: str) -> int:
     record("S")
     try:
+        if m == "rate429event":
+            emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "utilization": 1.0}})
+            time.sleep(300)
+            return 1
         if m == "rate429":
             emit({"type": "result", "is_error": True, "result": "429 Too many requests",
                   "terminal_reason": "api_error", "api_error": "rate_limit_error"})

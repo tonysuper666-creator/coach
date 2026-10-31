@@ -4,7 +4,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -23,6 +27,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             Text("复习", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
         }
         HorizontalDivider()
+        OfflinePractice(c)
         if (due.isEmpty()) {
             CenterMessage("今天没有到期的复习。")
             return@Column
@@ -43,5 +48,58 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 }
             }
         }
+    }
+}
+
+/** Independent from the learning thread: a downloaded review never changes Continue. */
+@Composable
+private fun OfflinePractice(c: CoachController) {
+    val revision by c.sync.revision.collectAsState()
+    val scope = rememberCoroutineScope()
+    var tick by remember { mutableStateOf(c.nowMillis()) }
+    LaunchedEffect(c) { while (true) { tick = c.nowMillis(); delay(1000) } }
+    val groups = remember(revision,tick) { c.sync.offlineGroups(c.courseId,tick) }
+    var active by remember { mutableStateOf<String?>(null) }
+    var chosen by remember { mutableStateOf<Map<String,String>>(emptyMap()) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var downloading by remember { mutableStateOf(false) }
+    val group = groups.firstOrNull { it.groupId == active }
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("离线练习", style = MaterialTheme.typography.titleMedium)
+        if (group == null) {
+            Text("${groups.filter { !it.submitted }.sumOf { it.cards.size }} 题可做 · 下载后无需连接 Mac")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { active = groups.firstOrNull { !it.submitted }?.groupId; chosen = emptyMap() },
+                    enabled = groups.any { !it.submitted }, modifier = Modifier.heightIn(min = 56.dp)) { Text("复习 ${groups.firstOrNull { !it.submitted }?.cards?.size ?: 3} 题") }
+                OutlinedButton(onClick = {
+                    downloading = true; error = null
+                    scope.launch {
+                        try { withContext(Dispatchers.IO) { c.sync.downloadOfflinePack(c.courseId) } }
+                        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                        catch (_: Exception) { error = "Mac 未连接，下载未完成；已有题仍可练习。" }
+                        finally { downloading = false }
+                    }
+                },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在下载…" else "下载练习包") }
+            }
+            groups.lastOrNull { it.submitted }?.let { last ->
+                TextButton(onClick = { active = last.groupId }) { Text("查看上组结果") }
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp),verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(group.cards,key = { it.attemptId }) { card ->
+                    QuizCardView(group.cards.indexOf(card)+1,group.cards.size,card,group.submitted,chosen[card.attemptId],c.math) {
+                        chosen = chosen + (card.attemptId to it)
+                    }
+                }
+                item {
+                    if (!group.submitted) Button(onClick = {
+                        try { c.sync.submitOfflineGroup(c.courseId,group.groupId,chosen,c.nowMillis()); error = null }
+                        catch (_: IllegalArgumentException) { error = "题组已提交或已过期，请重新下载。" }
+                    },enabled = group.cards.all { chosen[it.attemptId] != null },modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
+                    else TextButton(onClick = { active = null; chosen = emptyMap() }) { Text("返回练习队列") }
+                }
+            }
+        }
+        error?.let { Text(it,color = MaterialTheme.colorScheme.error) }
     }
 }

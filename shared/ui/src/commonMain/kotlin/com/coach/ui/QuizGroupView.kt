@@ -52,6 +52,11 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             }
             Markdown(card.stem, true, "q:${card.attemptId}", math)
             val shown = card.answer ?: selected
+            if (card.options.isEmpty()) {
+                OutlinedTextField(value = shown.orEmpty(), onValueChange = onSelect, readOnly = locked,
+                    label = { Text("你的回答") }, modifier = Modifier.fillMaxWidth())
+                if (locked && card.grade == null) Text("答案已保存，联网后批改",style = MaterialTheme.typography.bodyMedium)
+            }
             card.options.forEach { (letter, text) ->
                 val isMine = shown == letter
                 val cardGrade = card.grade
@@ -82,7 +87,7 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             }
             card.grade?.let { grade ->
                 Text(
-                    verdictText(grade),
+                    verdictText(grade) + if (grade.note.isBlank()) "" else " · ${grade.note}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (grade.correct) successColor() else MaterialTheme.colorScheme.error,
                 )

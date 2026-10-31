@@ -104,6 +104,14 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             call.respond(HttpStatusCode.NoContent)
 
         }
+        get("/offline-pack") {
+            val size = call.request.queryParameters["size"]?.toIntOrNull() ?: 10
+            val course = call.request.queryParameters["courseId"] ?: actor.execute { courses().singleOrNull() }
+            if (size !in 1..30 || course.isNullOrBlank() || course == "__system__") { call.respond(HttpStatusCode.BadRequest); return@get }
+            call.response.headers.append(HttpHeaders.CacheControl,"no-store")
+            val pack = actor.execute { downloadOfflinePack(course,call.request.header("X-Coach-Device")!!,size) }
+            call.respondText(LedgerJson.encodeToString(pack),ContentType.Application.Json)
+        }
         get("/v1/hello") { call.respondText(LedgerJson.encodeToString(actor.execute { hello() }),ContentType.Application.Json) }
         get("/v1/courses/{course}/events") {
             val course=call.parameters["course"]!!

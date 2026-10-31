@@ -38,6 +38,8 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
         val response = client.post("$baseUrl/v1/commands") { expectSuccess=false; contentType(ContentType.Application.Json);setBody(LedgerJson.encodeToString(command)) }
         return LedgerJson.decodeFromString(response.bodyAsText())
     }
+    override suspend fun offlinePack(course: String, size: Int): OfflineChoicePack = LedgerJson.decodeFromString(
+        client.get("$baseUrl/offline-pack") { parameter("size",size);parameter("courseId",course) }.bodyAsText())
     override suspend fun watch(onLedger: suspend () -> Unit) {
         val url = baseUrl.replaceFirst("http","ws")+"/v1/ws"
         client.webSocket(urlString=url) {

@@ -18,4 +18,5 @@ const val PROTOCOL_VERSION = 1
 
 /** Keys travel only with offline packs, separately from the question events. */
 @Serializable data class OfflineKey(val attemptId: String, val correctOptionId: String)
-@Serializable data class OfflineChoicePack(val groups: List<List<Event>>, val keys: List<OfflineKey>)
+@Serializable data class OfflineChoicePack(val groups: List<List<Event>>, val keys: List<OfflineKey>,
+    val packId: String = "", val courseId: String = "", val deviceId: String = "", val expiresAt: Long = 0, val epoch: String = "")

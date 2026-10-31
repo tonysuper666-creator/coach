@@ -11,6 +11,7 @@ import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -40,7 +41,8 @@ class TutorClient(
     }
     @kotlin.concurrent.Volatile private var live: Channel<String>? = null
 
-    fun start(scope: CoroutineScope): Job = scope.launch {
+    // Handshake nonce initialization can block; keep CPU workers free on two-core Android devices.
+    fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         var backoff = 250L
         while (isActive) {
             val queue = Channel<String>(capacity = 64)

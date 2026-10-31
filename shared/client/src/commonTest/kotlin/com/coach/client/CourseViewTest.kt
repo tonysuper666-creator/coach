@@ -34,6 +34,12 @@ class CourseViewTest {
 
     private fun view(events: List<Event>): CourseView = CourseView(events, project(events))
 
+    @Test fun visibleOrderSurvivesSortedProjectionMaps() {
+        val events=listOf(outline("K2" to "First topic", "K1" to "Second topic"))
+        val sorted=project(events).let { it.copy(mastery=it.mastery.toSortedMap()) }
+        assertEquals(listOf("First topic", "Second topic"),CourseView(events,sorted).kps.map { it.title })
+    }
+
     @Test fun kpListKeepsOutlineOrderAndNames() {
         val v = view(listOf(outline("K1" to "信息不对称", "K2" to "逆向选择")))
         assertEquals(listOf("信息不对称", "逆向选择"), v.kps.map { it.title })

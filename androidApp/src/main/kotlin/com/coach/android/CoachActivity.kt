@@ -23,6 +23,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import com.coach.client.ChatItem
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -66,6 +69,19 @@ class CoachActivity : ComponentActivity() {
         // 首字样本进 logcat（tag CoachTtft），总验收按它算 p50。
         val model = TutorModel(System::currentTimeMillis) { s ->
             Log.i("CoachTtft", """{"thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""")
+        }
+        // Content-free end/snapshot hashes let acceptance compare reconnect output with the ledger.
+        scope.launch {
+            val reported=HashSet<String>()
+            model.state.collect { state ->
+                state.threads.values.flatMap { it.items }.filterIsInstance<ChatItem.Tutor>().forEach { item ->
+                    val message=item.message
+                    val key="${message.id}:${message.epoch}:${message.status}:${message.text.length}"
+                    if(message.done && message.text.isNotEmpty() && reported.add(key)) {
+                        Log.i("CoachStream", """{"msg":"${message.id}","status":"${message.status}","chars":${message.text.length},"snapshots":${message.epoch},"sha256":"${sha256Hex(message.text.toByteArray(Charsets.UTF_8))}"}""")
+                    }
+                }
+            }
         }
         val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)

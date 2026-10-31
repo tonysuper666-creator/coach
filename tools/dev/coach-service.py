@@ -9,6 +9,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -159,6 +160,13 @@ def install():
     os.chmod(RECORD, 0o600)
     shutil.copy2(__file__, BASE / 'control.py')
     shutil.copy2(root / 'tools/dev/coach-pair.py', BASE / 'pair.py')
+    desktop = HOME / 'Desktop'
+    desktop.mkdir(exist_ok=True)
+    for label, entry, arguments in [('Coach 配对.command','pair.py',''), ('Coach 停止服务.command','control.py','stop'), ('Coach 启动服务.command','control.py','start')]:
+        launcher = desktop / label
+        launcher.write_text('#!/bin/bash\nset -e\n' + shlex.quote(sys.executable) + ' "$HOME/Coach/service/' + entry + '" ' + arguments + '\nprintf "\\n操作结束，可以关闭窗口。\\n"\nread -r\n')
+        launcher.chmod(0o755)
+
     try:
         start()
     except BaseException:

@@ -1,7 +1,8 @@
 package com.coach.ui
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -70,7 +71,7 @@ private fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolea
                     shape = MaterialTheme.shapes.small,
                     border = BorderStroke(if (isMine) 2.dp else 1.dp, border),
                     color = if (isMine) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .5f) else MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT).clickable(enabled = !locked) { onSelect(letter) },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT).selectable(selected = isMine, enabled = !locked, role = Role.RadioButton) { onSelect(letter) },
                 ) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(letter, style = MaterialTheme.typography.titleMedium)

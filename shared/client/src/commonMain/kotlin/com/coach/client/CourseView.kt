@@ -71,8 +71,8 @@ class CourseView(private val events: List<Event>, val projection: Projection) {
         }
         projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
         val attempted = events.filter { it.type == "question_posed" }.flatMap { posed -> (posed.payload["kpIds"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.toSet()
-        // 顺序以投影的大纲顺序为准（mastery 按大纲顺序排列）；没有 mastery 的才按事件顺序补在后面。
-        val order = (projection.mastery.keys + titles.keys).distinct()
+        // The outline owns display order; serialized mastery maps may sort their keys.
+        val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
             val m = projection.mastery[id]
             val status = when {

@@ -10,6 +10,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.websocket.*
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.decodeFromString
 
 class DeviceAuthorizationException : IllegalStateException("Device pairing required")
@@ -39,7 +40,15 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     }
     override suspend fun watch(onLedger: suspend () -> Unit) {
         val url = baseUrl.replaceFirst("http","ws")+"/v1/ws"
-        client.webSocket(urlString=url) { for(frame in incoming) if(frame is Frame.Text) onLedger() }
+        client.webSocket(urlString=url) {
+            for(frame in incoming) if(frame is Frame.Text) {
+                val obj=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
+                // Text/math deltas update the message stream, not the learning ledger.
+                // Catch up on durable facts rather than issuing HTTP reads for every token.
+                if(obj.str("t") in setOf("ledger","tutor.state","tutor.cards","tutor.feedback","msg.end") ||
+                    (obj.str("t").isEmpty() && "epoch" in obj)) onLedger()
+            }
+        }
     }
     fun close() { client.close() }
 }

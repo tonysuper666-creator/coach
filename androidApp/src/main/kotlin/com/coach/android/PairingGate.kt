@@ -32,10 +32,10 @@ fun PairingGate(store: KeystoreCredentials, serverUrl: String, content: @Composa
         catch (_: Exception) { /* Offline use keeps its pairing; retry on the next connection. */ }
         finally { transport.close() }
     }
-    MaterialTheme {
+    Surface(Modifier.fillMaxSize(), color=MaterialTheme.colorScheme.background) {
         val paired = credentials
         if (paired != null) content(paired)
-        else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        else Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("连接你的 Mac", style = MaterialTheme.typography.headlineMedium)
             Text("先打开 Tailscale，再输入 Mac 上显示的 6 位配对码。")
             OutlinedTextField(value=code, onValueChange={ code=it.filter { c -> c in '0'..'9' }.take(6); error=null },

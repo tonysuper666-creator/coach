@@ -5,11 +5,13 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 
 
 def main():
     home = Path.home()
     try:
+        subprocess.run([sys.executable, str(home / 'Coach/service/control.py'), 'start'], check=True, stdout=subprocess.DEVNULL)
         install = json.loads((home / 'Coach/service/installation.json').read_text())
         with (home / 'Library/LaunchAgents/local.coach.server.plist').open('rb') as source:
             config = plistlib.load(source)

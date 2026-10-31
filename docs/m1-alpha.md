@@ -1,6 +1,6 @@
 Coach M1-alpha Android integration
 
-Result: partial. Builder-C's UI head b2a40a9 is integrated. Three knowledge points were repeated in a fresh isolated ledger: three explanations, nine question events, nine actual submissions and nine server grades; Today shows 3/49. After pairing, one tap on Continue starts the cached lesson. The current APK uses the shared ComposerField and AnchoredChatList.
+Result: partial. Builder-C's UI heads b2a40a9 and 04e9695 are integrated. The b2 theme/Markdown/composer API is retained; the incoming viewport-reveal logic and all five assertion cases are integrated through the key-based API. The restoration flag is observable so lifecycle waits actually resume. Three knowledge points were repeated in a fresh isolated ledger (runtime captures from b2 before the final focused reveal-lifecycle fix; rendering/theme/composer are unchanged): three explanations, nine question events, nine actual submissions and nine server grades; Today shows 3/49. After pairing, one tap on Continue starts the cached lesson. The current APK uses the shared ComposerField and AnchoredChatList.
 
 The UI renders headings, hanging lists, quotes, inline emphasis and math. Titles keep the complete first anchor and expose additional scope in details. Reading is bounded to 600dp, with two panes at 640dp. Status contrast is checked in both themes. Timing stays in developer logs. Reply metadata preserves the actual serving model, including fallback. Subsequent UI polish remains owned by Builder-C.
 
@@ -24,11 +24,11 @@ Integration and validation
 
 The branch is based on main 11ec183 after #13/#14/#17/#21/#22 merged. It preserves study-companion routes and independent source-index repair. The integration adds prepared lessons, actor-owned supply, compatible schema v5, course ordering, exact-model blind review, persistent service supervision and the Codex subscription-config fix.
 
-Current unique JVM results: domain48, client15, UI27, store17, core15, AI46, app52 = 220; zero failure/error/skip. Unchanged backend/client gates were executed in earlier integration batches; after the UI merge, the following passed again:
+Current unique JVM results: domain48, client15, UI32, store17, core15, AI46, app52 = 225; zero failure/error/skip. Unchanged backend/client gates were executed in earlier integration batches; after the UI merge, the following passed again:
 
     ./gradlew :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest --max-workers=6
 
-The original full shared/server gate and APK build commands are preserved in the issue evidence. The current delivery also reruns the full check-pairing.py script against the exact APK, covering fresh-process Keystore, HTTP/WS, allowlist enforcement, dual clients and revocation, with ai_calls=0.
+The original full shared/server gate and APK build commands are preserved in the issue evidence. An earlier pairing run timed out on hello, and its unchanged retry passed; both logs are retained. The delivery also reruns the full check-pairing.py script against the exact APK, covering fresh-process Keystore, HTTP/WS, allowlist enforcement, dual clients and revocation, with ai_calls=0.
 
 Unchanged bridge code was verified with fault_injection.py (58/58) and exam_protection.py (2/2); those were not needlessly repeated for UI-only changes. There is no daily call cap or utilization pause. Official Claude rejection switches interactive teaching to Codex, replaces the partial prefix and explains the switch. Pool blind reviews still reject a changed vendor/model. November 2 00:00-15:00 UTC rejects model calls before CLI dispatch.
 

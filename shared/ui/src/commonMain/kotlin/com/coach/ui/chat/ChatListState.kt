@@ -1,5 +1,6 @@
 package com.coach.ui.chat
 
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,7 +30,7 @@ class ChatAnchor(pinned: Boolean = true, key: Any? = null, fraction: Float = 0f)
 @Stable
 class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatAnchor = ChatAnchor()) {
     /** True until the first restore has run, so the initial (0,0) position never overwrites a stored anchor. */
-    internal var restoring = true
+    internal var restoring by mutableStateOf(true)
 
     /** Newest item key seen, and whether the reader was at the tail when a newer item arrived (the list keeps the old first item on screen, hiding the new one). */
     internal var newestKey: Any? = null
@@ -45,12 +46,16 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
      */
     suspend fun scrollItemTopIntoView(key: Any) {
         val index = newestFirstKeys.indexOf(key).takeIf { it >= 0 } ?: return
-        // The item may be far outside the measured window: bring it into view first, then read its real size.
+        anchor.pinned = false
+        snapshotFlow { restoring }.first { !it }
+        androidx.compose.runtime.withFrameNanos { }
         list.scrollToItem(index, 0)
-        val size = androidx.compose.runtime.snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
+        val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
         val info = list.layoutInfo
-        val viewport = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding
-        list.scrollToItem(index, size - viewport)
+        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
+        if (room <= 0) list.scrollToItem(index, -room) else list.scrollBy(-room.toFloat())
+        // A clamped no-op emits no scroll update; settle the tail flag explicitly (04e9695).
+        anchor.pinned = list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0
     }
 }
 

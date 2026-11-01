@@ -105,6 +105,8 @@ Gradle：24 tests / 0 failures / 0 errors / 0 skipped。另验证在线 backup �
 
 ## 历史发生时间与跨预演状态哈希修复（2026-11-01）
 
+本节为已合并 PR #53 的历史证据；QA-C 独立复跑和 Architect 后续复核已通过。下节记录新的增量切片，不能把本节通过延伸为整卡完成。
+
 结果：本切片本机验证达到；26 tests / 0 failures / 0 errors / 0 skipped。原有 24 项断言保留，新增两项分别用同一基线的两份副本在相隔两天的注入时钟下导入并比较规范化状态哈希，以及检查导入日没有 legacy 事实、通过/复习使用上次复习时间、ISO 笔记时间和无时间记录的快照回退时间。尚待 QA-C 独立复跑及 Architect 复核。
 
 `occurredAt`、作答 `posedAt`、消息创建时间均由来源或快照确定。计划保存 `history_time`，不使用导入墙钟补历史事实。实际库仍保留真实审计时间；状态输出仅归一化迁移批次及迁移事件的审计时间，原生事件不变。独立验证器从 SQLite 重建规范化业务表，逐条核验历史时间，并检查导入日通过、作答、笔记没有增加。
@@ -133,3 +135,51 @@ done
 - 两份领域投影 SHA-256：`0a3352d15add5bc0152a03c92e09f97aafa772be4edeb5dfc17bf0a1bfc33858`
 
 所有实际数据和全库输出仅留私有语料目录；公开交付仅计数/哈希。生产只读备份，无 seed、激活、DeepTutor 源或 8790 访问，无新增模型调用。正式增量修订协议及其批次审计时间问题仍留下一切片，整卡不结束，TON-1102 不解锁。
+
+## 连续增量修订与一次确认材料（2026-11-01）
+
+结果：部分达到。工具支持同一源 ID 的内容修订、每批独立审计时间及两轮副本增量；初始 521 条 / 556 个事件，第一轮 1 条修订 / 1 个事件，第二轮 5 条修订及 1 条新增 / 6 个事件，各阶段重导均为 0/0/0。增量输入是从固定快照构造的测试夹具，**没有重新捕获正式源，不能据此认定两次正式增量对账已完成**。待 QA-C 在新目录独立验收，再交 Architect 复核。
+
+变更包括领域投影与实体表：不可变账本保留原历史事件，每个变化来源只追加一条带前后哈希/原值/快照时间的修订；投影替换该来源的历史事实，题目和消息分别更新其可见实体。原生学习操作继续优先；后续首次通过使原已存档的复习获得资格时，复习在该通过之后回放。投影版本 4 → 5，防止使用旧缓存。已复核提议的输入绑定未放宽；题目/KP 变化则归档旧提议且整体保持未确认隔离，不能把旧复核用于新内容。
+
+本机门禁实际执行：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist :shared:domain:jvmTest :server:store:test --offline --max-workers=2 --console=plain
+```
+
+迁移工具 35 项、领域层 49 项、存储层 26 项，均 0 失败、0 错误、0 跳过。原 26 项迁移测试保留，新增覆盖单源修订、两轮多种历史事实修订、独立批次/跨时钟状态、旧批次升级、源删除/时钟倒置回滚、编码主键哈希、后续原生复习优先、旧提议失效隔离及新增通过后的复习。一次新测试因重复把毫秒乘以 1000 导致预期错误，已修正单位后重跑；没有放宽原测试。首次夹具和首次 writer 预演也曾失败，分别修复了源选项数组读取与 SQLite 内容哈希中既有主键标记的重建；失败目录未算作成功。
+
+实际命令如下（输出目录均为新建，副本和完整状态不公开）：
+
+```sh
+SNAPSHOT="$HOME/Coach/migrate-staging/2026-10-31T07-41-31.131462Z"
+SEED="$HOME/Coach/corpus/seed-content-manifest.json"
+PROPOSAL="$HOME/Coach/corpus/ton-1095/proposal-reviewed.json"
+FIXTURE="$HOME/Coach/corpus/ton-1095/increment-fixtures-2026-11-02-b"
+nice -n 15 python3 tools/migrate-deeptutor/make-incremental-fixture.py --snapshot "$SNAPSHOT" --out "$FIXTURE"
+for suffix in d e; do
+  OUT="$HOME/Coach/corpus/ton-1095/writer-increment-2026-11-02-$suffix"
+  JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor rehearse-incremental \
+    --snapshot "$SNAPSHOT" --next-snapshot "$FIXTURE/snapshot-1" --second-snapshot "$FIXTURE/snapshot-2" \
+    --coach-db "$HOME/Coach/data/coach.sqlite" --seed-manifest "$SEED" --proposal "$PROPOSAL" --out "$OUT"
+  nice -n 15 python3 tools/migrate-deeptutor/verify-incremental.py \
+    --snapshot "$SNAPSHOT" --next-snapshot "$FIXTURE/snapshot-1" --second-snapshot "$FIXTURE/snapshot-2" --seed "$SEED" --out "$OUT"
+done
+nice -n 15 python3 tools/migrate-deeptutor/verify-import.py --snapshot "$SNAPSHOT" --seed "$SEED" \
+  --out "$HOME/Coach/corpus/ton-1095/writer-increment-2026-11-02-b/initial"
+```
+
+独立验证器直接读取源 SQLite/JSON、导入后的实体和有效事实，逐项核对题干/选项、消息正文/时间、作答、笔记、日志、已通过和复习队列；不以审计事件数代替可见状态对账。测试夹具第一轮只改一题，第二轮修订复习、作答、消息、笔记及日志元数据，另新增一条有内容的历史日志。原 242 个旧事件仍只存档。45 个未知类型、60 道五选项、2 条未解析回答均保留。课程、weights、原生事件/题目/消息、学习证据、复习和 pending 保持相同。每轮回退 SQLite 与自己的 before.sqlite 逐字节相同；每阶段 first/second 状态相同。
+
+同一基线/三个输入在不同墙钟运行，基线、计划、各阶段规范化状态逐字节相同，实际各批审计时间不同。全库状态包含全部业务表与 schema，归一化仅屏蔽迁移审计时间。每阶段 SHA-256：
+
+| 阶段 | 全库规范化状态 | 领域投影 |
+|---|---|---|
+| 初始（135 → 691 个事件） | `0aa45d2514d16a1b6d0bbc69b502e92e5ec1ab4512675c64561564785649472a` | `3e2740e689c0cd7344060317cb261432d9b49f09114f73277465d4eb4f657eca` |
+| 增量 1（692 个事件） | `a3315fb4f90c57fb16ac6f08badcc46a1161b389ebe165287165980251ba5c80` | `d1525a29d97c93c44bada67c862fe07c11f01a0ab3b3f17c155f3941977007af` |
+| 增量 2（698 个事件） | `c3adcbbcdc4946002636ed38e5ed46094af4b1d8053299fb2b5be10e397618e2` | `053d436889787d625b49adf67f3e6a82243e67316b0cd71ca594d7bc70402a84` |
+
+确认草稿在私有输出的 `confirmation-details.md`：108 题、49 KP / 62 条前置、10 道简答源评分依据、2 条 B/c 原回答、60 道五选项/字母依赖解析，以及 9 个通过时间的近似说明，逐项附来源、建议与依据。107 道题有归属提议，1 道仍未知；没有独立 rubric 时只引用 explanation，不伪造分值，待本人核对。修订后的题目必须重新复核；本轮未询问本人，新增模型调用 0（卡内既有 2）。
+
+仍未验证/完成：真实新快照的连续增量、无 ID 数组重排的人工 ID 对照、本人一次合并确认、新评分键的盲审、5 KP UI、blobs 备份及正式切换。该工具仍只写新建隔离副本；没有正式写库/激活入口，没有 DeepTutor 运行文件或 8790 访问，不结束整卡、不解锁 TON-1102。

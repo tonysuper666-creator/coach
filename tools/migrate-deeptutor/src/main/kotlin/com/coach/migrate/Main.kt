@@ -10,6 +10,7 @@ private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only 
        migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
        migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
        migrate-deeptutor rehearse --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
+       migrate-deeptutor rehearse-incremental --snapshot DIR --next-snapshot DIR --second-snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
 seed-content defaults: data ~/Coach/data, corpus ~/Coach/corpus/ECNM10119-健康经济学/教材.
 rehearse writes learning history twice into a NEW isolated online backup, never into --coach-db.
@@ -30,6 +31,7 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
     if(args.firstOrNull()=="rehearse") { rehearseCommand(args.drop(1));return }
+    if(args.firstOrNull()=="rehearse-incremental") { incrementalRehearsalCommand(args.drop(1));return }
     // Keep the established corpus/manifest entry point used by TON-1095 and integration.
     // Explicit --database selects the structured CourseContent/blobs variant.
     if(args.firstOrNull()=="seed-content" && "--database" in args) {

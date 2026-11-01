@@ -55,6 +55,19 @@ fun validateProposal(mapping:JsonObject, proposal:JsonObject) {
     kpIds.forEach(::visit)
 }
 
+/** An old review is evidence only for its exact input. Changed banks stay wholly quarantined.
+ * Keep strict validateProposal unchanged; never rewrite hashes to make a stale review pass.
+ */
+fun incrementalPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject,reviewedMapping:JsonObject):JsonObject {
+    validateProposal(reviewedMapping,proposal)
+    val current=sha(canonical(proposalInput(mapping)))
+    if(current==proposal.str("input_hash")) return importPlan(mapping,seed,proposal)
+    return JsonObject(importPlan(mapping,seed,null)+mapOf("proposal_review" to buildJsonObject {
+        put("status","stale_quarantined");put("reviewed_input_hash",proposal.str("input_hash"));put("current_input_hash",current)
+        put("archived_proposal",proposal);put("reason","Question or KP content changed; no prior review or confirmation transfers to this version")
+    }))
+}
+
 fun validateSeed(mapping:JsonObject, seed:JsonObject) {
     val kps=mapping.array("knowledge_points").map { it.jsonObject }
     val existing=seed.array("knowledge_points").map { it.jsonObject }
@@ -174,6 +187,7 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val q=v.jsonObject;val raw=qs.getValue(q.str("id")).obj("source_record")
         val names=q.array("kp_ids").map { kps.getValue(it.jsonPrimitive.content).str("name") }
         append("${n+1}. ${raw.str("question").replace('\n',' ')}\n   放到：${names.joinToString("；").ifBlank { "暂无对应知识点，待核对" }}。理由：${q.str("reason")}\n")
+        append("   来源：${q.str("id")}；内容哈希 ${qs.getValue(q.str("id")).str("content_hash")}；建议 KP ID：${q.array("kp_ids").joinToString()}。依据为上述已异厂复核提议，尚未本人确认。\n")
         if(q.str("warning").isNotBlank()) append("   待核对：${q.str("warning")}\n")
     }
     append("\n## 概念与建议先学的内容\n\n")
@@ -181,12 +195,14 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val k=v.jsonObject
         val names=k.array("prerequisite_ids").map { kps.getValue(it.jsonPrimitive.content).str("name") }
         append("- ${kps.getValue(k.str("id")).str("name")}\n  概念：${k.array("concept_ids").joinToString("、") { concepts.getValue(it.jsonPrimitive.content) }}；建议先学：${names.joinToString("；").ifBlank { "无" }}\n")
+        append("  来源 KP ${k.str("id")}；conceptIds=${k.array("concept_ids").joinToString()}；前置 IDs=${k.array("prerequisite_ids").joinToString()}；依据：${k.str("reason").ifBlank { "已异厂复核的模型提议；仅为学习顺序建议" }}。\n")
     }
     append("\n## 无法自动识别的历史回答\n\n下列回答保留原文，不推断大小写或替你选择；字母仅用于对照当时选项。\n\n")
     mapping.array("legacy_attempts").forEach { v ->
         val raw=v.jsonObject.obj("source_record");val q=parseText(raw.str("question_json")).jsonObject
         if(isChoice(q) && choiceAnswer(q,raw.str("user_answer"))==JsonNull) {
             append("- ${q.str("question").ifBlank { q.str("prompt") }}\n  原回答：${raw.str("user_answer")}\n")
+            append("  来源：${v.jsonObject.str("id")}；建议值：保持未解析（answer=null），不自动把 B/c 改成选项 ID。依据：原回答不能通过严格答案映射，需对照原选项。\n")
             choiceEntries(q).forEach { (letter,text) -> append("  $letter：$text\n") }
         }
     }
@@ -195,11 +211,28 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
     val sample=if(short.size<=10) short else (0..9).map { short[it*(short.size-1)/9] }
     sample.forEachIndexed { n,row ->
         val raw=row.obj("source_record")
-        append("${n+1}. ${raw.str("question")}\n\n")
+        append("${n+1}. ${raw.str("question")}\n\n来源：${row.str("id")}；内容哈希 ${row.str("content_hash")}。\n\n")
         val rubric=raw["rubric"] ?: raw["grading_rubric"] ?: raw["marking_criteria"] ?: raw["explanation"]
         val rubricText=when(rubric) { is JsonPrimitive -> rubric.contentOrNull;null -> null;else -> canonical(rubric) }
-        append("源采分点（尚待本人抽查）：${rubricText ?: "源题没有独立评分标准，待生成并异厂复核"}\n\n")
+        append("建议采分点（沿用源 rubric/grading_rubric/marking_criteria，缺失则以源 explanation 作待核对草案，未生成分值、未认证评分键）：${rubricText ?: "源题没有独立评分标准，待生成并异厂复核"}\n\n依据：以上源字段原文，暂不推断满分或分配权重；本人抽查后再激活。\n\n")
     }
+    append("\n## 五个选项及字母依赖解析的统一核对\n\n建议：五个选项原样保留，以稳定 optionId 表示答案；解析中的字母改为对应选项正文。依据：源题的选项映射，仍为 UNREVIEWED；下面同时保留原解析作对照。\n\n")
+    qs.values.filter { isChoice(it.obj("source_record")) }.forEach { row ->
+        val raw=row.obj("source_record");val mapped=mapChoiceQuestion(raw)
+        if(choiceEntries(raw).size==5 || Regex("[A-E]").containsMatchIn(raw.str("explanation"))) {
+            append("- 来源：${row.str("id")}；选项数 ${choiceEntries(raw).size}；源哈希 ${row.str("content_hash")}\n")
+            append("  题干：${raw.str("question").ifBlank { raw.str("prompt") }}\n")
+            choiceEntries(raw).forEach { (letter,text) -> append("  $letter：$text\n") }
+            append("  原解析：${raw.str("explanation")}\n  建议解析：${mapped.str("explanation")}\n  建议正确 optionId：${mapped["correctOptionId"] ?: JsonNull}；状态：未复核，不进入题池或成绩。\n\n")
+        }
+    }
+    append("\n## 历史已通过时间的近似说明\n\n建议：保留 legacy_passed，solid=false；发生时间优先用同 KP 的 last_review_at。这是最近复习时间的近似，不能当作真实首次通过时刻；缺失时依次取 evidence.created_at、mastery updated_at、快照时间。依据为源时间证据，绝不用导入当天填充。\n\n")
+    val schedules=mapping.array("legacy_schedule").map { it.jsonObject }.associateBy { it.str("kp_id") }
+    mapping.array("legacy_passed").forEach { value ->
+        val row=value.jsonObject;val kp=row.str("id").substringAfterLast(':')
+        append("- 来源：${row.str("id")}；建议时间来源：${schedules[kp]?.obj("source_record")?.get("last_review_at") ?: "缺失，按以上确定顺序回落"}；历史时间为近似值。\n")
+    }
+    append("\n本文仅准备一次确认材料，尚未发出确认请求；正式增量源快照若改变题目或 KP 内容，必须重新提议并异厂复核，再替换本文对应项。\n")
 }
 
 fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?):String = buildString {

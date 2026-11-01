@@ -62,6 +62,17 @@ class ImportPlanTest {
         assertFailsWith<IllegalArgumentException> { importPlan(mapping(),JsonObject(seed+mapOf("knowledge_points" to JsonArray(emptyList()))),null) }
     }
 
+    @Test fun `incremental bank changes archive old review without reusing its authority`() {
+        val original=mapping();val p=proposal(original)
+        val changed=JsonObject(original+("questions" to JsonArray(original.array("questions").map { v -> JsonObject(v.jsonObject+("content_hash" to JsonPrimitive("changed"))) })))
+        assertFailsWith<IllegalArgumentException> { importPlan(changed,seed,p) }
+        val plan=incrementalPlan(changed,seed,p,original)
+        assertEquals("stale_quarantined",plan.obj("proposal_review").str("status"));assertEquals(p,plan.obj("proposal_review").obj("archived_proposal"))
+        assertTrue(plan.array("records").map { it.jsonObject }.filter { it.str("kind")=="legacy_question" }.all { it.obj("payload").array("kp_ids").isEmpty() })
+        val edited=JsonObject(p+("concepts" to JsonArray(emptyList())))
+        assertFailsWith<IllegalArgumentException> { incrementalPlan(changed,seed,edited,original) }
+    }
+
     @Test fun `array choices and historical answers become option identities`() {
         val q=obj("""{"question_type":"choice","prompt":"Synthetic","expected_answer":"B","options":[{"label":"A","body":"Wrong"},{"label":"B","body":"Right"}]}""")
         val mapped=mapChoiceQuestion(q)

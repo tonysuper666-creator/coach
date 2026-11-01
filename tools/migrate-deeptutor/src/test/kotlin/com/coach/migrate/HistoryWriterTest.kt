@@ -10,6 +10,12 @@ import java.sql.DriverManager
 import kotlin.test.*
 
 class HistoryWriterTest {
+    @Test fun `SQLite archive hashes preserve encoded primary key without retaining marker`() {
+        val source=legacy("mastery.sqlite3","mastery_events",json("_source_pk" to "event%3Aid","id" to "event:id","payload_json" to "{}"))
+        assertFalse(source.obj("source_record").containsKey("_source_pk"))
+        assertEquals(source.str("content_hash"),sourceContentHash(source.str("id"),source.getValue("source_record")))
+        assertNotEquals(source.str("content_hash"),sourceContentHash(source.str("id"),json("id" to "event:id","payload_json" to "changed")))
+    }
     private val seed=Json.parseToJsonElement("""{"course":{"id":"course"},"knowledge_points":[{"id":"kp","name":"Synthetic","module_id":"module"}],"exam_weights":{"kp":10}}""").jsonObject
     private val choice=Json.parseToJsonElement("""{"question_type":"mcq","question":"Synthetic choice","options":{"A":"first","B":"second","C":"third","D":"fourth","E":"fifth"},"correct_answer":"B","explanation":"B 正确，A、C、D、E 不对。"}""").jsonObject
     private fun fixture():Pair<JsonObject,JsonObject> {
@@ -166,6 +172,149 @@ class HistoryWriterTest {
         assertFalse(Regex("[A-E]").containsMatchIn(q.str("explanation")))
         assertTrue(q.str("explanation").contains("「second」"));assertFalse(q.containsKey("importIssue"))
         assertEquals(JsonNull,choiceAnswer(choice,"c"));assertEquals(JsonNull,choiceAnswer(choice,"I think B"))
+    }
+
+    private fun revise(plan:JsonObject,mapping:JsonObject,kind:String,raw:JsonObject,payload:JsonObject,at:Long):Pair<JsonObject,JsonObject> {
+        val source=json("id" to "legacy:$kind","source_record" to raw,"content_hash" to sha(canonical(raw)))
+        val records=plan.array("records").map { v -> if(v.jsonObject.str("id")==source.str("id")) plannedRecord(source,kind,payload) else v }
+        return JsonObject(plan+mapOf("history_time" to JsonObject(plan.obj("history_time")+("snapshot_at" to JsonPrimitive(at))),"records" to JsonArray(records))) to
+            JsonObject(mapping+("sources" to JsonArray(mapping.array("sources").map { v -> if(v.jsonObject.str("id")==source.str("id")) source else v })))
+    }
+
+    @Test fun `new source imports normally and two clocks give identical incremental state`() = withDatabase { baseline ->
+        val root=Files.createTempDirectory("history-increment-clocks")
+        try {
+            val source=java.nio.file.Path.of(baseline.query("PRAGMA database_list").first { it.str("name")=="main" }.str("file"))
+            val states=mutableListOf<JsonObject>()
+            for((index,clock) in listOf(1900000000000L,1900172800000L).withIndex()) {
+                val copy=root.resolve("copy-$index.sqlite");backupDatabase(source,copy)
+                DriverManager.getConnection("jdbc:sqlite:$copy").use { db ->
+                    val (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping) { clock }
+                    val raw=JsonObject(choice+("question" to JsonPrimitive("revised")))
+                    val payload=plan.array("records").map { it.jsonObject }.single { it.str("kind")=="legacy_question" }.obj("payload")
+                    val (next,map)=revise(plan,mapping,"legacy_question",raw,JsonObject(payload+("question" to mapChoiceQuestion(raw))),1700190000000L)
+                    val note=json("created_at" to 1700000000,"output" to "New historical source")
+                    val newSource=json("id" to "legacy:new-note","content_hash" to sha(canonical(note)),"source_record" to note)
+                    val withNew=JsonObject(next+("records" to JsonArray(next.array("records")+plannedRecord(newSource,"notes",note))))
+                    val withMap=JsonObject(map+("new_source" to newSource))
+                    val report=writeHistory(db,withNew,seed,withMap) { clock+86400000L }
+                    assertEquals(JsonPrimitive(1),report["records_inserted"]);assertEquals(JsonPrimitive(1),report["records_revised"]);assertEquals(JsonPrimitive(2),report["events_added"])
+                    assertEquals(2,databaseState(db,"course").obj("projection").obj("journal").values.sumOf { it.jsonObject.getValue("notes").jsonPrimitive.int })
+                    val state=databaseState(db,"course")
+                    assertEquals(JsonPrimitive(0),writeHistory(db,withNew,seed,withMap) { error("repeat") }["events_added"])
+                    assertEquals(state,databaseState(db,"course"));states+=state
+                }
+            }
+            assertEquals(sha(canonical(states[0])),sha(canonical(states[1])))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `v1 batch upgrades without rewriting history or calling the clock`() = withDatabase { db ->
+        val (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping) { 1900000000000L }
+        val events=db.query("SELECT * FROM events ORDER BY seq");val projection=databaseState(db,"course").obj("projection")
+        db.exec("ALTER TABLE migration_batches RENAME TO migration_batches_v2")
+        db.exec("CREATE TABLE migration_batches(course_id TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,manifest_json TEXT NOT NULL,recorded_at INTEGER NOT NULL)")
+        db.exec("INSERT INTO migration_batches SELECT course_id,manifest_hash,manifest_json,recorded_at FROM migration_batches_v2")
+        db.exec("DROP TABLE migration_batches_v2")
+        val report=writeHistory(db,plan,seed,mapping) { error("Existing v1 batch must keep its own clock") }
+        assertEquals(JsonPrimitive(0),report["events_added"]);assertEquals(events,db.query("SELECT * FROM events ORDER BY seq"))
+        assertEquals(projection,databaseState(db,"course").obj("projection"))
+        assertEquals(1,db.query("SELECT * FROM migration_batches").size)
+    }
+
+    @Test fun `corrected historical review cannot overwrite a later learner snooze`() = withDatabase { db ->
+        val (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping) { 1900000000000L }
+        val original=db.query("SELECT event_json FROM events ORDER BY seq").map { LedgerJson.decodeFromString<Event>(it.str("event_json")) }
+        val old=plan.array("records").map { it.jsonObject }.single { it.str("kind")=="legacy_schedule" }.obj("payload")
+        val (next,map)=revise(plan,mapping,"legacy_schedule",json("correction" to 1),JsonObject(old+("dueAt" to JsonPrimitive(1700172800L))),1700190000000L)
+        writeHistory(db,next,seed,map) { 1900086400000L }
+        val revision=LedgerJson.decodeFromString<Event>(db.query("SELECT event_json FROM events WHERE type='legacy_source_revised'").single().str("event_json"))
+        val day=logicalDay(1700090000000L,"Europe/London")
+        val learner=Event(revision.seq,"later-learner","course","review_snoozed",recordedAt=1700090000000L,occurredAt=1700090000000L,deviceId="native",actor="LEARNER",payload=json("kpId" to "kp","untilDay" to day+4))
+        val baselineReview=project(original+learner).review
+        // Snoozing owns the due day; the corrected source still supplies its interval.
+        assertEquals(baselineReview.getValue("kp").copy(intervalDays=2),project(original+learner+revision.copy(seq=revision.seq+1)).review.getValue("kp"))
+    }
+
+    @Test fun `one changed source appends one revision and updates the quarantined question`() = withDatabase { db ->
+        val (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping) { 1900000000000L }
+        val originals=db.query("SELECT * FROM events ORDER BY seq")
+        val raw=JsonObject(choice+("question" to JsonPrimitive("Corrected stem")))
+        val payload=plan.array("records").map { it.jsonObject }.single { it.str("kind")=="legacy_question" }.obj("payload")
+        val (next,map)=revise(plan,mapping,"legacy_question",raw,JsonObject(payload+("question" to mapChoiceQuestion(raw))),1700190000000L)
+        val report=writeHistory(db,next,seed,map) { 1900086400000L }
+        assertEquals(JsonPrimitive(0),report["records_inserted"]);assertEquals(JsonPrimitive(1),report["records_revised"]);assertEquals(JsonPrimitive(1),report["events_added"])
+        assertEquals(originals,db.query("SELECT * FROM events ORDER BY seq LIMIT ?",originals.size))
+        val revision=parseText(db.query("SELECT payload FROM events WHERE type='legacy_source_revised'").single().str("payload")).jsonObject
+        assertEquals(sha(canonical(choice)),revision.str("old_content_hash"));assertEquals(sha(canonical(raw)),revision.str("new_content_hash"))
+        assertEquals(JsonPrimitive(1700190000000L),revision["snapshot_at"])
+        val q=db.query("SELECT * FROM questions WHERE question_id='legacy:legacy_question'").single()
+        assertEquals("Corrected stem",q.str("stem_md"));assertEquals("UNREVIEWED",q.str("key_state"));assertEquals(5,parseText(q.str("options")).jsonArray.size)
+        assertTrue(db.query("SELECT * FROM question_kp").isEmpty());assertTrue(db.query("SELECT * FROM answer_keys").isEmpty())
+        val state=databaseState(db,"course")
+        val again=writeHistory(db,next,seed,map) { error("A repeated snapshot needs no new clock") }
+        assertEquals(JsonPrimitive(0),again["events_added"]);assertEquals(JsonPrimitive(0),again["records_revised"]);assertEquals(state,databaseState(db,"course"))
+        assertEquals(listOf(1900000000000L,1900086400000L),db.query("SELECT recorded_at FROM migration_batches ORDER BY snapshot_at").map { it.getValue("recorded_at").jsonPrimitive.long })
+    }
+
+    @Test fun `two incremental rounds correct notes logs reviews messages and answers without duplicate learning`() = withDatabase { db ->
+        var (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping) { 1900000000000L }
+        val before=databaseState(db,"course").obj("projection")
+        val changedKinds=listOf("notes","legacy_journal","legacy_schedule","legacy_message","legacy_attempt")
+        for(round in 1..2) {
+            for(kind in changedKinds) {
+                val old=plan.array("records").map { it.jsonObject }.single { it.str("kind")==kind }.obj("payload")
+                val raw=JsonObject(mapping.array("sources").map { it.jsonObject }.single { it.str("id")=="legacy:$kind" }.obj("source_record")+("correction" to JsonPrimitive(round)))
+                val payload=when(kind) {
+                    "notes" -> JsonObject(raw+("output" to JsonPrimitive("Corrected note $round")))
+                    "legacy_journal" -> JsonObject(old+("entry" to json("text" to "Corrected journal $round")))
+                    "legacy_schedule" -> JsonObject(old+("dueAt" to JsonPrimitive(1700086400L+round*86400L)))
+                    "legacy_message" -> JsonObject(raw+("content" to JsonPrimitive("Corrected body $round")))
+                    else -> JsonObject(old+mapOf("answer" to JsonPrimitive("option-$round"),"reset" to JsonPrimitive(round==2)))
+                }
+                val realRaw=when(kind) { "notes","legacy_message" -> payload;else -> raw }
+                val next=revise(plan,mapping,kind,realRaw,payload,1700190000000L+round*86400000L)
+                plan=next.first;mapping=next.second
+            }
+            val report=writeHistory(db,plan,seed,mapping) { 1900000000000L+round*86400000L }
+            assertEquals(JsonPrimitive(5),report["records_revised"]);assertEquals(JsonPrimitive(5),report["events_added"])
+            val state=databaseState(db,"course");val projection=state.obj("projection")
+            assertEquals(before.obj("journal").values.sumOf { it.jsonObject.getValue("answers").jsonPrimitive.int },projection.obj("journal").values.sumOf { it.jsonObject.getValue("answers").jsonPrimitive.int })
+            assertEquals(before.obj("journal").values.sumOf { it.jsonObject.getValue("notes").jsonPrimitive.int },projection.obj("journal").values.sumOf { it.jsonObject.getValue("notes").jsonPrimitive.int })
+            assertTrue(canonical(projection).contains("Corrected journal $round"));assertFalse(canonical(projection).contains("old journal"))
+            assertEquals("Corrected body $round",db.query("SELECT content_md FROM messages WHERE message_id='legacy:legacy_message'").single().str("content_md"))
+            assertEquals(logicalDay((1700086400L+round*86400L)*1000,"Europe/London"),projection.obj("review").obj("kp").getValue("dueDay").jsonPrimitive.long)
+            assertFalse(projection.obj("journal").containsKey(logicalDay(1900000000000L+round*86400000L,"Europe/London").toString()))
+            val effective=effectiveHistoryEvents(db.query("SELECT event_json FROM events ORDER BY seq").map { LedgerJson.decodeFromString<Event>(it.str("event_json")) })
+            assertEquals(1,effective.count { it.type=="answer_submitted" });assertEquals(JsonPrimitive("option-$round"),effective.single { it.type=="answer_submitted" }.payload["answer"])
+            val repeat=writeHistory(db,plan,seed,mapping) { error("unchanged round") }
+            assertEquals(JsonPrimitive(0),repeat["events_added"]);assertEquals(JsonPrimitive(0),repeat["records_revised"]);assertEquals(state,databaseState(db,"course"))
+        }
+        assertEquals(3,db.query("SELECT * FROM migration_batches").size)
+    }
+
+    @Test fun `newly passed source activates a previously archived historical schedule`() = withDatabase { db ->
+        val (complete,mapping)=fixture()
+        val schedule=complete.array("records").map { it.jsonObject }.single { it.str("kind")=="legacy_schedule" }.obj("payload")
+        val (unpassed,map)=revise(complete,mapping,"legacy_schedule",json("revision" to 0),JsonObject(schedule+("queue_eligible" to JsonPrimitive(false))),1700090000000L)
+        val initial=JsonObject(unpassed+("records" to JsonArray(unpassed.array("records").filter { it.jsonObject.str("kind")!="legacy_passed" })))
+        writeHistory(db,initial,seed,map) { 1900000000000L }
+        assertTrue(databaseState(db,"course").obj("projection").obj("review").isEmpty())
+        val restored=JsonObject(initial+("records" to JsonArray(initial.array("records")+complete.array("records").single { it.jsonObject.str("kind")=="legacy_passed" })))
+        val (next,nextMap)=revise(restored,map,"legacy_schedule",json("revision" to 1),schedule,1700190000000L)
+        val report=writeHistory(db,next,seed,nextMap) { 1900086400000L }
+        assertEquals(JsonPrimitive(1),report["records_inserted"]);assertEquals(JsonPrimitive(1),report["records_revised"])
+        assertEquals(logicalDay(1700086400L*1000,"Europe/London"),databaseState(db,"course").obj("projection").obj("review").obj("kp").getValue("dueDay").jsonPrimitive.long)
+        assertEquals(JsonPrimitive(0),writeHistory(db,next,seed,nextMap)["events_added"])
+    }
+
+    @Test fun `source deletion and clock before new snapshot roll back all changes`() = withDatabase { db ->
+        val (plan,mapping)=fixture();writeHistory(db,plan,seed,mapping)
+        val before=databaseState(db,"course")
+        assertFailsWith<IllegalArgumentException> { writeHistory(db,JsonObject(plan+("records" to JsonArray(plan.array("records").drop(1)))),seed,mapping) }
+        val next=JsonObject(plan+("history_time" to json("snapshot_at" to 1900000000000L)))
+        assertFailsWith<IllegalArgumentException> { writeHistory(db,next,seed,mapping) { 1800000000000L } }
+        assertEquals(before,databaseState(db,"course"))
     }
 
     @Test fun `read only online backup includes committed WAL and restores normalized state`() {

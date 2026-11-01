@@ -301,6 +301,10 @@ class ChatService(
         publish(tutor.settings(courseId,threadId,groupSize,mode),threadId,courseId)
     }
 
+    suspend fun retryMistakes(threadId: String, courseId: String) {
+        publish(tutor.retryMistakes(courseId,threadId),threadId,courseId)
+    }
+
     suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String) {
         val outcome = tutor.explain(courseId,threadId,mode)
         publish(outcome,threadId,courseId)

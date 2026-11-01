@@ -98,6 +98,22 @@ class TutorMachine(private val actor: LedgerActor) {
         stateEvent(c)?.payload?.str("state")=="AWAIT" && pending(c).isEmpty() && activeTurn(c).isEmpty()
     }
 
+    /** Review is a pool-only action, even when normal learning is configured for one question.
+     * Repeated taps return the same pending group and never queue AI work. */
+    suspend fun retryMistakes(course: String, thread: String): TutorOutcome = actor.execute {
+        tutorTransaction {
+            val c = context(course,thread)
+            requireNotBusy(c)
+            val existing = pending(c)
+            if (existing.isNotEmpty()) return@tutorTransaction outcome(c,cards=existing)
+            val take = takePoolGroup(course,c.kp,uid(),3,thread=thread,
+                untaught=!snapshot(course).projection.explainedKpIds.contains(c.kp))
+            require(take.status == "READY") { "这个知识点暂时不足 3 道新题，请稍后再练。错题仍会保留。" }
+            transition(c,TutorState.AWAIT_ANSWER)
+            outcome(c,cards=take.events)
+        }
+    }
+
     /** An asynchronous refill must not advance a teaching turn or pose a second pending group. */
     suspend fun resumePool(course: String, thread: String): TutorOutcome? = actor.execute {
         tutorTransaction {

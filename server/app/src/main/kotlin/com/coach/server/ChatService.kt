@@ -345,17 +345,26 @@ class ChatService(
         } else if (plan?.explanation == true) {
             val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
             when {
-                plan.mistakes.isEmpty() -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
+                // Teaching new concepts always needs the source pages, mistakes or not.
+                plan.mistakes.isEmpty() || plan.conceptIds.isNotEmpty() -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
                 // Every wrong answer carries a reviewed explanation: the reasoning is already in the request. Source pages invite the model to deliberate before its first character (measured 1.4 s without them, 4-7 s with them).
                 plan.reviewedBasis -> LessonPreparation.headerOnly(sourcePack)
                 else -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback, LessonPreparation.MAX_RETEACH_INPUT_CHARS)
             }
         } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
+        val recentTurns = recent.map { it.first to TutorOutputGuard.modelInput(it.second).let { text ->
+            if (plan?.mistakes?.isNotEmpty() == true) text.take(LessonPreparation.MAX_RETEACH_TURN_CHARS) else text } }
+        if (plan != null && plan.staged) {
+            // Part one needs no source pages (fast first character); part two teaches the new concepts from the pages.
+            val mistakesContext = listOf(TutorOutputGuard.modelInput(LessonPreparation.headerOnly(sourcePack)), plan.mistakeInstruction()).joinToString("\n")
+            val lessonContext = listOf(TutorOutputGuard.modelInput(enriched), plan.copy(mistakes = emptyList()).instruction(),
+                "The graded questions are already explained in the part of this reply written before this one; do not repeat them. Start directly with the new concepts and use a different example from any in that part.").joinToString("\n")
+            scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), mistakesContext, recentTurns, lessonContext) }
+            return messageId
+        }
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
-        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
-            recent.map { it.first to TutorOutputGuard.modelInput(it.second).let { text ->
-                if (plan?.mistakes?.isNotEmpty() == true) text.take(LessonPreparation.MAX_RETEACH_TURN_CHARS) else text } }) }
+        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context, recentTurns) }
         return messageId
     }
 
@@ -420,7 +429,7 @@ class ChatService(
         )
     }
 
-    private suspend fun run(session: Session, question: String, pack: String, recent: List<Pair<String, String>>) {
+    private suspend fun run(session: Session, question: String, pack: String, recent: List<Pair<String, String>>, lessonPack: String? = null) {
         val visibleText = StringBuilder()
         val rawAnswer = StringBuilder()
         val started = System.nanoTime()
@@ -430,9 +439,10 @@ class ChatService(
         }
         fun elapsedMs(): Long = (System.nanoTime() - started) / 1_000_000
 
-        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true) { attempt ->
+        fun newGuard() = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true) { attempt ->
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
+        var guard = newGuard()
         fun acceptFiltered(text: String) {
             val revision = guard.takeRevision()
             if (revision == null) {
@@ -496,10 +506,31 @@ class ChatService(
             }
         }
 
-        val result = try {
+        suspend fun streamStage(context: String, turns: List<Pair<String, String>>, effort: String, reviewedBasis: Boolean): BridgeResult =
             withContext(Dispatchers.IO) {
-                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed, session.plan?.effort ?: "medium", session.plan?.reviewedBasis == true), sink) { handle ->
+                bridge.streamChat(teachRequest(question, context, turns, session.model, session.lookupAllowed, effort, reviewedBasis), sink) { handle ->
                     session.attach(handle)
+                }
+            }
+        val result = try {
+            if (lessonPack == null) streamStage(pack, recent, session.plan?.effort ?: "medium", session.plan?.reviewedBasis == true)
+            else {
+                val first = streamStage(pack, recent, "low", true)
+                if (first !is BridgeResult.Success || session.forcedStatus != null) first
+                else {
+                    // Part one is complete: flush it, record its call, then stream the lesson as part two of the same message.
+                    acceptFiltered(guard.finish())
+                    for (segment in visible.finish()) emitSegment(session, segment, visibleText)
+                    val partOne = visibleText.toString()
+                    actor.execute { recordAiCall(callId = first.call.callId, task = first.call.task, requestedModel = first.call.requestedModel,
+                        servedBy = first.call.servedBy ?: session.model, ttftMs = first.call.ttftMs, durMs = first.call.durMs, inChars = first.call.inChars,
+                        outChars = partOne.length, status = first.terminal?.status ?: StreamStatus.COMPLETE, queueMs = first.call.queueMs, physicalCalls = first.call.physicalCalls) }
+                    guard = newGuard()
+                    visible = VisibleStream { drop ->
+                        log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+                    }
+                    emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
+                    streamStage(lessonPack, recent + ("assistant" to partOne.take(LessonPreparation.MAX_RETEACH_TURN_CHARS * 2)), "medium", false)
                 }
             }
         } catch (error: Exception) {

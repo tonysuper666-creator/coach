@@ -12,8 +12,33 @@ object MathDelimiters {
     private val han = Regex("[\\u3400-\\u9fff]")
     private val greek = "\\u0370-\\u03ff\\u1f00-\\u1fff"
     private val words = setOf("ATE", "ATT", "Cov", "E", "FOC", "GDP", "IV", "MRS", "MRT", "OLS", "Pr", "SE", "Var")
-    private fun valid(body: String) = !Regex("</?[A-Za-z][^<>]*>").containsMatchIn(body) &&
-        !han.containsMatchIn(body.replace(Regex("\\\\(?:text|operatorname|mathrm|textbf|textit)\\s*\\{[^\\{\\}]*\\}"), ""))
+    // Compiled once: building a Regex inside these scanners (some per character) cost tens of milliseconds per sealed block on ART (TON-1142).
+    private val htmlTag = Regex("</?[A-Za-z][^<>]*>")
+    private val textCommand = Regex("\\\\(?:text|operatorname|mathrm|textbf|textit)\\s*\\{[^\\{\\}]*\\}")
+    private val fenceOpen = Regex("^(`{3,}|~{3,})")
+    private val fenceClose = Regex("(`{3,}|~{3,})")
+    private val scriptWord = Regex("([_^])([A-Za-z]{2,}|[$greek]{2,})")
+    private val greekStart = Regex("^[$greek]")
+    private val latinWord = Regex("^[A-Za-z]+")
+    private val subscriptBody = Regex("[A-Za-z0-9,$greek]+")
+    private val subscriptChar = Regex("[A-Za-z0-9$greek]")
+    private val numberStart = Regex("^(?:\\d+(?:\\.\\d+)?|\\.\\d+)")
+    private val identStart = Regex("[A-Za-z$greek]")
+    private val identPrev = Regex("[\\p{L}0-9_$\\\\`]")
+    private val equationChar = Regex("[A-Za-z0-9${greek}_^\\{\\}()\\[\\]+*/×·⋅%\\- ]")
+    private val scriptGroup = Regex("[_^](?:\\{[^\\{\\}]*\\}|[A-Za-z]+)")
+    private val lhsEnd = Regex("[A-Za-z${greek}0-9)\\]]")
+    private val latinRun = Regex("[A-Za-z]{2,}")
+    private val timesMark = Regex("\\$(?:\\\\)?(?:times|imes)", RegexOption.IGNORE_CASE)
+    private val listLabel = Regex("^(\\s*[-*+]\\s+)([^:：\\n]+?)(\\s*)([:：])", RegexOption.MULTILINE)
+    private val singleLatin = Regex("^[A-Za-z]")
+    private val singleGreek = Regex("^[$greek]$")
+    private val symbolList = Regex("^[A-Za-z$greek](?:\\s*,\\s*[A-Za-z$greek])+$")
+    private val relationChar = Regex("[_^=≤≥≈≠]")
+    private val expectation = Regex("(E\\s*\\[[^\\]\\n]+]\\s*(?:=|≈|≠|≤|≥|<|>)\\s*[-+]?(?:\\d+(?:\\.\\d+)?|[A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]))?))")
+    private val comparison = Regex("([A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]+))?\\s*(?:≈|≠|≤|≥|<|>)\\s*[-+−]?\\d+(?:\\.\\d+)?)")
+    private fun valid(body: String) = !htmlTag.containsMatchIn(body) &&
+        !han.containsMatchIn(body.replace(textCommand, ""))
     private fun literal(s: String, needle: String, from: Int): Int {
         var i = from
         while (i <= s.length - needle.length) {
@@ -47,14 +72,14 @@ object MathDelimiters {
         while (i < s.length) {
             val c = s[i]
             if ((c == '`' || c == '~') && (i == 0 || s[i - 1] == '\n')) {
-                val fence = Regex("^(`{3,}|~{3,})").find(s.substring(i))?.value
+                val fence = fenceOpen.find(s.substring(i))?.value
                 if (fence != null) {
                     var p = s.indexOf('\n', i).let { if (it < 0) s.length else it + 1 }
                     var end = s.length
                     while (p < s.length) {
                         val e = s.indexOf('\n', p).let { if (it < 0) s.length else it }
                         val line = s.substring(p, e).trimEnd()
-                        if (line.startsWith(fence) && Regex("(`{3,}|~{3,})").matches(line)) { end = e; break }
+                        if (line.startsWith(fence) && fenceClose.matches(line)) { end = e; break }
                         p = if (e == s.length) e else e + 1
                     }
                     append(s.substring(i, end)); i = end; continue
@@ -97,20 +122,20 @@ object MathDelimiters {
         val parts = first.segments.map { if (it.text != null) scan(repair(it.text)) else MathTokens(listOf(it), 0) }
         return MathTokens(parts.flatMap { it.segments }, parts.sumOf { it.unresolved })
     }
-    private fun brace(s: String) = s.replace(Regex("([_^])([A-Za-z]{2,}|[$greek]{2,})")) { "${it.groupValues[1]}{${it.groupValues[2]}}" }
+    private fun brace(s: String) = s.replace(scriptWord) { "${it.groupValues[1]}{${it.groupValues[2]}}" }
     private fun identifier(s: String, start: Int): Int? {
         val tail = s.substring(start)
-        val g = Regex("^[$greek]").find(tail)?.value
-        val w = Regex("^[A-Za-z]+").find(tail)?.value.orEmpty()
+        val g = greekStart.find(tail)?.value
+        val w = latinWord.find(tail)?.value.orEmpty()
         if (g == null && (w.isEmpty() || (w.length > 1 && w !in words))) return null
         var end = start + (g?.length ?: w.length)
         while (s.getOrNull(end) == '_' || s.getOrNull(end) == '^') {
             val p = end + 1
             if (s.getOrNull(p) == '{') {
                 val close = s.indexOf('}', p + 1)
-                if (close < 0 || close - p > 42 || !Regex("[A-Za-z0-9,$greek]+").matches(s.substring(p + 1, close))) break
+                if (close < 0 || close - p > 42 || !subscriptBody.matches(s.substring(p + 1, close))) break
                 end = close + 1
-            } else if (s.getOrNull(p)?.toString()?.matches(Regex("[A-Za-z0-9$greek]")) == true) end = p + 1 else break
+            } else if (s.getOrNull(p)?.toString()?.matches(subscriptChar) == true) end = p + 1 else break
         }
         return end
     }
@@ -123,7 +148,7 @@ object MathDelimiters {
             if (c == '\n' || c == '\r') break
             if (c.isWhitespace()) { i++; continue }
             if ((c == '<' && html.containsMatchIn(s.substring(i))) || c in "$`|\\") break
-            val number = Regex("^(?:\\d+(?:\\.\\d+)?|\\.\\d+)").find(s.substring(i))?.value
+            val number = numberStart.find(s.substring(i))?.value
             val id = if (number == null) identifier(s, i) else null
             if (number != null || id != null) {
                 i = id ?: (i + number!!.length); atom = true; token = "atom"; if (stack.isEmpty()) safe = i; continue
@@ -143,20 +168,20 @@ object MathDelimiters {
     private fun equations(s: String): String {
         val out = StringBuilder(); var copied = 0; var i = 0
         while (i < s.length) {
-            if (!Regex("[A-Za-z$greek]").matches(s[i].toString()) || s.getOrNull(i - 1)?.toString()?.matches(Regex("[\\p{L}0-9_$\\\\`]")) == true) { i++; continue }
+            if (!identStart.matches(s[i].toString()) || s.getOrNull(i - 1)?.toString()?.matches(identPrev) == true) { i++; continue }
             var p = i; var depth = 0; var eq = -1
             while (p < minOf(s.length, i + 60)) {
                 val c = s[p]
                 if (c in "([") depth++
                 else if (c in ")]") { depth--; if (depth < 0) break }
                 else if (c == '=' && depth == 0) { eq = p; break }
-                else if (!Regex("[A-Za-z0-9${greek}_^\\{\\}()\\[\\]+*/×·⋅%\\- ]").matches(c.toString())) break
+                else if (!equationChar.matches(c.toString())) break
                 p++
             }
             if (eq < 0) { i++; continue }
             val lhs = s.substring(i, eq).trimEnd()
-            val plain = lhs.replace(Regex("[_^](?:\\{[^\\{\\}]*\\}|[A-Za-z]+)"), "")
-            if (lhs.isEmpty() || !Regex("[A-Za-z${greek}0-9)\\]]").matches(lhs.last().toString()) || Regex("[A-Za-z]{2,}").findAll(plain).any { it.value !in words }) { i++; continue }
+            val plain = lhs.replace(scriptGroup, "")
+            if (lhs.isEmpty() || !lhsEnd.matches(lhs.last().toString()) || latinRun.findAll(plain).any { it.value !in words }) { i++; continue }
             var r = eq + 1; while (s.getOrNull(r) == ' ' || s.getOrNull(r) == '\t') r++
             val end = rhs(s, r)
             if (end == null) { i++; continue }
@@ -166,16 +191,16 @@ object MathDelimiters {
         return out.append(s.substring(copied)).toString()
     }
     private fun repairPart(input: String): String {
-        var s = input.replace(Regex("\\$(?:\\\\)?(?:times|imes)", RegexOption.IGNORE_CASE), "×")
-        s = s.replace(Regex("^(\\s*[-*+]\\s+)([^:：\\n]+?)(\\s*)([:：])", RegexOption.MULTILINE)) {
+        var s = input.replace(timesMark, "×")
+        s = s.replace(listLabel) {
             val v = it.groupValues[2].trim()
-            val single = Regex("^[A-Za-z]").containsMatchIn(v) || Regex("^[$greek]$").matches(v)
-            val list = Regex("^[A-Za-z$greek](?:\\s*,\\s*[A-Za-z$greek])+$").matches(v)
-            if (v.length in 1..220 && !v.contains('$') && !v.contains('`') && !han.containsMatchIn(v) && (single || list || Regex("[_^=≤≥≈≠]").containsMatchIn(v)))
+            val single = singleLatin.containsMatchIn(v) || singleGreek.matches(v)
+            val list = symbolList.matches(v)
+            if (v.length in 1..220 && !v.contains('$') && !v.contains('`') && !han.containsMatchIn(v) && (single || list || relationChar.containsMatchIn(v)))
                 "${it.groupValues[1]}\$$v\$${it.groupValues[3]}${it.groupValues[4]}" else it.value
         }
-        s = s.replace(Regex("(E\\s*\\[[^\\]\\n]+]\\s*(?:=|≈|≠|≤|≥|<|>)\\s*[-+]?(?:\\d+(?:\\.\\d+)?|[A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]))?))")) { "\$${it.value.trim()}\$" }
-        s = s.replace(Regex("([A-Za-z$greek][A-Za-z0-9]*(?:_(?:\\{[^\\{\\}\\n]+\\}|[A-Za-z0-9$greek]+))?\\s*(?:≈|≠|≤|≥|<|>)\\s*[-+−]?\\d+(?:\\.\\d+)?)")) { "\$${brace(it.value.trim())}\$" }
+        s = s.replace(expectation) { "\$${it.value.trim()}\$" }
+        s = s.replace(comparison) { "\$${brace(it.value.trim())}\$" }
         return equations(s)
     }
     private fun repair(s: String): String {

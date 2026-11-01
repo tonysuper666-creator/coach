@@ -9,26 +9,45 @@ import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.*
 import kotlin.math.max
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-/** Parsed once per sha + SVG variant. Persistent SVG storage belongs to the message store. */
+/**
+ * Parsed once per sha + SVG variant. Persistent SVG storage belongs to the message store.
+ * The cache is touched from the UI thread only; [prewarm] does the slow parsing on a worker and hands the results back to its caller,
+ * so a block that seals with a dozen formulas finds them parsed instead of parsing them inside the frame (TON-1142).
+ */
 class MathSvgDocument private constructor(val root: SvgNode, val box: List<Float>) {
     val widthEm get() = box[2] / 1000f
     val ascentEm get() = -box[1] / 1000f
     val descentEm get() = (box[1] + box[3]) / 1000f
     companion object {
         private val cache = mutableMapOf<Pair<String, String>, MathSvgDocument>()
-        fun parse(sha: String, svg: String): MathSvgDocument = cache.getOrPut(sha to svg) {
+        private val tokens = Regex("<[^>]+>|[^<]+")
+        private val tagName = Regex("^<([A-Za-z]+)")
+        private val attribute = Regex("([\\w:-]+)\\s*=\\s*\"([^\"]*)\"")
+        private val entity = Regex("&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);")
+        private val supportedTags = setOf("svg", "g", "path", "rect", "text")
+        fun parse(sha: String, svg: String): MathSvgDocument = cache.getOrPut(sha to svg) { build(svg) }
+        /** Parse the formulas that are not cached yet off the UI thread, then publish them; call from the UI thread. Unparseable SVG is left for [parse] to report. */
+        suspend fun prewarm(formulas: Collection<Pair<String, String>>) {
+            val todo = formulas.distinct().filter { it !in cache }
+            if (todo.isEmpty()) return
+            val built = withContext(Dispatchers.Default) { todo.map { (_, svg) -> runCatching { build(svg) }.getOrNull() } }
+            todo.forEachIndexed { i, key -> built[i]?.let { cache.getOrPut(key) { it } } }
+        }
+        private fun build(svg: String): MathSvgDocument {
             require(!svg.contains("<!")) { "SVG declarations are unsupported" }
             val stack = mutableListOf<SvgNode>(); var root: SvgNode? = null
-            for (token in Regex("<[^>]+>|[^<]+").findAll(svg)) {
+            for (token in tokens.findAll(svg)) {
                 val value = token.value
                 if (value.startsWith("</")) {
                     require(stack.isNotEmpty() && stack.last().tag == value.substring(2, value.length - 1).trim()) { "Unbalanced SVG" }
                     stack.removeAt(stack.lastIndex)
                 } else if (value.startsWith('<')) {
-                    val tag = Regex("^<([A-Za-z]+)").find(value)?.groupValues?.get(1) ?: error("Invalid SVG tag")
-                    require(tag in setOf("svg", "g", "path", "rect", "text")) { "Unsupported SVG: $tag" }
-                    val attrs = Regex("([\\w:-]+)\\s*=\\s*\"([^\"]*)\"").findAll(value).associate { it.groupValues[1] to decode(it.groupValues[2]) }
+                    val tag = tagName.find(value)?.groupValues?.get(1) ?: error("Invalid SVG tag")
+                    require(tag in supportedTags) { "Unsupported SVG: $tag" }
+                    val attrs = attribute.findAll(value).associate { it.groupValues[1] to decode(it.groupValues[2]) }
                     val node = SvgNode(tag, attrs, path = attrs["d"]?.let { PathParser().parsePathString(it).toPath() })
                     // Validate transforms before exposing a Painter; unsupported output becomes source text.
                     node.transforms()
@@ -41,9 +60,9 @@ class MathSvgDocument private constructor(val root: SvgNode, val box: List<Float
             val parsed = requireNotNull(root)
             val box = numbers(parsed.attrs["viewBox"] ?: error("Missing viewBox"))
             require(box.size == 4 && box[2] > 0 && box[3] > 0 && box.all { it.isFinite() })
-            MathSvgDocument(parsed, box)
+            return MathSvgDocument(parsed, box)
         }
-        private fun decode(s: String): String = Regex("&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);").replace(s) {
+        private fun decode(s: String): String = if ('&' !in s) s else entity.replace(s) {
             when (val v = it.groupValues[1]) {
                 "amp" -> "&"; "lt" -> "<"; "gt" -> ">"; "quot" -> "\""; "apos" -> "'"
                 else -> (if (v.startsWith("#x")) v.drop(2).toInt(16) else v.drop(1).toInt()).toChar().toString()
@@ -52,17 +71,20 @@ class MathSvgDocument private constructor(val root: SvgNode, val box: List<Float
     }
 }
 
-fun numbers(s: String): List<Float> = s.trim().split(Regex("[\\s,]+")).filter { it.isNotEmpty() }.map { it.toFloat() }
+private val numberSeparator = Regex("[\\s,]+")
+private val transformCall = Regex("(translate|scale)\\s*\\(([^)]*)\\)")
+fun numbers(s: String): List<Float> = s.trim().split(numberSeparator).filter { it.isNotEmpty() }.map { it.toFloat() }
 data class SvgNode(val tag: String, val attrs: Map<String, String>, val path: Path? = null, val children: MutableList<SvgNode> = mutableListOf(), var text: String = "") {
-    fun transforms(): List<Pair<String, List<Float>>> {
+    private var parsedTransforms: List<Pair<String, List<Float>>>? = null
+    /** Parsed once: drawing asks for it on every node of every redraw. */
+    fun transforms(): List<Pair<String, List<Float>>> = parsedTransforms ?: run {
         val source = attrs["transform"].orEmpty()
-        val regex = Regex("(translate|scale)\\s*\\(([^)]*)\\)")
-        require(regex.replace(source, "").isBlank()) { "Unsupported SVG transform" }
-        return regex.findAll(source).map {
+        require(transformCall.replace(source, "").isBlank()) { "Unsupported SVG transform" }
+        transformCall.findAll(source).map {
             val args = numbers(it.groupValues[2]); require(args.size in 1..2)
             it.groupValues[1] to args
         }.toList()
-    }
+    }.also { parsedTransforms = it }
 }
 
 /** Subset painter with platform text fallback; no browser or platform SVG engine. */

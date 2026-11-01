@@ -86,7 +86,7 @@ cmp "$HOME/Coach/migrate-out/check-a/report.md" "$HOME/Coach/migrate-out/check-b
 
 ## M1 考前准备（TON-1095）
 
-本卡的学习记录处理只接受 `--dry-run`，仅产出计划，不连接 Coach 学习库。已有的 `seed-content` 负责 TON-1127 课程装载，本轮课程继续复用已有清单。2026-11-03 之前只准备计划与确认草稿，不导入学习记录，也不提前请本人确认。
+`--dry-run` 保留原有纯计划模式；新增 `rehearse` 只在自动创建的 Coach 数据库副本上真实写入。TON-1127 已装载的课程和分值事件只校验复用。最新授权允许立即副本预演；生产导入、激活和本人确认仍须分别验收。
 
 已装载课程的清单来自 TON-1127，不再次创建 Course、Module、KP、教材页或 `exam_weights_set`。把已有课程清单作为历史导入计划的前提：
 
@@ -144,10 +144,33 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py \
 
 可在本轮开工前对源 data 用 Python `lstat` 记录 `{相对路径: [size, mtime_ns]}`，之后传 `--before-inventory FILE` 核对运行期间源目录不变（只 stat，不对源开库）。私有 JSON 不得进仓库。验证器输出仅含计数和哈希，完整原文留在本机。
 
-## 11 月 3 日之后：正式迁移与回退待办
+## 隔离副本真实导入与回滚验证
 
-正式导入适配器尚未实现，计划模拟不能替代这一步。届时重新捕获有效快照并核对变动，按卡正文把归属/学习顺序与 10 道简答抽查合成一次面板事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。
+只读打开现有 Coach 数据库，以 SQLite online backup 捕获已提交的 WAL，生成 `before.sqlite`；再复制为 `coach.sqlite`。所有写入都发生在新输出目录的 `coach.sqlite`，没有生产导入开关。命令拒绝复用输出目录、覆盖快照或在运行中的数据目录下生成副本。
 
-接入实际账本前强制备份 Coach 库与 blobs，核对已装载课程和分值事件并复用，核对跨库的 assessment/interaction 关联；实现按稳定源 ID 更新修订，再在隔离副本上跑两次真实导入并逐条比对、抽 5 个 KP 对照界面。只有模拟通过不能宣称这些验收已通过。
+```sh
+tools/dev/heavy "$TOOLS" rehearse \
+  --snapshot "$SNAPSHOT" --coach-db "$HOME/Coach/data/coach.sqlite" \
+  --seed-manifest "$HOME/Coach/corpus/seed-content-manifest.json" \
+  --proposal "$HOME/Coach/corpus/ton-1095/proposal-reviewed.json" \
+  --out "$HOME/Coach/corpus/ton-1095/writer-rehearsal"
+
+nice -n 15 python3 tools/migrate-deeptutor/verify-import.py \
+  --snapshot "$SNAPSHOT" --seed "$HOME/Coach/corpus/seed-content-manifest.json" \
+  --out "$HOME/Coach/corpus/ton-1095/writer-rehearsal"
+```
+
+副本已有的 KP 名称、顺序、模块及最新 `exam_weights_set` 必须与清单相同，否则拒绝。导入采用单事务和稳定源 ID：`migration_records` 保留原值与内容哈希，`migration_batches` 保留未经确认的提议和未知原类型。相同输入第二次写入零记录、零事件；源修订或提议变化拒绝并回滚整笔事务，避免把修订当新作答。**修订替换及正式增量切换尚未实现。**
+
+- 题库原样保留全部选项，五选项题不截断；全部题 `LEGACY/UNREVIEWED`，不写 `question_kp`、答案键或题池。解析中的独立选项字母替换为选项正文，原文仅存档；仍须逐题盲审。
+- 历史作答发出 `legacy_attempt` 和 `answer_submitted`，重置作答另发 `attempt_voided`；不发评分事件。独立题目身份、指纹与空证据 KP 集合保证不消耗原生首答资格，不进入学习窗口。无法确定的自由回答保留原文与 null 结构化答案，确认清单附原选项上下文。
+- `legacy_passed` 不提升 solid；复习只接收原已通过集合，原始复习状态完整保留；已有 Coach 复习安排优先，冲突的历史安排只存档。队列按 Europe/London 的 04:00 学习日换算，间隔取上次复习到到期的学习日差（至少一天），ease 从新调度器默认 2.3 开始，lapses 保留。
+- 笔记和有内容的旧日志有各自历史事件；旧事件只发 `legacy_imported` 档案引用，不重放旧评分或教学事件。历史消息使用独立 LEGACY 会话，仅保留正文和显示关联字段。
+
+`first-state.json`、`second-state.json` 对全部表行、schema 和实际领域投影规范化，必须完全相同；`rehearsal.json` 记录状态/投影哈希和实际事件计数。另从 `before.sqlite` 生成 `rollback.sqlite`，验证逻辑状态逐字节恢复基线，绝不覆盖生产库。独立 Python 验证器直接读取快照 SQL、原题 JSON 和三份 Coach 副本，核对课程复用、逐条历史记录、事件隔离、首答身份、现有 pending/证据不变及回滚结果。输出目录含完整学习库副本和历史原文，必须保持私有，不得整目录附到公开 PR 或评论。
+
+## 正式迁移仍待验收
+
+固定快照预演不能证明源之后的新数据已同步。独立 QA-C 验收、随后异源复核通过后，把归属/学习顺序与 10 道简答源采分点合成一次本人事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。仍须完成新快照增量、5 个 KP 界面对照、blobs 备份与正式切换/恢复验证，不能因工具 PR 合并而结束整张迁移卡。
 
 切换不放在考试前 7 天内；连续两次增量对账零差异后再切换。切换前记录备份和课程清单哈希。切换后 DeepTutor 原样只读可开，保留至少两周；需要回退时停止 Coach 写入、保存 Coach 切换后的新增记录，重新打开 DeepTutor，必要时恢复切换前 Coach 备份。不得把 Coach 数据反写 DeepTutor，也不得删除源数据。正式切换/备份恢复尚未演练。

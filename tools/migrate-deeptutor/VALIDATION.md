@@ -56,3 +56,19 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py --snapshot "$SNAPSHOT"
 全部退出 0。Gradle：15 tests / 0 failures / 0 errors / 0 skipped。独立验证器直接读复制库与 JSON，对照全部 32 条作答、108 条正文、已通过/复习集合、45 个原类型缺失项；八份输出逐字节一致。完整快照、提议、确认草稿与复核答复留本机私有语料目录；计数及哈希报告随 Multica 交付。
 
 11 月 3 日之后仍需：新快照、把归属/前置与 10 道简答采分点合并向本人确认、正式写库适配器、备份与真实重导、5 个 KP 界面对照、切换/回退演练。不能因本工具 PR 合并而结束整张迁移卡。
+
+## 真实副本 writer（2026-11-01，验证待续）
+
+结果：未达到迁移验收；本轮真实导入 0 次。11 月 1 日 21:00 的本人指令已取消旧日期门槛，上节的日期限制仅为历史记录。
+
+新增 `rehearse` 命令，读取在线 Coach 数据库的只读 SQLite backup，在新私有目录内对副本执行真实事务导入两次，并比较全库规范化状态和领域回放。另附独立 Python/SQLite 对账器。实现保留已有课程与原生复习/待答状态，隔离历史题与作答，把旧事件作为档案保存；原值、五个选项和未解析回答留存。尚未编译或运行这些新增 Kotlin 测试，不能以代码中的断言作为验收证据。
+
+尝试命令：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist --offline --max-workers=2 --console=plain
+```
+
+该调用一直等待全机锁（持有者 TON-1073 VM base/head comparison），Gradle 未启动；取消本轮等待进程后退出 143，未取消锁持有者。`python3 -m py_compile tools/migrate-deeptutor/verify-import.py tools/migrate-deeptutor/verify-plan.py` 与 `git diff --check` 退出 0。实际双导、状态哈希、事件数、回退与独立验收均未验证，PR 保持草稿。恢复后须执行 README 的 `rehearse` 和 `verify-import.py` 命令，并用真实输出替换本段待续记录。
+
+正式导入、增量源修订、本人一次合并确认、五个 KP 界面对照及切换仍未完成；本轮未写生产库、未激活、未访问 DeepTutor 源，新增付费模型调用 0。

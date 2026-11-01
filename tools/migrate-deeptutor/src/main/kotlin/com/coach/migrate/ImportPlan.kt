@@ -2,7 +2,7 @@ package com.coach.migrate
 
 import kotlinx.serialization.json.*
 
-/** Data only: this module deliberately has no Coach database connection or import switch. */
+/** Reviewable data contract shared by the dry-run planner and the isolated database writer. */
 fun proposalInput(mapping:JsonObject):JsonObject = buildJsonObject {
     put("knowledge_points",JsonArray(mapping.array("knowledge_points").map { v ->
         val k=v.jsonObject
@@ -125,7 +125,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
         put("schema_version",1);put("dry_run",true);put("course_id",courseId)
         put("input_hash",sha(canonical(proposalInput(mapping))));put("seed_hash",sha(canonical(seed)))
         put("content_action","reference_existing_only");put("exam_weights_action","reuse_existing_event")
-        put("exam_weights",seed.obj("exam_weights"));put("formal_import_not_before","2026-11-03")
+        put("exam_weights",seed.obj("exam_weights"))
         put("human_confirmation","pending");put("proposals",proposal ?: JsonNull)
         put("unknown_types",JsonArray(mapping.array("knowledge_points").map { it.jsonObject }.filter { it["original_type_available"]==JsonPrimitive(false) }))
         put("records",JsonArray(records.sortedBy { it.str("id") }))
@@ -161,7 +161,7 @@ fun simulatePlan(plan:JsonObject,prior:JsonObject=JsonObject(emptyMap())):Simula
 }
 
 fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildString {
-    append("# 学习记录搬家确认草稿\n\n这份清单只供核对；11 月 3 日之后再请你确认。尚未导入学习记录。旧作答永远只作历史展示，不计入新学习成绩。\n\n")
+    append("# 学习记录搬家确认草稿\n\n这份清单只供核对；隔离副本预演通过后再合并请你确认。正式库尚未导入学习记录。旧作答永远只作历史展示，不计入新学习成绩。\n\n")
     if(proposal==null) { append("题目归属、概念与建议先学的内容尚未完成异厂复核。\n");return@buildString }
     validateProposal(mapping,proposal)
     val kps=mapping.array("knowledge_points").map { it.jsonObject }.associateBy { it.str("id") }
@@ -181,7 +181,15 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val names=k.array("prerequisite_ids").map { kps.getValue(it.jsonPrimitive.content).str("name") }
         append("- ${kps.getValue(k.str("id")).str("name")}\n  概念：${k.array("concept_ids").joinToString("、") { concepts.getValue(it.jsonPrimitive.content) }}；建议先学：${names.joinToString("；").ifBlank { "无" }}\n")
     }
-    append("\n## 简答评分标准抽查\n\n11 月 3 日之后合并询问：归属和学习顺序有没有需要调整的？以下 10 道简答的评分标准是否合理？\n\n")
+    append("\n## 无法自动识别的历史回答\n\n下列回答保留原文，不推断大小写或替你选择；字母仅用于对照当时选项。\n\n")
+    mapping.array("legacy_attempts").forEach { v ->
+        val raw=v.jsonObject.obj("source_record");val q=parseText(raw.str("question_json")).jsonObject
+        if(isChoice(q) && choiceAnswer(q,raw.str("user_answer"))==JsonNull) {
+            append("- ${q.str("question").ifBlank { q.str("prompt") }}\n  原回答：${raw.str("user_answer")}\n")
+            choiceEntries(q).forEach { (letter,text) -> append("  $letter：$text\n") }
+        }
+    }
+    append("\n## 简答评分标准抽查\n\n预演通过后合并询问：归属和学习顺序有没有需要调整的？以下 10 道简答的评分标准是否合理？\n\n")
     val short=qs.values.filter { it.obj("source_record").str("question_type")=="short_answer" }
     val sample=if(short.size<=10) short else (0..9).map { short[it*(short.size-1)/9] }
     sample.forEachIndexed { n,row ->
@@ -194,7 +202,7 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
 }
 
 fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?):String = buildString {
-    append("# 学习记录搬家：确认草稿\n\n11 月 3 日之后再确认，目前没有导入学习记录。\n\n")
+    append("# 学习记录搬家：确认草稿\n\n隔离副本预演通过后再确认，正式库目前没有导入学习记录。\n\n")
     val counts=mapping.obj("counts")
     append("保留 ${counts.str("passed")} 个已通过、${counts.str("attempts")} 条旧作答、${counts.str("schedules")} 条复习、${counts.str("notes")} 条笔记。旧作答只展示，不计入新成绩；${counts.str("original_types_missing")} 项缺失的原类型保留未知。\n\n")
     if(proposal==null) { append("模型提议和异厂复核尚未齐全。\n");return@buildString }

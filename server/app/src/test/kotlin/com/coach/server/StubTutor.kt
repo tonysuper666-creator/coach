@@ -16,6 +16,9 @@ class StubTutor : AutoCloseable {
     private val executor = java.util.concurrent.Executors.newCachedThreadPool()
     @Volatile var framesWritten = 0
     @Volatile var aborted = false
+    val abortedRequests = java.util.concurrent.atomic.AtomicInteger()
+    val requestEfforts = java.util.Collections.synchronizedList(ArrayList<String?>())
+    private val routed = java.util.Collections.synchronizedList(ArrayList<Pair<String, Triple<String, Long, Int>>>())
     @Volatile var requests = 0
     val requestBodies = java.util.Collections.synchronizedList(ArrayList<String>())
 
@@ -42,14 +45,24 @@ class StubTutor : AutoCloseable {
         replies.addLast(Triple(completionBody(text,model), -1L, 200))
     }
 
+    /** A reply for the next request whose body contains [marker]; staged replies issue two requests in parallel, so order cannot route them. */
+    fun streamWhen(marker: String, delayMs: Long, vararg chunks: String) {
+        routed.add(marker to Triple(chunks.joinToString("") { if (it.startsWith("data:")) it else frame(it) }, delayMs, 200))
+    }
+
+    fun httpErrorWhen(marker: String, status: Int) { routed.add(marker to Triple("{}", -1L, status)) }
+
     fun httpError(status: Int) { replies.addLast(Triple("{}",-1L,status)) }
 
     fun rateLimit() { replies.addLast(Triple("""{"error":{"code":"rate_limit_error","message":"429 Too many requests"}}""", -1L, 429)) }
 
     private fun handle(exchange: HttpExchange) {
         requests++
-        requestBodies.add(exchange.requestBody.readBytes().decodeToString())
-        val (body, delay, status) = replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
+        val requestBody = exchange.requestBody.readBytes().decodeToString()
+        requestBodies.add(requestBody)
+        requestEfforts.add(exchange.requestHeaders.getFirst("X-Coach-Effort"))
+        val match = synchronized(routed) { routed.firstOrNull { requestBody.contains(it.first) }?.also { routed.remove(it) } }
+        val (body, delay, status) = match?.second ?: replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
         if (delay < 0) {
             val bytes = body.toByteArray()
             exchange.responseHeaders.add("Content-Type", "application/json")
@@ -72,6 +85,7 @@ class StubTutor : AutoCloseable {
         } catch (error: Throwable) {
             // 客户端断开 = 取消；真实桥在这里杀掉 CLI 进程组（本测试只验证服务端确实断开了）
             aborted = true
+            abortedRequests.incrementAndGet()
         }
     }
 

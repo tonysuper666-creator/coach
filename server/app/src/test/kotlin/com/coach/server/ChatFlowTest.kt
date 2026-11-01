@@ -128,6 +128,122 @@ class ChatFlowTest {
         assertEquals("Plain unpaginated text", LessonPreparation.headerOnly("Plain unpaginated text"))
     }
 
+    /** An untaught knowledge point with one reviewed question: a wrong answer then asks for the first explanation, which is staged. */
+    private suspend fun seedReviewed(h: Harness) {
+        h.actor.execute {
+            val id = enqueueSupply("course-1","kp-1","Objective","Synthetic source")
+            val job = supplyJobs().single { it.id == id }
+            val options = listOf("opportunity cost","sunk expenditure","fixed payment","total revenue").mapIndexed { j,text -> com.coach.domain.Option("o$j",text) }
+            storeVerifiedBatch(claimJob(id)!!,job,listOf(
+                com.coach.store.VerifiedPoolQuestion("Which cost describes the forgone alternative?",options,"o0",
+                    "Opportunity cost is the best forgone alternative; sunk costs cannot be recovered.","Synthetic source","claude","gpt"),
+                com.coach.store.VerifiedPoolQuestion("Which cost cannot be recovered once spent?",options,"o1",
+                    "A sunk cost is already spent and cannot be recovered.","Synthetic source","claude","gpt")))
+        }
+    }
+
+    /** Opens the thread, answers one reviewed question wrongly, and leaves the tutor ready for the first explanation. */
+    private fun answerWrongBeforeTeaching(h: Harness, ws: Ws) {
+        ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["cost"],"title":"Synthetic objective"}""")
+        ws.await("tutor.state")
+        ws.send("""{"t":"tutor.settings","threadId":"thread-1","courseId":"course-1","groupSize":1}""")
+        ws.send("""{"t":"tutor.test","threadId":"thread-1","courseId":"course-1"}""")
+        val group = ws.await("tutor.cards")
+        val card = (group.getValue("cards") as kotlinx.serialization.json.JsonArray).first().jsonObject
+        val wrong = runBlocking { h.actor.execute {
+            val map = card.getValue("letterMap").jsonObject
+            val correct = map.getValue(tutorChoiceKey(card.str("questionId")).correctOptionId)
+            map.values.first { it != correct }
+        } }
+        ws.send("""{"t":"tutor.answer","threadId":"thread-1","courseId":"course-1","groupId":"${group.str("groupId")}","submissionId":"wrong-1","answers":{"${card.str("attemptId")}":$wrong}}""")
+        ws.await("tutor.feedback")
+        while (ws.await("tutor.state").str("state") != "FEEDBACK") Unit
+    }
+
+    private fun collectDeltas(ws: Ws): Pair<String, JsonObject> {
+        val text = StringBuilder()
+        while (true) {
+            val frame = ws.await("msg.delta","msg.end", timeoutMs = 8_000)
+            if (frame.str("t") == "msg.end") return text.toString() to frame
+            text.append(frame.str("text"))
+        }
+    }
+
+    @Test
+    fun stagedFirstExplanationStreamsMistakesThenLessonInOrderEvenWhenTheLessonFinishesFirst() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            val partOne = listOf("你选的「sunk expenditure」不对，","因为已花掉的钱收不回；","正确项「opportunity cost」成立。")
+            h.tutor.streamWhen("explains the graded mistakes only", 120, *partOne.toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 5, "机会成本是放弃的最佳替代。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("complete", end.str("status"))
+                val first = visible.indexOf("你选的「sunk expenditure」不对")
+                val second = visible.indexOf("机会成本是放弃的最佳替代。")
+                assertTrue(first == 0 && second > visible.indexOf("正确项「opportunity cost」成立。"), "part one must come first and whole, then the lesson: $visible")
+                assertEquals(1, Regex("你选的").findAll(visible).count(), "the lesson must not repeat the mistake block")
+                assertEquals(2, h.tutor.requests, "one upstream request per part")
+                assertEquals(setOf("low","medium"), h.tutor.requestEfforts.takeLast(2).toSet())
+                val bodies = h.tutor.requestBodies.takeLast(2)
+                val mistakesBody = bodies.single { it.contains("explains the graded mistakes only") }
+                val lessonBody = bodies.single { it.contains("Start directly with the new concepts") }
+                assertTrue(!mistakesBody.contains("Fully teach ONLY") && lessonBody.contains("Fully teach ONLY"))
+                assertTrue(!lessonBody.contains("Cover EVERY graded question"), "the lesson part carries no mistake block")
+                assertTrue(runBlocking { h.actor.execute { events("course-1").any { it.type == "explanation_delivered" } } })
+            }
+        }
+    }
+
+    @Test
+    fun stagedLessonFailureKeepsPartOneAndEndsTruncatedWithARetryableReason() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            h.tutor.streamWhen("explains the graded mistakes only", 20, "你选的「sunk expenditure」不对。", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.httpErrorWhen("Start directly with the new concepts", 500)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val messageId = ws.await("msg.start").str("msg")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("truncated", end.str("status"))
+                assertEquals("lesson_part_failed", end.str("reason"))
+                assertTrue(visible.contains("你选的「sunk expenditure」不对。"), "part one must survive: $visible")
+                val stored = runBlocking { h.snapshot(messageId) }
+                assertEquals("truncated", stored?.status)
+                assertTrue(stored?.content.orEmpty().contains("你选的「sunk expenditure」不对。"))
+                assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type == "explanation_delivered" } } },
+                    "an unfinished lesson must not mark the concepts taught, so the retry teaches them")
+            }
+        }
+    }
+
+    @Test
+    fun cancellingAStagedReplyStopsBothUpstreams() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            h.tutor.streamWhen("explains the graded mistakes only", 400, "一","二","三","四","五","六", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 400, "甲","乙","丙","丁","戊","己", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val messageId = ws.await("msg.start").str("msg")
+                ws.await("msg.delta")
+                val deadline = System.nanoTime() + 3_000_000_000L
+                while (h.tutor.requests < 2 && System.nanoTime() < deadline) Thread.sleep(20)
+                assertEquals(2, h.tutor.requests, "the lesson request must be in flight before the cancel")
+                ws.send("""{"t":"msg.cancel","msg":"$messageId"}""")
+                val end = ws.await("msg.end", timeoutMs = 3_000)
+                assertEquals("cancelled", end.str("status"))
+                val stopAt = System.nanoTime() + 3_000_000_000L
+                while (h.tutor.abortedRequests.get() < 2 && System.nanoTime() < stopAt) Thread.sleep(20)
+                assertEquals(2, h.tutor.abortedRequests.get(), "both upstream streams must be cut")
+            }
+        }
+    }
+
     @Test
     fun longUnmarkedLessonPackFallsBackToBoundedPrefix() {
         val source = "Introduction.\n\n" + "Unpaginated source text. ".repeat(900)

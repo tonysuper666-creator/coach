@@ -344,12 +344,18 @@ class ChatService(
             SourcePack.prepare(sourcePack,hits).render()
         } else if (plan?.explanation == true) {
             val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
-            preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
+            when {
+                plan.mistakes.isEmpty() -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
+                // Every wrong answer carries a reviewed explanation: the reasoning is already in the request. Source pages invite the model to deliberate before its first character (measured 1.4 s without them, 4-7 s with them).
+                plan.reviewedBasis -> LessonPreparation.headerOnly(sourcePack)
+                else -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback, LessonPreparation.MAX_RETEACH_INPUT_CHARS)
+            }
         } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
-            recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
+            recent.map { it.first to TutorOutputGuard.modelInput(it.second).let { text ->
+                if (plan?.mistakes?.isNotEmpty() == true) text.take(LessonPreparation.MAX_RETEACH_TURN_CHARS) else text } }) }
         return messageId
     }
 
@@ -492,7 +498,7 @@ class ChatService(
 
         val result = try {
             withContext(Dispatchers.IO) {
-                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed), sink) { handle ->
+                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed, session.plan?.effort ?: "medium", session.plan?.reviewedBasis == true), sink) { handle ->
                     session.attach(handle)
                 }
             }

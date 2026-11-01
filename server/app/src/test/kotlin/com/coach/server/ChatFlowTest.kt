@@ -107,6 +107,28 @@ class ChatFlowTest {
     }
 
     @Test
+    fun reteachBudgetKeepsTheRankedPageOpeningInsteadOfTheBareHeader() {
+        val header = "Knowledge point: Moral hazard\nReference: textbook\n\n"
+        val page = { n: Int, body: String -> "**〔PDF 第 $n 页 · 书第 $n 页〕**\n$body\n" }
+        val source = header + page(1, "Unrelated filler. ".repeat(300)) + page(2, "Moral hazard changes behavior after insurance. ".repeat(300))
+        val selected = LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Moral hazard"), LessonPreparation.MAX_RETEACH_INPUT_CHARS)
+
+        assertTrue(selected.startsWith(header))
+        assertTrue(selected.length <= LessonPreparation.MAX_RETEACH_INPUT_CHARS)
+        assertTrue(selected.contains("Moral hazard changes behavior"), "the best-ranked page opening must survive a small budget")
+        // The default budget is untouched.
+        assertTrue(LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Moral hazard")).length > LessonPreparation.MAX_RETEACH_INPUT_CHARS)
+    }
+
+    @Test
+    fun headerOnlyKeepsTitleAndReferenceButNoPages() {
+        val header = "Knowledge point: Moral hazard\nReference: textbook p.5\n"
+        val source = header + "**〔PDF 第 1 页 · 书第 1 页〕**\nPage body that must not be sent.\n"
+        assertEquals(header.trimEnd(), LessonPreparation.headerOnly(source))
+        assertEquals("Plain unpaginated text", LessonPreparation.headerOnly("Plain unpaginated text"))
+    }
+
+    @Test
     fun longUnmarkedLessonPackFallsBackToBoundedPrefix() {
         val source = "Introduction.\n\n" + "Unpaginated source text. ".repeat(900)
         val selected = LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Synthetic KP"))

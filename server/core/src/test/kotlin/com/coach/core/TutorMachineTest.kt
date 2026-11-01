@@ -71,10 +71,16 @@ class TutorMachineTest {
             assertEquals("Sunk cost is recoverable",mistake.selectedText)
             assertEquals("Opportunity cost is the forgone alternative",mistake.correctText)
             assertTrue(plan.instruction().contains("First paragraph"))
+            assertTrue(plan.instruction().contains("begin the reply with the Chinese words ‘你选的’"))
             assertTrue(plan.instruction().contains(mistake.explanation))
+            assertEquals("low",plan.effort)
+            assertTrue(plan.reviewedBasis)
             f.machine.finish(plan,"recap",true)
             f.seed("kp-2"); f.open("other","kp-2")
-            assertTrue(assertNotNull(f.machine.next("course","other").plan).mistakes.isEmpty())
+            val plain=assertNotNull(f.machine.next("course","other").plan)
+            assertTrue(plain.mistakes.isEmpty())
+            assertEquals("medium",plain.effort)
+            assertFalse(plain.reviewedBasis)
         }
     }
 

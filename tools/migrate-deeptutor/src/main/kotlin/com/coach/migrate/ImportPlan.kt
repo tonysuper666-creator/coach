@@ -123,6 +123,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
     require(records.map { it.str("id") }.toSet().size==records.size) { "Duplicate source identity in import plan" }
     return buildJsonObject {
         put("schema_version",1);put("dry_run",true);put("course_id",courseId)
+        put("history_time",mapping.obj("history_time"))
         put("input_hash",sha(canonical(proposalInput(mapping))));put("seed_hash",sha(canonical(seed)))
         put("content_action","reference_existing_only");put("exam_weights_action","reuse_existing_event")
         put("exam_weights",seed.obj("exam_weights"))

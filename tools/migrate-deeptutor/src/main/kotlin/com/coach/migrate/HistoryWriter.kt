@@ -11,6 +11,8 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.time.LocalDate
+import java.time.Instant
+import java.time.ZoneId
 import kotlin.io.path.*
 
 internal fun openReadOnly(path:Path):Connection = DriverManager.getConnection("jdbc:sqlite:file:${path.toRealPath().toUri().rawPath}?mode=ro")
@@ -37,13 +39,22 @@ internal fun backupDatabase(source:Path,destination:Path) {
     }
 }
 
-/** Logical rows, schema and replay, independent of WAL/page layout and query row order. */
+/** Logical rows, schema and replay. Only migration audit clocks are normalized; native rows stay exact. */
 internal fun databaseState(db:Connection,course:String):JsonObject {
     val tables=db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     val logical=buildJsonObject {
         for(t in tables) {
             val name=t.str("name");val escaped=name.replace("\"","\"\"")
-            put(name,JsonArray(db.query("SELECT * FROM \"$escaped\"").sortedBy(::canonical)))
+            val rows=db.query("SELECT * FROM \"$escaped\"").map { row -> when {
+                name=="migration_batches" -> JsonObject(row+("recorded_at" to JsonPrimitive(0)))
+                name=="events" && row.str("device_id")=="deeptutor-migration" -> {
+                    val event=parseText(row.str("event_json")).jsonObject
+                    JsonObject(row+mapOf("recorded_at" to JsonPrimitive(0),
+                        "event_json" to JsonPrimitive(canonical(JsonObject(event+("recordedAt" to JsonPrimitive(0)))))))
+                }
+                else -> row
+            } }
+            put(name,JsonArray(rows.sortedBy(::canonical)))
         }
     }
     val events=db.query("SELECT event_json FROM events WHERE course_id=? ORDER BY seq",course)
@@ -69,13 +80,36 @@ internal fun validateInstalledCourse(db:Connection,seed:JsonObject) {
     }
 }
 
-private fun timestamp(payload:JsonObject,fallback:Long):Long =
-    (payload["created_at"] as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() && it>0 && it<1e11 }?.let { (it*1000).toLong() } ?: fallback
+private fun sourceTimestamp(value:JsonElement?):Long? {
+    val p=value as? JsonPrimitive ?: return null
+    return p.doubleOrNull?.takeIf { it.isFinite() && it>0 && it<1e11 }?.let { (it*1000).toLong() }
+        ?: runCatching { Instant.parse(p.content).toEpochMilli().takeIf { it>0 } }.getOrNull()
+}
+private fun timestamp(payload:JsonObject,fallback:Long):Long = sourceTimestamp(payload["created_at"]) ?: fallback
+
+/** No import wall clock participates in historical facts, including untimed archive records. */
+private fun historicalTime(row:JsonObject,plan:JsonObject,mapping:JsonObject):Long {
+    val history=plan.obj("history_time")
+    val cutoff=history["snapshot_at"]?.jsonPrimitive?.long ?: error("Missing deterministic snapshot timestamp")
+    val p=row.obj("payload");val kind=row.str("kind")
+    val kp=p.str("kp_id")
+    val schedule=if(kind=="legacy_passed") plan.array("records").map { it.jsonObject }
+        .firstOrNull { it.str("kind")=="legacy_schedule" && it.obj("payload").str("kp_id")==kp }?.obj("payload") else p
+    val evidence=mapping.array("knowledge_points").map { it.jsonObject }.firstOrNull { it.str("id")==kp }?.obj("anchors")
+    val candidates=when(kind) {
+        "legacy_passed","legacy_schedule" -> listOf(schedule?.obj("original_state")?.get("last_review_at"),
+            evidence?.get("created_at"),history["mastery_updated_at"])
+        else -> listOf(p["created_at"],p["updated_at"])
+    }
+    val dayTime=if(kind=="legacy_journal") LocalDate.parse(p.str("day")).atTime(12,0)
+        .atZone(ZoneId.of("Europe/London")).toInstant().toEpochMilli() else null
+    return (listOfNotNull(dayTime)+candidates.mapNotNull(::sourceTimestamp)).firstOrNull { it<=cutoff } ?: cutoff
+}
 
 /** Single-transaction writer. CLI only calls this on a newly created rehearsal copy.
  * A revised source identity aborts the entire transaction; it cannot replay learner effects.
  */
-internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:JsonObject):JsonObject {
+internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:JsonObject,clock:()->Long=System::currentTimeMillis):JsonObject {
     require(db.autoCommit) { "Writer owns its transaction" }
     val course=plan.str("course_id");require(course==seed.obj("course").str("id"))
     validateInstalledCourse(db,seed)
@@ -100,12 +134,13 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
         db.exec("CREATE TABLE IF NOT EXISTS migration_records(source_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,source_hash TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,source_json TEXT NOT NULL)")
         val batch=db.query("SELECT * FROM migration_batches WHERE course_id=?",course).singleOrNull()
         require(batch==null || batch.str("manifest_hash")==manifestHash) { "Migration manifest changed; obtain a new reviewed reconciliation" }
-        val now=batch?.get("recorded_at")?.jsonPrimitive?.long ?: System.currentTimeMillis()
+        val now=batch?.get("recorded_at")?.jsonPrimitive?.long ?: clock()
+        require(now>=plan.obj("history_time").getValue("snapshot_at").jsonPrimitive.long) { "Import clock precedes snapshot" }
         if(batch==null) db.exec("INSERT INTO migration_batches VALUES(?,?,?,?)",course,manifestHash,canonical(manifest),now)
         var inserted=0;var addedEvents=0
-        fun emit(row:JsonObject,type:String,payload:JsonObject,suffix:String="",at:Long=timestamp(row.obj("payload"),now)):Long {
+        fun emit(row:JsonObject,type:String,payload:JsonObject,suffix:String="",at:Long=historicalTime(row,plan,mapping)):Long {
             val id="migration:"+sha(course+":"+row.str("id")+":"+type+":"+suffix)
-            val event=Event(0,id,course,type,recordedAt=now,occurredAt=at.coerceAtMost(now),deviceId="deeptutor-migration",actor="SYSTEM",
+            val event=Event(0,id,course,type,recordedAt=now,occurredAt=at,deviceId="deeptutor-migration",actor="SYSTEM",
                 threadId=if(type in setOf("legacy_attempt","answer_submitted","attempt_voided")) "legacy-thread:"+sha(row.str("id")) else null,
                 payload=JsonObject(payload+mapOf("sourceId" to JsonPrimitive(row.str("id")))))
             val old=db.query("SELECT seq,event_json FROM events WHERE course_id=? AND idem_key=?",course,id).singleOrNull()
@@ -151,7 +186,7 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
                     emit(row,"legacy_attempt",JsonObject(p+mapOf(
                         "attemptId" to JsonPrimitive(attempt),"questionId" to JsonPrimitive("legacy-attempt-question:"+sha(id)),
                         "fingerprint" to JsonPrimitive("legacy-attempt-fingerprint:"+sha(id)),"kpIds" to JsonArray(emptyList()),
-                        "posedAt" to JsonPrimitive(timestamp(p,now)),
+                        "posedAt" to JsonPrimitive(historicalTime(row,plan,mapping)),
                         "keyState" to JsonPrimitive("UNREVIEWED"),"purpose" to JsonPrimitive("HISTORY"))))
                     emit(row,"answer_submitted",buildJsonObject { put("attemptId",attempt);put("answer",p["answer"] ?: JsonNull);put("historical",true) })
                     if(p["reset"]==JsonPrimitive(true)) emit(row,"attempt_voided",buildJsonObject { put("attemptId",attempt);put("reason",p.str("reset_reason")) })
@@ -182,7 +217,7 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
                     db.exec("INSERT OR IGNORE INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'LEGACY','LEGACY_SESSION',?)",thread,course,thread)
                     val next=db.query("SELECT coalesce(max(mseq),0)+1 AS n FROM messages WHERE thread_id=?",thread).single().getValue("n").jsonPrimitive.long
                     db.exec("INSERT INTO messages(thread_id,mseq,message_id,role,status,content_md,created_at,delta_index) VALUES(?,?,?,?,'complete',?,?,0)",
-                        thread,next,id,p.str("role"),p.str("content"),timestamp(p,now))
+                        thread,next,id,p.str("role"),p.str("content"),historicalTime(row,plan,mapping))
                     emit(row,"legacy_imported",buildJsonObject { put("messageId",id);put("threadId",thread) })
                 }
                 else -> emit(row,"legacy_imported",buildJsonObject { put("kind",kind);put("archive",p) })

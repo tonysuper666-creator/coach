@@ -55,6 +55,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         it.type == "kp_opened" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
     }?.threadId ?: "kp:$kpId"
 
+    val mistakes: MistakeReview by lazy { mistakeReview(events) }
+
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()

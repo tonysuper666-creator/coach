@@ -90,7 +90,7 @@ app = repo / 'desktopApp/build/compose/binaries/main/app/Coach.app/Contents/MacO
 for i in range(runs_n):
     for name, mode in (('pinned', 1), ('scrolled-away', 2)):
         r = start_run('mac', name); log = out / f'mac-{name}-{i + 1}.log'
-        env = dict(os.environ, COACH_AUTOPLAY=str(mode), COACH_RENDER_STATE=str(out / f'state-{name}-{i + 1}.json'),
+        env = dict(os.environ, COACH_MODE='spike', COACH_AUTOPLAY=str(mode), COACH_RENDER_STATE=str(out / f'state-{name}-{i + 1}.json'),
                    JAVA_TOOL_OPTIONS=f'-Dcoach.summaryCapturePath={out}/mac-{name}-{i + 1}.png')
         with log.open('w') as f: subprocess.run(['nice', '-n', '15', str(app)], env=env, stdout=f, stderr=subprocess.STDOUT, timeout=420)
         text = log.read_text(); summary = [l for l in text.splitlines() if l.startswith('SUMMARY')]

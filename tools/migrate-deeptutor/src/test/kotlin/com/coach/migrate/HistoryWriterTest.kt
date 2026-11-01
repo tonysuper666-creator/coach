@@ -18,7 +18,7 @@ class HistoryWriterTest {
             "legacy_attempt" to json("created_at" to 1700000000,"user_answer" to "I think B"),
             "legacy_passed" to JsonPrimitive(1.0),
             "legacy_schedule" to json("kp_id" to "kp"),
-            "notes" to json("created_at" to 1700000000,"output" to "historical note"),
+            "notes" to json("created_at" to "2023-11-14T22:13:20Z","output" to "historical note"),
             "legacy_message" to json("session_id" to "session","role" to "user","content" to "body only","created_at" to 1700000000),
             "legacy_event_archive" to json("type" to "attempt_graded","payload" to "never execute this old event"),
             "legacy_journal" to json("text" to "old journal")
@@ -28,12 +28,53 @@ class HistoryWriterTest {
             "legacy_question" to json("question" to mapChoiceQuestion(choice),"kp_ids" to emptyList<String>(),"association_confirmed" to false,"keyState" to "UNREVIEWED"),
             "legacy_attempt" to json("created_at" to 1700000000,"origin" to "LEGACY","kp_id" to "kp","question" to mapChoiceQuestion(choice),"answer" to null,"answer_unresolved" to true,"unresolved_answer_text" to "I think B","reset" to true,"reset_reason" to "old reset","window_eligible" to false),
             "legacy_passed" to json("kp_id" to "kp","passed" to true,"solid" to false),
-            "legacy_schedule" to json("kp_id" to "kp","dueAt" to 1700086400,"queue_eligible" to true,"original_state" to json("lapse_count" to 2,"stability" to 3.5)),
+            "legacy_schedule" to json("kp_id" to "kp","dueAt" to 1700086400,"queue_eligible" to true,"original_state" to json("lapse_count" to 2,"stability" to 3.5,"last_review_at" to 1700000100)),
             "legacy_journal" to json("day" to "2023-11-14","entry" to raws.last().second)
         )
         val records=raws.zip(sources).map { (pair,source) -> plannedRecord(source,pair.first,payloads[pair.first] ?: pair.second.jsonObject) }
-        val plan=json("course_id" to "course","records" to JsonArray(records),"unknown_types" to JsonArray(listOf(json("id" to "kp","type" to null,"current_source_type" to "memory"))),"human_confirmation" to "pending")
+        val plan=json("course_id" to "course","history_time" to json("snapshot_at" to 1700090000000L,"mastery_updated_at" to 1700000050),"records" to JsonArray(records),"unknown_types" to JsonArray(listOf(json("id" to "kp","type" to null,"current_source_type" to "memory"))),"human_confirmation" to "pending")
         return plan to json("sources" to JsonArray(sources))
+    }
+
+    @Test fun `same baseline imported under different days has identical normalized state hash`() = withDatabase { baseline ->
+        val root=Files.createTempDirectory("history-clock-copies")
+        try {
+            val source=java.nio.file.Path.of(baseline.query("PRAGMA database_list").first { it.str("name")=="main" }.str("file"))
+            val (plan,mapping)=fixture()
+            val states=mutableListOf<JsonObject>();val audits=mutableListOf<Long>()
+            for((index,clock) in listOf(1900000000000L,1900172800000L).withIndex()) {
+                val copy=root.resolve("copy-$index.sqlite");backupDatabase(source,copy)
+                DriverManager.getConnection("jdbc:sqlite:$copy").use { db ->
+                    writeHistory(db,plan,seed,mapping) { clock }
+                    audits+=db.query("SELECT recorded_at FROM migration_batches").single().getValue("recorded_at").jsonPrimitive.long
+                    assertEquals(baseline.query("SELECT * FROM events ORDER BY seq"),db.query("SELECT * FROM events WHERE device_id!='deeptutor-migration' ORDER BY seq"))
+                    states+=databaseState(db,"course")
+                }
+            }
+            assertNotEquals(audits[0],audits[1])
+            assertEquals(sha(canonical(states[0])),sha(canonical(states[1])))
+            assertEquals(states[0].obj("projection"),states[1].obj("projection"))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `import day journal has no legacy facts and source history dates survive`() = withDatabase { db ->
+        val (plan,mapping)=fixture();val now=1900000000000L
+        val before=databaseState(db,"course").obj("projection").obj("journal")
+        writeHistory(db,plan,seed,mapping) { now }
+        val after=databaseState(db,"course").obj("projection").obj("journal")
+        val importDay=logicalDay(now,"Europe/London").toString()
+        assertEquals(before[importDay],after[importDay])
+        val events=db.query("SELECT * FROM events WHERE device_id='deeptutor-migration'")
+        assertTrue(events.all { logicalDay(it.getValue("occurred_at").jsonPrimitive.long,"Europe/London").toString()!=importDay })
+        for(type in listOf("legacy_passed","legacy_schedule")) {
+            assertEquals(1700000100000L,events.single { it.str("type")==type }.getValue("occurred_at").jsonPrimitive.long)
+        }
+        assertEquals(1700000000000L,events.single { it.str("type")=="note_saved" }.getValue("occurred_at").jsonPrimitive.long)
+        val untimed=events.single { parseText(it.str("payload")).jsonObject.str("sourceId")=="legacy:legacy_question" }
+        assertEquals(1700090000000L,untimed.getValue("occurred_at").jsonPrimitive.long)
+        val history=after.obj(logicalDay(1700000100000L,"Europe/London").toString())
+        assertEquals(listOf(JsonPrimitive("kp")),history.array("newlyPassed"))
+        assertEquals(JsonPrimitive(1),history["answers"]);assertEquals(JsonPrimitive(1),history["notes"])
     }
     private fun withDatabase(setup:(LedgerStore)->Unit={},block:(java.sql.Connection)->Unit) {
         val dir=Files.createTempDirectory("history-writer-test")

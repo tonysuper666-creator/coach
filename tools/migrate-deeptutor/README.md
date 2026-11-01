@@ -167,7 +167,11 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-import.py \
 - `legacy_passed` 不提升 solid；复习只接收原已通过集合，原始复习状态完整保留；已有 Coach 复习安排优先，冲突的历史安排只存档。队列按 Europe/London 的 04:00 学习日换算，间隔取上次复习到到期的学习日差（至少一天），ease 从新调度器默认 2.3 开始，lapses 保留。
 - 笔记和有内容的旧日志有各自历史事件；旧事件只发 `legacy_imported` 档案引用，不重放旧评分或教学事件。历史消息使用独立 LEGACY 会话，仅保留正文和显示关联字段。
 
-`first-state.json`、`second-state.json` 对全部表行、schema 和实际领域投影规范化，必须完全相同；`rehearsal.json` 记录状态/投影哈希和实际事件计数。另从 `before.sqlite` 生成 `rollback.sqlite`，验证逻辑状态逐字节恢复基线，绝不覆盖生产库。独立 Python 验证器直接读取快照 SQL、原题 JSON 和三份 Coach 副本，核对课程复用、逐条历史记录、事件隔离、首答身份、现有 pending/证据不变及回滚结果。输出目录含完整学习库副本和历史原文，必须保持私有，不得整目录附到公开 PR 或评论。
+历史事件的 `occurredAt` 与导入墙钟无关：已通过和复习优先使用 `original_state.last_review_at`，其次为该 KP 的 evidence 创建时间、mastery 更新时间；其他事实使用来源的 `created_at` / `updated_at`（秒或带时区的 ISO 时间），日志使用来源日期的伦敦中午。没有可用时间时使用 `copy-stats.json.before` 中最新的已捕获源文件 mtime；晚于这个快照截止时间的来源值不参与选择。缺失 WAL 的 `absent` 不作为时间。该依据写入 `history_time`，原值保持不变，导入时钟早于快照则拒绝。历史作答的 `posedAt`、消息创建时间采用相同历史时间。
+
+`first-state.json`、`second-state.json` 纳入全部业务表行、schema 和实际领域投影（SQLite 内部记账表除外），必须完全相同。计算状态哈希时，仅把 `migration_batches.recorded_at` 和 `deeptutor-migration` 事件的 SQL `recorded_at` / JSON `recordedAt` 归一化为 0；数据库仍保留实际审计时间，原生事件时间完全保留。因此同一基线、快照、计划在不同导入日也得到相同状态/投影哈希。`rehearsal.json` 记录哈希和实际事件计数；跨预演比较须先核对基线和计划一致。
+
+另从 `before.sqlite` 生成 `rollback.sqlite`，验证逻辑状态逐字节恢复基线，绝不覆盖生产库。独立 Python 验证器直接读取快照 SQL、原题 JSON 和三份 Coach 副本，核对课程复用、逐条历史记录、历史发生时间、全部业务表的审计时间归一化、导入日没有增加 legacy 通过/作答/笔记、事件隔离、首答身份、现有 pending/证据不变及回滚结果。输出目录含完整学习库副本和历史原文，必须保持私有，不得整目录附到公开 PR 或评论。
 
 ## 正式迁移仍待验收
 

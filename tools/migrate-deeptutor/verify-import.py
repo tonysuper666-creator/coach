@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Independent verification of a real rehearsal SQLite database. Opens copies only, read-only."""
 import argparse
+import base64
 from collections import Counter
 from datetime import datetime, timedelta
 import hashlib
 import json
+import math
 from pathlib import Path
 import sqlite3
 from zoneinfo import ZoneInfo
@@ -40,6 +42,44 @@ def day(seconds):
     # Subtract on the local calendar, matching the domain's DST-safe 04:00 boundary.
     date = at.date() - timedelta(days=int(at.hour < 4))
     return (date - datetime(1970, 1, 1).date()).days
+
+
+def source_millis(value):
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds) and 0 < seconds < 1e11:
+            return int(seconds * 1000)
+    except (TypeError, ValueError):
+        pass
+    try:
+        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return int(at.timestamp() * 1000) if at.tzinfo and at.timestamp() > 0 else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def verify_normalized_tables(db, state):
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+    check(tables == set(state["tables"]), "Normalized state omits a business table")
+    for table in tables:
+        actual = []
+        for row in rows(db, table):
+            row = {k: base64.b64encode(v).decode() if isinstance(v, bytes) else v for k, v in row.items()}
+            if table == "migration_batches":
+                row["recorded_at"] = 0
+            if table == "events" and row["device_id"] == "deeptutor-migration":
+                row["recorded_at"] = 0
+                row["event_json"] = json.loads(row["event_json"])
+                row["event_json"]["recordedAt"] = 0
+            actual.append(row)
+        saved = []
+        for row in state["tables"][table]:
+            row = dict(row)
+            if table == "events" and row["device_id"] == "deeptutor-migration":
+                row["event_json"] = json.loads(row["event_json"])
+            saved.append(row)
+        key = lambda r: json.dumps(r, sort_keys=True, ensure_ascii=False)
+        check(sorted(actual, key=key) == sorted(saved, key=key), "Normalized SQL table differs: " + table)
 
 
 def verify(snapshot, out, seed_path):
@@ -90,7 +130,31 @@ def verify(snapshot, out, seed_path):
         by_source = {}
         for e in events:
             by_source.setdefault(e["payload"]["sourceId"], []).append(e)
+        snapshot_times = [datetime.fromisoformat(v.split(":", 1)[1].replace("Z", "+00:00"))
+                          for v in load(snapshot / "copy-stats.json")["before"].values() if v != "absent"]
+        cutoff = int(max(snapshot_times).timestamp() * 1000)
+        check(plan["history_time"] == mapping["history_time"] and plan["history_time"]["snapshot_at"] == cutoff,
+              "Historical cutoff differs from captured source mtimes")
+        schedules = {r["payload"]["kp_id"]: r["payload"] for r in records.values() if r["kind"] == "legacy_schedule"}
+        anchors = {k["id"]: k.get("anchors") or {} for k in mapping["knowledge_points"]}
         for key, r in records.items():
+            p, kind = r["payload"], r["kind"]
+            if kind in ("legacy_passed", "legacy_schedule"):
+                schedule = schedules.get(p["kp_id"], {}) if kind == "legacy_passed" else p
+                candidates = [schedule.get("original_state", {}).get("last_review_at"),
+                              anchors.get(p["kp_id"], {}).get("created_at"), plan["history_time"]["mastery_updated_at"]]
+            else:
+                candidates = [p.get("created_at"), p.get("updated_at")]
+            times = [t for v in candidates if (t := source_millis(v)) is not None and t <= cutoff]
+            expected_time = times[0] if times else cutoff
+            if kind == "legacy_journal":
+                historical_noon = datetime.fromisoformat(p["day"] + "T12:00:00").replace(tzinfo=ZoneInfo("Europe/London"))
+                if int(historical_noon.timestamp() * 1000) <= cutoff:
+                    expected_time = int(historical_noon.timestamp() * 1000)
+            check(all(e["occurredAt"] == expected_time for e in by_source[key]), "Event time differs from historical source")
+            if kind == "legacy_attempt":
+                check(next(e for e in by_source[key] if e["type"] == "legacy_attempt")["payload"]["posedAt"] == expected_time,
+                      "Historical attempt posed time differs")
             kinds = Counter(e["type"] for e in by_source[key])
             if r["kind"] in ("legacy_event_archive", "legacy_journal_metadata"):
                 check(kinds == {"legacy_imported": 1}, "Old event executed as a current fact")
@@ -135,6 +199,13 @@ def verify(snapshot, out, seed_path):
         check(first_bytes == second_bytes, "Normalized database changed on second import")
         check(hashlib.sha256(first_bytes).hexdigest() == report["state_sha256"], "State hash mismatch")
         projection = json.loads(first_bytes)["projection"]
+        verify_normalized_tables(after, json.loads(first_bytes))
+        import_days = {str(day(e["recordedAt"] / 1000)) for e in events}
+        for import_day in import_days:
+            old = baseline_projection["journal"].get(import_day, {})
+            new = projection["journal"].get(import_day, {})
+            check(all(new.get(k, 0) == old.get(k, 0) for k in ("answers", "notes"))
+                  and new.get("newlyPassed", []) == old.get("newlyPassed", []), "Import day gained legacy learning facts")
         passed_ids = {r["payload"]["kp_id"] for r in records.values() if r["kind"] == "legacy_passed"}
         check(all(projection["mastery"][kp]["passed"] for kp in passed_ids), "Historical passed fact missing from replay")
         for r in records.values():

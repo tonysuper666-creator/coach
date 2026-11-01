@@ -59,6 +59,8 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py --snapshot "$SNAPSHOT"
 
 ## 真实副本 writer（2026-11-01）
 
+本节为 PR #52 的历史证据，已被下节时间修复取代。Architect 独立复核发现旧版本用导入墙钟补缺失的历史时间，导致当天错误新增 9 个通过；这里的旧状态哈希只能证明同一批次重导幂等，不能比较独立预演。两次旧预演基线实际相同。
+
 结果：部分达到；在现有 Coach 数据库的隔离副本内实际执行两次事务导入，第一次 521 条历史记录 / 556 个事件，第二次 0 条 / 0 个。全库规范化状态逐字节相同。11 月 1 日 21:00 的本人指令已取消旧日期门槛，上节的日期限制仅为历史记录。尚待独立 QA-C 验收与后续异源复核，不能视为整个迁移卡完成。
 
 从在线 Coach 数据库以只读 SQLite backup 捕获基线，再写入新私有目录内的副本。基线 135 个事件，导入后 691 个。独立 Python/SQLite 检查源快照、三份 Coach 副本及领域回放，实测如下：
@@ -100,3 +102,34 @@ Gradle：24 tests / 0 failures / 0 errors / 0 skipped。另验证在线 backup �
 完整副本、原始学习数据和全表 state JSON 仅留私有语料目录；平台附件只交付计数与哈希。生产库仅只读 backup，未重复 seed、未激活、未访问 DeepTutor 源或 8790。新增付费模型调用 0；卡内既有归属复核物理调用 2。
 
 正式导入、增量源修订、本人一次合并确认（归属/前置及 10 道简答采分点）、五个 KP 界面对照、blobs 备份与正式切换仍未完成。当前 writer 遇到源修订会拒绝并回滚，不宣称已经支持正式增量替换；不能因工具 PR 合并而结束整张迁移卡或解锁 TON-1102。
+
+## 历史发生时间与跨预演状态哈希修复（2026-11-01）
+
+结果：本切片本机验证达到；26 tests / 0 failures / 0 errors / 0 skipped。原有 24 项断言保留，新增两项分别用同一基线的两份副本在相隔两天的注入时钟下导入并比较规范化状态哈希，以及检查导入日没有 legacy 事实、通过/复习使用上次复习时间、ISO 笔记时间和无时间记录的快照回退时间。尚待 QA-C 独立复跑及 Architect 复核。
+
+`occurredAt`、作答 `posedAt`、消息创建时间均由来源或快照确定。计划保存 `history_time`，不使用导入墙钟补历史事实。实际库仍保留真实审计时间；状态输出仅归一化迁移批次及迁移事件的审计时间，原生事件不变。独立验证器从 SQLite 重建规范化业务表，逐条核验历史时间，并检查导入日通过、作答、笔记没有增加。
+
+实际执行命令（以下全部退出 0；两份输出目录此前不存在）：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist --offline --max-workers=2 --console=plain
+SNAPSHOT="$HOME/Coach/migrate-staging/2026-10-31T07-41-31.131462Z"
+SEED="$HOME/Coach/corpus/seed-content-manifest.json"
+for suffix in a b; do
+  OUT="$HOME/Coach/corpus/ton-1095/writer-time-2026-11-01-$suffix"
+  JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor rehearse \
+    --snapshot "$SNAPSHOT" --coach-db "$HOME/Coach/data/coach.sqlite" \
+    --seed-manifest "$SEED" --proposal "$HOME/Coach/corpus/ton-1095/proposal-reviewed.json" --out "$OUT"
+  nice -n 15 python3 tools/migrate-deeptutor/verify-import.py --snapshot "$SNAPSHOT" --seed "$SEED" --out "$OUT"
+done
+```
+
+首次测试曾因把缺失 WAL 的 `absent` 当作时间解析而失败，修正后全量测试通过。首次独立验证曾因嵌套 JSON 字段顺序影响 Python 的行排序而失败；逐 ID 比对证实实际行差异 0，改为递归按键排序后完整检查通过，未减少检查内容。
+
+两个真实导入时钟分别为 `1793572191054` 和 `1793572241913`。两份基线、mapping、计划、首次状态、二次状态分别逐字节相同；各自回退 SQLite 与基线逐字节相同。两次都首次写入 521 条记录 / 556 个事件，二次 0 / 0，事件总数 135 → 691。保留 45 个未知类型、60 道五选项、2 条未解析回答；课程内容、原生学习/复习/pending/分值不变。日志只增加源历史日 `20754`、`20755`，不再产生错误导入日 `20758`，该日新增通过/作答/笔记均为 0。
+
+- 基线和回退状态 SHA-256：`1fc6b8d43cdb61ef14b6b2d2c1460b3556f94fa31cc54ce1099ba007fc50da9d`
+- 两份预演的首次及二次状态 SHA-256：`15c24b6461b475670da0522122a538f1a7a32577006db6a643be1b73c9776d3d`
+- 两份领域投影 SHA-256：`0a3352d15add5bc0152a03c92e09f97aafa772be4edeb5dfc17bf0a1bfc33858`
+
+所有实际数据和全库输出仅留私有语料目录；公开交付仅计数/哈希。生产只读备份，无 seed、激活、DeepTutor 源或 8790 访问，无新增模型调用。正式增量修订协议及其批次审计时间问题仍留下一切片，整卡不结束，TON-1102 不解锁。

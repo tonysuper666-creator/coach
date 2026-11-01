@@ -195,7 +195,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         for(kp in a.kps) firstQuestion.add("$kp:${a.question}")
         fingerprintTimes.getOrPut(a.posed.payload.str("fingerprint")) { mutableListOf() }.add(a.answerTime)
     }
-    for (raw in events) {
+    for (raw in effectiveHistoryEvents(events)) {
         if (!seenIdem.add(raw.idemKey)) continue
         val e = upcasters.upcast(raw)
         if (e == null) { unsupported.add(raw.type); continue }

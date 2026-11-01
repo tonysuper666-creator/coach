@@ -106,9 +106,7 @@ private fun historicalTime(row:JsonObject,plan:JsonObject,mapping:JsonObject):Lo
     return (listOfNotNull(dayTime)+candidates.mapNotNull(::sourceTimestamp)).firstOrNull { it<=cutoff } ?: cutoff
 }
 
-/** Single-transaction writer. CLI only calls this on a newly created rehearsal copy.
- * A revised source identity aborts the entire transaction; it cannot replay learner effects.
- */
+/** Transactional source revisions. The CLI can only write newly created rehearsal copies. */
 internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:JsonObject,clock:()->Long=System::currentTimeMillis):JsonObject {
     require(db.autoCommit) { "Writer owns its transaction" }
     val course=plan.str("course_id");require(course==seed.obj("course").str("id"))
@@ -128,21 +126,44 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
     // Never persist hidden model round metadata, even in the archive.
     val manifest=JsonObject(plan.filterKeys { it!="records" })
     val manifestHash=sha(canonical(manifest))
+    fun batchId(manifestJson:String, records:List<JsonObject>) = sha(manifestJson+canonical(JsonArray(records.sortedBy { it.str("id") })))
+    val identities=plan.array("records").map { v -> val r=v.jsonObject
+        buildJsonObject { for(k in listOf("id","source_hash","payload_hash")) put(k,r.getValue(k)) } }
+    val batchId=batchId(canonical(manifest),identities)
+    val snapshotAt=plan.obj("history_time").getValue("snapshot_at").jsonPrimitive.long
     db.autoCommit=false
     try {
-        db.exec("CREATE TABLE IF NOT EXISTS migration_batches(course_id TEXT PRIMARY KEY,manifest_hash TEXT NOT NULL,manifest_json TEXT NOT NULL,recorded_at INTEGER NOT NULL)")
         db.exec("CREATE TABLE IF NOT EXISTS migration_records(source_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,source_hash TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,source_json TEXT NOT NULL)")
-        val batch=db.query("SELECT * FROM migration_batches WHERE course_id=?",course).singleOrNull()
-        require(batch==null || batch.str("manifest_hash")==manifestHash) { "Migration manifest changed; obtain a new reviewed reconciliation" }
+        val oldColumns=db.query("PRAGMA table_info(migration_batches)").map { it.str("name") }
+        if(oldColumns.isNotEmpty() && "batch_id" !in oldColumns) db.exec("ALTER TABLE migration_batches RENAME TO migration_batches_v1")
+        db.exec("CREATE TABLE IF NOT EXISTS migration_batches(course_id TEXT NOT NULL,batch_id TEXT NOT NULL,manifest_hash TEXT NOT NULL,manifest_json TEXT NOT NULL,recorded_at INTEGER NOT NULL,snapshot_at INTEGER NOT NULL,PRIMARY KEY(course_id,batch_id))")
+        if(oldColumns.isNotEmpty() && "batch_id" !in oldColumns) {
+            for(old in db.query("SELECT * FROM migration_batches_v1")) {
+                val ids=db.query("SELECT source_id AS id,source_hash,payload_hash FROM migration_records WHERE course_id=?",old.str("course_id"))
+                val history=parseText(old.str("manifest_json")).jsonObject.obj("history_time")
+                db.exec("INSERT INTO migration_batches VALUES(?,?,?,?,?,?)",old.str("course_id"),batchId(old.str("manifest_json"),ids),old.str("manifest_hash"),old.str("manifest_json"),old.getValue("recorded_at").jsonPrimitive.long,history.getValue("snapshot_at").jsonPrimitive.long)
+            }
+            db.exec("DROP TABLE migration_batches_v1")
+        }
+        val batch=db.query("SELECT * FROM migration_batches WHERE course_id=? AND batch_id=?",course,batchId).singleOrNull()
         val now=batch?.get("recorded_at")?.jsonPrimitive?.long ?: clock()
-        require(now>=plan.obj("history_time").getValue("snapshot_at").jsonPrimitive.long) { "Import clock precedes snapshot" }
-        if(batch==null) db.exec("INSERT INTO migration_batches VALUES(?,?,?,?)",course,manifestHash,canonical(manifest),now)
-        var inserted=0;var addedEvents=0
+        require(now>=snapshotAt) { "Import clock precedes snapshot" }
+        val latest=db.query("SELECT max(snapshot_at) AS n FROM migration_batches WHERE course_id=?",course).single()["n"]?.jsonPrimitive?.longOrNull
+        require(latest==null || snapshotAt>=latest) { "Cannot apply a snapshot older than the latest imported batch" }
+        val sourceIds=identities.map { it.str("id") }.toSet()
+        require(sourceIds.size==identities.size && db.query("SELECT source_id FROM migration_records WHERE course_id=?",course).all { it.str("source_id") in sourceIds }) { "Source deletion requires an explicit reconciliation; no silent history removal" }
+        if(batch==null) db.exec("INSERT INTO migration_batches VALUES(?,?,?,?,?,?)",course,batchId,manifestHash,canonical(manifest),now,snapshotAt)
+        var inserted=0;var revised=0;var addedEvents=0
+        var revisionFacts:MutableList<JsonObject>?=null
         fun emit(row:JsonObject,type:String,payload:JsonObject,suffix:String="",at:Long=historicalTime(row,plan,mapping)):Long {
             val id="migration:"+sha(course+":"+row.str("id")+":"+type+":"+suffix)
             val event=Event(0,id,course,type,recordedAt=now,occurredAt=at,deviceId="deeptutor-migration",actor="SYSTEM",
                 threadId=if(type in setOf("legacy_attempt","answer_submitted","attempt_voided")) "legacy-thread:"+sha(row.str("id")) else null,
                 payload=JsonObject(payload+mapOf("sourceId" to JsonPrimitive(row.str("id")))))
+            if(revisionFacts!=null) {
+                revisionFacts!!.add(buildJsonObject { put("type",type);put("occurredAt",at);put("payload",event.payload) })
+                return db.query("SELECT min(seq) AS n FROM events WHERE course_id=? AND device_id='deeptutor-migration' AND json_extract(payload,'$.sourceId')=?",course,row.str("id")).single().getValue("n").jsonPrimitive.long
+            }
             val old=db.query("SELECT seq,event_json FROM events WHERE course_id=? AND idem_key=?",course,id).singleOrNull()
             if(old!=null) {
                 val previous=LedgerJson.decodeFromString<Event>(old.str("event_json"))
@@ -163,21 +184,29 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
             val p=row.obj("payload");val id=row.str("id");val kind=row.str("kind")
             require(row.str("payload_hash")==sha(canonical(p))) { "Corrupt planned payload" }
             val raw=if(kind=="legacy_message") p else rawById[id]?.get("source_record") ?: error("Missing original source: $id")
+            require(row.str("source_hash")==sourceContentHash(id,raw)) { "Corrupt source content hash: $id" }
             val old=db.query("SELECT * FROM migration_records WHERE source_id=?",id).singleOrNull()
             if(old!=null) {
-                require(old.str("course_id")==course && old.str("kind")==kind && old.str("source_hash")==row.str("source_hash") &&
-                    old.str("payload_hash")==row.str("payload_hash") && old.str("payload_json")==canonical(p) && old.str("source_json")==canonical(raw)) {
-                    "Source revision conflict: $id; transaction rolled back"
+                require(old.str("course_id")==course && old.str("kind")==kind) { "Source identity changed course or kind: $id" }
+                if(old.str("source_hash")==row.str("source_hash")) {
+                    require(old.str("payload_hash")==row.str("payload_hash") && old.str("payload_json")==canonical(p) && old.str("source_json")==canonical(raw)) { "Unchanged source has conflicting derived data: $id" }
+                    continue
                 }
-                continue
+                revisionFacts=mutableListOf()
+                revised++
+            } else {
+                revisionFacts=null
+                inserted++
             }
-            db.exec("INSERT INTO migration_records VALUES(?,?,?,?,?,?,?)",id,course,kind,row.str("source_hash"),row.str("payload_hash"),canonical(p),canonical(raw))
-            inserted++
             when(kind) {
                 "legacy_question" -> {
                     val q=p.obj("question");val stem=q.str("question").ifBlank { q.str("stem") }.ifBlank { q.str("prompt") }
                     val seq=emit(row,"legacy_imported",p)
-                    db.exec("INSERT INTO questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state,created_seq) VALUES(?,?,?,?,?,'LEGACY',?,'UNREVIEWED',?)",
+                    if(old!=null) {
+                        require(db.query("SELECT question_id FROM questions WHERE question_id=? AND course_id=? AND origin='LEGACY' AND key_state='UNREVIEWED'",id,course).size==1 &&
+                            listOf("question_kp","answer_keys","pool_details","constructed_details").all { table -> db.query("SELECT question_id FROM $table WHERE question_id=?",id).isEmpty() }) { "Cannot revise a promoted legacy question" }
+                        db.exec("UPDATE questions SET format=?,stem_md=?,options=? WHERE question_id=?",if(isChoice(q)) "SINGLE_CHOICE" else "SHORT_ANSWER",stem,q["options"]?.let(::canonical),id)
+                    } else db.exec("INSERT INTO questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state,created_seq) VALUES(?,?,?,?,?,'LEGACY',?,'UNREVIEWED',?)",
                         id,course,if(isChoice(q)) "SINGLE_CHOICE" else "SHORT_ANSWER",stem,q["options"]?.let(::canonical),"legacy:"+sha(id),seq)
                     // Deliberately no question_kp, answer_keys or pool_details.
                 }
@@ -215,18 +244,45 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
                 "legacy_message" -> {
                     val thread="legacy-chat:"+sha(course+":"+p.str("session_id"))
                     db.exec("INSERT OR IGNORE INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'LEGACY','LEGACY_SESSION',?)",thread,course,thread)
-                    val next=db.query("SELECT coalesce(max(mseq),0)+1 AS n FROM messages WHERE thread_id=?",thread).single().getValue("n").jsonPrimitive.long
-                    db.exec("INSERT INTO messages(thread_id,mseq,message_id,role,status,content_md,created_at,delta_index) VALUES(?,?,?,?,'complete',?,?,0)",
-                        thread,next,id,p.str("role"),p.str("content"),historicalTime(row,plan,mapping))
+                    if(old!=null) {
+                        val previous=db.query("SELECT m.thread_id,t.kind,t.course_id FROM messages m JOIN threads t USING(thread_id) WHERE message_id=?",id).single()
+                        require(previous.str("kind")=="LEGACY" && previous.str("course_id")==course && previous.str("thread_id")==thread) { "Moving messages between sessions requires explicit reconciliation" }
+                        db.exec("UPDATE messages SET role=?,content_md=?,created_at=? WHERE message_id=?",p.str("role"),p.str("content"),historicalTime(row,plan,mapping),id)
+                    } else {
+                        val next=db.query("SELECT coalesce(max(mseq),0)+1 AS n FROM messages WHERE thread_id=?",thread).single().getValue("n").jsonPrimitive.long
+                        db.exec("INSERT INTO messages(thread_id,mseq,message_id,role,status,content_md,created_at,delta_index) VALUES(?,?,?,?,'complete',?,?,0)",
+                            thread,next,id,p.str("role"),p.str("content"),historicalTime(row,plan,mapping))
+                    }
                     emit(row,"legacy_imported",buildJsonObject { put("messageId",id);put("threadId",thread) })
                 }
                 else -> emit(row,"legacy_imported",buildJsonObject { put("kind",kind);put("archive",p) })
             }
+            val facts=revisionFacts
+            revisionFacts=null
+            if(old!=null) emit(row,"legacy_source_revised",buildJsonObject {
+                put("kind",kind);put("old_content_hash",old.str("source_hash"));put("new_content_hash",row.str("source_hash"))
+                put("old_payload_hash",old.str("payload_hash"));put("new_payload_hash",row.str("payload_hash"))
+                put("snapshot_at",snapshotAt);put("old_source",parseText(old.str("source_json")));put("new_source",raw)
+                put("facts",JsonArray(requireNotNull(facts)))
+            },suffix=batchId)
+            db.exec("INSERT INTO migration_records VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_hash=excluded.source_hash,payload_hash=excluded.payload_hash,payload_json=excluded.payload_json,source_json=excluded.source_json",
+                id,course,kind,row.str("source_hash"),row.str("payload_hash"),canonical(p),canonical(raw))
         }
-        if(inserted>0) db.exec("DELETE FROM projection_cache WHERE course_id=?",course)
+        // Stable chronological ordering inside migration-owned threads, including late arrivals.
+        if(inserted+revised>0) {
+            for(thread in db.query("SELECT DISTINCT m.thread_id FROM messages m JOIN migration_records r ON r.source_id=m.message_id WHERE r.course_id=? AND r.kind='legacy_message'",course)) {
+                val messages=db.query("SELECT message_id FROM messages WHERE thread_id=? ORDER BY created_at,message_id",thread.str("thread_id"))
+                require(messages.all { it.str("message_id") in sourceIds }) { "Legacy thread contains a native message; cannot reorder" }
+                messages.forEachIndexed { index,m -> db.exec("UPDATE messages SET mseq=? WHERE message_id=?",-index-1,m.str("message_id")) }
+                messages.forEachIndexed { index,m -> db.exec("UPDATE messages SET mseq=? WHERE message_id=?",index+1,m.str("message_id")) }
+            }
+            db.exec("DELETE FROM projection_cache WHERE course_id=?",course)
+        }
+        // Fail inside the transaction if corrected history cannot be replayed safely.
+        databaseState(db,course)
         require(db.query("PRAGMA foreign_key_check").isEmpty()) { "Foreign key violation" }
         db.commit()
-        return buildJsonObject { put("records_inserted",inserted);put("events_added",addedEvents);put("records_unchanged",ordered.size-inserted) }
+        return buildJsonObject { put("records_inserted",inserted);put("records_revised",revised);put("events_added",addedEvents);put("records_unchanged",ordered.size-inserted-revised) }
     } catch(e:Throwable) { db.rollback();throw e } finally { db.autoCommit=true }
 }
 

@@ -26,7 +26,6 @@ fun mapChoiceQuestion(q: JsonObject): JsonObject {
             put("correctOptionId",correct)
             put("fingerprint",questionFingerprint(stem,options))
         } else put("importIssue","Missing or invalid legacy options/key; requires review")
-        if(options.size!=4) put("importIssue","Legacy option count ${options.size}; retain every option, quarantine until blind review")
     }
 }
 

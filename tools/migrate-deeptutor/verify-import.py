@@ -53,6 +53,12 @@ def verify(snapshot, out, seed_path):
         check(all(actual.get(k) == v for k, v in baseline.items()), "Pre-existing learner events changed")
         content_tables = ("outline_kp", "source_docs", "source_pages", "blobs", "course_content", "course_modules")
         tables = {r[0] for r in before.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # Explicit event seq inserts advance SQLite's AUTOINCREMENT bookkeeping.
+        for table in tables - {"events", "questions", "threads", "messages", "projection_cache", "migration_records", "migration_batches", "sqlite_sequence"}:
+            check(rows(before, table) == rows(after, table), "Unrelated baseline table changed: " + table)
+        for table in ("questions", "threads", "messages"):
+            baseline_rows = {repr(sorted(r.items())) for r in rows(before, table)}
+            check(baseline_rows <= {repr(sorted(r.items())) for r in rows(after, table)}, "Existing rows changed: " + table)
         for table in content_tables:
             if table in tables:
                 check(rows(before, table) == rows(after, table), "Course content changed: " + table)
@@ -61,10 +67,22 @@ def verify(snapshot, out, seed_path):
         imported = {r["source_id"]: dict(r) for r in after.execute("SELECT * FROM migration_records")}
         records = {r["id"]: r for r in plan["records"]}
         check(set(imported) == set(records), "Missing/extra imported identities")
+        originals = {}
+        def collect(value):
+            if isinstance(value, dict):
+                if "source_record" in value and str(value.get("id", "")).startswith("legacy:"):
+                    originals[value["id"]] = value["source_record"]
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        collect(mapping)
         for key, row in imported.items():
             record = records[key]
             check(row["source_hash"] == record["source_hash"] and row["payload_hash"] == record["payload_hash"], "Source revision changed")
             check(json.loads(row["payload_json"]) == record["payload"], "Persisted payload differs")
+            check(json.loads(row["source_json"]) == originals[key], "Original source value lost")
         delta = [v for k, v in actual.items() if k not in baseline]
         events = [json.loads(v["event_json"]) for v in delta]
         check({e["payload"]["sourceId"] for e in events} == set(records), "Source lacks real ledger events")
@@ -117,6 +135,15 @@ def verify(snapshot, out, seed_path):
         check(first_bytes == second_bytes, "Normalized database changed on second import")
         check(hashlib.sha256(first_bytes).hexdigest() == report["state_sha256"], "State hash mismatch")
         projection = json.loads(first_bytes)["projection"]
+        passed_ids = {r["payload"]["kp_id"] for r in records.values() if r["kind"] == "legacy_passed"}
+        check(all(projection["mastery"][kp]["passed"] for kp in passed_ids), "Historical passed fact missing from replay")
+        for r in records.values():
+            p = r["payload"]
+            if r["kind"] == "legacy_schedule" and p["queue_eligible"] and p["kp_id"] not in baseline_projection["review"]:
+                review = projection["review"][p["kp_id"]]
+                check(review["dueDay"] == day(p["dueAt"]) and review["lapses"] == p["original_state"].get("lapse_count", 0), "Imported review replay differs")
+        note_delta = sum(j["notes"] for j in projection["journal"].values()) - sum(j["notes"] for j in baseline_projection["journal"].values())
+        check(note_delta == sum(r["kind"] == "notes" for r in records.values()), "Historical notes missing from replay")
         check(all(not any(a.startswith("legacy-attempt:") for a in [*m["window"], *m["support"], *m["solidLatch"]]) for m in projection["mastery"].values()), "Legacy entered mastery/solid")
         check(projection["position"]["pending"] == baseline_projection["position"]["pending"], "Migration displaced a live pending answer")
         for kp, review in baseline_projection["review"].items():
@@ -134,6 +161,7 @@ def verify(snapshot, out, seed_path):
         source_report = module.verify(snapshot, out, out, seed_path, rehearsal=True)
         return {"source_counts": source_report["source_counts"], "record_kinds": dict(Counter(r["kind"] for r in records.values())),
                 "events_before": len(baseline), "events_after": len(actual), "events_added": len(delta), "second_events_added": 0,
+                "second_records_inserted": report["second"]["records_inserted"], "passed_facts_replayed": len(passed_ids), "notes_replayed": note_delta,
                 "state_sha256": report["state_sha256"], "projection_sha256": report["projection_sha256"],
                 "unknown_types_preserved": len(batch["unknown_types"]), "five_option_questions_quarantined": options_5,
                 "unresolved_answers_preserved": source_report["unresolved_choice_answers_preserved"],

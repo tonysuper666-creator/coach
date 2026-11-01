@@ -57,18 +57,46 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py --snapshot "$SNAPSHOT"
 
 11 月 3 日之后仍需：新快照、把归属/前置与 10 道简答采分点合并向本人确认、正式写库适配器、备份与真实重导、5 个 KP 界面对照、切换/回退演练。不能因本工具 PR 合并而结束整张迁移卡。
 
-## 真实副本 writer（2026-11-01，验证待续）
+## 真实副本 writer（2026-11-01）
 
-结果：未达到迁移验收；本轮真实导入 0 次。11 月 1 日 21:00 的本人指令已取消旧日期门槛，上节的日期限制仅为历史记录。
+结果：部分达到；在现有 Coach 数据库的隔离副本内实际执行两次事务导入，第一次 521 条历史记录 / 556 个事件，第二次 0 条 / 0 个。全库规范化状态逐字节相同。11 月 1 日 21:00 的本人指令已取消旧日期门槛，上节的日期限制仅为历史记录。尚待独立 QA-C 验收与后续异源复核，不能视为整个迁移卡完成。
 
-新增 `rehearse` 命令，读取在线 Coach 数据库的只读 SQLite backup，在新私有目录内对副本执行真实事务导入两次，并比较全库规范化状态和领域回放。另附独立 Python/SQLite 对账器。实现保留已有课程与原生复习/待答状态，隔离历史题与作答，把旧事件作为档案保存；原值、五个选项和未解析回答留存。尚未编译或运行这些新增 Kotlin 测试，不能以代码中的断言作为验收证据。
+从在线 Coach 数据库以只读 SQLite backup 捕获基线，再写入新私有目录内的副本。基线 135 个事件，导入后 691 个。独立 Python/SQLite 检查源快照、三份 Coach 副本及领域回放，实测如下：
 
-尝试命令：
+| 项目 | 实测 |
+|---|---:|
+| 源 KP / 题 / 作答 | 49 / 108 / 32 |
+| legacy_passed / 复习 / 笔记 | 9 / 9 / 12 |
+| 仅存档的旧事件 / 消息 | 242 / 108 |
+| 日志内容 / 日志元数据 | 0 / 1 |
+| 保留未知类型 / 五选项题 / 未解析回答 | 45 / 60 / 2 |
+| 第二次未变化的历史记录 | 521 |
+
+108 题保持 `LEGACY/UNREVIEWED`，未创建归属、答案键或题池记录；未确认的提议仅存档。32 条历史作答有独立题目身份和指纹，不占用原生首答资格、不计入证据；3 条重置另发撤销事件。9 个旧已通过在回放中生效，9 条复习原值保留，12 条笔记进入历史回放。242 个旧事件没有作为现役评分或教学事件重放。消息正文与源逐条相同，隐藏模型回合元数据未留存。
+
+已有课程内容和全部非迁移业务表保持相同，已有题目/会话/消息行逐字段保留；原生学习事件、证据、复习、pending 与 `exam_weights_set` 不变。全库状态与 schema 纳入幂等比较；三份库 integrity_check 均为 ok。回退副本全部表行和规范化状态与基线一致；仅验证私有副本恢复，未覆盖生产库。
+
+本机实际命令（均退出 0）：
 
 ```sh
 JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist --offline --max-workers=2 --console=plain
+SNAPSHOT="$HOME/Coach/migrate-staging/2026-10-31T07-41-31.131462Z"
+SEED="$HOME/Coach/corpus/seed-content-manifest.json"
+OUT="$HOME/Coach/corpus/ton-1095/writer-2026-11-01-b"
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor rehearse \
+  --snapshot "$SNAPSHOT" --coach-db "$HOME/Coach/data/coach.sqlite" \
+  --seed-manifest "$SEED" --proposal "$HOME/Coach/corpus/ton-1095/proposal-reviewed.json" --out "$OUT"
+nice -n 15 python3 tools/migrate-deeptutor/verify-import.py --snapshot "$SNAPSHOT" --seed "$SEED" --out "$OUT"
 ```
 
-该调用一直等待全机锁（持有者 TON-1073 VM base/head comparison），Gradle 未启动；取消本轮等待进程后退出 143，未取消锁持有者。`python3 -m py_compile tools/migrate-deeptutor/verify-import.py tools/migrate-deeptutor/verify-plan.py` 与 `git diff --check` 退出 0。实际双导、状态哈希、事件数、回退与独立验收均未验证，PR 保持草稿。恢复后须执行 README 的 `rehearse` 和 `verify-import.py` 命令，并用真实输出替换本段待续记录。
+Gradle：24 tests / 0 failures / 0 errors / 0 skipped。另验证在线 backup 包含已提交 WAL、源连接拒绝写入、源修订冲突整笔回滚、已有复习和待答保留、历史首答隔离。首次构建与首次实际预演曾失败，已修复排序数值类型、五选项误报及标量原值处理；首次预演事务回滚，未将其算作成功。上轮曾等待重构建锁并取消自己的等待进程，本轮锁释放后正常执行，未绕过全机锁。
 
-正式导入、增量源修订、本人一次合并确认、五个 KP 界面对照及切换仍未完成；本轮未写生产库、未激活、未访问 DeepTutor 源，新增付费模型调用 0。
+成功预演的 SHA-256：
+
+- 基线及回退规范化状态：`1fc6b8d43cdb61ef14b6b2d2c1460b3556f94fa31cc54ce1099ba007fc50da9d`
+- 首次与第二次全库状态：`21242ce4443cfbd7f13f4ae633a648c61dfc47102f008d4d1ed32a969a613916`
+- 实际领域投影：`5aa553515837bc1570ac1d852ae54abc54f0bacd1eecdc6ff4d47479a936fcb9`
+
+完整副本、原始学习数据和全表 state JSON 仅留私有语料目录；平台附件只交付计数与哈希。生产库仅只读 backup，未重复 seed、未激活、未访问 DeepTutor 源或 8790。新增付费模型调用 0；卡内既有归属复核物理调用 2。
+
+正式导入、增量源修订、本人一次合并确认（归属/前置及 10 道简答采分点）、五个 KP 界面对照、blobs 备份与正式切换仍未完成。当前 writer 遇到源修订会拒绝并回滚，不宣称已经支持正式增量替换；不能因工具 PR 合并而结束整张迁移卡或解锁 TON-1102。

@@ -16,7 +16,7 @@ class HistoryWriterTest {
         val raws=listOf(
             "legacy_question" to choice,
             "legacy_attempt" to json("created_at" to 1700000000,"user_answer" to "I think B"),
-            "legacy_passed" to json("kp_id" to "kp"),
+            "legacy_passed" to JsonPrimitive(1.0),
             "legacy_schedule" to json("kp_id" to "kp"),
             "notes" to json("created_at" to 1700000000,"output" to "historical note"),
             "legacy_message" to json("session_id" to "session","role" to "user","content" to "body only","created_at" to 1700000000),
@@ -31,7 +31,7 @@ class HistoryWriterTest {
             "legacy_schedule" to json("kp_id" to "kp","dueAt" to 1700086400,"queue_eligible" to true,"original_state" to json("lapse_count" to 2,"stability" to 3.5)),
             "legacy_journal" to json("day" to "2023-11-14","entry" to raws.last().second)
         )
-        val records=raws.zip(sources).map { (pair,source) -> plannedRecord(source,pair.first,payloads[pair.first] ?: pair.second) }
+        val records=raws.zip(sources).map { (pair,source) -> plannedRecord(source,pair.first,payloads[pair.first] ?: pair.second.jsonObject) }
         val plan=json("course_id" to "course","records" to JsonArray(records),"unknown_types" to JsonArray(listOf(json("id" to "kp","type" to null,"current_source_type" to "memory"))),"human_confirmation" to "pending")
         return plan to json("sources" to JsonArray(sources))
     }
@@ -64,6 +64,7 @@ class HistoryWriterTest {
         val question=db.query("SELECT * FROM questions").single()
         assertEquals("UNREVIEWED",question.str("key_state"));assertEquals(5,parseText(question.str("options")).jsonArray.size)
         assertEquals("body only",db.query("SELECT content_md FROM messages").single().str("content_md"))
+        assertEquals(JsonPrimitive(1.0),parseText(db.query("SELECT source_json FROM migration_records WHERE kind='legacy_passed'").single().str("source_json")))
         val projection=first.obj("projection")
         assertTrue(projection.obj("position").obj("pending").isEmpty())
         val mastery=projection.obj("mastery").obj("kp")
@@ -122,7 +123,7 @@ class HistoryWriterTest {
         assertEquals(choiceAnswer(choice,"B"),q["correctOptionId"])
         assertEquals(5,q.array("options").size);assertEquals("UNREVIEWED",q.str("keyState"))
         assertFalse(Regex("[A-E]").containsMatchIn(q.str("explanation")))
-        assertTrue(q.str("explanation").contains("「second」"));assertTrue(q.str("importIssue").contains("5"))
+        assertTrue(q.str("explanation").contains("「second」"));assertFalse(q.containsKey("importIssue"))
         assertEquals(JsonNull,choiceAnswer(choice,"c"));assertEquals(JsonNull,choiceAnswer(choice,"I think B"))
     }
 

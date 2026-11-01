@@ -84,7 +84,7 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
     val rawById=mutableMapOf<String,JsonObject>()
     fun collect(v:JsonElement) {
         when(v) {
-            is JsonObject -> { if(v["source_record"] is JsonObject && v.str("id").startsWith("legacy:")) rawById[v.str("id")]=v
+            is JsonObject -> { if(v.containsKey("source_record") && v.str("id").startsWith("legacy:")) rawById[v.str("id")]=v
                 v.values.forEach(::collect) }
             is JsonArray -> v.forEach(::collect)
             else -> Unit
@@ -123,11 +123,11 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
         // The projector only accepts a legacy schedule after its legacy_passed fact.
         val ordered=plan.array("records").map { it.jsonObject }.sortedWith(compareBy<JsonObject> {
             when(it.str("kind")) { "legacy_passed" -> 0;"legacy_schedule" -> 2;else -> 1 }
-        }.thenBy { if(it.str("kind")=="legacy_message") timestamp(it.obj("payload"),0) else 0 }.thenBy { it.str("id") })
+        }.thenBy { if(it.str("kind")=="legacy_message") timestamp(it.obj("payload"),0L) else 0L }.thenBy { it.str("id") })
         for(row in ordered) {
             val p=row.obj("payload");val id=row.str("id");val kind=row.str("kind")
             require(row.str("payload_hash")==sha(canonical(p))) { "Corrupt planned payload" }
-            val raw=if(kind=="legacy_message") p else rawById[id]?.obj("source_record") ?: error("Missing original source: $id")
+            val raw=if(kind=="legacy_message") p else rawById[id]?.get("source_record") ?: error("Missing original source: $id")
             val old=db.query("SELECT * FROM migration_records WHERE source_id=?",id).singleOrNull()
             if(old!=null) {
                 require(old.str("course_id")==course && old.str("kind")==kind && old.str("source_hash")==row.str("source_hash") &&

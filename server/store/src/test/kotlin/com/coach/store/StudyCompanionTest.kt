@@ -33,6 +33,7 @@ class StudyCompanionTest {
             val moved = db.command(wire("file_quick_ask",json("threadId" to first.threadId,"messageId" to message,"action" to "MOVE")))
             assertEquals("OK",moved.status)
             assertEquals("kp-1",moved.result.str("kpId"))
+            assertEquals("kp:kp-1",moved.result.str("targetThreadId"))
             assertEquals("Synthetic question and answer",db.recentTurns(moved.result.str("targetThreadId")).single().second)
             assertEquals(before.mastery,db.snapshot("course").projection.mastery)
             assertEquals(before.position,db.snapshot("course").projection.position)

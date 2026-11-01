@@ -9,6 +9,23 @@ import java.sql.DriverManager
 import kotlin.test.*
 
 class ChatPersistenceTest {
+    @Test fun kpCannotBeReboundToAnotherThreadId() {
+        val directory = Files.createTempDirectory("chat-kp-binding-")
+        try {
+            LedgerStore(directory).use { store ->
+                store.bindTutorThread("course", "persisted-thread", "kp")
+
+                val error = assertFailsWith<IllegalArgumentException> {
+                    store.bindTutorThread("course", "new-thread", "kp")
+                }
+
+                assertTrue(error.message.orEmpty().contains("persisted-thread"))
+                assertTrue(error.message.orEmpty().contains("new-thread"))
+                store.bindTutorThread("course", "persisted-thread", "kp")
+            }
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
     @Test fun quickAskRetryOnALaterDayKeepsItsOriginalThread() {
         val directory = Files.createTempDirectory("chat-next-day-")
         var now = 1793451600000L

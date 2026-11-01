@@ -245,6 +245,87 @@ class ChatFlowTest {
     }
 
     @Test
+    fun stagedPartOneHttpFailureNeverSendsTheLessonRequestAndLeavesTheConceptUntaught() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            h.tutor.httpErrorWhen("explains the graded mistakes only", 500)
+            h.tutor.streamWhen("Start directly with the new concepts", 400, "不该出现的第二段", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val messageId = ws.await("msg.start").str("msg")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("failed", end.str("status"))
+                assertTrue(!visible.contains("不该出现的第二段"), "the lesson part must never surface after part one failed: $visible")
+                Thread.sleep(600) // longer than the lesson part's start delay
+                assertEquals(1, h.tutor.requests, "the lesson request must not be sent (or, if it was in flight, must be cut)")
+                assertTrue(h.tutor.requests == 1 || h.tutor.abortedRequests.get() >= 1)
+                assertEquals("failed", runBlocking { h.snapshot(messageId) }?.status)
+                assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type == "explanation_delivered" } } })
+            }
+        }
+    }
+
+    @Test
+    fun stagedPartOneFirstTokenTimeoutCutsTheLessonUpstreamThatIsAlreadyStreaming() {
+        Harness(defaultTimings(firstTokenDeadlineMs = 800)).use { h ->
+            runBlocking { seedReviewed(h) }
+            // Part one stalls before its first character; the lesson part (started 250 ms later) streams happily into its buffer.
+            h.tutor.streamWhen("explains the graded mistakes only", 1_500, "太晚的第一段", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 150, "甲","乙","丙","丁","戊","己","庚","辛","壬","癸", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val messageId = ws.await("msg.start").str("msg")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("failed", end.str("status"))
+                assertEquals("first_token_timeout", end.str("reason"))
+                assertTrue(visible.isEmpty(), "buffered lesson text must not leak when part one never produced a character: $visible")
+                assertEquals(2, h.tutor.requests, "the lesson request was already in flight")
+                // The stub notices a dropped client when it next writes: part one only after its 1.5 s first-frame delay.
+                val stopAt = System.nanoTime() + 5_000_000_000L
+                while (h.tutor.abortedRequests.get() < 2 && System.nanoTime() < stopAt) Thread.sleep(20)
+                assertEquals(2, h.tutor.abortedRequests.get(), "both upstream streams must be cut, so no bridge slot stays occupied")
+                assertEquals("failed", runBlocking { h.snapshot(messageId) }?.status)
+                assertTrue(runBlocking { h.actor.execute { events("course-1").none { it.type == "explanation_delivered" } } })
+            }
+        }
+    }
+
+    @Test
+    fun stagedReplyOnAOneSlotBridgeKeepsPartOneFastAndFinishesBothPartsInOrderWithoutWatchdogTimeouts() {
+        // The production bridge currently serves one Claude request at a time: the lesson part queues behind part one.
+        Harness(defaultTimings(firstTokenDeadlineMs = 1_500)).use { h ->
+            h.tutor.limitConcurrency(1)
+            runBlocking { seedReviewed(h) }
+            h.tutor.streamWhen("explains the graded mistakes only", 150, "你选的「sunk expenditure」不对，","因为已花掉的钱收不回；","正确项「opportunity cost」成立。", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 1_200, "机会成本是放弃的最佳替代。", "它与沉没成本相对。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port,h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                val sentAt = System.nanoTime()
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                ws.await("msg.start")
+                val firstDelta = ws.await("msg.delta")
+                val firstMs = (System.nanoTime() - sentAt) / 1_000_000
+                assertTrue(firstMs < 1_000, "part one's first character took ${firstMs}ms; the queued lesson request must not slow it")
+                val (rest, end) = collectDeltas(ws)
+                val visible = firstDelta.str("text") + rest
+                assertEquals("complete", end.str("status"), "reason=${end.str("reason")}")
+                assertTrue(end.str("reason").isBlank() || end.str("reason") == "null")
+                assertTrue(visible.indexOf("正确项「opportunity cost」成立。") in 0 until visible.indexOf("机会成本是放弃的最佳替代。"),
+                    "both parts in order: $visible")
+                assertTrue(visible.contains("它与沉没成本相对。"))
+                assertEquals(2, h.tutor.requests)
+                val served = h.tutor.servedAtNanos.toList()
+                assertEquals(2, served.size)
+                // Part one's stream (3 frames x 150 ms) had to finish before the queued lesson request was served.
+                assertTrue((served[1] - served[0]) / 1_000_000 >= 400, "the one-slot stub served both requests at once: ${(served[1] - served[0]) / 1_000_000}ms apart")
+                assertTrue(runBlocking { h.actor.execute { events("course-1").any { it.type == "explanation_delivered" } } })
+            }
+        }
+    }
+
+    @Test
     fun longUnmarkedLessonPackFallsBackToBoundedPrefix() {
         val source = "Introduction.\n\n" + "Unpaginated source text. ".repeat(900)
         val selected = LessonPreparation.boundedInput(source, com.coach.domain.json("name" to "Synthetic KP"))

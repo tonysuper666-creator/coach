@@ -20,6 +20,10 @@ class StubTutor : AutoCloseable {
     val requestEfforts = java.util.Collections.synchronizedList(ArrayList<String?>())
     private val routed = java.util.Collections.synchronizedList(ArrayList<Pair<String, Triple<String, Long, Int>>>())
     @Volatile var requests = 0
+    /** Null = unlimited. Set before the first request: `limitConcurrency(1)` mimics the production bridge. */
+    @Volatile private var concurrencyLimit: java.util.concurrent.Semaphore? = null
+    val servedAtNanos = java.util.Collections.synchronizedList(ArrayList<Long>())
+    fun limitConcurrency(slots: Int) { concurrencyLimit = java.util.concurrent.Semaphore(slots, true) }
     val requestBodies = java.util.Collections.synchronizedList(ArrayList<String>())
 
     init {
@@ -63,6 +67,16 @@ class StubTutor : AutoCloseable {
         requestEfforts.add(exchange.requestHeaders.getFirst("X-Coach-Effort"))
         val match = synchronized(routed) { routed.firstOrNull { requestBody.contains(it.first) }?.also { routed.remove(it) } }
         val (body, delay, status) = match?.second ?: replies.pollFirst() ?: Triple("""{"error":"no stub reply"}""", -1L, 200)
+        // A bridge with N upstream slots serves requests in arrival order; the rest wait here exactly as they wait in the real bridge.
+        val slot = concurrencyLimit
+        slot?.acquire()
+        try {
+            servedAtNanos.add(System.nanoTime())
+            respond(exchange, body, delay, status)
+        } finally { slot?.release() }
+    }
+
+    private fun respond(exchange: HttpExchange, body: String, delay: Long, status: Int) {
         if (delay < 0) {
             val bytes = body.toByteArray()
             exchange.responseHeaders.add("Content-Type", "application/json")

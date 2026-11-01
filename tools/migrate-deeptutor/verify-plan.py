@@ -34,7 +34,7 @@ def inventory(root):
             for p in [root, *root.rglob("*")]}
 
 
-def verify(snapshot, out, repeat, seed_path, before_inventory=None, source_data=None):
+def verify(snapshot, out, repeat, seed_path, before_inventory=None, source_data=None, rehearsal=False):
     mapping = load(out / "mapping.json")
     plan = load(out / "import-plan.json")
     seed = load(seed_path)
@@ -108,15 +108,17 @@ def verify(snapshot, out, repeat, seed_path, before_inventory=None, source_data=
             check(set(row) <= message_fields and row == {k: v for k, v in source.items() if k in message_fields}, "Message metadata retained or body changed")
             checked_messages += 1
         check(sum(r["kind"] == "legacy_message" for r in records.values()) == checked_messages, "Message body lost from plan")
-        filenames = {p.name for p in out.iterdir() if p.is_file()}
-        check(filenames == {p.name for p in repeat.iterdir() if p.is_file()}, "Repeat file set differs")
         hashes = {}
-        for name in sorted(filenames):
-            data = (out / name).read_bytes()
-            check(data == (repeat / name).read_bytes(), "Repeat bytes differ: " + name)
-            hashes[name] = hashlib.sha256(data).hexdigest()
-        simulation = load(out / "simulation.json")
-        check(simulation["second_inserted"] == simulation["second_revised"] == 0, "Second simulation changed records")
+        if not rehearsal:
+            filenames = {p.name for p in out.iterdir() if p.is_file()}
+            check(filenames == {p.name for p in repeat.iterdir() if p.is_file()}, "Repeat file set differs")
+            for name in sorted(filenames):
+                data = (out / name).read_bytes()
+                check(data == (repeat / name).read_bytes(), "Repeat bytes differ: " + name)
+                hashes[name] = hashlib.sha256(data).hexdigest()
+        simulation = None if rehearsal else load(out / "simulation.json")
+        if simulation is not None:
+            check(simulation["second_inserted"] == simulation["second_revised"] == 0, "Second simulation changed records")
         report = {"source_counts": counts, "unknown_original_types_preserved": len(unknown),
                   "source_attempts_checked": checked_attempts, "unresolved_choice_answers_preserved": unresolved,
                   "message_bodies_checked": checked_messages, "source_exam_weight_total": total,

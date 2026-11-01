@@ -12,7 +12,14 @@ fun mapChoiceQuestion(q: JsonObject): JsonObject {
     val correct = entries.indexOfFirst { it.first == key }.let { options.getOrNull(it)?.optionId }
     val stem = q.str("question").ifBlank { q.str("stem") }.ifBlank { q.str("prompt") }
     return buildJsonObject {
-        for ((name,value) in q) if (name !in setOf("options","correct_answer","key","answer","expected_answer")) put(name,value)
+        for ((name,value) in q) if (name !in setOf("options","correct_answer","key","answer","expected_answer")) {
+            // References to display letters must not survive option reordering. The untouched
+            // source remains in migration_records; this rendering still requires blind review.
+            put(name,if(name=="explanation" && value is JsonPrimitive && value.isString)
+                JsonPrimitive(Regex("(?<![A-Za-z0-9_])[A-E](?![A-Za-z0-9_])").replace(value.content) { m ->
+                    entries.singleOrNull { it.first==m.value }?.second?.let { "「$it」" } ?: m.value
+                }) else value)
+        }
         put("options", JsonArray(options.map { buildJsonObject { put("optionId",it.optionId); put("text",it.text) } }))
         put("keyState","UNREVIEWED")
         if (correct != null && runCatching { ChoiceKey(options,correct) }.isSuccess) {

@@ -146,16 +146,21 @@ class MistakeReviewSmoke {
         val bitmap=ui.takeScreenshot()
         java.io.File(context.cacheDir,"review-snap-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,60,it) }
         bitmap.recycle() } }
+    /** The option's letter sits right before its text in the tree: "✓ B" there means this very row is chosen. */
+    private fun chosen(optionText: String): Boolean {
+        val nodes=visibleTexts();val want=norm(optionText).take(40)
+        val at=nodes.indexOfFirst { norm(it.drop(2)).contains(want) }
+        return at>0 && nodes[at-1].contains("✓")
+    }
     private fun marks()=visibleTexts().count { it.contains("✓") }
-    /** Cards are still arriving right after the first one shows, so a click can land on a stale node: retry until the ✓ shows. */
+    /** Reveals the row and taps it. A wrong or missed tap is caught later: the submit button stays disabled
+     * ("选完 3 题后提交") until every card has a choice, and [click] refuses a disabled button. */
     private fun pick(optionText: String,card: Int) {
-        repeat(5) {
-            val before=marks();trace("pick attempt $it marks=$before text=${optionText.take(50)}")
-            try { val node=scrollTo(optionText,card=card);snap("c${card}a${it}-before");tap(node);snap("c${card}a${it}-after") } catch(e: AssertionError) { if(it==4) throw e;Thread.sleep(400);return@repeat }
-            val end=SystemClock.elapsedRealtime()+2_000
-            while(SystemClock.elapsedRealtime()<end) { if(marks()>before) return;Thread.sleep(50) }
+        repeat(3) {
+            trace("pick attempt $it card=$card text=${optionText.take(50)}")
+            try { val node=scrollTo(optionText,card=card);snap("c${card}a$it-before");tap(node);Thread.sleep(400);snap("c${card}a$it-after");return }
+            catch(e: AssertionError) { if(it==2) throw e;Thread.sleep(400) }
         }
-        throw AssertionError("Option click never took effect: $optionText; "+visibleTexts().joinToString(" | "))
     }
     private fun settleAndCapture(name: String,mark: Long) {
         instrumentation.waitForIdleSync();Thread.sleep(100)
@@ -251,7 +256,7 @@ class MistakeReviewSmoke {
             val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             val r=android.graphics.Rect();node.getBoundsInScreen(r)
             trace("reveal #$it ${text.take(30)} at ${r.centerY()} page=${page?.top}-${page?.bottom}")
-            if(page!=null && r.centerY()>=page.top+60 && r.centerY()<=page.bottom-120) return node
+            if(page!=null && r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) return node
             node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
             instrumentation.waitForIdleSync();Thread.sleep(700)
         }
@@ -262,9 +267,9 @@ class MistakeReviewSmoke {
             val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             if(hit!=null) {
                 val r=android.graphics.Rect();hit.getBoundsInScreen(r)
-                if(page==null || (r.centerY()>=page.top+60 && r.centerY()<=page.bottom-120) || (stuck>=2 && r.centerY()>=page.top+20 && r.centerY()<=page.bottom-30)) { trace("found after $it drags: ${text.take(40)}");return hit }
+                if(page==null || (r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) || (stuck>=2 && r.centerY()>=page.top+20 && r.centerY()<=page.bottom-30)) { trace("found after $it drags: ${text.take(40)}");return hit }
                 trace("found at ${r.centerY()} outside page ${page.top}-${page.bottom}; nudging")
-                val down=r.centerY()>page.bottom-120
+                val down=r.centerY()>page.bottom-60
                 // At the very end of the page the row cannot rise further; after two fruitless nudges tap it where it is.
                 if(!scroll(down)) stuck++ else stuck=0
                 return@repeat

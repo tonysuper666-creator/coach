@@ -1,6 +1,7 @@
 package com.coach.android
 
 import android.content.Intent
+import android.os.Bundle
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -30,7 +31,14 @@ class MistakeReviewSmoke {
     private lateinit var course: String
     private lateinit var keys: JSONObject
 
+    private fun step(name: String) {
+        val message = "COACH_STEP ${System.currentTimeMillis()} elapsed=${SystemClock.elapsedRealtime()} $name"
+        instrumentation.sendStatus(0, Bundle().apply { putString("stream", "\n$message\n") })
+        trace(message)
+    }
+
     @Test fun wrongAnswersRetryAndClear() {
+        step("wrongAnswersRetryAndClear started")
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
         require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
@@ -44,24 +52,30 @@ class MistakeReviewSmoke {
         val resume = args.getString("coachPhase") == "resume"
         if (!resume) context.deleteDatabase("coach-client.db")
         try {
+            step("launch activity")
             context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             if (!resume) {
+            step("request initial questions")
             click(waitText("出题",15_000,enabled=true))
             waitText("第 1 / 3 题",15_000)
             val first = group("kp:$kp")
+            step("answer initial questions")
             answer(first, wrong = 2)
             scrollTo("提交本组答案").let(::click)
             scrollTo("本组 1 / 3 题正确",substring=true)
+            step("initial answers graded")
             click(waitText("← 今天"))
             } else click(waitText("← 今天",15_000))
             val first = group("kp:$kp")
             val reviewButton = waitText("到期复习")
+            step("open mistake list")
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
             waitText("错题 2")
             waitText(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
             settleAndCapture("wrong-list",reviewMark)
+            step("mistake list captured")
             samples.put("wrongCount",2)
             if (args.getString("coachPhase") == "prepare") {
                 samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
@@ -72,20 +86,24 @@ class MistakeReviewSmoke {
             scrollTo("正确答案：",substring=true)
             scrollTo("判分依据：",substring=true)
             val retryButton = scrollTo("再练一组")
+            step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
             click(retryButton)
             waitText("第 1 / 3 题")
             settleAndCapture("retry",retryMark)
+            step("retry questions captured")
             val retry = group("mistakes:$kp")
             val oldIds = (0 until first.length()).map { first.getJSONObject(it).getJSONObject("payload").getString("questionId") }.toSet()
             assertEquals(3,retry.length())
             for (i in 0 until retry.length()) assertFalse(oldIds.contains(retry.getJSONObject(i).getJSONObject("payload").getString("questionId")))
+            step("answer retry questions")
             answer(retry,wrong=0)
             val clearMark=SystemClock.elapsedRealtimeNanos()
             click(scrollTo("提交本组答案"))
             waitText("错题 0")
             waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
+            step("cleared list captured")
             samples.put("newQuestions",3).put("clearedCount",2)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
@@ -99,6 +117,7 @@ class MistakeReviewSmoke {
     }
 
     @Test fun cachedMistakesSurviveRestartWithoutMac() {
+        step("cachedMistakesSurviveRestartWithoutMac started")
         require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
         val port=requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
@@ -106,10 +125,12 @@ class MistakeReviewSmoke {
             .putExtra("coachUrl","http://${BuildConfig.COACH_TAIL_HOST}:$port")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         click(waitText("到期复习",15_000))
+        step("open offline mistake list")
         waitText("错题 2")
         waitText("离线可回看错题；连接 Mac 后可再练。")
         scrollTo("正确答案：",substring=true)
         settleAndCapture("offline",SystemClock.elapsedRealtimeNanos())
+        step("offline mistake list captured")
         samples.put("offlineWrongCount",2)
         java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
     }
@@ -156,6 +177,7 @@ class MistakeReviewSmoke {
     /** Reveals the row and taps it. A wrong or missed tap is caught later: the submit button stays disabled
      * ("选完 3 题后提交") until every card has a choice, and [click] refuses a disabled button. */
     private fun pick(optionText: String,card: Int) {
+        step("select answer card=$card")
         repeat(3) {
             trace("pick attempt $it card=$card text=${optionText.take(50)}")
             try { val node=scrollTo(optionText,card=card);snap("c${card}a$it-before");tap(node);Thread.sleep(400);snap("c${card}a$it-after");return }

@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = 600.dp
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null) {
     val thread = view.tutorThreadId(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
@@ -65,6 +65,13 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false) }
     }
 
+    // A newly passed queue item opens its successor after grading/streaming settles.
+    LaunchedEffect(kp.status, view.weekTarget?.id, tv.busy, pending) {
+        if (weekActions != null && view.weekProgress(kp.id) != null && kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID) && !tv.busy && pending == null) {
+            weekActions.onOpen(view.weekTarget?.id)
+        }
+    }
+
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
             Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
@@ -84,9 +91,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
                         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }
+                    view.weekProgress(kp.id)?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) }
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)
                         additionalScope.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                        if (weekActions != null) WeekPicker(view, weekActions, ui.connected)
                     }
                 }
             }
@@ -178,6 +187,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
+            }
+            if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
+                OutlinedButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一个知识点 →") }
+                weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
             // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。

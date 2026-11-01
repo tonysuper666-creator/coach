@@ -51,3 +51,9 @@ Kotlin：core 19、AI 61、app 90、UI 54，共 224 项，失败/跳过均 0；�
 OPPO 首次安装因系统确认页而超时，确认安装后已核对 APK SHA-256 为 `94aca75d13c3185c1e00850c8e2f9f38b88ad5351943f45cb74776951fd4cea0`。后续测试期间设备被实际使用，已停止所有真机操作。没有有效的 OPPO 五道题截图或五次重讲分布；不以模拟器结果代替该验收项。意外截到的个人界面已从本次证据中移除。
 
 后续先确认 OPPO 空闲，再前台一轮补齐真实点选/提交、至少五道不同题结果卡，以及五次重讲客户端首字和逐条首段审阅；最后交 Scout 独立验收，再交 Claude 系复核。当前不能宣称整卡达到验收标准。
+
+## 11-01 rebase 与模拟器补测
+
+候选版已 rebase 到 main `2a37c68`（含 #28 的 `coachApplicationId` / `-Pcoach.port`），并 cherry-pick TON-1149 的 `325e51f`（卡包不得默认连生产端口；补丁 ID 与原提交相同，两边谁先合另一边 rebase 都不冲突）。门禁在最终 head 上重跑，退出 0：`tools/dev/heavy ./gradlew :server:core:test :server:ai:test :server:app:test :shared:ui:jvmTest :androidApp:assembleDebug -PcoachApplicationId=com.coach.android.ton1150 --max-workers=2`，Kotlin 230 项失败/跳过 0；`test_sandbox_workdir.py` 通过，`fault_injection.py` 60/60。
+
+模拟器（隔离服务 18860、独立桥 8816，数据为生产库只读拷贝，未连接 18791/8791/8790/DeepTutor）：6 个知识点各完整提交 3 道错题，18 张结果卡均显示所选项、正确项与已复核解析；判分到结果卡期间新增模型调用 0。6 次换例重讲的客户端首字（`CoachTtft`，模拟器口径）：5.827、6.418、6.718、7.411、7.772、7.978 秒，中位 7.065，p90（最近秩，n=6）7.978。这是模拟器数字，且与旧 4.7 秒口径（先追问再等首字）不是同一触发，不得当作真机结果。包名为卡包而不带 `coachUrl` 启动，或 `coachUrl` 指向 18791，均直接抛出 `Refusing production default`。作业表前后一致：completed 26、failed 1（拷贝自带的历史行），无新增，活动 0。

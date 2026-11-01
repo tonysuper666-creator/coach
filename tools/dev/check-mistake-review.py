@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import re
+import selectors
 import socket
 import sqlite3
 import subprocess
@@ -109,14 +110,61 @@ def stop(p):
         except subprocess.TimeoutExpired: p.kill(); p.wait()
 
 
+def stream_instrument(command, report, phase, timeout=420, heartbeat=10):
+    """Stream partial output even if the runner hangs before the test starts."""
+    start = time.monotonic()
+    last_step = 'waiting for instrumentation startup'
+    output = bytearray()
+    pending = b''
+    process = subprocess.Popen(list(map(str, command)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    next_heartbeat = start
+    try:
+        with report.open('wb') as log:
+            while True:
+                now = time.monotonic()
+                if now >= next_heartbeat:
+                    print(f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())} OPPO {phase} '
+                          f'elapsed={now-start:.1f}s last={last_step}', flush=True)
+                    next_heartbeat = now + heartbeat
+                if now - start >= timeout:
+                    raise TimeoutError(f'OPPO {phase} timed out after {timeout}s; last={last_step}; report={report}')
+                for key, _ in selector.select(min(next_heartbeat-now, timeout-(now-start), 1)):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    log.write(chunk); log.flush(); output.extend(chunk)
+                    pending += chunk
+                    lines = pending.split(b'\n'); pending = lines.pop()
+                    for line in lines:
+                        decoded = line.decode('utf-8', errors='replace').strip()
+                        if 'COACH_STEP ' in decoded:
+                            last_step = decoded.split('COACH_STEP ', 1)[1]
+                        print(f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())} OPPO {phase} {decoded}', flush=True)
+                if process.poll() is not None and not selector.get_map():
+                    if pending:
+                        print(pending.decode('utf-8', errors='replace'), flush=True)
+                    if process.returncode != 0:
+                        raise RuntimeError(f'OPPO {phase} instrumentation exited {process.returncode}; last={last_step}; report={report}')
+                    return output.decode('utf-8', errors='replace')
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.terminate()
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired: process.kill(); process.wait()
+        process.stdout.close()
+
+
 def instrument(method, phase):
     run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE+'.test'])
     run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE])
-    output = run([ADB, '-s', SERIAL, 'shell', 'am', 'instrument', '-w', '-e', 'class',
+    output = stream_instrument([ADB, '-s', SERIAL, 'shell', 'am', 'instrument', '-w', '-e', 'class',
         'com.coach.android.MistakeReviewSmoke#'+method, '-e', 'coachPhase', phase,
         '-e', 'coachPort', PORT, '-e', 'coachDevice', DEVICE, '-e', 'coachToken', TOKEN,
-        '-e', 'coachKp', kp, PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner'], timeout=420)
-    (OUT/(phase+'.txt')).write_text(output)
+        '-e', 'coachKp', kp, PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner'], OUT/(phase+'.txt'), phase)
     if 'OK (1 test)' not in output: raise RuntimeError('Phone replay failed in '+phase+'; inspect phase report')
     print('OPPO '+phase+' passed', flush=True)
 
@@ -181,6 +229,9 @@ try:
     (OUT/'summary.json').write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary), flush=True)
 finally:
+    # A killed adb client can leave the runner on the device; stop it before collecting evidence.
+    try: subprocess.run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE+'.test'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.TimeoutExpired): pass
     # Failure evidence written by the instrumented test, kept next to the other artifacts.
     try: snaps = [n for n in run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'ls', 'cache']).split() if n.startswith('review-snap-')]
     except Exception: snaps = []
@@ -192,3 +243,5 @@ finally:
     # Keep the production package untouched; only remove this test package's private keys.
     subprocess.run([ADB, '-s', SERIAL, 'shell', 'am', 'force-stop', PACKAGE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'rm', '-f', 'cache/review-keys.json'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try: subprocess.run([ADB, '-s', SERIAL, 'uninstall', PACKAGE+'.test'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired): pass

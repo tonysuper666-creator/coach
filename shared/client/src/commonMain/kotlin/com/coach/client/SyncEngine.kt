@@ -12,6 +12,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
+import kotlin.time.TimeSource
+import kotlin.time.TimeMark
 
 interface LedgerTransport {
     suspend fun hello(epoch: String?): Hello
@@ -25,7 +27,14 @@ interface LedgerTransport {
 /** Device-specific immutable outbox and disposable ledger replica. Database survives process restarts. */
 class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
-    private val newId: () -> String, private val hash: (ByteArray) -> String) {
+    private val newId: () -> String, private val hash: (ByteArray) -> String,
+    private val retentionTimeSource: TimeSource = TimeSource.Monotonic) {
+    companion object {
+        // Server retention: 14 daily days + the preceding 8 weekly weeks.
+        const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
+    }
+    private data class RetentionAnchor(val generation: Long, val age: Long, val mark: TimeMark)
+    private var retentionAnchors = emptyMap<String, RetentionAnchor>()
     private val mutex = Mutex()
     private val _connection = MutableStateFlow("offline")
     val connection = _connection.asStateFlow()
@@ -123,6 +132,36 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private fun meta(key: String) = q.getMeta(key).executeAsOneOrNull()
     private fun save(events: List<Event>) { for(e in events) q.putEvent(e.seq,e.courseId,LedgerJson.encodeToString(e)) }
 
+    /** Each row's persisted age is a lower bound on time since this coverage.
+     * Anchor only AFTER reading that age, never at engine construction or hello.
+     * age + elapsed remains a lower bound; MAX merges overlapping observers without
+     * addition. A generation changes on every new coverage, even in the same epoch.
+     * No shared clock offset can jump and instantly age another engine's coverage. */
+    private fun retainOrPrune(expectedEpoch: String, backedUpThroughSeq: Long) {
+        val nextAnchors = db.transactionWithResult {
+            // Take the SQLite write lock before reading ages, including across processes.
+            q.markBackupCovered(backedUpThroughSeq,expectedEpoch)
+            check(meta("epoch") == expectedEpoch) { "Epoch changed during retention" }
+            val next = mutableMapOf<String, RetentionAnchor>()
+            for(row in q.allCommands().executeAsList()) {
+                val age = row.backup_retained_millis ?: continue
+                val anchor = retentionAnchors[row.command_id]?.takeIf { it.generation == row.backup_coverage_generation }
+                if(anchor == null) {
+                    next[row.command_id] = RetentionAnchor(row.backup_coverage_generation,age,retentionTimeSource.markNow())
+                } else {
+                    val elapsed = anchor.mark.elapsedNow().inWholeMilliseconds.coerceAtLeast(0)
+                    val candidate = anchor.age + elapsed.coerceAtMost(OUTBOX_RETENTION_MILLIS - anchor.age)
+                    q.advanceBackupAge(candidate,row.command_id,anchor.generation)
+                    next[row.command_id] = anchor
+                }
+            }
+            q.prune(backedUpThroughSeq,OUTBOX_RETENTION_MILLIS)
+            next
+        }
+        // A rolled-back coverage must never leave an anchor for a future generation.
+        retentionAnchors = nextAnchors
+    }
+
     suspend fun syncOnce() = mutex.withLock {
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
@@ -139,13 +178,17 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putMeta("epoch",hello.epoch)
             }
         }
-        q.prune(hello.backedUpThroughSeq)
+        retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
         for(row in pending) {
             val receipt = transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256))
             check(receipt.epoch == hello.epoch) { "Epoch changed during upload" }
-            db.transaction { q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id);q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt)) }
-            q.prune(receipt.backedUpThroughSeq)
+            db.transaction {
+                q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id)
+                check(meta("epoch") == hello.epoch) { "Epoch changed during acknowledgement" }
+                q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt))
+            }
+            retainOrPrune(hello.epoch,receipt.backedUpThroughSeq)
         }
         pullCourses(hello.epoch)
         _connection.value = "online"

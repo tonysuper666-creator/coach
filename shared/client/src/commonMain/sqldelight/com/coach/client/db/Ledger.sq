@@ -1,5 +1,5 @@
 CREATE TABLE replica(seq INTEGER PRIMARY KEY,course_id TEXT NOT NULL,event_json TEXT NOT NULL);
-CREATE TABLE outbox(command_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,payload_bytes TEXT NOT NULL,payload_sha256 TEXT NOT NULL,ack_seq INTEGER,receipt_status TEXT);
+CREATE TABLE outbox(command_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,payload_bytes TEXT NOT NULL,payload_sha256 TEXT NOT NULL,ack_seq INTEGER,receipt_status TEXT,backup_covered_at INTEGER);
 CREATE TABLE sync_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 
 allEvents:
@@ -15,9 +15,11 @@ INSERT INTO outbox(command_id,device_id,payload_bytes,payload_sha256) VALUES(?,?
 ackCommand:
 UPDATE outbox SET ack_seq=?,receipt_status=? WHERE command_id=?;
 replayAfter:
-UPDATE outbox SET ack_seq=NULL,receipt_status=NULL WHERE ack_seq>? AND receipt_status<>'REJECTED';
+UPDATE outbox SET ack_seq=NULL,receipt_status=NULL,backup_covered_at=NULL WHERE ack_seq>? AND receipt_status<>'REJECTED';
+markBackupCovered:
+UPDATE outbox SET backup_covered_at=? WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED' AND backup_covered_at IS NULL;
 prune:
-DELETE FROM outbox WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED';
+DELETE FROM outbox WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED' AND backup_covered_at<=?;
 getMeta:
 SELECT value FROM sync_meta WHERE key=?;
 putMeta:

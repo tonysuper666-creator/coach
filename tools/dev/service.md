@@ -48,4 +48,12 @@ Android 复验先构建 debug 与 androidTest APK，再启动并清理自己拥�
 
 日志为 `~/Coach/logs/{server,bridge,mathsvc}-YYYY-MM-DD.log`，跨日第一次写入时换文件，各自保留当天和此前 13 日。桥请求元数据也进入轮转流，不记提示词或答案。JVM 初始化前的错误在 `bootstrap.log`；不分享含真实地址或账号的原始日志。检查健康不等于订阅可调用，CLI 登录状态另查完整桥 `/health`。
 
-夜间备份与唤醒逻辑沿用账本实现；本卡还需在允许时段完成真休眠、JVM 单调钟实测、重启 Tailscale 后重绑、旧备份的发件箱额外保留策略。2026-11-02 15:00 GMT 前不做真休眠和 Tailscale 重启。
+夜间备份与唤醒逻辑沿用账本实现；本卡还需在允许时段完成真休眠、JVM 单调钟实测、重启 Tailscale 后重绑。2026-11-02 15:00 GMT 前不做真休眠和 Tailscale 重启。
+
+旧备份恢复的客户端保留策略见 DESIGN §4.3：14 日 + 此前 8 周的自动快照最老不足 70 日，命令首次被当前 epoch 备份覆盖后至少保留 70 日单调钟观测时间。未确认、不在备份水位内、REJECTED 的命令均不按时间清理；REJECTED 不重放。墙钟跳变不参与计龄，进程关闭期间不计龄，可能保留更久；epoch 改变先重放，再开始新窗口。schema 3→4 为旧记录保守补一个完整窗口，不会找回升级前已删除的命令。窗口外的历史备份没有完整恢复保证；此项独立隔离演练不替代真休眠、登录和 Tailscale 门禁，也不代表真实客户端已经发布。
+
+不触碰常驻服务的恢复与迁移回归（临时 SQLite、回环随机 HTTP 端口；不运行会故障注入生产的 `check-service.py`）：
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.OfflineRestoreTest --tests com.coach.server.TwoRestoresOfflineTest --tests com.coach.server.OutboxRetentionTest --tests com.coach.server.OfflinePackTest --tests com.coach.server.UsageObservationTest
+```

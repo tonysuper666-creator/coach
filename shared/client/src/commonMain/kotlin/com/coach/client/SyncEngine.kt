@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
+import kotlin.time.TimeSource
 
 interface LedgerTransport {
     suspend fun hello(epoch: String?): Hello
@@ -25,7 +26,13 @@ interface LedgerTransport {
 /** Device-specific immutable outbox and disposable ledger replica. Database survives process restarts. */
 class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
-    private val newId: () -> String, private val hash: (ByteArray) -> String) {
+    private val newId: () -> String, private val hash: (ByteArray) -> String,
+    private val retentionTimeSource: TimeSource = TimeSource.Monotonic) {
+    companion object {
+        // Server retention: 14 daily days + the preceding 8 weekly weeks.
+        const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
+    }
+    private var retentionMark = retentionTimeSource.markNow()
     private val mutex = Mutex()
     private val _connection = MutableStateFlow("offline")
     val connection = _connection.asStateFlow()
@@ -123,6 +130,29 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private fun meta(key: String) = q.getMeta(key).executeAsOneOrNull()
     private fun save(events: List<Event>) { for(e in events) q.putEvent(e.seq,e.courseId,LedgerJson.encodeToString(e)) }
 
+    /** Persist only observed monotonic elapsed time. Downtime across process restarts
+     * is deliberately uncounted: neither local nor server wall time can prove age. */
+    private fun advanceRetentionTime(): Long {
+        val elapsed = retentionMark.elapsedNow().inWholeMilliseconds.coerceAtLeast(0)
+        val now = db.transactionWithResult {
+            val previous = meta("outboxRetentionTime")?.toLong() ?: 0L
+            val next = previous + elapsed.coerceAtMost(Long.MAX_VALUE - previous)
+            q.putMeta("outboxRetentionTime",next.toString())
+            next
+        }
+        retentionMark = retentionTimeSource.markNow()
+        return now
+    }
+
+    private fun retainOrPrune(backedUpThroughSeq: Long) {
+        // Sample at observation, not at sync start: an upload/snapshot may take a long time.
+        val now = advanceRetentionTime()
+        db.transaction {
+            q.markBackupCovered(now,backedUpThroughSeq)
+            q.prune(backedUpThroughSeq,now - OUTBOX_RETENTION_MILLIS)
+        }
+    }
+
     suspend fun syncOnce() = mutex.withLock {
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
@@ -139,13 +169,13 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putMeta("epoch",hello.epoch)
             }
         }
-        q.prune(hello.backedUpThroughSeq)
+        retainOrPrune(hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
         for(row in pending) {
             val receipt = transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256))
             check(receipt.epoch == hello.epoch) { "Epoch changed during upload" }
             db.transaction { q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id);q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt)) }
-            q.prune(receipt.backedUpThroughSeq)
+            retainOrPrune(receipt.backedUpThroughSeq)
         }
         pullCourses(hello.epoch)
         _connection.value = "online"

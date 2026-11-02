@@ -57,6 +57,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val unsupported = mutableSetOf<String>()
     val weights = mutableMapOf<String, Int>()
     var current: String? = null
+    var studyScope: StudyScope? = null
     var examDay: Long? = null
     var previousTime: Long? = null
     var previousDay: Long? = null
@@ -213,6 +214,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         }
         if (e.type != "journal_summarized") journalLatest[day] = e.seq
         when (e.type) {
+            "study_scope_set" -> studyScope = if (p.num("week") > 0) StudyScope(e.id, p.num("week").toInt(), p.strings("kpIds")) else null
+            "study_scope_advanced" -> studyScope?.let { scope ->
+                val index = scope.kpIds.indexOf(p.str("kpId"))
+                if (scope.id == p.str("scopeId") && index >= scope.cursor) studyScope = scope.copy(cursor = index + 1)
+            }
             "quick_ask_opened" -> quickAsks[p.num("day")] = QuickAskThread(requireNotNull(e.threadId), e.courseId, p.num("day"), p.str("kpId").ifBlank { null })
             "outline_revised" -> {
                 for (v in (p["ops"] as? JsonArray).orEmpty()) {
@@ -321,7 +327,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         ?: outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") }
     val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
-    return Projection(timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
+    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),

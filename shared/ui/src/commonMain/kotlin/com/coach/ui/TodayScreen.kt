@@ -19,7 +19,7 @@ import com.coach.client.TutorUiState
 @Composable
 fun TodayScreen(
     c: CoachController, view: CourseView?, ui: TutorUiState, selectedKpId: String?,
-    onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit,
+    onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit, weekActions: WeekActions? = null,
 ) {
     if (view == null) return CenterMessage("正在加载课程…")
     val kps = view.kps
@@ -39,9 +39,14 @@ fun TodayScreen(
                     Text(view.projection.today(c.nowMillis()).coverageText, style = MaterialTheme.typography.titleMedium)
                     Text("已通过 $passed / ${kps.size} 个知识点", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (target != null) {
-                        ContinueCard(target) { onOpen(target.id, true) }
+                        ContinueCard(target, view.isResume(target)) { onOpen(target.id, true) }
                     } else {
-                        Text("所有知识点都已通过。", style = MaterialTheme.typography.titleMedium)
+                        if (view.projection.studyScope == null) Text("所有知识点都已通过。", style = MaterialTheme.typography.titleMedium)
+                    }
+                    if (weekActions != null) {
+                        WeekPicker(view, weekActions, ui.connected)
+                        WeekSummary(view, weekActions, ui.connected)
+                        target?.let { view.weekProgress(it.id) }?.let { Text(it, style = MaterialTheme.typography.labelLarge) }
                     }
                     val now = c.nowMillis()
                     ReviewCard(view.dueReviews(now).size, onOpenReview)
@@ -73,7 +78,7 @@ internal fun splitTitle(title: String): Pair<String, String> {
 }
 
 @Composable
-private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
+private fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
     val (tag, main) = splitTitle(kp.title)
     Surface(
         color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -81,8 +86,8 @@ private fun ContinueCard(kp: KpRow, onClick: () -> Unit) {
         modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (tag.isBlank()) "继续" else "继续 · $tag", style = MaterialTheme.typography.labelLarge)
-            Text(main, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+            Text(if (resume) "回到（没学完）" else "开始下一个", style = MaterialTheme.typography.labelLarge)
+            Text(if (resume) "回到 $main（没学完）" else "开始下一个：$main", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
         }
     }
 }

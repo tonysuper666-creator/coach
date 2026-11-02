@@ -57,3 +57,11 @@ Android 复验先构建 debug 与 androidTest APK，再启动并清理自己拥�
 ```sh
 tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.OfflineRestoreTest --tests com.coach.server.TwoRestoresOfflineTest --tests com.coach.server.OutboxRetentionTest --tests com.coach.server.OfflinePackTest --tests com.coach.server.UsageObservationTest
 ```
+
+夜间备份的隔离恢复演练：
+
+```sh
+tools/dev/heavy ./gradlew :server:store:test --tests com.coach.store.NightlyBackupTest --rerun-tasks
+```
+
+该演练调用真实 `backupIfDue`、SQLite `VACUUM INTO` 和离线恢复，在临时目录写入合成事件、流式消息与 blob；检查本地时区 03:30 触发、同日重复抑制、重开数据库后超过 24 小时补做、SQLite 完整性、blob 硬链接、JSONL 导出、恢复前后课程事件一致、epoch 更新和安全副本。另注入硬链接失败，验证未发布备份水位、拒绝不完整恢复并能重试。调度时钟通过构造参数推进，不修改系统时间，不读写生产数据库，不调用 AI。它不证明机器实际跨过 03:30、真实系统休眠、登录时限、Tailscale 重启或真机重连；这些仍需各自的实测记录。

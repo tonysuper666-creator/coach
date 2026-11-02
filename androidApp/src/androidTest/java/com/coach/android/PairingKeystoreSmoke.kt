@@ -69,6 +69,11 @@ class PairingKeystoreSmoke {
         assertEquals(configured,coachServerUrl("https://example.com:443"))
         assertEquals(configured,coachServerUrl("http://user:secret@${BuildConfig.COACH_TAIL_HOST}:18892"))
         assertEquals("http://${BuildConfig.COACH_TAIL_HOST}:18892",coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18892"))
+        val card = "com.coach.android.ton1149"
+        assertEquals("http://${BuildConfig.COACH_TAIL_HOST}:18892", coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18892", card))
+        assertThrows(IllegalStateException::class.java) { coachServerUrl(null, card) }
+        assertThrows(IllegalStateException::class.java) { coachServerUrl("http://10.0.2.2:18892", card) }
+        assertThrows(IllegalStateException::class.java) { coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18791", card) }
         assertThrows(SecurityException::class.java) { TutorClient("http://10.0.2.2:18791","test","x".repeat(43),TutorModel(System::currentTimeMillis)) }
         assertThrows(SecurityException::class.java) { PairingClient("http://10.0.2.2:18791") }
         assertThrows(SecurityException::class.java) { HttpLedgerTransport("http://10.0.2.2:18791","test","x".repeat(43)) }

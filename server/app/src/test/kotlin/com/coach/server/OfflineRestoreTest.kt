@@ -170,6 +170,82 @@ class OfflineRestoreTest {
         exerciseConcurrentEngines(restoreAtHalfway=true)
     }
 
+    @Test fun engineCreatedDuringOutageCannotBackdateCoverageWhenItSyncsFirst() = runBlocking {
+        exerciseStaleEngineCoverage(newFirst=true, constructionDay=29, outageDays=30)
+    }
+
+    @Test fun olderEngineSyncingFirstAlsoKeepsFullCoverageWindow() = runBlocking {
+        exerciseStaleEngineCoverage(newFirst=false, constructionDay=29, outageDays=30)
+    }
+
+    @Test fun delayedFirstSyncCannotIncludeTimeBeforeBackupCoverage() = runBlocking {
+        exerciseStaleEngineCoverage(newFirst=true, constructionDay=29, outageDays=130)
+    }
+
+    @Test fun longPausedInstanceCannotBackdateNewCoverage() = runBlocking {
+        exerciseStaleEngineCoverage(newFirst=true, constructionDay=0, outageDays=130)
+    }
+
+    private suspend fun exerciseStaleEngineCoverage(newFirst: Boolean, constructionDay: Int, outageDays: Int) {
+        val clock=TestTimeSource()
+        val root=Files.createTempDirectory("coach-stale-coverage-")
+        val data=root.resolve("server")
+        val drivers=mutableListOf<JdbcSqliteDriver>()
+        var server: Server?=null
+        var transport: HttpLedgerTransport?=null
+        try {
+            var store=LedgerStore(data)
+            store.enroll("phone",token)
+            store.registerQuestion("online","course","online","SINGLE_CHOICE","Synthetic choice online","VERIFIED","one",options)
+            val old=store.backup(root.resolve("old"))
+            server=Server(store);val port=server.port()
+            transport=HttpLedgerTransport("http://127.0.0.1:$port","phone",token)
+            fun open(): SyncEngine {
+                val driver=JdbcSqliteDriver("jdbc:sqlite:${root.resolve("shared.sqlite")}",java.util.Properties(),ClientDatabase.Schema)
+                drivers.add(driver)
+                return SyncEngine(ClientDatabase(driver),"phone",transport!!,listOf("course"),{ UUID.randomUUID().toString() },::sha256,clock)
+            }
+            val older=open();older.syncOnce()
+            val command=older.enqueue(submit("online"));older.syncOnce()
+            var newer: SyncEngine?=if(constructionDay==0) open().also { it.syncOnce() } else null
+            server.close();server=null
+            repeat(outageDays) { index ->
+                clock += 1.days
+                assertFails { older.syncOnce() }
+                if(index+1==constructionDay) newer=open()
+            }
+            store=LedgerStore(data);server=Server(store,port)
+            server.actor.execute { backup(root.resolve("covered")) }
+            suspend fun pollBoth() {
+                if(newFirst) { newer!!.syncOnce();older.syncOnce() }
+                else { older.syncOnce();newer!!.syncOnce() }
+            }
+            pollBoth()
+            repeat(69) { day ->
+                clock += 1.days;pollBoth()
+                assertEquals(command,older.retainedCommands().singleOrNull(),"deleted after only ${day+1} real days since coverage")
+            }
+            clock += 1.days - 1.milliseconds;pollBoth()
+            assertEquals(command,older.retainedCommands().singleOrNull(),"must retain at coverage + 70d - 1ms")
+            // Recovery at the very end of the window, twice, must renew the window
+            // even in an instance that still remembers coverage from an earlier epoch.
+            repeat(2) { round ->
+                server!!.close();server=null
+                store=LedgerStore.restore(data,old);server=Server(store,port)
+                pollBoth()
+                assertEquals(1,store.events("course").count { it.type=="answer_submitted" })
+                val seq=store.hello().lastSeq;pollBoth();assertEquals(seq,store.hello().lastSeq)
+                server!!.actor.execute { backup(root.resolve("recovered-$round")) };pollBoth()
+                clock += 70.days - 1.milliseconds;pollBoth()
+                assertEquals(command,older.retainedCommands().singleOrNull(),"epoch $round must receive a fresh 70d window")
+            }
+            clock += 1.milliseconds;pollBoth()
+            assertTrue(older.retainedCommands().isEmpty())
+            val seq=store.hello().lastSeq;pollBoth();assertEquals(seq,store.hello().lastSeq)
+            println("STALE_COVERAGE newerFirst=$newFirst constructionDay=$constructionDay outageDays=$outageDays retainedBefore70d=true restores=2 recovered=1 duplicateFirstAnswers=0 prunedAt70d=true")
+        } finally { transport?.close();drivers.forEach { it.close() };server?.close();root.toFile().deleteRecursively() }
+    }
+
     private suspend fun exerciseConcurrentEngines(restoreAtHalfway: Boolean) {
         val clock=TestTimeSource()
         val root=Files.createTempDirectory("coach-shared-client-")

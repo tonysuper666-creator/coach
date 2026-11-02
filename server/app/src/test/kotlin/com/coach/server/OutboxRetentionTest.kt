@@ -19,7 +19,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class OutboxRetentionTest {
     private class Direct(var store: LedgerStore) : LedgerTransport {
         var failUpload = false
-        var afterCommand: () -> Unit = {}
+        var afterCommand: suspend () -> Unit = {}
         val uploads = mutableMapOf<String,Int>()
         override suspend fun hello(epoch: String?) = store.hello()
         override suspend fun snapshot(course: String) = store.snapshot(course)
@@ -143,6 +143,122 @@ class OutboxRetentionTest {
         } finally { driver.close();store.close();root.toFile().deleteRecursively() }
     }
 
+    @Test fun observersWithDifferentMonotonicOriginsMergeAgeWithoutAddition() = runBlocking {
+        val root=Files.createTempDirectory("coach-retention-origins-")
+        val store=LedgerStore(root.resolve("server"))
+        val drivers=mutableListOf<JdbcSqliteDriver>()
+        try {
+            val transport=Direct(store)
+            val firstClock=TestTimeSource();val secondClock=TestTimeSource().apply { this += 1000.days }
+            fun open(clock: TestTimeSource): SyncEngine {
+                val driver=JdbcSqliteDriver("jdbc:sqlite:${root.resolve("shared.sqlite")}",Properties(),ClientDatabase.Schema)
+                drivers.add(driver)
+                return client(ClientDatabase(driver),transport,clock)
+            }
+            val first=open(firstClock);val second=open(secondClock)
+            first.syncOnce();second.syncOnce()
+            val command=first.enqueue(body());first.syncOnce()
+            store.backup(root.resolve("covered"));first.syncOnce();second.syncOnce()
+            repeat(69) {
+                firstClock += 1.days;secondClock += 1.days
+                first.syncOnce();second.syncOnce()
+                assertEquals(command,first.retainedCommands().single())
+            }
+            firstClock += 1.days - 1.milliseconds;secondClock += 1.days - 1.milliseconds
+            second.syncOnce();first.syncOnce();assertEquals(command,first.retainedCommands().single())
+            firstClock += 1.milliseconds;secondClock += 1.milliseconds
+            first.syncOnce();second.syncOnce();assertTrue(first.retainedCommands().isEmpty())
+            println("RETENTION independentClockOrigins=1000d observers=2 before70d=retained at70d=pruned")
+        } finally { drivers.forEach { it.close() };store.close();root.toFile().deleteRecursively() }
+    }
+
+    @Test fun repeatedCoverageInSameEpochCannotReusePreviousCoverageAnchor() = runBlocking {
+        val root=Files.createTempDirectory("coach-retention-generation-")
+        val store=LedgerStore(root.resolve("server"))
+        val driver=JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        try {
+            ClientDatabase.Schema.create(driver)
+            val db=ClientDatabase(driver);val clock=TestTimeSource();val sync=client(db,Direct(store),clock)
+            sync.syncOnce();val command=sync.enqueue(body());sync.syncOnce()
+            store.backup(root.resolve("covered"));sync.syncOnce()
+            clock += 69.days;sync.syncOnce()
+            // Two overlapping snapshot resets may prepare replay for the same epoch.
+            // A coverage identity must change even when the epoch string does not.
+            db.ledgerQueries.replayAfter(-1)
+            sync.syncOnce()
+            clock += 70.days - 1.milliseconds;sync.syncOnce()
+            assertEquals(command,sync.retainedCommands().single())
+            clock += 1.milliseconds;sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
+            assertEquals(1,store.events("course").count { it.type=="kp_opened" })
+            println("RETENTION sameEpochCoverageRenewal=true fullWindow=70d duplicateEffects=0")
+        } finally { driver.close();store.close();root.toFile().deleteRecursively() }
+    }
+
+    @Test fun draftSchemaFourUpgradeDiscardsUnsafeSharedClockAges() = runBlocking {
+        val root=Files.createTempDirectory("coach-retention-draft-upgrade-")
+        val store=LedgerStore(root.resolve("server"))
+        var driver: JdbcSqliteDriver?=null
+        try {
+            val url="jdbc:sqlite:${root.resolve("client.sqlite")}"
+            driver=JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema)
+            driver.execute(null,"DROP TABLE outbox",0)
+            driver.execute(null,"CREATE TABLE outbox(command_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,payload_bytes TEXT NOT NULL,payload_sha256 TEXT NOT NULL,ack_seq INTEGER,receipt_status TEXT,backup_covered_at INTEGER)",0)
+            val raw="""{ "type":"open_kp", "courseId":"course", "clientTime":0, "payload":{"kpId":"synthetic-kp"} }"""
+            val hash=sha256(raw.toByteArray())
+            val command=WireCommand("phone","draft-acked",raw,hash)
+            val ack=store.command(command)
+            driver.execute(null,"INSERT INTO outbox VALUES('draft-acked','phone',?,?,?,'OK',0)",3) {
+                bindString(0,raw);bindString(1,hash);bindLong(2,ack.eventSeqs.max())
+            }
+            ClientDatabase(driver).ledgerQueries.putMeta("outboxRetentionTime",1000.days.inWholeMilliseconds.toString())
+            ClientDatabase(driver).ledgerQueries.putMeta("epoch",store.hello().epoch)
+            driver.execute(null,"PRAGMA user_version=4",0);driver.close();driver=null
+            driver=JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema)
+            val db=ClientDatabase(driver)
+            assertNull(db.ledgerQueries.allCommands().executeAsOne().backup_retained_millis)
+            assertNull(db.ledgerQueries.getMeta("outboxRetentionTime").executeAsOneOrNull())
+            val clock=TestTimeSource();val sync=client(db,Direct(store),clock)
+            store.backup(root.resolve("covered"));sync.syncOnce()
+            clock += 70.days - 1.milliseconds;sync.syncOnce();assertEquals(command,sync.retainedCommands().single())
+            clock += 1.milliseconds;sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
+            println("RETENTION_MIGRATION schema=4->5 unsafeAgeDiscarded=true immutableBytesPreserved=true fullWindow=70d")
+        } finally { driver?.close();store.close();root.toFile().deleteRecursively() }
+    }
+
+    @Test fun receiptFromOldEpochCannotOverwriteAnotherEnginesReplay() = runBlocking {
+        val root=Files.createTempDirectory("coach-retention-stale-receipt-")
+        val data=root.resolve("server")
+        var store=LedgerStore(data)
+        val drivers=mutableListOf<JdbcSqliteDriver>()
+        try {
+            val old=store.backup(root.resolve("old"))
+            val transport=Direct(store);val clock=TestTimeSource()
+            fun open(): SyncEngine {
+                val driver=JdbcSqliteDriver("jdbc:sqlite:${root.resolve("shared.sqlite")}",Properties(),ClientDatabase.Schema)
+                drivers.add(driver)
+                return client(ClientDatabase(driver),transport,clock)
+            }
+            val first=open();val second=open();first.syncOnce();second.syncOnce()
+            val command=first.enqueue(body())
+            transport.afterCommand={
+                // Deliver the old server's receipt only after the other connection
+                // has observed a restore and durably replayed into the new epoch.
+                transport.afterCommand={}
+                store.close();store=LedgerStore.restore(data,old);transport.store=store
+                second.syncOnce()
+            }
+            assertFails { first.syncOnce() }
+            assertEquals(store.hello().epoch,second.receipt(command.commandId)!!.epoch)
+            assertEquals(1,store.events("course").count { it.type=="kp_opened" })
+            store.backup(root.resolve("covered"));first.syncOnce();second.syncOnce()
+            clock += 70.days - 1.milliseconds;second.syncOnce();first.syncOnce()
+            assertEquals(command,first.retainedCommands().single())
+            clock += 1.milliseconds;first.syncOnce();second.syncOnce()
+            assertTrue(first.retainedCommands().isEmpty())
+            println("RETENTION staleEpochReceipt=rolledBack sharedConnections=2 replayEffects=1 freshWindow=70d")
+        } finally { drivers.forEach { it.close() };store.close();root.toFile().deleteRecursively() }
+    }
+
     @Test fun schemaThreeUpgradePreservesImmutableBytesAndStartsFullWindowForUnknownAge() = runBlocking {
         val root=Files.createTempDirectory("coach-retention-upgrade-")
         val store=LedgerStore(root.resolve("server"))
@@ -169,10 +285,10 @@ class OutboxRetentionTest {
             }
             driver.execute(null,"PRAGMA user_version=3",0)
             driver.close();driver=null
-            // The same schema-aware open used by the desktop applies migration 3 -> 4.
+            // The same schema-aware open used by the desktop applies migrations 3 -> 5.
             driver=JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema)
             val upgraded=ClientDatabase(driver)
-            assertTrue(upgraded.ledgerQueries.allCommands().executeAsList().all { it.backup_covered_at==null && it.payload_bytes==raw && it.payload_sha256==hash })
+            assertTrue(upgraded.ledgerQueries.allCommands().executeAsList().all { it.backup_retained_millis==null && it.payload_bytes==raw && it.payload_sha256==hash })
             val transport=Direct(store);val clock=TestTimeSource();val sync=client(upgraded,transport,clock)
             store.backup(root.resolve("before-upgrade"));sync.syncOnce()
             assertEquals(3,sync.retainedCommands().size)
@@ -184,7 +300,7 @@ class OutboxRetentionTest {
             assertEquals(3,sync.retainedCommands().size)
             clock += 1.milliseconds;sync.syncOnce()
             assertEquals("legacy-rejected",sync.retainedCommands().single().commandId)
-            println("RETENTION_MIGRATION schema=3->4 oldBytesPreserved=3 unknownAgeFullWindow=true rejectedReplays=0")
+            println("RETENTION_MIGRATION schema=3->5 oldBytesPreserved=3 unknownAgeFullWindow=true rejectedReplays=0")
         } finally { driver?.close();store.close();root.toFile().deleteRecursively() }
     }
 }

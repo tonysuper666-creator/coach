@@ -27,7 +27,8 @@ class UsageObservationTest {
             JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema).use { driver ->
                 ClientDatabase(driver).ledgerQueries.putMeta("preserved","offline study")
                 driver.execute(null,"DROP TABLE usage_outbox",0)
-                driver.execute(null,"ALTER TABLE outbox DROP COLUMN backup_covered_at",0)
+                driver.execute(null,"ALTER TABLE outbox DROP COLUMN backup_retained_millis",0)
+                driver.execute(null,"ALTER TABLE outbox DROP COLUMN backup_coverage_generation",0)
                 driver.execute(null,"PRAGMA user_version=2",0)
             }
             JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema).use { driver ->

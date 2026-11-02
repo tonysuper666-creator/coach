@@ -21,13 +21,15 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 
 @Composable
-fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null, autoplay: Int = 0, baselineSheet: Boolean = false, tickMs: Long = 50, streamOnly: Int = -1, chunk: Int = 30, runId: Long = 0L, scrollEnd: Boolean = false, wideSheet: Boolean = false) {
+fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Boolean, folding: String, save: () -> Unit, report: (String) -> Unit, chinesePage: Int? = null, autoplay: Int = 0, baselineSheet: Boolean = false, tickMs: Long = 50, streamOnly: Int = -1, chunk: Int = 30, runId: Long = 0L, scrollEnd: Boolean = false, wideSheet: Boolean = false, threadCpuNanos: () -> Long = { 0L }) {
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             if (chinesePage != null && corpus != null) { CompositionLocalProvider(LocalScrollMathToEnd provides scrollEnd) { ChineseSheet(corpus.chinese.drop(chinesePage * 2).take(2)) }; return@Surface }
             if (wideSheet && corpus != null) { CompositionLocalProvider(LocalScrollMathToEnd provides scrollEnd) { WideSheet(corpus.assets) }; return@Surface }
             if (baselineSheet && corpus != null) { BaselineSheet(corpus.assets); return@Surface }
             LaunchedEffect(Unit) { report("READY messages=${corpus?.messages?.size ?: 0}") }
+            // The corpus already holds every formula's SVG: parse them off the UI thread so no block pays for it when it seals.
+            LaunchedEffect(corpus) { corpus?.let { MathSvgDocument.prewarm(it.assets.values.map { asset -> asset.sha to asset.svg }) } }
             val list = rememberLazyListState(state.scrollIndex, state.scrollOffset)
             // Autoplay always starts from the first answer, before any saved cursor can be read.
             // autoplay: 1 = all answers pinned, 2 = all answers with the reader scrolled away, 3 = one answer (streamOnly), scrolled away, at tickMs.
@@ -62,7 +64,9 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                     val beforeIndex = list.firstVisibleItemIndex; val beforeOffset = list.firstVisibleItemScrollOffset
                     // Content shorter than the viewport leaves nothing below: the list is at its end, which is following the tail, not reading away from it.
                     val awayBefore = list.canScrollForward
+                    val parseStart = kotlin.time.TimeSource.Monotonic.markNow()
                     blocks = engine.append(message.substring(state.cursor, end), end == message.length)
+                    run.appendMs += parseStart.elapsedNow().inWholeNanoseconds / 1e6
                     state.cursor = end
                     if (pinned && blocks.isNotEmpty()) list.scrollToItem(blocks.lastIndex)
                     else if (scrolledAway && !awayBefore) { run.atEndSkipped++ }
@@ -88,7 +92,18 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
             }
             // Frame pacing while a replay streams: with the loop below requesting a frame every vsync, a long layout/paint shows as a long gap.
             LaunchedEffect(autoplay) {
-                if (autoplay in 1..2) { var last = 0L; while (true) { val t = withFrameNanos { it }; if (state.running && last != 0L) { val dt = (t - last) / 1e6; run.frameMs += dt; if (dt > 100) run.hitches += "m${state.message}@${state.cursor}=${dt.toInt()}ms" }; last = t } }
+                if (autoplay in 1..2) {
+                    var last = 0L; var lastCpu = threadCpuNanos()
+                    while (true) {
+                        val t = withFrameNanos { it }; val cpu = threadCpuNanos()
+                        if (state.running && last != 0L) {
+                            val dt = (t - last) / 1e6; run.frameMs += dt; if (dt > 100) run.hitches += "m${state.message}@${state.cursor}=${dt.toInt()}ms"
+                            // Main-thread CPU spent since the previous frame started: unlike wall time it does not grow when the emulator is descheduled.
+                            val used = (cpu - lastCpu) / 1e6; if (cpu != 0L) { run.cpuMs += used; if (used > 12) run.cpuSlow += "m${state.message}@${state.cursor}=${used.toInt()}ms" }
+                        }
+                        last = t; lastCpu = cpu
+                    }
+                }
             }
             // Live measurement of what the reader is looking at (not the stored anchor): first visible block, how far into it, viewport width.
             LaunchedEffect(list) {
@@ -139,13 +154,13 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                     }
                     if (corpus == null) Text("请先加载本机公式与回答语料。")
                     SelectionContainer(Modifier.weight(1f)) {
-                        LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        ProvideMarkdownMeasurer { LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             items(blocks, key = { it.key }) { block ->
                                 MarkdownContent(block, corpus?.assets.orEmpty(), modifier = Modifier.fillMaxWidth().onSizeChanged {
                                     if (block.sealed) { val old = heights.put(block.key, it.width to it.height); if (old != null && old.first == it.width) maxShift = maxOf(maxShift, kotlin.math.abs(old.second - it.height).toFloat()) }
                                 }, onFailure = { failures += it })
                             }
-                        }
+                        } }
                     }
                     Row {
                         for (option in listOf("A", "B", "C")) FilterChip(state.selected == option, { state.selected = option; save() }, label = { Text(option) }, modifier = Modifier.padding(end = 8.dp))
@@ -171,13 +186,14 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
 }
 
 private class RunMetrics {
-    val frameMs = mutableListOf<Double>(); val hitches = mutableListOf<String>()
+    val frameMs = mutableListOf<Double>(); val hitches = mutableListOf<String>(); val appendMs = mutableListOf<Double>(); val cpuMs = mutableListOf<Double>(); val cpuSlow = mutableListOf<String>()
     fun frameSummary(): String {
         if (frameMs.isEmpty()) return "frames=0"
         val sorted = frameMs.sorted(); val p50 = sorted[sorted.size / 2]; val p95 = sorted[(sorted.size * 95 / 100).coerceAtMost(sorted.size - 1)]
         val jank = frameMs.count { it > 25 }
         fun f(v: Double) = (kotlin.math.round(v * 10) / 10).toString()
-        return "frames=${frameMs.size} frameP50Ms=${f(p50)} frameP95Ms=${f(p95)} frameMaxMs=${f(sorted.last())} frameOver25Ms=$jank frameOver25Pct=${f(jank * 100.0 / frameMs.size)} frameOver100Ms=${hitches.size} hitches=${hitches.take(6)}"
+        val cpu = if (cpuMs.isEmpty()) "" else { val c = cpuMs.sorted(); " mainCpuTotalMs=${f(c.sum())} mainCpuP50Ms=${f(c[c.size / 2])} mainCpuP95Ms=${f(c[(c.size * 95 / 100).coerceAtMost(c.size - 1)])} mainCpuP99Ms=${f(c[(c.size * 99 / 100).coerceAtMost(c.size - 1)])} mainCpuMaxMs=${f(c.last())} mainCpuOver8Pct=${f(cpuMs.count { it > 8 } * 100.0 / cpuMs.size)} mainCpuOver12Ms=${cpuSlow.size} cpuSlow=${cpuSlow.sortedByDescending { it.substringAfter('=').removeSuffix("ms").toInt() }.take(10)}" }
+        return "frames=${frameMs.size} frameP50Ms=${f(p50)} frameP95Ms=${f(p95)} frameMaxMs=${f(sorted.last())} frameOver25Ms=$jank frameOver25Pct=${f(jank * 100.0 / frameMs.size)} frameOver100Ms=${hitches.size} appendTotalMs=${f(appendMs.sum())} appendMaxMs=${f(appendMs.maxOrNull() ?: 0.0)}$cpu hitches=${hitches.take(12)}"
     }
     var sealedShift = 0f; var firstVisibleShift = 0f; var firstVisibleSamples = 0; var atEndSkipped = 0; var failures = 0; var messages = 0; var lastCounted = -1
 }

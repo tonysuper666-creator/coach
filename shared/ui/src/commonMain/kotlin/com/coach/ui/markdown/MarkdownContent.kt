@@ -38,13 +38,23 @@ fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model:
     }
 }
 
+/**
+ * One text measurer for all the formulas of a message. Each `rememberTextMeasurer()` is a separate instance with its own small layout cache,
+ * so a list of eight formula lines used to measure the same probe strings eight times when its block sealed.
+ */
+val LocalMarkdownMeasurer = compositionLocalOf<TextMeasurer?> { null }
+@Composable
+fun ProvideMarkdownMeasurer(content: @Composable () -> Unit) = CompositionLocalProvider(LocalMarkdownMeasurer provides rememberTextMeasurer(cacheSize = 64), content = content)
+@Composable
+private fun sharedMeasurer(): TextMeasurer = LocalMarkdownMeasurer.current ?: rememberTextMeasurer()
+
 /** Test hook: scroll every display formula to its right end (used to prove the end of a wide formula is reachable). */
 val LocalScrollMathToEnd = compositionLocalOf { false }
 
 /** One display formula: natural size, horizontally scrollable so a formula wider than the screen is never cut off. */
 @Composable
 fun ScrollableMath(document: MathSvgDocument, tex: String, emPx: Float, color: Color, modifier: Modifier = Modifier) {
-    val measurer = rememberTextMeasurer()
+    val measurer = sharedMeasurer()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val scroll = rememberScrollState()
     if (LocalScrollMathToEnd.current) LaunchedEffect(scroll.maxValue) { if (scroll.maxValue > 0) scroll.scrollTo(scroll.maxValue) }
@@ -175,7 +185,7 @@ private fun FailedFormula(tex: String) {
 @Composable
 private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit, style: TextStyle, trimLeadingSpace: Boolean = false) {
     val source = run.joinToString("") { it.index.toString() }
-    val measurer = rememberTextMeasurer()
+    val measurer = sharedMeasurer()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val foreground = LocalContentColor.current
     // Fixed line height keeps the line box constant, but the baseline inside it depends on whether the line holds CJK
@@ -223,6 +233,9 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     })
 }
 
+/** Building the GFM flavour is not free and every live paragraph is re-rendered on each delta; the parser itself keeps no state between calls. */
+private val inlineParser = MarkdownParser(GFMFlavourDescriptor())
+
 internal fun renderMarkdownText(source: String): AnnotatedString = buildAnnotatedString { appendStyledMarkdown(source) }
 
 /** Render inline AST styles; reference definitions/links and raw HTML stay literal. */
@@ -230,7 +243,7 @@ private fun AnnotatedString.Builder.appendStyledMarkdown(raw: String) {
     // Math is handled before this point (MathDelimiters), so every `$` that arrives here is a plain character, usually currency.
     // The GFM parser would pair two of them as inline LaTeX and swallow the emphasis between them (`**$20**，… $80` showed its asterisks).
     val source = escapeDollars(raw)
-    val root = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(source)
+    val root = inlineParser.buildMarkdownTreeFromString(source)
     fun visit(node: ASTNode) {
         val type = node.type.name
         val value = source.substring(node.startOffset, node.endOffset)

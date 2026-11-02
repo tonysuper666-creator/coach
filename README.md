@@ -16,10 +16,10 @@
 ```sh
 sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
 tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :desktopApp:createDistributable :server:app:installDist :server:store:installDist --max-workers=2
-tools/dev/heavy ./gradlew :desktopApp:run --offline -Pcoach.autoExitSeconds=5 --max-workers=2
+COACH_URL=http://127.0.0.1:<测试端口> COACH_TOKEN_FILE=<测试令牌> COACH_CLIENT_DIR=<测试账本目录> tools/dev/heavy ./gradlew :desktopApp:run --offline -Pcoach.autoExitSeconds=5 --max-workers=2
 ```
 
-首次联网同步包括 Compose 安卓构件与桌面打包的 JDK probe。以后桌面运行可 `--offline`。产物为 `androidApp/build/outputs/apk/debug/androidApp-debug.apk` 和 `desktopApp/build/compose/binaries/main/app/Coach.app`。
+首次联网同步包括 Compose 安卓构件与桌面打包的 JDK probe。以后桌面运行可 `--offline`。**开发版桌面（`:desktopApp:run`，或带 `COACH_AUTOPLAY` / `COACH_RENDER_STATE` / `-Dcoach.capturePath` 等测量开关的任何启动）不再默认连生产**：必须显式给 `COACH_URL`（端口不得是 18791 / 8791 / 8790）、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`，否则启动即失败；打包的 `Coach.app` 日常使用不受影响。渲染回放用 `COACH_MODE=spike`，不连服务端。产物为 `androidApp/build/outputs/apk/debug/androidApp-debug.apk` 和 `desktopApp/build/compose/binaries/main/app/Coach.app`。
 
 **每个重命令都用 `tools/dev/heavy COMMAND ...`**（包括 Gradle、SDK 安装、模拟器）。它用 `~/dev/.coach-heavy.lock` 的 `mkdir` 原子锁串行化，等待时打印持有者 PID 与命令；子进程以 `nice -n 15` 运行，退出或中断时释放锁。Gradle 默认 `org.gradle.workers.max=2`。不要绕过锁；只有确认持有者已不存在，才人工清理异常退出遗留的锁。测试可用 `COACH_HEAVY_LOCK` 指定隔离锁目录。模拟器运行期间先前台完成 APK 编译，再用 adb 安装/验收，不同时开另一重构建。
 

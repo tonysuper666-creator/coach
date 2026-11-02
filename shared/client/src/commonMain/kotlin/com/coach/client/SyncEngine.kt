@@ -32,7 +32,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         // Server retention: 14 daily days + the preceding 8 weekly weeks.
         const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
     }
-    private var retentionMark = retentionTimeSource.markNow()
+    private val retentionBase = meta("outboxRetentionTime")?.toLong() ?: 0L
+    private val retentionMark = retentionTimeSource.markNow()
     private val mutex = Mutex()
     private val _connection = MutableStateFlow("offline")
     val connection = _connection.asStateFlow()
@@ -130,18 +131,17 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private fun meta(key: String) = q.getMeta(key).executeAsOneOrNull()
     private fun save(events: List<Event>) { for(e in events) q.putEvent(e.seq,e.courseId,LedgerJson.encodeToString(e)) }
 
-    /** Persist only observed monotonic elapsed time. Downtime across process restarts
-     * is deliberately uncounted: neither local nor server wall time can prove age. */
+    /** Anchor each instance once, then merge progress with MAX, never addition.
+     * Overlapping engines/processes must not count the same elapsed time twice.
+     * Downtime across restarts remains uncounted; wall clocks cannot prove age. */
     private fun advanceRetentionTime(): Long {
         val elapsed = retentionMark.elapsedNow().inWholeMilliseconds.coerceAtLeast(0)
-        val now = db.transactionWithResult {
-            val previous = meta("outboxRetentionTime")?.toLong() ?: 0L
-            val next = previous + elapsed.coerceAtMost(Long.MAX_VALUE - previous)
-            q.putMeta("outboxRetentionTime",next.toString())
-            next
+        val candidate = retentionBase + elapsed.coerceAtMost(Long.MAX_VALUE - retentionBase)
+        return db.transactionWithResult {
+            // First statement is an atomic write, including across separate SQLite connections.
+            q.advanceRetentionTime(candidate.toString())
+            meta("outboxRetentionTime")!!.toLong()
         }
-        retentionMark = retentionTimeSource.markNow()
-        return now
     }
 
     private fun retainOrPrune(backedUpThroughSeq: Long) {

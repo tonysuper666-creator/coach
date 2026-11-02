@@ -20,6 +20,7 @@ import java.util.UUID
 import kotlin.test.*
 import kotlin.time.TestTimeSource
 import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(kotlin.time.ExperimentalTime::class)
 class OfflineRestoreTest {
@@ -159,6 +160,69 @@ class OfflineRestoreTest {
             }
             println("OLD_BACKUP_HTTP restores=2 recovered=1 lost=0 duplicateFirstAnswers=0 restarted=true coveredByNewerBackup=true")
         } finally { transport?.close();driver?.close();server?.close();root.toFile().deleteRecursively() }
+    }
+
+    @Test fun concurrentEnginesKeepCoveredAnswersUntilSeventyDays() = runBlocking {
+        exerciseConcurrentEngines(restoreAtHalfway=false)
+    }
+
+    @Test fun concurrentEnginesRecoverOlderBackupAndRestartEpochWindow() = runBlocking {
+        exerciseConcurrentEngines(restoreAtHalfway=true)
+    }
+
+    private suspend fun exerciseConcurrentEngines(restoreAtHalfway: Boolean) {
+        val clock=TestTimeSource()
+        val root=Files.createTempDirectory("coach-shared-client-")
+        val data=root.resolve("server")
+        val drivers=mutableListOf<JdbcSqliteDriver>()
+        var server: Server?=null
+        var transport: HttpLedgerTransport?=null
+        try {
+            var store=LedgerStore(data)
+            store.enroll("phone",token)
+            store.registerQuestion("online","course","online","SINGLE_CHOICE","Synthetic choice online","VERIFIED","one",options)
+            val old=store.backup(root.resolve("old"))
+            server=Server(store);val port=server.port()
+            transport=HttpLedgerTransport("http://127.0.0.1:$port","phone",token)
+            fun open(): SyncEngine {
+                val driver=JdbcSqliteDriver("jdbc:sqlite:${root.resolve("shared.sqlite")}",java.util.Properties(),ClientDatabase.Schema)
+                drivers.add(driver)
+                return SyncEngine(ClientDatabase(driver),"phone",transport!!,listOf("course"),{ UUID.randomUUID().toString() },::sha256,clock)
+            }
+            val first=open();var second=open()
+            suspend fun pollBoth() = coroutineScope {
+                listOf(first,second).map { async { it.syncOnce() } }.awaitAll()
+            }
+            first.syncOnce();second.syncOnce()
+            val command=first.enqueue(submit("online"));first.syncOnce()
+            server.actor.execute { backup(root.resolve("covered")) };pollBoth()
+            repeat(35) { day ->
+                clock += 1.days;pollBoth()
+                if(day==16) {
+                    // A replacement instance anchors to the already persisted progress.
+                    drivers.last().close();second=open()
+                }
+            }
+            assertEquals(command,first.retainedCommands().singleOrNull(),"two engines must retain at 35 real days")
+            if(restoreAtHalfway) {
+                server.close();server=null
+                store=LedgerStore.restore(data,old);server=Server(store,port)
+                pollBoth()
+                assertEquals(1,store.events("course").count { it.type=="answer_submitted" })
+                assertEquals(store.snapshot("course").projection.bytes(),first.projection("course").bytes())
+                server.actor.execute { backup(root.resolve("recovered")) };pollBoth()
+                repeat(35) { clock += 1.days;pollBoth() }
+                assertEquals(command,first.retainedCommands().singleOrNull(),"epoch replay must start a new full window")
+            }
+            clock += 35.days - 1.milliseconds;pollBoth()
+            assertEquals(command,first.retainedCommands().singleOrNull(),"must retain until 70 days after coverage")
+            clock += 1.milliseconds;pollBoth()
+            assertTrue(first.retainedCommands().isEmpty())
+            val seq=store.hello().lastSeq;pollBoth()
+            assertEquals(seq,store.hello().lastSeq)
+            assertEquals(1,store.events("course").count { it.type=="answer_submitted" })
+            println("CONCURRENT_RETENTION engines=2 separateConnections=true overlappingHttp=true staggeredRestart=true restore=$restoreAtHalfway retainedAt35d=1 prunedAt70d=true recoveredAnswers=1 duplicateFirstAnswers=0")
+        } finally { transport?.close();drivers.forEach { it.close() };server?.close();root.toFile().deleteRecursively() }
     }
 
     @Test fun immutableOldSerializationReplaysAndHttpAuthBindsDevice() = runBlocking {

@@ -4,6 +4,8 @@ import com.coach.client.UsageVocabulary
 import io.ktor.server.application.*
 import io.ktor.server.application.hooks.ResponseSent
 import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.http.HttpStatusCode
 import io.ktor.util.AttributeKey
 import kotlinx.serialization.json.*
 import java.nio.file.Files
@@ -16,6 +18,7 @@ import java.time.format.DateTimeFormatter
 internal val observedDevice = AttributeKey<String>("observed-device")
 private val requestStart = AttributeKey<Long>("usage-request-start")
 private val responseReady = AttributeKey<Long>("usage-response-ready")
+private val activityTicket = AttributeKey<Long>("activity-ticket")
 private val usageLabels = mapOf(
     "open" to "打开应用", "screen" to "切屏", "tap" to "点按", "error" to "错误", "disconnect" to "断线",
     "reconnect" to "连接恢复", "first_word" to "首字", "app" to "应用", "today" to "今天页", "study" to "学习页",
@@ -26,7 +29,8 @@ private val usageLabels = mapOf(
 private fun JsonObject.usageLabel(key: String): String = getValue(key).jsonPrimitive.content.let { usageLabels[it] ?: "其他操作" }
 
 /** One owner for both listeners. Metadata only, separate from learning facts and backups. */
-class UsageObservation(private val logs: Path, private val state: Path) : AutoCloseable {
+class UsageObservation(private val logs: Path, private val state: Path,
+                       val coverage: ActivityCoverage = ActivityCoverage(logs)) : AutoCloseable {
     private val access = ServiceLog(logs, "access") { LocalDate.now(ZoneOffset.UTC) }
     private val connection = run {
         val directory = state.resolve("diagnostics")
@@ -62,7 +66,7 @@ class UsageObservation(private val logs: Path, private val state: Path) : AutoCl
             put("responseReadyMs", ready?.let(::JsonPrimitive) ?: JsonNull)
             put("firstWordMs", firstWord?.let(::JsonPrimitive) ?: JsonNull)
         }
-        runCatching { access.write((row.toString()+"\n").toByteArray()) }
+        runCatching { access.write((row.toString()+"\n").toByteArray()) }.onFailure { coverage.writeFailed() }
     }
 
     /** Uses receive day for offline uploads and also shows the original device timestamp. */
@@ -107,7 +111,14 @@ class UsageObservation(private val logs: Path, private val state: Path) : AutoCl
         connection.prepareStatement("DELETE FROM usage WHERE received<?").use { it.setLong(1,start-14*86_400_000L); it.executeUpdate() }
         return output
     }
-    @Synchronized override fun close() { access.close(); connection.close() }
+    private var closed = false
+    @Synchronized override fun close() {
+        if (closed) return
+        closed = true
+        runCatching { access.close() }.onFailure { coverage.writeFailed() }
+        coverage.close()
+        connection.close()
+    }
 }
 
 /** Log only route templates: arbitrary paths/queries can contain private text. */
@@ -126,12 +137,17 @@ internal fun usageRoute(path: String): String {
 
 fun Application.observeUsage(observation: UsageObservation) {
     install(createApplicationPlugin("UsageAccess") {
-        onCall { call -> call.attributes.put(requestStart, System.nanoTime()) }
+        onCall { call ->
+            val ticket = observation.coverage.begin("http")
+            if (ticket == null) call.respondText("Service switching; retry", status = HttpStatusCode.ServiceUnavailable)
+            else { call.attributes.put(activityTicket, ticket); call.attributes.put(requestStart, System.nanoTime()) }
+        }
         onCallRespond { call, _ -> call.attributes.getOrNull(requestStart)?.let { call.attributes.put(responseReady, (System.nanoTime()-it)/1_000_000) } }
         on(ResponseSent) { call ->
             val elapsed = call.attributes.getOrNull(requestStart)?.let { (System.nanoTime()-it)/1_000_000 } ?: 0
             observation.access(call.attributes.getOrNull(observedDevice),usageRoute(call.request.path()),
                 call.request.httpMethod.value,call.response.status()?.value ?: 500,elapsed,call.attributes.getOrNull(responseReady))
+            call.attributes.getOrNull(activityTicket)?.let { observation.coverage.end(it) }
         }
     })
 }

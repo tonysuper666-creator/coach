@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only TON-1175 gates, plus explicit private build/snapshot evidence writers.
 
-No defaults point at a service, database, token or production port. Positive
-acceptance evidence is supported; lossless access coverage is NOT supported by
-the current server sink, so the logs gate deliberately always refuses it.
+No defaults point at a service, database, token or production port. Legacy access
+logs cannot prove idle; coverage v1 requires process-owned counters and a held
+admission fence through shutdown, in addition to the independent JFR gate.
 """
 import argparse
 import contextlib
@@ -142,12 +142,13 @@ def candidate(manifest_path, expected_hash, release, head, plist_path):
             'relocated dependency environment changed')
 
 
-def logs(evidence, paths):
-    # There is no unforgeable "coverage=true" JSON flag. UsageObservation.access
-    # swallows write errors and has no sequence/flush barrier; even an empty,
-    # readable, unrotated file cannot prove absence of omitted requests.
+def logs(evidence, paths, closed_seal=None):
     require(paths and all(Path(name).is_file() for name in paths), 'access logs missing')
-    raise GateError('unsupported access-log protocol: lossless coverage cannot be established')
+    try:
+        from .activity_coverage import verify
+    except ImportError:
+        from activity_coverage import verify
+    verify(evidence, paths, stopped=closed_seal is not None, seal=closed_seal)
 
 
 def idle(evidence, installation, java, jcmd, lsof):
@@ -341,6 +342,7 @@ def main():
     check.add_argument('head')
     check.add_argument('plist')
     coverage = sub.add_parser('logs')
+    coverage.add_argument('--closed-seal')
     coverage.add_argument('evidence')
     coverage.add_argument('paths', nargs='+')
     recording = sub.add_parser('idle')
@@ -362,7 +364,7 @@ def main():
         elif args.action == 'candidate':
             candidate(args.manifest, args.sha256, args.release, args.head, args.plist)
         elif args.action == 'logs':
-            logs(args.evidence, args.paths)
+            logs(args.evidence, args.paths, args.closed_seal)
         elif args.action == 'idle':
             idle(args.evidence, args.installation, args.java, args.jcmd, args.lsof)
         elif args.action == 'snapshot':

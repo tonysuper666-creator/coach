@@ -20,6 +20,8 @@ dependencies {
 }
 application { mainClass = "com.coach.server.MainKt" }
 tasks.test {
+    systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath)
+    systemProperty("coach.checkout", rootProject.projectDir.absolutePath)
     exclude("**/LiveChatTest*", "**/TutorLiveTest*")
     dependsOn(tasks.installDist)
     systemProperty("coach.serverBinary", layout.buildDirectory.file("install/app/bin/app").get().asFile.absolutePath)

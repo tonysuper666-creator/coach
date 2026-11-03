@@ -124,6 +124,7 @@ class ChatService(
         }
     }
     private val sessions = ConcurrentHashMap<String, Session>()
+    internal fun activityQuiet(): Boolean = sessions.isEmpty() && waitingPools.isEmpty()
 
     class Session(
         val messageId: String,

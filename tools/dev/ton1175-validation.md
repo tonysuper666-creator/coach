@@ -1,13 +1,12 @@
 # TON-1175 evidence and rollback transaction
 
-These tools are for independent review and isolated rehearsal. **They cannot
-currently pass the production gate.** `UsageObservation.access()` swallows write
-errors and exposes no independent ingress/write-loss counters or flush barrier.
-An empty, readable, unrotated access file cannot prove absence of omitted requests.
-`ton1175_verify.py logs` therefore always exits nonzero, including when a JSON
-file claims coverage. Do not replace it with a command that returns success.
-Resolving this requires a separately reviewed service-side evidence contract;
-this change only touches `tools/dev`.
+These tools are for independent review and isolated rehearsal. Coverage protocol
+v1 now binds a process-owned journal, live counters and a held admission fence to
+the shutdown record. Legacy access files and caller-supplied `coverage=true` still
+fail closed. See [the coverage contract](activity-coverage.md) for collection,
+fault tests and limits. This implementation does not authorize production use;
+QA-C and Architect review remain required, as do the real 900-second JFR and
+five-minute original-device/learning gates below.
 
 ## Reproduce without production
 
@@ -106,12 +105,16 @@ events/settings/coverage fail closed. Old recordings made without these enabled
 events cannot be used. The unit fixture is deliberately short; it verifies the
 real parser and proves the Python entrypoint rejects it as a production idle proof.
 
-`logVerifier` receives `IDLE_JSON LOG...` before stopping and again after stopping.
-The provided `logs` implementation always refuses the current protocol. A future
-protocol must bind complete ingress/activity coverage (including established WS),
-write-loss accounting, flush/rotation barriers and process identity across the
-observation-to-stop gap. File existence or a caller-controlled coverage flag
-cannot replace that contract. Do not disable this gate for a cutover.
+`logVerifier` receives `IDLE_JSON LOG...` before stopping. For protocol v1,
+`accessLogs` in the switch configuration must list **all activity journal files
+for the observed lifetime**; acceptance's separate `accessLogs` still names the
+ordinary access files. The switcher obtains a live atomic seal on the private
+control socket before invoking the controller. After stopping it appends
+`--closed-seal NONCE` to the verifier arguments and requires the same process's
+closed chain with that nonce, zero active/failed/rejected changes and process
+exit. The held socket releases the fence on abort/EOF. A missing seal or an
+unsupported journal cannot pass. Do not replace this gate with an unconditional
+success command; configured gate executables are trusted review inputs.
 
 ## Five-minute acceptance
 

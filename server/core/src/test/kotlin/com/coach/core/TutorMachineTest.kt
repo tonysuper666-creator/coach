@@ -46,6 +46,69 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun gradedMistakesUseReviewedExplanationsAndNeverLeakPendingKeys() = runBlocking {
+        TutorFixture().use { f ->
+            f.actor.execute {
+                val id = enqueueSupply("course","kp-1","Objective","Synthetic source")
+                val job = supplyJobs().single { it.id == id }
+                val options = listOf(Option("right","Opportunity cost is the forgone alternative"),Option("wrong","Sunk cost is recoverable"),Option("other","Total revenue"),Option("last","Fixed payment"))
+                storeVerifiedBatch(claimJob(id)!!,job,listOf(com.coach.store.VerifiedPoolQuestion(
+                    "Which cost describes the forgone alternative?",options,"right",
+                    "Opportunity cost is the best forgone alternative; sunk costs cannot be recovered.","Synthetic source","claude","gpt")))
+            }
+            f.open(); f.teach(); f.machine.settings("course","thread",1)
+            val cards=f.machine.next("course","thread").cards
+            assertFalse(cards.single().payload.toString().contains("forgone alternative;"))
+            val pending=f.machine.followup("course","thread")
+            assertTrue(pending.mistakes.isEmpty())
+            f.machine.finish(pending,"hint",true)
+            val graded=f.submit(cards,setOf(0))
+            val feedback=graded.grades.single().payload.str("feedback")
+            assertTrue(feedback.contains("Sunk cost is recoverable"))
+            assertTrue(feedback.contains("sunk costs cannot be recovered"))
+            val plan=assertNotNull(f.machine.explain("course","thread",TeachingMode.EXAMPLE).plan)
+            val mistake=plan.mistakes.single()
+            assertEquals("Sunk cost is recoverable",mistake.selectedText)
+            assertEquals("Opportunity cost is the forgone alternative",mistake.correctText)
+            assertTrue(plan.instruction().contains("Cover EVERY graded question"))
+            assertTrue(plan.instruction().contains("begin the reply with the Chinese words ‘你选的’"))
+            assertTrue(plan.instruction().contains(mistake.explanation))
+            assertEquals("low",plan.effort)
+            assertTrue(plan.reviewedBasis)
+            // A first explanation of new concepts still needs the source pages and normal effort.
+            val untaught=plan.copy(conceptIds=setOf("new-concept"))
+            assertEquals("medium",untaught.effort)
+            assertFalse(untaught.reviewedBasis)
+            // ...but its mistakes are explained first, in a separate fast part.
+            assertTrue(untaught.staged)
+            assertFalse(plan.staged)
+            assertTrue(untaught.mistakeInstruction().contains("Cover EVERY graded question"))
+            assertFalse(untaught.mistakeInstruction().contains("Fully teach ONLY"))
+            assertFalse(untaught.copy(mistakes=emptyList()).instruction().contains("Cover EVERY graded question"))
+            f.machine.finish(plan,"recap",true)
+            f.seed("kp-2"); f.open("other","kp-2")
+            val plain=assertNotNull(f.machine.next("course","other").plan)
+            assertTrue(plain.mistakes.isEmpty())
+            assertEquals("medium",plain.effort)
+            assertFalse(plain.reviewedBasis)
+        }
+    }
+
+    @Test fun missingExplanationIsAdmittedAndNewCorrectGroupClearsOldMistakes() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed();f.open();f.teach()
+            val cards=f.machine.next("course","thread").cards
+            val grades=f.submit(cards,setOf(0,1))
+            assertTrue(grades.grades.first().payload.str("feedback").contains("暂无已复核解析"))
+            val plan=assertNotNull(f.machine.next("course","thread",allowExample=true).plan)
+            assertEquals(2,plan.mistakes.size)
+            assertTrue(plan.mistakes.all { it.explanation.isEmpty() })
+            f.machine.finish(plan,"recap",true)
+            f.submit(f.machine.next("course","thread").cards,id="correct-group")
+            assertTrue(assertNotNull(f.machine.explain("course","thread",TeachingMode.EXAMPLE).plan).mistakes.isEmpty())
+        }
+    }
+
     @Test fun reopeningPersistedKpThreadDoesNotCreateAnotherBinding() = runBlocking {
         TutorFixture().use { f ->
             f.seed()

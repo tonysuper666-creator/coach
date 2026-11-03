@@ -493,6 +493,99 @@ class ChatFlowTest {
         }
     }
 
+    private fun trace(h: Harness, message: String): JsonObject {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3)
+        while (System.nanoTime() < deadline) {
+            val line = synchronized(h.logs) { h.logs.firstOrNull { it.startsWith("COACH first_word ") && it.contains("\"msg\":\"$message\"") } }
+            if (line != null) return com.coach.domain.LedgerJson.parseToJsonElement(line.substringAfter("COACH first_word ")).jsonObject
+            Thread.sleep(10)
+        }
+        error("missing first-word trace for $message")
+    }
+
+    @Test
+    fun simulatedBridgeSeparatesRawAndVisibleAndNeverCountsProgressAsText() {
+        Harness().use { h ->
+            h.tutor.stream(150, "placeholder\n", "可见正文。\n", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                val t = trace(h, id)
+                fun n(key: String) = t.str(key).toLong()
+                assertTrue(n("prepared_ms") <= n("bridge_start_ms"))
+                assertTrue(n("raw_first_ms") - n("bridge_start_ms") >= 100)
+                assertTrue(n("visible_first_ms") - n("raw_first_ms") >= 100)
+                assertTrue(n("end_ms") >= n("visible_first_ms"))
+                assertEquals("2", t.str("bridge_queue_ms"))
+                assertEquals("900", t.str("bridge_ttft_ms"))
+                assertTrue(!t.toString().contains("可见正文") && !t.toString().contains("placeholder"))
+            }
+        }
+        Harness(defaultTimings(firstTokenDeadlineMs = 600)).use { h ->
+            h.tutor.stream(100, *Array(20) { "placeholder\n" }, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.await("msg.progress")
+                ws.await("msg.end")
+                val t = trace(h, id)
+                assertTrue(t.str("raw_first_ms").toLong() >= 0)
+                assertEquals("null", t.str("visible_first_ms"))
+                assertEquals("failed", t.str("status"))
+            }
+        }
+    }
+
+    @Test
+    fun simulatedBridgeLeavesMissingStagesMissingAndLinksFallback() {
+        Harness().use { h ->
+            h.tutor.rateLimit()
+            h.tutor.completion("fallback private answer", BridgeClient.CODEX)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val primary = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                val fallback = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                val first = trace(h, primary)
+                val second = trace(h, fallback)
+                assertEquals("null", first.str("raw_first_ms"))
+                assertEquals("null", first.str("visible_first_ms"))
+                assertEquals(primary, second.str("parent_msg"))
+                assertEquals("fallback", second.str("attempt"))
+                assertEquals("null", second.str("prepared_ms"))
+                assertTrue(second.str("raw_first_ms").toLong() >= second.str("bridge_start_ms").toLong())
+                assertTrue(second.str("visible_first_ms").toLong() >= second.str("raw_first_ms").toLong())
+            }
+        }
+        Harness().use { h ->
+            h.tutor.stream(1000, "late", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.send("""{"t":"msg.cancel","msg":"$id"}""")
+                ws.await("msg.end")
+                val t = trace(h, id)
+                assertEquals("cancelled", t.str("status"))
+                assertEquals("null", t.str("raw_first_ms"))
+                assertEquals("null", t.str("visible_first_ms"))
+            }
+        }
+        Harness().use { h ->
+            h.tutor.stream(10, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                val t = trace(h, id)
+                assertEquals("failed", t.str("status"))
+                assertEquals("null", t.str("raw_first_ms"))
+                assertEquals("null", t.str("visible_first_ms"))
+            }
+        }
+    }
+
     @Test
     fun streamedAnswerReachesTheClientAndLandsComplete() {
         Harness().use { h ->

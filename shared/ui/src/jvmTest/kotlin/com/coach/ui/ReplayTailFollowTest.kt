@@ -2,6 +2,7 @@ package com.coach.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -12,11 +13,36 @@ import androidx.compose.ui.unit.dp
 import com.coach.ui.chat.AnchoredChatList
 import com.coach.ui.chat.ChatListState
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import java.io.File
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class ReplayTailFollowTest {
+    @Test fun interruptedFollowContinuesOnNextGrowth() = runComposeUiTest {
+        val list = LazyListState()
+        var text by mutableStateOf("short")
+        var attempts = 0
+        setContent {
+            FollowReplayTail(list, true, scroll = { index, overflow ->
+                attempts++
+                if (attempts == 1) throw CancellationException("gesture interrupted scroll")
+                if (overflow == 0) list.scrollToItem(index) else list.scrollBy(overflow.toFloat())
+            })
+            LazyColumn(state = list, modifier = Modifier.size(200.dp, 120.dp)) {
+                item { Text(text) }
+            }
+        }
+        waitForIdle()
+        runOnIdle { text = "first growth ".repeat(80) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        assertEquals(1, attempts)
+        runOnIdle { text += "second growth ".repeat(80) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        assertTrue(attempts >= 2, "following must survive a cancelled scroll")
+        assertFalse(list.canScrollForward, "the next growth reaches the end")
+    }
+
     @Test fun realReplayKeepsItsPinWhileFollowingAndSwitchingMessages() = runComposeUiTest {
         val input = File(System.getProperty("user.home"), "Coach/corpus/render/replay.json")
         org.junit.Assume.assumeTrue("Real replay corpus is local acceptance input", input.isFile)

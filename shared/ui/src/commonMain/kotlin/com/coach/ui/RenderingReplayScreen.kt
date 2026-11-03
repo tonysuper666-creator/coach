@@ -17,6 +17,9 @@ import androidx.compose.ui.unit.dp
 import com.coach.ui.markdown.*
 import com.coach.ui.math.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -207,8 +210,16 @@ private class RunMetrics {
  * not the stream clock: a tick that only adds text within the same line needs no scroll.
  * This also keeps the end of a block taller than the viewport reachable. */
 @Composable
-internal fun FollowReplayTail(list: LazyListState, pinned: Boolean, onScroll: () -> Unit = {}) {
+internal fun FollowReplayTail(
+    list: LazyListState,
+    pinned: Boolean,
+    scroll: suspend (Int, Int) -> Unit = { index, overflow ->
+        if (overflow == 0) list.scrollToItem(index) else list.scrollBy(overflow.toFloat())
+    },
+    onScroll: () -> Unit = {},
+) {
     val currentOnScroll by rememberUpdatedState(onScroll)
+    val currentScroll by rememberUpdatedState(scroll)
     LaunchedEffect(list, pinned) {
         if (!pinned) return@LaunchedEffect
         fun request(): Pair<Int, Int>? {
@@ -227,8 +238,14 @@ internal fun FollowReplayTail(list: LazyListState, pinned: Boolean, onScroll: ()
             // on the next frame, using the latest geometry rather than a stale request.
             withFrameNanos { }
             val (index, overflow) = request() ?: return@collect
-            currentOnScroll()
-            if (overflow == 0) list.scrollToItem(index) else list.scrollBy(overflow.toFloat())
+            try {
+                currentOnScroll()
+                currentScroll(index, overflow)
+            } catch (e: CancellationException) {
+                // A competing user gesture may cancel just the scroll mutation. Keep
+                // collecting future layouts, but respect cancellation of this effect.
+                currentCoroutineContext().ensureActive()
+            }
         }
     }
 }

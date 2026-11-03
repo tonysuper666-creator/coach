@@ -560,7 +560,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return transaction {
             val effects = mutableListOf<Long>()
             fun emit(type: String, payload: JsonObject, idem: String? = null) {
-                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited")) "LEARNER" else "SYSTEM"
+                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited","study_scope_set","study_scope_advanced")) "LEARNER" else "SYSTEM"
                 effects.add(append(body.courseId,type,payload,idem ?: "cmd:${c.deviceId}:${c.commandId}:${effects.size}",c.deviceId,actor,c,effects.size,body.clientTime,body.payload.str("threadId").ifBlank { null }).seq)
             }
             val p = body.payload
@@ -627,6 +627,46 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }
+                    }
+                }
+                "retry_week_mistake" -> {
+                    val old = weekMistakes(events(body.courseId), p.num("week").toInt()).firstOrNull { it.payload.str("attemptId") == p.str("attemptId") }
+                    if (old == null) { status="REJECTED"; error="MISTAKE_CHANGED" }
+                    else {
+                        val qid = old.payload.str("questionId")
+                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
+                        else {
+                            val thread = "week-review:${p.num("week")}:$qid"
+                            val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload + mapOf(
+                                "attemptId" to JsonPrimitive(uid()), "purpose" to JsonPrimitive("RECALL"),
+                                "review" to JsonPrimitive(true), "weekReview" to p.getValue("week")
+                            ))), device=c.deviceId, thread=thread)
+                            effects.addAll(posed.map { it.seq })
+                            result = json("threadId" to thread)
+                        }
+                    }
+                }
+                "set_study_scope" -> {
+                    val week = p.num("week").toInt()
+                    val points = weekPoints(events(body.courseId))
+                    if (week != 0 && points.none { week in it.weeks }) { status="REJECTED"; error="UNKNOWN_WEEK" }
+                    else {
+                        val state = snapshot(body.courseId).projection
+                        val ids = points.filter { week in it.weeks && state.mastery[it.id]?.let { m -> m.passed && !m.needsRepair } != true }.map { it.id }
+                        emit("study_scope_set", json("week" to week, "kpIds" to ids, "basis" to "COURSE_WEEK_OR_W_LABEL"))
+                        result = json("target" to ids.firstOrNull())
+                    }
+                }
+                "advance_study_scope" -> {
+                    val state = snapshot(body.courseId).projection
+                    val scope = state.studyScope
+                    val available = weekPoints(events(body.courseId)).map { it.id }.toSet()
+                    if (scope == null || scope.id != p.str("scopeId") || scope.target(state.mastery, available) != p.str("kpId")) {
+                        status="CONFLICT"; error="STUDY_SCOPE_MOVED"
+                    } else {
+                        emit("study_scope_advanced", json("scopeId" to scope.id, "kpId" to p.str("kpId")))
+                        result = json("target" to scope.copy(cursor=scope.kpIds.indexOf(p.str("kpId")) + 1).target(state.mastery, available))
                     }
                 }
                 "open_kp" -> emit("kp_opened",p)

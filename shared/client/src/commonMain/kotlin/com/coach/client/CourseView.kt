@@ -102,8 +102,9 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 val o = op as? JsonObject ?: continue
                 val id = o.s("kpId").ifBlank { o.s("id") }
                 if (id.isBlank()) continue
-                if (o.s("op") == "retire") { retired += id; continue }
-                retired -= id
+                val operation = o.s("op").ifBlank { "add" }
+                if (operation == "retire") { retired += id; continue }
+                if (operation == "add") retired -= id
                 val title = o.s("title").ifBlank { o.s("name") }
                 if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }

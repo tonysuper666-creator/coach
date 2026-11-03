@@ -139,6 +139,60 @@ class WeekScopeRetireTest {
         }
     }
 
+    @Test fun restoredPointAndOldCandidateCacheStayConsistentAcrossSyncAndRestart(): Unit = runBlocking {
+        val root = Files.createTempDirectory("coach-week-restore-v6-")
+        val store = LedgerStore(root)
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        try {
+            ClientDatabase.Schema.create(driver)
+            val db = ClientDatabase(driver)
+            fun engine() = SyncEngine(db, "phone", Direct(store), listOf("C"), { UUID.randomUUID().toString() }, ::sha256)
+            val client = engine()
+            store.seedWeek()
+            client.syncOnce()
+            client.enqueue(CommandBody("set_study_scope", "C", 1000, json("week" to 2)))
+            client.syncOnce()
+            store.append("C", "kp_overridden", json("kpId" to "a", "kind" to "MARK_PASSED"))
+            store.append("C", "kp_overridden", json("kpId" to "c", "kind" to "MARK_PASSED"))
+            val evidence = store.snapshot("C").projection.mastery.getValue("c")
+            store.append("C", "outline_revised", json("ops" to JsonArray(listOf(json("op" to "retire", "kpId" to "b")))))
+            store.append("C", "outline_revised", json("ops" to JsonArray(listOf(
+                json("op" to "setPrereq", "kpId" to "b", "prereqs" to emptyList<String>()),
+                json("op" to "move", "kpId" to "b", "index" to 1)))))
+            client.syncOnce()
+            var view = CourseView(client.localEvents("C"), client.projection("C"))
+            assertNull(view.kp("b"), "修改前置和顺序不能使退休点恢复")
+            assertTrue(weekPoints(client.localEvents("C")).none { it.id == "b" })
+            assertNull(view.weekTarget)
+
+            // 不重复发送标题；恢复必须保留旧标题及已掌握的证据。
+            store.append("C", "outline_revised", json("ops" to JsonArray(listOf(json("op" to "add", "kpId" to "b")))))
+            client.syncOnce()
+            val projection = client.projection("C")
+            view = CourseView(client.localEvents("C"), projection)
+            assertEquals("b", view.weekTarget?.id)
+            assertEquals("b", view.continueTarget?.id)
+            assertEquals("【W2】B", view.kp("b")?.title)
+            assertEquals("【W2】B", weekPoints(client.localEvents("C")).first { it.id == "b" }.title)
+            assertEquals(evidence, projection.mastery["c"])
+            assertEquals(store.snapshot("C").projection.bytes(), projection.bytes())
+
+            // 旧 PR59 的 v6 缓存可以带有效周范围，却使用旧恢复语义；必须丢弃。
+            val seq = db.ledgerQueries.replicaSeq("C").executeAsOne()
+            val stale = projection.copy(version = 6, position = projection.position.copy(continueTarget = "c"))
+            db.ledgerQueries.putProjection("C", 6L, seq, assertNotNull(client.epoch), LedgerJson.encodeToString(stale))
+            val restarted = engine()
+            assertEquals(store.snapshot("C").projection.bytes(), restarted.projection("C").bytes())
+            restarted.syncOnce()
+            assertEquals(store.snapshot("C").projection.bytes(), restarted.projection("C").bytes())
+            assertEquals("b", CourseView(restarted.localEvents("C"), restarted.projection("C")).weekTarget?.id)
+            val scope = assertNotNull(restarted.projection("C").studyScope)
+            assertEquals("OK", store.command(wire("advance_study_scope", json("scopeId" to scope.id, "kpId" to "b"))).status)
+        } finally {
+            driver.close(); store.close(); root.toFile().deleteRecursively()
+        }
+    }
+
     private class Direct(var store: LedgerStore) : LedgerTransport {
         override suspend fun hello(epoch: String?) = store.hello()
         override suspend fun snapshot(course: String) = store.snapshot(course)

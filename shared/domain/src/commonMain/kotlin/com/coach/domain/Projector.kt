@@ -228,7 +228,9 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                     when(o.str("op", "add")) {
                         "add", "setPrereq", "retire" -> {
                             val old = outline.getOrNull(i) ?: Kp(id)
-                            val value = old.copy(prereqs = if (o.containsKey("prereqs")) o.strings("prereqs") else old.prereqs, retired = old.retired || o.str("op") == "retire")
+                            // add 表示该点回到活动大纲：重新加入的点复活；setPrereq/move 不改退休状态。
+                            val retired = when (o.str("op", "add")) { "add" -> false; "retire" -> true; else -> old.retired }
+                            val value = old.copy(prereqs = if (o.containsKey("prereqs")) o.strings("prereqs") else old.prereqs, retired = retired)
                             if (i < 0) outline.add(value) else outline[i] = value
                         }
                         "move" -> if (i >= 0) { val kp = outline.removeAt(i); outline.add(o.num("index").toInt().coerceIn(0,outline.size), kp) }

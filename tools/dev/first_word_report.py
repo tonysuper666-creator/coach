@@ -35,9 +35,13 @@ ATTEMPTS = {"primary", "fallback"}
 
 BAD_KINDS = (
     "json", "not_object", "missing_key", "unsafe_id", "unknown_status",
-    "non_number", "non_finite", "negative", "ordering", "unknown_field",
+    "non_number", "non_finite", "negative", "out_of_range", "ordering",
+    "unknown_field",
 )
 MAX_BAD_SAMPLES = 10
+# Millisecond offsets far above any live request are still valid JSON; cap them
+# so a corrupt value cannot reach float conversion or the percentile samples.
+MAX_OFFSET_MS = 10 ** 12
 
 
 class NonFinite(ValueError):
@@ -53,14 +57,37 @@ def _is_number(value):
 
 
 def _number_error(value):
-    """Return a bad-kind name when a value is unusable as a millisecond offset."""
+    """Return a bad-kind name when a value is unusable as a millisecond offset.
+
+    Integers are compared directly: `math.isfinite(10 ** 400)` raises
+    OverflowError, so the range check must precede any float conversion.
+    """
     if not _is_number(value):
         return "non_number"
+    if isinstance(value, int):
+        if value < 0:
+            return "negative"
+        return "out_of_range" if value > MAX_OFFSET_MS else None
     if not math.isfinite(value):
         return "non_finite"
     if value < 0:
         return "negative"
-    return None
+    return "out_of_range" if value > MAX_OFFSET_MS else None
+
+
+def key_errors(obj):
+    """A duplicate key is only usable when every part is a safe token or null."""
+    kinds = []
+    msg = obj.get("msg")
+    if msg is None:
+        kinds.append("missing_key")
+    elif not _is_id(msg):
+        kinds.append("unsafe_id")
+    for name in ("rid", "parent_msg"):
+        value = obj.get(name)
+        if value is not None and not _is_id(value):
+            kinds.append("unsafe_id")
+    return kinds
 
 
 def _is_id(value):
@@ -138,8 +165,8 @@ def validate(obj):
         value = obj.get(key)
         if value is None:
             continue
-        if not _is_number(value) or not math.isfinite(value):
-            # Already counted as non_number/non_finite; ordering is not defined here.
+        if _number_error(value) is not None:
+            # Already counted; ordering is undefined against an unusable endpoint.
             previous = None
             continue
         if previous is not None and value < previous:
@@ -220,8 +247,11 @@ def collect(paths):
             if not isinstance(obj, dict):
                 mark(file_index, line_no, "not_object")
                 continue
-            if not _is_id(obj.get("msg")):
-                mark(file_index, line_no, "missing_key" if obj.get("msg") is None else "unsafe_id")
+            kinds = key_errors(obj)
+            if kinds:
+                # Checked here, before any dict keying: a list or object in a key
+                # part is unhashable and would otherwise abort the whole report.
+                mark(file_index, line_no, kinds[0])
                 continue
             kept.append((file_index, line_no, obj))
     return kept, counters, bad, samples, files, excluded
@@ -399,8 +429,9 @@ def build_report(paths, threshold_ms, limit, source_label):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Recompute same-clock first-word stage timings from COACH first_word lines.")
-    parser.add_argument("--log", required=True, nargs="+", type=Path, metavar="PATH",
-                        help="log file(s) to read; read-only")
+    parser.add_argument("--log", required=True, action="append", nargs="+", type=Path,
+                        metavar="PATH",
+                        help="log file(s) to read; repeat the flag or list paths after it; read-only")
     parser.add_argument("--slow-ms", type=float, default=5000.0, metavar="MS",
                         help="slow first-word threshold in milliseconds (default 5000)")
     parser.add_argument("--max-details", type=int, default=20, metavar="N",
@@ -414,7 +445,8 @@ def main(argv=None):
         parser.error("--max-details must be zero or greater")
 
     try:
-        report = build_report(args.log, args.slow_ms, args.max_details, args.source_label)
+        paths = [path for group in args.log for path in group]
+        report = build_report(paths, args.slow_ms, args.max_details, args.source_label)
     except OSError as error:
         print("first_word_report: cannot read input: " + str(error), file=sys.stderr)
         return 2

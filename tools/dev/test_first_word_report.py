@@ -5,6 +5,7 @@ derived from the injected clock values rather than from a snapshot.
 """
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,10 @@ FIXTURE = Path(__file__).with_name("fixtures") / "first_word" / "mixed.log"
 sys.path.insert(0, str(TOOL.parent))
 
 import first_word_report as fwr  # noqa: E402
+
+
+def run_cli(*args):
+    return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True)
 
 
 def attempt(msg, prepared=None, bridge=None, raw=None, visible=None, end=None,
@@ -198,7 +203,8 @@ class BadLineTest(ReportCase):
         self.assertEqual(report["lines"], {"total": 11, "first_word": 9, "unrelated": 1, "blank": 1})
         self.assertEqual(report["bad"], {
             "json": 1, "missing_key": 1, "negative": 1, "non_finite": 1, "non_number": 1,
-            "not_object": 1, "ordering": 1, "unknown_field": 0, "unknown_status": 1, "unsafe_id": 1,
+            "not_object": 1, "ordering": 1, "out_of_range": 0, "unknown_field": 0,
+            "unknown_status": 1, "unsafe_id": 1,
         })
         self.assertEqual(report["attempts"]["unique_attempts"], 0)
         self.assertEqual(report["excluded_attempts"], 9)
@@ -253,8 +259,7 @@ class ThresholdTest(ReportCase):
 
 class CommandLineTest(unittest.TestCase):
     def run_cli(self, *args):
-        import subprocess
-        return subprocess.run([sys.executable, str(TOOL), *args], capture_output=True, text=True)
+        return run_cli(*args)
 
     def test_committed_fixture_produces_expected_report(self):
         result = self.run_cli("--log", str(FIXTURE))
@@ -283,6 +288,71 @@ class CommandLineTest(unittest.TestCase):
     def test_non_finite_threshold_is_rejected(self):
         result = self.run_cli("--log", str(FIXTURE), "--slow-ms", "nan")
         self.assertEqual(result.returncode, 2)
+
+
+class CliRegressionTest(unittest.TestCase):
+    """Real command-line runs for defects found against the first head.
+
+    Each log mixes bad and good lines in one file, which is the case that used to
+    abort the whole report: the run must still exit 0 with valid JSON and count
+    the rejected lines.
+    """
+
+    def setUp(self):
+        work = tempfile.TemporaryDirectory(prefix="first-word-cli-")
+        self.addCleanup(work.cleanup)
+        self.root = Path(work.name)
+
+    def write_log(self, name, *lines):
+        path = self.root / name
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_illegal_key_types_are_counted_not_fatal(self):
+        log = self.write_log(
+            "keys.log",
+            attempt("good", prepared=10, bridge=20, raw=30, visible=40, end=50),
+            attempt("bad-list", prepared=10, bridge=20, raw=30, visible=40, end=50, rid=[]),
+            attempt("bad-object", prepared=10, bridge=20, raw=30, visible=40, end=50,
+                    extra={"parent_msg": {"nested": True}}),
+        )
+        result = run_cli("--log", str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["bad"]["unsafe_id"], 2)
+        self.assertEqual(report["attempts"]["primary"], 1)
+        self.assertEqual(report["excluded_attempts"], 2)
+        self.assertEqual(report["bad_samples"]["unsafe_id"],
+                         [{"file": 0, "line": 2}, {"file": 0, "line": 3}])
+
+    def test_huge_integer_offset_is_rejected_without_crashing(self):
+        huge = "COACH first_word " + json.dumps(
+            {"msg": "huge", "status": "complete", "prepared_ms": 10 ** 400})
+        log = self.write_log(
+            "huge.log",
+            attempt("good", prepared=0, bridge=0, raw=1, visible=2, end=3),
+            huge,
+        )
+        result = run_cli("--log", str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["bad"]["out_of_range"], 1)
+        self.assertEqual(report["attempts"]["primary"], 1)
+        self.assertEqual(report["excluded_attempts"], 1)
+        self.assertEqual(report["stages"]["primary"]["prepared_ms"]["n"], 1)
+
+    def test_repeated_log_flag_reads_every_file(self):
+        first = self.write_log("a.log", attempt("m1", prepared=10, bridge=20, raw=30, visible=40, end=50))
+        second = self.write_log("b.log", attempt("m2", prepared=10, bridge=20, raw=30, visible=60, end=70))
+        repeated = run_cli("--log", str(first), "--log", str(second))
+        listed = run_cli("--log", str(first), str(second))
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        report = json.loads(repeated.stdout)
+        self.assertEqual(report, json.loads(listed.stdout))
+        self.assertEqual(len(report["input"]["files"]), 2)
+        self.assertEqual(report["attempts"]["primary"], 2)
+        self.assertEqual(report["duplicates"]["identical_removed"], 0)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@ python3 -m unittest tools.dev.test_first_word_report -v
 Exit code `0` prints the report on stdout. Exit code `2` means usage error or an
 unreadable input file (message on stderr, no report).
 
+`--log a --log b` and `--log a b` read the same files in the same order and
+produce the same report; every path given is read once per occurrence.
+
 ## What it does not do
 
 - It makes no attribution. The offsets are observation points on one clock; a
@@ -75,9 +78,11 @@ combination across stages.
 Each attempt is keyed by `(msg, rid, parent_msg)`. Identical lines for one key
 collapse to one attempt (`duplicates.identical_removed`). Lines that disagree
 for the same key are *all* dropped and counted (`duplicates.conflict_keys`,
-`duplicates.conflict_attempts_removed`); the tool never picks one. A line whose
-`msg` is missing or not a safe token cannot be keyed and is excluded earlier as
-`bad.missing_key` / `bad.unsafe_id`.
+`duplicates.conflict_attempts_removed`); the tool never picks one. All three
+key parts must be a safe token (`msg`) or a safe token / `null` (`rid`,
+`parent_msg`): a line whose key holds a list, an object or a non-token string
+cannot be keyed and is excluded earlier as `bad.missing_key` / `bad.unsafe_id`,
+before any grouping, so one malformed key cannot abort the report.
 
 ## Validation
 
@@ -85,8 +90,9 @@ A record is excluded when any of these hold, counted in `bad`:
 
 `json` (unparsable), `not_object`, `missing_key`, `unsafe_id`, `unknown_status`,
 `non_number` (offset is text or a boolean), `non_finite` (`NaN`/`Infinity`),
-`negative` (an offset below zero), `ordering` (a present endpoint precedes an
-earlier present one).
+`negative` (an offset below zero), `out_of_range` (an offset above 10^12 ms,
+checked as an integer so an oversized literal cannot overflow a float),
+`ordering` (a present endpoint precedes an earlier present one).
 
 `unknown_field` is counted but the record is kept: a future server field must
 not silently empty the report. Field names outside the whitelist and all values

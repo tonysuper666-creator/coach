@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 
 try:
@@ -189,6 +190,7 @@ class Rehearsal:
         self.root = Path(tempfile.mkdtemp(prefix='ton1175-', dir='/tmp')).resolve()
         os.chmod(self.root, 0o700)
         self.case, self.process = case, None
+        self.audits = []
         self.config = self.root / 'switch.json'
         self.java, self.jcmd = java_home / 'bin/java', java_home / 'bin/jcmd'
         self.head, self.old_head = head, old_head
@@ -319,6 +321,7 @@ class Rehearsal:
         require(not any(int(row.split()[0]) in registered and not row.split()[1].startswith('Z')
                         for row in rows), 'command workload survived group cleanup')
         require(load(self.adapter.owner)['pgid'] not in registered, 'service shared a command process group')
+        self.audits.append(dict(record=record, events=events))
         return events
 
     def exercise(self):
@@ -380,7 +383,8 @@ class Rehearsal:
             sameJvmSealRelease=self.case == 'held_seal', committedLedgerRowRetained=committed,
             serviceParent=1, commandGroupsReaped=sum(e['event']=='command_reaped' for e in events),
             acceptanceReserveElapsedSeconds=reserve_elapsed,
-            recoveryRequiredObserved=self.case == 'recovery_timeout')
+            recoveryRequiredObserved=self.case == 'recovery_timeout',
+            idleProof=load(self.root / 'idle.json'), supervisionAudit=self.audits)
 
     def cleanup(self):
         if self.process is not None and self.process.poll() is None:
@@ -449,7 +453,9 @@ def main():
         except Exception as error:
             # Private diagnostics have a fixed type/action schema and no child
             # output, exception text, payload, credentials or process argv.
-            write(args.root / 'hook-error.json', dict(action=args.hook, error=type(error).__name__))
+            frame = traceback.extract_tb(error.__traceback__)[-1]
+            write(args.root / 'hook-error.json', dict(action=args.hook, error=type(error).__name__,
+                source=Path(frame.filename).name, line=frame.lineno))
             raise
         return
     require(not rest, 'unexpected rehearsal arguments')

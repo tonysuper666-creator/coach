@@ -24,7 +24,12 @@ each old JVM must report at least 900 seconds of uninterrupted monotonic
 coverage. A real JFR recording, process identity, heartbeats and request-log
 verification pass through the existing verifier before acquiring the seal.
 
-The scenarios are normal switch followed by rollback; a stopped worker before
+Before observation, a separate real bootstrap race kills the controller after
+launchd creates the job and before PID registration. The persisted intent must
+allow removal of that exact job. The output retains coverage/JFR proof hashes
+and supervisor event records for independent inspection after cleanup.
+
+The nine transaction scenarios are normal switch followed by rollback; a stopped worker before
 the seal; worker SIGKILL while the seal is held; after actual service stop;
 after pointer writes; during acceptance after a real authenticated ledger
 commit; an acceptance hang that exhausts the actual 300-second reserve; a

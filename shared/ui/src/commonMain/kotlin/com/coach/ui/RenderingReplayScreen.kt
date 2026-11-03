@@ -1,6 +1,7 @@
 package com.coach.ui
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -46,6 +47,7 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
             var maxShift by remember { mutableStateOf(0f) }
             // Run-wide metrics for autoplay: sealed-block height change, first visible item shift while the reader is scrolled away.
             val run = remember { RunMetrics() }
+            FollowReplayTail(list, pinned) { run.tailScrolls++ }
             val heights = remember(message) { mutableMapOf<Int, Pair<Int, Int>>() }
             val density = LocalDensity.current
             LaunchedEffect(state.running, message) {
@@ -68,9 +70,8 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                     blocks = engine.append(message.substring(state.cursor, end), end == message.length)
                     run.appendMs += parseStart.elapsedNow().inWholeNanoseconds / 1e6
                     state.cursor = end
-                    if (pinned && blocks.isNotEmpty()) list.scrollToItem(blocks.lastIndex)
-                    else if (scrolledAway && !awayBefore) { run.atEndSkipped++ }
-                    else if (scrolledAway) {
+                    if (!pinned && scrolledAway && !awayBefore) { run.atEndSkipped++ }
+                    else if (!pinned && scrolledAway) {
                         androidx.compose.runtime.withFrameNanos { }
                         run.firstVisibleShift = maxOf(run.firstVisibleShift, if (list.firstVisibleItemIndex == beforeIndex) kotlin.math.abs(list.firstVisibleItemScrollOffset - beforeOffset).toFloat() else Float.MAX_VALUE)
                         run.firstVisibleSamples++
@@ -78,9 +79,12 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                         if (shift != 0) report("SHIFT message=${state.message} cursor=${state.cursor} blocks=${blocks.size} before=($beforeIndex,$beforeOffset) after=(${list.firstVisibleItemIndex},${list.firstVisibleItemScrollOffset}) canScrollForward=${list.canScrollForward} viewportPx=${list.layoutInfo.viewportSize.height} contentPx=${list.layoutInfo.totalItemsCount}")
                     }
                 }
+                // Count the follow caused by the final seal's measured layout as well.
+                // Do this before changing the effect's running key, which cancels it.
+                repeat(2) { withFrameNanos { } }
                 if (state.cursor >= message.length) state.running = false
                 save()
-                report("REPLAY message=${state.message} chars=${state.cursor} blocks=${blocks.size} sealedHeightShiftPx=$maxShift failures=${failures.size} parsedChars=${engine.parsedCharacters}")
+                report("REPLAY message=${state.message} chars=${state.cursor} blocks=${blocks.size} sealedHeightShiftPx=$maxShift failures=${failures.size} parsedChars=${engine.parsedCharacters} parseCalls=${engine.parseCalls} tailScrolls=${run.tailScrolls}")
                 if (autoplay == 3 && state.cursor >= message.length) report("STREAM_DONE message=${state.message}")
                 if (autoplay in 1..2 && corpus != null && state.cursor >= message.length && run.lastCounted != state.message) {
                     run.lastCounted = state.message
@@ -186,6 +190,7 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
 }
 
 private class RunMetrics {
+    var tailScrolls = 0
     val frameMs = mutableListOf<Double>(); val hitches = mutableListOf<String>(); val appendMs = mutableListOf<Double>(); val cpuMs = mutableListOf<Double>(); val cpuSlow = mutableListOf<String>()
     fun frameSummary(): String {
         if (frameMs.isEmpty()) return "frames=0"
@@ -196,6 +201,36 @@ private class RunMetrics {
         return "frames=${frameMs.size} frameP50Ms=${f(p50)} frameP95Ms=${f(p95)} frameMaxMs=${f(sorted.last())} frameOver25Ms=$jank frameOver25Pct=${f(jank * 100.0 / frameMs.size)} frameOver100Ms=${hitches.size} appendTotalMs=${f(appendMs.sum())} appendMaxMs=${f(appendMs.maxOrNull() ?: 0.0)}$cpu hitches=${hitches.take(12)}"
     }
     var sealedShift = 0f; var firstVisibleShift = 0f; var firstVisibleSamples = 0; var atEndSkipped = 0; var failures = 0; var messages = 0; var lastCounted = -1
+}
+
+/** The replay is chronological, unlike the reverse-layout chat. Follow measured overflow,
+ * not the stream clock: a tick that only adds text within the same line needs no scroll.
+ * This also keeps the end of a block taller than the viewport reachable. */
+@Composable
+internal fun FollowReplayTail(list: LazyListState, pinned: Boolean, onScroll: () -> Unit = {}) {
+    val currentOnScroll by rememberUpdatedState(onScroll)
+    LaunchedEffect(list, pinned) {
+        if (!pinned) return@LaunchedEffect
+        fun request(): Pair<Int, Int>? {
+            val info = list.layoutInfo
+            val lastIndex = info.totalItemsCount - 1
+            val last = info.visibleItemsInfo.lastOrNull { it.index == lastIndex }
+            return when {
+                lastIndex < 0 -> null
+                last == null -> lastIndex to 0
+                else -> (last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding))
+                    .takeIf { it > 0 }?.let { lastIndex to it }
+            }
+        }
+        snapshotFlow { request() }.filterNotNull().collect {
+            // Layout snapshots can arrive while placement is still running. Scroll only
+            // on the next frame, using the latest geometry rather than a stale request.
+            withFrameNanos { }
+            val (index, overflow) = request() ?: return@collect
+            currentOnScroll()
+            if (overflow == 0) list.scrollToItem(index) else list.scrollBy(overflow.toFloat())
+        }
+    }
 }
 
 /** Digits sit on the baseline in both the text font and the MathJax glyphs, so their ink bottoms expose inline baseline error. */

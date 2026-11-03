@@ -576,9 +576,13 @@ class ChatService(
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
-        val safeReason = reason?.takeIf { it in setOf("empty_visible_body", "rate_limited", "first_token_timeout", "cancelled") } ?: "other"
-        log("COACH msg.end msg=${session.messageId} model=${session.model} status=$status reason=$safeReason chars=${content.length} ttft=${result.call.ttftMs}")
-        session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs)) }
+        val rid = safeRequestId(result.call.requestId)
+        val traffic = terminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
+        val source = terminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
+        val terminalStatus = terminal?.status?.takeIf { it in setOf("complete", "failed", "cancelled", "truncated") }
+        val failure = safeDiagnosticReason((result as? BridgeResult.Failure)?.reason)
+        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${result.call.ttftMs} terminal=$terminalStatus failure=$failure")
+        session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs, rid)) }
         if (willFallback) fallback(session,question,pack)
     }
 
@@ -725,8 +729,8 @@ class ChatService(
         else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy))
-        log("COACH fallback msg=$messageId model=$fallbackModel status=$status")
-        session.trace?.let { log(it.finish(status, result.terminal?.queueMs, result.terminal?.ttftMs)) }
+        log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=${safeDiagnosticReason(reason)}")
+        session.trace?.let { log(it.finish(status, result.terminal?.queueMs, result.terminal?.ttftMs, result.call.requestId)) }
     }
 
     /**

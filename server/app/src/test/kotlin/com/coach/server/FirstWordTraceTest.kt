@@ -26,5 +26,9 @@ class FirstWordTraceTest {
         assertEquals(7, n("bridge_queue_ms"))
         assertEquals(42, n("bridge_ttft_ms"))
         assertFalse(line.contains("private"))
+        assertEquals("cli_exit", safeDiagnosticReason("cli_exit"))
+        assertEquals("http_502", safeDiagnosticReason("http_502: private response"))
+        assertEquals("transport", safeDiagnosticReason("transport: private exception"))
+        assertEquals(null, safeDiagnosticReason(null))
     }
 }

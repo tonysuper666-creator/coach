@@ -504,6 +504,63 @@ class ChatFlowTest {
     }
 
     @Test
+    fun productionStatsCanJoinSimulatedServerAndBridgeLogs() {
+        Harness().use { h ->
+            val terminal = StubTutor.terminal("complete").replace(
+                "\"x_coach\":{", "\"x_coach\":{\"traffic\":\"user\",\"source\":\"production\","
+            )
+            h.tutor.stream(10, "synthetic answer", terminal, StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                val t = trace(h, id)
+                assertEquals("rid-stub", t.str("rid"))
+                val serverLine = synchronized(h.logs) { h.logs.single { it.startsWith("COACH msg.end msg=$id ") } }
+                assertTrue(serverLine.contains("rid=rid-stub traffic=user source=production"), serverLine)
+                assertTrue(serverLine.contains("terminal=complete failure=null"), serverLine)
+                val root = generateSequence(java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath()) { it.parent }
+                    .first { Files.exists(it.resolve("tools/bridge/production_stats.py")) }
+                val dir = Files.createTempDirectory("coach-stats-fixture-")
+                try {
+                    val serverLog = dir.resolve("server.log")
+                    val bridgeLog = dir.resolve("bridge.log")
+                    Files.writeString(serverLog, serverLine + "\n")
+                    Files.writeString(bridgeLog, "rid=rid-stub traffic=user source=production\n")
+                    val process = ProcessBuilder("python3", root.resolve("tools/bridge/production_stats.py").toString(),
+                        "--server-log", serverLog.toString(), "--bridge-log", bridgeLog.toString())
+                        .redirectErrorStream(true).start()
+                    val output = process.inputStream.bufferedReader().readText()
+                    assertEquals(0, process.waitFor(), output)
+                    val stats = com.coach.domain.LedgerJson.parseToJsonElement(output).jsonObject
+                    assertTrue(stats.str("matched_server_ends").toInt() > 0, output)
+                    assertTrue(stats.str("first_word_samples").toInt() > 0, output)
+                } finally {
+                    Files.deleteIfExists(dir.resolve("server.log"))
+                    Files.deleteIfExists(dir.resolve("bridge.log"))
+                    Files.deleteIfExists(dir)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun bridgeFreeTextReasonIsNotLogged() {
+        Harness().use { h ->
+            h.tutor.stream(10, "synthetic body", StubTutor.terminal("failed", "private prompt https://example.invalid/secret"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val id = ws.await("msg.start").str("msg")
+                ws.await("msg.end")
+                trace(h, id)
+                val line = synchronized(h.logs) { h.logs.single { it.startsWith("COACH msg.end msg=$id ") } }
+                assertTrue(line.contains("reason=other"), line)
+                assertTrue(!line.contains("private") && !line.contains("https://"), line)
+            }
+        }
+    }
+
+    @Test
     fun simulatedBridgeSeparatesRawAndVisibleAndNeverCountsProgressAsText() {
         Harness().use { h ->
             h.tutor.stream(150, "placeholder\n", "可见正文。\n", StubTutor.terminal("complete"), StubTutor.DONE)

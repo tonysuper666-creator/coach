@@ -67,6 +67,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val references = HashMap<String, String>()
         val prereqs = HashMap<String, List<String>>()
         val anchorDocs = HashMap<String, Triple<String, Int, Int>>()
+        // 退休的点不再出现在学习路线里；语义与 weekPoints 一致：后一条 add 可以把它重新启用。
+        val retired = HashSet<String>()
         for (e in events) when (e.type) {
             "outline_revised" -> {
             // 课程内容装载（TON-1127）把整份 CourseContent 放在事件里：知识点名、模块、概念、教材页锚点。
@@ -74,6 +76,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             for (k in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
                 val o = k as? JsonObject ?: continue
                 val id = o.s("id"); if (id.isBlank()) continue
+                if ((o["retired"] as? JsonPrimitive)?.contentOrNull == "true") { retired += id; continue }
+                retired -= id
                 titles[id] = o.s("title").ifBlank { o.s("name") }.ifBlank { id }
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
@@ -92,6 +96,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 val o = op as? JsonObject ?: continue
                 val id = o.s("kpId").ifBlank { o.s("id") }
                 if (id.isBlank()) continue
+                if (o.s("op") == "retire") { retired += id; continue }
+                retired -= id
                 val title = o.s("title").ifBlank { o.s("name") }
                 if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
@@ -105,7 +111,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val attempted = events.filter { it.type == "question_posed" }.flatMap { posed -> (posed.payload["kpIds"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.toSet()
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
-        order.filter { it in titles }.map { id ->
+        order.filter { it in titles && it !in retired }.map { id ->
             val m = projection.mastery[id]
             val status = when {
                 m == null -> KpStatus.NEW
@@ -155,7 +161,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     val weekPoints by lazy { weekPoints(events) }
     val weeks: List<Int> by lazy { weekPoints.flatMap { it.weeks }.distinct().sorted() }
     fun weekKps(week: Int): List<KpRow> = weekPoints.filter { week in it.weeks }.mapNotNull { kp(it.id) }
-    val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, kps.map { it.id }.toSet())?.let(::kp)
+    /** 周目标与 `advance_study_scope` 用同一个可用集合（退休的点已排除），否则客户端选出的点服务端会判 STUDY_SCOPE_MOVED。 */
+    val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, weekPoints.map { it.id }.toSet())?.let(::kp)
     fun weekProgress(kpId: String): String? = projection.studyScope?.let { s ->
         s.kpIds.indexOf(kpId).takeIf { it >= s.cursor }?.let { "第 ${s.week} 周 · 第 ${it + 1} / ${s.kpIds.size} 个" }
     }

@@ -3,7 +3,8 @@ package com.coach.domain
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
-const val PROJECTION_VERSION = 5
+/** 投影形状变了就必须加一：v6 起 `State.studyScope` 参与投影，v5 的缓存行（没有周学习范围）不得命中。 */
+const val PROJECTION_VERSION = 6
 val LedgerJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 enum class Format { SINGLE_CHOICE, SHORT_ANSWER, ESSAY, CALCULATION }

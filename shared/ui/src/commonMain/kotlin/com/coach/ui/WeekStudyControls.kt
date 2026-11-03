@@ -42,8 +42,27 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
+fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean, directWhenUnscoped: Boolean = false) {
+    if (directWhenUnscoped && view.projection.studyScope == null) {
+        if (view.weeks.isEmpty()) {
+            Text("暂无可选周次。", style = MaterialTheme.typography.bodyMedium)
+        } else {
+            if (!connected) Text("连接 Mac 后可选择周次。", style = MaterialTheme.typography.bodyMedium)
+            if (actions.busy) Text("正在更新…", style = MaterialTheme.typography.bodyMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                view.weeks.forEach { week ->
+                    val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
+                    OutlinedButton(onClick = { actions.select(week) }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("第 $week 周 · $remaining 个待学")
+                    }
+                }
+            }
+        }
+        actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+        return
+    }
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(onClick = { expanded = true }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {

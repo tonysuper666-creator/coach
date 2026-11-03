@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
         val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
         val serverUrl = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
         val credentialStore = KeystoreCredentials(this, serverUrl)
-        setContent { PairingGate(credentialStore, serverUrl) { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage, intent.getIntExtra("autoplay", 0), intent.getBooleanExtra("baseline", false), intent.getLongExtra("tickMs", 50L), intent.getIntExtra("streamOnly", -1), intent.getIntExtra("chunk", 30), intent.getLongExtra("runId", 0L), intent.getBooleanExtra("scrollEnd", false), intent.getBooleanExtra("wide", false)) } }
+        setContent { PairingGate(credentialStore, serverUrl) { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage, intent.getIntExtra("autoplay", 0), intent.getBooleanExtra("baseline", false), intent.getLongExtra("tickMs", 50L), intent.getIntExtra("streamOnly", -1), intent.getIntExtra("chunk", 30), intent.getLongExtra("runId", 0L), intent.getBooleanExtra("scrollEnd", false), intent.getBooleanExtra("wide", false), android.os.Debug::threadCpuTimeNanos) } }
         // JankStats needs the DecorView, which setContent installs.
         jank = JankStats.createAndTrack(window) { frame ->
             if (owner.state.running) { frames++; if (frame.isJank) badFrames++ }

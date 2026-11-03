@@ -32,6 +32,7 @@ private fun env(name: String, default: String) = System.getenv(name)?.takeIf { i
 
 /** 桌面端「今天 / 学习」入口：连本机（或 Tailscale 上）的 Coach 服务端，账本副本在 `~/Coach/client/`。 */
 fun runCoach() {
+    refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val home = System.getProperty("user.home")
     val baseUrl = env("COACH_URL", "http://127.0.0.1:18791")
     val deviceId = env("COACH_DEVICE_ID", "desktop")

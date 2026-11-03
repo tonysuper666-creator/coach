@@ -57,7 +57,11 @@ class MathAssets(private val fetch: (suspend (tex: String, display: Boolean) -> 
         val display = key.substringBefore(':') == "true"
         val tex = key.substringAfter(':')
         // 请求方的 LaunchedEffect 会因别的公式到货而重启；已发出的请求必须跑完，否则这个公式永远停在源码 chip。
-        withContext(NonCancellable) { val asset = runCatching { loader(tex, display) }.getOrNull(); if (asset != null) assets[key] = asset else failed[key] = true }
+        withContext(NonCancellable) {
+            val asset = runCatching { loader(tex, display) }.getOrNull()
+            // Parse the SVG on a worker before the formula becomes visible, so drawing it later does not parse inside a frame.
+            if (asset != null) { com.coach.ui.math.MathSvgDocument.prewarm(listOf(asset.sha to asset.svg)); assets[key] = asset } else failed[key] = true
+        }
     }
 }
 

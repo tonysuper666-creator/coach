@@ -51,6 +51,7 @@ class Adapter:
         self.timeout = float(c.get('timeout', 20))
         require(0 < self.timeout <= 30, 'bounded controller timeout required')
         self.owner = self.root / 'launchd-owner.json'
+        self.intent = self.root / 'launchd-intent.json'
 
     def inside(self, value):
         path = Path(value).absolute()
@@ -91,10 +92,17 @@ class Adapter:
         if result.returncode == 113:  # ESRCH: the exact job is absent.
             return None
         require(result.returncode == 0, 'cannot inspect test launchd job')
+        if self.intent.exists():
+            private(self.intent)
+            intent = load(self.intent)
+            path = re.search(rb'^\s*path = (.+)\s*$', result.stdout, re.M)
+            require(intent['target'] == self.target and path is not None
+                    and self.inside(path[1].decode().strip()) == Path(intent['plist']),
+                    'loaded job differs from durable bootstrap intent')
         match = re.search(rb'^\s*pid = ([0-9]+)\s*$', result.stdout, re.M)
         return int(match[1]) if match else 0
 
-    def identity(self, pid):
+    def identity(self, pid, launching=False):
         require(pid > 1, 'unsafe job PID')
         # Never infer daemon ownership from an executable name or an old PID file.
         daemon = self.command(['multica', 'daemon', 'status', '--output', 'json'])
@@ -103,8 +111,10 @@ class Adapter:
         result = self.command(['/bin/ps', '-p', str(pid), '-o', 'lstart=', '-o', 'command='])
         if result.returncode != 0:
             return None
-        require(str(self.root).encode() in result.stdout and b'/app/lib/' in result.stdout
-                and b'com.coach.server.MainKt' in result.stdout, 'unexpected test service process')
+        jvm = b'/app/lib/' in result.stdout and b'com.coach.server.MainKt' in result.stdout
+        launcher = launching and b'/app/bin/app' in result.stdout
+        require(str(self.root).encode() in result.stdout and (jvm or launcher),
+                'unexpected test service process')
         parent = self.command(['/bin/ps', '-p', str(pid), '-o', 'ppid='])
         require(parent.returncode == 0 and int(parent.stdout) == 1
                 and os.getpgid(pid) != os.getpgrp(), 'service is not isolated under launchd')
@@ -143,6 +153,10 @@ class Adapter:
             require(self.ready(p), 'loaded test job is not ready')
             return
         require(pid is None, 'test job already loaded without a live JVM; stop it first')
+        self.owner.unlink(missing_ok=True)
+        # Persist before launchctl can create a service. A killed controller
+        # cannot strand an unregistered job between bootstrap and remember().
+        atomic(self.intent, json.dumps(dict(target=self.target, plist=str(self.plist))).encode())
         result = self.command(['/bin/launchctl', 'bootstrap', self.domain, str(self.plist)])
         require(result.returncode == 0, 'test job bootstrap failed')
         deadline = time.monotonic() + self.timeout
@@ -167,12 +181,16 @@ class Adapter:
         pid = self.job()
         if pid is None:
             return
-        identity = self.identity(pid) if pid else None
-        if identity is not None:
+        identity = self.identity(pid, launching=True) if pid else None
+        if identity is not None and self.owner.exists():
             private(self.owner)
             owner = load(self.owner)
             require(owner['label'] == self.label and owner['pid'] == pid
                     and owner['identity'] == identity, 'test service identity changed')
+        elif identity is not None:
+            # job() has matched launchd's loaded plist path to the private
+            # pre-bootstrap intent. Boot out that exact job, never a raw PID.
+            require(self.intent.is_file(), 'unregistered job has no bootstrap intent')
         require(self.command(['/bin/launchctl', 'bootout', self.target]).returncode == 0,
                 'test job bootout failed')
         deadline = time.monotonic() + self.timeout

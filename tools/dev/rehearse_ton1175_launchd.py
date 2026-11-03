@@ -84,7 +84,17 @@ def hook(action, root, args):
     adapter = Adapter(root / 'adapter.json')
     c = load(root / 'rehearsal.json')
     phase = load(root / 'ops/journal.json')['phase'] if (root / 'ops/journal.json').exists() else None
-    if action == 'candidate':
+    if action == 'bootstrap_race':
+        original = adapter.command
+        def command(argv):
+            result = original(argv)
+            if argv[:2] == ['/bin/launchctl', 'bootstrap'] and result.returncode == 0:
+                write(root / 'bootstrap-created.json', dict(controller=os.getpid()))
+                os.kill(os.getpid(), signal.SIGSTOP)
+            return result
+        adapter.command = command
+        adapter.start()
+    elif action == 'candidate':
         release, head, _ = args
         proof = load(root / 'build.json')
         require(str(Path(release).resolve()) == str(root / 'candidate') and head == c['head']
@@ -359,10 +369,17 @@ class Rehearsal:
                     'committed candidate ledger row was lost')
         if self.case == 'held_seal':
             require(load(self.root / 'seal-released.json')['pid'] == self.old_pid, 'missing same-JVM release proof')
+        acceptance = [e['at'] for e in events if e['event'] == 'acceptance_budget']
+        termination = [e['at'] for e in events if e['event'] == 'worker_terminate']
+        reserve_elapsed = termination[0]-acceptance[0] if acceptance and termination else None
+        if self.case == 'acceptance_timeout':
+            require(reserve_elapsed is not None and reserve_elapsed >= 299,
+                    'real acceptance reserve was shortened')
         return dict(case=self.case, exitCode=code, finalPhase=phase, oldHello=200,
             observedSeconds=seconds, coverageMonotonicSeconds=mono, jfrVerified=True,
             sameJvmSealRelease=self.case == 'held_seal', committedLedgerRowRetained=committed,
             serviceParent=1, commandGroupsReaped=sum(e['event']=='command_reaped' for e in events),
+            acceptanceReserveElapsedSeconds=reserve_elapsed,
             recoveryRequiredObserved=self.case == 'recovery_timeout')
 
     def cleanup(self):
@@ -376,11 +393,52 @@ class Rehearsal:
         require(not self.root.exists(), 'test plist/root survived cleanup')
 
 
+def bootstrap_race(java_home, head, old_head, app_hash):
+    """Kill the live launcher caller after bootstrap but before PID registration."""
+    job = Rehearsal('bootstrap_race', java_home, head, old_head, app_hash)
+    controller = None
+    try:
+        job.setup()
+        job.adapter.stop()
+        controller = subprocess.Popen([sys.executable, str(HERE), '--hook', 'bootstrap_race',
+            '--root', str(job.root)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        deadline = time.monotonic()+30
+        while not (job.root / 'bootstrap-created.json').exists():
+            require(controller.poll() is None and time.monotonic() < deadline, 'bootstrap race checkpoint missing')
+            time.sleep(.03)
+        require(load(job.root / 'bootstrap-created.json')['controller'] == controller.pid
+                and not job.adapter.owner.exists(), 'controller already registered job')
+        controller.kill()  # exact live unreaped child, never an audit PID
+        controller.wait(timeout=5)
+        controller = None
+        deadline = time.monotonic()+20
+        while True:
+            pid = job.adapter.job()
+            if pid:
+                try:
+                    if job.adapter.identity(pid):
+                        break
+                except Exception:
+                    pass
+            require(time.monotonic() < deadline, 'unregistered real JVM did not start')
+            time.sleep(.1)
+        job.adapter.stop()
+        require(job.adapter.job() is None, 'bootstrap race left a loaded job')
+        return dict(controllerKilledBeforeRegistration=True, realJvmStarted=True,
+                    exactIntentJobRemoved=True, cleanupComplete=True)
+    finally:
+        if controller is not None and controller.poll() is None:
+            controller.kill()
+            controller.wait(timeout=5)
+        job.cleanup()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--hook', choices=('candidate', 'idle', 'snapshot', 'accept', 'controller'))
+    parser.add_argument('--hook', choices=('candidate', 'idle', 'snapshot', 'accept', 'controller', 'bootstrap_race'))
     parser.add_argument('--root', type=Path)
     parser.add_argument('--cases', nargs='+', choices=CASES + ('startup_failure',), default=list(CASES) + ['startup_failure'])
     args, rest = parser.parse_known_args()
@@ -409,6 +467,7 @@ def main():
     # Scope is tools/dev: both releases legitimately use this same JVM build.
     require(not run(['git', '-C', REPO, 'diff', old_head, head, '--', 'server', 'shared']), 'JVM source changed; build old separately')
     app_hash = tree_hash(REPO / 'server/app/build/install/app')
+    creation = bootstrap_race(java_home, head, old_head, app_hash)
     jobs, results, failures = [], [], []
     try:
         for case in dict.fromkeys(args.cases):
@@ -440,14 +499,19 @@ def main():
                         print('fault failed:', job.case, type(error).__name__, flush=True)
                 if pending:
                     print('waiting for bounded scenarios:', ','.join(j.case for j in pending.values()), flush=True)
+    except Exception as error:
+        failures.append(dict(stage='setup_or_observation', error=type(error).__name__))
+        raise
     finally:
         for job in jobs:
             try:
                 job.cleanup()
             except Exception as error:
-                failures.append(dict(case=job.case, cleanup=type(error).__name__))
+                failures.append(dict(case=job.case, cleanup=type(error).__name__,
+                    privateRoot=str(job.root), target=job.adapter.target if hasattr(job, 'adapter') else None))
         write(args.output, dict(result='pass' if not failures else 'fail', sourceHead=head, oldHead=old_head,
             appTreeSha256=app_hash, cases=sorted(results, key=lambda r:r['case']), failures=failures,
+            bootstrapRace=creation,
             cleanupComplete=all(not j.root.exists() for j in jobs), productionValidated=False,
             scope='unmanaged isolated JVM/launchd; synthetic identity and note; no tutor/dependency gate'))
     require(not failures, 'isolated rehearsal failed; inspect redacted output')

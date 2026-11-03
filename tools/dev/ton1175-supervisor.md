@@ -106,3 +106,9 @@ Unix-socket seal, observe HTTP 503, kill/freeze the worker, and require the same
 JVM to survive and respond HTTP 200 after EOF releases its seal. Its stop/start
 controller remains a fixture; this does not claim a full real service upgrade,
 real 900-second JFR, original-device authentication or production learning gates.
+
+For the additional opt-in real JVM/launchd switch and fault scenarios, see
+`tools/dev/ton1175-launchd.md`. That rehearsal keeps the actual 900-second
+observation and 300-second acceptance reserve, and removes its disposable jobs
+before returning. Its unmanaged JVM scope still does not validate production
+dependencies or learning gates.

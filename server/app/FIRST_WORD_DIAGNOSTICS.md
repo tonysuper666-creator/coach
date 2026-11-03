@@ -13,3 +13,5 @@ tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.FirstWordTra
 ```
 
 The controllable-clock test distinguishes injected preparation, bridge and filtering delays; the simulated bridge exercises raw-before-visible, progress, empty output, cancellation and fallback through WebSocket routes.
+
+To aggregate these lines offline, use `tools/dev/first_word_report.py`; its stage definitions, percentile rule, de-duplication and provenance limits are documented in `tools/dev/first_word_report.md`.

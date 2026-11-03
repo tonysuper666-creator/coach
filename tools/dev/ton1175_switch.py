@@ -5,6 +5,7 @@ The service controller must accept `stop` and `start`; it must operate only on
 its owned instance. Configuration and idle evidence are private trusted inputs.
 """
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import hashlib
@@ -118,7 +119,7 @@ def get_time(value):
         raise GateError('invalid timestamp') from exc
 
 
-def check_idle(c, old_head, stopped=False):
+def check_idle(c, old_head, stopped=False, coverage_seal=None):
     """Require recent measured evidence, an independent live identity verifier, and log coverage.
 
     verifier is a trusted executable, not a user-supplied result flag; it must
@@ -147,12 +148,28 @@ def check_idle(c, old_head, stopped=False):
             row = json.loads(line)
             at = get_time(row['at'])
             require(at <= now + 2, 'access log has future entry')
+            if row.get('protocol') == 1:
+                # The trusted coverage verifier reconciles these metadata-only journal rows.
+                continue
             if at > end:
                 require(isinstance(row.get('route'), str), 'access log route missing')
                 require(row['route'] == '/v1/hello', 'client route after idle window')
     # A separate verifier must check log list covers the entire post-window
     # interval, including rotation; it is invoked again after stopping.
-    run(c['logVerifier'] + [c['idleEvidence']] + logs)
+    require(not stopped or 'coverage' not in p or coverage_seal, 'shutdown coverage seal missing')
+    run(c['logVerifier'] + (['--closed-seal', coverage_seal] if coverage_seal else []) + [c['idleEvidence']] + logs)
+
+
+def coverage_guard(c):
+    if 'coverage' not in load(c['idleEvidence']):
+        # Legacy/custom protocols remain subject to their mandatory logVerifier.
+        # The shipped verifier rejects them; they gain no coverage=true bypass.
+        return contextlib.nullcontext(None)
+    try:
+        from .activity_coverage import stop_guard
+    except ImportError:
+        from activity_coverage import stop_guard
+    return stop_guard(c['idleEvidence'], c['accessLogs'])
 
 
 def load_state(c):
@@ -308,31 +325,32 @@ def operate(c, action, apply):
             require(baseline.is_file() and not baseline.is_symlink()
                     and stat.S_IMODE(baseline.stat().st_mode) == 0o600,
                     'private acceptance baseline missing')
-            set_journal(ops, 'switching')
-            try:
-                command(c, 'stop')
-                require(current(c, ops) == ['old', 'old'], 'pointers changed while stopping')
-                check_idle(c, c['expectedSourceHead'], stopped=True)
-                atomic(c['plist'], (ops / 'new.plist').read_bytes(), state['plistMode'])
-                atomic(c['installation'], (ops / 'new.json').read_bytes(), state['installationMode'])
-                # The startup itself spends the same five-minute budget.
-                started = time.time()
-                deadline = time.monotonic() + ACCEPTANCE_SECONDS
-                run(c['controller'] + ['start'], timeout=min(60, deadline - time.monotonic()))
-                set_journal(ops, 'validating')
-                run(c['acceptanceVerifier'] + [str(baseline), str(started),
-                                               str(started + ACCEPTANCE_SECONDS)],
-                    timeout=deadline - time.monotonic())
-                require(time.monotonic() <= deadline, 'acceptance deadline expired')
-                require(current(c, ops) == ['new', 'new'], 'pointers changed during acceptance')
-                set_journal(ops, 'switched')
-                print('candidate accepted within five-minute transaction')
-            except BaseException as original:
+            with coverage_guard(c) as seal:
+                set_journal(ops, 'switching')
                 try:
-                    restore(c, ops, state)
-                except BaseException as rollback_error:
-                    raise GateError('switch failed and recovery failed; run recover --apply after diagnosing controller') from rollback_error
-                raise GateError('switch failed; old pointers restored and old service started') from original
+                    command(c, 'stop')
+                    require(current(c, ops) == ['old', 'old'], 'pointers changed while stopping')
+                    check_idle(c, c['expectedSourceHead'], stopped=True, coverage_seal=seal)
+                    atomic(c['plist'], (ops / 'new.plist').read_bytes(), state['plistMode'])
+                    atomic(c['installation'], (ops / 'new.json').read_bytes(), state['installationMode'])
+                    # The startup itself spends the same five-minute budget.
+                    started = time.time()
+                    deadline = time.monotonic() + ACCEPTANCE_SECONDS
+                    run(c['controller'] + ['start'], timeout=min(60, deadline - time.monotonic()))
+                    set_journal(ops, 'validating')
+                    run(c['acceptanceVerifier'] + [str(baseline), str(started),
+                                                   str(started + ACCEPTANCE_SECONDS)],
+                        timeout=deadline - time.monotonic())
+                    require(time.monotonic() <= deadline, 'acceptance deadline expired')
+                    require(current(c, ops) == ['new', 'new'], 'pointers changed during acceptance')
+                    set_journal(ops, 'switched')
+                    print('candidate accepted within five-minute transaction')
+                except BaseException as original:
+                    try:
+                        restore(c, ops, state)
+                    except BaseException as rollback_error:
+                        raise GateError('switch failed and recovery failed; run recover --apply after diagnosing controller') from rollback_error
+                    raise GateError('switch failed; old pointers restored and old service started') from original
         else:
             if phase == 'rolled_back' and pointers == ['old', 'old']:
                 print('already rolled back; no action')

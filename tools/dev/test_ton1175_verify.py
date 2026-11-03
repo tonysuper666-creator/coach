@@ -140,10 +140,12 @@ class EvidenceTest(unittest.TestCase):
                     (self.root / 'rotated.log').rename(self.log)
 
     def test_current_access_sink_always_refuses_negative_coverage_claim(self):
+        legacy = self.root / 'legacy-coverage.json'
+        legacy.write_text('{"coverage":true,"dropped":0}')
         for text in ('', '{"coverage":true,"dropped":0}\n'):
             self.log.write_text(text)
             with self.assertRaisesRegex(verify.GateError, 'lossless coverage'):
-                verify.logs('not-a-trusted-result-flag', [str(self.log)])
+                verify.logs(legacy, [str(self.log)])
 
     def test_original_desktop_hello_against_isolated_http_server(self):
         owner = self

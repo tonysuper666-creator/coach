@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import socket
 import subprocess
 import tempfile
@@ -154,6 +155,40 @@ class ActivityCoverageTests(unittest.TestCase):
         f.assert_old()
         self.assertFalse((f.root / 'calls').exists(), 'unsafe proof must fail before controller stop')
         self.assertEqual(200, s.request())
+
+    def supervised_seal_fault(self, fault):
+        from .test_ton1175_supervise import SupervisorTests
+        s = self.service
+        s.proof()
+        f = self.transaction()
+        # Hold immediately before a controller stop. The real JVM stays alive
+        # outside command groups, so HTTP tests seal release, not a replacement
+        # fixture's claimed state. No production service is addressed.
+        f.controller.write_text('''import pathlib,sys,time
+r=pathlib.Path(sys.argv[1]);action=sys.argv[2]
+if action=='stop' and not (r/'once').exists():
+ (r/'once').touch();(r/'fault-ready').touch();time.sleep(90)
+if action=='start': (r/'running').write_text('b'*40)
+''')
+        helper = SupervisorTests(methodName='runTest')
+        helper.f, helper.record = f, f.root / 'supervision'
+        self.addCleanup(helper.doCleanups)
+        child = helper.launch()
+        helper.wait_for(lambda: (f.root / 'fault-ready').exists(), child)
+        self.assertEqual(503, s.request(), 'sealed real JVM must reject HTTP')
+        owner = json.loads((helper.record / 'owner.json').read_text())
+        os.kill(owner['workerPid'], fault)
+        helper.finish(child, 1 if fault == signal.SIGKILL else 124)
+        helper.assert_recovered()
+        self.assertIsNone(s.child.poll(), 'command cleanup must not kill the real service')
+        self.assertIsNone(s.snapshot().get('seal'))
+        self.assertEqual(200, s.request(), 'EOF after forced worker exit must release the seal')
+
+    def test_supervised_worker_kill_releases_real_seal(self):
+        self.supervised_seal_fault(signal.SIGKILL)
+
+    def test_supervised_deadline_kill_releases_real_seal(self):
+        self.supervised_seal_fault(signal.SIGSTOP)
 
     def test_complete_http_ws_rotation_and_closed_positive(self):
         s = self.service

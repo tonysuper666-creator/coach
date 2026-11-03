@@ -172,6 +172,15 @@ requirements and the access-coverage prerequisite are satisfied.
 
 ## Failure and recovery
 
+Use the [bounded foreground supervisor](ton1175-supervisor.md) for staged
+`switch`, `rollback` and `recover`. It owns command groups across worker death,
+preserves the 300-second acceptance reserve and adds separate rollback/recovery
+budgets. The direct entry below remains a low-level transaction; it does not
+clean up its children after its own SIGKILL.
+
+Observation end to seal is at most 120 seconds. Background jobs can start in
+that gap and be cancelled at stop; SQLite transactions protect committed data.
+
 `ton1175_switch.py prepare|stage|switch|rollback|recover --config CONFIG [--apply]`
 defaults to read-only preflight: no state creation, service control or pointer
 replacement. Explicit `--apply` is required for side effects. The configuration
@@ -190,8 +199,8 @@ Separate approved backup policy still applies.
 
 If rollback fails, `recovery_required` and the 0700 directory/0600 retained files
 allow `recover --config CONFIG --apply` after diagnosing the controller. Inspect
-`journal.json` before any new operation. SIGKILL, power loss and host failure
-cannot execute in-process rollback; `switching`/`validating` journals are explicitly
+`journal.json` before any new operation. Power loss, host failure and SIGKILL of
+the cleanup owner cannot execute rollback; `switching`/`validating` journals are explicitly
 recoverable by `recover`. Unknown externally modified pointers are refused for
 manual investigation. Do not leave the transaction running in the background.
 Independent QA and Architect review are required before any production handoff.

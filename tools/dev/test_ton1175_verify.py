@@ -292,6 +292,59 @@ class CandidateTest(unittest.TestCase):
 
 
 class JfrTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin kernel ABI')
+    def test_kernel_query_binds_actual_java_whole_file_lock_and_rejects_other_owners(self):
+        java_home = os.environ.get('JAVA_HOME')
+        java = str(Path(java_home) / 'bin/java') if java_home else shutil.which('java')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'LockOwner.java'
+            source.write_text('''import java.nio.channels.*;import java.nio.file.*;
+class LockOwner { public static void main(String[] args)throws Exception {
+ try(FileChannel c=FileChannel.open(Path.of(args[0]),StandardOpenOption.CREATE,StandardOpenOption.WRITE);
+     FileLock l=c.tryLock()) {System.out.println("ready");System.out.flush();Thread.sleep(30000);}
+}}''')
+            path = root / 'server.lock'
+            child = subprocess.Popen([java, str(source), str(path)], stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), 'ready')
+                verify.darwin_lock_owner(path, child.pid)
+                with self.assertRaisesRegex(verify.GateError, 'whole-file'):
+                    verify.darwin_lock_owner(path, os.getpid())
+                link = root / 'link'
+                link.symlink_to(path)
+                with self.assertRaises(OSError):
+                    verify.darwin_lock_owner(link, child.pid)
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+                child.stdout.close()
+            with self.assertRaisesRegex(verify.GateError, 'whole-file'):
+                verify.darwin_lock_owner(path, child.pid)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin kernel ABI')
+    def test_kernel_query_rejects_partial_or_shared_locks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'server.lock'
+            for mode in ('partial', 'shared'):
+                with self.subTest(mode=mode):
+                    child = subprocess.Popen([sys.executable, '-u', '-c',
+                        'import fcntl,sys,time\n'
+                        'f=open(sys.argv[1],"w+")\n'
+                        'fcntl.lockf(f, fcntl.LOCK_SH if sys.argv[2]=="shared" else fcntl.LOCK_EX, '
+                        '0 if sys.argv[2]=="shared" else 1)\n'
+                        'print("ready",flush=True);time.sleep(30)', str(path), mode],
+                        stdout=subprocess.PIPE, text=True)
+                    try:
+                        self.assertEqual(child.stdout.readline().strip(), 'ready')
+                        with self.assertRaisesRegex(verify.GateError, 'whole-file'):
+                            verify.darwin_lock_owner(path, child.pid)
+                    finally:
+                        child.terminate()
+                        child.wait(timeout=10)
+                        child.stdout.close()
+
     def test_real_recording_detects_socket_read_wrong_pid_and_short_window(self):
         java_home = os.environ.get('JAVA_HOME')
         java = str(Path(java_home) / 'bin/java') if java_home else shutil.which('java')

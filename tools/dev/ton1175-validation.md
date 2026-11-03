@@ -94,6 +94,11 @@ the same live installed server command, its exclusive whole-file write lock on
 `dataDir/server.lock`, and unchanged installation/recording before and after
 inspection. JFR's JVM PID, main class and start time must match the live lifetime
 measured by `jcmd VM.uptime`; a reused PID alone cannot satisfy it.
+On macOS the verifier reads the native `F_GETLK` result for the lock inode and
+requires the exact JVM PID, write-lock type and whole-file range. This is a
+read-only kernel query: Darwin `lsof` can report a blank lock field even for a
+real Java `FileChannel` lock. Missing, shared, partial, foreign or replaced locks
+fail closed. Other platforms retain the `lsof` whole-file lock check.
 
 `Ton1175Jfr.java` inspects the recording directly through JDK's event API. It
 requires enabled `SocketRead`, `ActiveSetting`, `DataLoss`, `CPULoad` and

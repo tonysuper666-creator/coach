@@ -71,6 +71,13 @@ a **new** record directory and explicit `--apply`. Unknown pointers refuse
 automatic recovery. Recovery restores retained pointers and restarts the old
 release; it never copies back a database snapshot. New committed rows remain.
 
+If `reap_timeout` appears, exit 2 and `recovery_required` mean a worker or
+command group may still be active. No automatic recovery is attempted, because
+it could race that process. The last owner record retains its PID or PGID for
+investigation; after supervisor exit this number can be reused and must not be
+used as a kill target. Establish that the original process and its work have
+ended before an authorized operator considers recovery.
+
 The foreground supervisor is the cleanup owner. Keep it alive until it returns.
 Worker SIGKILL and stopped workers are handled; SIGKILL of the **supervisor**,
 power loss or host failure cannot execute its cleanup. After those failures,
@@ -99,3 +106,9 @@ Unix-socket seal, observe HTTP 503, kill/freeze the worker, and require the same
 JVM to survive and respond HTTP 200 after EOF releases its seal. Its stop/start
 controller remains a fixture; this does not claim a full real service upgrade,
 real 900-second JFR, original-device authentication or production learning gates.
+
+For the additional opt-in real JVM/launchd switch and fault scenarios, see
+`tools/dev/ton1175-launchd.md`. That rehearsal keeps the actual 900-second
+observation and 300-second acceptance reserve, and removes its disposable jobs
+before returning. Its unmanaged JVM scope still does not validate production
+dependencies or learning gates.

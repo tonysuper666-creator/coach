@@ -33,6 +33,10 @@ class Budgets:
     acceptance: float = 300
 
 
+class ReapTimeout(Exception):
+    """A process may still be running; automatic recovery would race it."""
+
+
 def send(stream, value):
     data = memoryview((json.dumps(value, separators=(',', ':')) + '\n').encode())
     while data:
@@ -105,6 +109,8 @@ class Supervisor:
         self.budgets = budgets
         self.worker = None
         self.job = None
+        self.unreaped_job = False
+        self.unreaped_worker = False
         self.interrupted = False
         self.sequence = 0
 
@@ -128,7 +134,7 @@ class Supervisor:
         return load(self.ops / 'journal.json')['phase']
 
     def cleanup_job(self):
-        if self.job is None:
+        if self.job is None or self.unreaped_job:
             return
         job = self.job
         # We have never polled/waited this guardian. Its PID cannot be reused.
@@ -138,11 +144,24 @@ class Supervisor:
             os.killpg(job.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        job.wait(timeout=5)
+        try:
+            job.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            self.unreaped_job = True
+            self.event('reap_timeout', kind='command', pgid=job.pid)
+            raise ReapTimeout('command group was not reaped') from error
         job.stdin.close()
         job.stdout.close()
         self.job = None
         self.event('command_reaped', pgid=job.pid, guardianCode=job.returncode)
+
+    def reap_worker(self, worker):
+        try:
+            worker.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            self.unreaped_worker = True
+            self.event('reap_timeout', kind='worker', pid=worker.pid)
+            raise ReapTimeout('worker was not reaped') from error
 
     def worker_run(self, action, apply, budget, graceful):
         """One worker and at most one brokered command, all owned in foreground."""
@@ -179,7 +198,7 @@ class Supervisor:
                 if stopping and now >= deadline:
                     self.event('worker_kill', pid=worker.pid)
                     worker.kill()
-                    worker.wait(timeout=5)
+                    self.reap_worker(worker)
                     break
                 # waitpid(WNOHANG) is safe now: no later signals are sent if it
                 # returns an exit status. There are no children in worker's group.
@@ -241,14 +260,17 @@ class Supervisor:
             try:
                 self.cleanup_job()
             finally:
-                if worker.poll() is None:
-                    worker.kill()
-                    worker.wait(timeout=5)
-                parent.close()
-                selector.close()
-                code = worker.returncode
-                self.worker = None
-                self.event('worker_reaped', code=code, timedOut=timed_out)
+                try:
+                    if not self.unreaped_worker and worker.poll() is None:
+                        worker.kill()
+                        self.reap_worker(worker)
+                finally:
+                    parent.close()
+                    selector.close()
+                    if not self.unreaped_worker:
+                        code = worker.returncode
+                        self.worker = None
+                        self.event('worker_reaped', code=code, timedOut=timed_out)
         return code, timed_out
 
     def execute(self, action, apply):
@@ -267,6 +289,9 @@ class Supervisor:
             self.event('started', action=action, apply=apply)
             try:
                 code, expired = self.worker_run(action, apply, self.budgets.transaction, self.budgets.grace)
+            except ReapTimeout:
+                self.event('finished', outcome='recovery_required', phase=self.phase())
+                return 2
             except (GateError, OSError, ValueError, KeyError, TypeError):
                 code, expired = 1, False
                 self.event('worker_transport_failed')
@@ -281,6 +306,9 @@ class Supervisor:
                 self.interrupted = False
                 try:
                     result, _ = self.worker_run('recover', True, self.budgets.recovery, 0)
+                except ReapTimeout:
+                    self.event('finished', outcome='recovery_required', phase=self.phase())
+                    return 2
                 except (GateError, OSError, ValueError, KeyError, TypeError):
                     result = 1
                 recovered = result == 0 and self.phase() == 'rolled_back'
@@ -306,7 +334,7 @@ def main(argv=None, *, budgets=None):
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     try:
         return runner.execute(args.action, args.apply)
-    except (GateError, OSError, ValueError, KeyError, TypeError):
+    except Exception:
         print('ERROR: supervisor failed; inspect private record and journal; recover required if incomplete', file=sys.stderr)
         return 2
     finally:

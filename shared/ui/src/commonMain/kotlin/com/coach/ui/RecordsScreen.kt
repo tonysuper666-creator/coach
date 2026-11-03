@@ -29,6 +29,10 @@ private sealed interface RecordSelection {
     data class Orphan(val orphan: OrphanedAnswer) : RecordSelection
 }
 
+/** 记录行的标题：历史记录里退休点仍显示知识点名，不回退到原始 id。 */
+internal fun changeTitle(view: CourseView, kpId: String): String =
+    (view.kpAny(kpId)?.title ?: kpId).let { splitTitle(it).second }
+
 /**
  * 记录：掌握变化的时间线。每个变化都能点开，看到支撑它的每一次作答：原题、你的原答、评分标准、逐字证据高亮、批改与复核用的模型。
  * 锁存撤销和没有计入的作答（孤儿作答）也在这里，并写明原因。
@@ -94,7 +98,7 @@ private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView,
 
 @Composable
 private fun ChangeRow(c: CoachController, view: CourseView, change: MasteryChange, selected: Boolean, onClick: () -> Unit) {
-    val title = view.kp(change.kpId)?.title?.let { splitTitle(it).second } ?: change.kpId
+    val title = changeTitle(view, change.kpId)
     val good = change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID
     Surface(
         onClick = onClick, tonalElevation = if (selected) 6.dp else 1.dp, shape = MaterialTheme.shapes.medium,
@@ -129,9 +133,11 @@ private fun RecordDetail(c: CoachController, view: CourseView, data: RecordsView
 
 @Composable
 private fun ChangeDetail(c: CoachController, view: CourseView, data: RecordsView, change: MasteryChange, onOpenKp: (String) -> Unit) {
+    // 记录是历史：退休点也要显示名字；只有「去这个知识点」仍要求活跃点。
+    val title = changeTitle(view, change.kpId)
     val kp = view.kp(change.kpId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text(kp?.title?.let { splitTitle(it).second } ?: change.kpId, style = MaterialTheme.typography.titleLarge)
+        Text(title, style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(change.kind.label, if (change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID) successColor() else MaterialTheme.colorScheme.error)
             Text(c.formatClock(change.at), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

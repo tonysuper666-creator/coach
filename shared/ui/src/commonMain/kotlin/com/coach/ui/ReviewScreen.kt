@@ -15,6 +15,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 
+/**
+ * 错题卡片的标题：错题是历史，退休点上的错题仍要显示知识点名，
+ * 只有活跃队列/选点才排除退休点。
+ */
+internal fun mistakeTitle(view: CourseView, kpId: String): String = view.kpAny(kpId)?.title ?: kpId
+
 /** Review defaults to mistakes from the durable ledger, including while disconnected. */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?) {
@@ -62,7 +68,8 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
     val tv = ui.threads[thread]
     val group = if (activeKp == null) null else view.quizGroups(thread).lastOrNull { it.groupId !in priorGroups }
     fun retry(kpId: String) {
-        val kp = view.kp(kpId)
+        // 错题可能是已退休点上的：名称和概念仍要能取到，否则会退回原始 id。
+        val kp = view.kpAny(kpId)
         val target = "mistakes:$kpId"
         val groups = view.quizGroups(target)
         priorGroups = groups.filter { it.submitted }.map { it.groupId }.toSet()
@@ -124,7 +131,7 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
             item { Text(view.mistakes.emptyText, Modifier.padding(vertical = 32.dp)) }
         } else {
             items(view.mistakes.items, key = { "${it.kpId}:${it.attemptId}" }) { mistake ->
-                MistakeCard(mistake, view.kp(mistake.kpId)?.title ?: mistake.kpId, c.math, ui.connected) { retry(mistake.kpId) }
+                MistakeCard(mistake, mistakeTitle(view, mistake.kpId), c.math, ui.connected) { retry(mistake.kpId) }
             }
         }
     }

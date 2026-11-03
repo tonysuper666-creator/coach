@@ -106,7 +106,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val select: (AppTab) -> Unit = { reviewWeek = null; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
     // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
-    val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
+    val anchorOfOpen = open?.let { (id, _) -> view?.kpAny(id) }?.takeIf { it.anchorDoc.isNotBlank() }
     LaunchedEffect(anchorOfOpen?.id, ui.connected) {
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
@@ -125,7 +125,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 OfflineBanner(ui, c)
                 val current = view
-                val target = open?.let { (id, _) -> current?.kp(id) }
+                // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
+                val target = open?.let { (id, _) -> current?.kpAny(id) }
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
                 // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->

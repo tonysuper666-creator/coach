@@ -176,7 +176,8 @@ class ChatFlowTest {
             runBlocking {
                 h.actor.execute {
                     append("course-1", "outline_revised", com.coach.domain.json("ops" to kotlinx.serialization.json.JsonArray(listOf(
-                        com.coach.domain.json("kpId" to "kp-1", "title" to "【W2·Ch3】Synthetic objective")
+                        com.coach.domain.json("kpId" to "kp-1", "title" to "【W2·Ch3】Synthetic objective"),
+                        com.coach.domain.json("kpId" to "kp-2", "title" to "【W2·Ch3】Next objective")
                     ))))
                     val bytes = com.coach.domain.LedgerJson.encodeToString(com.coach.protocol.CommandBody(
                         "set_study_scope", "course-1", 1000, com.coach.domain.json("week" to 2)))
@@ -200,6 +201,20 @@ class ChatFlowTest {
                 val (visible, end) = collectDeltas(ws)
                 assertEquals("complete", end.str("status"))
                 assertTrue(visible.contains("已复核错因。") && visible.contains("继续学习。"), visible)
+                runBlocking { h.actor.execute {
+                    fun send(type: String, payload: JsonObject): com.coach.protocol.Receipt {
+                        val bytes = com.coach.domain.LedgerJson.encodeToString(com.coach.protocol.CommandBody(type, "course-1", 1000, payload))
+                        return command(com.coach.protocol.WireCommand("test", java.util.UUID.randomUUID().toString(), bytes, com.coach.store.sha256(bytes.toByteArray())))
+                    }
+                    val wrong = com.coach.domain.weekMistakes(events("course-1"), 2).single()
+                    assertEquals("OK", send("retry_week_mistake", com.coach.domain.json("week" to 2, "attemptId" to wrong.payload.str("attemptId"))).status)
+                    val retry = events("course-1").last { it.type == "question_posed" }
+                    val right = retry.payload.getValue("letterMap").jsonObject.getValue(tutorChoiceKey(retry.payload.str("questionId")).correctOptionId)
+                    assertEquals("OK", send("submit_answer", com.coach.domain.json("attemptId" to retry.payload.str("attemptId"), "answer" to right, "posedSnapshot" to retry.payload)).status)
+                    assertTrue(com.coach.domain.weekMistakes(events("course-1"), 2).isEmpty())
+                    val scope = assertNotNull(snapshot("course-1").projection.studyScope)
+                    assertEquals("kp-2", send("advance_study_scope", com.coach.domain.json("scopeId" to scope.id, "kpId" to "kp-1")).result.str("target"))
+                } }
             }
         }
     }

@@ -63,8 +63,11 @@ class IntegratedCandidateTest {
             assertEquals(1, restored.mistakes.items.size)
             submit("q3", "new3", true)
             assertTrue(CourseView(db.events("C"), db.snapshot("C").projection).mistakes.items.isEmpty())
-            val scope = assertNotNull(db.snapshot("C").projection.studyScope)
-            assertEquals("b", db.command(wire("advance_study_scope", json("scopeId" to scope.id, "kpId" to "a"))).result.str("target"))
+            val projection = db.snapshot("C").projection
+            val scope = assertNotNull(projection.studyScope)
+            assertTrue(projection.mastery["a"]?.passed == true)
+            assertEquals("b", CourseView(db.events("C"), projection).weekTarget?.id)
+            assertEquals("CONFLICT", db.command(wire("advance_study_scope", json("scopeId" to scope.id, "kpId" to "a"))).status)
             db.close()
         } finally { dir.toFile().deleteRecursively() }
     }

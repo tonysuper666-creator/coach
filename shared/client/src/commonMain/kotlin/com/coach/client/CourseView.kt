@@ -58,7 +58,13 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     val mistakes: MistakeReview by lazy { mistakeReview(events) }
 
-    val kps: List<KpRow> by lazy {
+    /**
+     * 全量行 + 退休集合。名称查询（记录、错题、已打开的知识点）要包含退休点，
+     * 否则历史会露出原始 id；学习路线和周目标只看 [kps]（活跃点）。
+     */
+    private class Rows(val all: List<KpRow>, val retired: Set<String>)
+
+    private val rows: Rows by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()
         val explained = HashSet<String>()
@@ -111,7 +117,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val attempted = events.filter { it.type == "question_posed" }.flatMap { posed -> (posed.payload["kpIds"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.toSet()
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
-        order.filter { it in titles && it !in retired }.map { id ->
+        Rows(order.filter { it in titles }.map { id ->
             val m = projection.mastery[id]
             val status = when {
                 m == null -> KpStatus.NEW
@@ -126,10 +132,17 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
                 anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
-        }
+        }, retired)
     }
 
+    /** 活跃知识点：学习路线、周目标和到期复习用它，退休点不在其中。 */
+    val kps: List<KpRow> by lazy { rows.all.filter { it.id !in rows.retired } }
+
+    /** 活跃查询：退休点返回 null。选点、队列、周目标用这个。 */
     fun kp(id: String): KpRow? = kps.firstOrNull { it.id == id }
+
+    /** 全量查询：包含已退休的点。只供历史名称展示（记录、错题、已打开的知识点），不进队列。 */
+    fun kpAny(id: String): KpRow? = rows.all.firstOrNull { it.id == id }
 
     /** 课程所在时区（装载内容里带），决定「今天」的逻辑日界线。 */
     val zone: String by lazy {

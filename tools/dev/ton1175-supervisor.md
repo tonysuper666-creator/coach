@@ -71,6 +71,13 @@ a **new** record directory and explicit `--apply`. Unknown pointers refuse
 automatic recovery. Recovery restores retained pointers and restarts the old
 release; it never copies back a database snapshot. New committed rows remain.
 
+If `reap_timeout` appears, exit 2 and `recovery_required` mean a worker or
+command group may still be active. No automatic recovery is attempted, because
+it could race that process. The last owner record retains its PID or PGID for
+investigation; after supervisor exit this number can be reused and must not be
+used as a kill target. Establish that the original process and its work have
+ended before an authorized operator considers recovery.
+
 The foreground supervisor is the cleanup owner. Keep it alive until it returns.
 Worker SIGKILL and stopped workers are handled; SIGKILL of the **supervisor**,
 power loss or host failure cannot execute its cleanup. After those failures,

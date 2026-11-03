@@ -107,6 +107,62 @@ if p.name == %r:
         self.assertEqual(supervise.Budgets().acceptance, 300)
         self.assertGreater(supervise.Budgets().transaction, 300)
 
+    def test_unreaped_command_requires_manual_recovery_without_racing_it(self):
+        # Architect's reproduction: really reap the child, but simulate waitpid
+        # timing out after SIGKILL in the stopped-service window.
+        prefix = '''import subprocess,json,pathlib
+_wait=subprocess.Popen.wait
+def wait(self,timeout=None):
+ ops=pathlib.Path(json.loads(pathlib.Path(sys.argv[sys.argv.index('--config')+1]).read_text())['stateDir'])
+ if timeout==5 and '_guardian' in self.args and json.loads((ops/'journal.json').read_text())['phase'] in ('switching','validating'):
+  _wait(self)
+  raise subprocess.TimeoutExpired(self.args,timeout)
+ return _wait(self,timeout)
+subprocess.Popen.wait=wait
+'''
+        self.f.stage()
+        child = self.launch(prefix=prefix, budgets=(6, 3, 4, 300))
+        out, err = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 2, (out, err))
+        events = [json.loads(line) for line in (self.record / 'events.jsonl').read_text().splitlines()]
+        self.assertEqual(self.phase(), 'switching')
+        self.assertEqual(self.f.running.read_text(), 'stopped')
+        self.assertTrue(any(e['event'] == 'reap_timeout' and e['kind'] == 'command' for e in events))
+        self.assertFalse(any(e['event'] == 'recovery_started' for e in events))
+        owner = json.loads((self.record / 'owner.json').read_text())
+        self.assertEqual(owner['last']['outcome'], 'recovery_required')
+        self.assertIsNotNone(owner['commandPgid'])
+        self.assertIsNone(owner['workerPid'])
+
+    def test_unexpected_supervisor_exception_returns_recovery_required(self):
+        child = self.launch(prefix="Supervisor.execute=lambda *args: 1/0")
+        out, err = child.communicate(timeout=10)
+        self.assertEqual(child.returncode, 2, (out, err))
+
+    def test_unreaped_worker_requires_manual_recovery(self):
+        self.hang_verifier(ignore=True)
+        self.f.stage()
+        prefix = '''import subprocess
+_wait=subprocess.Popen.wait
+def wait(self,timeout=None):
+ if timeout==5 and any(str(arg).endswith('ton1175_switch.py') for arg in self.args):
+  _wait(self)
+  raise subprocess.TimeoutExpired(self.args,timeout)
+ return _wait(self,timeout)
+subprocess.Popen.wait=wait
+'''
+        child = self.launch(prefix=prefix, budgets=(1, 1, 3, 1))
+        self.wait_for(lambda: (self.f.root / 'fault-ready').exists(), child)
+        os.kill(json.loads((self.record / 'owner.json').read_text())['workerPid'], signal.SIGSTOP)
+        out, err = child.communicate(timeout=15)
+        self.assertEqual(child.returncode, 2, (out, err))
+        events = [json.loads(line) for line in (self.record / 'events.jsonl').read_text().splitlines()]
+        self.assertTrue(any(e['event'] == 'reap_timeout' and e['kind'] == 'worker' for e in events))
+        self.assertFalse(any(e['event'] == 'recovery_started' for e in events))
+        owner = json.loads((self.record / 'owner.json').read_text())
+        self.assertEqual(owner['last']['outcome'], 'recovery_required')
+        self.assertIsNotNone(owner['workerPid'])
+
     def test_pre_seal_hang_is_bounded_without_service_changes(self):
         self.hang_verifier('reject-idle', ignore=True)
         self.f.stage()

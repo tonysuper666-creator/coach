@@ -254,6 +254,10 @@ class Rehearsal:
         with Control(root / 'state/activity.sock') as control:
             self.start = control.ask('snapshot')
         healthy(self.start)
+        # JFR timestamps and Python wall time can differ slightly. Keep our
+        # own control reads strictly outside the observed window; coverage
+        # snapshots still bracket both guards, so ingress there also rejects.
+        time.sleep(2)
         self.window_start = time.time()
         self.monotonic_start = time.monotonic()
         self.identity = digest(run(['/bin/ps', '-p', self.old_pid, '-o', 'lstart=', '-o', 'command=']).strip())
@@ -277,6 +281,7 @@ class Rehearsal:
     def evidence(self):
         require(time.monotonic()-self.monotonic_start >= 903, 'real observation still incomplete')
         end = time.time()
+        time.sleep(2)
         with Control(self.root / 'state/activity.sock') as control:
             finish = control.ask('snapshot')
         recording = self.root / 'idle.jfr'
@@ -516,6 +521,15 @@ def main():
                             if (job.root / name).is_file():
                                 value = load(job.root / name)
                                 failure[name] = value if name != 'supervision/owner.json' else value['last']
+                        if (job.root / 'idle.jfr').is_file():
+                            # Fixed-schema metadata only, no addresses, stack
+                            # traces, request bodies or arbitrary thread names.
+                            data = json.loads(run([job.java.parent / 'jfr', 'print', '--json',
+                                '--events', 'jdk.SocketRead', job.root / 'idle.jfr']))
+                            failure['socketReads'] = [dict(start=e['values']['startTime'],
+                                duration=e['values']['duration'], bytes=e['values']['bytesRead'],
+                                control=e['values']['eventThread']['javaName'] == 'coach-activity-control')
+                                for e in data['recording']['events'] if e['values']['bytesRead'] > 0]
                         failures.append(failure)
                         print('fault failed:', job.case, type(error).__name__, flush=True)
                 if pending:

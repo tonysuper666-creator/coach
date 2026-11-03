@@ -26,6 +26,10 @@ verification pass through the existing verifier before acquiring the seal.
 The observation opens only after a recorded CPU heartbeat exists, and the final
 dump must contain a heartbeat after its end. Fixed JFR startup sleeps cannot
 establish either boundary.
+Control snapshots bracket two-second guards outside the JFR window to keep
+their Unix socket reads outside it despite minor clock calibration differences.
+Coverage counters include these guards, so application ingress still rejects.
+Failed cases retain fixed-schema socket-read timing metadata for diagnosis.
 
 Before observation, a separate real bootstrap race kills the controller after
 launchd creates the job and before PID registration. The persisted intent must

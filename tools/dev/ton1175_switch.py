@@ -87,6 +87,18 @@ ACCEPTANCE_SECONDS = 300
 
 def run(argv, timeout=60):
     require(isinstance(argv, list) and argv and all(isinstance(v, str) for v in argv), 'invalid command')
+    if 'TON1175_SUPERVISOR_FD' in os.environ:
+        # The supervisor creates and owns command groups. A killed transaction
+        # cannot orphan a command between Popen and PID registration.
+        try:
+            from .ton1175_supervise import remote_run
+        except ImportError:
+            from ton1175_supervise import remote_run
+        try:
+            remote_run(argv, timeout)
+        except Exception as error:
+            raise GateError('supervised controller or verifier failed') from error
+        return
     try:
         require(timeout > 0, 'acceptance deadline expired')
         # A timed out verifier must not leave a child writing evidence later.
@@ -334,6 +346,12 @@ def operate(c, action, apply):
                     atomic(c['plist'], (ops / 'new.plist').read_bytes(), state['plistMode'])
                     atomic(c['installation'], (ops / 'new.json').read_bytes(), state['installationMode'])
                     # The startup itself spends the same five-minute budget.
+                    if 'TON1175_SUPERVISOR_FD' in os.environ:
+                        try:
+                            from .ton1175_supervise import acceptance_checkpoint
+                        except ImportError:
+                            from ton1175_supervise import acceptance_checkpoint
+                        acceptance_checkpoint()
                     started = time.time()
                     deadline = time.monotonic() + ACCEPTANCE_SECONDS
                     run(c['controller'] + ['start'], timeout=min(60, deadline - time.monotonic()))

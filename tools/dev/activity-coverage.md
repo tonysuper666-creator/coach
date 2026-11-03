@@ -82,7 +82,8 @@ Power loss/crash without a sealed closure refuses reuse of the evidence.
    transaction to restore the old release without restoring its database.
 
 The socket connection is the fence lifetime. EOF on checker exit releases it;
-a checker frozen with an open connection requires operator cancellation. The
+a checker frozen with an open connection needs the
+[foreground supervisor](ton1175-supervisor.md) or operator cancellation. The
 same local account already controls the service. Only one control connection is
 served at a time. Do not run another checkpoint client during a held stop fence.
 Unadmitted TCP bytes in OS queues do not count as application work; shutdown

@@ -31,7 +31,10 @@ class IntegratedCandidateTest {
                 "ops" to JsonArray(listOf(json("kpId" to "a", "title" to "【W2·Ch3】First"), json("kpId" to "b", "title" to "【W2·Ch3】Second")))
             ))
             assertEquals("a", db.command(wire("set_study_scope", json("week" to 2))).result.str("target"))
-            val options = listOf(Option("yes", "Right"), Option("no", "Wrong"))
+            val options = listOf(
+                Option("yes", "Right"), Option("no", "Wrong"),
+                Option("other1", "Distractor one"), Option("other2", "Distractor two")
+            )
             for (n in 0..3) db.registerQuestion("q$n", "C", "", "SINGLE_CHOICE", "Prompt $n", "VERIFIED", "yes", options, listOf("a"))
             fun submit(question: String, attempt: String, correct: Boolean) {
                 val posed = db.poseChoiceGroup("C", "group-$attempt", listOf(json("attemptId" to attempt, "questionId" to question, "kpIds" to listOf("a"), "purpose" to "PRACTICE", "policyVersion" to 1))).single()

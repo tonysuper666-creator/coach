@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -80,14 +81,28 @@ def load(path):
     return json.loads(Path(path).read_text())
 
 
-def run(argv):
+ACCEPTANCE_SECONDS = 300
+
+
+def run(argv, timeout=60):
     require(isinstance(argv, list) and argv and all(isinstance(v, str) for v in argv), 'invalid command')
     try:
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=60)
+        require(timeout > 0, 'acceptance deadline expired')
+        # A timed out verifier must not leave a child writing evidence later.
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            result = child.wait(timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            raise
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GateError('controller or verifier could not run') from exc
-    require(result.returncode == 0, 'controller or verifier returned nonzero')
+    require(result == 0, 'controller or verifier returned nonzero')
 
 
 def command(c, action):
@@ -214,6 +229,10 @@ def stage(c, apply):
         load_state(c)
         print('already staged; recovery material retained')
         return
+    for name in ('acceptanceSnapshot', 'acceptanceVerifier'):
+        argv = c.get(name)
+        require(isinstance(argv, list) and argv and all(isinstance(v, str) for v in argv),
+                'five-minute acceptance command missing: ' + name)
     old = Path(c['installation']).read_bytes()
     old_plist = Path(c['plist']).read_bytes()
     info, plist = json.loads(old), plistlib.loads(old_plist)
@@ -230,7 +249,7 @@ def stage(c, apply):
     require(candidate_hash == c['candidateTreeSha256'], 'candidate release hash changed')
     # This must check build provenance and the relocated dependency environment;
     # file presence alone is not evidence that Python and npm dependencies work.
-    run(c['candidateVerifier'] + [str(release), c['candidateHead']])
+    run(c['candidateVerifier'] + [str(release), c['candidateHead'], c['plist']])
     newinfo = dict(info, root=str(release), sourceHead=c['candidateHead'])
     newplist = dict(plist)
     newplist['ProgramArguments'] = [str(release / 'app/bin/app')]
@@ -241,7 +260,7 @@ def stage(c, apply):
     newplist['EnvironmentVariables'] = env
     files = {'old.plist': old_plist, 'old.json': old,
              'new.plist': plistlib.dumps(newplist), 'new.json': json.dumps(newinfo, indent=2).encode()}
-    state = {'configHash': digest(json.dumps(c, sort_keys=True).encode()), 'candidateTreeSha256': candidate_hash,
+    state = {'version': 2, 'configHash': digest(json.dumps(c, sort_keys=True).encode()), 'candidateTreeSha256': candidate_hash,
              'files': {name: digest(value) for name, value in files.items()},
              'plistMode': stat.S_IMODE(Path(c['plist']).stat().st_mode),
              'installationMode': stat.S_IMODE(Path(c['installation']).stat().st_mode)}
@@ -270,17 +289,25 @@ def operate(c, action, apply):
         pointers = current(c, ops)
         require('unknown' not in pointers, 'unknown pointers; manual intervention required')
         if action == 'switch':
+            require(state.get('version') == 2, 'legacy stage lacks acceptance contract; create a new stage')
             if phase == 'switched' and pointers == ['new', 'new']:
                 print('already switched; no action')
                 return
             require(phase in ('staged', 'rolled_back') and pointers == ['old', 'old'],
                     'incomplete transaction; use recover')
             require(tree_hash(c['release']) == state['candidateTreeSha256'], 'candidate release changed')
-            run(c['candidateVerifier'] + [c['release'], c['candidateHead']])
+            run(c['candidateVerifier'] + [c['release'], c['candidateHead'], c['plist']])
             check_idle(c, c['expectedSourceHead'])
             if not apply:
                 print('switch dry-run: gates passed; no stop or pointer changes')
                 return
+            # Snapshot original identities and data high-water marks before stopping.
+            baseline = ops / 'acceptance-baseline.json'
+            baseline.unlink(missing_ok=True)
+            run(c['acceptanceSnapshot'] + [str(baseline)])
+            require(baseline.is_file() and not baseline.is_symlink()
+                    and stat.S_IMODE(baseline.stat().st_mode) == 0o600,
+                    'private acceptance baseline missing')
             set_journal(ops, 'switching')
             try:
                 command(c, 'stop')
@@ -288,9 +315,18 @@ def operate(c, action, apply):
                 check_idle(c, c['expectedSourceHead'], stopped=True)
                 atomic(c['plist'], (ops / 'new.plist').read_bytes(), state['plistMode'])
                 atomic(c['installation'], (ops / 'new.json').read_bytes(), state['installationMode'])
-                command(c, 'start')
+                # The startup itself spends the same five-minute budget.
+                started = time.time()
+                deadline = time.monotonic() + ACCEPTANCE_SECONDS
+                run(c['controller'] + ['start'], timeout=min(60, deadline - time.monotonic()))
+                set_journal(ops, 'validating')
+                run(c['acceptanceVerifier'] + [str(baseline), str(started),
+                                               str(started + ACCEPTANCE_SECONDS)],
+                    timeout=deadline - time.monotonic())
+                require(time.monotonic() <= deadline, 'acceptance deadline expired')
+                require(current(c, ops) == ['new', 'new'], 'pointers changed during acceptance')
                 set_journal(ops, 'switched')
-                print('candidate started; live acceptance is still required')
+                print('candidate accepted within five-minute transaction')
             except BaseException as original:
                 try:
                     restore(c, ops, state)
@@ -301,7 +337,7 @@ def operate(c, action, apply):
             if phase == 'rolled_back' and pointers == ['old', 'old']:
                 print('already rolled back; no action')
                 return
-            require(phase in ('switching', 'switched', 'recovering', 'recovery_required'),
+            require(phase in ('switching', 'validating', 'switched', 'recovering', 'recovery_required'),
                     'no switch transaction to recover')
             if not apply:
                 print('rollback dry-run: no stop or pointer changes')
@@ -319,6 +355,10 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
+    def interrupted(signum, frame):
+        raise GateError('transaction interrupted')
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     try:
         c = load(args.config)
         if args.action == 'prepare':
@@ -327,8 +367,11 @@ def main():
             stage(c, args.apply)
         else:
             operate(c, args.action, args.apply)
-    except (GateError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except GateError as error:
         print('ERROR:', str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, TypeError):
+        print('ERROR: configuration or recovery evidence unreadable', file=sys.stderr)
         return 1
     return 0
 

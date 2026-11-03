@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import signal
 import stat
 import subprocess
 import sys
@@ -47,6 +48,8 @@ class SwitchTest(unittest.TestCase):
         self.controller.write_text('''import pathlib, sys\nr = pathlib.Path(sys.argv[1]); action = sys.argv[2]\nwith (r / "calls").open("a") as f: f.write(action + "\\n")\nif action == "stop":\n (r / "running").write_text("stopped")\n if (r / "request-on-stop").exists():\n  import datetime, json\n  with (r / "access.log").open("a") as f: f.write(json.dumps({"at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "route": "/v1/chat"}) + "\\n")\nelse:\n if (r / "fail-start").exists():\n  (r / "fail-start").unlink(); sys.exit(1)\n import json\n (r / "running").write_text(json.loads((r / "installation.json").read_text())["sourceHead"])\n''')
         self.verifier = self.root / 'verifier.py'
         self.verifier.write_text('import pathlib,sys\nsys.exit(1 if pathlib.Path(sys.argv[1]).exists() else 0)\n')
+        self.snapshot = self.root / 'snapshot.py'
+        self.snapshot.write_text('import os,sys\np=sys.argv[1]\nfd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\nos.write(fd,b"{}")\nos.close(fd)\n')
         self.idle = self.root / 'idle.json'
         self.recording = self.root / 'recording.jfr'
         self.recording.write_bytes(b'fixture recording, checked by fixture verifier')
@@ -65,7 +68,9 @@ class SwitchTest(unittest.TestCase):
                        'idleEvidence': str(self.idle), 'accessLogs': [str(self.log)],
                        'candidateVerifier': [sys.executable, str(self.verifier), str(self.root / 'reject-candidate')],
                        'idleVerifier': [sys.executable, str(self.verifier), str(self.root / 'reject-idle')],
-                       'logVerifier': [sys.executable, str(self.verifier), str(self.root / 'reject-logs')]}
+                       'logVerifier': [sys.executable, str(self.verifier), str(self.root / 'reject-logs')],
+                       'acceptanceSnapshot': [sys.executable, str(self.snapshot)],
+                       'acceptanceVerifier': [sys.executable, str(self.verifier), str(self.root / 'reject-acceptance')]}
         self.config_path = self.root / 'config.json'
         self.config_path.write_text(json.dumps(self.config))
 
@@ -230,6 +235,89 @@ class SwitchTest(unittest.TestCase):
                 release.operate(self.config, 'switch', True)
         self.assert_old()
         self.assertEqual(self.running.read_text(), 'b' * 40)
+
+    def test_missing_acceptance_contract_cannot_stage(self):
+        del self.config['acceptanceVerifier']
+        self.config_path.write_text(json.dumps(self.config))
+        self.invoke('stage', True, False)
+        self.assertFalse(self.ops.exists())
+
+    def test_acceptance_failure_rolls_back_and_preserves_new_write(self):
+        self.verifier.write_text('''import pathlib,sys
+marker=pathlib.Path(sys.argv[1])
+if marker.name=='reject-acceptance':
+ with (marker.parent/'database').open('a') as f: f.write('accepted new write\\n')
+ sys.exit(1)
+''')
+        self.stage()
+        self.invoke('switch', True, False)
+        self.assert_old()
+        self.assertEqual(self.running.read_text(), 'b' * 40)
+        self.assertIn('accepted new write', self.database.read_text())
+        self.assertEqual((self.root / 'calls').read_text().splitlines(), ['stop', 'start', 'stop', 'start'])
+
+    def test_acceptance_timeout_kills_descendants_and_rolls_back(self):
+        self.verifier.write_text('''import pathlib,subprocess,sys,time
+marker=pathlib.Path(sys.argv[1])
+if marker.name=='reject-acceptance':
+ subprocess.Popen([sys.executable,'-c',"import pathlib,time;time.sleep(1);pathlib.Path("+repr(str(marker.parent/'orphan-write'))+").touch()"])
+ time.sleep(10)
+''')
+        self.stage()
+        real_run = release.run
+        def short_timeout(argv, timeout=60):
+            if str(self.root / 'reject-acceptance') in argv:
+                self.assertGreater(timeout, 299)
+                timeout = 0.1
+            return real_run(argv, timeout=timeout)
+        with mock.patch.object(release, 'run', side_effect=short_timeout):
+            with self.assertRaises(release.GateError):
+                release.operate(self.config, 'switch', True)
+        self.assert_old()
+        # Foreground wait checks a concrete late-write hazard, not external CI.
+        time.sleep(1.1)
+        self.assertFalse((self.root / 'orphan-write').exists())
+
+    def test_sigterm_during_acceptance_rolls_back(self):
+        self.verifier.write_text('''import pathlib,sys,time
+marker=pathlib.Path(sys.argv[1])
+if marker.name=='reject-acceptance':
+ (marker.parent/'validating').touch()
+ time.sleep(10)
+''')
+        self.stage()
+        child = subprocess.Popen([sys.executable, str(SCRIPT), 'switch', '--config',
+                                  str(self.config_path), '--apply'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not (self.root / 'validating').exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue((self.root / 'validating').exists())
+            child.send_signal(signal.SIGTERM)
+            _, errors = child.communicate(timeout=5)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertIn(b'old pointers restored', errors)
+            self.assert_old()
+            self.assertEqual(self.running.read_text(), 'b' * 40)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+    def test_missing_baseline_refuses_before_stop(self):
+        self.snapshot.write_text('pass\n')
+        self.stage()
+        self.invoke('switch', True, False)
+        self.assert_old()
+        self.assertFalse((self.root / 'calls').exists())
+
+    def test_validating_phase_is_recoverable(self):
+        self.stage()
+        (self.ops / 'journal.json').write_text(json.dumps({'phase': 'validating'}))
+        self.plist.write_bytes((self.ops / 'new.plist').read_bytes())
+        self.installation.write_bytes((self.ops / 'new.json').read_bytes())
+        self.invoke('recover', True)
+        self.assert_old()
 
 
 if __name__ == '__main__':

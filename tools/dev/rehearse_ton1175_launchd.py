@@ -250,7 +250,7 @@ class Rehearsal:
         settings += '</configuration>'
         atomic(root / 'idle.jfc', settings.encode())
         run([self.jcmd, self.old_pid, 'JFR.start', 'name=ton1175', f'settings={root / "idle.jfc"}'])
-        time.sleep(2.1)  # first real CPULoad heartbeat precedes the window
+        self.heartbeat_after()  # observe a real sample before opening the window
         with Control(root / 'state/activity.sock') as control:
             self.start = control.ask('snapshot')
         healthy(self.start)
@@ -258,15 +258,29 @@ class Rehearsal:
         self.monotonic_start = time.monotonic()
         self.identity = digest(run(['/bin/ps', '-p', self.old_pid, '-o', 'lstart=', '-o', 'command=']).strip())
 
+    def heartbeat_after(self, after=None):
+        """Wait for recorded coverage, rather than assuming JFR startup latency."""
+        recording = self.root / 'heartbeat.jfr'
+        deadline = time.monotonic()+15
+        while time.monotonic() < deadline:
+            run([self.jcmd, self.old_pid, 'JFR.dump', 'name=ton1175', f'filename={recording}'])
+            os.chmod(recording, 0o600)
+            data = json.loads(run([self.java.parent / 'jfr', 'print', '--json',
+                                   '--events', 'jdk.CPULoad', recording]))
+            beats = [dt.datetime.fromisoformat(e['values']['startTime'].replace('Z', '+00:00')).timestamp()
+                     for e in data['recording']['events']]
+            if beats and (after is None or max(beats) >= after):
+                return recording
+            time.sleep(.25)
+        raise RuntimeError('real JFR heartbeat boundary deadline expired')
+
     def evidence(self):
         require(time.monotonic()-self.monotonic_start >= 903, 'real observation still incomplete')
         end = time.time()
         with Control(self.root / 'state/activity.sock') as control:
             finish = control.ask('snapshot')
-        time.sleep(2.1)  # final heartbeat follows window end, without HTTP probes
         recording = self.root / 'idle.jfr'
-        run([self.jcmd, self.old_pid, 'JFR.dump', 'name=ton1175', f'filename={recording}'])
-        os.chmod(recording, 0o600)
+        os.replace(self.heartbeat_after(end), recording)
         stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
         proof = dict(windowStart=stamp(self.window_start), windowEnd=stamp(end),
             verifiedAtEpoch=time.time(), sourceHead=self.old_head, pid=self.old_pid,
@@ -453,7 +467,8 @@ def main():
         except Exception as error:
             # Private diagnostics have a fixed type/action schema and no child
             # output, exception text, payload, credentials or process argv.
-            frame = traceback.extract_tb(error.__traceback__)[-1]
+            frames = traceback.extract_tb(error.__traceback__)
+            frame = frames[-2] if frames[-1].name == 'require' and len(frames) > 1 else frames[-1]
             write(args.root / 'hook-error.json', dict(action=args.hook, error=type(error).__name__,
                 source=Path(frame.filename).name, line=frame.lineno))
             raise

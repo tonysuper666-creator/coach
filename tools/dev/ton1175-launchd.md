@@ -23,6 +23,9 @@ All nine observe real time concurrently. No injected application clock is used:
 each old JVM must report at least 900 seconds of uninterrupted monotonic
 coverage. A real JFR recording, process identity, heartbeats and request-log
 verification pass through the existing verifier before acquiring the seal.
+The observation opens only after a recorded CPU heartbeat exists, and the final
+dump must contain a heartbeat after its end. Fixed JFR startup sleeps cannot
+establish either boundary.
 
 Before observation, a separate real bootstrap race kills the controller after
 launchd creates the job and before PID registration. The persisted intent must

@@ -141,7 +141,7 @@ class WeekScopeRetireTest {
 
     @Test fun restoredPointAndOldCandidateCacheStayConsistentAcrossSyncAndRestart(): Unit = runBlocking {
         val root = Files.createTempDirectory("coach-week-restore-v6-")
-        val store = LedgerStore(root)
+        var store = LedgerStore(root)
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         try {
             ClientDatabase.Schema.create(driver)
@@ -180,6 +180,15 @@ class WeekScopeRetireTest {
             // 旧 PR59 的 v6 缓存可以带有效周范围，却使用旧恢复语义；必须丢弃。
             val seq = db.ledgerQueries.replicaSeq("C").executeAsOne()
             val stale = projection.copy(version = 6, position = projection.position.copy(continueTarget = "c"))
+            store.close()
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${root.resolve("coach.sqlite")}").use { sql ->
+                sql.prepareStatement("UPDATE projection_cache SET version=6, blob=? WHERE name='all' AND course_id='C'").use { statement ->
+                    statement.setBytes(1, LedgerJson.encodeToString(stale).toByteArray(Charsets.UTF_8))
+                    assertEquals(1, statement.executeUpdate())
+                }
+            }
+            store = LedgerStore(root)
+            assertEquals(projection.bytes(), store.snapshot("C").projection.bytes(), "服务端重启必须重放旧 v6 缓存")
             db.ledgerQueries.putProjection("C", 6L, seq, assertNotNull(client.epoch), LedgerJson.encodeToString(stale))
             val restarted = engine()
             assertEquals(store.snapshot("C").projection.bytes(), restarted.projection("C").bytes())

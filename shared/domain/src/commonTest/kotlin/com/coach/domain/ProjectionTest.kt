@@ -25,6 +25,7 @@ private class Script {
     }
     fun state() = project(events)
     fun mastery() = state().mastery["kp"] ?: Mastery()
+    fun revise(vararg ops: JsonObject) = e("outline_revised", json("ops" to JsonArray(ops.toList())))
 }
 
 class ProjectionTest {
@@ -100,6 +101,48 @@ class ProjectionTest {
         s.e("kp_opened",json("kpId" to "kp","via" to "CONTINUE"));s.e("question_posed",json("attemptId" to "review","questionId" to "q","kpIds" to listOf("next"),"review" to true,"purpose" to "RECALL","offlinePack" to true))
         assertEquals("kp",s.state().position.continueTarget)
         repeat(3) { s.answer("$it") };assertEquals("next",s.state().position.continueTarget)
+    }
+    @Test fun reAddedKpReturnsToContinueWhileRetiredStaysOut() {
+        // 课程调整把知识点拿掉又重新加入：重新 add 的点必须回到后续学习候选，只 retire 的点不得进入。
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        assertEquals("a",s.state().position.continueTarget)
+        s.revise(json("op" to "retire","kpId" to "a"))
+        assertEquals("b",s.state().position.continueTarget)
+        s.revise(json("op" to "add","kpId" to "a"))
+        assertEquals("a",s.state().position.continueTarget)
+        // 重启与乱序/重复投递得到同一结论。
+        val expected=s.state().bytes()
+        assertEquals(expected,project(s.events.reversed()).bytes())
+        assertEquals(expected,project(s.events+s.events.take(2)).bytes())
+    }
+    @Test fun prereqAndMoveNeverReviveRetiredKp() {
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        s.revise(json("op" to "retire","kpId" to "a"))
+        s.revise(json("op" to "setPrereq","kpId" to "a","prereqs" to emptyList<String>()))
+        s.revise(json("op" to "move","kpId" to "a","index" to 1))
+        assertEquals("b",s.state().position.continueTarget)
+        // setPrereq 仍按契约改写前置：未掌握的前置挡住候选，重新 add 也不丢这条限制。
+        val p=Script()
+        p.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        p.revise(json("op" to "setPrereq","kpId" to "a","prereqs" to listOf("b")))
+        assertEquals("b",p.state().position.continueTarget)
+        p.revise(json("op" to "retire","kpId" to "a"))
+        p.revise(json("op" to "add","kpId" to "a"))
+        assertEquals("b",p.state().position.continueTarget)
+    }
+    @Test fun reAddedKpKeepsMasteryAndReviewEvidence() {
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "kp"),json("op" to "add","kpId" to "other"))
+        repeat(3) { s.answer("$it") }
+        val mastered=s.mastery();val scheduled=s.state().review.getValue("kp")
+        assertTrue(mastered.passed)
+        s.revise(json("op" to "retire","kpId" to "kp"))
+        s.revise(json("op" to "add","kpId" to "kp"))
+        assertEquals(mastered,s.mastery())
+        assertEquals(scheduled,s.state().review.getValue("kp"))
+        assertEquals("other",s.state().position.continueTarget)
     }
     @Test fun londonDstUsesCalendarBeforeFourAmBoundary() {
         // 2026-10-25 03:30 UTC is 03:30 local after the autumn clock change.

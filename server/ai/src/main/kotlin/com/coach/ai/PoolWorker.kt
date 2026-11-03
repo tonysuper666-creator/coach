@@ -160,7 +160,11 @@ class PoolWorker(
                 return Step(job.id,job.kind,if(ok) "completed" else "stale",if(ok) 1 else 0)
             }
         }
-        val reason=if(result is BridgeResult.Failure && (result.reason.contains("timeout",true) || result.terminal?.reason?.contains("timeout",true)==true)) "TIMEOUT" else "MALFORMED"
+        val reason = when {
+            result is BridgeResult.Failure && (result.reason.contains("timeout",true) || result.terminal?.reason?.contains("timeout",true)==true) -> "TIMEOUT"
+            result is BridgeResult.Failure && (result.reason == "cli_exit" || result.terminal?.reason == "cli_exit") -> "CLI_ERROR"
+            else -> "MALFORMED"
+        }
         val failed=actor.execute { failSupply(token,reason) }
         return Step(job.id,job.kind,if(failed) "failed" else "stale")
     }

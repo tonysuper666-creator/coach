@@ -208,6 +208,30 @@ class PoolWorkerTest {
         dir.toFile().deleteRecursively()
     }
 
+    @Test fun constructedCliStartupFailureIsNotMalformedAndDoesNotRetry() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("constructed-cli-error")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            actor.execute { append("c","legacy_passed",json("kpId" to "kp")) }
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            bridge.enqueue(200,StubBridge.completion(constructed()))
+            repeat(2) { bridge.enqueue(502,StubBridge.errorWithTerminal(502).replace("timeout","cli_exit")) }
+            worker.ensureConstructed("c","kp","Objective",source);worker.runOne()
+            val reviews=actor.execute { supplyJobs().filter { it.kind=="review_constructed" } }
+            assertEquals(2,reviews.size)
+            repeat(2) { assertEquals("failed",worker.runOne()!!.state) }
+            assertTrue(reviews.all { actor.execute { jobState(it.id)?.first } == "failed" })
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db ->
+                db.createStatement().use { st -> st.executeQuery("SELECT last_error FROM jobs WHERE kind='review_constructed'").use { rows ->
+                    while(rows.next()) assertEquals("CLI_ERROR",rows.getString(1))
+                } }
+            }
+            assertNull(worker.runOne())
+            assertEquals(0,actor.execute { constructedAvailable("c","kp") })
+            assertEquals(3,bridge.requests.size)
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
     @Test fun rejectedConstructedReviewDoesNotEnterPool() = runBlocking<Unit> {
         val dir=Files.createTempDirectory("constructed-reject")
         val actor=LedgerActor(this,LedgerStore(dir))

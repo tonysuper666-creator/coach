@@ -315,6 +315,25 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** Server-only answer key, never included in a card or model prompt. */
     fun tutorChoiceKey(questionId: String): ChoiceKey = ChoiceKey(choiceOptions(questionId), requireNotNull(choiceId(questionId)))
 
+    /** Available only on the server; callers expose this after submission, never in a posed card. */
+    fun verifiedChoiceExplanation(questionId: String): String = query(
+        """SELECT d.explanation FROM pool_details d JOIN questions q USING(question_id)
+           WHERE question_id=? AND q.key_state='VERIFIED' AND d.generator<>'' AND d.reviewer<>''""", questionId
+    ) { it.getString(1).trim() }.singleOrNull().orEmpty()
+
+    private fun gradedChoiceFeedback(questionId: String, correct: String, chosen: String, map: Map<String,String>): String {
+        val verdict = choiceFeedback(correct,chosen,map)
+        if (map[correct] == chosen.trim().uppercase()) return verdict
+        val options = choiceOptions(questionId)
+        val selected = options.singleOrNull { map[it.optionId] == chosen.trim().uppercase() }?.text.orEmpty()
+        val right = options.single { it.optionId == correct }.text
+        val explanation = verifiedChoiceExplanation(questionId)
+        return verdict + "\n你选的 ${chosen.trim().uppercase()}：$selected\n正确项 ${map.getValue(correct)}：$right\n" +
+            if (explanation.isNotBlank()) "你的选择与已复核解析不符：$explanation"
+            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。点「换个例子再讲」可结合原题解释。"
+    }
+
+
     fun hello(): Hello = query("SELECT epoch,backed_up_through_seq,last_seq_before FROM ledger_meta") {
         Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
     }.single()
@@ -560,7 +579,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return transaction {
             val effects = mutableListOf<Long>()
             fun emit(type: String, payload: JsonObject, idem: String? = null) {
-                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited")) "LEARNER" else "SYSTEM"
+                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited","study_scope_set","study_scope_advanced")) "LEARNER" else "SYSTEM"
                 effects.add(append(body.courseId,type,payload,idem ?: "cmd:${c.deviceId}:${c.commandId}:${effects.size}",c.deviceId,actor,c,effects.size,body.clientTime,body.payload.str("threadId").ifBlank { null }).seq)
             }
             val p = body.payload
@@ -623,10 +642,52 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     if (correct != null) emit("attempt_graded",json("attemptId" to attemptId,
                                         "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
                                         "max" to 1,"status" to "EXACT",
-                                        "feedback" to choiceFeedback(correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
+                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap),
+                                        "correctAnswer" to "${frozenMap[correct]} · ${choiceOptions(qid).first { it.optionId == correct }.text}",
+                                        "rationale" to verifiedChoiceExplanation(qid).ifBlank { "按本题已复核答案判分。" }),"attempt:$attemptId:grade:exact")
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }
+                    }
+                }
+                "retry_week_mistake" -> {
+                    val old = weekMistakes(events(body.courseId), p.num("week").toInt()).firstOrNull { it.payload.str("attemptId") == p.str("attemptId") }
+                    if (old == null) { status="REJECTED"; error="MISTAKE_CHANGED" }
+                    else {
+                        val qid = old.payload.str("questionId")
+                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
+                        else {
+                            val thread = "week-review:${p.num("week")}:$qid"
+                            val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload + mapOf(
+                                "attemptId" to JsonPrimitive(uid()), "purpose" to JsonPrimitive("RECALL"),
+                                "review" to JsonPrimitive(true), "weekReview" to p.getValue("week")
+                            ))), device=c.deviceId, thread=thread)
+                            effects.addAll(posed.map { it.seq })
+                            result = json("threadId" to thread)
+                        }
+                    }
+                }
+                "set_study_scope" -> {
+                    val week = p.num("week").toInt()
+                    val points = weekPoints(events(body.courseId))
+                    if (week != 0 && points.none { week in it.weeks }) { status="REJECTED"; error="UNKNOWN_WEEK" }
+                    else {
+                        val state = snapshot(body.courseId).projection
+                        val ids = points.filter { week in it.weeks && state.mastery[it.id]?.let { m -> m.passed && !m.needsRepair } != true }.map { it.id }
+                        emit("study_scope_set", json("week" to week, "kpIds" to ids, "basis" to "COURSE_WEEK_OR_W_LABEL"))
+                        result = json("target" to ids.firstOrNull())
+                    }
+                }
+                "advance_study_scope" -> {
+                    val state = snapshot(body.courseId).projection
+                    val scope = state.studyScope
+                    val available = weekPoints(events(body.courseId)).map { it.id }.toSet()
+                    if (scope == null || scope.id != p.str("scopeId") || scope.target(state.mastery, available) != p.str("kpId")) {
+                        status="CONFLICT"; error="STUDY_SCOPE_MOVED"
+                    } else {
+                        emit("study_scope_advanced", json("scopeId" to scope.id, "kpId" to p.str("kpId")))
+                        result = json("target" to scope.copy(cursor=scope.kpIds.indexOf(p.str("kpId")) + 1).target(state.mastery, available))
                     }
                 }
                 "open_kp" -> emit("kp_opened",p)
@@ -764,7 +825,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun supplyCallCount(): Long = query("SELECT coalesce(sum(physical_calls),0) FROM ai_calls") { it.getLong(1) }.single()
     fun failSupply(token: Fence, reason: String): Boolean {
-        require(reason in setOf("EMPTY", "TEXT_ONLY", "MALFORMED", "TIMEOUT"))
+        require(reason in setOf("EMPTY", "TEXT_ONLY", "MALFORMED", "TIMEOUT", "CLI_ERROR"))
         if (token.epoch != hello().epoch) return false
         return sql("UPDATE jobs SET state='failed',last_error=?,updated_at=? WHERE job_id=? AND fence=? AND state='running'",
             reason,clock(),token.id,token.value) == 1

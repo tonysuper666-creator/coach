@@ -140,7 +140,10 @@ def render_sandbox_profile() -> Path:
         tpl = SANDBOX_TEMPLATE.read_text(encoding="utf-8")
     except OSError:
         return SANDBOX_PROFILE
-    body = tpl.replace("@@HOME@@", str(Path.home()))
+    # SBPL string literals need escaped paths; grant only this bridge's work tree.
+    def profile_path(path: Path) -> str:
+        return json.dumps(str(path.resolve()), ensure_ascii=False)[1:-1]
+    body = tpl.replace("@@HOME@@", profile_path(Path.home())).replace("@@WORK_DIR@@", profile_path(WORK_DIR))
     try:
         SANDBOX_PROFILE.parent.mkdir(parents=True, exist_ok=True)
         if not SANDBOX_PROFILE.exists() or SANDBOX_PROFILE.read_text(encoding="utf-8") != body:

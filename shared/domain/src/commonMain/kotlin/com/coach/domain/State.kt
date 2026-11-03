@@ -33,6 +33,7 @@ typealias JournalDay = Journal
     val taughtConceptIds: Set<String> = emptySet(), val explainedKpIds: Set<String> = emptySet(),
     val kpTitles: Map<String, String> = emptyMap(),
     val quickAsks: Map<Long, QuickAskThread> = emptyMap(),
+    val studyScope: StudyScope? = null,
     val position: Position = Position(), val mastery: Map<String, Mastery> = emptyMap(),
     val review: Map<String, Review> = emptyMap(), val journal: Map<Long, Journal> = emptyMap(),
     val coverage: Coverage = Coverage(), val orphanedAttempts: List<String> = emptyList(),

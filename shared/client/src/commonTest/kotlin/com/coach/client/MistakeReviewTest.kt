@@ -73,6 +73,16 @@ class MistakeReviewTest {
         answer("c1",true); answer("c2",true); answer("c3",true)
         assertEquals("other",mistakeReview(events).items.single().kpId)
     }
+    @Test fun replayingAWeeklyMistakeDoesNotCountAsANewQuestion() {
+        answer("w", false, question="original")
+        answer("c1", true); answer("c2", true)
+        answer("retry", true, question="original")
+        val posed = events.indexOfFirst { it.type == "question_posed" && it.payload.str("attemptId") == "retry" }
+        events[posed] = events[posed].copy(payload=JsonObject(events[posed].payload + ("weekReview" to JsonPrimitive(2))))
+        assertEquals(listOf("w"), mistakeReview(events).items.map { it.attemptId })
+        answer("c3", true)
+        assertTrue(mistakeReview(events).items.isEmpty())
+    }
     @Test fun structuredAnswerAndRationaleSurviveReplicaReplay() {
         answer("w",false)
         event("attempt_graded",json("attemptId" to "w","score" to 0,"max" to 1,"status" to "EXACT",

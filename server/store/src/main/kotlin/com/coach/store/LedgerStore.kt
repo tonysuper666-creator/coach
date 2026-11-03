@@ -644,8 +644,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                         "max" to 1,"status" to "EXACT",
                                         "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap),
                                         "correctAnswer" to "${frozenMap[correct]} · ${choiceOptions(qid).first { it.optionId == correct }.text}",
-                                        "rationale" to (query("SELECT explanation FROM pool_details WHERE question_id=?",qid) { it.getString(1) }.singleOrNull()
-                                            ?.takeIf { it.isNotBlank() } ?: "按本题已复核答案判分。")),"attempt:$attemptId:grade:exact")
+                                        "rationale" to verifiedChoiceExplanation(qid).ifBlank { "按本题已复核答案判分。" }),"attempt:$attemptId:grade:exact")
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }

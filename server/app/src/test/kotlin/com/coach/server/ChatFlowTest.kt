@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import java.net.URI
@@ -166,6 +167,40 @@ class ChatFlowTest {
             val frame = ws.await("msg.delta","msg.end", timeoutMs = 8_000)
             if (frame.str("t") == "msg.end") return text.toString() to frame
             text.append(frame.str("text"))
+        }
+    }
+
+    @Test
+    fun selectedWeekAndMistakeFeedbackCoexistWithTheStubTutorService() {
+        Harness().use { h ->
+            runBlocking {
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json("ops" to kotlinx.serialization.json.JsonArray(listOf(
+                        com.coach.domain.json("kpId" to "kp-1", "title" to "【W2·Ch3】Synthetic objective")
+                    ))))
+                    val bytes = com.coach.domain.LedgerJson.encodeToString(com.coach.protocol.CommandBody(
+                        "set_study_scope", "course-1", 1000, com.coach.domain.json("week" to 2)))
+                    val wireCommand = com.coach.protocol.WireCommand("test", java.util.UUID.randomUUID().toString(), bytes, com.coach.store.sha256(bytes.toByteArray()))
+                    assertEquals("OK", command(wireCommand).status)
+                }
+                seedReviewed(h)
+            }
+            h.tutor.streamWhen("explains the graded mistakes only", 5, "已复核错因。", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 5, "继续学习。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                runBlocking { h.actor.execute {
+                    val all = events("course-1")
+                    assertEquals(1, com.coach.domain.weekMistakes(all, 2).size)
+                    val feedback = all.last { it.type == "attempt_graded" }.payload.str("feedback")
+                    assertTrue(feedback.contains("你的选择与已复核解析不符"), feedback)
+                    assertEquals("kp-1", snapshot("course-1").projection.studyScope?.target(snapshot("course-1").projection.mastery))
+                } }
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("complete", end.str("status"))
+                assertTrue(visible.contains("已复核错因。") && visible.contains("继续学习。"), visible)
+            }
         }
     }
 

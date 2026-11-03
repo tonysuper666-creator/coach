@@ -75,6 +75,8 @@ fun mistakeReview(input: List<Event>): MistakeReview {
                 outstanding[kp to id] = Mistake(id, kp, card, right,
                     g.str("rationale").ifBlank { feedback.ifBlank { "按本题已复核答案判分。" } })
             } else {
+                // Replaying the original weekly mistake is not a new pool question.
+                if (q["weekReview"] != null) continue
                 val fresh = seenCorrect.getOrPut(kp) { mutableSetOf() }.add(q.str("questionId").ifBlank { id })
                 if (id in hinted || !fresh) { streak[kp] = 0; continue }
                 streak[kp] = (streak[kp] ?: 0) + 1

@@ -172,6 +172,40 @@ class PreflightTest(unittest.TestCase):
         with self.assertRaisesRegex(switch.GateError, 'private snapshot changed during process binding'):
             preflight._check_started(self.config, before, self.roots, 42, replace)
 
+    def test_stop_binding_follows_phase_and_pinned_sides(self):
+        self.capture()
+        for phase, expected in (('switching', 'old'), ('recovering', None)):
+            with self.subTest(phase=phase):
+                switch.set_journal(self.ops, phase)
+                if phase == 'recovering':
+                    switch.atomic(self.plist, self.materials['new.plist'])
+                before = self.revalidate('stop')
+                binding = mock.Mock(return_value={'pid': 42})
+                self.assertEqual(preflight._check_stopping(self.config, before, self.roots, 42, binding),
+                                 {'pid': 42})
+                _, sides, roots, selected = binding.call_args.args
+                self.assertEqual(selected, expected)
+                self.assertEqual(sides['old']['release'], str(self.sides['old']['release']))
+                self.assertEqual(sides['new']['release'], str(self.sides['new']['release']))
+                self.assertEqual(roots, {'cellar': str(self.cellar), 'node': str(self.node_root)})
+
+    def test_stop_binding_rejects_pointer_or_pin_replacement(self):
+        self.capture()
+        switch.set_journal(self.ops, 'switching')
+        before = self.revalidate('stop')
+        def replace_pointer(*args):
+            switch.atomic(self.plist, self.materials['old.plist'])
+            return {}
+        with self.assertRaisesRegex(switch.GateError, 'pointer identity changed'):
+            preflight._check_stopping(self.config, before, self.roots, 42, replace_pointer)
+        before = self.revalidate('stop')
+        def replace_pin(*args):
+            path = self.private / 'pin.json'
+            switch.atomic(path, path.read_bytes())
+            return {}
+        with self.assertRaisesRegex(switch.GateError, 'private snapshot changed during stop binding'):
+            preflight._check_stopping(self.config, before, self.roots, 42, replace_pin)
+
     def test_modified_stage_or_current_pointer_rejected(self):
         switch.atomic(self.plist, self.materials['new.plist'])
         with self.assertRaisesRegex(switch.GateError, 'preflight pointer'):

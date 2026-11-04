@@ -49,7 +49,7 @@ def _daemon_pid():
 def _binding(pid, side, roots, plist):
     require(_job(plist) == pid and _daemon_pid() != pid, 'launchd or daemon PID changed')
     identity = process._identity(pid)
-    require(identity[0] == 1 and str(Path(side['release']) / 'app/lib') in identity[1]
+    require(identity[0] == 1 and str(Path(side['release']) / 'app/lib') + '/' in identity[1]
             and 'com.coach.server.MainKt' in identity[1], 'unexpected launchd process identity')
     evidence = process.bind(pid, side, roots)
     require(evidence['identity'] == identity and _job(plist) == pid
@@ -64,3 +64,23 @@ def check_started(config, before):
     pid = _job(config['plist'])
     return preflight._check_started(config, before, roots, pid,
                                    lambda p, side, trusted: _binding(p, side, trusted, config['plist']))
+
+
+def _stop_binding(pid, sides, roots, expected, plist):
+    identity = process._identity(pid)
+    matches = [name for name in ('old', 'new')
+               if str(Path(sides[name]['release']) / 'app/lib') + '/' in identity[1]]
+    require(len(matches) == 1 and (expected is None or matches[0] == expected),
+            'stop process release differs from journal')
+    result = _binding(pid, sides[matches[0]], roots, plist)
+    require(result['identity'] == identity, 'stop process identity changed')
+    return result
+
+
+def check_stopping(config, before):
+    """Read-only stop identity check; a held admission seal remains mandatory."""
+    roots = preflight._production_roots(config)
+    pid = _job(config['plist'])
+    return preflight._check_stopping(config, before, roots, pid,
+                                    lambda p, sides, trusted, expected:
+                                    _stop_binding(p, sides, trusted, expected, config['plist']))

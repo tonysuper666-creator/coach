@@ -275,3 +275,34 @@ def _check_started(config, before, roots, pid, binding):
         return result
     except (KeyError, TypeError, ValueError) as exc:
         raise GateError('invalid startup snapshot') from exc
+
+
+def _check_stopping(config, before, roots, pid, binding):
+    """Bind a live stop target to the journal and both pinned release snapshots.
+
+    This read-only check does not establish the held coverage seal or authorize
+    a stop. During recovery the live process may belong to either release.
+    """
+    require(_revalidate(config, 'stop', roots) == before,
+            'transaction or pointer identity changed before stop binding')
+    private_dir = config['adapterSnapshotDir']
+    private_id = directory_snapshot(private_dir)
+    pin_bytes, pin_inode = _read_file(Path(private_dir) / 'pin.json', private_id, 0o600)
+    try:
+        pin = json.loads(pin_bytes)
+        snapshot_bytes, snapshot_inode = _read_file(Path(private_dir) / 'snapshot.json', private_id, 0o600)
+        require(digest(snapshot_bytes) == pin['snapshotHash'], 'private snapshot changed')
+        snapshot = json.loads(snapshot_bytes)
+        require(snapshot['roots'] == {'cellar': roots['cellar'], 'node': roots['node']},
+                'snapshot trusted roots differ')
+        expected = before[0]
+        require(expected in ('old', None), 'unknown stop side')
+        result = binding(pid, snapshot['sides'], snapshot['roots'], expected)
+        require(_revalidate(config, 'stop', roots) == before,
+                'transaction or pointer identity changed during stop binding')
+        require(_read_file(Path(private_dir) / 'pin.json', private_id, 0o600) == (pin_bytes, pin_inode)
+                and _read_file(Path(private_dir) / 'snapshot.json', private_id, 0o600)
+                == (snapshot_bytes, snapshot_inode), 'private snapshot changed during stop binding')
+        return result
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GateError('invalid stop snapshot') from exc

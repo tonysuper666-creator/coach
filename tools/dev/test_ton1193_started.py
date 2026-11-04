@@ -61,6 +61,29 @@ class LaunchdBindingTest(unittest.TestCase):
             with self.assertRaisesRegex(GateError, 'identity changed'):
                 started._binding(345, self.side, self.roots, self.plist)
 
+    def test_stop_selects_live_release_and_rejects_wrong_or_ambiguous_side(self):
+        sides = {'old': self.side, 'new': {'release': '/fixed/candidate'}}
+        with mock.patch.object(started.process, '_identity', return_value=self.identity), \
+             mock.patch.object(started, '_binding', return_value={'identity': self.identity}) as bind:
+            started._stop_binding(345, sides, self.roots, 'old', self.plist)
+            bind.assert_called_once_with(345, self.side, self.roots, self.plist)
+            started._stop_binding(345, sides, self.roots, None, self.plist)
+            with self.assertRaisesRegex(GateError, 'differs from journal'):
+                started._stop_binding(345, sides, self.roots, 'new', self.plist)
+            with self.assertRaisesRegex(GateError, 'differs from journal'):
+                started._stop_binding(345, {'old': self.side, 'new': self.side}, self.roots, None, self.plist)
+
+    def test_stop_rejects_changed_identity_and_lookalike_classpath(self):
+        sides = {'old': self.side, 'new': {'release': '/fixed/candidate'}}
+        with mock.patch.object(started.process, '_identity', return_value=self.identity), \
+             mock.patch.object(started, '_binding', return_value={'identity': (1, 'reused')}):
+            with self.assertRaisesRegex(GateError, 'identity changed'):
+                started._stop_binding(345, sides, self.roots, 'old', self.plist)
+        fake = (1, 'java /fixed/release/app/library/a.jar com.coach.server.MainKt')
+        with mock.patch.object(started.process, '_identity', return_value=fake):
+            with self.assertRaisesRegex(GateError, 'differs from journal'):
+                started._stop_binding(345, sides, self.roots, 'old', self.plist)
+
 
 if __name__ == '__main__':
     unittest.main()

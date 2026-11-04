@@ -1,8 +1,7 @@
 """Staged snapshot preflight for the unfinished production adapter.
 
 No service control or command-line entry point is exposed. This partial check
-does not authorize a switch: capability, whitelist and process gates remain
-mandatory. The private fixture
+does not authorize a switch: launchd and process gates remain mandatory. The private fixture
 helper accepts roots only for isolated tests; the production entry fixes them.
 The pin is protected by the same uid/private-directory trust boundary as stage,
 not against an attacker able to rewrite all files as the service owner.
@@ -14,12 +13,66 @@ import plistlib
 import pwd
 import re
 import stat
+import warnings
 
 from . import ton1175_verify as verify
 from . import ton1193_snapshots as snapshots
 from .ton1175_switch import GateError, digest, require, tree_hash
 from .ton1193_transaction import _read_file, load_bound_state
-from .ton1193_trust import _components, _open_path, directory_snapshot
+from .ton1193_trust import _components, _open_path, directory_snapshot, capability
+
+PLIST_KEYS = frozenset(('EnvironmentVariables', 'ExitTimeOut', 'KeepAlive', 'Label',
+                        'ProgramArguments', 'RunAtLoad', 'StandardErrorPath',
+                        'StandardOutPath', 'ThrottleInterval', 'Umask', 'WorkingDirectory'))
+ENV_PINS = frozenset(('BRIDGE_LOG_STDOUT', 'BRIDGE_PORT', 'COACH_MANAGE_SERVICES',
+                      'COACH_PORT', 'COACH_TAIL_HOST', 'PATH'))
+ENV_KEYS = ENV_PINS | frozenset(('COACH_BRIDGE_HOME', 'COACH_DATA_DIR', 'COACH_LOG_DIR',
+                                 'COACH_MATHSVC', 'COACH_NODE', 'COACH_PYTHON', 'COACH_RUN_DIR',
+                                 'COACH_SERVICE_ROOT', 'HOME', 'JAVA_HOME'))
+PLIST_PINS = {'ExitTimeOut': int, 'KeepAlive': bool, 'RunAtLoad': bool,
+              'StandardErrorPath': str, 'StandardOutPath': str, 'ThrottleInterval': int,
+              'Umask': int}
+
+
+def _whitelist(plist, config, roots):
+    require(isinstance(plist, dict) and set(plist) == PLIST_KEYS, 'plist keys differ from whitelist')
+    env = plist['EnvironmentVariables']
+    require(isinstance(env, dict) and set(env) == ENV_KEYS
+            and all(isinstance(value, str) for value in env.values()), 'environment keys or types differ from whitelist')
+    pins = config['adapterEnvPins']
+    require(isinstance(pins, dict) and set(pins) == ENV_PINS
+            and all(isinstance(value, str) for value in pins.values())
+            and all(env[key] == pins[key] for key in ENV_PINS), 'environment pins differ')
+    plist_pins = config['adapterPlistPins']
+    require(isinstance(plist_pins, dict) and set(plist_pins) == set(PLIST_PINS), 'plist pins differ')
+    require(plist['Label'] == 'local.coach.server', 'production label differs')
+    for key, kind in PLIST_PINS.items():
+        require(type(plist[key]) is kind and type(plist_pins[key]) is kind
+                and plist[key] == plist_pins[key], 'plist pins differ')
+    log_root = Path(roots['home']) / 'Coach/logs'
+    for key in ('StandardOutPath', 'StandardErrorPath'):
+        path = plist[key]
+        _components(path)
+        require(Path(path).parent == log_root, 'log path outside fixed root')
+        fd = _open_path(path)
+        try:
+            node = os.fstat(fd)
+            require(stat.S_ISREG(node.st_mode) and node.st_uid == os.getuid()
+                    and not node.st_mode & 0o022, 'unsafe log file')
+        finally:
+            os.close(fd)
+    group_writable = False
+    for path in env['PATH'].split(':'):
+        fd = _open_path(path, directory=True)
+        try:
+            node = os.fstat(fd)
+            require(stat.S_ISDIR(node.st_mode) and node.st_uid in (0, os.getuid())
+                    and not node.st_mode & 0o002, 'unsafe PATH directory')
+            group_writable |= bool(node.st_mode & 0o020)
+        finally:
+            os.close(fd)
+    if group_writable:
+        warnings.warn('PATH includes a group-writable directory', stacklevel=2)
 
 
 def _paths(home):
@@ -50,6 +103,7 @@ def _stage(config, roots):
     for name in ('old', 'new'):
         info = json.loads(materials[name + '.json'])
         plist = plistlib.loads(materials[name + '.plist'])
+        _whitelist(plist, config, roots)
         env = plist['EnvironmentVariables']
         release = info['root']
         _components(release)
@@ -110,6 +164,9 @@ def _preflight(config, roots):
     require(Path(config['adapterSnapshotDir']).parent == Path(config['stateDir']),
             'private snapshot directory must be inside stage')
     state, state_hash, state_id, sides, stable = _stage(config, roots)
+    evidence = capability(Path(__file__).resolve().parents[2], sides['old']['release'],
+                          config['expectedSourceHead'])
+    require(evidence == {'coverageProtocol': 'v1'}, 'legacy-protocol-absent')
     manifest_path = config['adapterManifest']
     manifest_hash = config['adapterManifestSha256']
     require(re.fullmatch(r'[0-9a-f]{64}', manifest_hash) is not None, 'invalid manifest pin')

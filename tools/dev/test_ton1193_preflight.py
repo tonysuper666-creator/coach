@@ -133,6 +133,45 @@ class PreflightTest(unittest.TestCase):
         switch.atomic(self.installation, self.materials['new.json'])
         self.assertEqual(self.revalidate('start')[0], 'new')
 
+    def test_post_start_binding_uses_journal_side_and_before_inodes(self):
+        self.capture()
+        for phase, side in (('switching', 'new'), ('recovering', 'old')):
+            with self.subTest(phase=phase):
+                switch.set_journal(self.ops, phase)
+                switch.atomic(self.plist, self.materials[side + '.plist'])
+                switch.atomic(self.installation, self.materials[side + '.json'])
+                before = self.revalidate('start')
+                binding = mock.Mock(return_value={'pid': 42})
+                result = preflight._check_started(self.config, before, self.roots, 42, binding)
+                self.assertEqual(result, {'pid': 42})
+                self.assertEqual(binding.call_args.args[1]['release'], str(self.sides[side]['release']))
+                self.assertEqual(binding.call_args.args[2], {'cellar': str(self.cellar), 'node': str(self.node_root)})
+
+    def test_post_start_pointer_inode_replacement_rejected_even_with_same_contents(self):
+        self.capture()
+        switch.set_journal(self.ops, 'switching')
+        switch.atomic(self.plist, self.materials['new.plist'])
+        switch.atomic(self.installation, self.materials['new.json'])
+        before = self.revalidate('start')
+        def replace(*args):
+            switch.atomic(self.plist, self.materials['new.plist'])
+            return {}
+        with self.assertRaisesRegex(switch.GateError, 'pointer identity changed'):
+            preflight._check_started(self.config, before, self.roots, 42, replace)
+
+    def test_post_start_private_snapshot_replacement_rejected(self):
+        self.capture()
+        switch.set_journal(self.ops, 'switching')
+        switch.atomic(self.plist, self.materials['new.plist'])
+        switch.atomic(self.installation, self.materials['new.json'])
+        before = self.revalidate('start')
+        def replace(*args):
+            path = self.private / 'snapshot.json'
+            switch.atomic(path, path.read_bytes())
+            return {}
+        with self.assertRaisesRegex(switch.GateError, 'private snapshot changed during process binding'):
+            preflight._check_started(self.config, before, self.roots, 42, replace)
+
     def test_modified_stage_or_current_pointer_rejected(self):
         switch.atomic(self.plist, self.materials['new.plist'])
         with self.assertRaisesRegex(switch.GateError, 'preflight pointer'):

@@ -243,3 +243,35 @@ def _revalidate(config, action, roots):
 def revalidate(config, action):
     """Load the durable private pin and enforce the journal's expected side."""
     return _revalidate(config, action, _production_roots(config))
+
+
+def _check_started(config, before, roots, pid, binding):
+    """Bind startup to the pinned journal side and the pre-launch pointers.
+
+    `binding` must independently validate launchd ownership and process images;
+    its arguments are the PID, the already pinned side, and the fixed roots.
+    This is only a gate; it does not start or stop a service.
+    """
+    current = _revalidate(config, 'start', roots)
+    require(current == before, 'transaction or pointer identity changed during startup')
+    private_dir = config['adapterSnapshotDir']
+    private_id = directory_snapshot(private_dir)
+    pin_bytes, pin_inode = _read_file(Path(private_dir) / 'pin.json', private_id, 0o600)
+    try:
+        pin = json.loads(pin_bytes)
+        snapshot_bytes, snapshot_inode = _read_file(Path(private_dir) / 'snapshot.json', private_id, 0o600)
+        require(digest(snapshot_bytes) == pin['snapshotHash'], 'private snapshot changed')
+        snapshot = json.loads(snapshot_bytes)
+        require(snapshot['roots'] == {'cellar': roots['cellar'], 'node': roots['node']},
+                'snapshot trusted roots differ')
+        expected = current[0]
+        require(expected in ('old', 'new'), 'unknown journal side')
+        result = binding(pid, snapshot['sides'][expected], snapshot['roots'])
+        require(_revalidate(config, 'start', roots) == before,
+                'transaction or pointer identity changed during process binding')
+        require(_read_file(Path(private_dir) / 'pin.json', private_id, 0o600) == (pin_bytes, pin_inode)
+                and _read_file(Path(private_dir) / 'snapshot.json', private_id, 0o600)
+                == (snapshot_bytes, snapshot_inode), 'private snapshot changed during process binding')
+        return result
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GateError('invalid startup snapshot') from exc

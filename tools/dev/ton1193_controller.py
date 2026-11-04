@@ -2,8 +2,8 @@
 
 The switch owns the coverage seal and checks its closed nonce.  This controller
 only accepts an independently held transaction lock and the pinned stage.
-INCOMPLETE: an absent job during recovery is refused, so an interrupted switch
-can require manual recovery. Do not use this draft for a production switch.
+INCOMPLETE: real isolated launchd switch and recovery remain unverified. Do not
+use this draft for a production switch.
 """
 import argparse
 import json
@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from . import ton1193_live as live, ton1193_preflight as preflight, ton1193_started as started
+from . import ton1193_live as live, ton1193_preflight as preflight, ton1193_started as started, ton1193_receipt as receipt
 from .ton1175_switch import GateError, require
 from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
@@ -55,13 +55,28 @@ def _exists(pid):
         raise GateError('cannot verify stopped PID') from exc
 
 
+def _stopped(config, phase, before, action):
+    """Require an absent label and an unreused, transaction-bound stopped PID."""
+    require(_job(config['plist']) is None, 'production label occupied')
+    proof = receipt.read(config)
+    require(not _exists(proof[0]['pid']), 'recorded PID still exists or was reused')
+    require(preflight.revalidate(config, action) == before, 'transaction snapshot changed')
+    require(receipt.read(config) == proof, 'stop intent changed')
+    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
+    require(_job(config['plist']) is None and not _exists(proof[0]['pid']),
+            'stopped job or PID appeared')
+    return proof
+
+
 def _stop(config, apply):
     phase = live.live_transaction(config['stateDir'])
     before = preflight.revalidate(config, 'stop')
-    # An absent job is deliberately not assumed to mean an absent process.
-    # Recovery must fail closed until a durable, independently bound PID can
-    # prove that an earlier stop completed.
-    require(bool(_job(config['plist'])), 'job absent or without PID; recovery requires manual inspection')
+    job = _job(config['plist'])
+    if job is None:
+        require(phase == 'recovering', 'job absent outside recovery')
+        _stopped(config, phase, before, 'stop')
+        return
+    require(job > 1, 'job without PID; recovery requires manual inspection')
     evidence = started.check_stopping(config, before)
     pid = evidence['pid']
     require(_job(config['plist']) == pid, 'launchd PID changed before stop')
@@ -70,6 +85,9 @@ def _stop(config, apply):
     require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
     if not apply:
         return
+    receipt.write(config, evidence)
+    require(started.check_stopping(config, before) == evidence, 'stop identity changed after intent')
+    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
     _launchctl(['bootout', _target()])
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
@@ -83,13 +101,13 @@ def _stop(config, apply):
 def _start(config, apply):
     phase = live.live_transaction(config['stateDir'])
     before = preflight.revalidate(config, 'start')
-    require(_job(config['plist']) is None, 'production label already occupied')
-    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
-    require(preflight.revalidate(config, 'start') == before, 'start snapshot changed')
-    require(_job(config['plist']) is None, 'production label appeared before start')
-    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
+    proof = _stopped(config, phase, before, 'start')
     if not apply:
         return
+    receipt.consume(config, proof)
+    require(preflight.revalidate(config, 'start') == before, 'start snapshot changed')
+    require(_job(config['plist']) is None and not _exists(proof[0]['pid']), 'stopped job or PID appeared')
+    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
     _launchctl(['bootstrap', f'gui/{os.getuid()}', config['plist']])
     # A loaded label with no PID is not treated as safely absent or ready.
     # Any identity or plist mismatch fails closed and the switch owns recovery.

@@ -11,7 +11,9 @@ import subprocess
 
 from . import ton1193_preflight as preflight
 from . import ton1193_process as process
+from . import ton1193_live as live
 from .ton1175_switch import GateError, require
+from .ton1193_trust import capability
 
 
 def _command(argv):
@@ -61,9 +63,12 @@ def _binding(pid, side, roots, plist):
 def check_started(config, before):
     """Check the fixed production label after startup; never changes launchd."""
     roots = preflight._production_roots(config)
+    phase = live.live_transaction(config['stateDir'])
     pid = _job(config['plist'])
-    return preflight._check_started(config, before, roots, pid,
-                                   lambda p, side, trusted: _binding(p, side, trusted, config['plist']))
+    result = preflight._check_started(config, before, roots, pid,
+                                     lambda p, side, trusted: _binding(p, side, trusted, config['plist']))
+    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
+    return result
 
 
 def _stop_binding(pid, sides, roots, expected, plist):
@@ -74,13 +79,27 @@ def _stop_binding(pid, sides, roots, expected, plist):
             'stop process release differs from journal')
     result = _binding(pid, sides[matches[0]], roots, plist)
     require(result['identity'] == identity, 'stop process identity changed')
+    return dict(result, side=matches[0])
+
+
+def _stopping_gate(pid, sides, roots, expected, config):
+    result = _stop_binding(pid, sides, roots, expected, config['plist'])
+    if result['side'] == 'old':
+        evidence = capability(Path(__file__).resolve().parents[2], sides['old']['release'],
+                              config['expectedSourceHead'])
+        require(evidence == {'coverageProtocol': 'v1'}, 'legacy-protocol-absent')
+        require(_stop_binding(pid, sides, roots, expected, config['plist']) == result,
+                'stop process changed during capability check')
     return result
 
 
 def check_stopping(config, before):
     """Read-only stop identity check; a held admission seal remains mandatory."""
     roots = preflight._production_roots(config)
+    phase = live.live_transaction(config['stateDir'])
     pid = _job(config['plist'])
-    return preflight._check_stopping(config, before, roots, pid,
-                                    lambda p, sides, trusted, expected:
-                                    _stop_binding(p, sides, trusted, expected, config['plist']))
+    result = preflight._check_stopping(config, before, roots, pid,
+                                      lambda p, sides, trusted, expected:
+                                      _stopping_gate(p, sides, trusted, expected, config))
+    require(live.live_transaction(config['stateDir']) == phase, 'transaction phase changed')
+    return result

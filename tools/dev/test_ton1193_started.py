@@ -84,6 +84,46 @@ class LaunchdBindingTest(unittest.TestCase):
             with self.assertRaisesRegex(GateError, 'differs from journal'):
                 started._stop_binding(345, sides, self.roots, 'old', self.plist)
 
+    def test_old_stop_requires_v1_but_recovery_new_does_not_check_old(self):
+        sides = {'old': self.side, 'new': {'release': '/fixed/candidate'}}
+        config = {'plist': self.plist, 'expectedSourceHead': 'a' * 40}
+        with mock.patch.object(started, '_stop_binding', return_value={'side': 'old'}), \
+             mock.patch.object(started, 'capability', return_value={'coverageProtocol': 'absent'}) as cap:
+            with self.assertRaisesRegex(GateError, 'legacy-protocol-absent'):
+                started._stopping_gate(345, sides, self.roots, 'old', config)
+            with self.assertRaisesRegex(GateError, 'legacy-protocol-absent'):
+                started._stopping_gate(345, sides, self.roots, None, config)
+            self.assertEqual(cap.call_count, 2)
+        with mock.patch.object(started, '_stop_binding', return_value={'side': 'new'}), \
+             mock.patch.object(started, 'capability') as cap:
+            self.assertEqual(started._stopping_gate(345, sides, self.roots, None, config)['side'], 'new')
+            cap.assert_not_called()
+        with mock.patch.object(started, '_stop_binding', side_effect=[{'side': 'old', 'pid': 345},
+                                                                      {'side': 'old', 'pid': 346}]), \
+             mock.patch.object(started, 'capability', return_value={'coverageProtocol': 'v1'}):
+            with self.assertRaisesRegex(GateError, 'changed during capability'):
+                started._stopping_gate(345, sides, self.roots, 'old', config)
+
+    def test_public_binding_checks_live_transaction_before_and_after(self):
+        config = {'stateDir': '/fixed/stage', 'plist': self.plist}
+        for action in ('start', 'stop'):
+            gate = started.check_started if action == 'start' else started.check_stopping
+            helper = '_check_started' if action == 'start' else '_check_stopping'
+            with self.subTest(action=action), \
+                 mock.patch.object(started.preflight, '_production_roots', return_value=self.roots), \
+                 mock.patch.object(started.live, 'live_transaction', side_effect=['switching', 'recovering']), \
+                 mock.patch.object(started, '_job', return_value=345), \
+                 mock.patch.object(started.preflight, helper, return_value={'pid': 345}):
+                with self.assertRaisesRegex(GateError, 'transaction phase changed'):
+                    gate(config, ('old', {}))
+            with self.subTest(action=action, missing_lock=True), \
+                 mock.patch.object(started.preflight, '_production_roots', return_value=self.roots), \
+                 mock.patch.object(started.live, 'live_transaction', side_effect=GateError('transaction lock not held')), \
+                 mock.patch.object(started, '_job') as job:
+                with self.assertRaisesRegex(GateError, 'transaction lock not held'):
+                    gate(config, ('old', {}))
+                job.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

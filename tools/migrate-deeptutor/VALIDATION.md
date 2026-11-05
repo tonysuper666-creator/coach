@@ -182,4 +182,6 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-import.py --snapshot "$SNAPSHO
 
 确认草稿在私有输出的 `confirmation-details.md`：108 题、49 KP / 62 条前置、10 道简答源评分依据、2 条 B/c 原回答、60 道五选项/字母依赖解析，以及 9 个通过时间的近似说明，逐项附来源、建议与依据。107 道题有归属提议，1 道仍未知；没有独立 rubric 时只引用 explanation，不伪造分值，待本人核对。修订后的题目必须重新复核；本轮未询问本人，新增模型调用 0（卡内既有 2）。
 
+选择题的解析在 `legacy_explanation_archive` 中按源文保存，不对字母做替换；`legacyLetterMap` 保存 optionId 到原字母的对应关系，`letter_map_complete` 表示映射是否完整。解析从派生 question 中移除，保守标记 `explanation_references_letters`，仅供归档；后续展示须先盲审，或在映射完整时按原字母映射展示，不能直接套用新随机顺序。题干和选项文字不变。
+
 仍未验证/完成：真实新快照的连续增量、无 ID 数组重排的人工 ID 对照、本人一次合并确认、新评分键的盲审、5 KP UI、blobs 备份及正式切换。该工具仍只写新建隔离副本；没有正式写库/激活入口，没有 DeepTutor 运行文件或 8790 访问，不结束整卡、不解锁 TON-1102。

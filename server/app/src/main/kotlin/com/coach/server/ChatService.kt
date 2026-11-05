@@ -141,6 +141,7 @@ class ChatService(
         @Volatile var phase: String = "teach"
         @Volatile var lookupAllowed: Boolean = false
         @Volatile var sourceProcess: Process? = null
+        var restrictedGuard: RestrictedSourceGuard? = null
         @Volatile var handle: BridgeStreamHandle? = null
         @Volatile var lessonHandle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
@@ -364,7 +365,10 @@ class ChatService(
         if(prepared!=null) { session.trace?.prepared(); scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
-            SourcePack.prepare(sourcePack,hits).render()
+            val selected = SourcePack.prepare(sourcePack,hits)
+            if (selected.restricted.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(
+                selected.restricted.map { it.text }, selected.browsable.map { it.text } + selected.legacy)
+            selected.render()
         } else if (plan?.explanation == true) {
             val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
             when {
@@ -466,7 +470,7 @@ class ChatService(
         }
         fun elapsedMs(): Long = (System.nanoTime() - started) / 1_000_000
 
-        fun newGuard() = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true) { attempt ->
+        fun newGuard() = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true,restrictedSources=session.restrictedGuard) { attempt ->
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
         var guard = newGuard()
@@ -726,12 +730,14 @@ class ChatService(
                 session.sourceProcess = process
                 if (session.forcedStatus != null) process?.destroyForcibly()
             }
-            if (pack.pages.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
+            if (pack.browsable.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
                 failure = "source_unavailable"
                 return
             }
             val gate = SourceCitationGate(pack.anchors)
-            val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false) { attempt ->
+            val restrictedGuard = if (pack.restricted.isEmpty()) null else RestrictedSourceGuard(
+                pack.restricted.map { it.text },pack.browsable.map { it.text })
+            val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false,restrictedSources=restrictedGuard) { attempt ->
                 session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
             }
             val visible = VisibleStream()
@@ -757,7 +763,7 @@ class ChatService(
             }
             val request = com.coach.ai.ChatRequest(
                 task="SOURCE_LOOKUP",model=session.model,system=com.coach.ai.TeachPrompt.SYSTEM,
-                user="""Read only the supplied textbook pages. Answer the student's question using this source lookup.
+                user="""Use the browsable textbook pages to answer. Internal references must not be quoted or repeated.
                     |Write ONLY supplement paragraphs, separated by a blank line. End EVERY paragraph with its source anchor, e.g. 【S1】.
                     |Every quotation must be copied verbatim from the anchored page. No unsupported claims. No questions, grading, tools, JSON or lookup markers.
                     |Student question: ${TutorOutputGuard.modelInput(question)}
@@ -807,6 +813,7 @@ class ChatService(
     private suspend fun fallback(previous: Session, question: String, pack: String) {
         val messageId = UUID.randomUUID().toString()
         val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan, FirstWordTrace(messageId, previous.messageId, previous.receivedAt), previous.receivedAt)
+        session.restrictedGuard = previous.restrictedGuard
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
         hub.emit(startFrame(session))
@@ -818,7 +825,7 @@ class ChatService(
         val visible = VisibleStream { drop ->
             log("COACH visible-drop msg=$messageId reason=${drop.reason}")
         }
-        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true) { attempt ->
+        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,restrictedSources=session.restrictedGuard) { attempt ->
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
         val segments = visible.push(guard.push(text) + guard.finish()) + visible.finish()

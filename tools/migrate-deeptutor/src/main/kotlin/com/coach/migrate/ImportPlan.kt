@@ -99,6 +99,8 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
     }
     add("questions","legacy_question") { row -> buildJsonObject {
         put("question",row.obj("question"));put("keyState","UNREVIEWED")
+        val raw=row.obj("source_record")
+        if(isChoice(raw)) put("legacy_explanation_archive",legacyChoiceArchive(raw))
         put("kp_ids",JsonArray(emptyList()));put("association_confirmed",false)
     } }
     add("legacy_attempts","legacy_attempt") { row ->
@@ -106,6 +108,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
         val result=parseText(raw.str("result_json")) as? JsonObject ?: JsonObject(emptyMap())
         buildJsonObject {
             put("origin","LEGACY");put("window_eligible",false);put("question",mapChoiceQuestion(q))
+            if(isChoice(q)) put("legacy_explanation_archive",legacyChoiceArchive(q))
             put("kp_id",q.str("knowledge_point_id"));put("reset",row.getValue("reset"))
             put("reset_reason",row.str("reset_reason"));put("created_at",raw["created_at"] ?: JsonNull)
             put("answer",if(isChoice(q)) choiceAnswer(q,raw.str("user_answer")) else JsonPrimitive(raw.str("user_answer")))
@@ -216,14 +219,14 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val rubricText=when(rubric) { is JsonPrimitive -> rubric.contentOrNull;null -> null;else -> canonical(rubric) }
         append("建议采分点（沿用源 rubric/grading_rubric/marking_criteria，缺失则以源 explanation 作待核对草案，未生成分值、未认证评分键）：${rubricText ?: "源题没有独立评分标准，待生成并异厂复核"}\n\n依据：以上源字段原文，暂不推断满分或分配权重；本人抽查后再激活。\n\n")
     }
-    append("\n## 五个选项及字母依赖解析的统一核对\n\n建议：五个选项原样保留，以稳定 optionId 表示答案；解析中的字母改为对应选项正文。依据：源题的选项映射，仍为 UNREVIEWED；下面同时保留原解析作对照。\n\n")
+    append("\n## 五个选项及字母依赖解析的统一核对\n\n建议：五个选项原样保留，以稳定 optionId 表示答案；解析和原始字母映射原样归档。展示须经盲审或使用原字母映射，状态仍为 UNREVIEWED。\n\n")
     qs.values.filter { isChoice(it.obj("source_record")) }.forEach { row ->
         val raw=row.obj("source_record");val mapped=mapChoiceQuestion(raw)
         if(choiceEntries(raw).size==5 || Regex("[A-E]").containsMatchIn(raw.str("explanation"))) {
             append("- 来源：${row.str("id")}；选项数 ${choiceEntries(raw).size}；源哈希 ${row.str("content_hash")}\n")
             append("  题干：${raw.str("question").ifBlank { raw.str("prompt") }}\n")
             choiceEntries(raw).forEach { (letter,text) -> append("  $letter：$text\n") }
-            append("  原解析：${raw.str("explanation")}\n  建议解析：${mapped.str("explanation")}\n  建议正确 optionId：${mapped["correctOptionId"] ?: JsonNull}；状态：未复核，不进入题池或成绩。\n\n")
+            append("  原解析：${raw.str("explanation")}\n  建议：原文归档，待盲审或按原字母映射展示。\n  建议正确 optionId：${mapped["correctOptionId"] ?: JsonNull}；状态：未复核，不进入题池或成绩。\n\n")
         }
     }
     append("\n## 历史已通过时间的近似说明\n\n建议：保留 legacy_passed，solid=false；发生时间优先用同 KP 的 last_review_at。这是最近复习时间的近似，不能当作真实首次通过时刻；缺失时依次取 evidence.created_at、mastery updated_at、快照时间。依据为源时间证据，绝不用导入当天填充。\n\n")

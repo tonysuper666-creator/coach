@@ -15,6 +15,34 @@ class PoolWorkerTest {
         "explanation" to "The source supports this result.","source_quote" to source) }).toString()
     private fun review()=JsonArray((0..2).map { i -> json("id" to i,"answer_text" to "Right result $i","defects" to emptyList<String>(),"note" to "Supported") }).toString()
 
+    @Test fun restrictedReferenceCanInformGenerationButCannotBecomeQuestionOrQuote() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("pool-internal-reference")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        val secret="Synthetic confidential scenario lists twenty four silver umbrellas before insurance begins"
+        try { StubBridge().use { bridge ->
+            actor.execute {
+                registerSourcePage("c","book","Synthetic textbook",1,source)
+                registerSourcePage("c","internal","Synthetic reference",1,secret,learnerVisible=false)
+            }
+            val generated=JsonArray((0..2).map { i -> json(
+                "stem" to if(i==0) secret else "Synthetic question $i asks for the uniquely correct result.",
+                "correct_text" to "Right result $i", "distractors" to listOf("Wrong one $i","Wrong two $i","Wrong three $i"),
+                "explanation" to "The source supports this result.", "source_quote" to if(i==1) secret else source)
+            }).toString()
+            bridge.enqueue(200,StubBridge.completion(generated))
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            worker.ensure("c","kp","Synthetic objective",source,3)
+            assertEquals("completed",worker.runOne()!!.state)
+            assertTrue(bridge.requests.single().contains(secret))
+            val queued=actor.execute { supplyJobs().single().subject.getValue("questions").jsonArray }
+            assertEquals(1,queued.size)
+            val retained=readStoredMcq(queued.single().jsonObject)
+            assertTrue(retained.stem.contains("question 2"))
+            assertEquals(source,retained.sourceQuote)
+            assertFalse(queued.toString().contains(secret))
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
     @Test fun generationReviewPersistenceAndAtomicTake() = runBlocking<Unit> {
         val dir=Files.createTempDirectory("pool-worker")
         val actor=LedgerActor(this,LedgerStore(dir))

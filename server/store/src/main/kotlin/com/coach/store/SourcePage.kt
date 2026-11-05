@@ -1,7 +1,7 @@
 package com.coach.store
 
-/** A page copied from the tutor-visible course library, never an answer key. */
-data class SourcePage(val docId: String, val pdfPage: Int, val text: String, val score: Double = 0.0) {
+/** A tutor-readable page; learner visibility also includes the document-name filter. */
+data class SourcePage(val docId: String, val pdfPage: Int, val text: String, val score: Double = 0.0, val learnerVisible: Boolean = true) {
     val key: String get() = "$docId:$pdfPage"
 }
 

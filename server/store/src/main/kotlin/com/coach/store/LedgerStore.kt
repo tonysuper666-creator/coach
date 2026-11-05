@@ -42,7 +42,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         // V5 is the combined alpha schema. Validate the known additive tables before accepting it.
-        val deployedAlpha = version in 5..6 &&
+        val deployedAlpha = version in 5..7 &&
             query("PRAGMA table_info(pool_details)") { it.getString(2) }.containsAll(listOf("question_id","pack_hash","explanation","source_quote","generator","reviewer")) &&
             query("PRAGMA table_info(pairing_code)") { it.getString(2) }.containsAll(listOf("singleton","code_sha256","expires_at","attempts"))
         require(version <= 4 || deployedAlpha) { "Database schema is newer than this server" }
@@ -109,6 +109,20 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 }
                 sql("CREATE TABLE IF NOT EXISTS chat_inputs(device_id TEXT NOT NULL,client_message_id TEXT NOT NULL,message_id TEXT NOT NULL UNIQUE REFERENCES messages(message_id),course_id TEXT NOT NULL,thread_id TEXT NOT NULL,PRIMARY KEY(device_id,client_message_id))")
                 sql("PRAGMA user_version=6")
+            }
+        }
+        if (version < 7) {
+            rawBackup(directory.resolve("backups/pre-V007-${uid()}"))
+            transaction {
+                val columns = query("PRAGMA table_info(source_docs)") { it.getString(2) }
+                if ("learner_visible" !in columns) sql("ALTER TABLE source_docs ADD COLUMN learner_visible INTEGER NOT NULL DEFAULT 1")
+                // Preserve the old browse restriction on existing tutor-invisible documents.
+                sql("UPDATE source_docs SET learner_visible=0 WHERE tutor_visible=0")
+                val hidden = query("SELECT doc_id,title,kind FROM source_docs") {
+                    Triple(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())
+                }.filter { !tutorSourceAllowed(it.first,it.second,it.third) }
+                hidden.forEach { sql("UPDATE source_docs SET learner_visible=0 WHERE doc_id=?",it.first) }
+                sql("PRAGMA user_version=7")
             }
         }
         ensureSourceIndexes()
@@ -1087,12 +1101,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** Import API keeps both language indexes in the same transaction as the source page. */
     fun registerSourcePage(course: String, doc: String, title: String, page: Int, text: String,
-        tutorVisible: Boolean = true, kind: String = "textbook") = transaction {
+        tutorVisible: Boolean = true, kind: String = "textbook", learnerVisible: Boolean = true) = transaction {
         require(page > 0 && doc.isNotBlank())
         val owner = query("SELECT course_id FROM source_docs WHERE doc_id=?",doc) { it.getString(1) }.singleOrNull()
         require(owner == null || owner == course) { "Source belongs to another course" }
-        sql("INSERT INTO source_docs(doc_id,course_id,kind,title,tutor_visible) VALUES(?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET title=excluded.title,kind=excluded.kind,tutor_visible=excluded.tutor_visible",
-            doc,course,kind,title,if(tutorVisible) 1 else 0)
+        sql("INSERT INTO source_docs(doc_id,course_id,kind,title,tutor_visible,learner_visible) VALUES(?,?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET title=excluded.title,kind=excluded.kind,tutor_visible=excluded.tutor_visible,learner_visible=excluded.learner_visible",
+            doc,course,kind,title,if(tutorVisible) 1 else 0,if(learnerVisible) 1 else 0)
         sql("INSERT INTO source_pages(doc_id,pdf_page,text,text_sha256) VALUES(?,?,?,?) ON CONFLICT(doc_id,pdf_page) DO UPDATE SET text=excluded.text,text_sha256=excluded.text_sha256",doc,page,text,sha256(text.toByteArray()))
     }
 
@@ -1102,7 +1116,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
      */
     fun browsableSources(course: String): JsonArray = JsonArray(query(
         """SELECT d.doc_id,d.title,d.kind,min(p.pdf_page),max(p.pdf_page),min(p.book_page),max(p.book_page) FROM source_docs d
-           JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.tutor_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
+           JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.learner_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
         else json("docId" to it.getString(1),"title" to it.getString(2),"kind" to it.getString(3),"firstPdfPage" to it.getInt(4),"lastPdfPage" to it.getInt(5),
             "firstBookPage" to it.getObject(6)?.let { _ -> it.getInt(6) },"lastBookPage" to it.getObject(7)?.let { _ -> it.getInt(7) })
@@ -1110,7 +1124,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     fun browsablePage(course: String, doc: String, pdfPage: Int): JsonObject? = query(
         """SELECT d.doc_id,d.title,d.kind,p.book_page,p.text FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
-           WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.tutor_visible=1""",course,doc,pdfPage) {
+           WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.learner_visible=1""",course,doc,pdfPage) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
         else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
@@ -1132,12 +1146,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         for (table in listOf("fts_en","fts_zh")) {
             val expression = terms.filter { table == "fts_en" || it.length >= 3 }.joinToString(" OR ") { "\"$it\"" }
             if (expression.isBlank()) continue
-            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
-                if (tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
-                    SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4)) else null
-            }.filterNotNull()
+            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
+                SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4),
+                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
+            }
         }
-        return found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }.sortedByDescending { it.score }.take(6)
+        val unique = found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
+        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
+            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
     }
 
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()

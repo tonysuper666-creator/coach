@@ -25,7 +25,12 @@ data class SourcePack(val pages: List<SourcePage>, val legacy: String = "") {
             val headers = Regex("(?m)^【S[0-9]+】 (.+) PDF page ([0-9]+)\\n").findAll(publicExisting).toList()
             val previous = headers.mapIndexed { i, h -> SourcePage(h.groupValues[1],h.groupValues[2].toInt(),
                 publicExisting.substring(h.range.last+1,headers.getOrNull(i+1)?.range?.first ?: publicExisting.length).trimEnd()) }
+            // Dropping a page is only safe while the retained legacy block still carries its text.
             val newHits = if (headers.isEmpty() && publicExisting.isNotBlank()) hits.filterNot { it.text.isNotBlank() && publicExisting.contains(it.text) } else hits
+            val pack = select(newHits,previous,headers.isEmpty(),publicExisting)
+            return if (pack.legacy.isNotBlank() || newHits.size == hits.size) pack else select(hits,previous,headers.isEmpty(),publicExisting)
+        }
+        private fun select(newHits: List<SourcePage>, previous: List<SourcePage>, noHeaders: Boolean, publicExisting: String): SourcePack {
             val candidates = (newHits + previous).groupBy { it.key }.values.map { versions -> versions.maxBy { it.score } }
             val selected = mutableListOf<SourcePage>()
             // Count headers and locators against the character budget as well.
@@ -41,7 +46,7 @@ data class SourcePack(val pages: List<SourcePage>, val legacy: String = "") {
             }
             // Legacy callers supply one opaque preparation excerpt. Multiple page markers are counted.
             val legacyPages = maxOf(1,Regex("【S[0-9]+】|<!-- PDF 第 [0-9]+ 页").findAll(publicExisting).count())
-            val legacy = if (headers.isEmpty() && selected.size + legacyPages <= 6 && publicExisting.length <= remaining) publicExisting else ""
+            val legacy = if (noHeaders && selected.size + legacyPages <= 6 && publicExisting.length <= remaining) publicExisting else ""
             return SourcePack(selected, legacy)
         }
     }

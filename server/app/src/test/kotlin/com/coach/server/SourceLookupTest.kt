@@ -56,6 +56,68 @@ class SourceLookupTest {
         assertFalse(SourcePack.prepare(pack.render(),emptyList()).anchors.values.any { secret in it })
     }
 
+    @Test fun dedupeNeverDropsTextTheSamePromptCannotCarry() {
+        val page = "A synthetic page defining adverse selection for the tutor."
+        // The existing context is over the whole-pack budget, so it cannot ride along as legacy.
+        val overBudget = "pasted learner context. ".repeat(2000) + page
+        val kept = SourcePack.prepare(overBudget,listOf(SourcePage("book",1,page,50.0)))
+        assertEquals("",kept.legacy)
+        assertEquals(listOf(1),kept.pages.map { it.pdfPage })
+        assertTrue(kept.render().contains(page))
+        // Other hits fill the six-page cap, so the legacy block holding the duplicate is dropped too.
+        val others = (1..7).map { SourcePage("book",it + 1,"A distinct synthetic page $it.",100.0 - it) }
+        val capped = SourcePack.prepare("pasted learner context.\n\n$page",listOf(SourcePage("book",1,page,200.0)) + others)
+        assertEquals("",capped.legacy)
+        assertEquals(6,capped.pages.size)
+        assertTrue(capped.render().contains(page))
+        // Falling back to the hits must restore the anchor without giving the restricted page one.
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val mixed = SourcePack.prepare(overBudget,listOf(SourcePage("book",1,page,50.0),
+            SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to page),mixed.anchors)
+        assertFalse(mixed.render().substringAfter("内部参考").contains("【S"))
+    }
+
+    @Test fun restrictedTextAlreadyInContextNeverBecomesAnAnchor() {
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val public = "A synthetic public page about adverse selection."
+        val pack = SourcePack.prepare("Learner pasted note: $secret",listOf(
+            SourcePage("book",1,public,10.0),SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to public),pack.anchors)
+        assertEquals(listOf("book"),pack.pages.map { it.docId })
+        assertFalse(pack.render().contains("sealed-ref"))
+        assertFalse(pack.render().contains("【S2】"))
+    }
+
+    @Test fun restrictedOnlyHitsStayFailClosedAndLookupCarriesNoLegacy() {
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val only = SourcePack.prepare("",listOf(SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertTrue(only.browsable.isEmpty())
+        assertEquals(emptyMap(),only.anchors)
+        assertEquals("",only.legacy)
+        assertFalse(only.render().contains("【S"))
+        val mixed = SourcePack.prepare("",listOf(SourcePage("book",1,"A synthetic public page.",10.0),
+            SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to "A synthetic public page."),mixed.anchors)
+        assertEquals("",mixed.legacy)
+        assertFalse(mixed.render().substringBefore("内部参考").contains(secret))
+        assertFalse(mixed.render().substringAfter("内部参考").contains("【S"))
+        // Over-budget context holding the same restricted text must still fail closed.
+        val pasted = SourcePack.prepare("pasted learner context. ".repeat(2000) + secret,
+            listOf(SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertTrue(pasted.browsable.isEmpty())
+        assertEquals(emptyMap(),pasted.anchors)
+        assertEquals("",pasted.legacy)
+    }
+
+    @Test fun duplicateTextNeverBreaksThePageOrCharacterBudget() {
+        val pages = (1..8).map { SourcePage("book",it,"text ".repeat(1000) + it,it.toDouble()) }
+        val pack = SourcePack.prepare("pasted learner context. ".repeat(2000),pages)
+        assertTrue(pack.pages.size <= 6)
+        assertEquals("",pack.legacy)
+        assertTrue(pack.render().length <= 40_000)
+    }
+
     @Test fun dualFtsIsCourseScopedAndAnswerDirectoriesAreInternalOnly() {
         LedgerStore(Files.createTempDirectory("source-fts-")).use { store ->
             store.registerSourcePage("c","book","Book",1,"Adverse selection and 逆向选择 are examples.")

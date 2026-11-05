@@ -204,6 +204,12 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             call.respondText(response,ContentType.Application.Json,status)
         }
         webSocket("/v1/ws") {
+            val socketTicket = observation?.coverage?.begin("ws")
+            if (observation != null && socketTicket == null) {
+                close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Service switching"))
+                return@webSocket
+            }
+            try {
             val device=call.request.header("X-Coach-Device")!!
             val token=call.request.header("Authorization")!!.removePrefix("Bearer ")
             suspend fun stillAuthorized(): Boolean {
@@ -288,6 +294,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
+            } finally { socketTicket?.let { observation?.coverage?.end(it) } }
         }
     }
 }

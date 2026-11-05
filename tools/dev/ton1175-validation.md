@@ -1,13 +1,12 @@
 # TON-1175 evidence and rollback transaction
 
-These tools are for independent review and isolated rehearsal. **They cannot
-currently pass the production gate.** `UsageObservation.access()` swallows write
-errors and exposes no independent ingress/write-loss counters or flush barrier.
-An empty, readable, unrotated access file cannot prove absence of omitted requests.
-`ton1175_verify.py logs` therefore always exits nonzero, including when a JSON
-file claims coverage. Do not replace it with a command that returns success.
-Resolving this requires a separately reviewed service-side evidence contract;
-this change only touches `tools/dev`.
+These tools are for independent review and isolated rehearsal. Coverage protocol
+v1 now binds a process-owned journal, live counters and a held admission fence to
+the shutdown record. Legacy access files and caller-supplied `coverage=true` still
+fail closed. See [the coverage contract](activity-coverage.md) for collection,
+fault tests and limits. This implementation does not authorize production use;
+QA-C and Architect review remain required, as do the real 900-second JFR and
+five-minute original-device/learning gates below.
 
 ## Reproduce without production
 
@@ -95,6 +94,11 @@ the same live installed server command, its exclusive whole-file write lock on
 `dataDir/server.lock`, and unchanged installation/recording before and after
 inspection. JFR's JVM PID, main class and start time must match the live lifetime
 measured by `jcmd VM.uptime`; a reused PID alone cannot satisfy it.
+On macOS the verifier reads the native `F_GETLK` result for the lock inode and
+requires the exact JVM PID, write-lock type and whole-file range. This is a
+read-only kernel query: Darwin `lsof` can report a blank lock field even for a
+real Java `FileChannel` lock. Missing, shared, partial, foreign or replaced locks
+fail closed. Other platforms retain the `lsof` whole-file lock check.
 
 `Ton1175Jfr.java` inspects the recording directly through JDK's event API. It
 requires enabled `SocketRead`, `ActiveSetting`, `DataLoss`, `CPULoad` and
@@ -106,12 +110,16 @@ events/settings/coverage fail closed. Old recordings made without these enabled
 events cannot be used. The unit fixture is deliberately short; it verifies the
 real parser and proves the Python entrypoint rejects it as a production idle proof.
 
-`logVerifier` receives `IDLE_JSON LOG...` before stopping and again after stopping.
-The provided `logs` implementation always refuses the current protocol. A future
-protocol must bind complete ingress/activity coverage (including established WS),
-write-loss accounting, flush/rotation barriers and process identity across the
-observation-to-stop gap. File existence or a caller-controlled coverage flag
-cannot replace that contract. Do not disable this gate for a cutover.
+`logVerifier` receives `IDLE_JSON LOG...` before stopping. For protocol v1,
+`accessLogs` in the switch configuration must list **all activity journal files
+for the observed lifetime**; acceptance's separate `accessLogs` still names the
+ordinary access files. The switcher obtains a live atomic seal on the private
+control socket before invoking the controller. After stopping it appends
+`--closed-seal NONCE` to the verifier arguments and requires the same process's
+closed chain with that nonce, zero active/failed/rejected changes and process
+exit. The held socket releases the fence on abort/EOF. A missing seal or an
+unsupported journal cannot pass. Do not replace this gate with an unconditional
+success command; configured gate executables are trusted review inputs.
 
 ## Five-minute acceptance
 
@@ -169,6 +177,15 @@ requirements and the access-coverage prerequisite are satisfied.
 
 ## Failure and recovery
 
+Use the [bounded foreground supervisor](ton1175-supervisor.md) for staged
+`switch`, `rollback` and `recover`. It owns command groups across worker death,
+preserves the 300-second acceptance reserve and adds separate rollback/recovery
+budgets. The direct entry below remains a low-level transaction; it does not
+clean up its children after its own SIGKILL.
+
+Observation end to seal is at most 120 seconds. Background jobs can start in
+that gap and be cancelled at stop; SQLite transactions protect committed data.
+
 `ton1175_switch.py prepare|stage|switch|rollback|recover --config CONFIG [--apply]`
 defaults to read-only preflight: no state creation, service control or pointer
 replacement. Explicit `--apply` is required for side effects. The configuration
@@ -187,8 +204,8 @@ Separate approved backup policy still applies.
 
 If rollback fails, `recovery_required` and the 0700 directory/0600 retained files
 allow `recover --config CONFIG --apply` after diagnosing the controller. Inspect
-`journal.json` before any new operation. SIGKILL, power loss and host failure
-cannot execute in-process rollback; `switching`/`validating` journals are explicitly
+`journal.json` before any new operation. Power loss, host failure and SIGKILL of
+the cleanup owner cannot execute rollback; `switching`/`validating` journals are explicitly
 recoverable by `recover`. Unknown externally modified pointers are refused for
 manual investigation. Do not leave the transaction running in the background.
 Independent QA and Architect review are required before any production handoff.

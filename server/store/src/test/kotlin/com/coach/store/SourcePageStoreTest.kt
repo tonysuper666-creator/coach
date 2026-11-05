@@ -30,7 +30,7 @@ class SourcePageStoreTest {
                         assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择").map { it.docId })
                         assertEquals(emptyList(),store.searchSourcePages("c","adverse selection"))
                         DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
-                            s.executeQuery("PRAGMA user_version").use { r -> assertTrue(r.next()); assertEquals(6,r.getInt(1)) }
+                            s.executeQuery("PRAGMA user_version").use { r -> assertTrue(r.next()); assertEquals(7,r.getInt(1)) }
                             s.executeQuery("SELECT count(*) FROM pool_details").use { r -> assertTrue(r.next()); assertEquals(0,r.getInt(1)) }
                         } }
                     }
@@ -48,5 +48,27 @@ class SourcePageStoreTest {
                 }
             } finally { dir.toFile().deleteRecursively() }
         }
+    }
+
+    @Test fun versionSixAnswerNamesMigrateToPrivateWithoutHidingTextbook() {
+        val dir = Files.createTempDirectory("source-v6-")
+        try {
+            LedgerStore(dir).use { store ->
+                store.registerSourcePage("c","book","Book",1,"Synthetic deductible")
+                store.registerSourcePage("c","appendix","答案 附录",1,"Synthetic deductible solution")
+            }
+            DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
+                s.execute("ALTER TABLE source_docs DROP COLUMN learner_visible")
+                s.execute("PRAGMA user_version=6")
+            } }
+            LedgerStore(dir).use { store ->
+                val pages = store.searchSourcePages("c","deductible").associateBy { it.docId }
+                assertTrue(pages.getValue("book").learnerVisible)
+                assertFalse(pages.getValue("appendix").learnerVisible)
+                assertNotNull(store.browsablePage("c","book",1))
+                assertNull(store.browsablePage("c","appendix",1))
+            }
+            assertTrue(Files.list(dir.resolve("backups")).use { paths -> paths.anyMatch { it.fileName.toString().startsWith("pre-V007-") } })
+        } finally { dir.toFile().deleteRecursively() }
     }
 }

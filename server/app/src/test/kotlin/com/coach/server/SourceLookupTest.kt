@@ -41,7 +41,84 @@ class SourceLookupTest {
         assertTrue(large.render().length <= 40_000)
     }
 
-    @Test fun dualFtsIsCourseScopedAndCannotReturnHiddenAnswerDirectories() {
+    @Test fun restrictedPagesHaveNoLocatorOrAnchorAndCannotBeCited() {
+        val secret = "A synthetic restricted sentence about unusual insurance scenarios."
+        val pack = SourcePack.prepare("",listOf(SourcePage("book",1,"A public source.",1.0),
+            SourcePage("sealed-secret",4,secret,100.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to "A public source."),pack.anchors)
+        assertTrue(pack.render().contains("内部参考（不可引用、不可复述）"))
+        assertFalse(pack.render().contains("sealed-secret"))
+        assertFalse(pack.render().substringAfter("内部参考").contains("【S"))
+        val gate = SourceCitationGate(pack.anchors)
+        assertTrue(gate.push("“$secret”【S1】\n\n").isEmpty())
+        assertEquals(listOf("“A public source.”【S1】\n\n"),gate.push("“A public source.”【S1】\n\n"))
+        assertTrue(SourcePack.prepare("",listOf(SourcePage("secret",1,secret,learnerVisible=false))).pages.isEmpty())
+        assertFalse(SourcePack.prepare(pack.render(),emptyList()).anchors.values.any { secret in it })
+    }
+
+    @Test fun dedupeNeverDropsTextTheSamePromptCannotCarry() {
+        val page = "A synthetic page defining adverse selection for the tutor."
+        // The existing context is over the whole-pack budget, so it cannot ride along as legacy.
+        val overBudget = "pasted learner context. ".repeat(2000) + page
+        val kept = SourcePack.prepare(overBudget,listOf(SourcePage("book",1,page,50.0)))
+        assertEquals("",kept.legacy)
+        assertEquals(listOf(1),kept.pages.map { it.pdfPage })
+        assertTrue(kept.render().contains(page))
+        // Other hits fill the six-page cap, so the legacy block holding the duplicate is dropped too.
+        val others = (1..7).map { SourcePage("book",it + 1,"A distinct synthetic page $it.",100.0 - it) }
+        val capped = SourcePack.prepare("pasted learner context.\n\n$page",listOf(SourcePage("book",1,page,200.0)) + others)
+        assertEquals("",capped.legacy)
+        assertEquals(6,capped.pages.size)
+        assertTrue(capped.render().contains(page))
+        // Falling back to the hits must restore the anchor without giving the restricted page one.
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val mixed = SourcePack.prepare(overBudget,listOf(SourcePage("book",1,page,50.0),
+            SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to page),mixed.anchors)
+        assertFalse(mixed.render().substringAfter("内部参考").contains("【S"))
+    }
+
+    @Test fun restrictedTextAlreadyInContextNeverBecomesAnAnchor() {
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val public = "A synthetic public page about adverse selection."
+        val pack = SourcePack.prepare("Learner pasted note: $secret",listOf(
+            SourcePage("book",1,public,10.0),SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to public),pack.anchors)
+        assertEquals(listOf("book"),pack.pages.map { it.docId })
+        assertFalse(pack.render().contains("sealed-ref"))
+        assertFalse(pack.render().contains("【S2】"))
+    }
+
+    @Test fun restrictedOnlyHitsStayFailClosedAndLookupCarriesNoLegacy() {
+        val secret = "A synthetic restricted sentence about unusual reinsurance scenarios."
+        val only = SourcePack.prepare("",listOf(SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertTrue(only.browsable.isEmpty())
+        assertEquals(emptyMap(),only.anchors)
+        assertEquals("",only.legacy)
+        assertFalse(only.render().contains("【S"))
+        val mixed = SourcePack.prepare("",listOf(SourcePage("book",1,"A synthetic public page.",10.0),
+            SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertEquals(mapOf("S1" to "A synthetic public page."),mixed.anchors)
+        assertEquals("",mixed.legacy)
+        assertFalse(mixed.render().substringBefore("内部参考").contains(secret))
+        assertFalse(mixed.render().substringAfter("内部参考").contains("【S"))
+        // Over-budget context holding the same restricted text must still fail closed.
+        val pasted = SourcePack.prepare("pasted learner context. ".repeat(2000) + secret,
+            listOf(SourcePage("sealed-ref",4,secret,90.0,learnerVisible=false)))
+        assertTrue(pasted.browsable.isEmpty())
+        assertEquals(emptyMap(),pasted.anchors)
+        assertEquals("",pasted.legacy)
+    }
+
+    @Test fun duplicateTextNeverBreaksThePageOrCharacterBudget() {
+        val pages = (1..8).map { SourcePage("book",it,"text ".repeat(1000) + it,it.toDouble()) }
+        val pack = SourcePack.prepare("pasted learner context. ".repeat(2000),pages)
+        assertTrue(pack.pages.size <= 6)
+        assertEquals("",pack.legacy)
+        assertTrue(pack.render().length <= 40_000)
+    }
+
+    @Test fun dualFtsIsCourseScopedAndAnswerDirectoriesAreInternalOnly() {
         LedgerStore(Files.createTempDirectory("source-fts-")).use { store ->
             store.registerSourcePage("c","book","Book",1,"Adverse selection and 逆向选择 are examples.")
             store.registerSourcePage("other","other-book","Book",1,"Adverse selection")
@@ -50,10 +127,17 @@ class SourceLookupTest {
             store.registerSourcePage("c","answers","答案",1,"Adverse selection")
             store.registerSourcePage("c","Answers/book","Solutions",1,"Adverse selection")
             store.registerSourcePage("c","answer-keys/book","Solutions",1,"Adverse selection")
-            assertEquals(listOf("book"),store.searchSourcePages("c","adverse selection").map { it.docId })
+            val hits = store.searchSourcePages("c","adverse selection")
+            assertEquals("book",hits.first().docId)
+            assertTrue(hits.drop(1).isNotEmpty())
+            assertTrue(hits.drop(1).all { !it.learnerVisible && it.docId.contains("answer",ignoreCase=true) })
+            assertTrue(hits.none { it.docId == "private" || it.docId == "other-book" })
+            val pack = SourcePack.prepare("",hits)
+            assertEquals(mapOf("S1" to hits.first().text),pack.anchors)
+            hits.drop(1).forEach { assertNull(store.browsablePage("c",it.docId,it.pdfPage)) }
             assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么").map { it.docId })
             store.registerSourcePage("c","book","Book",1,"Moral hazard is different.")
-            assertEquals(emptyList(),store.searchSourcePages("c","adverse selection"))
+            assertTrue(store.searchSourcePages("c","adverse selection").all { !it.learnerVisible })
             assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard").map { it.docId })
             assertEquals(emptyList(),store.searchSourcePages("c","\" OR * : ( )"))
         }
@@ -129,6 +213,36 @@ class SourceLookupTest {
             assertEquals(1,h.frames.filter { it.str("t") == "msg.start" }.map { it.str("msg") }.distinct().size)
             assertTrue(h.stub.requestBodies.first().contains("hidden risk before contracting"))
             assertTrue(h.actor.execute { events("c") }.none { it.type in setOf("attempt_graded","question_posed","explanation_delivered") })
+        }
+    }
+
+    @Test fun restrictedInitialAnswerIsNeverPublishedOrPersisted() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute { registerSourcePage("c","answer_keys/private","Private reference",1,secret) }
+            h.stub.stream(1,"$secret. A safe conclusion.",StubTutor.terminal("complete"),StubTutor.DONE)
+            val id = h.chat.ask("t","c","Explain adverse selection")
+            val result = h.awaitEnd(id)
+            assertFalse(result.contains(secret))
+            assertFalse(h.frames.any { it.toString().contains(secret) })
+            assertFalse(h.chat.snapshot(id).toString().contains(secret))
+            assertTrue(h.stub.requestBodies.first().contains(secret))
+        }
+    }
+
+    @Test fun restrictedLookupEchoIsNeverPublishedOrPersisted() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute { registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false) }
+            h.stub.stream(1,"Initial answer.【需查原文:adverse selection】",StubTutor.terminal("complete"),StubTutor.DONE)
+            h.stub.stream(1,"$secret【S1】\n\n", "“hidden risk before contracting”【S1】\n\n",StubTutor.terminal("complete"),StubTutor.DONE)
+            val id = h.chat.ask("t","c","Explain adverse selection")
+            val result = h.awaitEnd(id)
+            assertFalse(result.contains(secret))
+            assertTrue(result.contains("hidden risk before contracting"))
+            assertFalse(h.frames.any { it.toString().contains(secret) })
+            assertFalse(h.chat.snapshot(id).toString().contains(secret))
+            assertTrue(h.stub.requestBodies.last().contains(secret))
         }
     }
 

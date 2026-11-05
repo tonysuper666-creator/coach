@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Read-only TON-1175 gates, plus explicit private build/snapshot evidence writers.
 
-No defaults point at a service, database, token or production port. Positive
-acceptance evidence is supported; lossless access coverage is NOT supported by
-the current server sink, so the logs gate deliberately always refuses it.
+No defaults point at a service, database, token or production port. Legacy access
+logs cannot prove idle; coverage v1 requires process-owned counters and a held
+admission fence through shutdown, in addition to the independent JFR gate.
 """
 import argparse
 import contextlib
+import ctypes
+import fcntl
 import http.client
 import json
 import os
@@ -142,12 +144,39 @@ def candidate(manifest_path, expected_hash, release, head, plist_path):
             'relocated dependency environment changed')
 
 
-def logs(evidence, paths):
-    # There is no unforgeable "coverage=true" JSON flag. UsageObservation.access
-    # swallows write errors and has no sequence/flush barrier; even an empty,
-    # readable, unrotated file cannot prove absence of omitted requests.
+def logs(evidence, paths, closed_seal=None):
     require(paths and all(Path(name).is_file() for name in paths), 'access logs missing')
-    raise GateError('unsupported access-log protocol: lossless coverage cannot be established')
+    try:
+        from .activity_coverage import verify
+    except ImportError:
+        from activity_coverage import verify
+    verify(evidence, paths, stopped=closed_seal is not None, seal=closed_seal)
+
+
+def darwin_lock_owner(path, pid):
+    """Query the kernel, without taking/releasing another process's lock.
+
+    Darwin lsof can report a blank lock field for Java FileChannel locks.
+    Darwin's sys/fcntl.h defines this native flock layout; F_GETLK returns the
+    conflicting owner's PID and exact range. Other platforms keep the lsof gate.
+    """
+    require(sys.platform == 'darwin', 'unsupported kernel lock query')
+    class Flock(ctypes.Structure):
+        _fields_ = [('start', ctypes.c_int64), ('length', ctypes.c_int64),
+                    ('pid', ctypes.c_int32), ('kind', ctypes.c_short), ('whence', ctypes.c_short)]
+    require(ctypes.sizeof(Flock) == 24, 'unsupported Darwin flock ABI')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        query = Flock(0, 0, 0, fcntl.F_WRLCK, os.SEEK_SET)
+        held = Flock.from_buffer_copy(fcntl.fcntl(fd, fcntl.F_GETLK, bytes(query)))
+        after = os.stat(path, follow_symlinks=False)
+        require((before.st_dev, before.st_ino) == (after.st_dev, after.st_ino), 'server lock inode changed')
+        require(held.pid == int(pid) and held.kind == fcntl.F_WRLCK
+                and held.start == 0 and held.length == 0 and held.whence == os.SEEK_SET,
+                'recorded JVM does not exclusively own whole-file server lock')
+    finally:
+        os.close(fd)
 
 
 def idle(evidence, installation, java, jcmd, lsof):
@@ -167,16 +196,20 @@ def idle(evidence, installation, java, jcmd, lsof):
         require(digest(ps) == p['processIdentitySha256'], 'recorded JVM process identity changed')
         require(str(Path(info['root']) / 'app/lib').encode() in ps
                 and b'com.coach.server.MainKt' in ps, 'live JVM is not the installed server')
-        # Merely having the file open is insufficient: require its whole-file
-        # write lock, and no second reported lock owner.
-        lines = captured([lsof, '-nP', '-F', 'pl', '--', str(Path(info['dataDir']) / 'server.lock')]).decode().splitlines()
-        owners, owner = [], None
-        for line in lines:
-            if line.startswith('p'):
-                owner = line[1:]
-            elif line == 'lW':
-                owners.append(owner)
-        require(owners == [pid], 'recorded JVM does not exclusively own server lock')
+        # Merely having the file open is insufficient. Query Darwin's kernel
+        # for an exact whole-file write-lock owner; retain lsof on other hosts.
+        lock = Path(info['dataDir']) / 'server.lock'
+        if sys.platform == 'darwin':
+            darwin_lock_owner(lock, pid)
+        else:
+            lines = captured([lsof, '-nP', '-F', 'pl', '--', str(lock)]).decode().splitlines()
+            owners, owner = [], None
+            for line in lines:
+                if line.startswith('p'):
+                    owner = line[1:]
+                elif line == 'lW':
+                    owners.append(owner)
+            require(owners == [pid], 'recorded JVM does not exclusively own server lock')
         return ps
 
     before = live_identity()
@@ -341,6 +374,7 @@ def main():
     check.add_argument('head')
     check.add_argument('plist')
     coverage = sub.add_parser('logs')
+    coverage.add_argument('--closed-seal')
     coverage.add_argument('evidence')
     coverage.add_argument('paths', nargs='+')
     recording = sub.add_parser('idle')
@@ -362,7 +396,7 @@ def main():
         elif args.action == 'candidate':
             candidate(args.manifest, args.sha256, args.release, args.head, args.plist)
         elif args.action == 'logs':
-            logs(args.evidence, args.paths)
+            logs(args.evidence, args.paths, args.closed_seal)
         elif args.action == 'idle':
             idle(args.evidence, args.installation, args.java, args.jcmd, args.lsof)
         elif args.action == 'snapshot':

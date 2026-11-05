@@ -27,6 +27,8 @@ class BrowseRoutesTest {
                 registerSourcePage("c","textbook:1","01 Synthetic chapter.md",33,"Second synthetic page.")
                 registerSourcePage("c","answers:1","Chapter answers.md",5,"Synthetic answer key text.",tutorVisible=false)
                 registerSourcePage("c","textbook:2","答案 附录.md",7,"Synthetic hidden appendix.")
+                registerSourcePage("c","reference:1","Synthetic reference.md",8,"Synthetic internal reference.",learnerVisible=false)
+                registerSourcePage("c","learner-only","Synthetic learner-only page.md",1,"Synthetic learner page.",tutorVisible=false)
                 registerSourcePage("other","textbook:3","Other course.md",1,"Another course.")
             }
             val port=engine.engine.resolvedConnectors().single().port
@@ -38,15 +40,20 @@ class BrowseRoutesTest {
             }
             assertEquals(401,get("/v1/courses/c/sources",false).statusCode())
             val docs=Json.parseToJsonElement(get("/v1/courses/c/sources").body()).jsonObject.getValue("docs").jsonArray.map { it.jsonObject }
-            assertEquals(listOf("textbook:1"),docs.map { it.getValue("docId").jsonPrimitive.content })
-            assertEquals(32,docs.single().getValue("firstPdfPage").jsonPrimitive.int); assertEquals(33,docs.single().getValue("lastPdfPage").jsonPrimitive.int)
+            assertEquals(setOf("textbook:1","learner-only"),docs.map { it.getValue("docId").jsonPrimitive.content }.toSet())
+            val textbook=docs.single { it.getValue("docId").jsonPrimitive.content=="textbook:1" }
+            assertEquals(32,textbook.getValue("firstPdfPage").jsonPrimitive.int); assertEquals(33,textbook.getValue("lastPdfPage").jsonPrimitive.int)
             // Book pages come from the pages themselves; the synthetic pages carry none, so none is invented.
-            assertTrue(docs.single().getValue("firstBookPage") is JsonNull)
-            val page=Json.parseToJsonElement(get("/v1/courses/c/sources/textbook:1/pages/32").body()).jsonObject
+            assertTrue(textbook.getValue("firstBookPage") is JsonNull)
+            assertEquals(200,get("/v1/courses/c/sources/learner-only/pages/1").statusCode())
+            val pageResponse=get("/v1/courses/c/sources/textbook:1/pages/32")
+            assertEquals(200,pageResponse.statusCode())
+            val page=Json.parseToJsonElement(pageResponse.body()).jsonObject
             assertTrue("deductibles" in page.getValue("text").jsonPrimitive.content)
             // Hidden and foreign material is not found, not merely filtered from the list.
             assertEquals(404,get("/v1/courses/c/sources/answers:1/pages/5").statusCode())
             assertEquals(404,get("/v1/courses/c/sources/textbook:2/pages/7").statusCode())
+            assertEquals(404,get("/v1/courses/c/sources/reference:1/pages/8").statusCode())
             assertEquals(404,get("/v1/courses/c/sources/textbook:3/pages/1").statusCode())
             assertEquals(404,get("/v1/courses/c/sources/textbook:1/pages/99").statusCode())
             assertEquals(404,get("/v1/courses/c/sources/textbook:1/pages/x").statusCode())

@@ -27,7 +27,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         pairingCommand(args, data)
         return@runBlocking
     }
-    configureBridgeTraffic(System.getenv(), managed)
+    val traffic = configureBridgeTraffic(System.getenv(), managed)
     // Management commands print their result to the invoking terminal, never service logs.
     if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)
@@ -56,7 +56,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     val token = Files.readString(tokenPath).trim()
     store.enroll(device,token)
     val actor = LedgerActor(this,store)
-    val children = if (managed) ChildServices(this) else null
+    val children = if (managed) ChildServices(this, traffic) else null
     val pushes = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity=64)
     // 导师流式链路：Ktor ↔ 桥副本 8791 ↔ WS（M1-01）
     val chat = ChatService(actor, this, ledgerChanged={ pushes.emit(it) }, allowSourceLookup = System.getenv("COACH_SOURCE_LOOKUP") == "true")

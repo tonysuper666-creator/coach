@@ -115,9 +115,12 @@ def main():
                                         '--manifest', str(manifest), '--sha256', manifest_hash],
                   'controller': [sys.executable, '-m', 'tools.dev.ton1193_isolated_controller',
                                  '--config', str(root / 'controller.json'), '--apply'],
-                  # Stage validates only command shape; this check intentionally
-                  # cannot run switch or claim acceptance without real inputs.
-                  'acceptanceSnapshot': ['/usr/bin/false'], 'acceptanceVerifier': ['/usr/bin/false']}
+                  # These hooks only cover identity so far: the verifier refuses
+                  # until real lecture and exercise checks are implemented.
+                  'acceptanceSnapshot': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
+                                         '--config', str(root / 'controller.json'), 'snapshot'],
+                  'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
+                                         '--config', str(root / 'controller.json'), 'accept']}
         switch.atomic(root / 'controller.json', json.dumps(config).encode())
         switch.stage(config, True)
         (root / 'stage/snapshot').mkdir(mode=0o700)

@@ -13,6 +13,7 @@ from unittest import mock
 from tools.dev import ton1175_switch as switch
 from tools.dev import ton1175_verify as verify
 from tools.dev import ton1193_preflight as preflight
+from tools.dev import ton1193_isolated_controller as isolated
 from tools.dev import ton1193_trust as trust
 
 
@@ -304,6 +305,71 @@ class PreflightTest(unittest.TestCase):
             with self.assertRaisesRegex(switch.GateError, 'environment keys'):
                 self.capture()
         cap.assert_not_called()
+
+    def test_isolated_profile_only_accepts_exact_test_environment_and_label(self):
+        import copy
+        label = 'local.coach.ton1193.test.' + 'a' * 32
+        good = copy.deepcopy(self.sides['new']['plist'])
+        good['Label'] = label
+        good['EnvironmentVariables'].update(
+            COACH_TRAFFIC='test',
+            COACH_BRIDGE_URL='http://127.0.0.1:' + self.env_pins['BRIDGE_PORT'])
+        profile = (isolated.ISOLATED_ENV_KEYS, label)
+        preflight._whitelist(good, self.config, self.roots, _isolated=profile)
+        production = copy.deepcopy(good)
+        production['Label'] = 'local.coach.server'
+        with self.assertRaisesRegex(switch.GateError, 'environment keys'):
+            preflight._whitelist(production, self.config, self.roots)
+        for key in ('COACH_TRAFFIC', 'COACH_BRIDGE_URL'):
+            extra = copy.deepcopy(self.sides['new']['plist'])
+            extra['EnvironmentVariables'][key] = good['EnvironmentVariables'][key]
+            with self.subTest(production_extra=key), self.assertRaisesRegex(switch.GateError, 'environment keys'):
+                preflight._whitelist(extra, self.config, self.roots)
+        for key, value in (('COACH_TRAFFIC', 'user'), ('COACH_BRIDGE_URL', 'http://127.0.0.1:8791'),
+                           ('COACH_BRIDGE_URL', 'http://localhost:' + self.env_pins['BRIDGE_PORT'])):
+            bad = copy.deepcopy(good)
+            bad['EnvironmentVariables'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(switch.GateError, 'traffic pins'):
+                preflight._whitelist(bad, self.config, self.roots, _isolated=profile)
+        for key in ('COACH_TRAFFIC', 'COACH_BRIDGE_URL', 'COACH_PORT'):
+            bad = copy.deepcopy(good)
+            del bad['EnvironmentVariables'][key]
+            with self.subTest(missing=key), self.assertRaisesRegex(switch.GateError, 'environment keys'):
+                preflight._whitelist(bad, self.config, self.roots, _isolated=profile)
+        bad = copy.deepcopy(good)
+        bad['EnvironmentVariables']['EXTRA'] = '1'
+        with self.assertRaisesRegex(switch.GateError, 'environment keys'):
+            preflight._whitelist(bad, self.config, self.roots, _isolated=profile)
+        with self.assertRaisesRegex(switch.GateError, 'isolated profile'):
+            preflight._whitelist(good, self.config, self.roots,
+                                 _isolated=(isolated.ISOLATED_ENV_KEYS, 'local.coach.server'))
+
+    def test_isolated_profile_is_used_for_both_staged_releases(self):
+        import copy
+        label = 'local.coach.ton1193.test.' + 'b' * 32
+        for side in ('old', 'new'):
+            plist = copy.deepcopy(self.sides[side]['plist'])
+            plist['Label'] = label
+            plist['EnvironmentVariables'].update(
+                COACH_TRAFFIC='test',
+                COACH_BRIDGE_URL='http://127.0.0.1:' + self.env_pins['BRIDGE_PORT'])
+            data = plistlib.dumps(plist)
+            switch.atomic(self.ops / (side + '.plist'), data)
+            self.state['files'][side + '.plist'] = switch.digest(data)
+            if side == 'old':
+                switch.atomic(self.plist, data)
+        switch.atomic(self.ops / 'state.json', json.dumps(self.state).encode())
+        original = preflight._whitelist
+
+        def isolated_whitelist(plist, config, roots):
+            return original(plist, config, roots, _isolated=(isolated.ISOLATED_ENV_KEYS, label))
+
+        with mock.patch.object(preflight, '_whitelist', side_effect=isolated_whitelist) as check:
+            _, _, _, sides, _ = preflight._stage(self.config, self.roots)
+        self.assertEqual(check.call_count, 2)
+        self.assertEqual(set(sides), {'old', 'new'})
+        with self.assertRaisesRegex(switch.GateError, 'environment keys'):
+            preflight._stage(self.config, self.roots)
 
     def test_path_symlink_and_world_write_rejected_group_write_reported(self):
         path = self.home / 'pathdir'

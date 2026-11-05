@@ -17,7 +17,7 @@ from . import ton1193_isolated_controller as isolated
 from .rehearse_ton1175_launchd import port
 
 REPO = Path(__file__).resolve().parents[2]
-OLD = '98e3dd3'
+OLD = '8d3608f'
 
 
 def cmd(*args, **kwargs):
@@ -95,7 +95,8 @@ def main():
                    COACH_SERVICE_ROOT=str(old_release), COACH_PYTHON=str(old_release / 'tools/bridge/.venv/bin/python'),
                    COACH_MATHSVC=str(old_release / 'tools/mathsvc/src/server.mjs'),
                    COACH_DATA_DIR=str(home / 'Coach/data'), COACH_LOG_DIR=str(logs),
-                   COACH_RUN_DIR=str(home / 'Coach/run'), COACH_BRIDGE_HOME=str(home / 'Coach/bridge'))
+                   COACH_RUN_DIR=str(home / 'Coach/run'), COACH_BRIDGE_HOME=str(home / 'Coach/bridge'),
+                   COACH_TRAFFIC='test', COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge_port}')
         plist = home / 'Library/LaunchAgents/service.plist'
         installation = home / 'Coach/service/installation.json'
         switch.atomic(plist, plistlib.dumps(dict(Label=label, ProgramArguments=[str(old_release / 'app/bin/app')],

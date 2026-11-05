@@ -23,6 +23,8 @@ from .ton1175_switch import GateError, require
 from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
 
+ISOLATED_ENV_KEYS = preflight.ENV_KEYS | frozenset(('COACH_TRAFFIC', 'COACH_BRIDGE_URL'))
+
 
 def fixture(path):
     path = Path(path)
@@ -66,9 +68,7 @@ def run(path, action, apply=False):
 
     def whitelist(plist, c, r):
         require(plist.get('Label') == label, 'fixture label mismatch')
-        # Only the label is substituted for the fixed-label whitelist; all
-        # other values and all transaction bytes remain the real fixture data.
-        original_whitelist(dict(plist, Label='local.coach.server'), c, r)
+        original_whitelist(plist, c, r, _isolated=(ISOLATED_ENV_KEYS, label))
 
     def job(plist):
         pid = controller._job(plist)

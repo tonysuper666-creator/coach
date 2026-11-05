@@ -34,18 +34,30 @@ PLIST_PINS = {'ExitTimeOut': int, 'KeepAlive': bool, 'RunAtLoad': bool,
               'Umask': int}
 
 
-def _whitelist(plist, config, roots):
+def _whitelist(plist, config, roots, *, _isolated=None):
     require(isinstance(plist, dict) and set(plist) == PLIST_KEYS, 'plist keys differ from whitelist')
     env = plist['EnvironmentVariables']
-    require(isinstance(env, dict) and set(env) == ENV_KEYS
+    env_keys = ENV_KEYS
+    label = 'local.coach.server'
+    if _isolated is not None:
+        env_keys, label = _isolated
+        require(env_keys == ENV_KEYS | frozenset(('COACH_TRAFFIC', 'COACH_BRIDGE_URL'))
+                and isinstance(label, str)
+                and re.fullmatch(r'local\.coach\.ton1193\.test\.[0-9a-f]{32}', label),
+                'invalid isolated profile')
+    require(isinstance(env, dict) and set(env) == env_keys
             and all(isinstance(value, str) for value in env.values()), 'environment keys or types differ from whitelist')
     pins = config['adapterEnvPins']
     require(isinstance(pins, dict) and set(pins) == ENV_PINS
             and all(isinstance(value, str) for value in pins.values())
             and all(env[key] == pins[key] for key in ENV_PINS), 'environment pins differ')
+    if _isolated is not None:
+        require(env['COACH_TRAFFIC'] == 'test'
+                and env['COACH_BRIDGE_URL'] == 'http://127.0.0.1:' + env['BRIDGE_PORT'],
+                'isolated traffic pins differ')
     plist_pins = config['adapterPlistPins']
     require(isinstance(plist_pins, dict) and set(plist_pins) == set(PLIST_PINS), 'plist pins differ')
-    require(plist['Label'] == 'local.coach.server', 'production label differs')
+    require(plist['Label'] == label, 'service label differs')
     for key, kind in PLIST_PINS.items():
         require(type(plist[key]) is kind and type(plist_pins[key]) is kind
                 and plist[key] == plist_pins[key], 'plist pins differ')

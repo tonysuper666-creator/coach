@@ -51,7 +51,9 @@ class CoachActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
-        val serverUrl=coachServerUrl(intent.getStringExtra("coachUrl"))
+        val requestedUrl = intent.getStringExtra("coachUrl")
+        val serverUrl = coachServerUrl(requestedUrl, packageName)
+        Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
             val dark = isSystemInDarkTheme()
@@ -176,12 +178,21 @@ class CoachActivity : ComponentActivity() {
 }
 
 /** The acceptance override only selects another port on the configured Mac. */
-internal fun coachServerUrl(requested: String?): String {
+internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {
     val configured = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
-    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
-    return requested.takeIf { candidate -> runCatching {
+    val accepted = if (BuildConfig.DEBUG) requested?.takeIf { candidate -> runCatching {
         val uri = java.net.URI(candidate)
         uri.scheme == "http" && uri.host == BuildConfig.COACH_TAIL_HOST && uri.port in 1..65535 &&
             uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null && uri.rawPath.orEmpty() in setOf("", "/")
-    }.getOrDefault(false) } ?: configured
+    }.getOrDefault(false) } else null
+    // A card package must not fall back to the production port when the extra is missing or rejected.
+    if (packageName != "com.coach.android") {
+        val port = accepted?.let { java.net.URI(it).port }
+        if (accepted == null || port == 18791 || port == 8791 || port == 8790) {
+            error("Refusing production default for $packageName; coachUrl=${requested ?: "<empty>"}")
+        }
+        return accepted
+    }
+    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
+    return accepted ?: configured
 }

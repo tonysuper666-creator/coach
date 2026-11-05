@@ -18,7 +18,8 @@ enum class EventType {
     mock_started, mock_submitted, legacy_imported, legacy_attempt, legacy_schedule,
     legacy_passed, exam_weights_set, explanation_pregenerated, server_restored,
     question_key_changed, answer_orphaned, tutor_state_changed, tutor_settings_changed,
-    course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported, legacy_source_revised
+    course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported,
+    legacy_source_revised, study_scope_set, study_scope_advanced
 }
 
 @Serializable

@@ -55,7 +55,7 @@ object Prompts {
 
     val GEN_SYSTEM = "You write exam questions for a university health economics course. Output JSON only."
 
-    fun genMcq(kp: String, excerpt: String, count: Int, avoid: List<String>): String {
+    fun genMcq(kp: String, excerpt: String, count: Int, avoid: List<String>, internalReference: String = ""): String {
         val avoidBlock = if (avoid.isEmpty()) "" else
             "\nDo NOT reuse these stems:\n" + avoid.joinToString("\n") { "- $it" }
         return """
@@ -65,6 +65,7 @@ Source excerpt (textbook; the ONLY allowed basis):
 <<<
 $excerpt
 >>>
+${if (internalReference.isBlank()) "" else "Internal reference (style only; never quote or reproduce):\n<<<\n$internalReference\n>>>"}
 
 Write $count distinct single-answer multiple-choice questions (one correct text and three distractor texts) that test this knowledge point at midterm level.
 Rules: exactly one option is correct; distractors plausible; answerable from the excerpt alone; English.

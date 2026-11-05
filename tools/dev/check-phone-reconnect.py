@@ -104,9 +104,13 @@ def main():
         if instrument.poll() is not None:
             raise RuntimeError('Instrumentation exited before its checkpoint')
         log = device('logcat', '-d', '-s', 'CoachReconnect:I', '*:S')
-        return '\n'.join(line for line in log.splitlines() if run_id in line)
+        checkpoints = '\n'.join(line for line in log.splitlines() if run_id in line)
+        if checkpoints:
+            (out/'checkpoints.txt').write_text(checkpoints+'\n')
+        return checkpoints
 
     try:
+        summary['phase'] = 'authorization'
         lease_valid()
         run(['bash', PHONE/'lease.sh', 'renew', 'TON-1094', '30'])
         run(['bash', PHONE/'probe.sh'], env=device_env)
@@ -115,6 +119,7 @@ def main():
             raise RuntimeError('The granted test device must be OPPO')
         summary['deviceBrand'] = brand
         summary['deviceModel'] = device('shell', 'getprop', 'ro.product.model').strip()
+        summary['phase'] = 'isolated server readiness'
         # Reserve checks only; a bind race causes server readiness to fail, never takeover.
         for host in ('127.0.0.1', tail_host()):
             with socket.socket() as sock:
@@ -125,6 +130,7 @@ def main():
         wait_for(lambda: (data/'device-token').is_file() or server.poll() is not None, 30)
         token = (data/'device-token').read_text().strip()
         initial = wait_for(hello, 40)
+        summary['phase'] = 'card APK installation'
         touched_phone = True
         for apk in ('debug/androidApp-debug.apk', 'androidTest/debug/androidApp-debug-androidTest.apk'):
             run(['bash', PHONE/'install.sh', ROOT/'androidApp/build/outputs/apk'/apk],
@@ -134,6 +140,7 @@ def main():
                     '-e', 'class', 'com.coach.android.'+test,
                     '-e', 'coachToken', token, '-e', 'coachRunId', run_id,
                     PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner']
+        summary['phase'] = 'network security gate'
         network = run(instrument_args('NetworkSecuritySmoke'), timeout=90)
         (out/'network.txt').write_text(network.replace(token, '[redacted]'))
         if 'OK (3 tests)' not in network:
@@ -142,11 +149,13 @@ def main():
         with (out/'reconnect.txt').open('w') as log:
             instrument = subprocess.Popen(instrument_args('LedgerReconnectSmoke'),
                 stdout=log, stderr=subprocess.STDOUT)
+        summary['phase'] = 'phone online checkpoint'
         wait_for(lambda: (s if f'READY port={args.port} ' in (s := report()) else None), 40)
         lease_valid()
         start = time.monotonic()
         os.killpg(server.pid, signal.SIGSTOP)
         paused = True
+        summary['phase'] = 'phone offline checkpoint during isolated JVM pause'
         wait_for(lambda: 'OFFLINE' in report(), 30)
         # Match the historical controlled JVM pause without claiming actual system sleep.
         while time.monotonic() - start < 32:
@@ -154,6 +163,7 @@ def main():
         os.killpg(server.pid, signal.SIGCONT)
         paused = False
         resumed = time.monotonic()
+        summary['phase'] = 'phone reconnection after JVM resume'
         instrument.wait(timeout=65)
         result = (out/'reconnect.txt').read_text().replace(token, '[redacted]')
         (out/'reconnect.txt').write_text(result)
@@ -163,10 +173,13 @@ def main():
         if 'OK (1 test)' not in result or 'RECONNECTED epochUnchanged=true' not in log:
             raise RuntimeError('Real-device reconnection assertion failed')
         assert hello()['epoch'] == initial['epoch']
-        summary.update(result='passed', reconnectTests=1, controlledPauseSeconds=round(resumed-start, 3),
+        summary.update(result='passed', phase='completed', reconnectTests=1, controlledPauseSeconds=round(resumed-start, 3),
                        completionAfterResumeSeconds=round(time.monotonic()-resumed, 3),
                        checkpointElapsedMs={key: int(re.search(key+r'[^\n]*elapsedMs=(\d+)', log)[1])
                                             for key in ('READY', 'OFFLINE', 'RECONNECTED')})
+    except Exception as error:
+        summary['failureType'] = type(error).__name__
+        raise
     finally:
         cleanup_errors = []
 

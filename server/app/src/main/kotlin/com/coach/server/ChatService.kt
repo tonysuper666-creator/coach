@@ -493,6 +493,7 @@ class ChatService(
         var partOneEndMs = -1L
         var lessonFirstDeltaMs = -1L
         fun handleDelta(text: String) {
+            session.trace?.raw(text)
             if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
             val previous = session.cursor
             acceptFiltered(guard.push(text))
@@ -510,7 +511,6 @@ class ChatService(
         }
         val sink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
-                session.trace?.raw(text)
                 handleDelta(text)
             }
         }
@@ -520,7 +520,6 @@ class ChatService(
         var lessonReleased = false
         val lessonSink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
-                session.trace?.raw(text)
                 synchronized(lessonLock) {
                     if (lessonFirstDeltaMs < 0) lessonFirstDeltaMs = elapsedMs()
                     if (lessonReleased) handleDelta(text) else lessonBuffer.append(text)
@@ -582,6 +581,7 @@ class ChatService(
                 }
             } catch (error: Exception) { internalFailure(error) }
         }
+        var firstBridgeResult: BridgeResult? = null
         val result = try {
             val first = withContext(Dispatchers.IO) {
                 session.trace?.bridge()
@@ -592,6 +592,7 @@ class ChatService(
                     lessonStart.complete(Unit)
                 }
             }
+            firstBridgeResult = first
             if (lessonJob == null) first
             else if (first !is BridgeResult.Success || session.forcedStatus != null) {
                 session.stopLesson()
@@ -606,7 +607,7 @@ class ChatService(
                     outChars = partOne.length, status = first.terminal?.status ?: StreamStatus.COMPLETE, queueMs = first.call.queueMs, physicalCalls = first.call.physicalCalls) }
                 guard = newGuard()
                 visible = VisibleStream { drop ->
-                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
                 }
                 emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
                 partOneEndMs = elapsedMs()
@@ -685,13 +686,16 @@ class ChatService(
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
-        val rid = safeRequestId(result.call.requestId)
-        val traffic = terminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
-        val source = terminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
+        // First-word timing describes the first bridge invocation even when the final
+        // message status comes from the subsequent, parallel lesson invocation.
+        val firstWordResult = firstBridgeResult ?: result
+        val rid = safeRequestId(firstWordResult.call.requestId)
+        val traffic = firstWordResult.terminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
+        val source = firstWordResult.terminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
         val terminalStatus = terminal?.status?.takeIf { it in setOf("complete", "failed", "cancelled", "truncated") }
         val failure = safeDiagnosticReason((result as? BridgeResult.Failure)?.reason)
-        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${result.call.ttftMs} terminal=$terminalStatus failure=$failure")
-        session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs, rid)) }
+        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${firstWordResult.call.ttftMs} terminal=$terminalStatus failure=$failure")
+        session.trace?.let { log(it.finish(status, firstWordResult.terminal?.queueMs, firstWordResult.terminal?.ttftMs, rid)) }
         if (willFallback) fallback(session,question,pack)
     }
 

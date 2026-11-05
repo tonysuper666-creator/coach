@@ -254,6 +254,38 @@ class ChatFlowTest {
     }
 
     @Test
+    fun bufferedLessonCannotClaimFirstWordOrLeakFilteredContentInLogs() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            h.tutor.streamWhen("explains the graded mistakes only", 600, "你选的「sunk expenditure」不对。",
+                StubTutor.terminal("complete", requestId = "rid-first", queueMs = 11, ttftMs = 601), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 5,
+                "placeholder: secret-lesson-excerpt\n", "机会成本是放弃的最佳替代。\n",
+                StubTutor.terminal("complete", requestId = "rid-lesson", queueMs = 22, ttftMs = 33), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("complete", end.str("status"))
+                assertTrue(visible.indexOf("你选的") in 0 until visible.indexOf("机会成本"), visible)
+                val stages = trace(h, end.str("msg"))
+                val stagedLog = synchronized(h.logs) { h.logs.single { it.startsWith("COACH staged msg=${end.str("msg")}") } }
+                val lessonDeltaMs = Regex("lesson_first_delta_ms=(\\d+)").find(stagedLog)!!.groupValues[1].toLong()
+                val rawFromBridgeMs = stages.str("raw_first_ms").toLong() - stages.str("bridge_start_ms").toLong()
+                assertTrue(lessonDeltaMs < rawFromBridgeMs, "lesson must arrive before part one raw: $stagedLog $stages")
+                assertTrue(stages.str("raw_first_ms").toLong() <= stages.str("visible_first_ms").toLong(), stages.toString())
+                assertEquals("rid-first", stages.str("rid"))
+                assertEquals("11", stages.str("bridge_queue_ms"))
+                assertEquals("601", stages.str("bridge_ttft_ms"))
+                val logs = synchronized(h.logs) { h.logs.toList() }
+                assertTrue(logs.any { it.startsWith("COACH msg.end msg=${end.str("msg")} rid=rid-first ") })
+                assertTrue(logs.any { it.startsWith("COACH visible-drop msg=${end.str("msg")}") }, logs.toString())
+                assertTrue(logs.none { it.contains("secret-lesson-excerpt") || it.contains("excerpt=") }, logs.toString())
+            }
+        }
+    }
+
+    @Test
     fun stagedLessonFailureKeepsPartOneAndEndsTruncatedWithARetryableReason() {
         Harness().use { h ->
             runBlocking { seedReviewed(h) }

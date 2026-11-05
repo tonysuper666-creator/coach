@@ -6,6 +6,8 @@ For a single attempt, compare `prepared_ms` (receipt through preparation), `brid
 
 `bridge_queue_ms` and `bridge_ttft_ms` are independently supplied bridge terminal metrics, and the existing `msg.end ttft` comes from the bridge client. Client `WsFirstWords` uses its own clock. Do not subtract across these clocks or assume their intervals have identical boundaries. No question, answer, prompt, URL, exception text or raw chunks are written to the new trace. `msg.end` keeps its request ID and provenance fields for the existing production statistics join. Diagnostic reasons retain known codes and HTTP status codes; free-form HTTP bodies, exception messages and unrecognized reasons are redacted. Filter-drop logs do not include excerpts.
 
+For a staged explanation, the first-word raw time excludes lesson chunks buffered before the first part finishes. The trace's request ID and bridge metrics, and the matching `msg.end` request ID, provenance and `ttft`, describe the first bridge invocation; the overall message status still reflects both parts.
+
 Run the offline simulation (no real tutor or production service):
 
 ```sh

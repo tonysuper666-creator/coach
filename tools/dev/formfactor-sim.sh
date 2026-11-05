@@ -12,9 +12,12 @@ S=$("$T/install.sh" "$APK" | tee "$OUT/install.log" | sed -n 's/^测试机: //p'
 [ -n "$S" ] || { echo "install failed, see $OUT/install.log"; exit 2; }
 grep -q '^Success' "$OUT/install.log" || { echo "install did not report Success, see $OUT/install.log"; exit 2; }
 dev() { $A -s "$S" shell "$@" </dev/null; }
+# The phone's own display-size setting is itself a density override (420 on the OPPO); reset clears it, so put it back.
+USER_DPI=$(dev wm density | sed -n 's/^Override density: //p' | tr -d '\r')
 restore() {
   dev wm size reset; dev wm density reset
   { echo "== after reset"; dev wm size; dev wm density; } | tee "$OUT/restored.txt"
+  if [ -n "$USER_DPI" ]; then dev wm density "$USER_DPI"; { echo "== user density restored"; dev wm density; } | tee -a "$OUT/restored.txt"; fi
 }
 trap restore EXIT INT TERM HUP
 { echo "== before"; dev wm size; dev wm density; } > "$OUT/before.txt"
@@ -40,9 +43,9 @@ printf '%s\n' "$CASES" | while read -r name w h dpi; do
   dev wm size "${w}x${h}"; dev wm density "$dpi"; sleep 2
   dev am start -S -W -n "$PKG/com.coach.android.LabActivity" >/dev/null; sleep 4
   $A -s "$S" exec-out screencap -p </dev/null > "$OUT/$tag.png"
-  # app= is the app window in px; dp = px * 160 / dpi.
-  app=$(dev dumpsys display | grep -o 'app [0-9]* x [0-9]*' | head -1 | tr -d ' ' | sed 's/app//')
-  line="$tag size=${w}x${h} dpi=$dpi window_dp=$((w * 160 / dpi))x$((h * 160 / dpi)) app_px=${app:-?}"
+  # Read the override back; dp = px * 160 / dpi.
+  got=$(dev wm size | sed -n 's/^Override size: //p' | tr -d '\r')
+  line="$tag size=${w}x${h} dpi=$dpi window_dp=$((w * 160 / dpi))x$((h * 160 / dpi)) override=${got:-?}"
   echo "$line" | tee -a "$OUT/readings.txt"
 done
 dev am force-stop "$PKG"

@@ -401,7 +401,9 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 | Pad Mini 竖 | 280–320 | 840–960 × 1260–1440 | Expanded（320 dpi 正好落在 840；默认密度若高于 320 会变成 Medium，O §8.1 对此已有规定：同内屏竖） |
 | Pad Mini 横 | 280–320 | 1260–1440 × 840–960 | Large：rail + 大纲 300 + 对话 + 原文 380 |
 
-OPPO 模拟：`tools/dev/formfactor-sim.sh` 在 OPPO 上对上表每种形态各取区间两端的 dpi，`wm size <宽>x<高>` + `wm density <dpi>` 后打开 `LabActivity`（`FormFactorLab`，与 `CoachApp` 同一套 `LayoutRules`）截图，退出时一律 `wm size reset`、`wm density reset`。截图与读数附在 TON-1135 的交付评论里。
+OPPO 模拟：`tools/dev/formfactor-sim.sh` 在 OPPO 上对上表每种形态各取区间两端的 dpi，`wm size <宽>x<高>` + `wm density <dpi>` 后打开 `LabActivity`（`FormFactorLab`，与 `CoachApp` 同一套 `LayoutRules`）截图，退出时一律 `wm size reset`、`wm density reset`，再把手机自己的显示大小（也是 density 覆盖，OPPO 上是 420）放回去。截图与读数附在 TON-1135 的交付评论里。
+
+结果（2026-11-05 OPPO Find X9 Ultra，12 张截图，截图像素 = 设定的 `wm size`）：12/12 与上表一致。外屏竖两端都是底栏；外屏横两端都是只有单字的窄图标栏、无头部、不分栏；内屏竖两端是带文字的 rail、辅助栏不常驻；内屏横两端是 rail + 对话 + 「本次参考」辅助栏；Pad 竖两端（含 320 dpi 的 840 dp 边界）是 rail + 对话 + 辅助栏；Pad 横两端是 rail + 「大纲」+ 对话 + 辅助栏。复原后 `wm size` 为 `Physical size: 1080x2376`，无覆盖。
 
 半折（`FoldingFeature` HALF_OPENED、书本姿态的铰链位置）：**未验证（无设备）**，OPPO 模拟不出铰链；铰链避让只有单元测试（`bookPostureSplitsOnTheHinge`）。
 

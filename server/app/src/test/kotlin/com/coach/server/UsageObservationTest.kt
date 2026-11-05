@@ -27,6 +27,8 @@ class UsageObservationTest {
             JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema).use { driver ->
                 ClientDatabase(driver).ledgerQueries.putMeta("preserved","offline study")
                 driver.execute(null,"DROP TABLE usage_outbox",0)
+                driver.execute(null,"ALTER TABLE outbox DROP COLUMN backup_retained_millis",0)
+                driver.execute(null,"ALTER TABLE outbox DROP COLUMN backup_coverage_generation",0)
                 driver.execute(null,"PRAGMA user_version=2",0)
             }
             JdbcSqliteDriver(url,Properties(),ClientDatabase.Schema).use { driver ->
@@ -104,6 +106,8 @@ class UsageObservationTest {
             assertTrue(log.contains("\"status\":401"))
             assertTrue(log.contains("\"device\":\"phone\""))
             assertFalse(log.contains(token));assertFalse(log.contains("PRIVATE"));assertFalse(report.contains(token))
+            assertEquals(0, observer.coverage.snapshot().getValue("failures").jsonPrimitive.long,
+                "the real filesystem writer must force journal files and their directory")
             println("USAGE_HTTP: auth=401 duplicate_events=1 oversize=413 privacy=clean")
         } finally { engine.stopSuspend(0,500);actor.close();scope.cancel();observer.close();root.toFile().deleteRecursively() }
     }

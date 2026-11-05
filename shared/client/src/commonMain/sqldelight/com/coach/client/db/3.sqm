@@ -1,0 +1,3 @@
+-- No trustworthy age exists in old clients. Start a full window when coverage
+-- is first observed after upgrading; never infer age from serialized clientTime.
+ALTER TABLE outbox ADD COLUMN backup_covered_at INTEGER;

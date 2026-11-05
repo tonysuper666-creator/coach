@@ -86,7 +86,7 @@ cmp "$HOME/Coach/migrate-out/check-a/report.md" "$HOME/Coach/migrate-out/check-b
 
 ## M1 考前准备（TON-1095）
 
-本卡的学习记录处理只接受 `--dry-run`，仅产出计划，不连接 Coach 学习库。已有的 `seed-content` 负责 TON-1127 课程装载，本轮课程继续复用已有清单。2026-11-03 之前只准备计划与确认草稿，不导入学习记录，也不提前请本人确认。
+`--dry-run` 保留原有纯计划模式；新增 `rehearse` 只在自动创建的 Coach 数据库副本上真实写入。TON-1127 已装载的课程和分值事件只校验复用。最新授权允许立即副本预演；生产导入、激活和本人确认仍须分别验收。
 
 已装载课程的清单来自 TON-1127，不再次创建 Course、Module、KP、教材页或 `exam_weights_set`。把已有课程清单作为历史导入计划的前提：
 
@@ -144,10 +144,59 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-plan.py \
 
 可在本轮开工前对源 data 用 Python `lstat` 记录 `{相对路径: [size, mtime_ns]}`，之后传 `--before-inventory FILE` 核对运行期间源目录不变（只 stat，不对源开库）。私有 JSON 不得进仓库。验证器输出仅含计数和哈希，完整原文留在本机。
 
-## 11 月 3 日之后：正式迁移与回退待办
+## 隔离副本真实导入与回滚验证
 
-正式导入适配器尚未实现，计划模拟不能替代这一步。届时重新捕获有效快照并核对变动，按卡正文把归属/学习顺序与 10 道简答抽查合成一次面板事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。
+只读打开现有 Coach 数据库，以 SQLite online backup 捕获已提交的 WAL，生成 `before.sqlite`；再复制为 `coach.sqlite`。所有写入都发生在新输出目录的 `coach.sqlite`，没有生产导入开关。命令拒绝复用输出目录、覆盖快照或在运行中的数据目录下生成副本。
 
-接入实际账本前强制备份 Coach 库与 blobs，核对已装载课程和分值事件并复用，核对跨库的 assessment/interaction 关联；实现按稳定源 ID 更新修订，再在隔离副本上跑两次真实导入并逐条比对、抽 5 个 KP 对照界面。只有模拟通过不能宣称这些验收已通过。
+```sh
+tools/dev/heavy "$TOOLS" rehearse \
+  --snapshot "$SNAPSHOT" --coach-db "$HOME/Coach/data/coach.sqlite" \
+  --seed-manifest "$HOME/Coach/corpus/seed-content-manifest.json" \
+  --proposal "$HOME/Coach/corpus/ton-1095/proposal-reviewed.json" \
+  --out "$HOME/Coach/corpus/ton-1095/writer-rehearsal"
+
+nice -n 15 python3 tools/migrate-deeptutor/verify-import.py \
+  --snapshot "$SNAPSHOT" --seed "$HOME/Coach/corpus/seed-content-manifest.json" \
+  --out "$HOME/Coach/corpus/ton-1095/writer-rehearsal"
+```
+
+副本已有的 KP 名称、顺序、模块及最新 `exam_weights_set` 必须与清单相同，否则拒绝。导入采用单事务和稳定源 ID：`migration_records` 保留最新原值与内容哈希，`migration_batches` 按课程及批次 ID 保存 manifest、快照时间和该批真实审计时间。相同来源跳过，变化来源追加一个 `legacy_source_revised`，新来源正常首次导入。修订事件保留来源 ID、前后内容/映射哈希、前后原值和快照时间；原始事件不修改。正式写库和切换入口仍未开放。
+
+- 题库原样保留全部选项，五选项题不截断；全部题 `LEGACY/UNREVIEWED`，不写 `question_kp`、答案键或题池。解析中的独立选项字母替换为选项正文，原文仅存档；仍须逐题盲审。
+- 历史作答发出 `legacy_attempt` 和 `answer_submitted`，重置作答另发 `attempt_voided`；不发评分事件。独立题目身份、指纹与空证据 KP 集合保证不消耗原生首答资格，不进入学习窗口。无法确定的自由回答保留原文与 null 结构化答案，确认清单附原选项上下文。
+- `legacy_passed` 不提升 solid；复习只接收原已通过集合，原始复习状态完整保留；已有 Coach 复习安排优先，冲突的历史安排只存档。队列按 Europe/London 的 04:00 学习日换算，间隔取上次复习到到期的学习日差（至少一天），ease 从新调度器默认 2.3 开始，lapses 保留。
+- 笔记和有内容的旧日志有各自历史事件；旧事件只发 `legacy_imported` 档案引用，不重放旧评分或教学事件。历史消息使用独立 LEGACY 会话，仅保留正文和显示关联字段。
+
+历史事件的 `occurredAt` 与导入墙钟无关：已通过和复习优先使用 `original_state.last_review_at`，其次为该 KP 的 evidence 创建时间、mastery 更新时间；其他事实使用来源的 `created_at` / `updated_at`（秒或带时区的 ISO 时间），日志使用来源日期的伦敦中午。没有可用时间时使用 `copy-stats.json.before` 中最新的已捕获源文件 mtime；晚于这个快照截止时间的来源值不参与选择。缺失 WAL 的 `absent` 不作为时间。该依据写入 `history_time`，原值保持不变，导入时钟早于快照则拒绝。历史作答的 `posedAt`、消息创建时间采用相同历史时间。
+
+`first-state.json`、`second-state.json` 纳入全部业务表行、schema 和实际领域投影（SQLite 内部记账表除外），必须完全相同。计算状态哈希时，仅把 `migration_batches.recorded_at` 和 `deeptutor-migration` 事件的 SQL `recorded_at` / JSON `recordedAt` 归一化为 0；数据库仍保留实际审计时间，原生事件时间完全保留。因此同一基线、快照、计划在不同导入日也得到相同状态/投影哈希。`rehearsal.json` 记录哈希和实际事件计数；跨预演比较须先核对基线和计划一致。
+
+另从 `before.sqlite` 生成 `rollback.sqlite`，验证逻辑状态逐字节恢复基线，绝不覆盖生产库。独立 Python 验证器直接读取快照 SQL、原题 JSON 和三份 Coach 副本，核对课程复用、逐条历史记录、历史发生时间、全部业务表的审计时间归一化、导入日没有增加 legacy 通过/作答/笔记、事件隔离、首答身份、现有 pending/证据不变及回滚结果。输出目录含完整学习库副本和历史原文，必须保持私有，不得整目录附到公开 PR 或评论。
+
+## 隔离副本的连续增量
+
+`rehearse-incremental` 从在线库只读备份开始，在新目录内运行初始导入和两轮连续增量，每阶段均重复导入并保存回退副本。每批有独立的 `recorded_at >= snapshot_at`，同批重导保留该批审计时间；旧单批表会在副本事务内升级。不同批次的 manifest 可以改变。来源删除、来源跨课程/种类变化、已激活题目修订、消息跨会话移动、原值未变而派生内容改变均拒绝并回滚，留给显式核对。
+
+领域投影版本升级为 5：每个来源只回放最新历史事实，修订审计事件仍留在不可变账本。普通修订放回原事实的位置，保留之后的原生复习操作；后续快照新增通过时，刚获得资格的旧复习安排放在通过事实之后。题干/选项和消息正文同时更新各自实体表；作答、笔记、日志及复习更新可见投影，不能只数审计事件。历史作答仍不成为学习证据。没有原始 ID 的 JSON 项继续使用捕获时的位置键，**重排前必须人工确定 ID 对照**，不能把重排当内容修订直接导入。
+
+旧提议只对已复核的原输入有效。题目或 KP 内容变化后，严格校验保持原样，旧提议以 `stale_quarantined` 存档，新计划不沿用其归属或复核资格。全部历史题仍为 `LEGACY/UNREVIEWED`，不写题目归属、答案键或题池。`confirmation-details.md` 合并 108 题（107 有归属提议、1 未知）、49 KP 的概念/62 条前置、10 道简答源评分依据、两条 B/c 未解析历史回答、60 道五选项及解析字母替换、9 个通过时间的近似说明。每项附来源、建议与依据；这是待核对草稿，不自动发起本人确认。没有独立 rubric 的题用源 explanation 作草案，未推断分值或认证评分键。
+
+```sh
+SNAPSHOT="$HOME/Coach/migrate-staging/2026-10-31T07-41-31.131462Z"
+SEED="$HOME/Coach/corpus/seed-content-manifest.json"
+PROPOSAL="$HOME/Coach/corpus/ton-1095/proposal-reviewed.json"
+# NEXT / SECOND 必须是已捕获的副本；OUT 必须为私有语料目录内的新目录。
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor rehearse-incremental \
+  --snapshot "$SNAPSHOT" --next-snapshot "$NEXT" --second-snapshot "$SECOND" \
+  --coach-db "$HOME/Coach/data/coach.sqlite" --seed-manifest "$SEED" --proposal "$PROPOSAL" --out "$OUT"
+nice -n 15 python3 tools/migrate-deeptutor/verify-incremental.py \
+  --snapshot "$SNAPSHOT" --next-snapshot "$NEXT" --second-snapshot "$SECOND" --seed "$SEED" --out "$OUT"
+```
+
+验证器独立读源 SQL/JSON 和输出 SQLite，核对旧账本不变、每个修订的哈希链、题目/消息实体、最新有效作答/笔记/日志与复习投影、原生状态、重复导入及逐字节回退。`make-incremental-fixture.py --snapshot "$SNAPSHOT" --out "$FIXTURE"` 可在全新私有目录复制并构造两轮测试输入，写入 `SYNTHETIC-INCREMENTAL-FIXTURE.json`；它不是新捕获证据，不能证明正式来源的增量已同步。
+
+## 正式迁移仍待验收
+
+固定快照预演不能证明源之后的新数据已同步。独立 QA-C 验收、随后异源复核通过后，把归属/学习顺序与 10 道简答源采分点合成一次本人事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。仍须完成新快照增量、5 个 KP 界面对照、blobs 备份与正式切换/恢复验证，不能因工具 PR 合并而结束整张迁移卡。
 
 切换不放在考试前 7 天内；连续两次增量对账零差异后再切换。切换前记录备份和课程清单哈希。切换后 DeepTutor 原样只读可开，保留至少两周；需要回退时停止 Coach 写入、保存 Coach 切换后的新增记录，重新打开 DeepTutor，必要时恢复切换前 Coach 备份。不得把 Coach 数据反写 DeepTutor，也不得删除源数据。正式切换/备份恢复尚未演练。

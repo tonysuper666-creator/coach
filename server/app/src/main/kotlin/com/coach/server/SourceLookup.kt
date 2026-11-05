@@ -1,38 +1,52 @@
 package com.coach.server
 
 import com.coach.store.SourcePage
-import com.coach.store.tutorSourceAllowed
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
 /** The same bounded pack is used for local enrichment and for the lookup snapshot. */
 data class SourcePack(val pages: List<SourcePage>, val legacy: String = "") {
-    val anchors: Map<String, String> get() = pages.mapIndexed { i, p -> "S${i + 1}" to p.text }.toMap()
+    val browsable: List<SourcePage> get() = pages.filter { it.learnerVisible }
+    val restricted: List<SourcePage> get() = pages.filterNot { it.learnerVisible }
+    val anchors: Map<String, String> get() = browsable.mapIndexed { i, p -> "S${i + 1}" to p.text }.toMap()
     fun render(): String = buildString {
-        pages.forEachIndexed { i, p -> appendLine("【S${i + 1}】 ${p.docId} PDF page ${p.pdfPage}\n${p.text}\n") }
+        browsable.forEachIndexed { i, p -> appendLine("【S${i + 1}】 ${p.docId} PDF page ${p.pdfPage}\n${p.text}\n") }
+        if (restricted.isNotEmpty()) {
+            appendLine("内部参考（不可引用、不可复述）")
+            restricted.forEach { appendLine("${it.text}\n") }
+        }
         if (legacy.isNotBlank()) append(legacy)
     }
     companion object {
         fun prepare(existing: String, hits: List<SourcePage>): SourcePack {
-            val headers = Regex("(?m)^【S[0-9]+】 (.+) PDF page ([0-9]+)\\n").findAll(existing).toList()
+            // Never promote a previous internal block to an anchored public page.
+            val publicExisting = existing.substringBefore("\n内部参考（不可引用、不可复述）")
+            val headers = Regex("(?m)^【S[0-9]+】 (.+) PDF page ([0-9]+)\\n").findAll(publicExisting).toList()
             val previous = headers.mapIndexed { i, h -> SourcePage(h.groupValues[1],h.groupValues[2].toInt(),
-                existing.substring(h.range.last+1,headers.getOrNull(i+1)?.range?.first ?: existing.length).trimEnd()) }
-            val newHits = if (headers.isEmpty() && existing.isNotBlank()) hits.filterNot { it.text.isNotBlank() && existing.contains(it.text) } else hits
+                publicExisting.substring(h.range.last+1,headers.getOrNull(i+1)?.range?.first ?: publicExisting.length).trimEnd()) }
+            // Dropping a page is only safe while the retained legacy block still carries its text.
+            val newHits = if (headers.isEmpty() && publicExisting.isNotBlank()) hits.filterNot { it.text.isNotBlank() && publicExisting.contains(it.text) } else hits
+            val pack = select(newHits,previous,headers.isEmpty(),publicExisting)
+            return if (pack.legacy.isNotBlank() || newHits.size == hits.size) pack else select(hits,previous,headers.isEmpty(),publicExisting)
+        }
+        private fun select(newHits: List<SourcePage>, previous: List<SourcePage>, noHeaders: Boolean, publicExisting: String): SourcePack {
             val candidates = (newHits + previous).groupBy { it.key }.values.map { versions -> versions.maxBy { it.score } }
             val selected = mutableListOf<SourcePage>()
             // Count headers and locators against the character budget as well.
             var remaining = 40_000
-            for (page in candidates.sortedByDescending { it.score }) {
+            val ordered = candidates.filter { it.learnerVisible }.sortedByDescending { it.score } +
+                candidates.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)
+            for (page in ordered) {
                 if (selected.size == 6) break
                 val cost = page.text.length + page.docId.length + 64
-                if (cost > remaining || !tutorSourceAllowed(page.docId)) continue
+                if (cost > remaining || (!page.learnerVisible && selected.none { it.learnerVisible })) continue
                 selected += page
                 remaining -= cost
             }
             // Legacy callers supply one opaque preparation excerpt. Multiple page markers are counted.
-            val legacyPages = maxOf(1,Regex("【S[0-9]+】|<!-- PDF 第 [0-9]+ 页").findAll(existing).count())
-            val legacy = if (headers.isEmpty() && selected.size + legacyPages <= 6 && existing.length <= remaining) existing else ""
+            val legacyPages = maxOf(1,Regex("【S[0-9]+】|<!-- PDF 第 [0-9]+ 页").findAll(publicExisting).count())
+            val legacy = if (noHeaders && selected.size + legacyPages <= 6 && publicExisting.length <= remaining) publicExisting else ""
             return SourcePack(selected, legacy)
         }
     }

@@ -46,6 +46,26 @@ Android 复验先构建 debug 与 androidTest APK，再启动并清理自己拥�
 
 `~/Coach/run/{bridge,mathsvc}.json` 是当前 JVM、清理守卫、真实服务 PID、健康状态和检查时间；JSON 原子更新。每个服务的 Python 守卫只负责进程组和父进程死亡清理，重启由 Ktor 决定。桥 liveness 是 `GET /health?scope=process`，避免 CLI 登录状态命令迟缓导致错误重启；完整 `/health` 仍提供 CLI 状态。mathsvc 使用自己的 stdin/stdout JSONL ping/pong。每十秒检查一次；死亡立即进入 1→60 秒指数退避，持续健康一分钟后复位。JVM 正常退出时等待清理；JVM 被 SIGKILL 后守卫自行清理桥、公式服务及已观察到的 CLI 进程组。
 
+守卫的 `ps` 查询最多等待 3 秒；第一次超时或查询失败后，本实例持续使用内核进程查询（macOS `libproc`，Linux `/proc`），仍可发现后来启动的独立 CLI 会话。退出清理始终直接查询内核，不再运行 `ps`。启动时间采用内核完整精度，发信号前重新核对存活成员的 PID、PGID 与启动时间；主服务直到最后一次信号后才被回收，固定其 PID/初始 PGID。若内核查询也失败，不用旧记录猜测 CLI 归属：仍强制清理固定的主服务组，并以错误退出，不能据此宣称所有独立会话都已释放。与此前相同，尚未被任何扫描观察到、就已脱离父进程的独立会话不在已知清理范围内。
+
+不触碰常驻服务的进程恢复验收：`python3 tools/dev/test_service_child.py -v`。它在临时目录和随机回环端口注入真实 3 秒超时，覆盖瞬时/连续故障、超时后新 CLI、父进程 SIGKILL、停止及拒绝 TERM 的进程、无关进程存活、PID 复用记录拒绝与端口重绑定。此测试不调用真实订阅 CLI，也不证明生产端口占用的原始归属。
+
 日志为 `~/Coach/logs/{server,bridge,mathsvc}-YYYY-MM-DD.log`，跨日第一次写入时换文件，各自保留当天和此前 13 日。桥请求元数据也进入轮转流，不记提示词或答案。JVM 初始化前的错误在 `bootstrap.log`；不分享含真实地址或账号的原始日志。检查健康不等于订阅可调用，CLI 登录状态另查完整桥 `/health`。
 
-夜间备份与唤醒逻辑沿用账本实现；本卡还需在允许时段完成真休眠、JVM 单调钟实测、重启 Tailscale 后重绑、旧备份的发件箱额外保留策略。2026-11-02 15:00 GMT 前不做真休眠和 Tailscale 重启。
+夜间备份与唤醒逻辑沿用账本实现；本卡还需在允许时段完成真休眠、JVM 单调钟实测、重启 Tailscale 后重绑。2026-11-02 15:00 GMT 前不做真休眠和 Tailscale 重启。
+
+旧备份恢复的客户端保留策略见 DESIGN §4.3：自动备份成功后才按 UTC 日期差清理，保留 14 日 + 此前 8 周；正常每日成功备份下，命令首次被当前 epoch 备份覆盖后保留至少 70 日单调钟观测时间足以覆盖旧快照。未确认、不在备份水位内、REJECTED 的命令均不按时间清理；REJECTED 不重放。每条已覆盖记录单独保存保守年龄，各实例从读到该条覆盖之后建立单调钟锚点，年龄候选以数据库原子最大值合并，多实例不叠加；覆盖前离线、构造后等首次同步和迟到实例补时都不能计入该条年龄。覆盖代次阻止旧锚点跨重放复用。墙钟跳变不参与计龄，没有存活锚点观测的停机时间不计龄，可能保留更久；epoch 改变先重放，再开始新窗口。schema 3→5 为旧记录保守补一个完整窗口，草稿 schema 4 的不可信共享钟年龄同样清零，不会找回升级前已删除的命令。备份失败、长期关机或墙钟回拨可能让清理滞后，残留超龄或手动历史备份没有完整恢复保证；此项独立隔离演练不替代真休眠、登录和 Tailscale 门禁，也不代表真实客户端已经发布。
+
+不触碰常驻服务的恢复与迁移回归（临时 SQLite、回环随机 HTTP 端口；不运行会故障注入生产的 `check-service.py`）：
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.OfflineRestoreTest --tests com.coach.server.TwoRestoresOfflineTest --tests com.coach.server.OutboxRetentionTest --tests com.coach.server.OfflinePackTest --tests com.coach.server.UsageObservationTest
+```
+
+夜间备份的隔离恢复演练：
+
+```sh
+tools/dev/heavy ./gradlew :server:store:test --tests com.coach.store.NightlyBackupTest --rerun-tasks
+```
+
+该演练调用真实 `backupIfDue`、SQLite `VACUUM INTO` 和离线恢复，在临时目录写入合成事件、流式消息与 blob；检查本地时区 03:30 触发、同日重复抑制、重开数据库后超过 24 小时补做、SQLite 完整性、blob 硬链接、JSONL 导出、恢复前后课程事件一致、epoch 更新和安全副本。另注入硬链接失败，验证未发布备份水位、拒绝不完整恢复并能重试。调度时钟通过构造参数推进，不修改系统时间，不读写生产数据库，不调用 AI。它不证明机器实际跨过 03:30、真实系统休眠、登录时限、Tailscale 重启或真机重连；这些仍需各自的实测记录。

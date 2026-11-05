@@ -168,39 +168,64 @@ def main():
                        checkpointElapsedMs={key: int(re.search(key+r'[^\n]*elapsedMs=(\d+)', log)[1])
                                             for key in ('READY', 'OFFLINE', 'RECONNECTED')})
     finally:
-        if server and server.poll() is None:
-            if paused:
-                os.killpg(server.pid, signal.SIGCONT)
-            os.killpg(server.pid, signal.SIGTERM)
+        cleanup_errors = []
+
+        def cleanup_step(label, action):
             try:
-                server.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                os.killpg(server.pid, signal.SIGKILL)
-                server.wait()
-        if instrument and instrument.poll() is None:
-            instrument.terminate()
-            instrument.wait(timeout=10)
-        try:
+                action()
+            except Exception:
+                # Keep trying the remaining cleanup without exposing private output.
+                cleanup_errors.append(label)
+
+        def stop_server():
+            if server and server.poll() is None:
+                if paused:
+                    os.killpg(server.pid, signal.SIGCONT)
+                os.killpg(server.pid, signal.SIGTERM)
+                try:
+                    server.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(server.pid, signal.SIGKILL)
+                    server.wait()
+
+        def stop_instrument():
+            if instrument and instrument.poll() is None:
+                instrument.terminate()
+                try:
+                    instrument.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    instrument.kill()
+                    instrument.wait()
+
+        def cleanup_phone():
+            if not touched_phone:
+                return
             lease_valid()
-            if touched_phone:
-                device('shell', 'am', 'force-stop', PACKAGE)
-                cleanup = device('uninstall', PACKAGE+'.test')
-                summary['testPackageRemoved'] = cleanup.strip() == 'Success'
-                if not summary['testPackageRemoved']:
-                    raise RuntimeError('Test package cleanup failed')
-        except BaseException:
-            summary['result'] = 'failed'
-            raise
-        finally:
+            device('shell', 'am', 'force-stop', PACKAGE)
+            cleanup = device('uninstall', PACKAGE+'.test')
+            summary['testPackageRemoved'] = cleanup.strip() == 'Success'
+            if not summary['testPackageRemoved']:
+                raise RuntimeError('Test package cleanup failed')
+
+        def count_calls():
             # Read only our temporary synthetic SQLite after JVM shutdown.
             if (data/'coach.sqlite').is_file():
                 with sqlite3.connect(data/'coach.sqlite') as db:
                     summary['aiCalls'] = db.execute('SELECT coalesce(sum(physical_calls),0) FROM ai_calls').fetchone()[0]
-            shutil.rmtree(data)
-            run(['bash', PHONE/'lease.sh', 'release', 'TON-1094'])
-            summary['finishedAt'] = datetime.now(timezone.utc).isoformat()
-            (out/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
-            print(json.dumps(summary), flush=True)
+
+        cleanup_step('isolated JVM', stop_server)
+        cleanup_step('instrumentation process', stop_instrument)
+        cleanup_step('test package', cleanup_phone)
+        cleanup_step('AI call count', count_calls)
+        cleanup_step('private data', lambda: shutil.rmtree(data))
+        cleanup_step('lease release', lambda: run(['bash', PHONE/'lease.sh', 'release', 'TON-1094']))
+        if cleanup_errors:
+            summary.update(result='failed', cleanupErrors=cleanup_errors)
+        summary['finishedAt'] = datetime.now(timezone.utc).isoformat()
+        (out/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+        print(json.dumps(summary), flush=True)
+        if cleanup_errors:
+            raise RuntimeError('Acceptance cleanup incomplete: '+', '.join(cleanup_errors))
 
 
 if __name__ == '__main__':

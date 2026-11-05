@@ -1,6 +1,7 @@
 package com.coach.ai
 
 import com.coach.core.LedgerActor
+import com.coach.core.RestrictedSourceGuard
 import com.coach.domain.*
 import com.coach.store.*
 import kotlinx.coroutines.Dispatchers
@@ -31,11 +32,15 @@ class PoolWorker(
         val pool = QuestionPool(client)
         if (job.kind == "gen_mcq") {
             val avoid = actor.execute { poolStems(input.str("course"),input.str("kp")) }
+            val reference = actor.execute { searchSourcePages(input.str("course"),input.str("objective")) }
+                .filterNot { it.learnerVisible }.take(2).map { it.text }
+            val overlap = RestrictedSourceGuard(reference,listOf(input.str("excerpt")))
             val generated = try {
                 withContext(Dispatchers.IO) {
                     beforeCall(BridgeClient.CLAUDE)
                     pool.generateFor(input.str("kp"),input.str("objective"),input.str("excerpt"),3,
-                        avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"))
+                        avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"),
+                        internalReference=reference.joinToString("\n\n"))
                 }
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
@@ -45,7 +50,12 @@ class PoolWorker(
             if (generated.questions.size != 3) {
                 return failureStep(job,token,generated.failureReason ?: "MALFORMED")
             }
-            var questions = generated.questions
+            var questions = generated.questions.filter { q ->
+                listOf(q.stem,q.explanation).plus(q.options.map { it.text }).none(overlap::overlaps) &&
+                    (QuestionGate.quotedVerbatim(q,input.str("excerpt")) ||
+                        reference.none { QuestionGate.quotedVerbatim(q,it) })
+            }
+            if (questions.isEmpty()) return failureStep(job,token,"MALFORMED")
             if (questions.any { !QuestionGate.quotedVerbatim(it,input.str("excerpt")) }) {
                 // Repair quotations before review; the response cannot replace questions, options or keys.
                 val repair = try { withContext(Dispatchers.IO) {

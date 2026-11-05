@@ -361,11 +361,11 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 - 按**窗口** dp 与姿态，不按机型。断点、短高规则（高 <480 优先）、Medium/Expanded/Large 布局照 `O §8.1`；对话栏宽度下限 360dp，侧栏在空间不够时先收起再压缩对话 〔评A §2〕；窗格分配用 `S §8` 的最小窗格算术 + `movableContentOf` 迁移内容。
 - 状态保持：Activity 自处理配置变化；状态在 ViewModel + 进程级 SyncEngine；进程被回收后从本地库恢复（`configChanges` 不能代替进程恢复，S1 真机测后台回收）〔评A §7〕。
 - 半折叠桌面姿态推到 M3；书本姿态的铰链避让 M1 做（分割线对齐铰链）。
-- S1 第一件事：在 Fold8 与 Pad Mini 真机打印实际窗口 dp 与 FoldingFeature，替换估算值。OPPO Pad Mini 需先装 Tailscale 并入 tailnet。
+- 窗口 dp 用**规格加 OPPO 模拟**确定，不连 Fold8、Pad（测试设备只有 OPPO 一台，李政 2026-11-05）：按公开规格的像素与可能的密度区间算窗口 dp，确认断点在整个区间里不变，再在 OPPO 上用 `wm size` + `wm density` 模拟截图，见 §8.2。
 
 ### 8.1 真机读数（TON-1100，2026-10-31）
 
-专用测试机 OPPO Find X9 Ultra（PMA120）、Android 16，物理 1080×2376@640dpi，系统把密度设成 420 → **窗口约 411×905dp**（竖屏、无铰链；这不是折叠屏读数）。**Fold8 内外屏与 Pad 横竖屏的真实窗口 dp 仍未读**（李政指定考后用 Fold8 补，Pad 待装 Tailscale）；S1 估算值保持有效，直到读到。
+专用测试机 OPPO Find X9 Ultra（PMA120）、Android 16，物理 1080×2376@640dpi，系统把密度设成 420 → **窗口约 411×905dp**（竖屏、无铰链；这不是折叠屏读数）。Fold8 内外屏与 Pad 横竖屏不再真机读数，改用规格加 OPPO 模拟（§8.2）。
 
 流式渲染掉帧（回放 20 条回答，`tools/render/perf-device.py`，装的是 `com.coach.android`、端口 18799，脚本启动前读已装包的端口、读到 18791 就退出；每次 ≥1461 帧，连续 3 次；JankStats，帧间隔 p50 16.6ms；同代码的上一组 3+3 次是钉底 8.5–9.4%、上滑 6.4–6.6%）：
 
@@ -379,6 +379,31 @@ Gradle 9.5.0 / Kotlin 2.4.0 / CMP 1.12.1（material3 1.12.0-alpha03）；`libs.v
 首字时间（真机，客户端看到正文首字，`tools/dev/ttft-device.py`）：测试服务端用生产库的快照（独立数据目录与端口，接真实桥副本），21 次追问（另有 1 次没找到发送按钮，未计），全部是 `claude-sonnet-5-5`、无兜底：**p50 4.7 秒、p90 9.7 秒**，最小 2.5、最大 19.9 秒，8/21 超过 5 秒；同代码上一组 22 次是 p50 4.6、p90 8.2。p50 在 ≤5 秒目标内但余量很小，p90 明显偏长；测量时 Mac 负载 15–27，是否受负载影响没有对照数据。
 
 中文输入法组字回车（豆包、系统拼音；`gradlew run` 与 `.app`）：**未测**。Mac 上的 agent 进程没有辅助功能权限，发不出按键；李政 2026-10-31 决定「这项先不测」。`EnterGate`（§7.6）只有单元测试，没有真输入法实测，所以「误发送 0 次」这条没有实测数据。
+
+### 8.2 规格与 OPPO 模拟（TON-1135，2026-11-05）
+
+规格（网上查，2026-11-05 核对）：
+
+| 屏 | 尺寸 | 像素（竖拿 宽×高） | 像素密度 | 来源 |
+|---|---|---|---|---|
+| Galaxy Z Fold8 内屏 | 7.6″，4:3 | 1848×2448 | 约 403 ppi | [O2 规格页](https://www.o2.co.uk/help/phones-sims-and-devices/samsung/galaxy-z-fold8-android-17/specifications)、[GSMArena](https://m.gsmarena.com/samsung_galaxy_z_fold8_key_features_revealed-news-73505.php) |
+| Galaxy Z Fold8 外屏 | 5.5″ | 1248×1972 | 约 428 ppi | 同上 |
+| OPPO Pad Mini | 8.8″，3:2 | 1680×2520 | 约 344 ppi | [nanoreview](https://nanoreview.net/en/tablet/oppo-pad-mini)、[GSMArena](https://fo.gsmarena.com/oppo_pad_mini-14624.php) |
+
+系统默认 densityDpi 查不到，dp 按区间给（dp = 像素 × 160 / dpi，窗口按全屏沉浸算）。`LayoutRules`（§8 断点）在整个区间里归类不变，`AdaptiveAndThemeTest.realScreensKeepTheirLayoutAcrossTheirDensityRange` 逐个 dpi 检查：
+
+| 形态 | dpi 区间 | 窗口 dp（宽×高） | 归类与布局 |
+|---|---|---|---|
+| Fold8 外屏竖 | 450–520 | 384–444 × 607–701 | Compact：底栏，原文用底部抽屉 |
+| Fold8 外屏横 | 450–520 | 607–701 × 384–444 | 短高（高 <480）：窄图标栏，无头部，不分栏 |
+| Fold8 内屏竖 | 374–450 | 657–790 × 870–1047 | Medium：rail，辅助栏覆盖式 |
+| Fold8 内屏横 | 374–450 | 870–1047 × 657–790 | Expanded：rail + 对话 + 辅助栏 360 并排 |
+| Pad Mini 竖 | 280–320 | 840–960 × 1260–1440 | Expanded（320 dpi 正好落在 840；默认密度若高于 320 会变成 Medium，O §8.1 对此已有规定：同内屏竖） |
+| Pad Mini 横 | 280–320 | 1260–1440 × 840–960 | Large：rail + 大纲 300 + 对话 + 原文 380 |
+
+OPPO 模拟：`tools/dev/formfactor-sim.sh` 在 OPPO 上对上表每种形态各取区间两端的 dpi，`wm size <宽>x<高>` + `wm density <dpi>` 后打开 `LabActivity`（`FormFactorLab`，与 `CoachApp` 同一套 `LayoutRules`）截图，退出时一律 `wm size reset`、`wm density reset`。截图与读数附在 TON-1135 的交付评论里。
+
+半折（`FoldingFeature` HALF_OPENED、书本姿态的铰链位置）：**未验证（无设备）**，OPPO 模拟不出铰链；铰链避让只有单元测试（`bookPostureSplitsOnTheHinge`）。
 
 ## 9. 设计系统（决定）〔O §9，C#19〕
 

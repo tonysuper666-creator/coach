@@ -31,7 +31,7 @@ class HistoryWriterTest {
         )
         val sources=raws.map { (kind,raw) -> json("id" to "legacy:$kind","source_record" to raw,"content_hash" to sha(canonical(raw))) }
         val payloads=mapOf(
-            "legacy_question" to json("question" to mapChoiceQuestion(choice),"kp_ids" to emptyList<String>(),"association_confirmed" to false,"keyState" to "UNREVIEWED"),
+            "legacy_question" to json("question" to mapChoiceQuestion(choice),"legacy_explanation_archive" to legacyChoiceArchive(choice),"kp_ids" to emptyList<String>(),"association_confirmed" to false,"keyState" to "UNREVIEWED"),
             "legacy_attempt" to json("created_at" to 1700000000,"origin" to "LEGACY","kp_id" to "kp","question" to mapChoiceQuestion(choice),"answer" to null,"answer_unresolved" to true,"unresolved_answer_text" to "I think B","reset" to true,"reset_reason" to "old reset","window_eligible" to false),
             "legacy_passed" to json("kp_id" to "kp","passed" to true,"solid" to false),
             "legacy_schedule" to json("kp_id" to "kp","dueAt" to 1700086400,"queue_eligible" to true,"original_state" to json("lapse_count" to 2,"stability" to 3.5,"last_review_at" to 1700000100)),
@@ -112,6 +112,10 @@ class HistoryWriterTest {
         assertEquals("UNREVIEWED",question.str("key_state"));assertEquals(5,parseText(question.str("options")).jsonArray.size)
         assertEquals("body only",db.query("SELECT content_md FROM messages").single().str("content_md"))
         assertEquals(JsonPrimitive(1.0),parseText(db.query("SELECT source_json FROM migration_records WHERE kind='legacy_passed'").single().str("source_json")))
+        val archived=parseText(db.query("SELECT payload_json FROM migration_records WHERE kind='legacy_question'").single().str("payload_json")).jsonObject.obj("legacy_explanation_archive")
+        assertEquals(choice["explanation"],archived["explanation"])
+        val importedPayload=db.query("SELECT payload FROM events WHERE type='legacy_imported'").map { parseText(it.str("payload")).jsonObject }.single { it.str("sourceId")=="legacy:legacy_question" }
+        assertEquals(archived,importedPayload.obj("legacy_explanation_archive"))
         val projection=first.obj("projection")
         assertTrue(projection.obj("position").obj("pending").isEmpty())
         val mastery=projection.obj("mastery").obj("kp")
@@ -165,12 +169,12 @@ class HistoryWriterTest {
         assertEquals(before,databaseState(db,"course"))
     }
 
-    @Test fun `five options retain their key and explanations lose display letter references`() {
+    @Test fun `five options retain their key and archive explanations unchanged`() {
         val q=mapChoiceQuestion(choice)
         assertEquals(choiceAnswer(choice,"B"),q["correctOptionId"])
         assertEquals(5,q.array("options").size);assertEquals("UNREVIEWED",q.str("keyState"))
-        assertFalse(Regex("[A-E]").containsMatchIn(q.str("explanation")))
-        assertTrue(q.str("explanation").contains("「second」"));assertFalse(q.containsKey("importIssue"))
+        assertFalse(q.containsKey("explanation"));assertEquals(choice["explanation"],legacyChoiceArchive(choice)["explanation"])
+        assertFalse(q.containsKey("importIssue"))
         assertEquals(JsonNull,choiceAnswer(choice,"c"));assertEquals(JsonNull,choiceAnswer(choice,"I think B"))
     }
 

@@ -1,5 +1,6 @@
 package com.coach.migrate
 
+import com.coach.domain.json
 import kotlinx.serialization.json.*
 import org.junit.Test
 import kotlin.test.*
@@ -89,6 +90,32 @@ class ImportPlanTest {
         val proseMapping=JsonObject(m+mapOf("legacy_attempts" to JsonArray(listOf(proseRow))))
         val unresolved=importPlan(proseMapping,seed,null).array("records").map { it.jsonObject }.single { it.str("kind")=="legacy_attempt" }.obj("payload")
         assertEquals(JsonNull,unresolved["answer"]);assertEquals("I think B, please explain",unresolved.str("unresolved_answer_text"))
+    }
+
+    @Test fun `choice archives keep point names math and option references verbatim in both payloads`() {
+        for (explanation in listOf("在 A 点，C 优于 A、B", "E[U(I)] 与 E[I]", "选 B，A、C 不对")) {
+            val q=obj("""{"question_type":"mcq","question":"A 点与 C 点","correct_answer":"B","options":{"A":"E 点","B":"C 点","C":"其他"}}""")
+                .let { JsonObject(it+("explanation" to JsonPrimitive(explanation))) }
+            val question=record("bank.json","questions","q",q)
+            val questionRow=JsonObject(question+("question" to mapChoiceQuestion(q)))
+            val attempt=record("mastery.sqlite3","mastery_interactions","a",json("question_json" to q.toString(),"user_answer" to "B","result_json" to "{}"))
+            val attemptRow=JsonObject(attempt+("reset" to JsonPrimitive(false)))
+            val m=JsonObject(mapping()+mapOf("questions" to JsonArray(listOf(questionRow)),"legacy_attempts" to JsonArray(listOf(attemptRow))))
+            val payloads=importPlan(m,seed,null).array("records").map { it.jsonObject }.filter { it.str("kind") in setOf("legacy_question","legacy_attempt") }.map { it.obj("payload") }
+            assertEquals(2,payloads.size)
+            for (payload in payloads) {
+                val mapped=payload.obj("question");val archive=payload.obj("legacy_explanation_archive")
+                assertEquals(q["question"],mapped["question"]);assertFalse(mapped.containsKey("explanation"))
+                assertEquals(listOf("E 点","C 点","其他"),mapped.array("options").map { it.jsonObject.str("text") })
+                assertEquals(JsonPrimitive(explanation),archive["explanation"])
+                assertEquals(JsonPrimitive(true),archive["explanation_references_letters"])
+                assertEquals(JsonPrimitive(true),archive["letter_map_complete"])
+                assertEquals(JsonPrimitive("B"),archive.obj("legacyLetterMap")[choiceAnswer(q,"B")!!.jsonPrimitive.content])
+            }
+        }
+        val duplicates=obj("""{"question_type":"mcq","options":{"A":"same","B":"same"}}""")
+        assertEquals(JsonPrimitive(false),legacyChoiceArchive(duplicates)["letter_map_complete"])
+        assertTrue(legacyChoiceArchive(duplicates).obj("legacyLetterMap").isEmpty())
     }
 
     @Test fun `curriculum gap stays explicit rather than forcing a question into the wrong KP`() {

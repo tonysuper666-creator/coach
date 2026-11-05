@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -18,10 +19,49 @@ from .rehearse_ton1175_launchd import port
 
 REPO = Path(__file__).resolve().parents[2]
 OLD = '8d3608f'
+BRIDGE_LOCK = REPO / 'tools/dev/ton1193_bridge_requirements.lock'
 
 
 def cmd(*args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
+
+
+def pins(path):
+    result = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.-]*)', line)
+        switch.require(match is not None, 'invalid Python lock pin')
+        name = re.sub(r'[-_.]+', '-', match[1]).lower()
+        switch.require(name not in result, 'duplicate Python lock pin')
+        result[name] = match[2]
+    switch.require(result, 'empty Python lock')
+    return result
+
+
+def dependency_preflight(lock, requirements):
+    locked, direct = pins(lock), pins(requirements)
+    switch.require(all(locked.get(name) == version for name, version in direct.items()),
+                   'Python lock differs from direct requirements')
+    return locked
+
+
+def verify_python(python, locked):
+    # pip check evaluates Python 3.15 markers and confirms the full closure.
+    cmd(python, '-m', 'pip', 'check')
+    script = '''import importlib.metadata as m, json, re
+out = {}
+for d in m.distributions():
+ name = re.sub(r'[-_.]+', '-', d.metadata['Name']).lower()
+ if name == 'pip': continue
+ if name in out: raise ValueError('duplicate distribution')
+ out[name] = d.version
+print(json.dumps(out, sort_keys=True))
+'''
+    actual = json.loads(subprocess.check_output([str(python), '-I', '-B', '-c', script], text=True))
+    switch.require(actual == locked, 'installed Python closure differs from lock')
 
 
 def main():
@@ -34,10 +74,14 @@ def main():
     cmd('git', 'diff', '--quiet', old, head, '--', 'server', 'tools/bridge',
         'tools/mathsvc', 'tools/dev/service-child.py', 'gradle', 'gradlew',
         'build.gradle.kts', 'settings.gradle.kts', cwd=REPO)
+    locked = dependency_preflight(BRIDGE_LOCK, REPO / 'tools/bridge/requirements.txt')
     java_home = Path(subprocess.check_output(['/usr/libexec/java_home', '-v', '17'], text=True).strip())
     java = java_home / 'bin/java'
-    node = Path(shutil.which('node')).resolve()
+    node_path = shutil.which('node')
+    switch.require(node_path is not None and shutil.which('npm') is not None, 'Node/npm missing')
+    node = Path(node_path).resolve()
     python = Path('/opt/homebrew/bin/python3.15')
+    switch.require(python.is_file() and os.access(python, os.X_OK), 'Python 3.15 missing')
     build_env = dict(os.environ, JAVA_HOME=str(java_home), PYTHONDONTWRITEBYTECODE='1')
     cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
         cwd=REPO, env=build_env)
@@ -59,10 +103,12 @@ def main():
                     ignore=shutil.ignore_patterns('.venv', 'node_modules', '__pycache__', '*.pyc'))
             (release / 'tools/dev').mkdir(parents=True)
             shutil.copy2(REPO / 'tools/dev/service-child.py', release / 'tools/dev/service-child.py')
-            cmd(python, '-m', 'venv', release / 'tools/bridge/.venv', env=build_env)
-            cmd(release / 'tools/bridge/.venv/bin/python', '-m', 'pip', 'install', '--disable-pip-version-check',
-                '-r', release / 'tools/bridge/requirements.txt', env=build_env)
-            cmd('npm', 'ci', '--ignore-scripts', '--offline', cwd=release / 'tools/mathsvc', env=build_env)
+            cmd(REPO / 'tools/dev/heavy', python, '-m', 'venv', release / 'tools/bridge/.venv', env=build_env)
+            cmd(REPO / 'tools/dev/heavy', release / 'tools/bridge/.venv/bin/python', '-m', 'pip', 'install',
+                '--disable-pip-version-check', '--no-deps', '-r', BRIDGE_LOCK, env=build_env)
+            cmd(REPO / 'tools/dev/heavy', 'npm', 'ci', '--ignore-scripts', '--offline',
+                cwd=release / 'tools/mathsvc', env=build_env)
+            verify_python(release / 'tools/bridge/.venv/bin/python', locked)
             (release / 'source-head.txt').write_text(source_head + '\n')
             verify.dependencies(release, str(node))
         old_release, new_release = releases / 'old', releases / 'new'

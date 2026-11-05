@@ -106,6 +106,9 @@ class TutorClient(
     }
 
     private suspend fun conversation(socket: ClientWebSocketSession, queue: Channel<String>, onReady: () -> Unit) = coroutineScope {
+        // Only messages carried over from the previous connection need a bootstrap resume.
+        // The reader may receive fresh history before the first pong; its gaps use resumeSender.
+        val carriedMessages = model.unfinishedMessageIds().toSet()
         val pongs = Channel<ByteArray>(Channel.CONFLATED)
         val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
         val reader = launch {
@@ -145,16 +148,19 @@ class TutorClient(
         try {
             // An upgrade alone does not prove the socket can exchange frames.
             withTimeout(PONG_TIMEOUT_MS) { verified.await() }
-            synchronized(lifecycle) {
+            val reconnectResumes = synchronized(lifecycle) {
                 check(!closed)
-                live = queue
                 model.onConnection(true)
+                val ids = model.unfinishedMessageIds().filter { it in carriedMessages }
+                // Register before publishing the queue, under the reader's lifecycle lock.
+                ids.forEach { model.noteResumeSent(it) }
+                live = queue
                 telemetry?.record("reconnect", "connection")
+                ids
             }
             onReady()
-            model.unfinishedMessageIds().forEach { id ->
+            reconnectResumes.forEach { id ->
                 socket.send(Frame.Text(resumeFrame(id).toString()))
-                model.noteResumeSent(id)
             }
             sender = launch { for (text in queue) socket.send(Frame.Text(text)) }
             ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }

@@ -70,7 +70,6 @@ class TutorOutputGuard(
     }
 
     private fun filter(sentence: String): String {
-        if (restrictedSources?.overlaps(sentence) == true) return ""
         if (referencesLetter(sentence)) {
             letterReferenceStripped = true
             return ""
@@ -82,7 +81,7 @@ class TutorOutputGuard(
             if (sentence.endsWith('\n')) examLines++
             if (!allowExamSection || examLines > 3 || (examLines == 3 && !sentence.endsWith('\n'))) return ""
         }
-        return sentence
+        return if (restrictedSources?.overlaps(sentence) == true) "" else sentence
     }
 
     companion object {

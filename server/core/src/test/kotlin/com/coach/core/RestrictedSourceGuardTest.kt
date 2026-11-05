@@ -21,4 +21,12 @@ class RestrictedSourceGuardTest {
         assertTrue(guard.overlaps("这里引用一段专门用于测试的合成内容"))
         assertFalse(guard.overlaps("答案是７"))
     }
+
+    @Test fun shortAnswersAndParaphrasesAreNotDeterministicallyBlocked() {
+        val guard = RestrictedSourceGuard(
+            listOf("答案是７。保险免赔额可以减少被保险人的道德风险。"), emptyList(),
+        )
+        assertFalse(guard.overlaps("答案是7。"))
+        assertFalse(guard.overlaps("自负部分让投保人更谨慎。"))
+    }
 }

@@ -3,6 +3,13 @@ package com.coach.core
 import kotlin.test.*
 
 class TutorOutputGuardTest {
+    @Test fun restrictedOverlapStillRecordsLetterReferences() {
+        val text = "A deliberately long synthetic restricted passage says choose option B."
+        val guard = TutorOutputGuard(restrictedSources=RestrictedSourceGuard(listOf(text), emptyList()))
+        assertEquals("", guard.push(text) + guard.finish())
+        assertTrue(guard.letterReferenceStripped)
+    }
+
     @Test fun referencesAreRemovedEvenWhenSplitAcrossChunks() {
         for (text in listOf("选 B。", "选 **B**。", "答案是 `C`。", "答案是Ｃ。", "Choose option D.", "The answer is A.", "B is correct.", "B 选项正确。")) {
             for (chunkSize in 1..text.length) {

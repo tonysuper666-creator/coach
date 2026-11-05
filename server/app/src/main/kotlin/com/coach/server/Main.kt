@@ -80,6 +80,15 @@ fun main(args: Array<String>): Unit = runBlocking {
     val observation = UsageObservation(
         Path.of(System.getenv("COACH_LOG_DIR") ?: (if (managed) data.parent else data).resolve("logs").toString()),
         Path.of(System.getenv("COACH_STATE_DIR") ?: (if (managed) data.parent else data).resolve("state").toString()))
+    observation.coverage.workQuiet = chat::activityQuiet
+    val defaultControl = Path.of(System.getenv("COACH_STATE_DIR") ?:
+        (if (managed) data.parent else data).resolve("state").toString()).resolve("activity-${observation.coverage.lifetime}.sock")
+    val control = System.getenv("COACH_ACTIVITY_SOCKET")?.let(Path::of) ?: defaultControl
+    runCatching { observation.coverage.startControl(control) }.onFailure {
+        // Diagnostic/control failure must refuse release evidence, while keeping learning available.
+        observation.coverage.writeFailed()
+        println("COACH activity control unavailable=${it.javaClass.simpleName}")
+    }
     val usageSummary = launch(Dispatchers.IO) {
         while (isActive) {
             runCatching { observation.summarize() }.onFailure { println("COACH usage summary unavailable=${it.javaClass.simpleName}") }
@@ -143,8 +152,10 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close() }
-        local.stop(100, 1000)
+        runBlocking {
+            children?.stop();supervisor.cancelAndJoin();local.stopSuspend(100,1000)
+            maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
+        }
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
     children?.start()

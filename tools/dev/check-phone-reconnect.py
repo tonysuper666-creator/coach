@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Foreground OPPO acceptance. Requires an existing TON-1094 guardian lease.
+
+Pauses only an owned, isolated JVM; never sleeps the Mac or restarts Tailscale.
+Build both APKs with -PcoachApplicationId=com.coach.android.ton1094
+-Pcoach.port=<port>, and :server:app:installDist through tools/dev/heavy first.
+"""
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+from local_config import value, tail_host
+
+ROOT = Path(__file__).resolve().parents[2]
+PHONE = Path.home() / 'Coach/testphone'
+PACKAGE = 'com.coach.android.ton1094'
+FORBIDDEN = {8790, 8791, 18791}
+
+
+def lease_valid():
+    fields = dict(line.split('=', 1) for line in (PHONE/'lease.d/info').read_text().splitlines())
+    if fields.get('card') != 'TON-1094' or int(fields['until']) <= time.time():
+        raise RuntimeError('A current guardian grant to TON-1094 is required')
+
+
+def wait_for(check, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        result = check()
+        if result:
+            return result
+        time.sleep(.25)
+    raise TimeoutError('Isolated acceptance phase timed out')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--serial', required=True)
+    parser.add_argument('--port', type=int, required=True)
+    parser.add_argument('--evidence', type=Path, required=True)
+    args = parser.parse_args()
+    if args.port in FORBIDDEN or not 1024 <= args.port <= 65535:
+        parser.error('A non-production unprivileged port is required')
+    if args.serial.startswith('emulator-'):
+        parser.error('This acceptance requires the leased OPPO')
+    out = args.evidence.resolve()
+    out.mkdir(mode=0o700, parents=True, exist_ok=False)
+    data = out/'private-data'
+    data.mkdir(mode=0o700)
+    adb = str(Path(value('coach.sdkDir')).expanduser()/'platform-tools/adb')
+    device_env = dict(os.environ, COACH_TESTPHONE=args.serial)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
+    env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data/'device-token'),
+               COACH_LOG_DIR=str(data/'logs'), COACH_STATE_DIR=str(data/'state'),
+               COACH_PACKS_DIR=str(data/'packs'), COACH_TAIL_HOST=tail_host(),
+               COACH_PORT=str(args.port), COACH_MANAGE_SERVICES='0',
+               COACH_TRAFFIC='test', COACH_BRIDGE_URL='http://127.0.0.1:1',
+               COACH_SOURCE_LOOKUP='false')
+    server = instrument = None
+    paused = False
+    touched_phone = False
+    token = ''
+    run_id = uuid.uuid4().hex
+    summary = dict(runId=run_id, startedAt=datetime.now(timezone.utc).isoformat(),
+                   head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                   scope='real OPPO; isolated JVM SIGSTOP/CONT; not OS sleep or Tailscale restart',
+                   package=PACKAGE, port=args.port, productionWrites=0, result='failed')
+
+    def run(command, timeout=30, **kwargs):
+        result = subprocess.run(list(map(str, command)), capture_output=True, text=True,
+                                timeout=timeout, **kwargs)
+        if result.returncode:
+            # Never expose command arguments (the instrumentation token) or arbitrary device output.
+            raise RuntimeError('Acceptance command failed: '+str(command[0]))
+        return result.stdout
+
+    def device(*command, **kwargs):
+        return run([adb, '-s', args.serial, *command], **kwargs)
+
+    def hello():
+        if server.poll() is not None:
+            raise RuntimeError('Isolated server exited')
+        try:
+            req = urllib.request.Request(f'http://127.0.0.1:{args.port}/v1/hello',
+                headers={'Authorization': 'Bearer '+token, 'X-Coach-Device': 'desktop'})
+            with urllib.request.urlopen(req, timeout=1) as response:
+                return json.load(response)
+        except (OSError, ValueError):
+            return None
+
+    def report():
+        if instrument.poll() is not None:
+            raise RuntimeError('Instrumentation exited before its checkpoint')
+        log = device('logcat', '-d', '-s', 'CoachReconnect:I', '*:S')
+        return '\n'.join(line for line in log.splitlines() if run_id in line)
+
+    try:
+        lease_valid()
+        run(['bash', PHONE/'lease.sh', 'renew', 'TON-1094', '30'])
+        run(['bash', PHONE/'probe.sh'], env=device_env)
+        brand = device('shell', 'getprop', 'ro.product.brand').strip()
+        if brand.lower() != 'oppo':
+            raise RuntimeError('The granted test device must be OPPO')
+        summary['deviceBrand'] = brand
+        summary['deviceModel'] = device('shell', 'getprop', 'ro.product.model').strip()
+        # Reserve checks only; a bind race causes server readiness to fail, never takeover.
+        for host in ('127.0.0.1', tail_host()):
+            with socket.socket() as sock:
+                sock.bind((host, args.port))
+        with (data/'server.log').open('w') as log:
+            server = subprocess.Popen([ROOT/'server/app/build/install/app/bin/app'],
+                env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        wait_for(lambda: (data/'device-token').is_file() or server.poll() is not None, 30)
+        token = (data/'device-token').read_text().strip()
+        initial = wait_for(hello, 40)
+        touched_phone = True
+        for apk in ('debug/androidApp-debug.apk', 'androidTest/debug/androidApp-debug-androidTest.apk'):
+            run(['bash', PHONE/'install.sh', ROOT/'androidApp/build/outputs/apk'/apk],
+                timeout=240, env=device_env)
+        def instrument_args(test):
+            return [adb, '-s', args.serial, 'shell', 'am', 'instrument', '-w',
+                    '-e', 'class', 'com.coach.android.'+test,
+                    '-e', 'coachToken', token, '-e', 'coachRunId', run_id,
+                    PACKAGE+'.test/androidx.test.runner.AndroidJUnitRunner']
+        network = run(instrument_args('NetworkSecuritySmoke'), timeout=90)
+        (out/'network.txt').write_text(network.replace(token, '[redacted]'))
+        if 'OK (3 tests)' not in network:
+            raise RuntimeError('Network/security smoke did not pass all 3 tests')
+        summary['networkTests'] = 3
+        with (out/'reconnect.txt').open('w') as log:
+            instrument = subprocess.Popen(instrument_args('LedgerReconnectSmoke'),
+                stdout=log, stderr=subprocess.STDOUT)
+        wait_for(lambda: (s if f'READY port={args.port} ' in (s := report()) else None), 40)
+        lease_valid()
+        start = time.monotonic()
+        os.killpg(server.pid, signal.SIGSTOP)
+        paused = True
+        wait_for(lambda: 'OFFLINE' in report(), 30)
+        # Match the historical controlled JVM pause without claiming actual system sleep.
+        while time.monotonic() - start < 32:
+            time.sleep(.25)
+        os.killpg(server.pid, signal.SIGCONT)
+        paused = False
+        resumed = time.monotonic()
+        instrument.wait(timeout=65)
+        result = (out/'reconnect.txt').read_text().replace(token, '[redacted]')
+        (out/'reconnect.txt').write_text(result)
+        log = device('logcat', '-d', '-s', 'CoachReconnect:I', '*:S')
+        log = '\n'.join(line for line in log.splitlines() if run_id in line)+'\n'
+        (out/'checkpoints.txt').write_text(log)
+        if 'OK (1 test)' not in result or 'RECONNECTED epochUnchanged=true' not in log:
+            raise RuntimeError('Real-device reconnection assertion failed')
+        assert hello()['epoch'] == initial['epoch']
+        summary.update(result='passed', reconnectTests=1, controlledPauseSeconds=round(resumed-start, 3),
+                       completionAfterResumeSeconds=round(time.monotonic()-resumed, 3),
+                       checkpointElapsedMs={key: int(re.search(key+r'[^\n]*elapsedMs=(\d+)', log)[1])
+                                            for key in ('READY', 'OFFLINE', 'RECONNECTED')})
+    finally:
+        if server and server.poll() is None:
+            if paused:
+                os.killpg(server.pid, signal.SIGCONT)
+            os.killpg(server.pid, signal.SIGTERM)
+            try:
+                server.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(server.pid, signal.SIGKILL)
+                server.wait()
+        if instrument and instrument.poll() is None:
+            instrument.terminate()
+            instrument.wait(timeout=10)
+        try:
+            lease_valid()
+            if touched_phone:
+                device('shell', 'am', 'force-stop', PACKAGE)
+                cleanup = device('uninstall', PACKAGE+'.test')
+                summary['testPackageRemoved'] = cleanup.strip() == 'Success'
+                if not summary['testPackageRemoved']:
+                    raise RuntimeError('Test package cleanup failed')
+        except BaseException:
+            summary['result'] = 'failed'
+            raise
+        finally:
+            # Read only our temporary synthetic SQLite after JVM shutdown.
+            if (data/'coach.sqlite').is_file():
+                with sqlite3.connect(data/'coach.sqlite') as db:
+                    summary['aiCalls'] = db.execute('SELECT coalesce(sum(physical_calls),0) FROM ai_calls').fetchone()[0]
+            shutil.rmtree(data)
+            run(['bash', PHONE/'lease.sh', 'release', 'TON-1094'])
+            summary['finishedAt'] = datetime.now(timezone.utc).isoformat()
+            (out/'summary.json').write_text(json.dumps(summary, indent=2)+'\n')
+            print(json.dumps(summary), flush=True)
+
+
+if __name__ == '__main__':
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, terminate)
+    main()

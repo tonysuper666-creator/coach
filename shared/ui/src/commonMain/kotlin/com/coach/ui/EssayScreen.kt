@@ -42,9 +42,9 @@ fun EssayScreen(c: CoachController, view: CourseView, onBack: () -> Unit) {
         }
         HorizontalDivider()
         when {
-            session == null -> EssayPicker(c) { c.essay = it }
+            session == null -> EssayPicker(c, c::startEssay)
             !session.handedIn -> EssayWriting(c, session)
-            else -> EssayResult(c, view, session) { c.essay = null }
+            else -> EssayResult(c, view, session, c::closeEssay)
         }
     }
 }
@@ -157,29 +157,8 @@ private fun trimMarks(x: Double) = if (x == x.toLong().toDouble()) x.toLong().to
 
 @Composable
 private fun EssayWriting(c: CoachController, s: EssaySession) {
-    val scope = rememberCoroutineScope()
-    val left = remainingSec(c, s)
     val words = Essay.wordCount(s.text)
-    fun handIn() {
-        if (s.handedIn) return
-        if (s.text.isBlank()) { c.essay = null; return }
-        c.tutor.telemetry?.record("tap", "essay_submit")
-        // 命令先落在本机队列里再显示「已交卷」：断网时也不丢，连上后自动送到 Mac。
-        val cmd = c.sync.enqueue(CommandBody("submit_answer", c.courseId, c.nowMillis(),
-            json("attemptId" to s.attemptId, "answer" to s.text, "posedSnapshot" to s.posed, "threadId" to "essay:${s.attemptId}")))
-        s.handedIn = true
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) { c.sync.syncOnce() }
-                val receipt = c.sync.receipt(cmd.commandId)
-                if (receipt == null) s.note = "Mac 未连接：已交卷，连上后自动送去批改。"
-                else if (receipt.status !in setOf("OK", "DUPLICATE")) s.note = "Mac 没有收下这篇（${receipt.status}）。原文还在下面，可以复制保存。"
-            } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { s.note = "Mac 未连接：已交卷，连上后自动送去批改。" }
-        }
-    }
-    // 到点自动交卷；离开过练习页、回来时已经过点的，也立刻交。
-    LaunchedEffect(left == 0L) { if (left == 0L) handIn() }
+    // 到点交卷由 controller 盯着（CoachController.startEssay），这一页只管写。
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
             Text(s.posed.str("stem"), style = MaterialTheme.typography.bodyMedium)
@@ -189,9 +168,9 @@ private fun EssayWriting(c: CoachController, s: EssaySession) {
                 color = if (words >= s.posed.num("wordTarget", Essay.WORD_TARGET.toLong()) * 0.8) successColor() else MaterialTheme.colorScheme.onSurfaceVariant)
             Text("到点自动交卷", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        OutlinedTextField(s.text, { s.text = it }, Modifier.fillMaxWidth().weight(1f).testTag("essay-text"),
+        OutlinedTextField(s.text, { if (!s.handedIn) s.text = it }, Modifier.fillMaxWidth().weight(1f).testTag("essay-text"),
             placeholder = { Text("先一句话直接回答，再定义、机制、证据（作者、年份、数字）、评价、结论。") })
-        Button(onClick = ::handIn, enabled = s.text.isNotBlank(), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("交卷") }
+        Button(onClick = { c.handInEssay(s) }, enabled = s.text.isNotBlank(), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("交卷") }
     }
 }
 

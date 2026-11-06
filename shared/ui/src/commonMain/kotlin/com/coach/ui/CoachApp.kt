@@ -19,7 +19,14 @@ import com.coach.client.KpRow
 import com.coach.client.SyncEngine
 import com.coach.client.TutorClient
 import com.coach.client.TutorUiState
+import com.coach.domain.json
+import com.coach.protocol.CommandBody
 import com.coach.ui.markdown.MathAsset
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -41,6 +48,9 @@ class CoachController(
     val course: com.coach.client.CourseHttp? = null,
     /** 论述限时练习的时限（秒）。默认 25 分钟；验收演示可以配短。 */
     val essayLimitSec: Int = com.coach.domain.Essay.TIME_LIMIT_SEC,
+    /** 论述的截止计时和交卷送出，不随页面走。必须跑在界面线程上：交卷和打字改的是同一份草稿。测试可注入虚拟时钟。 */
+    private val essayClock: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
+    private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
     // Keep arrival anchors as long as the tutor model, including a trip back to Today.
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
@@ -57,6 +67,41 @@ class CoachController(
     internal val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
     /** 正在写的那篇论述。放在这里：离开练习页再回来，倒计时照走，草稿还在。 */
     internal var essay by mutableStateOf<EssaySession?>(null)
+        private set
+
+    /** 题目到手，开始计时。截止由这里盯着，不看练习页在不在屏幕上：回复习页、切到别的页，到点照样交卷。 */
+    internal fun startEssay(s: EssaySession) {
+        essay = s
+        essayClock.launch {
+            while (essay === s && !s.handedIn) {
+                val left = s.deadline - nowMillis()
+                if (left <= 0) { handInEssay(s); break }
+                // 每秒对一次墙钟：手机休眠时 delay 不走，醒来后一秒内补交。
+                delay(left.coerceAtMost(1000))
+            }
+        }
+    }
+
+    /** 交卷：只交一次。草稿就此定稿，命令先落进本机队列再送 Mac，断网也不丢。 */
+    internal fun handInEssay(s: EssaySession) {
+        if (s.handedIn || essay !== s) return
+        if (s.text.isBlank()) { essay = null; return }
+        tutor.telemetry?.record("tap", "essay_submit")
+        val cmd = sync.enqueue(CommandBody("submit_answer", courseId, nowMillis(),
+            json("attemptId" to s.attemptId, "answer" to s.text, "posedSnapshot" to s.posed, "threadId" to "essay:${s.attemptId}")))
+        s.handedIn = true
+        essayClock.launch {
+            try {
+                withContext(io) { sync.syncOnce() }
+                val receipt = sync.receipt(cmd.commandId)
+                if (receipt == null) s.note = "Mac 未连接：已交卷，连上后自动送去批改。"
+                else if (receipt.status !in setOf("OK", "DUPLICATE")) s.note = "Mac 没有收下这篇（${receipt.status}）。原文还在下面，可以复制保存。"
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { s.note = "Mac 未连接：已交卷，连上后自动送去批改。" }
+        }
+    }
+
+    internal fun closeEssay() { essay = null }
 }
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */

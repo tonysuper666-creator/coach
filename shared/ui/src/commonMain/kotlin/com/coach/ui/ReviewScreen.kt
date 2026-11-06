@@ -87,7 +87,7 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
         priorGroups = groups.filter { it.submitted }.map { it.groupId }.toSet()
         activeKp = kpId; chosen.clear(); notice = null
         c.tutor.model.onSent(target, "retry", null)
-        if (!c.tutor.open(target, c.courseId, kpId, kp?.conceptIds ?: listOf(kpId), kp?.title ?: kpId) ||
+        if (!c.tutor.open(target, c.courseId, kpId, kp?.conceptIds ?: listOf(kpId), kp?.title ?: kpId, review = true) ||
             !c.tutor.retryMistakes(target, c.courseId)) {
             c.tutor.model.onFailure(target, "Mac 未连接，连上后可再练；错题已保存在本机。")
         }

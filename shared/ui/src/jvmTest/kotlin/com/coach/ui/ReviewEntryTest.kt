@@ -17,6 +17,11 @@ import com.coach.protocol.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.coroutines.channels.Channel
 import java.io.File
 import javax.imageio.ImageIO
 import kotlin.test.*
@@ -25,6 +30,46 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class ReviewEntryTest {
     private val now = 1_794_052_800_000L
+
+    @Test fun retryOpensAReviewThreadBeforeRequestingNewQuestions() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val db = ClientDatabase(driver)
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("No network")
+            override suspend fun snapshot(course: String): Snapshot = error("No network")
+            override suspend fun events(course: String, after: Long): EventsPage = error("No network")
+            override suspend fun command(command: WireCommand): Receipt = error("No network")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("No network")
+        }
+        val payloads = listOf(
+            "question_posed" to json("attemptId" to "a", "questionId" to "q", "kpIds" to listOf("K"),
+                "stem" to "Synthetic question", "format" to "SINGLE_CHOICE",
+                "options" to JsonArray(listOf(json("optionId" to "right", "text" to "Right"), json("optionId" to "wrong", "text" to "Wrong"))),
+                "letterMap" to json("right" to "B", "wrong" to "A")),
+            "answer_submitted" to json("attemptId" to "a", "answer" to "A"),
+            "attempt_graded" to json("attemptId" to "a", "score" to 0, "max" to 1, "status" to "EXACT"))
+        val events = payloads.mapIndexed { i, (type, payload) -> Event(i + 1L, "mistake$i", "C", type,
+            recordedAt = now, occurredAt = now, deviceId = "synthetic", actor = "SYSTEM", payload = payload) }
+        val model = TutorModel({ now }).also { it.onConnection(true) }
+        val queue = Channel<String>(Channel.UNLIMITED)
+        val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", model)
+        TutorClient::class.java.getDeclaredField("live").apply { isAccessible = true }.set(tutor, queue)
+        val c = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { "id" }, { "hash" }), tutor, formatClock = { "12:00" }, nowMillis = { now })
+        try {
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { ReviewScreen(c, CourseView(events, project(events)), { _, _ -> }, {}) } } }
+                onNodeWithText("再练一组").performClick()
+                val open = Json.parseToJsonElement(assertNotNull(queue.tryReceive().getOrNull())).jsonObject
+                val retry = Json.parseToJsonElement(assertNotNull(queue.tryReceive().getOrNull())).jsonObject
+                assertEquals("tutor.open", open.getValue("t").jsonPrimitive.content)
+                assertEquals("mistakes:K", open.getValue("threadId").jsonPrimitive.content)
+                assertTrue(open.getValue("review").jsonPrimitive.boolean, "The separate mistakes thread must not claim the ordinary KP binding")
+                assertEquals("tutor.retryMistakes", retry.getValue("t").jsonPrimitive.content)
+                assertEquals("mistakes:K", retry.getValue("threadId").jsonPrimitive.content)
+            }
+        } finally { tutor.close(); queue.cancel(); driver.close() }
+    }
     private fun facts(examKnown: Boolean): List<Event> {
         val day = logicalDay(now, "Europe/London")
         val payloads = mutableListOf(

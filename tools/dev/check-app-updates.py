@@ -100,10 +100,14 @@ def main():
                COACH_LOG_DIR=str(out / 'logs'), COACH_PACKS_DIR=str(out / 'packs'), COACH_STATE_DIR=str(out / 'state'),
                COACH_PORT=str(PORT), COACH_TAIL_HOST=tail_host(), COACH_TRAFFIC='test',
                COACH_BRIDGE_URL='http://127.0.0.1:1', COACH_SOURCE_LOOKUP='false', COACH_APP_UPDATE_DIR=str(updates))
-    server = emulator = None
+    server = emulator = logcat = None
     logs = []
     def log(name):
         handle = (out / name).open('wb'); logs.append(handle); return handle
+    stages = log('stages.txt')
+    def stage(text):
+        # Content-free timeline so a failure can be placed against server and device logs.
+        stages.write(f'{time.strftime("%H:%M:%S", time.gmtime())}Z {text}\n'.encode()); stages.flush()
     try:
         server = subprocess.Popen([str(ROOT / 'server/app/build/install/app/bin/app')], env=env,
                                   stdout=log('server.log'), stderr=subprocess.STDOUT)
@@ -136,6 +140,8 @@ def main():
         adb('uninstall', PACKAGE, check=False)
         adb('install', out / 'N.apk', timeout=90)
         adb('install', '-r', out / 'test.apk', timeout=90)
+        logcat = subprocess.Popen([adb_bin, '-s', serial, 'logcat', '-v', 'threadtime'],
+                                  stdout=log('logcat.txt'), stderr=subprocess.STDOUT)
         # Write as the debuggable target UID: shell-created external files are
         # not readable by the app under Android 15's scoped-storage rules.
         fixture = 'files/update-fixtures'
@@ -166,11 +172,12 @@ def main():
             adb('shell', 'uiautomator', 'dump', '/sdcard/ton1252.xml', check=False)
             return ET.fromstring(adb('shell', 'cat', '/sdcard/ton1252.xml').stdout)
         def find(label, timeout=40):
+            stage('wait ' + label)
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 nodes = list(tree().iter('node'))
                 for node in nodes:
-                    if label in (node.get('text', '') + node.get('content-desc', '')): return node
+                    if label in (node.get('text', '') + node.get('content-desc', '')): stage('saw ' + label); return node
                 time.sleep(.3)
             raise RuntimeError('UI did not show: ' + label)
         def tap(node):
@@ -199,9 +206,9 @@ def main():
         (out / 'version-before.txt').write_text('\n'.join(line.strip() for line in before.splitlines() if 'versionCode=' in line or 'versionName=' in line))
         # Server fault injection is confined to the isolated publication directory.
         release(wrong)
-        adb('emu', 'network', 'speed', '10000:10000')
+        adb('emu', 'network', 'speed', '10000:10000'); stage('network limited')
         tap(find('下载并更新')); find('正在下载'); screenshot('02-download-progress')
-        adb('emu', 'network', 'speed', 'full')
+        adb('emu', 'network', 'speed', 'full'); stage('network full')
         find('签名与当前应用不一致'); screenshot('02-signature-rejected')
         print('Wrong signing identity rejected in app: PASS', flush=True)
         bad_hash = dict(valid, sha256='0' * 64)
@@ -232,6 +239,20 @@ def main():
                    'productionWrites': 0, 'realTutorCalls': 0, 'phoneUsed': False}
         (out / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)
+    except BaseException:
+        # Keep the failing device state privately before the emulator is torn down.
+        if emulator is not None and emulator.poll() is None:
+            stage('failure capture')
+            failure = out / 'failure'
+            failure.mkdir(mode=0o700, exist_ok=True)
+            for name, command in [('screen.png', ('exec-out', 'screencap', '-p')),
+                                  ('ui.xml', ('exec-out', 'uiautomator', 'dump', '/dev/tty')),
+                                  ('package.txt', ('shell', 'dumpsys', 'package', PACKAGE)),
+                                  ('files.txt', ('shell', 'run-as', PACKAGE, 'ls', '-laR', 'cache', 'files'))]:
+                try: (failure / name).write_bytes(adb(*command, check=False, timeout=20).stdout)
+                except subprocess.TimeoutExpired: pass
+            time.sleep(2)
+        raise
     finally:
         if emulator is not None and emulator.poll() is None:
             adb('emu', 'kill', check=False, timeout=10)
@@ -241,6 +262,8 @@ def main():
             server.terminate()
             try: server.wait(timeout=15)
             except subprocess.TimeoutExpired: server.kill(); server.wait(timeout=5)
+        if logcat is not None and logcat.poll() is None:
+            logcat.terminate(); logcat.wait(timeout=10)
         for handle in logs: handle.close()
 
 

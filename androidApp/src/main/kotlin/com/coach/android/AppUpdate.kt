@@ -195,7 +195,8 @@ internal fun AppUpdatePrompt(context: Context, serverUrl: String, credentials: P
     AlertDialog(onDismissRequest = { updater.hide() }, title = { Text("Coach 有新版本") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("版本 ${release.name} · 升级会保留学习记录和配对。")
-            if (state.progress != null) { LinearProgressIndicator(progress = { state.progress!! / 100f }, modifier = Modifier.fillMaxWidth()); Text("正在下载 ${state.progress}%") }
+            // The indicator reads its lambda later (draw/semantics); capture the value instead of re-reading nullable state.
+            state.progress?.let { progress -> LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth()); Text("正在下载 $progress%") }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (state.ready && !context.packageManager.canRequestPackageInstalls()) Text("首次更新需允许 Coach 安装应用；允许后会继续安装。")
         } },

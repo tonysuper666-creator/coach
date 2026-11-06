@@ -235,7 +235,7 @@ finally:
     # Failure evidence written by the instrumented test, kept next to the other artifacts.
     try: snaps = [n for n in run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'ls', 'cache']).split() if n.startswith('review-snap-')]
     except Exception: snaps = []
-    for name in ['review-fail.png', 'review-fail.txt', 'review-trace.txt'] + snaps:
+    for name in ['review-fail.png', 'review-fail.txt', 'review-fail-run.txt', 'review-trace.txt'] + snaps:
         try: (OUT/name).write_bytes(run([ADB, '-s', SERIAL, 'exec-out', 'run-as', PACKAGE, 'cat', 'cache/'+name], binary=True))
         except Exception: pass
     for p in reversed(children): stop(p)

@@ -101,6 +101,24 @@ class ExamPanelTest {
         assertEquals("W7–W8、W10", weekSpans(missing.unplanned))
     }
 
+    @Test fun aMidtermWeekTheOutlineExemptsIsShownAsExemptNotMissingAndNeverMastered() {
+        val exemption = e("outline_revised", json("week7" to json("knowledgePoints" to 0, "reason" to "Week 7 is Midterm Exam; no new lecture.")))
+        val weighted = ExamFocus(focus.weeks + listOf(WeekFocus(7, 2.0), WeekFocus(8, 1.0)))
+        val panel = view(exemption).examPanel(now, weighted)
+        val w7 = panel.weeks.single { it.week == 7 }
+        assertTrue(w7.exempt)
+        assertEquals(0, w7.total)
+        assertEquals(0.0, w7.score, "an exempt week is not counted as mastered")
+        assertNull(w7.action)
+        assertEquals(listOf(8), panel.unplanned, "only the week without exemption metadata is reported missing")
+        assertFalse(panel.weeks.single { it.week == 8 }.exempt)
+
+        // 没有豁免元数据时，W7 照旧算押题周缺课。
+        assertEquals(listOf(7, 8), view().examPanel(now, weighted).unplanned)
+        // 没有押题配置：W7 也照样列出并标豁免。
+        assertTrue(view(exemption).examPanel(now, null).weeks.single { it.week == 7 }.exempt)
+    }
+
     @Test fun malformedPrivateConfigIsIgnoredRatherThanTrusted() {
         val parsed = ExamFocus.parse(json("weeks" to JsonArray(listOf(
             json("week" to 4, "weight" to 3, "topic" to "T"), json("week" to 0, "weight" to 9),

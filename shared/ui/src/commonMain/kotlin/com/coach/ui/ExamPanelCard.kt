@@ -151,7 +151,8 @@ private fun WeekLine(row: WeekMastery) {
         Text("W${row.week}", Modifier.widthIn(min = 32.dp), style = MaterialTheme.typography.labelLarge)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             if (row.topic.isNotBlank()) Text(row.topic, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-            if (row.total == 0) Text("大纲里还没有这周的知识点", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (row.exempt) Text("期中周（无新课，豁免）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else if (row.total == 0) Text("大纲里还没有这周的知识点", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else LinearProgressIndicator(progress = { row.score.toFloat() }, Modifier.fillMaxWidth().height(6.dp), color = successColor(), trackColor = MaterialTheme.colorScheme.surfaceVariant, strokeCap = androidx.compose.ui.graphics.StrokeCap.Round, gapSize = 0.dp, drawStopIndicator = {})
         }
         if (row.total > 0) Text("${row.passed}/${row.total} 过" + if (row.solid > 0) " · ${row.solid} 稳" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

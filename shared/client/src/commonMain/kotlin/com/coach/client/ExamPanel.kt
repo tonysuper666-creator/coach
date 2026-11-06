@@ -40,6 +40,8 @@ data class WeekMastery(
     val week: Int, val topic: String, val total: Int, val passed: Int, val solid: Int, val needsRepair: Int,
     /** 0..1：已通过算一半，稳固算满。 */
     val score: Double, val weight: Double, val priority: Double, val action: ExamAction?,
+    /** 大纲明确记了这周没有新课（期中周豁免）：不是缺课，也不算掌握。 */
+    val exempt: Boolean = false,
 )
 
 sealed interface ExamCountdown {
@@ -83,13 +85,13 @@ fun CourseView.examPanel(nowMillis: Long, focus: ExamFocus?): ExamPanel {
             else -> null
         }
         WeekMastery(week, focus?.topic(week).orEmpty(), kps.size, passed, solid, kps.count { it.status == KpStatus.NEEDS_REPAIR },
-            score, weight, weight * (1 - score), action)
+            score, weight, weight * (1 - score), action, exempt = kps.isEmpty() && week in midtermExemptionWeeks)
     }
     val top = rows.filter { it.priority > 0 && it.action != null }
         .sortedWith(compareByDescending<WeekMastery> { it.priority }.thenByDescending { it.weight }.thenBy { it.week })
         .take(3)
     val offFocus = rows.filter { it.total > 0 && it.score < 1 && it.weight == 0.0 }.map { it.week }
-    val unplanned = rows.filter { it.total == 0 && it.weight > 0 }.map { it.week }
+    val unplanned = rows.filter { it.total == 0 && it.weight > 0 && !it.exempt }.map { it.week }
     return ExamPanel(countdown, rows, top, focus != null, offFocus, unplanned)
 }
 

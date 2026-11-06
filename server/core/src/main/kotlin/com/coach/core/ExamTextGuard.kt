@@ -82,11 +82,10 @@ class ExamTextIndex(documents: List<String>) {
             }
             val words = Regex("[a-z]+").findAll(normalized).map {
                 val start = starts[it.range.first]
-                // Formula variables and literal TeX command names are not English
-                // words. Keep their offsets for streaming: a partial variable can
-                // still grow into a word in the next delta.
-                val matchable = (it.value.length > 1 || it.value == "a" || it.value == "i") &&
-                    (visible || start == 0 || text[start - 1] != '\\')
+                // Single-letter formula variables are not English words, except
+                // articles/pronouns. Keep all raw offsets for partial words and
+                // retain backslash-prefixed words in the literal view.
+                val matchable = it.value.length > 1 || it.value == "a" || it.value == "i"
                 Word(it.value, start, ends[it.range.last], matchable)
             }.toList()
             // Ignored suffixes do not finish a word (e.g. "Am**" or "Am\u200B").

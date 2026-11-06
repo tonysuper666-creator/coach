@@ -166,6 +166,14 @@ class ExamTextGuardTest {
     @Test fun texTextWrappersCannotHideVisibleWords() =
         assertObfuscationBlocked(quote.split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" })
 
+    @Test fun backslashPrefixedWordsRemainProtectedIncludingInsideCode() {
+        val words = quote.split(" ")
+        val everyWord = words.joinToString(" ") { "\\$it" }
+        val alternating = words.mapIndexed { i, word -> if (i % 2 == 0) "\\$word" else word }.joinToString(" ")
+        for (input in listOf(everyWord, alternating, "`$everyWord`"))
+            assertObfuscationBlocked(input)
+    }
+
     @Test fun literalControlWordPrefixesCannotSplitOffTheirBackslash() {
         val commands = listOf("in", "to", "not", "max", "text")
         val collisionIndex = ExamTextIndex(listOf(exam) + commands.map { "$it $quote." })

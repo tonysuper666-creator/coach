@@ -27,7 +27,8 @@ internal class ExamOverlap(documents: List<String>) {
         "hнһ", "iіι", "jјϳ", "kкκ", "lӏ", "mм", "oоο", "pрρ", "qԛ", "sѕ", "tтτ", "uυ",
         "vѵν", "wԝ", "xхχ", "yу").flatMap { group -> group.drop(1).map { it to group.first() } }.toMap()
     // Independent regex implementation of the English-word criterion: formula
-    // variables and control names are not prose; articles/pronouns still count.
+    // variables are not prose; articles/pronouns still count. The literal view
+    // retains readable backslash-prefixed words, even inside code spans.
     private fun english(text: String) = Regex("[a-z]+").findAll(text).map { it.value }
         .filter { it.length > 1 || it == "a" || it == "i" }.toList()
     private fun words(text: String): List<String> {
@@ -39,7 +40,7 @@ internal class ExamOverlap(documents: List<String>) {
         return english(folded)
     }
     private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKC)
-        .replace(Regex("\\\\[A-Za-z]+"), "").lowercase(java.util.Locale.ROOT))
+        .lowercase(java.util.Locale.ROOT))
     private val windows = documents.flatMap { words(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
     private val literalWindows = documents.flatMap { literal(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
     fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
@@ -145,6 +146,15 @@ class ExamOutputTest {
             assertTrue(checker.hit(exams.first().split(" ").joinToString(" $filler ")))
         assertTrue(checker.hit(exams.first().split(" ").joinToString(" ") { "\\text{$it}" }))
         assertTrue(checker.hit(exams.first().replace(" ", "_")))
+    }
+
+    @Test fun independentCheckerDetectsBackslashPrefixedWords() {
+        val checker = ExamOverlap(exams)
+        val words = exams.first().split(" ")
+        val everyWord = words.joinToString(" ") { "\\$it" }
+        assertTrue(checker.hit(everyWord))
+        assertTrue(checker.hit(words.mapIndexed { i, word -> if (i % 2 == 0) "\\$word" else word }.joinToString(" ")))
+        assertTrue(checker.hit("`$everyWord`"))
     }
 
     @Test fun bufferedEnglishPrefixDoesNotTurnActiveChineseStreamingIntoAStall() = runBlocking {

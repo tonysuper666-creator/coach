@@ -1,5 +1,21 @@
 # DeepTutor 迁移工具
 
+## 离线追加大纲（TON-1262）
+
+`add-outline` 给已有课程追加知识点。先从只读生产连接做 SQLite online backup，在新副本上验收；命令要求显式指定已有数据库目录，并持有服务端的 `server.lock`。不要对正在使用的库导入。
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :server:store:test :tools:migrate-deeptutor:installDist
+tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor add-outline \
+  --input "$PRIVATE_OUTLINE_JSON" --database "$OFFLINE_DATABASE_DIR"
+```
+
+输入沿用本地大纲清单：`course.id`、`additive:true`、`retiresExisting:false`、`modules`（`id/ordinal/name`）和 `knowledgePoints`（`id/moduleId/ordinal/title/week/examFormats/prerequisiteIds/anchors`）。标题用既有 `【W8·…】` 周次标记，须与 `week` 一致；锚点包含 `docId/pdfPage`，可带 `bookPage`，只引用同课程已有、可见且有正文的教材页。可选 `sourceAnchor` 必须属于 `anchors`。不导入源文档或新考试权重，不生成虚构的无教学内容周知识点。
+
+新 ID 和模块不得覆盖已有记录，顺序必须接在旧点之后，先修必须存在且无环。工具从新点生成安全的 `add` 操作，忽略输入 `ops`，在同一事务写入 `outline_kp`、模块、可选的既有 `course_content` 元数据及一条 `outline_revised` 事件。旧装载库没有 `course_content` 时继续沿用事件与 packs 路径。原有点、学习事实、教材和考试权重保留；任何写入失败全部回滚。相同规范化事件哈希重复导入输出 `unchanged`，同 ID 内容冲突则拒绝，不作修订。
+
+真实输入、隔离副本及报告存放在仓库和 DeepTutor 之外的私有目录；仓库只收合成测试数据。此入口的验证不替代开讲、开练、模拟器及上线验收。
+
 ## 已确认迁移：离线写入、在线备份和回退（TON-1095）
 
 `apply-confirmed` 直接在指定的现有 Coach 库调用经复核的 `writeHistory`，不会用旧预演库替换生产库，也不会启动服务。`rollback-confirmed` 只恢复本次导入之前的备份。真实材料、备份和输出必须放在仓库及 DeepTutor 外的私有目录。备份、目标库和输入目录必须相互分离。

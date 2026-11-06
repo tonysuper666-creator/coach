@@ -15,7 +15,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Reuse verified original questions with fresh attempt IDs and server grading. Never alters the weekly cursor. */
 @Composable
-fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, onBack: () -> Unit) {
+fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: String = "← 今天", onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var thread by remember(week) { mutableStateOf<String?>(null) }
     var choice by remember(thread) { mutableStateOf<String?>(null) }
@@ -42,7 +42,7 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, onBack: 
     val group = thread?.let { view.quizGroups(it).lastOrNull() }
     val card = group?.cards?.singleOrNull()
     Column(Modifier.fillMaxSize()) {
-        TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
+        TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(back) }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text("第 $week 周错题", style = MaterialTheme.typography.titleLarge) }
             if (card != null) {

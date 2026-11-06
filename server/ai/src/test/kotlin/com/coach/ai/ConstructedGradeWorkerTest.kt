@@ -118,6 +118,43 @@ class ConstructedGradeWorkerTest {
         } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 
+    @Test fun transientGraderOutageIsRetriedInsteadOfDroppingTheAnswer() = runBlocking<Unit> {
+        var now=1793188800000L
+        val dir=Files.createTempDirectory("grade-outage")
+        val actor=LedgerActor(this,LedgerStore(dir) { now })
+        try { StubBridge().use { bridge ->
+            actor.execute { poseAndSubmit() }
+            // The bridge restarts (or is still binding its port) while the answer waits for its first grade.
+            bridge.enqueue(503,"""{"error":"bridge restarting"}""")
+            val worker=ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge)))
+            assertTrue(worker.runOne())
+            val job=actor.execute { constructedRecord("c","a")!! }.getValue("jobs").jsonArray.single().jsonObject
+            assertEquals("queued",job.str("state"),"a channel outage must not permanently drop the answer's grade")
+            assertFalse(worker.runOne())
+            now+=60_000
+            bridge.enqueue(200,StubBridge.completion(draft()))
+            assertTrue(worker.runOne())
+            assertEquals("AI_UNREVIEWED",actor.execute { events("c").single { it.type=="attempt_graded" }.payload.str("status") })
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun wakeRecoveryDoesNotSpendTheReviewRetryBudget() = runBlocking<Unit> {
+        val now=1793188800000L
+        val dir=Files.createTempDirectory("grade-wake")
+        val actor=LedgerActor(this,LedgerStore(dir) { now })
+        try { StubBridge().use { bridge ->
+            actor.execute { poseAndSubmit() }
+            bridge.enqueue(200,StubBridge.completion(draft()))
+            assertTrue(ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge))).runOne())
+            // The Mac sleeps three times while the cross-vendor review is in flight; every wake requeues the claim.
+            repeat(3) { actor.execute { assertNotNull(claimGradeWork());recoverSuspension() } }
+            bridge.enqueue(503,"""{"error":"review temporarily unavailable"}""")
+            assertTrue(ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge))).runOne())
+            val review=actor.execute { constructedRecord("c","a")!! }.getValue("jobs").jsonArray.map { it.jsonObject }.single { it.str("kind")=="review_grade" }
+            assertEquals("queued",review.str("state"),"sleeping through a review must not use up its retries")
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
     @Test fun claudeRateLimitFallsBackWithNoticeAndRetainsCrossVendorReview() = runBlocking<Unit> {
         val dir=Files.createTempDirectory("grade-fallback")
         val actor=LedgerActor(this,LedgerStore(dir))
@@ -154,6 +191,22 @@ class ConstructedGradeWorkerTest {
             LedgerStore.restore(dir,backup).use { restored ->
                 assertFalse(restored.persistGradeReview(review,json("decision" to "CONFIRM")))
                 assertTrue(restored.events("c").none { it.type=="grade_reviewed" })
+            }
+            backup.toFile().deleteRecursively()
+        } finally { runCatching { store.close() };dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun answerWaitingForItsGraderStillOpensInTheRecordViewAfterRestore() {
+        val dir=Files.createTempDirectory("grade-restore-record")
+        val store=LedgerStore(dir)
+        try {
+            store.poseAndSubmit()
+            // The scheduled backup ran while the answer was still waiting for its grader.
+            val backup=store.backup(dir.resolveSibling(dir.fileName.toString()+"-backup"))
+            store.close()
+            LedgerStore.restore(dir,backup).use { restored ->
+                val record=assertNotNull(restored.constructedRecord("c","a"),"restored answer no longer opens in the record view")
+                assertTrue(record.getValue("jobs").jsonArray.map { it.jsonObject }.any { it.str("kind")=="grade_attempt" && it.str("state")=="queued" })
             }
             backup.toFile().deleteRecursively()
         } finally { runCatching { store.close() };dir.toFile().deleteRecursively() }

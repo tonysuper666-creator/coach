@@ -45,7 +45,9 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 }
                 actor.execute { draft.calls.forEach { recordAiCall(it.toJson(),"foreground") } }
                 if(draft.defects.isNotEmpty() || draft.draft==null) {
-                    actor.execute { failGradeWork(work,draft.defects.joinToString(),false) };return true
+                    // A bridge that is restarting or rate limited is not a verdict on the answer; only a bad grade is final.
+                    val outage=draft.defects.isNotEmpty() && draft.defects.all { it.startsWith("grade_call_") }
+                    actor.execute { failGradeWork(work,draft.defects.joinToString(),outage) };return true
                 }
                 val grader=draft.calls.last().servedBy ?: error("missing_grader_identity")
                 val payload=gradePayload(requireNotNull(draft.draft),answer,numeric,question,input.str("finalAnswer"),draft.evidenceSpans)
@@ -74,7 +76,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 if(committed) onChanged(input.str("course"))
             }
         } catch(e: CancellationException) { throw e }
-        catch(e: Exception) { actor.execute { failGradeWork(work,e.javaClass.simpleName) } }
+        catch(e: Exception) { actor.execute { failGradeWork(work,e.javaClass.simpleName,work.kind=="review_grade") } }
         return true
     }
 }

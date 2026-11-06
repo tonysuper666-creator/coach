@@ -19,6 +19,9 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
 
+private const val LEDGER_FRAME_BYTES = 256 * 1024
+private const val LEDGER_READ_PAGE = 128
+
 class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), private var mono: Long = System.nanoTime()) {
     fun sample(now: Long, nano: Long): Boolean {
         val wallDelta = now-wall;val monoDelta=(nano-mono)/1_000_000
@@ -218,20 +221,82 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 return false
             }
             val cursors=mutableMapOf<String,Long>()
+            val notified=mutableMapOf<String,Long>()
+            val httpCourses=mutableSetOf<String>()
+            var streaming=false
             var epoch=""
-            suspend fun catchUp() {
+            val ledgerSend=Mutex()
+            suspend fun catchUpLocked() {
                 // Recheck revocation on established sockets before sending any learning data.
                 if (!stillAuthorized()) return
-                val meta=actor.execute { hello() }
-                if(meta.epoch!=epoch) { epoch=meta.epoch;cursors.clear();send(Frame.Text(LedgerJson.encodeToString(meta))) }
-                for(course in actor.execute { courses() }) {
-                    val es=actor.execute { events(course,cursors[course] ?: 0) }
-                    if(es.isNotEmpty()) { send(Frame.Text(LedgerJson.encodeToString(LedgerFrame(course=course,epoch=epoch,events=es))));cursors[course]=es.last().seq }
+                val (meta,heads)=actor.execute { hello() to courseHeads() }
+                if(meta.epoch!=epoch) {
+                    epoch=meta.epoch;cursors.clear();notified.clear();httpCourses.clear()
+                    send(Frame.Text(LedgerJson.encodeToString(meta)))
+                }
+                suspend fun hint(course: String, head: Long) {
+                    if(head <= (notified[course] ?: 0)) return
+                    // Old HttpLedgerTransport watches `t=ledger` and pulls /events over HTTP.
+                    // Retain that signal without pushing the same history into tutor sockets.
+                    // Oversized events also use HTTP: remain in hint mode for this course until
+                    // a subsequent hello acknowledges recovery via ledgerAfter. Never claim an
+                    // empty frame delivered the missing event or stream past that gap.
+                    val after=cursors[course] ?: 0
+                    val notice=json("t" to "ledger","course" to course,"epoch" to epoch,
+                        "events" to JsonArray(emptyList()),
+                        "httpCatchUp" to json("after" to after,"throughSeq" to head,
+                            "url" to "/v1/courses/${course.encodeURLPathPart()}/events?after=$after"))
+                    if (!stillAuthorized()) return
+                    val text=notice.toString()
+                    // An unusually long course ID can itself exceed the envelope budget.
+                    // Hello is also an existing HTTP-sync signal and has no course identifier.
+                    send(Frame.Text(if(text.toByteArray(Charsets.UTF_8).size <= LEDGER_FRAME_BYTES) text else LedgerJson.encodeToString(meta)))
+                    notified[course]=head
+                }
+                for((course,head) in heads) {
+                    if(!streaming || course in httpCourses) { hint(course,head);continue }
+                    // A fixed high-water mark bounds this pass even when writers keep appending.
+                    // Subscription is established before the initial pass, so a queued push
+                    // drains anything committed after this watermark in the next pass.
+                    while((cursors[course] ?: 0) < head) {
+                        val es=actor.execute {
+                            if(hello().epoch != epoch) null
+                            else events(course,cursors[course] ?: 0,LEDGER_READ_PAGE,head)
+                        } ?: return
+                        if(es.isEmpty()) break
+                        val prefix=json("t" to "ledger","course" to course,"epoch" to epoch).toString().dropLast(1)+",\"events\":["
+                        val envelopeBytes=prefix.toByteArray(Charsets.UTF_8).size+2
+                        val encoded=mutableListOf<String>()
+                        var bytes=envelopeBytes
+                        var through=cursors[course] ?: 0
+                        suspend fun flush(): Boolean {
+                            if(encoded.isEmpty()) return true
+                            if(!stillAuthorized()) return false
+                            send(Frame.Text(prefix+encoded.joinToString(",")+"]}"))
+                            cursors[course]=through
+                            encoded.clear();bytes=envelopeBytes
+                            return true
+                        }
+                        for(event in es) {
+                            val text=LedgerJson.encodeToString(event)
+                            val size=text.toByteArray(Charsets.UTF_8).size
+                            if(bytes+size+(if(encoded.isEmpty()) 0 else 1) > LEDGER_FRAME_BYTES && !flush()) return
+                            if(envelopeBytes+size > LEDGER_FRAME_BYTES) {
+                                httpCourses.add(course)
+                                hint(course,head)
+                                break
+                            }
+                            bytes+=size+(if(encoded.isEmpty()) 0 else 1)
+                            encoded.add(text);through=event.seq
+                        }
+                        if(!flush()) return
+                        if(course in httpCourses) break
+                    }
                 }
             }
-            catchUp()
+            suspend fun catchUp() = ledgerSend.withLock { catchUpLocked() }
             // Receive and push concurrently; StateFlow is not a durable ledger, reconnect catches up from SQLite.
-            val sender=launch { pushes.collect { catchUp() } }
+            val sender=launch(start = CoroutineStart.UNDISPATCHED) { pushes.collect { catchUp() } }
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
             // Serialize resume snapshot creation + delivery against this socket's deltas.
             val firstWords = WsFirstWords(device, observation)
@@ -242,15 +307,31 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 } }
             } }
             val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
-            try { for(frame in incoming) if(frame is Frame.Text) {
+            try {
+            catchUp()
+            for(frame in incoming) if(frame is Frame.Text) {
                 val receivedAt = System.nanoTime()
                 if (!stillAuthorized()) break
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
                 firstWords.received(message)
                 try { when(message.str("t")) {
                     "hello" -> {
-                        for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) cursors[course]=seq.jsonPrimitive.long
-                        catchUp()
+                        ledgerSend.withLock {
+                            val currentEpoch=actor.execute { hello().epoch }
+                            // Missing epoch is accepted for v1 compatibility; an explicit stale
+                            // epoch must not skip restored history using a pre-restore cursor.
+                            val compatible=message.str("epoch").let { it.isEmpty() || it==currentEpoch }
+                            if(epoch!=currentEpoch) {
+                                epoch=currentEpoch;cursors.clear();notified.clear();httpCourses.clear()
+                                send(Frame.Text(LedgerJson.encodeToString(actor.execute { hello() })))
+                            }
+                            streaming=true
+                            cursors.clear();notified.clear();httpCourses.clear()
+                            if(compatible) for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) {
+                                (seq as? JsonPrimitive)?.longOrNull?.let { cursors[course]=it.coerceAtLeast(0) }
+                            }
+                            catchUpLocked()
+                        }
                     }
                     "msg.ask" -> {
                         val service=chat

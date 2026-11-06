@@ -37,14 +37,17 @@ class ExamTextIndex(documents: List<String>) {
 
     internal data class Word(val value: String, val start: Int, val end: Int)
     companion object {
-        // Keep raw offsets through compatibility normalization (full-width letters/ligatures).
+        // Keep raw offsets through compatibility normalization. Combine marks with
+        // their base so decomposed accents have the same words as whole-text NFKC.
         internal fun words(text: String): List<Word> {
             val normalized = StringBuilder()
             val starts = ArrayList<Int>()
             val ends = ArrayList<Int>()
             var offset = 0
             while (offset < text.length) {
-                val end = offset + Character.charCount(text.codePointAt(offset))
+                var end = offset + Character.charCount(text.codePointAt(offset))
+                while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
+                    end += Character.charCount(text.codePointAt(end))
                 val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKC).lowercase(Locale.ROOT)
                 piece.forEach { normalized.append(it); starts.add(offset); ends.add(end) }
                 offset = end
@@ -53,6 +56,7 @@ class ExamTextIndex(documents: List<String>) {
                 Word(it.value, starts[it.range.first], ends[it.range.last])
             }.toList()
         }
+        private val MARK_TYPES = setOf(Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt())
     }
 }
 

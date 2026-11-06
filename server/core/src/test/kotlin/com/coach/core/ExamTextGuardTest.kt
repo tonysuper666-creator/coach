@@ -27,6 +27,7 @@ class ExamTextGuardTest {
             "AMBER, badgers. carry\ndelicate **emerald** feathers gently home",
             "Ａｍｂｅｒ badgers carry delicate emerald feathers gently home!",
             "𝔄mber badgers carry delicate emerald feathers gently home!",
+            "Amber e\u0301 badgers carry delicate emerald feathers gently home!",
             "Amber badgers carry delicate \$\$emerald\$\$ feathers gently home",
         )
         for (input in variants) repeat(10) { seed ->

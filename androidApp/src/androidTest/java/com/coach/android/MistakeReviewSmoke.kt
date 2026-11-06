@@ -322,18 +322,9 @@ class MistakeReviewSmoke {
         }
         throw AssertionError("Visible text missing: $text")
     }
-    /** The submit control is a fixed footer, outside the scrolling question list. */
+    /** Submit can be below the viewport or visible at its edge. */
     private fun submitAnswers() {
-        val end=SystemClock.elapsedRealtime()+5_000
-        while(SystemClock.elapsedRealtime()<end) {
-            find("提交本组答案")?.let { click(it);return }
-            if(find("选完",substring=true)!=null) {
-                val missing=(1..3).firstOrNull { it !in selectedCards }
-                throw AssertionError("第 ${missing ?: "未知"} 题未选中，提交按钮仍不可用")
-            }
-            Thread.sleep(100)
-        }
-        throw AssertionError("提交按钮未出现")
+        click(scrollTo("提交本组答案"))
     }
     /** On wide layouts Today remains alongside the study pane and needs no back button. */
     private fun returnToToday() {
@@ -424,6 +415,7 @@ class MistakeReviewSmoke {
     private fun scrollTo(text: String,substring: Boolean=false,card: Int?=null): AccessibilityNodeInfo {
         // 先请已组合的行自己滚进来：短拖会被吸附回原位，这一步最省。
         repeat(3) {
+            if(text=="提交本组答案") find(text)?.let { return it }
             val node=find(text,substring,anyVisibility=true) ?: return@repeat
             val pageRect=page()?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             val r=android.graphics.Rect();node.getBoundsInScreen(r)
@@ -436,6 +428,7 @@ class MistakeReviewSmoke {
         var moved: Boolean?=null
         while(true) {
             checkTime("scrollTo ${text.take(30)}")
+            if(text=="提交本组答案") find(text)?.let { return it }
             val before=look(text,substring)
             if(text=="提交本组答案" && before.view.atFooter && find("选完",substring=true)!=null) {
                 val missing=(1..3).firstOrNull { it !in selectedCards }

@@ -16,29 +16,31 @@ class Ton1175Jfr {
     static final long MAX_HEALTH_BYTES = 1024;
     static final int MAX_ROUND_READS = 4;
     static final long ROUND_SPAN_NANOS = Duration.ofSeconds(5).toNanos();
+    static final long INTRA_ROUND_GAP_NANOS = Duration.ofMillis(100).toNanos();
     static final long MIN_ROUND_GAP_NANOS = Duration.ofSeconds(9).toNanos();
 
-    record HealthEvent(Instant start, long thread, long bytes) {}
+    record HealthEvent(Instant start, Instant end, long thread, long bytes) {}
     static class Counts {
         long pid, jvmStartEpochMillis, socketReads, attributedHealthReads, clientReads;
-        long healthRounds, maxReadsPerRound, maxBytesPerRound, minRoundGapMillis;
+        long healthRounds, maxReadsPerRound, maxBytesPerRound, minRoundGapMillis, maxIntraRoundGapMicros;
         String rejectReason = "NONE";
         void emit() {
             System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStartEpochMillis\":%d,"
                 + "\"socketReads\":%d,\"attributedHealthReads\":%d,\"clientReads\":%d,"
                 + "\"healthRounds\":%d,\"maxReadsPerRound\":%d,\"maxBytesPerRound\":%d,"
-                + "\"minRoundGapMillis\":%d,\"rejectReason\":\"%s\"}%n",
+                + "\"minRoundGapMillis\":%d,\"maxIntraRoundGapMicros\":%d,\"rejectReason\":\"%s\"}%n",
                 pid, jvmStartEpochMillis, socketReads, attributedHealthReads, clientReads,
-                healthRounds, maxReadsPerRound, maxBytesPerRound, minRoundGapMillis, rejectReason);
+                healthRounds, maxReadsPerRound, maxBytesPerRound, minRoundGapMillis, maxIntraRoundGapMicros, rejectReason);
         }
     }
     static String rounds(List<HealthEvent> events, long windowNanos, Counts counts) {
         events.sort(Comparator.comparing(HealthEvent::start));
-        Instant first = null;
+        Instant first = null, previousEnd = null;
         long thread = -1, reads = 0, bytes = 0, minGap = Long.MAX_VALUE;
-        boolean crossedThreads = false, overReads = false, overBytes = false, shortGap = false;
+        boolean crossedThreads = false, overReads = false, overBytes = false, shortGap = false, overSpan = false;
         for (HealthEvent event : events) {
-            if (first == null || Duration.between(first, event.start()).toNanos() > ROUND_SPAN_NANOS) {
+            long intraGap = previousEnd == null ? Long.MAX_VALUE : Duration.between(previousEnd, event.start()).toNanos();
+            if (first == null || intraGap >= INTRA_ROUND_GAP_NANOS) {
                 if (first != null) {
                     long gap = Duration.between(first, event.start()).toNanos();
                     minGap = Math.min(minGap, gap);
@@ -46,7 +48,11 @@ class Ton1175Jfr {
                 }
                 first = event.start(); thread = event.thread(); reads = 0; bytes = 0;
                 counts.healthRounds++;
+            } else {
+                counts.maxIntraRoundGapMicros = Math.max(counts.maxIntraRoundGapMicros, intraGap / 1_000);
             }
+            if (event.end().isBefore(event.start()) || Duration.between(first, event.end()).toNanos() > ROUND_SPAN_NANOS) overSpan = true;
+            previousEnd = event.end();
             if (event.thread() < 0 || event.thread() != thread) crossedThreads = true;
             reads++; bytes += event.bytes();
             counts.maxReadsPerRound = Math.max(counts.maxReadsPerRound, reads);
@@ -58,6 +64,7 @@ class Ton1175Jfr {
         if (crossedThreads) return "ROUND_THREADS";
         if (overReads) return "ROUND_READ_LIMIT";
         if (overBytes) return "ROUND_BYTES_LIMIT";
+        if (overSpan) return "ROUND_SPAN";
         if (shortGap) return "ROUND_GAP";
         if (counts.healthRounds > healthReadLimit(windowNanos)) return "ROUND_COUNT";
         return "NONE";
@@ -156,7 +163,7 @@ class Ton1175Jfr {
                                         frames, bridgePort)) {
                                     counts.attributedHealthReads++;
                                     var thread = event.getThread();
-                                    health.add(new HealthEvent(event.getStartTime(), thread == null ? -1 : thread.getId(),
+                                    health.add(new HealthEvent(event.getStartTime(), event.getEndTime(), thread == null ? -1 : thread.getId(),
                                             event.getLong("bytesRead")));
                                 }
                             }

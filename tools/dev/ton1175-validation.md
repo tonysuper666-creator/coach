@@ -110,17 +110,22 @@ the bridge port to the active transaction's old plist and configuration hash.
 Only a non-truncated stack with the observed old `ChildServices` health frame,
 no client/routing/session frame, loopback address, matching port and at most
 1024 bytes can be attributed to health checks. SocketRead stack traces must be
-enabled throughout. Attributed reads are grouped by start time into rounds:
-reads no more than five seconds after the round's first read belong to that
-round, must come from one event thread, and are capped at four reads and 1024
-bytes in total. Consecutive round starts must be at least nine seconds apart,
-and the number of rounds cannot exceed `ceil(seconds/10)+2`.
-Two otherwise identical same-thread reads 250 ms apart cannot be distinguished
-from two reads in one probe with this data; do not treat this algorithm as proof
-that such a pair cannot be rapid retries. This ambiguity awaits Architect review.
+enabled throughout. Attributed reads are ordered by start time. A read belongs
+to the previous round only if its start is less than 100 ms after the previous
+read's end; otherwise it begins a new round. Each round spans at most five
+seconds, uses one event thread, and contains at most four reads and 1024 bytes.
+Consecutive round starts must be at least nine seconds apart, and the number of
+rounds cannot exceed `ceil(seconds/10)+2`. This distinction relies on the old
+`8d3608f` health loop's minimum 250 ms retry delay after completing a probe;
+the verifier requires that exact full old source head in the staged installation
+and transaction configuration, and `HEALTH_FRAME` pins the recorded frame. A
+long pause between reads in one probe can cause a safe rejection.
+The gate establishes absence of client reads and the shape of attributed reads;
+it cannot prove continuous bridge health, since failed connections may yield no reads.
 All other positive reads count as client reads and reject idle; evidence JSON
 cannot declare exclusions. Inspector output reports total, attributed health and
-client reads, rounds, per-round maxima, minimum gap and a fixed rejection code,
+client reads, rounds, per-round maxima, minimum round gap, maximum in-round gap
+in microseconds, and a fixed rejection code,
 including on rejection. The stage files, old plist and installation are read
 without following links and rechecked around inspection. Missing
 events/settings/coverage fail closed. Old recordings made without these enabled

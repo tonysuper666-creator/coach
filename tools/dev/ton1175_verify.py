@@ -26,6 +26,8 @@ try:
 except ImportError:
     from ton1175_switch import GateError, atomic, digest, file_hash, get_time, load, require, tree_hash
 
+HEALTH_LOOP_OLD_HEAD = '8d3608f5f32bb690f36284e71ca55ceec9e39bbf'
+
 
 def release_links(release):
     root = Path(release).resolve()
@@ -206,6 +208,9 @@ def staged_bridge_port(config_path, installation, expected_config_hash):
         pointers[key] = _read_file(config[key], parents[key], state[mode])
         require(digest(pointers[key][0]) == state['files']['old.' + extension],
                 'stage pointer is not the bound old side')
+    require(json.loads(pointers['installation'][0]).get('sourceHead')
+            == config.get('expectedSourceHead') == HEALTH_LOOP_OLD_HEAD,
+            'unreviewed managed health loop source')
     env = plistlib.loads(pointers['plist'][0])['EnvironmentVariables']
     pin = config['adapterEnvPins']['BRIDGE_PORT']
     require(isinstance(pin, str) and re.fullmatch(r'[1-9][0-9]{0,4}', pin)

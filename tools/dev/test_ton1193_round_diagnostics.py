@@ -19,7 +19,7 @@ class DiagnosticTest(unittest.TestCase):
                                             'windowEnd': 'end', 'pid': 123}))
             data = {'socketReads': 11, 'attributedHealthReads': 10, 'clientReads': 1,
                     'healthRounds': 3, 'maxReadsPerRound': 4, 'maxBytesPerRound': 900,
-                    'minRoundGapMillis': 10000, 'rejectReason': 'ROUND_READ_LIMIT',
+                    'minRoundGapMillis': 10000, 'maxIntraRoundGapMicros': 1000, 'rejectReason': 'ROUND_READ_LIMIT',
                     'address': 'private', 'stack': 'secret'}
             result = mock.Mock(returncode=1, stdout=json.dumps(data).encode(),
                                stderr=b'JFR evidence rejected; inspector line 1\n')
@@ -44,6 +44,25 @@ class DiagnosticTest(unittest.TestCase):
         counts['clientReads'] = True
         with self.assertRaises(ValueError):
             driver.safe_counts(counts)
+
+    def test_seal_diagnostic_is_closed_and_post_failure_only(self):
+        baseline = dict(closed=False, workQuiet=True, failures=0, active=0, ingress=7,
+                        rejected=0, lifetime='private', pid=2, jvmStart='private')
+        cases = [({}, 'NO_VISIBLE_CAUSE'), ({'closed': True}, 'CLOSED'),
+                 ({'seal': 'secret'}, 'ALREADY_SEALED'), ({'failures': 1}, 'WRITE_FAILURES'),
+                 ({'active': 1}, 'ACTIVE'), ({'workQuiet': False}, 'WORK_NOT_QUIET'),
+                 ({'lifetime': 'other'}, 'LIFETIME_CHANGED'), ({'ingress': 8}, 'INGRESS_CHANGED'),
+                 ({'rejected': 1}, 'REJECTED_CHANGED'), ({'active': True}, 'SNAPSHOT_INVALID')]
+        with mock.patch.object(driver.switch, 'load', return_value={}), \
+             mock.patch.object(driver.coverage, 'observed', return_value=({'socket': 'private'}, baseline)), \
+             mock.patch.object(driver.coverage, 'Control') as control:
+            for changes, expected in cases:
+                control.return_value.__enter__.return_value.ask.return_value = dict(baseline, **changes)
+                result = driver.seal_diagnostic({'idleEvidence': 'private'})
+                self.assertEqual(result, expected)
+                self.assertNotIn('private', result)
+            control.side_effect = OSError('secret')
+            self.assertEqual(driver.seal_diagnostic({'idleEvidence': 'private'}), 'SNAPSHOT_UNAVAILABLE')
 
 
 if __name__ == '__main__':

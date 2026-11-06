@@ -63,9 +63,35 @@ def wait_old(config, roots, label, kernel, owned):
 
 
 COUNTS = ('socketReads', 'attributedHealthReads', 'clientReads', 'healthRounds',
-          'maxReadsPerRound', 'maxBytesPerRound', 'minRoundGapMillis')
+          'maxReadsPerRound', 'maxBytesPerRound', 'minRoundGapMillis', 'maxIntraRoundGapMicros')
 REASONS = {'NONE', 'CLIENT_READ', 'ROUND_THREADS', 'ROUND_READ_LIMIT', 'ROUND_BYTES_LIMIT',
-           'ROUND_GAP', 'ROUND_COUNT', 'EVIDENCE_INVALID'}
+           'ROUND_GAP', 'ROUND_SPAN', 'ROUND_COUNT', 'EVIDENCE_INVALID'}
+
+
+def seal_diagnostic(config):
+    """Compare a post-failure snapshot; a concurrent change can obscure the cause."""
+    try:
+        proof = switch.load(config['idleEvidence'])
+        cov, end = coverage.observed(proof)
+        with coverage.Control(cov['socket']) as client:
+            current = client.ask('snapshot')
+        for key in ('closed', 'workQuiet'):
+            if type(current[key]) is not bool:
+                return 'SNAPSHOT_INVALID'
+        for key in ('failures', 'active', 'ingress', 'rejected'):
+            if type(current[key]) is not int or current[key] < 0:
+                return 'SNAPSHOT_INVALID'
+        if current['closed']: return 'CLOSED'
+        if current.get('seal'): return 'ALREADY_SEALED'
+        if current['failures']: return 'WRITE_FAILURES'
+        if current['active']: return 'ACTIVE'
+        if not current['workQuiet']: return 'WORK_NOT_QUIET'
+        if any(current[k] != end[k] for k in ('lifetime', 'pid', 'jvmStart')): return 'LIFETIME_CHANGED'
+        if current['ingress'] != end['ingress']: return 'INGRESS_CHANGED'
+        if current['rejected'] != end['rejected']: return 'REJECTED_CHANGED'
+        return 'NO_VISIBLE_CAUSE'
+    except (OSError, ValueError, KeyError, TypeError, switch.GateError):
+        return 'SNAPSHOT_UNAVAILABLE'
 
 
 def safe_counts(data):
@@ -261,6 +287,8 @@ def worker(config_path, report_path, inject):
                 report['unverified'].remove('successful switch')
             except switch.GateError as exc:
                 journal = json.loads((root / 'stage/journal.json').read_text())
+                if str(exc) == 'coverage unavailable':
+                    report['sealDiagnostic'] = seal_diagnostic(config)
                 if not inject or journal['phase'] != 'rolled_back':
                     raise
                 injected = json.loads((root / 'injected-acceptance.json').read_text())

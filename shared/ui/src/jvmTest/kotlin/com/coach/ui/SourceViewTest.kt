@@ -150,6 +150,24 @@ class SourceViewTest {
         } finally { fake.stop() }
     }
 
+    @Test fun turningPagesRendersTheirOwnTextAndCachedReturn() {
+        val fake = Fake()
+        try {
+            runComposeUiTest {
+                showResources(fake, SourceJump("textbook:2", 41))
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 41 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("（12 / 31）", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("下一页").performClick()
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 42 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("source-page-label").assertTextContains("PDF 第 42 页", substring = true)
+                onNodeWithText("这是第 41 页的正文。", substring = true).assertDoesNotExist()
+                onNodeWithText("上一页").performClick()
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 41 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                assertEquals(2, fake.pageHits.get(), "return uses the cached page")
+            }
+        } finally { fake.stop() }
+    }
+
     @Test fun unreachableMacSaysSoInsteadOfShowingAPlaceholder() {
         val fake = Fake(listWorks = false, pageWorks = false)
         try {

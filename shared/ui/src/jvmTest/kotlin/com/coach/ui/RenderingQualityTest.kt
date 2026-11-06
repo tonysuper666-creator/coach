@@ -143,4 +143,8 @@ class WrongAnswerCopyTest {
         val grade = com.coach.client.CardGrade(false, 0, 1, "回答错误，正确答案是 C。需求缺乏弹性，因为 |ε|<1")
         assertEquals("✗ 答错了，正确答案是 C：需求缺乏弹性，因为 |ε|<1", com.coach.ui.verdictText(grade))
     }
+    @Test fun chosenAnswerDoesNotProduceTwoColons() {
+        val grade = com.coach.client.CardGrade(false, 0, 1, "回答错误，正确答案是 B。你选的 A：需要留意条件")
+        assertEquals("✗ 答错了，正确答案是 B；你选的 A：需要留意条件", com.coach.ui.verdictText(grade))
+    }
 }

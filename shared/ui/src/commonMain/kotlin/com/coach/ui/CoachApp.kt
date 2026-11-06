@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 import com.coach.ui.adaptive.LayoutRules
@@ -86,7 +87,7 @@ enum class AppTab(val label: String, val glyph: String) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -99,6 +100,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var tab by remember { mutableStateOf(initialTab) }
     var source by remember { mutableStateOf<SourceJump?>(null) }
     var reviewWeek by remember { mutableStateOf<Int?>(null) }
+    AppBackHandler(source != null, reviewWeek != null, open != null,
+        closeSource = { source = null }, closeReview = { reviewWeek = null },
+        closeStudy = { open = null; tab = AppTab.TODAY }, register = backHandler)
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
     val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewWeek = null; source = null; open = id to start }
@@ -208,6 +212,20 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
 }
 
+/** Let Android own the system callback; the shared navigation decides which layer to close. */
+@Composable
+internal fun AppBackHandler(sourceOpen: Boolean, reviewOpen: Boolean, studyOpen: Boolean,
+                            closeSource: () -> Unit, closeReview: () -> Unit, closeStudy: () -> Unit,
+                            register: @Composable (Boolean, () -> Unit) -> Unit) {
+    register(sourceOpen || reviewOpen || studyOpen) {
+        when {
+            sourceOpen -> closeSource()
+            reviewOpen -> closeReview()
+            studyOpen -> closeStudy()
+        }
+    }
+}
+
 /** Pad 横屏：左讲解、右原文并排。讲解窗格是同一个 movable 内容，从单栏/两栏布局挪过来时保留它的组合状态。 */
 @Composable
 internal fun SourceSplit(study: @Composable () -> Unit, source: @Composable () -> Unit) {
@@ -240,11 +258,11 @@ private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
 }
 
 @Composable
-private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) -> Unit) {
+internal fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) -> Unit) {
     NavigationRail(containerColor = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxHeight()) {
         Spacer(Modifier.weight(1f))
         AppTab.entries.forEach { t ->
-            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
+            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, modifier = Modifier.clearAndSetSemantics { if (compact) contentDescription = t.label }, style = MaterialTheme.typography.titleMedium) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
         }
         Spacer(Modifier.weight(1f))
     }

@@ -125,6 +125,8 @@ def fold_outline(snapshot, supplement=None):
                 points[kp] = dict(raw, title=raw.get('title') or raw.get('name', ''), candidate=True)
     for point in points.values():
         point['weeks'] = point_weeks(point)
+        if not point.get('anchors') and point.get('sourceAnchor'):
+            point['anchors'] = [point['sourceAnchor']]
     return list(points.values())
 
 
@@ -220,7 +222,8 @@ def mistakes(snapshot):
         g = a['grade'] or {}
         if a['submitted'] and not a['voided'] and isinstance(g.get('score'), (int, float)) and isinstance(g.get('max'), (int, float)) and 0 <= g['score'] < g['max']:
             result.append(mistake_record(a, snapshot))
-    return result
+    selected = snapshot.get('selected_attempt_ids')
+    return result if selected is None else [r for r in result if r['attempt_id'] in selected]
 
 
 def mastery_rows(snapshot, points):
@@ -228,7 +231,9 @@ def mastery_rows(snapshot, points):
     cache = next((c for c in snapshot['caches'] if c['version'] == 4 and c['last_seq'] == last_seq and c['data'].get('version') == 4 and c['data'].get('lastSeq') == last_seq), None)
     result = {}
     for p in points:
-        if p.get('candidate'):
+        if p['id'] in snapshot.get('mastery_labels', {}):
+            state = snapshot['mastery_labels'][p['id']]
+        elif p.get('candidate'):
             state = '候选提纲尚未安装；掌握度未验证'
         elif not cache:
             state = '掌握度未验证（投影缺失、版本不支持或序号落后）'
@@ -313,13 +318,37 @@ def build_notes(snapshot, supplement=None, materials=(), weeks=11):
                        'points': selected, 'mistakes': records, 'mastery': {p['id']: mastery[p['id']] for p in selected},
                        'formulas': formulas(formula_text), 'materials': source_sections,
                        'week_note': (supplement or {}).get(f'week{week}', {}).get('reason', ''),
-                       'unassigned_mistakes': unassigned})
+                       'unassigned_mistakes': unassigned, 'mistake_policy': snapshot.get('mistake_policy', 'historical')})
     return result
 
 
+def build_point_note(snapshot, point_id, supplement=None):
+    """Build one knowledge-point note using the same ledger extraction as weeks."""
+    points = fold_outline(snapshot, supplement)
+    point = next((p for p in points if p['id'] == point_id), None)
+    if point is None:
+        raise ValueError('找不到该知识点')
+    records = [r for r in mistakes(snapshot) if point_id in r['kp_ids']]
+    formula_text = '\n'.join([point['title']] + [r['explanation'] for r in records])
+    return {'point_id': point_id, 'course': snapshot['course'],
+            'last_seq': max(e['seq'] for e in snapshot['events']),
+            'points': [point], 'mistakes': records,
+            'mastery': {point_id: mastery_rows(snapshot, points)[point_id]},
+            'formulas': formulas(formula_text), 'materials': [], 'week_note': '',
+            'unassigned_mistakes': 0, 'mistake_policy': snapshot.get('mistake_policy', 'historical')}
+
+
 def render_markdown(note):
-    lines = [f'# 第 {note["week"]} 周 · 我的复习笔记', '', f'账本序号：{note["last_seq"]}。本周有效历史错题：{len(note["mistakes"])} 条。',
-             '错题按有效作答逐次保留，后续答对不删除旧错题；跨周知识点会出现在各所属周，不能把周数相加当作全课程总数。', '', '## 要点与掌握度', '']
+    by_point = 'point_id' in note
+    title = note['points'][0]['title'] if by_point else f'第 {note["week"]} 周'
+    scope = '本知识点' if by_point else '本周'
+    policy = '错题按有效作答逐次保留，后续答对不删除旧错题。' if by_point else '错题按有效作答逐次保留，后续答对不删除旧错题；跨周知识点会出现在各所属周，不能把周数相加当作全课程总数。'
+    pending = note.get('mistake_policy') == 'pending'
+    if pending:
+        policy = '错题与应用周错题列表一致：仅保留当前待练选择题，后续答对、作废或改判后不再列出。'
+    label = '待练选择题错题' if pending else '有效历史错题'
+    lines = [f'# {title} · 我的复习笔记', '', f'账本序号：{note["last_seq"]}。{scope}{label}：{len(note["mistakes"])} 条。',
+             policy, '', '## 要点与掌握度', '']
     if note['week_note']:
         lines += [note['week_note'], '']
     if not note['points']:
@@ -332,7 +361,7 @@ def render_markdown(note):
         lines.append('')
     lines += ['## 公式', '']
     if not note['formulas']:
-        lines += ['本周来源未提取到明确公式；不自动编造。', '']
+        lines += [f'{scope}来源未提取到明确公式；不自动编造。', '']
     else:
         lines += ['公式为来源中的显式数学标记或带等号条目；完整适用条件见要点和材料原文。', '']
     for formula in note['formulas']:
@@ -343,14 +372,14 @@ def render_markdown(note):
             lines += [f'### {section["heading"]}', '', f'来源：{section["source"]}', ''] + section['lines'] + ['']
     lines += ['## 我的错题', '']
     if not note['mistakes']:
-        lines += ['账本未记录本周有效错题；这不表示本周已经掌握。', '']
+        lines += [f'{scope}无错题；这不表示{scope}已经掌握。', '']
     for index, record in enumerate(note['mistakes'], 1):
         lines += [f'### 错题 {index}', '', f'记录：{record["attempt_id"]}；序号 {record["seq"]}；得分 {record["score"]}/{record["max"]}。', '',
                   record['provenance'], '', '题干：', '', record['stem'], '']
         lines += [f'- {option}' for option in record['options']]
         lines += ['', '我的答案：' + record['answer'], '', '正确或参考答案：' + record['correct'], '', '账本记录的错因／讲解：', '', record['explanation'], '']
     if note['unassigned_mistakes']:
-        lines += [f'提醒：全课程另有 {note["unassigned_mistakes"]} 条错题缺少可归周知识点，见 audit.json，不能归作本周。', '']
+        lines += [f'提醒：全课程另有 {note["unassigned_mistakes"]} 条错题缺少可归周知识点，不能归作本周。', '']
     return '\n'.join(lines)
 
 

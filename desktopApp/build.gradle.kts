@@ -14,6 +14,7 @@ dependencies {
     implementation(libs.serialization.json)
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)
+    implementation(libs.material3)
     testImplementation(kotlin("test"))
 }
 val localConfig = Properties().apply {
@@ -40,6 +41,17 @@ compose.desktop {
 tasks.withType<JavaExec>().configureEach {
     providers.gradleProperty("coach.autoExitSeconds").orNull?.let { systemProperty("coach.autoExitSeconds", it) }
 }
+
+// Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.
+val notesCore by tasks.registering(Zip::class) {
+    from(rootProject.file("tools")) {
+        include("notes/__init__.py", "notes/exporter.py", "notes/mathml.py", "notes/desktop.py")
+    }
+    archiveFileName.set("notes-core.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("generated/notes"))
+}
+sourceSets.main { resources.srcDir(notesCore.map { it.destinationDirectory }) }
+tasks.processResources { dependsOn(notesCore) }
 
 tasks.withType<JavaExec>().configureEach {
     for (key in listOf("coach.exportFormulas", "coach.capturePath", "coach.captures", "coach.captureDir")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }

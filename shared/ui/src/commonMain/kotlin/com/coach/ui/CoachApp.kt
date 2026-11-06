@@ -99,11 +99,13 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var tab by remember { mutableStateOf(initialTab) }
     var source by remember { mutableStateOf<SourceJump?>(null) }
     var reviewWeek by remember { mutableStateOf<Int?>(null) }
+    // 模拟考整屏打开："" 是模拟考首页，其余是某一场考试的 id。
+    var mock by remember { mutableStateOf<String?>(null) }
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewWeek = null; source = null; open = id to start }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewWeek = null; mock = null; source = null; open = id to start }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
-    val select: (AppTab) -> Unit = { reviewWeek = null; tab = it; open = null; source = null }
+    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
     // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
     val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
@@ -111,7 +113,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
     SideEffect {
-        weekActions.onOpen = { id -> source = null; reviewWeek = null; tab = AppTab.TODAY; open = id?.let { it to true } }
+        weekActions.onOpen = { id -> source = null; reviewWeek = null; mock = null; tab = AppTab.TODAY; open = id?.let { it to true } }
         weekActions.onReview = { week -> reviewWeek = week; open = null; source = null }
     }
     LaunchedEffect(open, tab, source) {
@@ -156,8 +158,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp)
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = openKp, onBack = null) else CenterMessage("正在加载课程…")
-                                AppTab.RECORDS -> RecordsScreen(c, current, wide) { id -> openKp(id, false) }
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = openKp, onBack = null, onOpenMock = { mock = "" }) else CenterMessage("正在加载课程…")
+                                AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
                         }
@@ -165,7 +167,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
                         val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
                         val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference) } }
-                        if (reviewWeek != null && current != null) {
+                        val mockId = mock
+                        if (mockId != null && current != null) {
+                            key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }) }
+                        } else if (reviewWeek != null && current != null) {
                             WeekMistakesScreen(c, current, reviewWeek!!, onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
                             study = { studyPane(paneArgs!!) },
@@ -189,7 +194,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         )
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
-                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null))
+                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null))
                     if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)

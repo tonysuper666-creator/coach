@@ -96,7 +96,8 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val math = MathProcess.locate()
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math) }
+    val mocks=MockEngine(MockLibrary.configured())
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); mockRoutes(actor,pushes,mocks) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

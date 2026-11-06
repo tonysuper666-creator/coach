@@ -136,6 +136,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             rawBackup(directory.resolve("backups/pre-constructed-${uid()}"))
             sql("CREATE TABLE constructed_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, reference_answer TEXT NOT NULL, rubric TEXT NOT NULL, rubric_fingerprint TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
         }
+        // The frozen paper (answers included) never leaves the server before submission.
+        sql("CREATE TABLE IF NOT EXISTS mock_sessions(mock_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,purpose TEXT NOT NULL,paper_json TEXT NOT NULL,started_at INTEGER NOT NULL,deadline INTEGER NOT NULL,answers_json TEXT NOT NULL DEFAULT '{}',submitted_at INTEGER,auto INTEGER NOT NULL DEFAULT 0)")
 
     }
 
@@ -999,6 +1001,22 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }),"grades" to JsonArray(es.filter { it.type in setOf("attempt_graded","grade_reviewed") }.map { it.payload }))
     }
 
+    fun createMock(session: MockSession) = sql("INSERT INTO mock_sessions(mock_id,course_id,kind,purpose,paper_json,started_at,deadline) VALUES(?,?,?,?,?,?,?)",
+        session.id,session.course,session.kind,session.purpose,session.paper.toString(),session.startedAt,session.deadline)
+    fun mock(id: String): MockSession? = mockRows("mock_id=?",id).singleOrNull()
+    /** Newest first; drill sampling reads recent sessions to avoid repeating the same questions. */
+    fun mocks(course: String, limit: Int = 50): List<MockSession> = mockRows("course_id=? ORDER BY started_at DESC LIMIT ?",course,limit)
+    fun courseSeq(course: String): Long = query("SELECT coalesce(max(seq),0) FROM events WHERE course_id=?",course) { it.getLong(1) }.single()
+    fun openMocks(): List<MockSession> = mockRows("submitted_at IS NULL ORDER BY deadline")
+    private fun mockRows(where: String, vararg values: Any?) = query("SELECT mock_id,course_id,kind,purpose,paper_json,started_at,deadline,answers_json,submitted_at,auto FROM mock_sessions WHERE $where",*values) {
+        MockSession(it.getString(1),it.getString(2),it.getString(3),it.getString(4),LedgerJson.parseToJsonElement(it.getString(5)).jsonObject,
+            it.getLong(6),it.getLong(7),LedgerJson.parseToJsonElement(it.getString(8)).jsonObject,(it.getObject(9) as? Number)?.toLong(),it.getInt(10)==1)
+    }
+    fun saveMockAnswers(id: String, answers: JsonObject): Boolean = sql("UPDATE mock_sessions SET answers_json=? WHERE mock_id=? AND submitted_at IS NULL",answers.toString(),id)==1
+    /** Only the first submission wins; manual and deadline submissions cannot both grade. */
+    fun closeMock(id: String, at: Long, auto: Boolean): Boolean = sql("UPDATE mock_sessions SET submitted_at=?,auto=? WHERE mock_id=? AND submitted_at IS NULL",at,if(auto) 1 else 0,id)==1
+    fun questionRegistered(id: String): Boolean = query("SELECT 1 FROM questions WHERE question_id=?",id) { true }.isNotEmpty()
+
     private fun gradeTransition(course: String, thread: String?, state: String) {
         if(thread==null) return
         val previous=events(course).lastOrNull { it.threadId==thread && it.type=="tutor_state_changed" } ?: return
@@ -1185,3 +1203,6 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
     }
 }
+
+data class MockSession(val id: String, val course: String, val kind: String, val purpose: String, val paper: JsonObject,
+    val startedAt: Long, val deadline: Long, val answers: JsonObject = JsonObject(emptyMap()), val submittedAt: Long? = null, val auto: Boolean = false)

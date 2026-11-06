@@ -24,13 +24,14 @@ def main():
     sdk = Path(os.environ['ANDROID_SDK_ROOT'])
     adb = str(sdk / 'platform-tools/adb')
     args.out.mkdir(mode=0o700, parents=True, exist_ok=True)
-    occupied = subprocess.check_output([adb, 'devices'], text=True)
-    port = next(p for p in range(5588, 5680, 2) if f'emulator-{p}' not in occupied and available(p) and available(p + 1))
+    # Select only local emulator ports; do not enumerate connected phones.
+    port = next(p for p in range(5588, 5680, 2) if available(p) and available(p + 1))
     serial = f'emulator-{port}'
     with (args.out / 'emulator-private.log').open('w') as log:
         process = subprocess.Popen([str(sdk / 'emulator/emulator'), '-avd', 'coach_1128_c70_r',
             '-port', str(port), '-read-only', '-no-window', '-no-audio', '-no-snapshot', '-gpu', 'host', '-cores', '2'],
             stdout=log, stderr=subprocess.STDOUT)
+        uninstall_failed = False
         try:
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
@@ -56,8 +57,10 @@ def main():
                 for package in (args.application_id + '.test', args.application_id):
                     try:
                         removed = subprocess.run([adb, '-s', serial, 'uninstall', package], capture_output=True, timeout=30)
+                        uninstall_failed |= removed.returncode != 0
                         print(json.dumps(dict(package=package, uninstallExitCode=removed.returncode)), flush=True)
                     except subprocess.TimeoutExpired:
+                        uninstall_failed = True
                         print(json.dumps(dict(package=package, uninstallTimedOut=True)), flush=True)
             if process.poll() is None:
                 process.terminate()
@@ -67,6 +70,7 @@ def main():
                     process.kill()
                     process.wait(timeout=10)
             print(json.dumps(dict(ownedEmulatorReaped=True, exitCode=process.returncode)), flush=True)
+            assert not uninstall_failed, 'Failed to uninstall isolated smoke APKs'
 
 
 def available(port):

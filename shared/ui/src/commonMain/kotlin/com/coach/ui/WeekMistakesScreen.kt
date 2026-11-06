@@ -3,12 +3,16 @@ package com.coach.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
 import com.coach.domain.*
+import com.coach.domain.math.MathDelimiters
 import com.coach.protocol.CommandBody
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
@@ -58,12 +62,53 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
                 val mistakes = weekMistakes(view.events, week)
                 if (mistakes.isEmpty()) item { Text("这一周没有待练的选择题错题。") }
                 items(mistakes, key = { it.id }) { e ->
-                    OutlinedButton(enabled = !busy, onClick = {
-                        command("retry_week_mistake", json("week" to week, "attemptId" to e.payload.str("attemptId"))) { thread = it.str("threadId") }
-                    }, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text(e.payload.str("stem")) }
+                    WeekMistakeItem(e.payload.str("stem"), e.payload.str("attemptId"), c.math, !busy) { attemptId ->
+                        command("retry_week_mistake", json("week" to week, "attemptId" to attemptId)) { thread = it.str("threadId") }
+                    }
                 }
             }
             error?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
+        }
+    }
+}
+
+// A preview is intentionally short; the untouched stem is shown on the retry card.
+private val embeddedImage = Regex("!\\[[^\\]]*]\\(\\s*data:image/[^\\s)]+\\s*\\)", RegexOption.IGNORE_CASE)
+private val imageData = Regex("data:image/[^\\s)\\]<>\"']+", RegexOption.IGNORE_CASE)
+internal fun mistakePreview(stem: String): String {
+    val clean = stem.replace(embeddedImage, "［图片］").replace(imageData, "［图片］")
+        .replace(Regex("\\s+"), " ").trim()
+    val result = StringBuilder()
+    var shortened = false
+    for (segment in MathDelimiters.tokenize(clean).segments) {
+        val remaining = 180 - result.length
+        val chunk = clean.substring(segment.start, segment.end)
+        if (chunk.length <= remaining) result.append(chunk)
+        else {
+            if (segment.math == null && remaining > 0) {
+                var end = remaining
+                if (end < chunk.length && end > 0 && chunk[end - 1].isHighSurrogate() && chunk[end].isLowSurrogate()) end--
+                result.append(chunk.take(end).trimEnd())
+            }
+            shortened = true
+            break
+        }
+    }
+    return result.toString().trim().ifEmpty { if (shortened) "［公式］" else "［题目］" } + if (shortened) "…" else ""
+}
+
+@Composable
+internal fun WeekMistakeItem(stem: String, attemptId: String, math: MathAssets, enabled: Boolean, onOpen: (String) -> Unit) {
+    val preview = remember(stem) { mistakePreview(stem) }
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+            .clickable(enabled = enabled, role = Role.Button) { onOpen(attemptId) },
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            QuizText(preview, "mistake:$attemptId:$preview", math)
+            if (preview.endsWith("…")) Text("点按查看完整题目", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

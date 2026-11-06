@@ -29,6 +29,31 @@ PACKAGE = 'com.coach.android.ton1094'
 FORBIDDEN = {8790, 8791, 18791}
 
 
+def installation_diagnostic(output):
+    """Retain known installer outcomes, never device text or exception messages."""
+    known = {'INSTALL_FAILED_USER_RESTRICTED', 'INSTALL_FAILED_UPDATE_INCOMPATIBLE',
+             'INSTALL_FAILED_VERSION_DOWNGRADE', 'INSTALL_FAILED_INSUFFICIENT_STORAGE',
+             'INSTALL_FAILED_INVALID_APK', 'INSTALL_FAILED_TEST_ONLY',
+             'INSTALL_FAILED_ALREADY_EXISTS', 'INSTALL_PARSE_FAILED_NO_CERTIFICATES',
+             'INSTALL_FAILED_ABORTED', 'INSTALL_FAILED_INTERNAL_ERROR'}
+    codes = set(re.findall(r'Failure \[([A-Z_]+)(?=[:\]])', output)) & known
+    return dict(packageManagerCodes=sorted(codes),
+                passwordPrompt='手机要求输入账号密码，必须人来点' in output.splitlines(),
+                transportFailure=bool(re.search(
+                    r'device offline|no devices/emulators found|device [^\n]+ not found|failed to connect',
+                    output)))
+
+
+def package_present(output, package):
+    """Empty successful pm output means absent; unexpected output stays unknown."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return False
+    if all(line in ('package:'+PACKAGE, 'package:'+PACKAGE+'.test') for line in lines):
+        return 'package:'+package in lines
+    raise ValueError('Unknown package query result')
+
+
 def process_flags(dump):
     """Keep only scheduling flags from our process record, never arbitrary dump text."""
     flags = {}
@@ -245,9 +270,18 @@ def main():
         initial = wait_for(hello, 40)
         summary['phase'] = 'card APK installation'
         touched_phone = True
-        for apk in ('debug/androidApp-debug.apk', 'androidTest/debug/androidApp-debug-androidTest.apk'):
-            run(['bash', PHONE/'install.sh', ROOT/'androidApp/build/outputs/apk'/apk],
-                timeout=240, env=device_env)
+        for role, apk in (('main', 'debug/androidApp-debug.apk'),
+                          ('test', 'androidTest/debug/androidApp-debug-androidTest.apk')):
+            summary['installingPackage'] = role
+            command = ['bash', PHONE/'install.sh', ROOT/'androidApp/build/outputs/apk'/apk]
+            result = subprocess.run(list(map(str, command)), timeout=240, env=device_env,
+                                    capture_output=True, text=True)
+            if result.returncode:
+                summary['installationFailure'] = dict(
+                    package=role, exitCode=result.returncode,
+                    **installation_diagnostic(result.stdout+'\n'+result.stderr))
+                raise RuntimeError('Card APK installation failed')
+        summary.pop('installingPackage', None)
         def instrument_args(test):
             return [adb, '-s', args.serial, 'shell', 'am', 'instrument', '-w',
                     '-e', 'class', 'com.coach.android.'+test,
@@ -355,18 +389,35 @@ def main():
             if not touched_phone:
                 return
             lease_valid()
-            device('shell', 'am', 'force-stop', PACKAGE)
             # Remove only this run's diagnostic files, including AtomicFile sidecars.
             files = [f'cache/ton1094-{run_id}-{channel}.json'+suffix
                      for channel in ('main', 'io') for suffix in ('', '.new', '.bak')]
             files += ['databases/synthetic-reconnect.sqlite'+suffix
                       for suffix in ('', '-wal', '-shm', '-journal')]
-            cleanup_step('phone synthetic files',
-                         lambda: device('shell', 'run-as', PACKAGE, 'rm', '-f', *files))
-            cleanup = device('uninstall', PACKAGE+'.test')
-            summary['testPackageRemoved'] = cleanup.strip() == 'Success'
-            if not summary['testPackageRemoved']:
-                raise RuntimeError('Test package cleanup failed')
+            def clean_main():
+                present = package_present(device('shell', 'pm', 'list', 'packages',
+                                                  '--user', '0', PACKAGE), PACKAGE)
+                if present:
+                    device('shell', 'am', 'force-stop', PACKAGE)
+                    device('shell', 'run-as', PACKAGE, 'rm', '-f', *files)
+
+            def clean_test():
+                test_package = PACKAGE+'.test'
+                # An install failure may leave no test package at all. Confirm
+                # absence rather than treating adb's uninstall error as success.
+                present = package_present(device('shell', 'pm', 'list', 'packages',
+                                                  '--user', '0', test_package), test_package)
+                summary['testPackagePresentBeforeCleanup'] = present
+                if present:
+                    device('uninstall', test_package)
+                summary['testPackageRemoved'] = not package_present(
+                    device('shell', 'pm', 'list', 'packages', '--user', '0', test_package),
+                    test_package)
+                if not summary['testPackageRemoved']:
+                    raise RuntimeError('Test package cleanup failed')
+
+            cleanup_step('phone synthetic files', clean_main)
+            cleanup_step('test package removal', clean_test)
 
         def count_calls():
             # Read only our temporary synthetic SQLite after JVM shutdown.

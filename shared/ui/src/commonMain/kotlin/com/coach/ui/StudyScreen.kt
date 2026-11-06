@@ -67,7 +67,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
     AdvanceOnNewPass(kp.id, kp.status, view.weekProgress(kp.id) != null, view.weekTarget?.id, tv.busy || pending != null, weekActions?.onOpen)
 
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val compactHeight = maxHeight < 480.dp
+    var showCompactHeader by remember(kp.id) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (compactHeight && !showCompactHeader) {
+            Row(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (onBack != null) TextButton(onClick = onBack) { Text("← 今天") }
+                Text(splitTitle(kp.title).second, Modifier.weight(1f), maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = { showCompactHeader = true }) { Text("详情 ▾") }
+            }
+        } else {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
             Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
                 // Back button and the title's first line sit on one row; the scope toggle lines up with the title's left edge.
@@ -81,6 +91,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Text(if (showScope) "收起学习范围" else tag.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · 共 ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾", style = MaterialTheme.typography.labelMedium)
                         }
+                        if (compactHeight) TextButton(onClick = { showCompactHeader = false }) { Text("收起详情 ▴") }
                         if (onOpenReference != null && kp.anchorDoc.isNotBlank()) OutlinedButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
                             Text("看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
@@ -94,6 +105,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     }
                 }
             }
+        }
         }
         HorizontalDivider()
 
@@ -137,7 +149,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             }
             seenGroups = groups.size
         }
-        Box(Modifier.weight(1f).widthIn(max = READING_WIDTH).fillMaxWidth()) {
+        Box(Modifier.weight(1f).widthIn(max = READING_WIDTH).fillMaxWidth().testTag("study-reading")) {
             if (rows.isEmpty()) Text(
                 if (kp.explained) "这个知识点讲过了。点「下一步」继续出题，或直接提问。" else "还没开始。点下面的「开始讲解」。",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -182,10 +194,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
+                if (compactHeight && weekActions != null && view.weekTarget?.id == kp.id) {
+                    OutlinedButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("下一知识点") }
+                }
             }
-            if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
+            if (!imeOpen && (!compactHeight || pending != null) && weekActions != null && view.weekTarget?.id == kp.id) {
                 OutlinedButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一个知识点 →") }
+                weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+            if (!imeOpen && compactHeight && pending == null && weekActions != null && view.weekTarget?.id == kp.id) {
                 weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
@@ -195,6 +214,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 placeholder = if (pending != null) "追问（不影响通过状态）…" else "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
             )
         }
+    }
     }
 }
 

@@ -8,6 +8,7 @@ The phone must already have an APK that is paired with a NON-production server (
 screen sits behind the pairing gate. Never pair a test device with the production port.
 
   COACH_DEVICE=host:port  adb serial (required)      PERF_RUNS=3   runs per mode      ADB=path/to/adb      PERF_PACKAGE=<installed package, e.g. a -PcoachApplicationId build>
+  PERF_COACH_URL=http://<tail host>:<installed port>  required for a card package: it refuses to start without the coachUrl extra
 """
 import json, os, re, subprocess, sys, time
 from pathlib import Path
@@ -19,6 +20,10 @@ serial = os.environ['COACH_DEVICE']; runs_n = int(os.environ.get('PERF_RUNS', '3
 min_frames = 900
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import devicecheck
 installed_port = devicecheck.require_test_port(adb, serial, package)
+coach_url = os.environ.get('PERF_COACH_URL', '')
+if coach_url and not re.fullmatch(rf'http://[^/:@?#]+:{installed_port}/?', coach_url): sys.exit(f'PERF_COACH_URL {coach_url!r} must point at the installed port {installed_port}')
+if package != 'com.coach.android' and not coach_url: sys.exit(f'{package} needs PERF_COACH_URL (coachServerUrl refuses the production default)')
+url_extra = ['--es', 'coachUrl', coach_url] if coach_url else []
 records = []
 
 def device(*a, timeout=30): return subprocess.run([adb, '-s', serial, *[str(x) for x in a]], capture_output=True, text=True, timeout=timeout).stdout
@@ -39,7 +44,7 @@ for i in range(runs_n):
     for name, mode in (('pinned', 1), ('scrolled-away', 2)):
         r = {'platform': 'android-device', 'mode': name, 'index': i + 1, 'device': info, 'before': snapshot(), 't0': time.strftime('%H:%M:%S')}
         device('shell', 'am', 'force-stop', package); device('logcat', '-c')
-        device('shell', 'am', 'start', '-W', '-n', package + '/com.coach.android.MainActivity', '--ei', 'autoplay', str(mode), '--el', 'runId', str(time.time_ns()))
+        device('shell', 'am', 'start', '-W', '-n', package + '/com.coach.android.MainActivity', '--ei', 'autoplay', str(mode), '--el', 'runId', str(time.time_ns()), *url_extra)
         logs = ''
         for _ in range(900):
             logs = device('logcat', '-d', '-s', 'CoachRender:I', 'AndroidRuntime:E', '*:S')

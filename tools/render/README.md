@@ -57,7 +57,7 @@ shift counts only samples with content still below the viewport; shorter content
 and streams the longest answer slowly (8 chars / 700 ms), reads into the middle of a block, changes the window through
 the four shapes while the stream is still arriving, then `am kill`s the process mid-stream. After every step the live
 anchor (first visible block key, fraction into it, measured from the layout) and the top visible text from
-`uiautomator` must be the same; block height is allowed to change. Desktop: `COACH_AUTOPLAY=1|2` with
+`uiautomator` must be the same; block height is allowed to change. Desktop (needs `COACH_MODE=spike`; without it the app starts as the real client): `COACH_AUTOPLAY=1|2` with
 `-Dcoach.summaryCapturePath=<png>` replays everything in the Mac app, prints the same SUMMARY (frame gaps measured
 with a continuous frame loop) and exports the live Skia surface.
 

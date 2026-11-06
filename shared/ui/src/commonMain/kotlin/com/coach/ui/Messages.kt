@@ -9,6 +9,7 @@ import androidx.compose.ui.unit.dp
 import com.coach.client.TutorMessage
 import com.coach.ui.markdown.MarkdownBlock
 import com.coach.ui.markdown.MarkdownContent
+import com.coach.ui.markdown.ProvideMarkdownMeasurer
 import com.coach.ui.markdown.StreamingMarkdown
 import kotlinx.coroutines.launch
 
@@ -67,9 +68,11 @@ internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets
     LaunchedEffectMath(blocks, math)
     // The renderer reports every formula it has to draw as source because no SVG is cached yet: fetch exactly those (same key it looked up).
     val scope = rememberCoroutineScope()
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEach { block ->
-            key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), failed = math.failed.keys, onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
+    ProvideMarkdownMeasurer {
+        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            blocks.forEach { block ->
+                key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), failed = math.failed.keys, onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
+            }
         }
     }
 }

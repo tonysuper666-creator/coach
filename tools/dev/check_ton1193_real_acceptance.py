@@ -66,7 +66,7 @@ def recording(root, java, pid, control_path, config, report):
     for event in ('SocketRead', 'ActiveSetting', 'DataLoss', 'CPULoad', 'JVMInformation'):
         settings += f'<event name="jdk.{event}"><setting name="enabled">true</setting>'
         if event == 'SocketRead':
-            settings += '<setting name="threshold">0 ns</setting>'
+            settings += '<setting name="threshold">0 ns</setting><setting name="stackTrace">true</setting>'
         if event == 'CPULoad':
             settings += '<setting name="period">1 s</setting>'
         settings += '</event>'
@@ -111,6 +111,8 @@ def recording(root, java, pid, control_path, config, report):
     report['earlySocketReads'] = dict(durationSeconds=time.monotonic()-mono_start, count=len(reads),
                                      bridgePortReads=sum(x.get('port') == int(config['adapterEnvPins']['BRIDGE_PORT'])
                                                          for x in reads))
+    report['earlySocketReadStacks'] = [dict(bytesRead=x.get('bytesRead'), address=x.get('address'),
+                                          port=x.get('port'), stackTrace=x.get('stackTrace')) for x in reads]
     switch.require(not reads, 'real JFR recorded SocketRead during idle window')
     # Foreground wait; no requests to the server while measuring the window.
     while time.monotonic() - mono_start < 903:

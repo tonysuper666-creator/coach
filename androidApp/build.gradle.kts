@@ -76,6 +76,7 @@ dependencies {
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     androidTestImplementation(project(":shared:domain"))
     androidTestImplementation(project(":shared:client"))
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")

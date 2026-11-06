@@ -1,6 +1,7 @@
 package com.coach.android
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -51,9 +52,8 @@ class CoachActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
-        val requestedUrl = intent.getStringExtra("coachUrl")
-        val serverUrl = coachServerUrl(requestedUrl, packageName)
-        Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
+        val serverUrl = coachServerUrl(intent, packageName)
+        Log.i("CoachUrl", "package=$packageName extra=${intent.getStringExtra(coachUrlExtra) ?: "<empty>"} resolved=$serverUrl")
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
             val dark = isSystemInDarkTheme()
@@ -183,6 +183,19 @@ class CoachActivity : ComponentActivity() {
  * not a Gradle or Intent switch: every other card package keeps refusing production.
  */
 internal const val releaseAcceptancePackage = "com.coach.android.ton1298"
+
+internal const val coachUrlExtra = "coachUrl"
+
+/**
+ * What every activity resolves before it builds credentials. The release acceptance package refuses the key itself: an explicit null, an Int, a
+ * Boolean or an array all read back as a missing string, and must not quietly become production.
+ */
+internal fun coachServerUrl(intent: Intent, packageName: String): String {
+    if (packageName == releaseAcceptancePackage && intent.hasExtra(coachUrlExtra)) {
+        error("Refusing coachUrl for release acceptance package $packageName; it only talks to the configured server")
+    }
+    return coachServerUrl(intent.getStringExtra(coachUrlExtra), packageName)
+}
 
 /** The acceptance override only selects another port on the configured Mac. */
 internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {

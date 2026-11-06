@@ -32,9 +32,8 @@ class MainActivity : ComponentActivity() {
         owner = ViewModelProvider(this)[ReplayOwner::class.java]
         owner.attach(this)
         val chinesePage = intent.getIntExtra("chinesePage", -1).takeIf { it >= 0 }
-        val requestedUrl = intent.getStringExtra("coachUrl")
-        val serverUrl = coachServerUrl(requestedUrl, packageName)
-        Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
+        val serverUrl = coachServerUrl(intent, packageName)
+        Log.i("CoachUrl", "package=$packageName extra=${intent.getStringExtra(coachUrlExtra) ?: "<empty>"} resolved=$serverUrl")
         val credentialStore = KeystoreCredentials(this, serverUrl)
         setContent { PairingGate(credentialStore, serverUrl) { RenderingReplayScreen(owner.state, owner.corpus, false, folding, owner::save, { Log.i("CoachRender", it) }, chinesePage, intent.getIntExtra("autoplay", 0), intent.getBooleanExtra("baseline", false), intent.getLongExtra("tickMs", 50L), intent.getIntExtra("streamOnly", -1), intent.getIntExtra("chunk", 30), intent.getLongExtra("runId", 0L), intent.getBooleanExtra("scrollEnd", false), intent.getBooleanExtra("wide", false), android.os.Debug::threadCpuTimeNanos) } }
         // JankStats needs the DecorView, which setContent installs.

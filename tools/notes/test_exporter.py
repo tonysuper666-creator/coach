@@ -12,6 +12,7 @@ from .exporter import (build_notes, build_point_note, effective_attempts, fold_o
                        render_markdown, write_export, formulas)
 from .fixtures import create_database
 from .mathml import MathError, mathml
+from .desktop import export_request
 
 
 class ExportTests(unittest.TestCase):
@@ -58,6 +59,27 @@ class ExportTests(unittest.TestCase):
         expected = Path(__file__).with_name('point-example.md').read_text(encoding='utf-8')
         self.assertEqual(render_markdown(build_point_note(self.snapshot, 'kp-2')), expected)
         self.assertIn('本周无错题', render_markdown(build_notes(self.snapshot)[2]))
+
+    def test_desktop_pending_snapshot_matches_expected_lines(self):
+        snap = copy.deepcopy(self.snapshot)
+        snap.update(mistake_policy='pending', selected_attempt_ids=['shared-wrong'],
+                    mastery_labels={'kp-1': '已通过', 'shared': '未开始'})
+        for key in ('questions', 'keys', 'pool', 'constructed'):
+            snap[key] = {}
+        before = copy.deepcopy(snap)
+        result = export_request({'snapshot': snap, 'selection': {'week': 1}})
+        self.assertEqual(result['attempt_ids'], ['shared-wrong'])
+        expected = Path(__file__).with_name('desktop-example.md').read_text(encoding='utf-8')
+        self.assertEqual(result['markdown'], expected)
+        self.assertEqual(snap, before)
+
+    def test_desktop_mismatch_stops_and_empty_week_is_explicit(self):
+        self.snapshot.update(mistake_policy='pending', selected_attempt_ids=['retry-1'])
+        with self.assertRaisesRegex(ValueError, '不一致'):
+            export_request({'snapshot': self.snapshot, 'selection': {'week': 1}})
+        self.snapshot['selected_attempt_ids'] = []
+        self.assertIn('本周无错题', export_request({'snapshot': self.snapshot, 'selection': {'week': 3}})['markdown'])
+        self.assertIn('本知识点无错题', export_request({'snapshot': self.snapshot, 'selection': {'point_id': 'kp-3'}})['markdown'])
 
     def test_independent_sql_matches_every_synthetic_week(self):
         query = Path(__file__).with_name('audit.sql').read_text()

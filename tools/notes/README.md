@@ -67,4 +67,28 @@ print([(w, counts[w], audit["weekly_counts"][str(w)]) for w in audit["sample_wee
 
 ## 接入应用
 
-`load_snapshot(path, course)` 是只读 I/O 边界；`build_notes(snapshot, supplement, materials)`、`render_markdown(note)`、`render_html(markdown, title)` 是纯函数，不修改输入。`write_export(...)` 是唯一输出文件边界。未来按钮可复用这些函数，在应用侧完成拷贝与选择本地导出目录。当前改动不增加应用 UI，也不运行 Gradle。
+`load_snapshot(path, course)` 是 CLI 的只读 I/O 边界；`build_notes(snapshot, supplement, materials)`、`build_point_note(snapshot, point_id)`、`render_markdown(note)`、`render_html(markdown, title)` 是纯函数，不修改输入。
+
+桌面课程页的「导出复习提纲」可以选择周次或知识点、本机文件夹，以及 Markdown / Markdown + PDF。每次点击打开对话框时冻结当前已同步账本，保存到所选目录中新建的 `Coach-复习-日期-随机标识` 文件夹；成功后可以打开文件夹。输出不覆盖旧文件，目录 0700、文件 0600；拒绝 Git 仓库目录。取消选择不写文件，失败清理未完成文件夹。导出期间仍可同步，但不会修改这份快照。
+
+桌面通过 `notes.desktop` 的 JSON 管道调用**同一份** Python 核心，安装包包含代码 zip，无须检出仓库或访问服务端 SQLite。需要本机 Python 3.10+；可以通过 `COACH_PYTHON` 指定解释器。账本通过进程管道传递，不生成临时私人快照，也不调用模型或上传。桌面仅复用已经同步到账本的答案与讲解；未下发到客户端的参考答案明确标为不可用，不另行抓取隐藏答案。
+
+桌面错题清单使用应用 `pendingChoiceMistakes` 的待练选择题快照；提取器仍归约完整账本，然后过滤这份选择，并核对结果 ID 集合完全一致，否则停止。CLI 默认仍导出历史错误，二者都走 `exporter.py`，在文件中说明各自口径。掌握度使用冻结的应用投影标签。要点、来源和公式来自账本中的知识点标题、证据锚点与错题讲解，不把可能包含整章教材的备课包原文附入提纲，也不调用模型另写摘要。空周写「本周无错题」。
+
+PDF 复用 `FormulaExport.kt` / `MathSvgPainter` 绘制的公式，优先复用当前窗口 SVG 缓存，缺失时请求已配置 Mac 的公式服务。它使用 A4、144 dpi 无损位图页面，中文及分式可离线打印；PDF 正文不能搜索或复制，随附 Markdown 保留可编辑文本。公式服务拒绝、不可用或公式过宽时，该处明确标注「公式未能清晰绘制，保留原始 TeX」，完成提示报告数量；这与应用保留源码的退路一致，不能当作公式全部渲染成功。公式位图超出安全尺寸或超过 100 页时停止；也可取消 PDF 勾选后导出 Markdown。
+
+## 桌面和模拟器验证
+
+```sh
+python3 -m unittest tools.notes.test_exporter -v
+tools/dev/heavy ./gradlew :desktopApp:test :shared:domain:jvmTest :shared:ui:jvmTest \
+  :server:app:installDist :desktopApp:createDistributable --console=plain
+tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest \
+  -PcoachApplicationId=com.coach.android.ton1294 -Pcoach.port=18894 --console=plain
+```
+
+`NotesExportTest` 实际运行安装包内的 Python，比较应用重做正确／作废过滤、五条错题、知识点选择、冻结字母映射，验证私有文件权限、拒绝仓库和 PDF 分页／xref。Python 测试将合成桌面导出逐行对照 `desktop-example.md`，并覆盖空周、知识点、输入不变与口径不一致时停止。
+
+窗口自动验收钩子使用 `COACH_NOTES_VERIFY_DIR`、`COACH_NOTES_VERIFY_WEEK`、`COACH_NOTES_VERIFY_CAPTURE`：自动打开真实对话框、捕获其 Compose 表面，并调用与导出按钮相同的代码。必须同时设置独立 `COACH_URL`、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`；开发守卫拒绝生产端口。输出目录必须已存在且在仓库外。可用 `JAVA_TOOL_OPTIONS=-Dcoach.autoExitSeconds=35` 限定窗口生命周期；包含大量公式时应延长并检查实际导出是否完成。
+
+模拟器只在 `tools/dev/heavy --emulator` 内使用 `coach_1128_c70_r`。`NotesReviewSmoke` 接收独立端口、一次性配对码、周次与 `expectedCount`；host 把同一数据导出的 Markdown 放入测试包 `cache/desktop-notes.md`。测试配对、同步、对照题干／选项／讲解与应用题卡，推进**副本**的学习游标后从今天页点击「再练这一周错题」，核对可见清单并在 cache 下保存截图。它不请求生成、也不提交新答案。真实数据的截图和日志只保存在本机私人目录，不上传。错题不足五条时必须如实记录，不能补造真实作答或把合成对照说成真实五题验收。

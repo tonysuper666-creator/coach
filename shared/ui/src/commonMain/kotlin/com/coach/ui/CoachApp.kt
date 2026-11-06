@@ -95,7 +95,7 @@ enum class AppTab(val label: String, val glyph: String) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -153,8 +153,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
                     key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
                 } }
-                val reviewPane = remember(c) { movableContentOf<CourseView> { reviewView ->
-                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" })
+                val reviewPane = remember(c, settings) { movableContentOf<CourseView> { reviewView ->
+                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, reminderSettings = settings)
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }

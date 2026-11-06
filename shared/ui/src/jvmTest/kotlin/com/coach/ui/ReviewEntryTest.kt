@@ -3,6 +3,7 @@ package com.coach.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toAwtImage
@@ -57,7 +58,7 @@ class ReviewEntryTest {
         try {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { Box(Modifier.size(width.dp, height.dp)) {
-                    if (integrated) CoachApp(c, dark = false) else when (page) {
+                    if (integrated) CoachApp(c, dark = false, settings = { Text("每日提醒 08:00") }) else when (page) {
                         "today" -> TodayScreen(c, view, TutorUiState(), null, { page = "review" }, { _, _ -> })
                         "review" -> ReviewScreen(c, view, { id, start -> assertEquals("K", id); startNow = start; page = "study" }, { page = "today" })
                         else -> StudyScreen(c, view.kp("K")!!, view, TutorUiState(), autoStart = startNow, onBack = { page = "review" }, reviewMode = true)
@@ -65,11 +66,13 @@ class ReviewEntryTest {
                 } } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("1 个知识点到期").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
+                if (integrated) onNodeWithText("每日提醒 08:00").assertDoesNotExist()
                 if (!examKnown) onNodeWithText("日期未公布", substring = true).assertIsDisplayed()
                 capture("review-today-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("到期复习").performClick()
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
                 if (integrated) {
+                    onNodeWithText("每日提醒 08:00").assertIsDisplayed()
                     onNodeWithTag("open-mock").assertIsDisplayed().performClick()
                     onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
@@ -81,6 +84,7 @@ class ReviewEntryTest {
                 if (!integrated) assertTrue(startNow, "Queue starts practice immediately on both layouts")
                 onNodeWithText("到期复习").assertExists()
                 onNodeWithText("开始复习").assertExists()
+                if (integrated) onNodeWithText("每日提醒 08:00").assertDoesNotExist()
                 onNodeWithText("开始讲解").assertDoesNotExist()
                 onNodeWithText("← 复习").assertExists()
                 if (integrated) {

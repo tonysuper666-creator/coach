@@ -78,6 +78,7 @@ dependencies {
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(project(":shared:domain"))
     androidTestImplementation(project(":shared:client"))
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")

@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.selection.selectable
 import com.coach.client.CourseView
+import com.coach.client.ExamFocus
 import com.coach.client.KpRow
 import com.coach.client.KpStatus
 import kotlin.math.roundToInt
@@ -35,19 +36,24 @@ internal fun routeModules(kps: List<KpRow>): List<ModuleProgress> {
 internal fun unmetPrereqs(kp: KpRow, view: CourseView): List<KpRow> =
     kp.prereqs.mapNotNull { view.kp(it) }.filter { it.status != KpStatus.PASSED && it.status != KpStatus.SOLID }
 
-/** 路线：全部知识点按章节排开，两层状态各自按知识点个数的比例显示（分值口径的「学了多少」在今天页顶部）。 */
+/** 路线：顶部是期末面板，下面全部知识点按章节排开，两层状态各自按知识点个数的比例显示（分值口径的「学了多少」在今天页顶部）。 */
 @Composable
-fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit) {
+fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit = {}) {
     if (view == null) return CenterMessage("正在加载课程…")
     val kps = view.kps
     if (kps.isEmpty()) return CenterMessage("课程里还没有知识点。")
     // 每个知识点有几道已复核的构答题：只有 Mac 服务返回了才显示；拿不到就什么都不说，不猜。
     val supply by produceState<Map<String, Int>?>(null, c) { value = c.course?.constructedSupply() }
+    // 押题权重在 Mac 的私有配置里；先拿到（或确认拿不到）再画面板，免得排序先按无权重闪一下。
+    val focus by produceState<Pair<Boolean, ExamFocus?>>(false to null, c) { value = true to c.course?.examFocus() }
     val passed = kps.count { it.status == KpStatus.PASSED || it.status == KpStatus.SOLID }
     val solid = kps.count { it.status == KpStatus.SOLID }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (view.weeks.isNotEmpty() && focus.first) item(key = "exam") {
+            ExamPanelCard(c, view, focus.second, onOpen, onPractice)
+        }
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("路线", style = MaterialTheme.typography.headlineMedium)
                 ProportionBar("已通过", passed, kps.size, MaterialTheme.colorScheme.secondary)
                 ProportionBar("稳固", solid, kps.size, successColor())

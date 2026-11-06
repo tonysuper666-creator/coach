@@ -98,6 +98,30 @@ class CourseViewTest {
         assertEquals(listOf(3, 0), due.map { it.overdueDays })
     }
 
+    @Test fun dueReviewCountIsZeroForEmptyFutureAndRemovedKnowledgePoints() {
+        val events = listOf(outline("K1" to "Synthetic topic"))
+        val today = com.coach.domain.logicalDay(now, "Europe/London")
+        assertEquals(0, view(events).dueReviews(now).size)
+        val projection = project(events).copy(review = mapOf(
+            "K1" to com.coach.domain.Review(dueDay = today + 1),
+            "removed" to com.coach.domain.Review(dueDay = today - 1),
+        ))
+        assertEquals(0, CourseView(events, projection).dueReviews(now).size)
+    }
+
+    @Test fun dueReviewCountChangesAtCourseFourAmBoundary() {
+        // 03:59 / 04:00 in Shanghai, while London's calendar date remains the previous day.
+        val before = 1_793_390_340_000L // 2026-10-30T19:59:00Z
+        val events = listOf(event("outline_revised", json(
+            "course" to json("tz" to "Asia/Shanghai"),
+            "ops" to JsonArray(listOf(json("op" to "add", "kpId" to "K1", "title" to "Synthetic topic"))),
+        )))
+        val tomorrow = com.coach.domain.logicalDay(before, "Asia/Shanghai") + 1
+        val v = CourseView(events, project(events).copy(review = mapOf("K1" to com.coach.domain.Review(dueDay = tomorrow))))
+        assertEquals(0, v.dueReviews(before).size)
+        assertEquals(1, v.dueReviews(before + 60_000).size)
+    }
+
     @Test fun examCountdownOnlyWhenAnExamDayIsSetAndNotPast() {
         val today = com.coach.domain.logicalDay(now, "Europe/London")
         val none = view(listOf(outline("K1" to "甲")))

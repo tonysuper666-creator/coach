@@ -24,7 +24,7 @@ internal fun mistakeTitle(view: CourseView, kpId: String): String = view.kpAny(k
 
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     var tab by remember(c.courseId) { mutableStateOf(if (due.isNotEmpty()) 1 else 0) }
@@ -32,6 +32,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
             Text("复习", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            reminderSettings()
         }
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)

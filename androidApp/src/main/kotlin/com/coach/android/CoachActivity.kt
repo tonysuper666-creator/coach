@@ -54,6 +54,7 @@ class CoachActivity : ComponentActivity() {
         // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
         val requestedUrl = intent.getStringExtra("coachUrl")
         val serverUrl = coachServerUrl(requestedUrl, packageName)
+        val reminder = ReviewReminder(applicationContext).also { it.configure(serverUrl) }
         Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
@@ -69,7 +70,7 @@ class CoachActivity : ComponentActivity() {
                     if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                     else {
                         val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), backHandler = { enabled, onBack -> BackHandler(enabled, onBack) })
+                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), backHandler = { enabled, onBack -> BackHandler(enabled, onBack) }, settings = { ReminderSettings(reminder) })
                     }
                 }
             }

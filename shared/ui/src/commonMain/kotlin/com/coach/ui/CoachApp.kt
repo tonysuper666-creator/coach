@@ -45,6 +45,8 @@ class CoachController(
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
     /** 看过（或预取过）的教材页，整个会话里留着：学习页的「看原文」多半不用再等 Mac。 */
     internal val sourcePages = HashMap<PageKey, com.coach.client.SourcePage>()
+    /** 期末面板点「修复 / 开讲 / 开练」留下的一次性启动（kpId → 是否出题）：学习页等历史加载完取走、发一次，重连不会再发。 */
+    internal val startRequests = mutableStateMapOf<String, Boolean>()
     /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
     internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(emptyMap())
     /** 模拟考的保存和续考时读卷都排这一把锁：同一时刻只有一个请求在路上，旧答案不会后到覆盖新答案，续考读到的也是最后存上的。 */
@@ -94,7 +96,8 @@ enum class AppTab(val label: String, val glyph: String) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }, settings: @Composable () -> Unit = {}) {
+    val currentSettings by rememberUpdatedState(settings)
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -157,7 +160,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
                 } }
                 val reviewPane = remember(c) { movableContentOf<CourseView> { reviewView ->
-                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" })
+                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, reminderSettings = { currentSettings() })
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }
@@ -174,7 +177,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val tabContent: @Composable () -> Unit = {
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
-                                AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp)
+                                AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
                                 AppTab.REVIEW -> if (current != null) reviewPane(current) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)

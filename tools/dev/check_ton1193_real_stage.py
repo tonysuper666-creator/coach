@@ -64,7 +64,7 @@ print(json.dumps(out, sort_keys=True))
     switch.require(actual == locked, 'installed Python closure differs from lock')
 
 
-def main():
+def main(exercise=None):
     switch.require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=REPO).strip(),
                    'checkout must be clean')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
@@ -170,13 +170,21 @@ def main():
         switch.stage(config, True)
         (root / 'stage/snapshot').mkdir(mode=0o700)
         snapshot = isolated.run(root / 'controller.json', 'preflight', True)
-        print(json.dumps({'head': head, 'oldHead': old, 'stage': 'staged',
+        metadata = {'head': head, 'oldHead': old, 'stage': 'staged',
                           'candidateRealDependencies': True, 'oldRealDependencies': True,
-                          'snapshotSha256': snapshot, 'switchAttempted': False}), flush=True)
+                          'snapshotSha256': snapshot, 'switchAttempted': False}
+        print(json.dumps(metadata), flush=True)
+        if exercise is not None:
+            exercise(root, config, metadata)
     finally:
+        # A process exercise creates this marker BEFORE bootstrap and removes it
+        # only after proving its label, kernel identities and ports are gone.
+        # Preserve dependencies/logs when cleanup cannot be proved.
+        switch.require(not (root / 'retain-on-cleanup-failure').exists(),
+                       'process cleanup unproved; private fixture retained')
         shutil.rmtree(root)
         switch.require(not root.exists(), 'private root survived cleanup')
-        print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': True}), flush=True)
+        print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': exercise is None}), flush=True)
 
 
 if __name__ == '__main__':

@@ -317,9 +317,29 @@ def build_notes(snapshot, supplement=None, materials=(), weeks=11):
     return result
 
 
+def build_point_note(snapshot, point_id, supplement=None):
+    """Build one knowledge-point note using the same ledger extraction as weeks."""
+    points = fold_outline(snapshot, supplement)
+    point = next((p for p in points if p['id'] == point_id), None)
+    if point is None:
+        raise ValueError('找不到该知识点')
+    records = [r for r in mistakes(snapshot) if point_id in r['kp_ids']]
+    formula_text = '\n'.join([point['title']] + [r['explanation'] for r in records])
+    return {'point_id': point_id, 'course': snapshot['course'],
+            'last_seq': max(e['seq'] for e in snapshot['events']),
+            'points': [point], 'mistakes': records,
+            'mastery': {point_id: mastery_rows(snapshot, points)[point_id]},
+            'formulas': formulas(formula_text), 'materials': [], 'week_note': '',
+            'unassigned_mistakes': 0}
+
+
 def render_markdown(note):
-    lines = [f'# 第 {note["week"]} 周 · 我的复习笔记', '', f'账本序号：{note["last_seq"]}。本周有效历史错题：{len(note["mistakes"])} 条。',
-             '错题按有效作答逐次保留，后续答对不删除旧错题；跨周知识点会出现在各所属周，不能把周数相加当作全课程总数。', '', '## 要点与掌握度', '']
+    by_point = 'point_id' in note
+    title = note['points'][0]['title'] if by_point else f'第 {note["week"]} 周'
+    scope = '本知识点' if by_point else '本周'
+    policy = '错题按有效作答逐次保留，后续答对不删除旧错题。' if by_point else '错题按有效作答逐次保留，后续答对不删除旧错题；跨周知识点会出现在各所属周，不能把周数相加当作全课程总数。'
+    lines = [f'# {title} · 我的复习笔记', '', f'账本序号：{note["last_seq"]}。{scope}有效历史错题：{len(note["mistakes"])} 条。',
+             policy, '', '## 要点与掌握度', '']
     if note['week_note']:
         lines += [note['week_note'], '']
     if not note['points']:
@@ -332,7 +352,7 @@ def render_markdown(note):
         lines.append('')
     lines += ['## 公式', '']
     if not note['formulas']:
-        lines += ['本周来源未提取到明确公式；不自动编造。', '']
+        lines += [f'{scope}来源未提取到明确公式；不自动编造。', '']
     else:
         lines += ['公式为来源中的显式数学标记或带等号条目；完整适用条件见要点和材料原文。', '']
     for formula in note['formulas']:
@@ -343,7 +363,7 @@ def render_markdown(note):
             lines += [f'### {section["heading"]}', '', f'来源：{section["source"]}', ''] + section['lines'] + ['']
     lines += ['## 我的错题', '']
     if not note['mistakes']:
-        lines += ['账本未记录本周有效错题；这不表示本周已经掌握。', '']
+        lines += [f'{scope}无错题；这不表示{scope}已经掌握。', '']
     for index, record in enumerate(note['mistakes'], 1):
         lines += [f'### 错题 {index}', '', f'记录：{record["attempt_id"]}；序号 {record["seq"]}；得分 {record["score"]}/{record["max"]}。', '',
                   record['provenance'], '', '题干：', '', record['stem'], '']

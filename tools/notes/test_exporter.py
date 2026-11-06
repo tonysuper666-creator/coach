@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from contextlib import closing
 
-from .exporter import (build_notes, effective_attempts, fold_outline, load_snapshot,
+from .exporter import (build_notes, build_point_note, effective_attempts, fold_outline, load_snapshot,
                        main, material_sections, mistakes, render_html,
                        render_markdown, write_export, formulas)
 from .fixtures import create_database
@@ -44,6 +44,20 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([len(n['mistakes']) for n in notes], [2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0])
         self.assertIn('历史迁移', notes[0]['mastery']['kp-1'])
         self.assertEqual(notes[1]['mastery']['kp-2'], '已巩固')
+
+    def test_point_note_selects_only_matching_ledger_records(self):
+        original = copy.deepcopy(self.snapshot)
+        note = build_point_note(self.snapshot, 'shared')
+        self.assertEqual([p['id'] for p in note['points']], ['shared'])
+        self.assertEqual([r['attempt_id'] for r in note['mistakes']], ['shared-wrong'])
+        self.assertEqual(self.snapshot, original)
+        with self.assertRaisesRegex(ValueError, '找不到该知识点'):
+            build_point_note(self.snapshot, 'missing')
+
+    def test_point_markdown_matches_synthetic_expected_lines(self):
+        expected = Path(__file__).with_name('point-example.md').read_text(encoding='utf-8')
+        self.assertEqual(render_markdown(build_point_note(self.snapshot, 'kp-2')), expected)
+        self.assertIn('本周无错题', render_markdown(build_notes(self.snapshot)[2]))
 
     def test_independent_sql_matches_every_synthetic_week(self):
         query = Path(__file__).with_name('audit.sql').read_text()

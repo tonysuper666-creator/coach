@@ -15,7 +15,7 @@ import java.io.File
 import android.database.sqlite.SQLiteDatabase
 import java.security.MessageDigest
 
-/** Fixtures are locally built APKs, pushed into this isolated package's external files directory. */
+/** Fixtures are locally built APKs, written with run-as into this isolated package's private files. */
 class AppUpdateSmoke {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     @Test fun installerIgnoresThirdPartyDefaultsAndFailsClosedWithoutTrustedHandler() {
@@ -60,7 +60,7 @@ class AppUpdateSmoke {
         assertEquals(PackageManager.PERMISSION_GRANTED, pm.checkPermission(android.Manifest.permission.INSTALL_PACKAGES, component.packageName))
     }
     private fun release(name: String): Pair<File, AppRelease> {
-        val directory = File(context.getExternalFilesDir(null), "update-fixtures")
+        val directory = File(context.filesDir, "update-fixtures")
         val metadata = JSONObject(File(directory, "$name.json").readText())
         return File(directory, "$name.apk") to AppRelease(metadata.getLong("versionCode"), metadata.getString("versionName"), metadata.getString("sha256"), metadata.getLong("size"))
     }

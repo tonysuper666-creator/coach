@@ -136,10 +136,15 @@ def main():
         adb('uninstall', PACKAGE, check=False)
         adb('install', out / 'N.apk', timeout=90)
         adb('install', '-r', out / 'test.apk', timeout=90)
-        fixture = f'/sdcard/Android/data/{PACKAGE}/files/update-fixtures'
-        adb('shell', 'mkdir', '-p', fixture)
+        # Write as the debuggable target UID: shell-created external files are
+        # not readable by the app under Android 15's scoped-storage rules.
+        fixture = 'files/update-fixtures'
+        adb('shell', 'run-as', PACKAGE, 'mkdir', '-p', fixture)
         for name in ['valid.apk', 'valid.json', 'wrong-signer.apk', 'wrong-signer.json']:
-            adb('push', out / name, fixture + '/' + name)
+            with (out / name).open('rb') as source:
+                subprocess.run([adb_bin, '-s', serial, 'shell', '-T', 'run-as', PACKAGE,
+                    'tee', fixture + '/' + name], stdin=source, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, check=True, timeout=45)
         url = f'http://{tail_host()}:{PORT}'
         def instrument(method, extra=()):
             result = adb('shell', 'am', 'instrument', '-w', '-e', 'class',

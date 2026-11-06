@@ -5,7 +5,7 @@ heavy = str(Path(__file__).resolve().with_name("heavy"))
 with tempfile.TemporaryDirectory(prefix="coach-heavy-") as tmp:
     env = dict(os.environ, COACH_HEAVY_LOCK=tmp + "/lock")
     first = subprocess.Popen(
-        [heavy, "bash", "-c", "echo running; sleep 2; exit 7"],
+        [heavy, "--emulator", "bash", "-c", "echo running; sleep 2; exit 7"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix="coach-heavy-") as tmp:
     assert first.stdout.readline().strip() == "running"
     assert Path(tmp + "/lock/owner").exists()
     second = subprocess.Popen(
-        [heavy, "bash", "-c", "ps -o ni= -p $$"],
+        [heavy, "--emulator", "bash", "-c", "ps -o ni= -p $$"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory(prefix="coach-heavy-") as tmp:
     print(
         "heavy: contention waits with owner; command exit=7 propagated; child nice>=15; exit cleanup OK"
     )
-    process = subprocess.Popen([heavy, "sleep", "30"], env=env)
+    process = subprocess.Popen([heavy, "--emulator", "sleep", "30"], env=env)
     for _ in range(100):
         if Path(tmp + "/lock/owner").exists():
             break

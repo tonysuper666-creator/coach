@@ -10,7 +10,8 @@ import kotlinx.serialization.Serializable
     val solidProgress: SolidProgress = SolidProgress(), val revokedAtSeq: Long? = null, val revokedReason: String? = null, val solidLatch: List<String> = emptyList()
 )
 @Serializable data class Review(val dueDay: Long, val intervalDays: Int = 1, val ease: Double = 2.3,
-    val lapses: Int = 0, val lastResult: String? = null, val lastReviewDay: Long? = null)
+    val lapses: Int = 0, val lastResult: String? = null, val lastReviewDay: Long? = null,
+    val baseDueDay: Long? = null, val baseIntervalDays: Int? = null, val snoozedUntilDay: Long? = null)
 @Serializable data class Journal(val answers: Int = 0, val correct: Int = 0, val orphaned: Int = 0,
     val followups: Int = 0, val notes: Int = 0, val minutes: Double = 0.0,
     val opened: List<String> = emptyList(), val delivered: List<String> = emptyList(),

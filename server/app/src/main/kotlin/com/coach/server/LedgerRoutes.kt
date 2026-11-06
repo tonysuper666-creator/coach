@@ -27,6 +27,10 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
+private const val CATCH_UP_PAGE = 64
+// Half the client limit, measured as UTF-16 length x 3, which never undercounts UTF-8 bytes.
+private const val CATCH_UP_BYTES = 512 * 1024
+
 fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
@@ -224,9 +228,16 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 if (!stillAuthorized()) return
                 val meta=actor.execute { hello() }
                 if(meta.epoch!=epoch) { epoch=meta.epoch;cursors.clear();send(Frame.Text(LedgerJson.encodeToString(meta))) }
-                for(course in actor.execute { courses() }) {
-                    val es=actor.execute { events(course,cursors[course] ?: 0) }
-                    if(es.isNotEmpty()) { send(Frame.Text(LedgerJson.encodeToString(LedgerFrame(course=course,epoch=epoch,events=es))));cursors[course]=es.last().seq }
+                // TutorClient drops any message over 1 MiB, so a long ledger goes out in pages;
+                // clients take a ledger frame only as the cue to pull over HTTP.
+                for(course in actor.execute { courses() }) while(true) {
+                    val es=actor.execute { events(course,cursors[course] ?: 0,CATCH_UP_PAGE) }
+                    if(es.isEmpty()) break
+                    var take=es.size
+                    var text=LedgerJson.encodeToString(LedgerFrame(course=course,epoch=epoch,events=es))
+                    while(take>1 && text.length*3>CATCH_UP_BYTES) { take/=2;text=LedgerJson.encodeToString(LedgerFrame(course=course,epoch=epoch,events=es.take(take))) }
+                    send(Frame.Text(text));cursors[course]=es[take-1].seq
+                    if(take==es.size && es.size<CATCH_UP_PAGE) break
                 }
             }
             catchUp()
@@ -267,7 +278,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device,receivedAt)
                     }
                     "tutor.open" -> {
-                        chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
+                        chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"),message["review"]?.jsonPrimitive?.booleanOrNull == true)
                         tutorSend.withLock { chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) } }
                     }
                     "msg.history" -> tutorSend.withLock {
@@ -290,7 +301,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         }
                     }
                 } } catch (error: IllegalArgumentException) {
-                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
+                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"clientMsgId" to message.str("clientMsgId").ifBlank { null },"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
             } finally { socketTicket?.let { observation?.coverage?.end(it) } }

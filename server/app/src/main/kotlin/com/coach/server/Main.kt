@@ -63,7 +63,19 @@ fun main(args: Array<String>): Unit = runBlocking {
     actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
     val supplyWorker = chat.startSupplyWorker()
-    actor.execute { backupIfDue() }
+    // A failed backup (disk full, unreadable blob) must not take learning down with it;
+    // the watermark stays put, so the backup is still due when the retry comes round.
+    var backupRetryAt = 0L
+    suspend fun backupSafely() {
+        if (System.currentTimeMillis() < backupRetryAt) return
+        try { actor.execute { backupIfDue() } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            backupRetryAt = System.currentTimeMillis() + 30 * 60_000
+            println("COACH backup failed=${e.javaClass.simpleName}: ${e.message}; retry in 30 min")
+        }
+    }
+    backupSafely()
     val maintenance = launch {
         val detector = SuspensionDetector()
         while(isActive) {
@@ -71,10 +83,11 @@ fun main(args: Array<String>): Unit = runBlocking {
             if(detector.sample(System.currentTimeMillis(),System.nanoTime())) {
                 // 进行中的消息按 truncated(reason=suspended) 收尾（§4.7），先断开再落库
                 chat.abortAll("suspended")
-                actor.execute { recoverSuspension();backupIfDue() }
+                actor.execute { recoverSuspension() }
+                backupSafely()
                 pushes.emit("wake")
                 println("COACH wake detected; messages truncated; running jobs requeued")
-            } else actor.execute { backupIfDue() }
+            } else backupSafely()
         }
     }
     val observation = UsageObservation(
@@ -96,7 +109,8 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val math = MathProcess.locate()
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes() }
+    val mocks=MockEngine(MockLibrary.configured())
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

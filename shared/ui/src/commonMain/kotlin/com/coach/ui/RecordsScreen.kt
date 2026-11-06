@@ -19,7 +19,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
+import com.coach.domain.flag
 import com.coach.domain.logicalDay
+import com.coach.domain.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -34,7 +36,7 @@ private sealed interface RecordSelection {
  * 锁存撤销和没有计入的作答（孤儿作答）也在这里，并写明原因。
  */
 @Composable
-fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenKp: (kpId: String) -> Unit) {
+fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenMock: ((mockId: String) -> Unit)? = null, onOpenKp: (kpId: String) -> Unit) {
     if (view == null) return CenterMessage("正在加载课程…")
     val records by produceState<RecordsView?>(null, view) {
         value = withContext(Dispatchers.Default) { RecordsView(view.events).also { it.changes; it.orphans } }
@@ -44,7 +46,7 @@ fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenKp
     // 宽屏右栏默认就是最新一条变化，不留一块空白；窄屏停在列表。
     val selected = picked ?: if (wide) data.changes.maxByOrNull { it.seq }?.let { RecordSelection.Change(it) } else null
     val list: @Composable (Modifier) -> Unit = { modifier ->
-        RecordsList(c, view, data, selected, modifier) { picked = it }
+        RecordsList(c, view, data, selected, modifier, onOpenMock) { picked = it }
     }
     if (wide) {
         Row(Modifier.fillMaxSize()) {
@@ -60,16 +62,34 @@ fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenKp
 }
 
 @Composable
-private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView, selected: RecordSelection?, modifier: Modifier, onSelect: (RecordSelection) -> Unit) {
+private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView, selected: RecordSelection?, modifier: Modifier, onOpenMock: ((String) -> Unit)?, onSelect: (RecordSelection) -> Unit) {
     val changes = data.changes.sortedByDescending { it.seq }
     val orphans = data.orphans.sortedByDescending { it.seq }
-    if (changes.isEmpty() && orphans.isEmpty()) {
+    val mocks = remember(data) { mockRecords(view, data) }
+    if (changes.isEmpty() && orphans.isEmpty() && mocks.isEmpty()) {
         Box(modifier) { CenterMessage("还没有掌握变化。连续答对 3 道不同的题，知识点就会「已通过」，这里会记下为什么。") }
         return
     }
     LazyColumn(modifier, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { Text("记录", style = MaterialTheme.typography.headlineMedium) }
         item { Text("每个掌握变化都能点开，看到原题、你的原答和判分依据。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (mocks.isNotEmpty()) {
+            item { Text("模拟考", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary) }
+            items(mocks, key = { "m:${it.mockId}" }) { m ->
+                Surface(onClick = { onOpenMock?.invoke(m.mockId) }, enabled = onOpenMock != null, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("record-mock")) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(dayLabel(logicalDay(m.at, view.zone)) + " " + c.formatClock(m.at), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(m.title, style = MaterialTheme.typography.bodyLarge)
+                            Text((if (m.purpose == "FULL_MOCK") "整卷模拟" else "限时单选") + (if (m.auto) " · 到点自动交卷" else "") + (if (m.pending > 0) " · ${m.pending} 题批改中" else ""),
+                                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("${marks(m.score)} / ${marks(m.max)}", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+        }
         var lastDay = Long.MIN_VALUE
         for (change in changes) {
             val day = logicalDay(change.at, view.zone)
@@ -278,6 +298,24 @@ private fun formatLabel(format: String) = when (format) { "SINGLE_CHOICE" -> "�
 private fun statusLabel(status: String) = when (status) { "AI_UNREVIEWED" -> "AI 草稿"; "EXACT" -> "精确判分"; "VERIFIED" -> "已核验"; else -> status }
 private fun percent(g: GradeView) = "${g.score * 100 / g.max}%"
 private fun trimZero(x: Double) = if (x == x.toLong().toDouble()) x.toLong().toString() else x.toString()
+
+private class MockRecord(val mockId: String, val title: String, val purpose: String, val auto: Boolean, val at: Long, val score: Double, val max: Double, val pending: Int)
+
+/** 交卷事件在本机账本里，离线也能列出；每题的分来自同一账本里的批改（复核改过的以复核为准），批完之前算「批改中」。 */
+private fun mockRecords(view: CourseView, data: RecordsView): List<MockRecord> =
+    view.events.filter { it.type == "mock_submitted" }.sortedByDescending { it.seq }.map { e ->
+        val p = e.payload
+        var score = 0.0; var pending = 0
+        for (unit in (p["items"] as? kotlinx.serialization.json.JsonArray).orEmpty()) {
+            val u = unit as? kotlinx.serialization.json.JsonObject ?: continue
+            val unitMarks = (u["marks"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0
+            val attempt = (u["attemptId"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: continue
+            val grade = data.attempt(attempt)?.effectiveGrade
+            if (grade == null || grade.max <= 0) pending++ else score += unitMarks * grade.score / grade.max
+        }
+        val max = ((p["max"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0) / 100
+        MockRecord(p.str("mockId"), p.str("title"), p.str("purpose"), p.flag("auto"), e.occurredAt, score, max, pending)
+    }
 
 /** 逻辑日（自 1970-01-01 起的天数）→「10月31日」。 */
 internal fun dayLabel(day: Long): String {

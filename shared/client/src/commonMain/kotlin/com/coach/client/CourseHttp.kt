@@ -6,6 +6,11 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.http.ContentType
+import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
@@ -13,6 +18,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -20,6 +27,9 @@ import kotlinx.serialization.json.jsonObject
 /** 课程原文的一个文档（教材一章）。页号是 PDF 页；书页范围来自各页自己的书页号（有的页没有）。 */
 data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int, val lastPdfPage: Int, val firstBookPage: Int?, val lastBookPage: Int?)
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
+
+/** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
+class MockReply(val body: JsonObject?, val error: String?)
 
 /**
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
@@ -42,6 +52,30 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     } catch (error: Exception) {
         null
     }
+
+    private suspend fun mockCall(path: String, body: JsonObject?): MockReply = try {
+        val url = "$base/v1/courses/${course.encodeURLPathPart()}/$path"
+        val response: HttpResponse = if (body == null) http.get(url) else http.post(url) { setBody(TextContent(body.toString(), ContentType.Application.Json)) }
+        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        if (response.status.isSuccess()) MockReply(parsed, null) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）")
+    } catch (error: kotlinx.coroutines.CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        MockReply(null, null)
+    }
+
+    /** 模拟考首页：可考的卷子、速刷题量、未交卷的考试、历次成绩。 */
+    suspend fun mocks(): MockReply = mockCall("mocks", null)
+    suspend fun startPaper(paperId: String): MockReply = mockCall("mocks", buildJsonObject { put("paperId", paperId) })
+    /** [week] 为 null 时按押题权重抽。 */
+    suspend fun startDrill(week: Int?): MockReply = mockCall("mocks", buildJsonObject { put("drill", buildJsonObject { week?.let { put("week", it) } }) })
+    /** 进行中返回卷面（不含答案与细则）；交卷后返回成绩。 */
+    suspend fun mock(mockId: String): MockReply = mockCall("mocks/${mockId.encodeURLPathPart()}", null)
+    /** [seq] must grow with every save of this exam; the Mac ignores a save numbered no higher than one it already stored. */
+    suspend fun saveMock(mockId: String, answers: JsonObject, seq: Long): MockReply =
+        mockCall("mocks/${mockId.encodeURLPathPart()}/answers", buildJsonObject { put("answers", answers); put("seq", seq) })
+    suspend fun submitMock(mockId: String, answers: JsonObject, auto: Boolean): MockReply =
+        mockCall("mocks/${mockId.encodeURLPathPart()}/submit", buildJsonObject { put("answers", answers); put("auto", auto) })
 
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")

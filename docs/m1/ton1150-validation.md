@@ -109,13 +109,13 @@ B 的 12 条消息每条恰有 3 个「你选的」块，第二段没有重复�
 
 ## OPPO 真机验收（11-06）
 
-环境：OPPO PMA120（1080×2376，ColorOS），测试机租约 TON-1150，00:03–00:21Z 前台一轮；测试前确认已解锁、无 instrument / `repeat.py` / 别的前台安装。APK 为 #48 head `b6e7414` 构建，`-PcoachApplicationId=com.coach.android.ton1150 -Pcoach.port=18861`，SHA-256 `0d2ac02306a98a05ec12cb22a8849f4fe1f4fe451db8b622c45bad72e6b5d7ac`，清单 `coach.port=18861`。隔离服务 18861（Tailscale `100.88.12.89`）+ 独立桥 8816（`BRIDGE_CLAUDE_CONCURRENCY=2`），数据为当时生产库的只读备份；未连接 18791/8791/8790/DeepTutor。ColorOS 不允许 shell `pm clear`，所以改用刚装好的空数据包，只配对一次。时间均为 UTC：没有直接查询手机时区，但第 1 轮 harness 在 Mac 上记下点按「换个例子再讲」的 UTC 时刻 00:06:37Z，桥 00:06:44Z 收到该请求，同一轮截图状态栏显示 00:06，三者一致，说明手机时钟与 UTC 对齐。
+环境：OPPO PMA120（1080×2376，ColorOS），测试机租约 TON-1150，00:03–00:21Z 前台一轮；测试前确认已解锁、无 instrument / `repeat.py` / 别的前台安装。APK 为 #48 head `b6e7414` 构建，`-PcoachApplicationId=com.coach.android.ton1150 -Pcoach.port=18861`，SHA-256 `0d2ac02306a98a05ec12cb22a8849f4fe1f4fe451db8b622c45bad72e6b5d7ac`，清单 `coach.port=18861`。隔离服务 18861（Tailscale `<isolated-host>`）+ 独立桥 8816（`BRIDGE_CLAUDE_CONCURRENCY=2`），数据为当时生产库的只读备份；未连接 18791/8791/8790/DeepTutor。ColorOS 不允许 shell `pm clear`，所以改用刚装好的空数据包，只配对一次。时间均为 UTC：没有直接查询手机时区，但第 1 轮 harness 在 Mac 上记下点按「换个例子再讲」的 UTC 时刻 00:06:37Z，桥 00:06:44Z 收到该请求，同一轮截图状态栏显示 00:06，三者一致，说明手机时钟与 UTC 对齐。
 
 版本：真机数字全部属于 `b6e7414`。之后 #48 rebase 到 main `151139d`，`ChatService.kt` 的冲突解决把 main 的首字追踪（TON-1175）与受限来源守卫（TON-1206）并入了重讲路径，**新 head 没有再上真机**，只跑了本机测试与构建。原始记录（7 行 logcat `CoachTtft`（第 1–6、8 轮）+ 第 7 轮服务端收到的 `client_ttft` 上报、桥日志切片、8 条重讲首段与全文、界面转储、harness 运行记录）附在 TON-1150 评论里。
 
 二次复核（Expert）在 `7fdfabd` 上发现：分两段的回复切到第二段时会新建输出守卫，第二段若触发字母答案过滤，发出的修订快照会把已完成的第一段一起清掉（客户端与落库都只剩第二段，仍记 complete）。已修复：第一段结束后其正文作为固定前缀，第二段的修订只替换前缀之后的部分；回归测试 `crossReviewSecondStageLetterRevisionMustPreserveCompletedMistakeBlock` 断言每个快照、客户端组装结果和落库都以第一段开头，且字母答案仍被滤掉。本次真机 8 轮都只有 1 次模型调用、没有走分两段的路径，所以这处修复不改变上面的真机数字的含义，但修复后的 head 同样没有再上真机。
 
-端口：不带 `coachUrl` 启动卡包，立即抛出 `Refusing production default for com.coach.android.ton1150; coachUrl=<empty>` 退出，不会回落到 18791；带 `coachUrl` 启动后日志为 `CoachUrl: package=com.coach.android.ton1150 extra=http://100.88.12.89:18861 resolved=http://100.88.12.89:18861`，然后进入配对页。
+端口：不带 `coachUrl` 启动卡包，立即抛出 `Refusing production default for com.coach.android.ton1150; coachUrl=<empty>` 退出，不会回落到 18791；带 `coachUrl` 启动后日志为 `CoachUrl: package=com.coach.android.ton1150 extra=http://<isolated-host>:18861 resolved=http://<isolated-host>:18861`，然后进入配对页。
 
 顺序：每个知识点先点「开始讲解」讲一遍 → 出题 → 三题全选错 → 提交 → 看结果卡 → 点「换个例子再讲」。8 个知识点，各 3 道错题。
 

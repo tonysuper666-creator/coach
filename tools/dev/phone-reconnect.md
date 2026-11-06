@@ -28,7 +28,13 @@ production ports, uses a fresh synthetic database and token, disables managed
 children, source lookup and the real bridge, and requires all three network
 security tests to pass before fault injection. The Android tests use the built
 `COACH_PORT`, refuse the production service, and the READY checkpoint must match
-the runner's port. The script never uses the general `check-android.py` runner,
+the runner's port. After READY, a bounded 15-second control leaves the JVM running
+and requires both main-thread and IO heartbeats to span at least ten seconds,
+with no gap over four seconds and every sampled sync status online/active.
+Failure aborts before STOP: it shows a diagnostic failure without JVM pause,
+not a reconnection pass or proof of freezing. This additional control does not
+extend the original 30-second OFFLINE deadline. It has not yet run on the phone.
+The script never uses the general `check-android.py` runner,
 which also has emulator and Tailscale Serve side effects.
 
 Only the runner's JVM process group receives STOP/CONT for about 32 seconds.

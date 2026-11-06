@@ -1,5 +1,7 @@
 package com.coach.client
 
+import com.coach.domain.courseExamDay
+import com.coach.domain.reviewsOn
 import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
@@ -53,8 +55,12 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
     fun tutorThreadId(kpId: String): String = events.lastOrNull {
-        it.type == "kp_opened" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
+        it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
     }?.threadId ?: "kp:$kpId"
+
+    fun reviewThreadId(kpId: String): String = events.filter {
+        it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
+    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"
 
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
@@ -123,10 +129,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     fun kp(id: String): KpRow? = kps.firstOrNull { it.id == id }
 
-    /** 课程所在时区（装载内容里带），决定「今天」的逻辑日界线。 */
-    val zone: String by lazy {
-        events.firstOrNull { it.type == "outline_revised" }?.payload?.let { ((it["course"] as? JsonObject)?.get("tz") as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() } ?: "Europe/London"
-    }
+    /** Shares the projector clock, including the 04:00 logical-day boundary. */
+    val zone: String get() = projection.timeZone
 
     fun logicalToday(nowMillis: Long): Long = logicalDay(nowMillis, zone)
 
@@ -134,18 +138,14 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     fun dueReviews(nowMillis: Long): List<DueReview> {
         val today = logicalToday(nowMillis)
         val order = kps.withIndex().associate { it.value.id to it.index }
-        return projection.review.mapNotNull { (id, review) ->
+        return projection.reviewsOn(today, examDay).mapNotNull { (id, review) ->
             val kp = kp(id) ?: return@mapNotNull null
-            if (review.dueDay > today) null else DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
+            if (review.dueDay > today || review.lastReviewDay == today) null else DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
         }.sortedWith(compareBy({ it.dueDay }, { order[it.kp.id] ?: Int.MAX_VALUE }))
     }
 
     /** 考试日（最近一次 `exam_set`）；没设就是 null。 */
-    val examDay: Long? by lazy {
-        events.lastOrNull { it.type == "exam_set" }?.payload?.let { p ->
-            (p["examDay"] as? JsonPrimitive)?.longOrNull ?: (p["examAt"] as? JsonPrimitive)?.longOrNull?.let { logicalDay(it, zone) }
-        }
-    }
+    val examDay: Long? by lazy { courseExamDay(events, zone) }
 
     /** 离考试还有几天；没设考试日、或已经考过返回 null。 */
     fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }

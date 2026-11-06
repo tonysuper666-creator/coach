@@ -22,6 +22,8 @@ interface LedgerTransport {
     suspend fun command(command: WireCommand): Receipt
     suspend fun offlinePack(course: String, size: Int): OfflineChoicePack = error("Offline packs unavailable")
     suspend fun watch(onLedger: suspend () -> Unit)
+    /** 同 [watch]；连接真正建立（握手完成）时调用 [onOpen]。重连退避只按建立之后的时长算，握手再慢也不算「用过」。 */
+    suspend fun watch(onOpen: () -> Unit, onLedger: suspend () -> Unit) { onOpen(); watch(onLedger) }
 }
 
 /** Device-specific immutable outbox and disposable ledger replica. Database survives process restarts. */
@@ -260,11 +262,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         try {
             val backoff=ReconnectBackoff()
             while(isActive) {
-                val opened=TimeSource.Monotonic.markNow()
-                try { transport.watch { hints.trySend(Unit) } }
+                var opened: TimeMark?=null
+                try { transport.watch(onOpen={ opened=TimeSource.Monotonic.markNow() }) { hints.trySend(Unit) } }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
-                delay(backoff.next(opened.elapsedNow().inWholeMilliseconds))
+                delay(backoff.next(opened?.elapsedNow()?.inWholeMilliseconds ?: 0))
             }
         } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }
     }

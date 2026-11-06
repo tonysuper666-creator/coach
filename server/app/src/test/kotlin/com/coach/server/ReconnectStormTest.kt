@@ -8,9 +8,11 @@ import com.coach.domain.*
 import com.coach.protocol.*
 import com.coach.store.LedgerStore
 import com.coach.store.sha256
+import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import io.ktor.server.request.path
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocketRaw
@@ -117,5 +119,35 @@ class ReconnectStormTest {
             println("STORM ledgerWatch connections=${seen.size} gapsMs=${gaps(seen)}")
             assertTrue(seen.size in 2..7, "6 秒内账本 socket 重连 ${seen.size} 次，间隔 ${gaps(seen)} ms")
         } finally { scope.cancel(); driver.close() }
+    }
+
+    /**
+     * 账本 socket 握手很慢（TCP 已连上，WS 升级 8 秒才回）、升级后只用了 3 秒就被关（TON-1283 F4）。
+     * 修前退避按整次 watch 耗时（约 11 秒，≥10 秒）当成「连接稳定」，每次都回到 250–500ms；
+     * 修后只算升级之后的 3 秒，等待照常逐次拉长。
+     */
+    @Test fun ledgerWatchSlowHandshakeDoesNotResetBackoff() = runBlocking {
+        val arrived = Collections.synchronizedList(mutableListOf<Long>())
+        val ended = Collections.synchronizedList(mutableListOf<Long>())
+        val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            intercept(ApplicationCallPipeline.Plugins) { if (context.request.path() == "/v1/ws") { arrived += System.nanoTime(); delay(8_000) } }
+            install(WebSockets)
+            routing { webSocketRaw("/v1/ws") { try { delay(3_000) } finally { ended += System.nanoTime() } } }
+        }.apply { start(wait = false) }
+        val port = engine.engine.resolvedConnectors().first().port
+        check(port !in setOf(8790, 8791, 18791))
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val transport = HttpLedgerTransport("http://127.0.0.1:$port", "desktop", token)
+        val sync = SyncEngine(ClientDatabase(driver), "desktop", transport, listOf("course"), { UUID.randomUUID().toString() }, ::sha256)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            sync.start(scope)
+            withTimeoutOrNull(60_000) { while (arrived.size < 4) delay(50) }
+            val waits = synchronized(arrived) { synchronized(ended) { (0 until minOf(ended.size, arrived.size - 1)).map { (arrived[it + 1] - ended[it]) / 1_000_000 } } }
+            println("STORM ledgerSlowHandshake waitsMs=$waits")
+            assertTrue(waits.size >= 3, "60 秒内只看到 ${arrived.size} 次连接：$waits")
+            assertTrue(waits[2] >= 900, "握手慢的连接被当成稳定连接，退避每次清零：$waits ms")
+        } finally { scope.cancel(); transport.close(); engine.stop(0, 500); driver.close() }
     }
 }

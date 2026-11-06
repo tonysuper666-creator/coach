@@ -183,6 +183,22 @@ class TutorModel(
         mutateThread(threadId) { copy(items = items.filterNot { it.key == "l:$clientMsgId" }) }
     }
 
+    /** 服务端回来的一条消息大到连接装不下（多半是超长对话的历史）：不能装作载入成功，在线程里说清楚。 */
+    fun onMessageTooLarge(threadId: String) = synchronized(lock) {
+        mutateThread(threadId) { copy(error = "这段对话太长，历史没能完整载入。") }
+    }
+
+    /** 连接已收下但服务端始终没确认（补发用尽或被挤出待确认队列）：撤掉乐观行，在线程里说清哪句没送到，请学习者重发。 */
+    fun onAskUndelivered(threadId: String, clientMsgId: String) = synchronized(lock) {
+        pendingSend.remove(threadId)
+        mutateThread(threadId) {
+            val lost = items.firstOrNull { it.key == "l:$clientMsgId" } as? ChatItem.Learner
+            val quote = lost?.text?.let { if (it.length > 40) it.take(40) + "…" else it }
+            copy(items = items.filterNot { it.key == "l:$clientMsgId" }, poolText = null,
+                error = if (quote != null) "这句提问没有送达，请重新发送：「$quote」" else "有一句提问没有送达，请重新发送。")
+        }
+    }
+
     fun onFrame(frame: String) {
         val ids = synchronized(lock) {
             handleFrame(frame)

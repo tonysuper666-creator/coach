@@ -142,4 +142,50 @@ class ClientAuditTest {
             assertEquals(2, delivered.size, "确认之后不能再重复补发")
         } finally { client.close(); engine.stop(0, 500); scope.cancel() }
     }
+
+    /**
+     * 线程已有 200 句、每句约 6 KB：服务端一帧发回约 1.2 MB 的 msg.history（TON-1283 F3）。
+     * 修前客户端把超过 1 MiB 的消息一律静默丢掉，连接照样显示在线，历史却永远载入不了。
+     * 同一条连接上还推了一份 2 MiB 的账本：导师用不上，仍可跳过，但不能因此断线。
+     */
+    @Test fun chatHistoryOverOneMebibyteStillLoads() = runBlocking {
+        val connections = AtomicInteger()
+        val history = buildJsonObject {
+            put("t", "msg.history"); put("courseId", "course"); put("threadId", "t1")
+            put("messages", JsonArray(List(200) { n -> json("t" to "msg.user", "msg" to "u$n", "role" to "user", "status" to "complete",
+                "text" to "极".repeat(2_000), "createdAt" to n.toLong(), "clientMsgId" to "c$n", "deviceId" to "desktop", "threadId" to "t1") }))
+        }.toString()
+        assertTrue(history.encodeToByteArray().size > 1_048_576)
+        val ledger = """{"t":"ledger","course":"course","epoch":"e","events":["${"账".repeat(700_000)}"]}"""
+        val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            install(WebSockets)
+            routing {
+                webSocketRaw("/v1/ws") {
+                    connections.incrementAndGet()
+                    send(Frame.Text(ledger))
+                    for (frame in incoming) when (frame) {
+                        is Frame.Ping -> send(Frame.Pong(frame.data))
+                        is Frame.Text -> if (Json.parseToJsonElement(frame.readText()).jsonObject["t"]?.jsonPrimitive?.content == "tutor.open") send(Frame.Text(history))
+                        else -> {}
+                    }
+                }
+            }
+        }.apply { start(wait = false) }
+        val port = engine.engine.resolvedConnectors().first().port
+        check(port !in setOf(8790, 8791, 18791))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val model = TutorModel(System::currentTimeMillis)
+        val client = TutorClient("http://127.0.0.1:$port", "desktop", token, model)
+        try {
+            client.start(scope)
+            withTimeout(10_000) { while (!model.state.value.connected) delay(20) }
+            assertTrue(client.open("t1", "course", "kp", emptyList(), "极限"))
+            withTimeoutOrNull(10_000) { while (model.state.value.threads["t1"]?.historyLoaded != true) delay(20) }
+            val view = model.state.value.threads["t1"]
+            assertEquals(true, view?.historyLoaded, "1.2 MB 的对话历史被静默丢掉：连接在线，线程却没有历史（error=${view?.error}）")
+            assertEquals(200, view?.items?.count { it.key.startsWith("l:") })
+            assertTrue(model.state.value.connected)
+            assertEquals(1, connections.get(), "大消息把导师连接踢断了")
+        } finally { client.close(); engine.stop(0, 500); scope.cancel() }
+    }
 }

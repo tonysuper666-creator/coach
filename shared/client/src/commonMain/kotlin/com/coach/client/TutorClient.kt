@@ -130,23 +130,37 @@ class TutorClient(
         val pongs = Channel<ByteArray>(Channel.CONFLATED)
         val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
         val reader = launch {
-            var body = ByteArray(0)
-            // 服务端按帧广播：连上时整份账本也走这条 socket。导师用不上的超大消息丢掉即可，不能为它断线。
-            var oversized = false
+            var parts = ArrayList<ByteArray>()
+            var size = 0L
+            // 服务端按帧广播：连上时整份账本也走这条 socket。导师用不上的超大账本推送丢掉即可，不能为它断线；
+            // 导师自己的消息（长对话的 msg.history）再大也要交给模型，装不下就在线程里明说，不能静默吞掉。
+            var keep = true
+            var sniffed = false
             for (frame in socket.incoming) when (frame) {
                 is Frame.Ping -> socket.send(Frame.Pong(frame.data))
                 is Frame.Pong -> pongs.trySend(frame.data)
                 is Frame.Close -> break
                 is Frame.Text -> {
-                    if (!oversized && body.size + frame.data.size > MAX_MESSAGE_BYTES) { oversized = true; body = ByteArray(0) }
-                    if (!oversized) body += frame.data
+                    if (keep) {
+                        parts += frame.data
+                        size += frame.data.size
+                        if (!sniffed && size > MAX_MESSAGE_BYTES) { sniffed = true; keep = messageType(parts) != "ledger" }
+                        if (keep && size > MAX_SOCKET_FRAME_BYTES) {
+                            keep = false
+                            val thread = messageThread(parts)
+                            synchronized(lifecycle) { if (!closed) model.onMessageTooLarge(thread) }
+                        }
+                        if (!keep) parts = ArrayList()
+                    }
                     if (frame.fin) {
-                        if (!oversized) {
-                            val text = body.decodeToString(throwOnInvalidSequence = true)
+                        if (keep) {
+                            val text = join(parts, size).decodeToString(throwOnInvalidSequence = true)
                             synchronized(lifecycle) { if (!closed) { confirm(text); model.onFrame(text) } }
                         }
-                        body = ByteArray(0)
-                        oversized = false
+                        parts = ArrayList()
+                        size = 0
+                        keep = true
+                        sniffed = false
                     }
                 }
                 else -> error("Unexpected binary tutor frame")
@@ -186,7 +200,8 @@ class TutorClient(
                 socket.send(Frame.Text(resumeFrame(id).toString()))
             }
             val resends = synchronized(lifecycle) {
-                unconfirmed.values.removeAll { it.resends >= MAX_ASK_RESENDS }
+                val exhausted = unconfirmed.filterValues { it.resends >= MAX_ASK_RESENDS }
+                exhausted.forEach { (id, ask) -> unconfirmed.remove(id); model.onAskUndelivered(ask.threadId, id) }
                 unconfirmed.values.onEach { it.resends++ }.map { it.frame }
             }
             resends.forEach { socket.send(Frame.Text(it)) }
@@ -220,6 +235,25 @@ class TutorClient(
     }
 
     private companion object {
+        /** 只看消息开头：服务端的帧都把 `t`、`threadId` 写在大字段（events / messages）之前。 */
+        private fun head(parts: List<ByteArray>): String {
+            val out = ByteArray(minOf(HEAD_BYTES, parts.sumOf { it.size }))
+            var at = 0
+            for (part in parts) { if (at == out.size) break; val n = minOf(part.size, out.size - at); part.copyInto(out, at, 0, n); at += n }
+            return out.decodeToString()
+        }
+        private fun field(parts: List<ByteArray>, name: String) =
+            Regex("\"$name\"\\s*:\\s*\"([^\"]*)\"").find(head(parts))?.groupValues?.get(1).orEmpty()
+        private fun messageType(parts: List<ByteArray>) = field(parts, "t")
+        private fun messageThread(parts: List<ByteArray>) = field(parts, "threadId")
+        private fun join(parts: List<ByteArray>, size: Long): ByteArray {
+            if (parts.size == 1) return parts[0]
+            val out = ByteArray(size.toInt())
+            var at = 0
+            for (part in parts) { part.copyInto(out, at); at += part.size }
+            return out
+        }
+        const val HEAD_BYTES = 512
         const val RESUME_TICK_MS = 1_000L
         const val PING_INTERVAL_MS = 5_000L
         const val PONG_TIMEOUT_MS = 5_000L
@@ -264,7 +298,10 @@ class TutorClient(
         }
         synchronized(lifecycle) {
             unconfirmed[clientMsgId] = Unconfirmed(threadId, frame.toString())
-            while (unconfirmed.size > MAX_UNCONFIRMED_ASKS) unconfirmed.remove(unconfirmed.keys.first())
+            while (unconfirmed.size > MAX_UNCONFIRMED_ASKS) {
+                val oldest = unconfirmed.keys.first()
+                unconfirmed.remove(oldest)?.let { model.onAskUndelivered(it.threadId, oldest) }
+            }
         }
         val sent = send(frame)
         if (!sent) {
@@ -274,17 +311,14 @@ class TutorClient(
         return sent
     }
 
-    /** Caller holds [lifecycle]. 本设备的 msg.user（或针对这句的 msg.error）到了，这句就不用再补发。 */
+    /** Caller holds [lifecycle]. 本设备的 msg.user（或点名这句的 msg.error）到了，这句就不用再补发；只带线程号的错误对不上具体哪句，一句也不清。 */
     private fun confirm(text: String) {
         if (unconfirmed.isEmpty()) return
         val obj = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         fun str(key: String) = (obj[key] as? JsonPrimitive)?.contentOrNull
         when (str("t")) {
             "msg.user" -> if (str("deviceId") == deviceId) str("clientMsgId")?.let(unconfirmed::remove)
-            "msg.error" -> {
-                str("msg")?.let(unconfirmed::remove)
-                str("threadId")?.let { thread -> unconfirmed.values.removeAll { it.threadId == thread } }
-            }
+            "msg.error" -> (str("clientMsgId") ?: str("msg"))?.let(unconfirmed::remove)
         }
     }
 

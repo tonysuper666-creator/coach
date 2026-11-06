@@ -50,9 +50,11 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     }
     override suspend fun offlinePack(course: String, size: Int): OfflineChoicePack = LedgerJson.decodeFromString(
         client.get("$baseUrl/offline-pack") { parameter("size",size);parameter("courseId",course) }.bodyAsText())
-    override suspend fun watch(onLedger: suspend () -> Unit) {
+    override suspend fun watch(onLedger: suspend () -> Unit) = watch({}, onLedger)
+    override suspend fun watch(onOpen: () -> Unit, onLedger: suspend () -> Unit) {
         val url = baseUrl.replaceFirst("http","ws")+"/v1/ws"
         client.webSocket(urlString=url) {
+            onOpen()
             for(frame in incoming) if(frame is Frame.Text) {
                 val obj=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
                 // Text/math deltas update the message stream, not the learning ledger.

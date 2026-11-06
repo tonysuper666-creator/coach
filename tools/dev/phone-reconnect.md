@@ -126,6 +126,13 @@ control passes, infer freezing from missing samples, or change phone power
 settings as a substitute for diagnosis. Further phone observation requires a
 new guardian grant and the same idle protection; keep waiting in the existing
 queue meanwhile.
+Process snapshots also count a fixed allowlist of kernel wait symbols from only
+the card process's tasks, read under its own UID. No task IDs, thread names,
+raw wait-channel text or stack dumps are saved. Unsupported symbols are counted
+as unknown, access failure stays unknown, and `0` may mean a hidden wait point.
+This observes scheduling without changing phone power settings or signalling
+the process. A snapshot still describes only that instant, and does not by itself
+identify a cause or prove a reconnection pass.
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

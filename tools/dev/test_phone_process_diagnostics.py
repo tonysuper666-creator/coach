@@ -48,6 +48,18 @@ class ProcessDiagnosticsTest(unittest.TestCase):
             with self.subTest(dump=dump):
                 self.assertIsNone(runner.wakefulness(dump))
 
+    def test_wait_channels_count_known_symbols_without_task_identifiers(self):
+        self.assertEqual(dict(known={'do_freezer_trap': 2, 'do_epoll_wait': 1,
+                                    '0': 1}, unknown=0),
+                         runner.wait_channels('do_freezer_trap\ndo_epoll_wait\n'
+                                              'do_freezer_trap\n0\n'))
+
+    def test_unknown_wait_channel_output_never_retains_private_text(self):
+        result=runner.wait_channels('private-token\n123:private-content\n'
+                                    'Permission denied\ndo_freezer_trap private-token\n')
+        self.assertEqual(dict(known={}, unknown=4), result)
+        self.assertEqual(dict(known={}, unknown=0), runner.wait_channels(''))
+
 
 if __name__ == '__main__':
     unittest.main()

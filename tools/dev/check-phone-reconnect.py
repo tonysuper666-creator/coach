@@ -73,6 +73,23 @@ def kernel_state(status):
     return states[0] if len(states) == 1 else None
 
 
+def wait_channels(output):
+    """Count only known kernel wait symbols; never retain task IDs or raw text."""
+    known = {'do_freezer_trap', '__refrigerator', 'futex_wait_queue',
+             'futex_wait_queue_me', 'do_epoll_wait', 'ep_poll',
+             'binder_thread_read', 'binder_ioctl_write_read', 'pipe_read',
+             'do_sigtimedwait', 'hrtimer_nanosleep', '0'}
+    counts = {}
+    unknown = 0
+    for line in output.splitlines():
+        symbol = line.strip()
+        if symbol in known:
+            counts[symbol] = counts.get(symbol, 0)+1
+        else:
+            unknown += 1
+    return dict(known=counts, unknown=unknown)
+
+
 def wakefulness(dump):
     """Exclude all power-dump data except the current wakefulness enum."""
     states = re.findall(r'^\s*mWakefulness=(Awake|Asleep|Dozing|Dreaming)\s*$',
@@ -223,6 +240,16 @@ def main():
             if re.fullmatch(r'[1-9][0-9]*', pid):
                 snapshot['kernelState'] = kernel_state(
                     device('shell', 'cat', '/proc/'+pid+'/status', timeout=5))
+                # The target PID is validated above. Read only its task wait points
+                # under the card UID. Do not signal it or collect Java/native dumps.
+                try:
+                    command = ('for task in /proc/'+pid+'/task/*/wchan; '
+                               'do cat "$task" && echo; done')
+                    snapshot['taskWaitChannels'] = wait_channels(device(
+                        'shell', 'run-as', PACKAGE, 'sh', '-c',
+                        "'"+command+"'", timeout=5))
+                except Exception as error:
+                    snapshot['waitChannelCaptureError'] = type(error).__name__
         except Exception as error:
             snapshot['processCaptureError'] = type(error).__name__
         try:

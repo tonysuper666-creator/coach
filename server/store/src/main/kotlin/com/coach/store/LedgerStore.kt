@@ -629,7 +629,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             }
                             val reserved = query("SELECT p.device_id,p.pack_json FROM offline_reservations r JOIN offline_packs p USING(pack_id) WHERE r.question_id=? AND r.expires_at>?",qid,clock()) { it.getString(1) to LedgerJson.decodeFromString<OfflineChoicePack>(it.getString(2)) }.singleOrNull()
                             val reservedSnapshot = reserved?.second?.groups?.flatten()?.firstOrNull { it.payload.str("attemptId") == attemptId }?.payload
-                            if (reserved != null && (reserved.first != c.deviceId || reservedSnapshot != posedSnapshot)) {
+                            // Only an attempt the live pack itself handed out is bound to its device and snapshot;
+                            // late answers from an expired pack and online re-poses of the same question are not.
+                            if (reserved != null && reservedSnapshot != null && (reserved.first != c.deviceId || reservedSnapshot != posedSnapshot)) {
                                 status="REJECTED"; error="OFFLINE_RESERVATION_MISMATCH"
                             } else if (activeReply) {
                                 status="REJECTED"; error="TUTOR_BUSY"
@@ -673,7 +675,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             val thread = "week-review:${p.num("week")}:$qid"
                             val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload + mapOf(
                                 "attemptId" to JsonPrimitive(uid()), "purpose" to JsonPrimitive("RECALL"),
-                                "review" to JsonPrimitive(true), "weekReview" to p.getValue("week")
+                                // The answer was just shown in feedback; re-picking it is practice, not a spaced review.
+                                "review" to JsonPrimitive(false), "weekReview" to p.getValue("week")
                             ))), device=c.deviceId, thread=thread)
                             effects.addAll(posed.map { it.seq })
                             result = json("threadId" to thread)
@@ -764,8 +767,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun backup(target: Path = directory.resolve("backups/${clock()}-${uid()}")): Path {
         val seq = lastSeq()
-        rawBackup(target)
+        // Clean up only a directory this call created: an explicit target may already hold a complete backup.
+        Files.createDirectories(target.toAbsolutePath().parent)
+        val created = try { Files.createDirectory(target); true } catch(e: java.nio.file.FileAlreadyExistsException) { false }
         try {
+            // Inside the cleanup: a VACUUM INTO that fails on a full disk leaves a partial copy behind.
+            rawBackup(target)
             val blobDir = Files.createDirectories(target.resolve("blobs"))
             Files.list(directory.resolve("blobs")).use { files -> files.forEach { Files.createLink(blobDir.resolve(it.fileName),it) } }
             Files.newBufferedWriter(target.resolve("events.jsonl"),Charsets.UTF_8).use { out ->
@@ -777,7 +784,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             Files.writeString(target.resolve("complete"),seq.toString(),StandardOpenOption.CREATE_NEW)
             sql("UPDATE ledger_meta SET backed_up_through_seq=?,last_backup_at=?",seq,clock())
             return target
-        } catch(e: Throwable) { target.toFile().deleteRecursively(); throw e }
+        } catch(e: Throwable) { if(created) target.toFile().deleteRecursively(); throw e }
     }
     fun backupIfDue(): Path? {
         val at = query("SELECT last_backup_at FROM ledger_meta") { it.getLong(1) }.single()
@@ -841,6 +848,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (token.epoch != hello().epoch) return false
         return sql("UPDATE jobs SET state='failed',last_error=?,updated_at=? WHERE job_id=? AND fence=? AND state='running'",
             reason,clock(),token.id,token.value) == 1
+    }
+    /** A claim abandoned by shutdown goes back to the queue without spending an attempt. */
+    fun releaseJob(token: Fence): Boolean {
+        if (token.epoch != hello().epoch) return false
+        return sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE job_id=? AND fence=? AND state='running'",
+            clock(),token.id,token.value) == 1
     }
     /** Retain the failed job, and atomically queue one fresh schema-constrained attempt. */
     fun retryMalformedSupply(token: Fence, job: SupplyJob): Boolean = transaction {
@@ -978,7 +991,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun failGradeWork(work: GradeWork, reason: String, retry: Boolean = true): Boolean = transaction {
         val token=requireNotNull(work.token)
         if(token.epoch != hello().epoch) return@transaction false
-        val again=retry && work.kind=="review_grade" && work.attempt <= 3 && clock() < work.subject.num("deadline")
+        val again=retry && work.attempt <= 3 && clock() < work.subject.num("deadline")
         val delay=when(work.attempt) { 1 -> 60_000L; 2 -> 3_600_000L; else -> 21_600_000L }
         sql("UPDATE jobs SET state=?,last_error=?,updated_at=? WHERE job_id=? AND state='running' AND fence=?",
             if(again) "queued" else "failed",reason,if(again) minOf(clock()+delay,work.subject.num("deadline")) else clock(),work.id,token.value)==1
@@ -989,9 +1002,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val es=events(course).filter { it.payload.str("attemptId")==attempt }
         val answer=es.firstOrNull { it.type=="answer_submitted" } ?: return null
         val posed=es.firstOrNull { it.type=="question_posed" } ?: return null
-        val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=?",course,attempt) {
+        // Restore re-enqueues pending grades, so one attempt can own several grade_attempt rows.
+        val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at DESC,job_id DESC LIMIT 1",course,attempt) {
             LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
-        }.singleOrNull() ?: return null
+        }.firstOrNull() ?: return null
         return json("posed" to posed.payload,"answer" to answer.payload,"question" to job.getValue("question"),
             "rubricFingerprint" to job.str("rubricFingerprint"),"deadline" to job.num("deadline"),
             "jobs" to JsonArray(query("SELECT kind,state,attempts,last_error,updated_at FROM jobs WHERE kind IN ('grade_attempt','review_grade') AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at,job_id",course,attempt) {
@@ -1055,7 +1069,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun renewLease(token: Fence, device: String): Boolean = token.epoch == hello().epoch && sql("UPDATE turn_leases SET expires_at=? WHERE thread_id=? AND device_id=? AND fence=? AND expires_at>?",clock()+120000,token.id,device,token.value,clock()) == 1
     fun recoverSuspension() = transaction {
         sql("UPDATE messages SET status='truncated',reason='suspended' WHERE status='streaming'")
-        sql("UPDATE jobs SET state='queued',fence=fence+1,updated_at=? WHERE state='running'",clock())
+        // The interrupted claim never reached a result; it must not use up the job's retry budget.
+        sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE state='running'",clock())
         sql("DELETE FROM turn_leases")
     }
     fun startMessage(thread: String, message: String, content: String = "") { sql("INSERT INTO messages(thread_id,mseq,message_id,status,content_md,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,'streaming',?,?)",thread,thread,message,content,clock()) }

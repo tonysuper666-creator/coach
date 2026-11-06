@@ -20,6 +20,7 @@ dependencies {
 }
 application { mainClass = "com.coach.server.MainKt" }
 tasks.test {
+    // Resolve after Kotlin has finished wiring test dependencies, including for opt-in replay tasks.
     doFirst { systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath) }
     systemProperty("coach.checkout", rootProject.projectDir.absolutePath)
     exclude("**/LiveChatTest*", "**/TutorLiveTest*")
@@ -87,4 +88,12 @@ tasks.register<JavaExec>("examReplay") {
 tasks.register("examReplayClasspath") {
     dependsOn(tasks.named("testClasses"))
     doLast { layout.buildDirectory.file("exam-replay-classpath.txt").get().asFile.writeText(sourceSets["test"].runtimeClasspath.asPath) }
+}
+
+// Explicit SQLite backup replay over the real WebSocket routes; no AI or production writes.
+tasks.register<JavaExec>("tutorMigrationReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.TutorMigrationReplayKt")
 }

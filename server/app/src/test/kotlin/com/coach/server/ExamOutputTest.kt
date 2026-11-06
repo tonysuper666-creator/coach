@@ -115,6 +115,33 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 
 class ExamOutputTest {
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
+    @Test fun protectedPreparedLessonsRequireTheCurrentPrivateReference() = runBlocking {
+        StubTutor().use { stub ->
+            val materials = ExamMaterials.fromTexts(exams, "Synthetic format: essays 40 percent.")
+            val bridge = BridgeClient(BridgeConfig(stub.baseUrl))
+            val data = Files.createTempDirectory("exam-cache")
+            ExamHarness(data.resolve("db"), materials, bridge).use { h ->
+                h.actor.execute { append("opaque-course", "outline_revised", json("course" to json("name" to "ECNM10119 synthetic"), "ops" to emptyList<String>())) }
+                val preparation = LessonPreparation(h.actor, bridge, data.resolve("packs"), materials)
+                val source = "Synthetic lesson pack"
+                val file = data.resolve("prepared-lessons/opaque-course/kp.json")
+                Files.createDirectories(file.parent)
+                val old = json("packHash" to LessonPreparation.cacheHash(source), "text" to "Previously prepared lesson", "model" to BridgeClient.CLAUDE)
+                Files.writeString(file, old.toString())
+                assertNull(preparation.cached("opaque-course", "kp", source))
+                val hash = com.coach.store.sha256(materials.context("ECNM10119", source).toByteArray())
+                Files.writeString(file, JsonObject(old + ("examHash" to JsonPrimitive(hash))).toString())
+                assertEquals("Previously prepared lesson", preparation.cached("opaque-course", "kp", source)?.text)
+                val revised = LessonPreparation(h.actor, bridge, data.resolve("packs"), ExamMaterials.fromTexts(exams, "Synthetic revised format: essays 50 percent."))
+                assertNull(revised.cached("opaque-course", "kp", source))
+                val ordinary = data.resolve("prepared-lessons/ordinary/kp.json")
+                Files.createDirectories(ordinary.parent)
+                Files.writeString(ordinary, old.toString())
+                assertNotNull(preparation.cached("ordinary", "kp", source))
+            }
+        }
+    }
+
     @Test fun streamingSnapshotsAndStoredBodyNeverContainTheExam() = runBlocking {
         StubTutor().use { stub ->
             ExamHarness(Files.createTempDirectory("exam-stream"), ExamMaterials.fromTexts(exams), BridgeClient(BridgeConfig(stub.baseUrl))).use { h ->

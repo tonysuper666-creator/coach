@@ -84,7 +84,7 @@ class ChatService(
     val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
-    private val preparation = LessonPreparation(actor,bridge,packsDirectory)
+    private val preparation = LessonPreparation(actor,bridge,packsDirectory,examMaterials)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()
 
@@ -355,17 +355,11 @@ class ChatService(
         val sourcePack = if (plan?.explanation == true) {
             preparation.pack(courseId, plan.context.kp).ifBlank { suppliedPack }
         } else suppliedPack
+        val examIdentity = preparation.examIdentity(courseId)
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mistakes.isEmpty() && plan.mode==TeachingMode.CURRENT)
-            preparation.cached(courseId,plan.context.kp,sourcePack) else null
+            preparation.cached(courseId,plan.context.kp,sourcePack,examIdentity) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan, FirstWordTrace(messageId, null, receivedAt), receivedAt)
-        session.examIdentity = actor.execute {
-            courseContent(courseId)?.course?.let { course -> listOf(course.code, course.title).firstOrNull { examMaterials.applies(it) } }
-                ?: events(courseId).asReversed().firstNotNullOfOrNull { event ->
-                if (event.type != "outline_revised") null else (event.payload["course"] as? JsonObject)?.let { course ->
-                    listOf(course.str("code"), course.str("name"), course.str("title")).firstOrNull { examMaterials.applies(it) }
-                }
-            } ?: courseId
-        }
+        session.examIdentity = examIdentity
         protectExams(session)
         session.examContext = examMaterials.context(session.examIdentity, question + "\n" + sourcePack.take(1_000))
         sessions[messageId] = session

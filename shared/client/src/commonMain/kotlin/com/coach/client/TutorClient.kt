@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.time.TimeSource
 import kotlin.uuid.Uuid
 
 /**
@@ -45,7 +46,7 @@ class TutorClient(
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
         followRedirects = false
-        install(WebSockets) { maxFrameSize = MAX_MESSAGE_BYTES.toLong() }
+        install(WebSockets) { maxFrameSize = MAX_SOCKET_FRAME_BYTES }
         install(HttpTimeout) { connectTimeoutMillis = 5_000; requestTimeoutMillis = 5_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }
@@ -83,16 +84,17 @@ class TutorClient(
         running?.takeUnless { it.isCompleted } ?: scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             telemetry?.record("open")
             val reporting = telemetry?.start(this)
-            var backoff = 250L
+            val backoff = ReconnectBackoff()
             try {
                 while (isActive) {
                     val queue = Channel<String>(capacity = 64)
+                    var readyAt: TimeSource.Monotonic.ValueTimeMark? = null
                     try {
                         // Receive raw control frames so the watchdog observes this socket's pong,
                         // independently of Ktor's default session close handshake (which can stall).
                         http.prepareRequest(url).body<ClientWebSocketSession, Unit> { socket ->
                             try {
-                                conversation(socket, queue) { backoff = 250 }
+                                conversation(socket, queue) { readyAt = TimeSource.Monotonic.markNow() }
                             } finally {
                                 queue.cancel()
                                 // Abort the transport; never wait for a frozen peer to acknowledge close.
@@ -108,8 +110,7 @@ class TutorClient(
                     } finally {
                         queue.cancel()
                     }
-                    delay(backoff)
-                    backoff = (backoff * 2).coerceAtMost(3_000)
+                    delay(backoff.next(readyAt?.elapsedNow()?.inWholeMilliseconds ?: 0))
                 }
             } finally { reporting?.cancel() }
         }.also { running = it; it.start() }
@@ -123,17 +124,22 @@ class TutorClient(
         val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
         val reader = launch {
             var body = ByteArray(0)
+            // 服务端按帧广播：连上时整份账本也走这条 socket。导师用不上的超大消息丢掉即可，不能为它断线。
+            var oversized = false
             for (frame in socket.incoming) when (frame) {
                 is Frame.Ping -> socket.send(Frame.Pong(frame.data))
                 is Frame.Pong -> pongs.trySend(frame.data)
                 is Frame.Close -> break
                 is Frame.Text -> {
-                    check(body.size + frame.data.size <= MAX_MESSAGE_BYTES) { "Tutor frame too large" }
-                    body += frame.data
+                    if (!oversized && body.size + frame.data.size > MAX_MESSAGE_BYTES) { oversized = true; body = ByteArray(0) }
+                    if (!oversized) body += frame.data
                     if (frame.fin) {
-                        val text = body.decodeToString(throwOnInvalidSequence = true)
+                        if (!oversized) {
+                            val text = body.decodeToString(throwOnInvalidSequence = true)
+                            synchronized(lifecycle) { if (!closed) model.onFrame(text) }
+                        }
                         body = ByteArray(0)
-                        synchronized(lifecycle) { if (!closed) model.onFrame(text) }
+                        oversized = false
                     }
                 }
                 else -> error("Unexpected binary tutor frame")
@@ -206,6 +212,7 @@ class TutorClient(
         const val PING_INTERVAL_MS = 5_000L
         const val PONG_TIMEOUT_MS = 5_000L
         const val MAX_MESSAGE_BYTES = 1_048_576
+        const val MAX_SOCKET_FRAME_BYTES = 64L * 1_048_576
     }
 
     /** 发出一帧；没有在线连接返回 false。 */

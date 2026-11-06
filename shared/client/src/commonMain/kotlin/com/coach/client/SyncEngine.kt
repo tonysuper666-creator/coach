@@ -253,12 +253,13 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             while(isActive) { try { syncOnce() } catch(e: CancellationException) { throw e } catch(e: Exception) { _connection.value="offline" };delay(2000) }
         }
         try {
-            var backoff = 250L
+            val backoff=ReconnectBackoff()
             while(isActive) {
-                try { transport.watch { hints.trySend(Unit) };backoff=250 }
+                val opened=TimeSource.Monotonic.markNow()
+                try { transport.watch { hints.trySend(Unit) } }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
-                delay(backoff);backoff=(backoff*2).coerceAtMost(5000)
+                delay(backoff.next(opened.elapsedNow().inWholeMilliseconds))
             }
         } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }
     }

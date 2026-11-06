@@ -86,6 +86,8 @@ def request(config, roots, path, valid=True):
 
 
 def wait_ready(config, roots, label, release, kernel, owned):
+    snapshot = json.loads((Path(config['adapterSnapshotDir']) / 'snapshot.json').read_text())
+    side = snapshot['sides'][release.name]
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         pid = job(config, label)
@@ -106,9 +108,8 @@ def wait_ready(config, roots, label, release, kernel, owned):
                         guard, child = kernel.get(state['guardPid']), kernel.get(state['pid'])
                         require(guard is not None and guard.ppid == pid and child is not None
                                 and child.ppid == guard.pid, 'managed child ancestry changed')
-                        expected = (release / 'tools/bridge/.venv/bin/python').resolve() if name == 'bridge' else Path(
-                            plistlib.loads(Path(config['plist']).read_bytes())['EnvironmentVariables']['COACH_NODE']).resolve()
-                        require(process._image(child.pid) == str(expected), 'managed child executable mismatch')
+                        expected = (side['python'][2][0], side['stub'][0]) if name == 'bridge' else (side['node'][0],)
+                        require(process._image(child.pid) in expected, 'managed child executable mismatch')
                         services[name] = {'guardPid': guard.pid, 'pid': child.pid,
                                           'image': process._image(child.pid), 'healthy': True}
                     # Health state alone is insufficient: query the actual bridge PID.
@@ -149,7 +150,11 @@ def stop(config, label, kernel, owned):
         raise GateError('isolated label or owned descendants survived cleanup')
     for name in ('COACH_PORT', 'BRIDGE_PORT'):
         with socket.socket() as probe:
+            # Completed HTTP connections leave TIME_WAIT tuples; a new listener
+            # must be possible without mistaking these for a surviving service.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(('127.0.0.1', int(config['adapterEnvPins'][name])))
+            probe.listen(1)
 
 
 def worker(config_path, report_path):

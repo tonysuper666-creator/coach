@@ -133,15 +133,22 @@ private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String,
 /** One paragraph of text: display formulas on their own scrollable row, text and inline formulas flowing as one wrapped paragraph. */
 @Composable
 private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, style: TextStyle, onFailure: (String) -> Unit, modifier: Modifier = Modifier, failed: Set<String> = emptySet()) {
-    if (live) {
+    val tokens = if (live) emptyList() else remember(text, model) { layoutMathSegments(MathDelimiters.tokenize(text, model).segments) }
+    if (live || (tokens.isNotEmpty() && tokens.all { it.text != null })) {
         // Still streaming: structure and emphasis are shown, formulas stay as written until the block seals (no half-typed LaTeX flicker).
-        Text(remember(text) { renderMarkdownText(text) }, modifier.fillMaxWidth(), style = style)
+        // A sealed paragraph without formulas keeps this same Text and its measured layout. It needs neither width subcomposition nor baseline probes.
+        val plain = if (live) text else remember(tokens) { tokens.joinToString("") { it.text.orEmpty() } }
+        Text(remember(plain) { renderMarkdownText(plain) }, modifier.fillMaxWidth(), style = style)
         return
     }
-    val tokens = remember(text, model) { layoutMathSegments(MathDelimiters.tokenize(text, model).segments) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val em = with(density) { style.fontSize.toPx() }
     val foreground = LocalContentColor.current
+    // Only display formulas can move to a separate row depending on the available width.
+    if (tokens.none { it.math != null && it.display }) {
+        MathRunsContent(listOf(tokens.withIndex().toList()).filter { it.isNotEmpty() }, assets, onFailure, style, em, foreground, failed, modifier)
+        return
+    }
     val widths = remember { HashMap<String, Float>() }
     BoxWithConstraints(modifier) {
         val available = with(density) { maxWidth.toPx() }
@@ -151,19 +158,24 @@ private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolea
                 runCatching { MathSvgDocument.parse(asset.sha, asset.svg).widthEm }.getOrDefault(Float.POSITIVE_INFINITY)
             } * em <= available
         }
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            runs.forEachIndexed { runIndex, run ->
-                val first = run.first().value
-                val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
-                val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
-                if (document != null) ScrollableMath(document, first.math!!, em, foreground)
-                else if (run.size == 1 && first.math != null && first.display && mathKey(first.math!!, true) in failed) FailedFormula(first.math!!)
-                else InlineRun(run, assets, onFailure, style, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
-            }
-            // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
-            if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
-                Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        MathRunsContent(runs, assets, onFailure, style, em, foreground, failed)
+    }
+}
+
+@Composable
+private fun MathRunsContent(runs: List<List<IndexedValue<MathSegment>>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit, style: TextStyle, em: Float, foreground: Color, failed: Set<String>, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        runs.forEachIndexed { runIndex, run ->
+            val first = run.first().value
+            val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
+            val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
+            if (document != null) ScrollableMath(document, first.math!!, em, foreground)
+            else if (run.size == 1 && first.math != null && first.display && mathKey(first.math!!, true) in failed) FailedFormula(first.math!!)
+            else InlineRun(run, assets, onFailure, style, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
+        }
+        // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
+        if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
+            Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -198,7 +210,10 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     val inline = mutableMapOf<String, InlineTextContent>()
     val text = buildAnnotatedString {
         run.forEachIndexed { part, (index, token) ->
-            if (token.text != null) append(renderMarkdownText(if (trimLeadingSpace && part == 0) token.text!!.trimStart(' ', '\t') else token.text!!))
+            if (token.text != null) {
+                val plain = if (trimLeadingSpace && part == 0) token.text!!.trimStart(' ', '\t') else token.text!!
+                append(remember(plain) { renderMarkdownText(plain) })
+            }
             else {
                 val tex = token.math!!
                 val asset = assets[mathKey(tex, token.display)]

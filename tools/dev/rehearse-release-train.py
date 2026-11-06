@@ -28,6 +28,7 @@ spec = importlib.util.spec_from_file_location('candidate_smoke', ROOT / 'tools/d
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 PROTECTED = {8790, 8791, 18791, 3790}
+INSTALLED_ROLLBACK = 'c0c5bb82510694a481351d60733b8c98d6162bb8'
 
 
 @contextmanager
@@ -114,14 +115,27 @@ def request(port, token, course, endpoint):
         return json.load(response)
 
 
-def readback(port, token, courses, client_app, expected=None):
+def client_probe(name, app, payload):
+    probe = subprocess.run(['java', '-cp', str(ROOT / 'server/app/build/classes/kotlin/test') + os.pathsep + str(app / 'lib/*'),
+                            'com.coach.server.' + name + 'Kt'], input=json.dumps(payload),
+                           text=True, capture_output=True, timeout=45)
+    require(probe.returncode == 0, 'client course/mistake/routing probe failed')
+    return json.loads(probe.stdout)
+
+
+def fingerprint(path):
+    with database(path.as_uri() + '?mode=ro', uri=True) as db:
+        return durable_fingerprint(db)
+
+
+def readback(port, token, courses, client_app, data, expected=None, *, review_supported=False):
     """Use real endpoints and the selected distribution's real client projector.
 
     Course content stays in memory/stdin. Nothing from it is printed or saved.
     Only pre-existing KP threads are opened; no lesson or real-data write is sent.
     """
     calls = smoke.Bridge.calls
-    opened = mistakes = wrong_cards = 0
+    opened = mistakes = wrong_cards = rejected = candidate_misroutes = legacy_misroutes = 0
     for course in courses:
         snapshot = request(port, token, course, 'snapshot')
         require(isinstance(snapshot.get('projection'), dict), 'missing course projection')
@@ -138,15 +152,13 @@ def readback(port, token, courses, client_app, expected=None):
         require(events == snapshot['events'], 'course event/snapshot disagreement')
         # The probe class comes from this checkout; all client/domain/protocol
         # libraries come from the binary actually selected for rollback.
-        probes = {}
-        for name, app in [('ReleaseTrainReadback', client_app), ('ReleaseTrainMistakeReadback', ROOT / 'server/app/build/install/app')]:
-            probe = subprocess.run(['java', '-cp', str(ROOT / 'server/app/build/classes/kotlin/test') + os.pathsep + str(app / 'lib/*'),
-                                    'com.coach.server.' + name + 'Kt'],
-                                   input=json.dumps({'events': events, 'expectedMistake': (expected or {}).get('wrongAttempt', ''),
-                                                     'retryAttempts': (expected or {}).get('retryAttempts', [])}),
-                                   text=True, capture_output=True, timeout=45)
-            require(probe.returncode == 0, 'client course/mistake projection failed')
-            probes[name] = json.loads(probe.stdout)
+        candidate_app = ROOT / 'server/app/build/install/app'
+        payload = dict(events=events, **{k: v for k, v in (expected or {}).items() if k != 'events'})
+        probes = {name: client_probe(name, app, dict(payload, expectLegacyMisroute=not review_supported))
+                  for name, app in [('ReleaseTrainReadback', client_app), ('ReleaseTrainMistakeReadback', candidate_app)]}
+        candidate_route = client_probe('ReleaseTrainReadback', candidate_app, dict(payload, expectLegacyMisroute=False))
+        candidate_misroutes += candidate_route['continueLearningMisroutes']
+        legacy_misroutes += probes['ReleaseTrainReadback']['continueLearningMisroutes']
         mistakes += probes['ReleaseTrainMistakeReadback']['mistakes']
         wrong_cards += probes['ReleaseTrainReadback']['wrongCards']
         contexts = {}
@@ -157,12 +169,19 @@ def readback(port, token, courses, client_app, expected=None):
         for thread, context in contexts.items():
             ws = smoke.WS(port, 'desktop', token)
             try:
+                before = fingerprint(data / 'coach.sqlite')
                 ws.send(dict(t='tutor.open', courseId=course, threadId=thread, kpId=context['kpId'],
                              conceptIds=context['conceptIds'], title=context.get('title', ''),
                              review=context.get('via') == 'REVIEW'))
-                frame(ws, 'tutor.state')
-                frame(ws, 'msg.history')
-                opened += 1
+                if context.get('via') == 'REVIEW' and not review_supported:
+                    result = ws.await_type('msg.error', 'tutor.state')
+                    require(result['t'] == 'msg.error', 'rollback unexpectedly accepted a review context')
+                    require(fingerprint(data / 'coach.sqlite') == before, 'rejected review open wrote durable data')
+                    rejected += 1
+                else:
+                    frame(ws, 'tutor.state')
+                    frame(ws, 'msg.history')
+                    opened += 1
             finally:
                 ws.close()
         if expected:
@@ -172,7 +191,12 @@ def readback(port, token, courses, client_app, expected=None):
                 e['payload']['attemptId'] for e in events if e['type'] in ('answer_submitted', 'attempt_voided')}
             require(pending == set(expected['retryAttempts']), 'candidate retry group lost')
     require(smoke.Bridge.calls == calls, 'readback unexpectedly called bridge')
-    return dict(courses=len(courses), tutorOpens=opened, trainClientMistakes=mistakes, rollbackClientWrongCards=wrong_cards, bridgeCalls=0)
+    if expected:
+        require(opened >= 1 and (review_supported or rejected >= 1), 'missing learning/review contract checks')
+        require(candidate_misroutes == 0 and legacy_misroutes == (0 if review_supported else 1), 'client routing contract failed')
+    return dict(courses=len(courses), tutorOpens=opened, rejectedReviewOpens=rejected, rejectedReviewWrites=0,
+                candidateContinueLearningMisroutes=candidate_misroutes, selectedClientContinueLearningMisroutes=legacy_misroutes,
+                trainClientMistakes=mistakes, rollbackClientWrongCards=wrong_cards, bridgeCalls=0)
 
 
 def seed(db, phase):
@@ -221,6 +245,7 @@ def exercise(port, token, phase):
             require(len(retry) == 3 and not ({c['questionId'] for c in retry} & {c['questionId'] for c in cards}),
                     'retry did not select three new questions')
             return dict(wrongAttempt=wrong['attemptId'], retryAttempts=[c['attemptId'] for c in retry],
+                        routingKp=f'ton1254-{phase}-kp', learningThread=f'ton1254-{phase}-thread', reviewThread=common['threadId'],
                         events=request(port, token, common['courseId'], 'snapshot')['events'])
     finally:
         ws.close()
@@ -234,7 +259,16 @@ def private_input(path):
     return path
 
 
-def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=None, expected_rollback_head=None):
+def installed_rollback(descriptor, expected_head):
+    require(descriptor is not None, 'rollback requires an explicit private installation descriptor')
+    require(descriptor.is_file() and not descriptor.is_symlink(), 'installation descriptor must be a regular private input')
+    installed = json.loads(descriptor.read_text())
+    require(installed.get('sourceHead') == expected_head, 'rollback head differs from the installed production version')
+    require(expected_head == INSTALLED_ROLLBACK, 'no reviewed downgrade contract for this installed version')
+    return expected_head
+
+
+def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=None, expected_rollback_head=None, installation=None):
     os.umask(0o077)
     source_data = private_input(private_data_dir)
     candidate = ROOT / 'server/app/build/install/app'
@@ -243,6 +277,7 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
     rollback = old
     rollback_head = old_head
     if rollback_checkout is not None:
+        installed_rollback(installation, expected_rollback_head)
         rollback_checkout = rollback_checkout.resolve()
         rollback_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=rollback_checkout, text=True).strip()
         require(rollback_head == expected_rollback_head, 'rollback checkout differs from pinned head')
@@ -437,7 +472,7 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                         migration = migration_window()
                 began = time.monotonic()
                 if rollback_checkout is not None:
-                    # Demonstrate the installed binary's real incompatibility before using the compatible baseline.
+                    # Keep the historical v6 binary incompatibility diagnostic as an additional check.
                     select('old')
                     try:
                         start()
@@ -453,8 +488,11 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     unchanged()
                 select('rollback')
                 port = start()
-                readbacks['rollback'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', candidate_state),
-                                             original=readback(port, token, real_courses, base / 'rollback'))
+                readbacks['rollback'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state),
+                                             original=readback(port, token, real_courses, base / 'rollback', data))
+                mocks = client_probe('ReleaseTrainMockReadback', base / 'candidate',
+                                     dict(baseUrl=f'http://127.0.0.1:{port}', token=token, course='ton1254-candidate'))
+                require(mocks == dict(status=404, clientError=True, completed=True), 'missing old-server mocks error')
                 exercise(port, token, 'rollback')
                 timings['rollback'] = round(time.monotonic() - began, 3)
                 require(timings['rollback'] < 300, 'isolated rollback exceeded 300 seconds')
@@ -479,23 +517,57 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     stop()
                 select('rollback')
                 port = start()
-                readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', candidate_state),
-                                                   original=readback(port, token, real_courses, base / 'rollback'))
+                readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state),
+                                                   original=readback(port, token, real_courses, base / 'rollback', data))
                 exercise(port, token, 'fault-recovery')
                 timings['fault-recovery'] = round(time.monotonic() - began, 3)
                 require(timings['fault-recovery'] < 300, 'isolated fault recovery exceeded 300 seconds')
                 stop()
                 unchanged()
+                # Resume on this exact database: review data is retained during the server-only downgrade.
+                began = time.monotonic()
+                select('candidate')
+                port = start()
+                readbacks['forward-roll'] = dict(
+                    candidate=readback(port, token, ['ton1254-candidate'], base / 'candidate', data, candidate_state, review_supported=True),
+                    original=readback(port, token, real_courses, base / 'candidate', data, review_supported=True))
+                calls = smoke.Bridge.calls
+                ws = smoke.WS(port, 'desktop', token)
+                try:
+                    common = dict(courseId='ton1254-candidate', threadId=candidate_state['reviewThread'])
+                    ws.send(dict(common, t='tutor.open', kpId=candidate_state['routingKp'], conceptIds=['synthetic'],
+                                 title='Synthetic objective', review=True))
+                    frame(ws, 'tutor.state')
+                    frame(ws, 'msg.history')
+                    ws.send(dict(common, t='tutor.retryMistakes'))
+                    cards = frame(ws, 'tutor.cards')['cards']
+                    require({c['attemptId'] for c in cards} == set(candidate_state['retryAttempts']), 'forward roll lost pending review cards')
+                finally:
+                    ws.close()
+                require(smoke.Bridge.calls == calls, 'forward review unexpectedly called bridge')
+                stop()
+                unchanged()
+                timings['forward-roll'] = round(time.monotonic() - began, 3)
+                require(timings['forward-roll'] < 300, 'isolated forward roll exceeded 300 seconds')
                 with database(data / 'coach.sqlite') as db:
                     kept = db.execute("select count(*) from events where course_id='ton1254-candidate'").fetchone()[0]
-                    require(kept > 0, 'candidate writes lost on rollback')
+                    require(kept >= 26, 'candidate writes lost on rollback/forward roll')
+                    review_cards = [json.loads(row[0]) for row in db.execute(
+                        "select payload from events where course_id='ton1254-candidate' and thread_id=? and type='question_posed'",
+                        (candidate_state['reviewThread'],))]
+                    require(len(review_cards) == 3 and all(c.get('purpose') == 'RECALL' and c.get('review') is True for c in review_cards),
+                            'forward review cards are not RECALL review attempts')
+                    schema_versions['forward-roll'] = db.execute('pragma user_version').fetchone()[0]
                 summary = dict(oldHead=old_head, candidateHead=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                                candidateSourceTrees={area: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + area], cwd=ROOT, text=True).strip() for area in ('server', 'shared')},
                                rehearsalSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                               rollbackHead=rollback_head, originalRollbackRejected=rollback_checkout is not None,
+                               rollbackHead=rollback_head, rollbackTargetFromInstallation=True, rollbackScope='server only; keep candidate client',
+                               oldApkReinstallAllowed=False, historicalV6BinaryRejected=rollback_checkout is not None,
+                               originalRollbackRejected=rollback_checkout is not None, mocksOnRollback=mocks,
+                               forwardReviewRecallCards=len(review_cards), forwardRollSameDatabase=True,
                                firstMigration=migration, courseReadbacks=readbacks, candidateWrongAnswers=1, candidateRetryNewCards=3,
                                startupFailures=startup_failures, schemaVersions=schema_versions,
-                               distributionSha256=hashes, phases=['old', 'candidate'] + (['original-rollback-refused'] if rollback_checkout is not None else []) + ['rollback', 'failed-start', 'fault-recovery'],
+                               distributionSha256=hashes, phases=['old', 'candidate'] + (['historical-v6-rollback-refused'] if rollback_checkout is not None else []) + ['rollback', 'failed-start', 'fault-recovery', 'forward-roll'],
                                originalTokenAcceptedStarts=authenticated_starts, syntheticLectureQuizPasses=4, candidateEventsRetained=kept,
                                originalEventsUnchanged=True, pairedTokenHashesUnchanged=True, copyIntegrity='ok',
                                startupAndLectureQuizSeconds=timings, databaseRestoredOnRollback=False,
@@ -524,7 +596,8 @@ if __name__ == '__main__':
     parser.add_argument('--old-head', required=True, help='source commit of the old distribution')
     parser.add_argument('--rollback-checkout', type=Path, help='clean checkout with a built compatible rollback distribution')
     parser.add_argument('--rollback-head', help='exact full commit of the compatible rollback checkout')
+    parser.add_argument('--rollback-installation', required=True, type=Path, help='explicit private copy of the pre-switch installation descriptor')
     args = parser.parse_args()
-    if bool(args.rollback_checkout) != bool(args.rollback_head):
-        parser.error('--rollback-checkout and --rollback-head must be provided together')
-    run(args.out, args.private_data_dir, args.old_distribution, args.old_head, args.rollback_checkout, args.rollback_head)
+    if not args.rollback_checkout or not args.rollback_head:
+        parser.error('--rollback-checkout and --rollback-head are required for the installed downgrade contract')
+    run(args.out, args.private_data_dir, args.old_distribution, args.old_head, args.rollback_checkout, args.rollback_head, args.rollback_installation)

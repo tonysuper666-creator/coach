@@ -15,11 +15,28 @@ fun main() {
     val view = CourseView(events, project(events))
     val cards = events.mapNotNull { it.threadId }.distinct().flatMap { view.quizGroups(it) }.flatMap { it.cards }
     val expected = input.str("expectedMistake")
+    val kp = input.str("routingKp")
+    val misroutes = if (kp.isBlank()) 0 else {
+        val selected = view.tutorThreadId(kp)
+        val learning = input.str("learningThread")
+        val review = input.str("reviewThread")
+        if (input["expectLegacyMisroute"]?.jsonPrimitive?.booleanOrNull == true) {
+            require(selected == review && selected != learning) { "Legacy routing limitation changed; reassess rollback contract" }
+            1
+        } else {
+            require(selected == learning && selected != review) { "Continue learning selected the review thread" }
+            0
+        }
+    }
     if (expected.isNotBlank()) {
         val card = requireNotNull(cards.singleOrNull { it.attemptId == expected }) { "Candidate card missing" }
         require(card.answer != null && card.grade?.correct == false) { "Candidate wrong answer missing" }
         val retry = input.getValue("retryAttempts").jsonArray.map { it.jsonPrimitive.content }.toSet()
         require(cards.filter { it.attemptId in retry }.size == 3 && cards.filter { it.attemptId in retry }.all { it.answer == null })
     }
-    println(buildJsonObject { put("wrongCards", cards.count { it.grade?.correct == false }) })
+    println(buildJsonObject {
+        put("wrongCards", cards.count { it.grade?.correct == false })
+        put("continueLearningMisroutes", misroutes)
+        put("routingChecked", kp.isNotBlank())
+    })
 }

@@ -177,9 +177,21 @@ class CoachActivity : ComponentActivity() {
     private fun sha256Hex(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 }
 
+/**
+ * The first-release acceptance package (TON-1298): the one card package that may reach the configured (production) server, so the release can be
+ * accepted on the shared OPPO without replacing `com.coach.android`. It still pairs only through a six-digit code minted on the Mac. Pinned here,
+ * not a Gradle or Intent switch: every other card package keeps refusing production.
+ */
+internal const val releaseAcceptancePackage = "com.coach.android.ton1298"
+
 /** The acceptance override only selects another port on the configured Mac. */
 internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {
     val configured = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
+    // Any `coachUrl` here means someone meant an isolated run: refuse rather than quietly use production, and never let an intent move its pairing.
+    if (packageName == releaseAcceptancePackage) {
+        if (requested != null) error("Refusing coachUrl for release acceptance package $packageName; it only talks to the configured server")
+        return configured
+    }
     val accepted = if (BuildConfig.DEBUG) requested?.takeIf { candidate -> runCatching {
         val uri = java.net.URI(candidate)
         uri.scheme == "http" && uri.host == BuildConfig.COACH_TAIL_HOST && uri.port in 1..65535 &&

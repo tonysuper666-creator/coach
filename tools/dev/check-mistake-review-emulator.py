@@ -187,10 +187,11 @@ def main():
                                          'review-cleared.png','review-restart-cleared.png','review-fail.png','review-fail.txt'):
                                 capture(name, phase)
                             for card in range(1, 4):
-                                for attempt in range(3):
-                                    for side in ('before', 'after'):
-                                        for suffix in ('png', 'txt'):
-                                            capture(f'review-snap-c{card}a{attempt}-{side}.{suffix}', phase)
+                                for round_no in range(1, 3):
+                                    for attempt in range(3):
+                                        for side in ('before', 'after'):
+                                            for suffix in ('png', 'txt'):
+                                                capture(f'review-snap-r{round_no}c{card}a{attempt}-{side}.{suffix}', phase)
                     instrument('wrongAnswersRetryAndClear','prepare3')
                     instrument('wrongAnswersRetryAndClear','resume3')
                     stop()

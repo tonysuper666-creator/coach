@@ -105,7 +105,7 @@ class MistakeReviewSmoke {
             val first = group("kp:$kp")
             step("answer initial questions")
             answer(first, wrong = wrongCount)
-            scrollTo("提交本组答案").let(::click)
+            submitAnswers()
             scrollTo("本组 ${3 - wrongCount} / 3 题正确",substring=true)
             step("initial answers graded")
             click(waitText("← 今天"))
@@ -142,7 +142,7 @@ class MistakeReviewSmoke {
             step("answer retry questions")
             answer(retry,wrong=0)
             val clearMark=SystemClock.elapsedRealtimeNanos()
-            click(scrollTo("提交本组答案"))
+            submitAnswers()
             waitText("错题 0")
             waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
@@ -219,7 +219,10 @@ class MistakeReviewSmoke {
         assertEquals("question_posed for $thread among ${all.length()} ledger events",3,cards.length())
         return cards
     }
+    private var answerRound=0
     private fun answer(cards: JSONArray, wrong: Int) {
+        answerRound++
+        selectedCards.clear()
         for(i in 0 until cards.length()) {
             val p=cards.getJSONObject(i).getJSONObject("payload")
             val correct=keys.getString(p.getString("questionId"))
@@ -250,10 +253,10 @@ class MistakeReviewSmoke {
             trace("pick attempt $it card=$card text=${optionText.take(50)}")
             try {
                 val node=scrollTo(optionText,card=card)
-                snap("c${card}a$it-before");tap(node)
+                snap("r${answerRound}c${card}a$it-before");tap(node)
                 val until=SystemClock.elapsedRealtime()+2_000
                 while(SystemClock.elapsedRealtime()<until && !chosen(optionText)) Thread.sleep(100)
-                snap("c${card}a$it-after")
+                snap("r${answerRound}c${card}a$it-after")
                 assertTrue("第 $card 题点按后未选中",chosen(optionText))
                 selectedCards.add(card)
                 return
@@ -318,6 +321,19 @@ class MistakeReviewSmoke {
             Thread.sleep(10)
         }
         throw AssertionError("Visible text missing: $text")
+    }
+    /** The submit control is a fixed footer, outside the scrolling question list. */
+    private fun submitAnswers() {
+        val end=SystemClock.elapsedRealtime()+5_000
+        while(SystemClock.elapsedRealtime()<end) {
+            find("提交本组答案")?.let { click(it);return }
+            if(find("选完",substring=true)!=null) {
+                val missing=(1..3).firstOrNull { it !in selectedCards }
+                throw AssertionError("第 ${missing ?: "未知"} 题未选中，提交按钮仍不可用")
+            }
+            Thread.sleep(100)
+        }
+        throw AssertionError("提交按钮未出现")
     }
     /** The list can preserve its scroll position: any visible card establishes that the page loaded. */
     private fun waitQuestionPage(timeout: Long=10_000) {

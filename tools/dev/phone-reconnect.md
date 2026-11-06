@@ -87,6 +87,18 @@ package and removes only that random run's files and atomic-write sidecars befor
 uninstalling `.test`, along with the test's synthetic SQLite and journal files.
 The summary's `faultInjected` field records whether STOP
 was actually reached. This independent-file diagnostic has not run on the phone.
+On 2026-11-06 at 06:22 UTC, matching server and both APKs built successfully
+through the heavy lock (135 tasks, 10 seconds), but the phone run failed during
+APK installation before any network gate or heartbeat measurement. Its installer
+output was discarded, so the reason remains unknown; test-package removal was
+also unconfirmed. The lease was released and isolated server data removed.
+The runner now records the failing APK role, exit code, known package-manager
+error codes and password/transport booleans, without preserving raw installer
+output. Unknown errors stay unknown. Cleanup checks the exact card test package
+before and after uninstall, so a confirmed absent package is safe to clean twice;
+an inaccessible or unexpected query is a cleanup failure, not proof of absence.
+Main-package file cleanup and test-package removal run independently. These
+installer and cleanup changes still require a guarded phone run.
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

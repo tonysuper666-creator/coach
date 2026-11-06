@@ -65,12 +65,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false, recordTap = false) }
     }
 
-    // A newly passed queue item opens its successor after grading/streaming settles.
-    LaunchedEffect(kp.status, view.weekTarget?.id, tv.busy, pending) {
-        if (weekActions != null && view.weekProgress(kp.id) != null && kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID) && !tv.busy && pending == null) {
-            weekActions.onOpen(view.weekTarget?.id)
-        }
-    }
+    AdvanceOnNewPass(kp.id, kp.status, view.weekProgress(kp.id) != null, view.weekTarget?.id, tv.busy || pending != null, weekActions?.onOpen)
 
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
@@ -199,6 +194,19 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 value = draft, onValueChange = { draft = it }, onSend = { send(it) }, gate = enterGate,
                 placeholder = if (pending != null) "追问（不影响通过状态）…" else "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
             )
+        }
+    }
+}
+
+/** Only advance after this open session observes an unpassed point become passed. */
+@Composable
+internal fun AdvanceOnNewPass(id: String, status: KpStatus, inWeek: Boolean, nextId: String?, busy: Boolean, onOpen: ((String?) -> Unit)?) {
+    var wasUnpassed by remember(id) { mutableStateOf(status != KpStatus.PASSED && status != KpStatus.SOLID) }
+    LaunchedEffect(id, status, inWeek, nextId, busy, onOpen) {
+        if (status != KpStatus.PASSED && status != KpStatus.SOLID) wasUnpassed = true
+        else if (wasUnpassed && inWeek && !busy && onOpen != null) {
+            wasUnpassed = false
+            onOpen(nextId)
         }
     }
 }

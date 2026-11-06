@@ -162,8 +162,8 @@ def main():
                                         '--manifest', str(manifest), '--sha256', manifest_hash],
                   'controller': [sys.executable, '-m', 'tools.dev.ton1193_isolated_controller',
                                  '--config', str(root / 'controller.json'), '--apply'],
-                  # These hooks only cover identity so far: the verifier refuses
-                  # until real lecture and exercise checks are implemented.
+                  # The verifier observes lesson/exercise evidence; a separate
+                  # isolated driver still needs to generate the real traffic.
                   'acceptanceSnapshot': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
                                          '--config', str(root / 'controller.json'), 'snapshot'],
                   'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',

@@ -4,7 +4,16 @@ This is a bounded TON-1094 test of the real Android SyncEngine over the Mac's
 Tailscale listener. It does not prove OS sleep, login startup, Tailscale restart,
 message truncation during real sleep, or production readiness.
 
-Wait for the existing device guardian to grant TON-1094 a lease. Renew it with
+The 2026-11-06 13:20 owner handoff restricts the current work to consolidating
+PR #77 into PR #18: no device use or new queue entry is authorized for this step.
+Before requesting another lease, document the root-cause analysis on TON-1094
+as required for cards with more than five unsuccessful leases. The foreground
+pass below identifies a successful test condition, not the cause of the earlier
+background stalls; that cause remains unknown. Production bridge repair belongs
+to TON-1298 and is separate from this harness.
+
+For a subsequently authorized device run, wait for the existing device guardian
+to grant TON-1094 a lease. Renew it with
 `~/Coach/testphone/lease.sh acquire TON-1094 60` before building. No grant means
 no device probing: rejoin the existing `wait.sh` queue instead. The runner checks
 the grant and the unlocked, awake, ten-minute-idle OPPO before installation.

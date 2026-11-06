@@ -4,6 +4,8 @@ import java.time.Instant;
 import java.util.*;
 import jdk.jfr.EventType;
 import jdk.jfr.consumer.RecordedEvent;
+import jdk.jfr.consumer.RecordedFrame;
+import jdk.jfr.consumer.RecordedStackTrace;
 import jdk.jfr.consumer.RecordingFile;
 
 /** Closed-schema inspection of the recording itself, never a caller's count flag. */
@@ -43,9 +45,12 @@ class Ton1175Jfr {
 
     public static void main(String[] args) throws Exception {
         try {
+            need(args.length == 4 || args.length == 5);
             Path path = Path.of(args[0]);
             Instant start = Instant.parse(args[1]), end = Instant.parse(args[2]);
             long pid = Long.parseLong(args[3]);
+            int bridgePort = args.length == 5 ? Integer.parseInt(args[4]) : 0;
+            need(bridgePort >= 0 && bridgePort <= 65535 && start.isBefore(end));
             long socketId = -1;
             Set<Long> guardedIds = new HashSet<>();
             try (RecordingFile file = new RecordingFile(path)) {
@@ -61,7 +66,7 @@ class Ton1175Jfr {
             List<Instant> heartbeats = new ArrayList<>();
             List<RecordedEvent> settings = new ArrayList<>();
             Instant jvmStart = null;
-            long reads = 0;
+            long reads = 0, healthReads = 0;
             boolean identity = false;
             try (RecordingFile file = new RecordingFile(path)) {
                 while (file.hasMoreEvents()) {
@@ -86,7 +91,20 @@ class Ton1175Jfr {
                             break;
                         case "jdk.SocketRead":
                             if (event.getLong("bytesRead") > 0 && !event.getEndTime().isBefore(start)
-                                    && !event.getStartTime().isAfter(end)) reads++;
+                                    && !event.getStartTime().isAfter(end)) {
+                                reads++;
+                                RecordedStackTrace stack = event.getStackTrace();
+                                List<String> frames = new ArrayList<>();
+                                if (stack != null) {
+                                    for (RecordedFrame frame : stack.getFrames()) {
+                                        frames.add(frame.getMethod().getType().getName() + "#"
+                                                + frame.getMethod().getName());
+                                    }
+                                }
+                                if (healthRead(event.getString("address"), event.getInt("port"),
+                                        event.getLong("bytesRead"), stack == null || stack.isTruncated(),
+                                        frames, bridgePort)) healthReads++;
+                            }
                             break;
                         default:
                             break;
@@ -108,11 +126,14 @@ class Ton1175Jfr {
                 need(active.containsKey(id) && "true".equals(active.get(id).get("enabled")));
             }
             need("0 ns".equals(active.get(socketId).get("threshold")));
+            if (bridgePort != 0) need("true".equals(active.get(socketId).get("stackTrace")));
             for (RecordedEvent setting : settings) {
                 if (setting.getStartTime().isAfter(start) && !setting.getStartTime().isAfter(end)) {
                     String name = setting.getString("name"), value = setting.getString("value");
                     need(!name.equals("enabled") || value.equals("true"));
                     need(setting.getLong("id") != socketId || !name.equals("threshold") || value.equals("0 ns"));
+                    need(bridgePort == 0 || setting.getLong("id") != socketId
+                            || !name.equals("stackTrace") || value.equals("true"));
                 }
             }
             heartbeats.sort(Comparator.naturalOrder());
@@ -125,10 +146,12 @@ class Ton1175Jfr {
                 }
                 previous = beat;
             }
-            // Count every socket read, including health checks: conservative
-            // rejection is preferable to guessing that a peer was internal.
-            System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStart\":\"%s\",\"socketReads\":%d}%n",
-                    pid, jvmStart, reads);
+            if (bridgePort != 0) need(healthReads <= healthReadLimit(Duration.between(start, end).toNanos()));
+            // Without a trusted bridge pin, every read is a client read. The
+            // caller must reject any nonzero clientReads.
+            System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStart\":\"%s\",\"socketReads\":%d,"
+                            + "\"attributedHealthReads\":%d,\"clientReads\":%d}%n",
+                    pid, jvmStart, reads, healthReads, reads - healthReads);
         } catch (Exception error) {
             // Static source location is useful to reviewers without disclosing
             // recording values or arbitrary exception messages.

@@ -364,7 +364,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val explanation = verifiedChoiceExplanation(questionId)
         return verdict + "\n你选的 ${chosen.trim().uppercase()}：$selected\n正确项 ${map.getValue(correct)}：$right\n" +
             if (explanation.isNotBlank()) "你的选择与已复核解析不符：$explanation"
-            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。点「换个例子再讲」可结合原题解释。"
+            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。"
     }
 
 

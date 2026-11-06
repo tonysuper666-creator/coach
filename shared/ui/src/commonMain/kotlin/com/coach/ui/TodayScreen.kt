@@ -75,16 +75,16 @@ internal fun splitTitle(title: String): Pair<String, String> {
 }
 
 @Composable
-private fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
-    val (tag, main) = splitTitle(kp.title)
+internal fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
+    val (_, main) = splitTitle(kp.title)
     Surface(
         color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,
         shape = MaterialTheme.shapes.extraLarge, onClick = onClick,
         modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (resume) "回到（没学完）" else "开始下一个", style = MaterialTheme.typography.labelLarge)
-            Text(if (resume) "回到 $main（没学完）" else "开始下一个：$main", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+            Text(if (resume) "继续学习" else "开始下一个", style = MaterialTheme.typography.labelLarge)
+            Text(if (resume) "$main（没学完）" else main, style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
         }
     }
 }

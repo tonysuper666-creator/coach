@@ -58,6 +58,17 @@ class TutorMachineTest {
             assertEquals(3, f.machine.next("course", "thread").cards.size)
         }
     }
+    @Test fun firstWrongAnswerDoesNotSuggestAnUnavailableExampleButton() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(); f.open(); f.teach()
+            val cards = f.machine.next("course", "thread").cards
+            val result = f.submit(cards, setOf(0))
+            val feedback = result.grades.first().payload.str("feedback")
+            assertTrue(feedback.contains("暂无已复核解析"))
+            assertFalse(feedback.contains("换个例子再讲"), feedback)
+            assertNotEquals("换个例子再讲", result.nextLabel)
+        }
+    }
     @Test fun gradedMistakesUseReviewedExplanationsAndNeverLeakPendingKeys() = runBlocking {
         TutorFixture().use { f ->
             f.actor.execute {

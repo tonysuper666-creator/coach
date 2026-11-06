@@ -27,6 +27,16 @@ class LedgerReconnectSmoke {
         assertTrue("Use a non-production build", BuildConfig.COACH_PORT !in setOf(8790,8791,18791))
         val runId=args.getString("coachRunId", "manual")
         fun mark(message: String) = android.util.Log.i("CoachReconnect","$runId $message port=${BuildConfig.COACH_PORT} elapsedMs=${android.os.SystemClock.elapsedRealtime()}")
+        // A main-looper heartbeat distinguishes coroutine-pool stalls from whole-process suspension.
+        val handler=android.os.Handler(android.os.Looper.getMainLooper())
+        val heartbeatActive=java.util.concurrent.atomic.AtomicBoolean(true)
+        val heartbeat=object : Runnable {
+            override fun run() {
+                if (!heartbeatActive.get()) return
+                mark("MAIN_HEARTBEAT");handler.postDelayed(this,2000)
+            }
+        }
+        handler.post(heartbeat)
         val wire=HttpLedgerTransport("http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}","desktop",token)
         // Only operation names and exception classes: never URLs, tokens, payloads or messages.
         suspend fun <T> observed(operation: String, block: suspend () -> T): T {
@@ -75,6 +85,8 @@ class LedgerReconnectSmoke {
                 mark("RECONNECTED epochUnchanged=true")
             }
         } finally {
+            heartbeatActive.set(false)
+            handler.removeCallbacks(heartbeat)
             status.cancelAndJoin();loop.cancelAndJoin();wire.close();driver.close();context.deleteDatabase(name)
         }
     }

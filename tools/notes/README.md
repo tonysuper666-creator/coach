@@ -87,26 +87,43 @@ tools/dev/heavy ./gradlew :desktopApp:test :shared:domain:jvmTest :shared:ui:jvm
   :server:app:installDist :desktopApp:createDistributable --console=plain
 tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest \
   -PcoachApplicationId=com.coach.android.ton1294 -Pcoach.port=18894 --console=plain
+tools/dev/heavy npm ci --prefix tools/mathsvc
 ```
+
+隔离服务端的公式进程需要 Node 和 `tools/mathsvc/node_modules`。先安装依赖，再启动自己的服务端，并用它自己的令牌确认 `/v1/math?tex=x%5E2&display=false` 返回 200 和 SVG；仅 `/v1/hello` 可用不足以证明公式服务可用。新检出缺少 MathJax 时 PDF 会明确回退到 TeX，必须补齐依赖后重新导出，不能沿用该产物作为公式成功证据。
 
 `NotesExportTest` 实际运行安装包内的 Python，比较应用重做正确／作废过滤、五条错题、知识点选择、冻结字母映射，验证私有文件权限、拒绝仓库和 PDF 分页／xref。Python 测试将合成桌面导出逐行对照 `desktop-example.md`，并覆盖空周、知识点、输入不变与口径不一致时停止。
 
 窗口自动验收钩子使用 `COACH_NOTES_VERIFY_DIR`、`COACH_NOTES_VERIFY_WEEK`、`COACH_NOTES_VERIFY_CAPTURE`：自动打开真实对话框、捕获其 Compose 表面，并调用与导出按钮相同的代码。必须同时设置独立 `COACH_URL`、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`；开发守卫拒绝生产端口。输出目录必须已存在且在仓库外。可用 `JAVA_TOOL_OPTIONS=-Dcoach.autoExitSeconds=35` 限定窗口生命周期；包含大量公式时应延长并检查实际导出是否完成。
 
-模拟器只在 `tools/dev/heavy --emulator` 内使用 `coach_1128_c70_r`。`NotesReviewSmoke` 接收独立端口、一次性配对码、周次与 `expectedCount`；host 把同一数据导出的 Markdown 放入测试包 `cache/desktop-notes.md`。测试配对、同步、对照题干／选项／讲解与应用题卡，推进**副本**的学习游标后从今天页点击「再练这一周错题」，核对可见清单并在 cache 下保存截图。它不请求生成、也不提交新答案。真实数据的截图和日志只保存在本机私人目录，不上传。错题不足五条时必须如实记录，不能补造真实作答或把合成对照说成真实五题验收。
+模拟器只在 `tools/dev/heavy --emulator` 内使用 `coach_1128_c70_r`。`NotesReviewSmoke` 接收独立端口、一次性配对码、周次与 `expectedCount`；host 把同一数据导出的 Markdown 放入测试包 `cache/desktop-notes.md`。测试配对、同步、对照题干／选项／讲解与应用题卡，推进**副本**的学习游标后从今天页点击「再练这一周错题」，搜索清单的无障碍题干节点并在 cache 下保存截图。它不请求生成、也不提交新答案。真实数据的截图和日志只保存在本机私人目录，不上传。错题不足五条时必须如实记录，不能补造真实作答或把合成对照说成真实五题验收。
+
+`review-visible=PASS` 仅表示找到无障碍节点，不证明题干在屏幕上完整可读，也不表示逐题点开再练。必须人工检查截图并另做原题卡对照；图片源码被直接显示、长题被按钮轮廓裁切等视觉问题不能被此自动结果覆盖。
 
 本卡负责人已批准“两条真实逐题对照 + 五条合成”的证据口径。`fixtures/edge-cases.json` 全部是合成内容：S1 公式、S2 内嵌图片、S3 三十段超长题干、S4 空选项、S5 普通单选，共五条待练题；另加 S6 多选，验证其与现有周错题页同步排除（应用该页仅收录 `SINGLE_CHOICE`，不冒充已支持多选复习）。`NotesExportTest.syntheticEdgesKeepFivePendingAndExcludeMultipleChoice` 实际调用打包的提取器，逐条核对原文和讲解，并检查图片解码／拒绝外部资源；不向生产账本插入这些样例。
 
 设备测试还逐题核对自己的答案，保存 `cache/notes-review/question-N.png` 与不含题目内容的 `agreement.txt`。启动模拟器时将 `ANDROID_SDK_ROOT` 指向实际包含 system-images 的 SDK，不能仅凭 Gradle 的 SDK 路径猜测 emulator 路径。测试命令（在已取得 heavy 模拟器锁的前台会话内）：
 
 ```sh
-# sys.boot_completed=1 不代表网络已就绪。仅初始化自己持锁的模拟器，
-# 再有限等待以下探针返回 HTTP 响应（未认证的 401 也证明路由已经通）。
+# 只操作自己持锁启动的模拟器。开机、Wi-Fi enabled，甚至已关联 SSID，
+# 都可能早于 DHCP 和 IPv4 默认路由就绪；显式关联后仍须等待 HTTP。
 adb -s emulator-5574 shell cmd connectivity airplane-mode disable
 adb -s emulator-5574 shell svc wifi enable
 adb -s emulator-5574 shell svc data enable
-printf 'GET /v1/hello HTTP/1.0\r\nHost: localhost\r\n\r\n' | \
-  adb -s emulator-5574 shell toybox nc -w 2 100.88.12.89 18894
+adb -s emulator-5574 shell cmd wifi connect-network AndroidWifi open
+notes_http_ready=0
+for notes_probe in $(seq 1 20); do
+  # 在 guest 内保留 stdin；直接 printf | adb shell nc 可能在 EOF 时
+  # 退出 0 却没有响应。未认证的 401 也可证明隔离端口路由已通。
+  if adb -s emulator-5574 shell \
+    "(printf 'GET /v1/hello HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n'; sleep 1) | toybox nc -w 2 100.88.12.89 18894" \
+    | rg -q '^HTTP/1\.[01] [0-9]{3}'; then
+    notes_http_ready=1
+    break
+  fi
+  sleep 1
+done
+test "$notes_http_ready" = 1 || exit 1
 # 仅在自己的隔离包和模拟器内；先确认文件确实进入应用 cache。
 adb -s emulator-5574 push "$PRIVATE_DESKTOP_MARKDOWN" /data/local/tmp/ton1294-desktop-notes.md
 adb -s emulator-5574 shell run-as com.coach.android.ton1294 mkdir -p cache
@@ -120,6 +137,8 @@ adb -s emulator-5574 shell am instrument -w \
   -e class com.coach.android.NotesReviewSmoke \
   com.coach.android.ton1294.test/androidx.test.runner.AndroidJUnitRunner
 ```
+
+若预检失败，先保存 `cmd wifi status`、`ip route show table all`、`ip rule show`，核查默认路由，再决定下一步；不要仅凭 `nc` 的退出码判成功。实际配对、同步和 instrumentation 仍须独立通过，不能用探针代替。
 
 真实副本使用 18894、合成库使用 18896，各用自己的数据目录、令牌、客户端缓存；不连接生产端口。读取两条真实题的原文截图仅在本机进行；对外证据只分享合成截图、合成 PDF 和无题目内容的逐题通过结果。
 

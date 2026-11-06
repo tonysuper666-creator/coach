@@ -92,7 +92,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         val mc = a.posed.payload.str("format") == "SINGLE_CHOICE"
         return !a.assisted && purpose in strictPurposes &&
             (!mc || purpose in timedPurposes) &&
-            !(a.submitted!!.payload.flag("offline") && purpose in timedPurposes)
+            !((a.submitted!!.payload.flag("offline") || a.submitted!!.payload.flag("overtime")) && purpose in timedPurposes)
     }
     fun refresh(kp: String, event: Event, changed: Attempt? = null) {
         val old = mastery[kp] ?: Mastery()
@@ -335,7 +335,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         summaryStale = value.summaryFromSeq?.let { (journalLatest[day] ?: 0) > it } ?: false)
     val next = outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") && it.prereqs.all { x -> mastery[x]?.passed == true } }
         ?: outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") }
-    val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") }?.kps?.firstOrNull()
+    val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") && !it.posed.payload.flag("drill") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0

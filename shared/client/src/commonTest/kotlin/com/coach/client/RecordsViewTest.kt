@@ -100,4 +100,27 @@ class RecordsViewTest {
         assertEquals("参考答案", rubric.referenceAnswer); assertEquals("写出定义", rubric.rubric.single().text); assertEquals("fp1", rubric.fingerprint)
         assertNull(rubricFrom(json("question" to json("stem" to "x"))))
     }
+
+    private fun essay(attempt: String, overtime: Boolean = false, submitted: Boolean = true): List<Event> = listOfNotNull(
+        event("question_posed", json("attemptId" to attempt, "questionId" to "q-$attempt", "format" to "ESSAY", "kpIds" to listOf("K1"),
+            "purpose" to "TIMED", "fingerprint" to "fp-$attempt", "stem" to "论述题 $attempt", "keyState" to "VERIFIED", "drill" to true), "essay:$attempt"),
+        if (!submitted) null else event("answer_submitted", JsonObject(json("attemptId" to attempt, "answer" to "My essay $attempt.") +
+            if (overtime) json("overtime" to true) else json()), "essay:$attempt"),
+        if (!submitted) null else event("attempt_graded", json("attemptId" to attempt, "score" to 1400, "max" to 2000, "status" to "AI_UNREVIEWED",
+            "items" to JsonArray(listOf(json("id" to "structure", "points" to 3, "reason" to "结构清楚", "evidence" to "My essay $attempt."))),
+            "rewrite" to "A better paragraph $attempt.", "rewriteNotice" to ""), "essay:$attempt"),
+        if (!submitted) null else event("grade_reviewed", json("attemptId" to attempt, "decision" to "CONFIRM", "reviewerModel" to "gpt",
+            "revised" to json("score" to 1400, "max" to 2000, "rewrite" to "A better paragraph $attempt.",
+                "items" to JsonArray(listOf(json("id" to "structure", "points" to 3, "reason" to "结构清楚", "evidence" to "My essay $attempt."))))), "essay:$attempt"),
+    )
+
+    @Test fun timedEssaysCanBeReopenedNewestFirstWithTheirRewriteAndLateHandIn() {
+        val events = listOf(outline()) + essay("e1") + choice("a1", true) + essay("e2", overtime = true) + essay("e3", submitted = false)
+        val essays = RecordsView(events).timedEssays
+        assertEquals(listOf("e2", "e1"), essays.map { it.attemptId }, "an essay never handed in is not a record")
+        assertTrue(essays.first().overtime); assertTrue(!essays.last().overtime)
+        val grade = assertNotNull(essays.last().effectiveGrade)
+        assertEquals("A better paragraph e1.", grade.rewrite)
+        assertEquals("结构清楚", grade.items.single().reason)
+    }
 }

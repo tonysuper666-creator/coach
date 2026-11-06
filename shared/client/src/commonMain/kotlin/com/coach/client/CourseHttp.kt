@@ -20,7 +20,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 
@@ -30,6 +32,10 @@ data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, v
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
 class MockReply(val body: JsonObject?, val error: String?)
+/** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
+data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
+/** [weeks] 是课程大纲里已有知识点的周，自己贴题时从这里选；[unmatched] 是因为那一周还没有知识点而暂时练不了的题数。 */
+data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, val unmatched: Int)
 
 /**
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
@@ -98,6 +104,13 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
 
     /** 期末押题权重（服务端私有配置）；没有配置或接口不通时返回 null，面板就只按掌握度排。 */
     suspend fun examFocus(): ExamFocus? = ExamFocus.parse(getObject("exam-focus"))
+    suspend fun essays(): EssayBankView? = getObject("essays")?.let { root ->
+        EssayBankView((root["prompts"] as? JsonArray).orEmpty().mapNotNull { v ->
+            val o = v as? JsonObject ?: return@mapNotNull null
+            EssayPrompt(o.s("id"), o.i("week"), (o["marks"] as? JsonPrimitive)?.doubleOrNull ?: 20.0, o.i("wordTarget"), o.s("stem"), o.s("pack"),
+                (o["fromMockPaper"] as? JsonPrimitive)?.booleanOrNull == true)
+        }, (root["weeks"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }, root.i("unmatched"))
+    }
 
     fun close() { http.close() }
 

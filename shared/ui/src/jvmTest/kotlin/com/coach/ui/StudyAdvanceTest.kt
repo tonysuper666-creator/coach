@@ -27,9 +27,9 @@ class StudyAdvanceTest {
         assertTrue(opened.isEmpty(), "wait until the grading stream settles")
         runOnIdle { busy = false }
         waitForIdle()
-        assertEquals(listOf("c"), opened)
+        assertEquals(listOf<String?>("c"), opened)
         runOnIdle { next = null }
         waitForIdle()
-        assertEquals(listOf("c"), opened, "advance only once")
+        assertEquals(listOf<String?>("c"), opened, "advance only once")
     }
 }

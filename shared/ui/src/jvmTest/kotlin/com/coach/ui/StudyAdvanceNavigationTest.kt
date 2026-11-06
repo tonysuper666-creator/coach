@@ -70,9 +70,9 @@ class StudyAdvanceNavigationTest {
             assertTrue(opened.isEmpty(), "do not leave during grading")
             runOnIdle { busy = false }
             waitForIdle()
-            assertEquals(listOf(null), opened, "last new pass exits to the week summary")
+            assertEquals(listOf<String?>(null), opened, "last new pass exits to the week summary")
             runOnIdle { busy = true }; runOnIdle { busy = false }; waitForIdle()
-            assertEquals(listOf(null), opened, "advance only once")
+            assertEquals(listOf<String?>(null), opened, "advance only once")
         } finally { scope.cancel(); tutor.close() }
     }
 }

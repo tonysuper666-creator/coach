@@ -4,6 +4,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.v2.runDesktopComposeUiTest
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
 import com.coach.client.*
 import com.coach.domain.Event
 import com.coach.domain.json

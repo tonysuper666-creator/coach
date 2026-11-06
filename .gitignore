@@ -10,3 +10,5 @@ __pycache__/
 /tools/bridge/.venv/
 /.service-evidence/
 /.service-build.log
+/.reminder-evidence*/
+/.reminder-*.log

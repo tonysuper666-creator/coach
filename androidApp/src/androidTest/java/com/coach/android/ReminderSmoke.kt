@@ -1,0 +1,153 @@
+package com.coach.android
+
+import android.app.NotificationManager
+import android.content.Intent
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityNodeInfo
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import app.cash.sqldelight.driver.android.AndroidSqliteDriver
+import com.coach.client.*
+import com.coach.client.db.ClientDatabase
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+import java.security.MessageDigest
+import java.time.ZonedDateTime
+import java.util.UUID
+
+/** Host runner owns the production-backup copy, isolated server and emulator lifecycle. */
+@RunWith(AndroidJUnit4::class)
+class ReminderSmoke {
+    private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val context = instrumentation.targetContext
+    private val args = InstrumentationRegistry.getArguments()
+    private val base get() = "http://${BuildConfig.COACH_TAIL_HOST}:${args.getString("coachPort")}"
+    private val prefs get() = context.getSharedPreferences("review-reminder", 0)
+    private val manager get() = context.getSystemService(NotificationManager::class.java)
+
+    @Test fun phase(): Unit = runBlocking {
+        val reminder = ReviewReminder(context)
+        when (args.getString("phase")) {
+            "prepare" -> {
+                val client = PairingClient(base)
+                try { KeystoreCredentials(context, base).save(client.pair(args.getString("pairingCode")!!, "TON-1293 reminder emulator")) }
+                finally { client.close() }
+                val count = countDue(sync = true)
+                assertTrue("Backup must contain due reviews for notification acceptance", count > 0)
+                prefs.edit().putInt("expectedCount", count).commit()
+                launch()
+                click(waitText("设置")); waitText("复习提醒")
+                click(waitNode { it.isCheckable })
+                click(waitText("Don't allow"))
+                waitText("通知权限未开启或提醒通知已关闭，暂时无法提醒。请到系统设置中允许通知。")
+                assertTrue(reminder.permissionAsked)
+                assertTrue(reminder.enabled)
+                click(waitNode { it.isCheckable }); click(waitNode { it.isCheckable })
+                Thread.sleep(500)
+                assertNull(find(instrumentation.uiAutomation.rootInActiveWindow) { it.text?.toString() == "Don't allow" })
+                waitText("复习提醒")
+                click(waitText("完成"))
+                reminder.update(enabled = false)
+                android.util.Log.i("CoachReminderTest", "permissionDenied=explained repeatedPrompt=false expected=$count")
+            }
+            "schedule" -> {
+                reminder.configure(base)
+                assertTrue(reminder.notificationsAllowed())
+                val time = ZonedDateTime.now().plusMinutes(2)
+                reminder.update(enabled = true, hour = time.hour, minute = time.minute)
+                val restored = ReviewReminder(context)
+                assertTrue(restored.enabled); assertEquals(time.hour, restored.hour); assertEquals(time.minute, restored.minute)
+                launch(); click(waitText("设置"))
+                waitText("提醒时间 %02d:%02d".format(time.hour, time.minute))
+                click(waitText("提醒时间 %02d:%02d".format(time.hour, time.minute)))
+                // Actual native time picker opens; leave the already selected two-minute time unchanged.
+                click(waitText("OK")); click(waitText("完成"))
+                android.util.Log.i("CoachReminderTest", "scheduledAt=${prefs.getLong("nextAt", -1)} expected=${prefs.getInt("expectedCount", -1)}")
+            }
+            "tap" -> {
+                val count = countDue(sync = false)
+                val notification = manager.activeNotifications.single { it.id == ReviewReminder.NOTIFICATION }
+                assertEquals("今天有 $count 道到期", notification.notification.extras.getString("android.title"))
+                instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
+                waitText("今天有 $count 道到期")
+                screenshot("notification.png")
+                click(waitText("今天有 $count 道到期"))
+                // Review page, rather than Today's landing page.
+                waitText("复习")
+                waitText("$count 个知识点到期")
+                screenshot("review.png")
+                assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
+                android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count tap=REVIEW")
+            }
+            "restored" -> {
+                assertTrue(reminder.enabled)
+                assertTrue(prefs.getLong("nextAt", -1) > System.currentTimeMillis())
+                android.util.Log.i("CoachReminderTest", "bootRestored=true scheduledAt=${prefs.getLong("nextAt", -1)}")
+                reminder.update(enabled = false)
+                assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
+                android.util.Log.i("CoachReminderTest", "disabled=true notificationCancelled=true")
+            }
+            "zero" -> {
+                // Host has stopped the isolated server. Empty the disposable local replica only.
+                context.deleteDatabase("coach-client.db")
+                assertEquals(0, countDue(sync = false))
+                reminder.configure(base); reminder.update(enabled = true)
+                reminder.deliver(prefs.getLong("nextAt", -1))
+                assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
+                // A stale alarm must not deliver after disabling.
+                val at = prefs.getLong("nextAt", -1)
+                reminder.update(enabled = false); reminder.deliver(at)
+                assertTrue(manager.activeNotifications.isEmpty())
+                android.util.Log.i("CoachReminderTest", "due=0 silent=true staleAlarmAfterDisable=silent")
+            }
+            else -> error("Unknown reminder smoke phase")
+        }
+    }
+
+    private suspend fun countDue(sync: Boolean): Int {
+        val credentials = KeystoreCredentials(context, base).load()!!
+        val driver = AndroidSqliteDriver(ClientDatabase.Schema, context, "coach-client.db")
+        val transport = HttpLedgerTransport(base, credentials.deviceId, credentials.token)
+        try {
+            val engine = SyncEngine(ClientDatabase(driver), credentials.deviceId, transport, listOf(BuildConfig.COACH_COURSE),
+                { UUID.randomUUID().toString() }, { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
+            if (sync) engine.syncOnce()
+            return CourseView(engine.localEvents(BuildConfig.COACH_COURSE), engine.projection(BuildConfig.COACH_COURSE))
+                .dueReviews(System.currentTimeMillis()).size
+        } finally { transport.close(); driver.close() }
+    }
+
+    private fun launch() {
+        context.startActivity(Intent(context, CoachActivity::class.java).putExtra("coachUrl", base)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+    }
+    private fun screenshot(name: String) {
+        Thread.sleep(300)
+        val image = instrumentation.uiAutomation.takeScreenshot()
+        File(context.cacheDir, name).outputStream().use { image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        image.recycle()
+    }
+    private fun find(node: AccessibilityNodeInfo?, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (predicate(node)) return node
+        for (i in 0 until node.childCount) find(node.getChild(i), predicate)?.let { return it }
+        return null
+    }
+    private fun waitNode(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            find(instrumentation.uiAutomation.rootInActiveWindow, predicate)?.let { return it }
+            Thread.sleep(50)
+        }
+        throw AssertionError("Accessibility target did not appear")
+    }
+    private fun waitText(text: String) = waitNode { it.text?.toString() == text }
+    private fun click(node: AccessibilityNodeInfo) {
+        var target = node
+        while (!target.isClickable) target = target.parent ?: error("No clickable ancestor")
+        assertTrue(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+    }
+}

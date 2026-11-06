@@ -155,7 +155,8 @@ def main():
                         input=json.dumps(keys).encode(),capture_output=True,timeout=10)
                 def capture(name):
                     result = subprocess.run([adb,'-s',args.serial,'exec-out','run-as',PACKAGE,'cat','cache/'+name],capture_output=True,timeout=10)
-                    if result.returncode == 0 and result.stdout:
+                    valid = result.stdout.startswith(b'\x89PNG\r\n\x1a\n') if name.endswith('.png') else not result.stdout.startswith((b'cat:', b'run-as:'))
+                    if result.returncode == 0 and result.stdout and valid:
                         (out/name).write_bytes(result.stdout)
                 def instrument(method, phase):
                     cmd = [adb,'-s',args.serial,'shell','am','instrument','-w','-e','class',TEST+'#'+method,

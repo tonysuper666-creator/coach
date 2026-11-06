@@ -100,7 +100,7 @@ class MistakeReviewSmoke {
             if (!resume) {
             step("request initial questions")
             click(waitText("出题",15_000,enabled=true))
-            waitText("第 1 / 3 题",15_000)
+            waitQuestionPage(15_000)
             val first = group("kp:$kp")
             step("answer initial questions")
             answer(first, wrong = wrongCount)
@@ -131,7 +131,7 @@ class MistakeReviewSmoke {
             step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
             click(retryButton)
-            waitText("第 1 / 3 题")
+            waitQuestionPage()
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
             val retry = group("mistakes:$kp")
@@ -302,6 +302,15 @@ class MistakeReviewSmoke {
             Thread.sleep(10)
         }
         throw AssertionError("Visible text missing: $text")
+    }
+    /** The list can preserve its scroll position: any visible card establishes that the page loaded. */
+    private fun waitQuestionPage(timeout: Long=10_000) {
+        val end=SystemClock.elapsedRealtime()+timeout
+        while(SystemClock.elapsedRealtime()<end) {
+            if((1..3).any { find("第 $it / 3 题") != null }) return
+            Thread.sleep(10)
+        }
+        throw AssertionError("No visible question heading on the three-question page")
     }
     /** Injects a steady 30-step finger drag; unlike `input swipe` its pace never depends on shell start-up. */
     private fun drag(x: Int,fromY: Int,toY: Int) {

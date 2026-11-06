@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import com.coach.client.*
 import com.coach.client.db.ClientDatabase
+import com.coach.protocol.*
 import kotlinx.coroutines.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,9 +27,32 @@ class LedgerReconnectSmoke {
         assertTrue("Use a non-production build", BuildConfig.COACH_PORT !in setOf(8790,8791,18791))
         val runId=args.getString("coachRunId", "manual")
         fun mark(message: String) = android.util.Log.i("CoachReconnect","$runId $message port=${BuildConfig.COACH_PORT} elapsedMs=${android.os.SystemClock.elapsedRealtime()}")
-        val transport=HttpLedgerTransport("http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}","desktop",token)
+        val wire=HttpLedgerTransport("http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}","desktop",token)
+        // Only operation names and exception classes: never URLs, tokens, payloads or messages.
+        suspend fun <T> observed(operation: String, block: suspend () -> T): T {
+            mark("REQUEST_BEGIN operation=$operation")
+            try {
+                return block().also { mark("REQUEST_END operation=$operation") }
+            } catch (error: Throwable) {
+                mark("REQUEST_FAILED operation=$operation type=${error.javaClass.simpleName} cause=${error.cause?.javaClass?.simpleName}")
+                throw error
+            }
+        }
+        val transport=object : LedgerTransport by wire {
+            override suspend fun hello(epoch: String?): Hello = observed("hello") { wire.hello(epoch) }
+            override suspend fun snapshot(course: String): Snapshot = observed("snapshot") { wire.snapshot(course) }
+            override suspend fun events(course: String, after: Long): EventsPage = observed("events") { wire.events(course,after) }
+            override suspend fun watch(onLedger: suspend () -> Unit) = observed("watch") { wire.watch(onLedger) }
+        }
         val engine=SyncEngine(ClientDatabase(driver),"desktop",transport,listOf("synthetic"),{UUID.randomUUID().toString()}, { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
         val loop=engine.start(this)
+        loop.invokeOnCompletion { mark("SYNC_LOOP_FINISHED type=${it?.javaClass?.simpleName ?: "completed"}") }
+        val status=launch(Dispatchers.IO) {
+            while(isActive) {
+                mark("SYNC_STATUS connection=${engine.connection.value} revision=${engine.revision.value} active=${loop.isActive}")
+                delay(2000)
+            }
+        }
         try {
             withTimeout(120000) {
                 while(engine.connection.value!="online") delay(50)
@@ -51,7 +75,7 @@ class LedgerReconnectSmoke {
                 mark("RECONNECTED epochUnchanged=true")
             }
         } finally {
-            loop.cancelAndJoin();transport.close();driver.close();context.deleteDatabase(name)
+            status.cancelAndJoin();loop.cancelAndJoin();wire.close();driver.close();context.deleteDatabase(name)
         }
     }
 }

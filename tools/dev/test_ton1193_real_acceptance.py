@@ -63,7 +63,9 @@ class IdleRecordingTest(unittest.TestCase):
                         'startTime': '1970-01-01T00:16:41Z'}}]}}).encode()
                 if 'jdk.SocketRead' in argv:
                     return json.dumps({'recording': {'events': [{'values': {
-                        'startTime': '1970-01-01T00:16:41Z', 'bytesRead': 12, 'port': 41500}}]}}).encode()
+                        'startTime': '1970-01-01T00:16:41Z', 'bytesRead': 12, 'port': 41500,
+                        'address': '127.0.0.1', 'stackTrace': {'truncated': False,
+                                                              'frames': [{'type': 'fixture'}]}}}]}}).encode()
                 return b'identity'
 
             control = mock.MagicMock()
@@ -79,6 +81,8 @@ class IdleRecordingTest(unittest.TestCase):
                         {'adapterEnvPins': {'BRIDGE_PORT': '41500'}, 'idleEvidence': str(root / 'idle.json')}, report)
             self.assertEqual(report['earlySocketReads']['count'], 1)
             self.assertEqual(report['earlySocketReads']['bridgePortReads'], 1)
+            self.assertEqual(report['earlySocketReadStacks'][0]['stackTrace']['frames'], [{'type': 'fixture'}])
+            self.assertIn('<setting name="stackTrace">true</setting>', (root / 'idle.jfc').read_text())
             self.assertFalse((root / 'idle.json').exists())
 
 

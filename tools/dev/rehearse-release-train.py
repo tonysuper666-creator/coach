@@ -5,6 +5,7 @@ No launchd, production controls, real bridge, mobile device or production writes
 The installed distribution is copied before use. All children finish in this call.
 """
 import argparse
+from contextlib import closing, contextmanager
 import hashlib
 import importlib.util
 import json
@@ -19,12 +20,20 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('candidate_smoke', ROOT / 'tools/dev/check-candidate-smoke.py')
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 PROTECTED = {8790, 8791, 18791, 3790}
+
+
+@contextmanager
+def database(path, **options):
+    with closing(sqlite3.connect(path, **options)) as connection:
+        with connection:
+            yield connection
 
 
 def require(value, message):
@@ -48,8 +57,101 @@ def distribution_digest(app):
     return digest.hexdigest()
 
 
+def durable_fingerprint(db):
+    """Exclude rebuildable projections, but protect speech and credentials too."""
+    maximum = db.execute('select coalesce(max(seq),0) from events').fetchone()[0]
+    digest = hashlib.sha256(digest_events(db, maximum))
+    for table, order in [('messages', 'thread_id,mseq'), ('devices', 'device_id')]:
+        for row in db.execute(f'select * from {table} order by {order}'):
+            digest.update(json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode())
+    return maximum, digest.digest()
+
+
+def restore_before_v7(data, backup, *, server_stopped):
+    """Private rehearsal only; a post-migration write must make restore fail closed."""
+    require(server_stopped, 'restore refused: server is running')
+    current = data / 'coach.sqlite'
+    with database(current) as db, database(backup.as_uri() + '?mode=ro', uri=True) as before:
+        require(before.execute('pragma integrity_check').fetchone()[0] == 'ok', 'invalid migration backup')
+        require(before.execute('pragma user_version').fetchone()[0] == 6, 'migration backup is not v6')
+        require(db.execute('pragma user_version').fetchone()[0] == 7, 'restore source is not v7')
+        require(durable_fingerprint(db) == durable_fingerprint(before), 'restore refused: durable writes after migration')
+        db.execute('pragma wal_checkpoint(TRUNCATE)')
+        before.backup(db)
+
+
+def frame(ws, kind):
+    result = ws.await_type(kind, 'msg.error')
+    require(result['t'] == kind, 'isolated tutor returned an error')
+    return result
+
+
+def request(port, token, course, endpoint):
+    path = '/v1/courses/' + urllib.parse.quote(course, safe='') + '/' + endpoint
+    req = urllib.request.Request(f'http://127.0.0.1:{port}' + path,
+                                 headers={'Authorization': 'Bearer ' + token, 'X-Coach-Device': 'desktop'})
+    with urllib.request.urlopen(req, timeout=15) as response:
+        require(response.status == 200, 'course readback failed')
+        return json.load(response)
+
+
+def readback(port, token, courses, client_app, expected=None):
+    """Use real endpoints and the selected distribution's real client projector.
+
+    Course content stays in memory/stdin. Nothing from it is printed or saved.
+    Only pre-existing KP threads are opened; no lesson or real-data write is sent.
+    """
+    calls = smoke.Bridge.calls
+    opened = mistakes = 0
+    for course in courses:
+        snapshot = request(port, token, course, 'snapshot')
+        require(isinstance(snapshot.get('projection'), dict), 'missing course projection')
+        today = request(port, token, course, 'today')
+        require(isinstance(today, dict), 'missing today progress')
+        events, after = [], 0
+        while True:
+            page = request(port, token, course, f'events?after={after}&limit=500')
+            events.extend(page['events'])
+            if not page.get('hasMore', False):
+                break
+            require(page['throughSeq'] > after, 'event paging did not advance')
+            after = page['throughSeq']
+        require(events == snapshot['events'], 'course event/snapshot disagreement')
+        # The probe class comes from this checkout; all client/domain/protocol
+        # libraries come from the binary actually selected for rollback.
+        probe = subprocess.run(['java', '-cp', str(ROOT / 'server/app/build/classes/kotlin/test') + os.pathsep + str(client_app / 'lib/*'),
+                                'com.coach.server.ReleaseTrainReadbackKt'],
+                               input=json.dumps({'events': events, 'expectedMistake': (expected or {}).get('wrongAttempt', '')}),
+                               text=True, capture_output=True, timeout=45)
+        require(probe.returncode == 0, 'selected client mistake projection failed')
+        mistakes += json.loads(probe.stdout)['mistakes']
+        contexts = {}
+        for event in events:
+            if event['type'] == 'kp_opened' and event['payload'].get('conceptIds'):
+                contexts[event['threadId']] = event['payload']
+        require(contexts or expected is None, 'candidate tutor context lost')
+        for thread, context in contexts.items():
+            ws = smoke.WS(port, 'desktop', token)
+            try:
+                ws.send(dict(t='tutor.open', courseId=course, threadId=thread, kpId=context['kpId'],
+                             conceptIds=context['conceptIds'], title=context.get('title', '')))
+                frame(ws, 'tutor.state')
+                frame(ws, 'msg.history')
+                opened += 1
+            finally:
+                ws.close()
+        if expected:
+            by_id = {e['id']: e for e in events}
+            require(all(by_id.get(e['id']) == e for e in expected['events']), 'candidate event payload changed')
+            pending = {e['payload']['attemptId'] for e in events if e['type'] == 'question_posed'} - {
+                e['payload']['attemptId'] for e in events if e['type'] in ('answer_submitted', 'attempt_voided')}
+            require(pending == set(expected['retryAttempts']), 'candidate retry group lost')
+    require(smoke.Bridge.calls == calls, 'readback unexpectedly called bridge')
+    return dict(courses=len(courses), tutorOpens=opened, mistakes=mistakes, bridgeCalls=0)
+
+
 def seed(db, phase):
-    for i in range(3):
+    for i in range(6 if phase == 'candidate' else 3):
         q = f'ton1254-{phase}-q{i}'
         options = [{'optionId': f'{q}-{j}', 'text': f'Synthetic option {j}'} for j in range(4)]
         db.execute('insert into questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state) values(?,?,?,?,?,?,?,?)',
@@ -63,22 +165,34 @@ def exercise(port, token, phase):
     try:
         common = {'threadId': f'ton1254-{phase}-thread', 'courseId': f'ton1254-{phase}'}
         ws.send(dict(common, t='tutor.open', kpId=f'ton1254-{phase}-kp', conceptIds=['synthetic'], title='Synthetic objective'))
-        require(ws.await_type('tutor.state', 'msg.error')['t'] == 'tutor.state', 'synthetic tutor open failed')
+        frame(ws, 'tutor.state')
         ws.send(dict(common, t='msg.ask', text='继续'))
-        ws.await_type('msg.start')
-        first = ws.await_type('msg.delta')
+        frame(ws, 'msg.start')
+        first = frame(ws, 'msg.delta')
         require(first.get('text') or first.get('delta'), 'no synthetic first delta')
-        require(ws.await_type('msg.end')['status'] == 'complete', 'synthetic lecture incomplete')
+        require(frame(ws, 'msg.end')['status'] == 'complete', 'synthetic lecture incomplete')
         deadline = time.monotonic() + 30
-        while ws.await_type('tutor.state')['state'] != 'AWAIT':
+        while frame(ws, 'tutor.state')['state'] != 'AWAIT':
             require(time.monotonic() < deadline, 'synthetic lecture did not settle')
         ws.send(dict(common, t='msg.ask', text='继续'))
-        group = ws.await_type('tutor.cards')
+        group = frame(ws, 'tutor.cards')
         cards = group['cards']
         require(len(cards) == 3, 'synthetic quiz missing cards')
         answers = {c['attemptId']: c['letterMap'][c['questionId'] + '-0'] for c in cards}
+        if phase == 'candidate':
+            wrong = cards[-1]
+            answers[wrong['attemptId']] = wrong['letterMap'][wrong['questionId'] + '-1']
         ws.send(dict(common, t='tutor.answer', groupId=group['groupId'], submissionId=f'ton1254-{phase}-submit', answers=answers))
-        require(len(ws.await_type('tutor.feedback')['grades']) == 3, 'synthetic quiz missing grades')
+        feedback = frame(ws, 'tutor.feedback')['grades']
+        require(len(feedback) == 3, 'synthetic quiz missing grades')
+        if phase == 'candidate':
+            require(sum(g['score'] < g['max'] for g in feedback) == 1, 'candidate mistake was not recorded')
+            ws.send(dict(common, t='tutor.retryMistakes'))
+            retry = frame(ws, 'tutor.cards')['cards']
+            require(len(retry) == 3 and not ({c['questionId'] for c in retry} & {c['questionId'] for c in cards}),
+                    'retry did not select three new questions')
+            return dict(wrongAttempt=wrong['attemptId'], retryAttempts=[c['attemptId'] for c in retry],
+                        events=request(port, token, common['courseId'], 'snapshot')['events'])
     finally:
         ws.close()
 
@@ -109,6 +223,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
     bridge_thread = threading.Thread(target=bridge.serve_forever)
     bridge_thread.start()
     process = None
+    authenticated_starts = 0
     ports, pids, exits, startup_failures = [], [], [], []
     summary = {}
     try:
@@ -118,16 +233,18 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
             data.mkdir(mode=0o700)
             (base / 'jvm-home').mkdir(mode=0o700)
             (base / 'jvm-tmp').mkdir(mode=0o700)
-            with sqlite3.connect((production / 'coach.sqlite').as_uri() + '?mode=ro', uri=True) as source:
-                with sqlite3.connect(data / 'coach.sqlite') as db:
+            with database((production / 'coach.sqlite').as_uri() + '?mode=ro', uri=True) as source:
+                with database(data / 'coach.sqlite') as db:
                     source.backup(db)
             (data / 'device-token').write_bytes(token_bytes)
             (data / 'device-token').chmod(0o600)
-            with sqlite3.connect(data / 'coach.sqlite') as db:
+            with database(data / 'coach.sqlite') as db:
                 require(db.execute('pragma integrity_check').fetchone()[0] == 'ok', 'invalid production snapshot')
                 maximum = db.execute('select coalesce(max(seq),0) from events').fetchone()[0]
                 original = digest_events(db, maximum)
                 devices = dict(db.execute('select device_id,token_sha256 from devices'))
+                real_courses = [row[0] for row in db.execute("select distinct course_id from events where course_id!='__system__'")]
+                require(real_courses, 'production copy has no course to read back')
                 # Cancel only copied work; no real content may be sent to any bridge.
                 db.execute("update jobs set state='cancelled', last_error='isolated_release_train' where state in ('queued','running')")
                 for phase in ('old', 'candidate', 'rollback', 'fault-recovery'):
@@ -158,7 +275,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                     process = None
 
             def start():
-                nonlocal process
+                nonlocal process, authenticated_starts
                 port = smoke.free_port()
                 while port in PROTECTED or port in ports:
                     port = smoke.free_port()
@@ -197,6 +314,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                     try:
                         with urllib.request.urlopen(req, timeout=2) as response:
                             if response.status == 200:
+                                authenticated_starts += 1
                                 return port
                     except OSError:
                         time.sleep(.2)
@@ -204,26 +322,85 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
 
             def unchanged():
                 require((data / 'device-token').read_bytes() == token_bytes, 'copied token changed')
-                with sqlite3.connect(data / 'coach.sqlite') as db:
+                with database(data / 'coach.sqlite') as db:
                     require(db.execute('pragma integrity_check').fetchone()[0] == 'ok', 'copy integrity failed')
                     require(digest_events(db, maximum) == original, 'original ledger events changed')
                     current_devices = dict(db.execute('select device_id,token_sha256 from devices'))
                     require(all(current_devices.get(k) == v for k, v in devices.items()), 'paired device token hashes changed')
 
+            def migration_window():
+                nonlocal data
+                require(rollback_checkout is not None, 'migration rehearsal needs the pinned baseline')
+                require(process is None, 'migration copy requires stopped server')
+                train_data = data
+                stage = base / 'migration-data'
+                stage.mkdir(mode=0o700)
+                with database(train_data / 'coach.sqlite') as source, database(stage / 'coach.sqlite') as target:
+                    source.backup(target)
+                (stage / 'device-token').write_bytes(token_bytes)
+                (stage / 'device-token').chmod(0o600)
+                calls = smoke.Bridge.calls
+                try:
+                    data = stage
+                    select('rollback')
+                    start()
+                    stop()
+                    backups = list((stage / 'backups').glob('pre-V007-*/coach.sqlite'))
+                    require(len(backups) == 1, 'missing unique automatic pre-v7 backup')
+                    restore_before_v7(stage, backups[0], server_stopped=process is None)
+                    select('old')
+                    start()  # The actual old binary must accept the restored v6 copy.
+                    stop()
+                    unchanged()
+                    select('rollback')
+                    port = start()
+                    ws = smoke.WS(port, 'desktop', token)
+                    try:
+                        ws.send(dict(t='tutor.open', courseId='ton1254-migration-write', threadId='ton1254-migration-write-thread',
+                                     kpId='ton1254-migration-write-kp', conceptIds=['synthetic'], title='Synthetic migration write'))
+                        frame(ws, 'tutor.state')
+                    finally:
+                        ws.close()
+                    stop()
+                    with database(stage / 'coach.sqlite') as db:
+                        written = durable_fingerprint(db)
+                    try:
+                        restore_before_v7(stage, backups[0], server_stopped=process is None)
+                    except RuntimeError as error:
+                        require(str(error) == 'restore refused: durable writes after migration', 'unexpected migration refusal')
+                    else:
+                        raise RuntimeError('migration restore discarded new writes')
+                    with database(stage / 'coach.sqlite') as db:
+                        require(db.execute('pragma user_version').fetchone()[0] == 7 and durable_fingerprint(db) == written,
+                                'refused migration restore changed the database')
+                    unchanged()
+                    require(smoke.Bridge.calls == calls, 'migration check called bridge')
+                    return dict(noWriteRestore='old binary authenticated on restored v6', withWriteRestore='refused; v7 writes retained',
+                                checks=['event max sequence', 'full event digest', 'messages', 'device credentials'], bridgeCalls=0)
+                finally:
+                    stop()
+                    data = train_data
+
             try:
-                timings, schema_versions = {}, {}
+                timings, schema_versions, readbacks = {}, {}, {}
+                candidate_state = None
+                migration = None
                 for name, phase in [('old', 'old'), ('candidate', 'candidate')]:
                     print(json.dumps({'phase': phase, 'state': 'starting'}), flush=True)
                     began = time.monotonic()
                     select(name)
                     port = start()
-                    exercise(port, token, phase)
+                    result = exercise(port, token, phase)
+                    if phase == 'candidate':
+                        candidate_state = result
                     timings[phase] = round(time.monotonic() - began, 3)
                     require(timings[phase] < 300, 'isolated acceptance exceeded 300 seconds')
                     stop()
                     unchanged()
-                    with sqlite3.connect(data / 'coach.sqlite') as db:
+                    with database(data / 'coach.sqlite') as db:
                         schema_versions[phase] = db.execute('pragma user_version').fetchone()[0]
+                    if phase == 'old' and rollback_checkout is not None:
+                        migration = migration_window()
                 began = time.monotonic()
                 if rollback_checkout is not None:
                     # Demonstrate the installed binary's real incompatibility before using the compatible baseline.
@@ -242,12 +419,14 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                     unchanged()
                 select('rollback')
                 port = start()
+                readbacks['rollback'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', candidate_state),
+                                             original=readback(port, token, real_courses, base / 'rollback'))
                 exercise(port, token, 'rollback')
                 timings['rollback'] = round(time.monotonic() - began, 3)
                 require(timings['rollback'] < 300, 'isolated rollback exceeded 300 seconds')
                 stop()
                 unchanged()
-                with sqlite3.connect(data / 'coach.sqlite') as db:
+                with database(data / 'coach.sqlite') as db:
                     schema_versions['rollback'] = db.execute('pragma user_version').fetchone()[0]
                 # A failed release must recover the same data, not restore an older snapshot.
                 began = time.monotonic()
@@ -266,21 +445,24 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                     stop()
                 select('rollback')
                 port = start()
+                readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', candidate_state),
+                                                   original=readback(port, token, real_courses, base / 'rollback'))
                 exercise(port, token, 'fault-recovery')
                 timings['fault-recovery'] = round(time.monotonic() - began, 3)
                 require(timings['fault-recovery'] < 300, 'isolated fault recovery exceeded 300 seconds')
                 stop()
                 unchanged()
-                with sqlite3.connect(data / 'coach.sqlite') as db:
+                with database(data / 'coach.sqlite') as db:
                     kept = db.execute("select count(*) from events where course_id='ton1254-candidate'").fetchone()[0]
                     require(kept > 0, 'candidate writes lost on rollback')
                 summary = dict(productionHead=installed['sourceHead'], candidateHead=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                                candidateSourceTrees={area: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + area], cwd=ROOT, text=True).strip() for area in ('server', 'shared')},
                                rehearsalSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                rollbackHead=rollback_head, originalRollbackRejected=rollback_checkout is not None,
+                               firstMigration=migration, courseReadbacks=readbacks, candidateWrongAnswers=1, candidateRetryNewCards=3,
                                startupFailures=startup_failures, schemaVersions=schema_versions,
                                distributionSha256=hashes, phases=['old', 'candidate'] + (['original-rollback-refused'] if rollback_checkout is not None else []) + ['rollback', 'failed-start', 'fault-recovery'],
-                               originalTokenAcceptedStarts=4, syntheticLectureQuizPasses=4, candidateEventsRetained=kept,
+                               originalTokenAcceptedStarts=authenticated_starts, syntheticLectureQuizPasses=4, candidateEventsRetained=kept,
                                originalEventsUnchanged=True, pairedTokenHashesUnchanged=True, copyIntegrity='ok',
                                startupAndLectureQuizSeconds=timings, databaseRestoredOnRollback=False,
                                productionConnections='readonly SQLite backup only', productionControlCalls=0,

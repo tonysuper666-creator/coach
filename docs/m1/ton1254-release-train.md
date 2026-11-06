@@ -88,6 +88,14 @@ The queued wrappers were cancelled and reaped; no pending check is reported
 as a pass. The clean compatible-baseline build and compatible rollback
 rehearsal below are also unverified. This is a partial delivery, kept draft.
 
+The 11:01 UTC continuation also adds the independent review's stronger gates:
+the selected rollback binary's own client projector reads candidate mistakes,
+and the first schema migration has separate zero-write/with-write scenarios.
+`python3 -W error::ResourceWarning -m unittest tools.dev.test_release_train`
+passes four tests (exit 0), including new events, same-watermark event edits,
+speech-only writes, changed credential hashes, a running server, and the wrong
+backup schema. This small guard test does not validate the JVM rehearsal.
+
 ## Isolated deployment and rollback
 
 The installed `5ef9989` starts against the v6 production copy. The candidate
@@ -97,6 +105,35 @@ Returning to the installed binary exits 1 with
 not a usable rollback path. The v7 source-visibility migration already exists
 on the pinned main, rather than being introduced by these train merges.
 Do not lower `user_version` or restore an older snapshot to mask this failure.
+
+### Two-stage production transition and paired phone rollback
+
+Stage A must first take the installed v6 release to the independently accepted
+`8e644b5` main baseline. Before admitting writes, its automatic
+`backups/pre-V007-*/coach.sqlite` is a possible migration fallback: stop the
+server, require the same maximum event sequence **and full event-row digest**,
+and require unchanged speech and credential rows. Only this zero-write window
+may restore that exact pre-migration backup and restart the original binary.
+Any event append, edit, message, or credential change closes the window; refuse
+restoration and retain the v7 data for forward repair. Never edit `user_version`.
+The harness tests both outcomes on a separate private clone, including actual
+old-binary authentication after the zero-write restore. Its helper is for a
+stopped, exclusively owned private rehearsal, not a production restore tool or
+an alternative to TON-1193/TON-1175's approved switch/seal protocol.
+
+After Stage A is accepted and at least one real learning session has completed
+successfully on that baseline, Stage B may install the feature train. Stage B's
+fallback is the compatible baseline on the **same current v7 database**; retain
+every train-period learner write. `8e644b5` is not yet a proven production
+baseline, and neither stage is authorized by this document alone.
+
+Server and phone versions must roll back together. The baseline server does
+not handle the train APK's `tutor.retryMistakes` command; it silently ignores
+that command and the new phone can wait without feedback. Do not leave the
+train APK paired with the baseline after rollback. Prepare the reviewed,
+matching prior APK and preserve its local state/credentials; paired rollback
+and user-visible recovery still require the owning device cards' acceptance.
+This rehearsal neither installs an APK nor claims that device gate passed.
 
 Build a compatible fallback from the clean, pinned main baseline, keeping
 the installed binary separately. This fallback contains main's schema and
@@ -132,6 +169,14 @@ succeeds. The same copied
 database is used throughout: rollback never restores an earlier database.
 All original event rows and paired-device token hashes must remain unchanged,
 candidate events must survive rollback, and SQLite integrity must remain `ok`.
+The candidate deliberately answers one question incorrectly, then explicitly
+requests three unseen retry questions. After both rollback and failure
+recovery, the harness reads its full event payloads, pending retry attempts,
+and retained mistake through the selected distribution's actual shared client
+projector. It also reads every original course's snapshot, today progress and
+mistake projection, and opens each pre-existing tutor context/history without
+asking for teaching or sending a bridge request. Responses stay private;
+only counts leave the copy. A `msg.error` fails these protocol checks.
 The report contains only metadata, hashes and aggregate counts. Temporary
 copies/logs are deleted and all owned listeners/processes are collected.
 JVM home/temp directories are also isolated; inherited JVM option variables

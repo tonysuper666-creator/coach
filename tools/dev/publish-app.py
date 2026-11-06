@@ -7,12 +7,32 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tempfile
 
 
 def publish(apk, directory, sdk):
+    # The build output may be replaced while SDK tools run. Never inspect it and
+    # then reopen it for publication: every check must describe the same bytes.
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.publish-', dir=directory) as private:
+        snapshot = Path(private) / 'snapshot.apk'
+        with apk.open('rb') as source, snapshot.open('xb') as output:
+            size = 0
+            while chunk := source.read(64 * 1024):
+                size += len(chunk)
+                if size > 268435456:
+                    raise ValueError('Invalid APK size')
+                output.write(chunk)
+            if size == 0:
+                raise ValueError('Invalid APK size')
+            output.flush()
+            os.fsync(output.fileno())
+        snapshot.chmod(0o400)
+        return _publish_snapshot(snapshot, directory, sdk)
+
+
+def _publish_snapshot(apk, directory, sdk):
     tools = sdk / 'build-tools/37.0.0'
     def run(*args):
         return subprocess.check_output(list(map(str, args)), text=True, stderr=subprocess.PIPE)
@@ -47,18 +67,9 @@ def publish(apk, directory, sdk):
             if certs != previous['signerSha256']:
                 raise ValueError('Update signing identity changed')
         # Content addresses remain available while another client finishes an older download.
-        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as temporary:
-            temp_path = Path(temporary.name)
-            try:
-                with apk.open('rb') as source:
-                    shutil.copyfileobj(source, temporary)
-                temporary.flush(); os.fsync(temporary.fileno())
-                with temp_path.open('rb') as copied:
-                    if hashlib.file_digest(copied, 'sha256').hexdigest() != digest:
-                        raise ValueError('APK changed while publishing')
-                os.replace(temp_path, directory / (digest + '.apk'))
-            finally:
-                temp_path.unlink(missing_ok=True)
+        # Move the very inode inspected by apksigner/aapt, without re-reading the
+        # mutable source path or making a second, unverified publication copy.
+        os.replace(apk, directory / (digest + '.apk'))
         with tempfile.NamedTemporaryFile(dir=target, mode='w', delete=False) as temporary:
             temp_path = Path(temporary.name)
             try:

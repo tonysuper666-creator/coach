@@ -150,6 +150,8 @@ def main():
             (out / (method + '.txt')).write_text(text)
             if 'OK (1 test)' not in text: raise RuntimeError(method + ' failed; inspect private test output')
             print(method + ': PASS', flush=True)
+        instrument('installerIgnoresThirdPartyDefaultsAndFailsClosedWithoutTrustedHandler')
+        instrument('deviceInstallerIsExplicitAndPrivileged')
         instrument('acceptsValidUpdateAndRejectsDigestAndSignerMismatch')
         instrument('seedUpgradeSentinel', ('-e', 'coachUrl', url, '-e', 'deviceId', credentials['deviceId'], '-e', 'token', credentials['token']))
         def launch():

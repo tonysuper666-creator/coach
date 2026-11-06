@@ -1,8 +1,11 @@
 package com.coach.android
 
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -118,9 +121,15 @@ internal class AppUpdater(private val context: Context, private val base: String
         try {
             // Re-check after the unknown-sources settings screen, before granting a read capability.
             verifyUpdate(context, apk, release)
-            return@withContext Intent(Intent.ACTION_VIEW).setDataAndType(
+            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(
                 FileProvider.getUriForFile(context, "${context.packageName}.updates", apk), "application/vnd.android.package-archive")
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val pm = context.packageManager
+            val candidates = pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(
+                (PackageManager.MATCH_DEFAULT_ONLY or PackageManager.MATCH_SYSTEM_ONLY).toLong()))
+            return@withContext trustedInstaller(intent, candidates) { packageName ->
+                pm.checkPermission(android.Manifest.permission.INSTALL_PACKAGES, packageName) == PackageManager.PERMISSION_GRANTED
+            }
         } catch (e: Exception) {
             apk.delete()
             mutable.value = mutable.value.copy(ready = false, error = (e as? UpdateRejected)?.message ?: "安装包无法验证，请重新下载。")
@@ -129,6 +138,18 @@ internal class AppUpdater(private val context: Context, private val base: String
     }
     fun installError() { mutable.value = mutable.value.copy(error = "未能打开系统安装器，请重试。") }
     fun close() { connection?.disconnect(); scope.cancel() }
+}
+
+/** URI access goes only to an explicit, privileged system installer, never a chooser/default handler. */
+internal fun trustedInstaller(intent: Intent, candidates: List<ResolveInfo>, canInstallPackages: (String) -> Boolean): Intent {
+    val activity = candidates.firstOrNull { candidate ->
+        val activity = candidate.activityInfo ?: return@firstOrNull false
+        val app = activity.applicationInfo ?: return@firstOrNull false
+        activity.exported && activity.enabled && app.enabled &&
+            (app.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0 &&
+            canInstallPackages(activity.packageName)
+    }?.activityInfo ?: throw UpdateRejected("未找到可信的系统安装器，已停止安装。请联系 Mac 上的更新服务。")
+    return Intent(intent).setComponent(ComponentName(activity.packageName, activity.name))
 }
 
 /** Check bytes and archive metadata, then require the exact currently installed signing identity. */

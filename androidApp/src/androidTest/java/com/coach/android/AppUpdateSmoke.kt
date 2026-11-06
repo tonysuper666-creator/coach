@@ -1,5 +1,11 @@
 package com.coach.android
 
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import android.net.Uri
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.PairedCredentials
 import org.json.JSONObject
@@ -12,6 +18,47 @@ import java.security.MessageDigest
 /** Fixtures are locally built APKs, pushed into this isolated package's external files directory. */
 class AppUpdateSmoke {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    @Test fun installerIgnoresThirdPartyDefaultsAndFailsClosedWithoutTrustedHandler() {
+        fun handler(name: String, system: Boolean = false, enabled: Boolean = true, exported: Boolean = true) = ResolveInfo().apply {
+            activityInfo = ActivityInfo().apply {
+                packageName = name; this.name = "$name.Installer"; this.enabled = enabled; this.exported = exported
+                applicationInfo = ApplicationInfo().apply {
+                    packageName = name; this.enabled = true
+                    flags = if (system) ApplicationInfo.FLAG_SYSTEM else 0
+                }
+            }
+        }
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("content://synthetic/verified.apk"), "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val untrusted = listOf(handler("third.party.default"), handler("system.viewer", system = true),
+            handler("system.disabled", system = true, enabled = false), handler("system.private", system = true, exported = false))
+        // Even a positive permission answer cannot turn a non-system APK handler into a trusted installer.
+        val resolved = trustedInstaller(intent, untrusted + handler("system.installer", system = true)) { it != "system.viewer" }
+        assertEquals("system.installer", resolved.component?.packageName)
+        assertEquals("system.installer.Installer", resolved.component?.className)
+        assertEquals(intent.data, resolved.data)
+        assertEquals(intent.type, resolved.type)
+        assertTrue(resolved.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        assertNull("resolver input must not become an implicit fallback", intent.component)
+        for (candidates in listOf(untrusted, emptyList())) {
+            try { trustedInstaller(intent, candidates) { it != "system.viewer" }; fail("untrusted installer accepted") }
+            catch (expected: UpdateRejected) { assertTrue(expected.message!!.contains("可信")) }
+        }
+    }
+    @Test fun deviceInstallerIsExplicitAndPrivileged() {
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("content://synthetic/verified.apk"), "application/vnd.android.package-archive")
+        val pm = context.packageManager
+        val candidates = pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(
+            (PackageManager.MATCH_DEFAULT_ONLY or PackageManager.MATCH_SYSTEM_ONLY).toLong()))
+        val explicit = trustedInstaller(intent, candidates) {
+            pm.checkPermission(android.Manifest.permission.INSTALL_PACKAGES, it) == PackageManager.PERMISSION_GRANTED
+        }
+        val component = requireNotNull(explicit.component)
+        val info = pm.getActivityInfo(component, PackageManager.ComponentInfoFlags.of(0))
+        assertTrue(info.exported && info.enabled && info.applicationInfo.enabled)
+        assertTrue(info.applicationInfo.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0)
+        assertEquals(PackageManager.PERMISSION_GRANTED, pm.checkPermission(android.Manifest.permission.INSTALL_PACKAGES, component.packageName))
+    }
     private fun release(name: String): Pair<File, AppRelease> {
         val directory = File(context.getExternalFilesDir(null), "update-fixtures")
         val metadata = JSONObject(File(directory, "$name.json").readText())

@@ -63,16 +63,22 @@ print(json.dumps(out, sort_keys=True))
     switch.require(actual == locked, 'installed Python closure differs from lock')
 
 
+def export_revision(repo, revision, destination):
+    """Build the old side from its own tracked sources, not the current tree."""
+    destination.mkdir(mode=0o700)
+    archive = destination.parent / 'old-source.tar'
+    try:
+        cmd('git', 'archive', '--format=tar', '--output', archive, revision, cwd=repo)
+        cmd('tar', '-xf', archive, '-C', destination)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
 def main(exercise=None):
     switch.require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=REPO).strip(),
                    'checkout must be clean')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
     old = subprocess.check_output(['git', 'rev-parse', OLD], cwd=REPO, text=True).strip()
-    # The old and current revisions may differ in the test harness only. Build
-    # inputs must be identical before sharing a real build between the sides.
-    cmd('git', 'diff', '--quiet', old, head, '--', 'server', 'tools/bridge',
-        'tools/mathsvc', 'tools/dev/service-child.py', 'gradle', 'gradlew',
-        'build.gradle.kts', 'settings.gradle.kts', cwd=REPO)
     locked = dependency_preflight(BRIDGE_LOCK, REPO / 'tools/bridge/requirements.txt')
     java_home = Path(subprocess.check_output(['/usr/libexec/java_home', '-v', '17'], text=True).strip())
     java = java_home / 'bin/java'
@@ -87,25 +93,30 @@ def main(exercise=None):
     try:
         home = root / 'h'
         isolated.activity_socket(home)
-        cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
-            cwd=REPO, env=build_env)
+        old_source = root / 'old-source'
+        export_revision(REPO, old, old_source)
+        # Refuse to install the shared lock if it does not satisfy either
+        # revision's declared direct dependencies.
+        dependency_preflight(BRIDGE_LOCK, old_source / 'tools/bridge/requirements.txt')
         releases = home / 'Coach/service/releases'
         for rel in ('Library/LaunchAgents', 'Coach/service/releases', 'Coach/data',
                     'Coach/logs', 'Coach/run', 'Coach/bridge'):
             isolated.private_directories(home / rel, root)
-        for name, source_head in (('old', old), ('new', head)):
+        for name, source_head, source in (('old', old, old_source), ('new', head, REPO)):
+            cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
+                cwd=source, env=build_env)
             release = releases / name
             release.mkdir(mode=0o700)
-            shutil.copytree(REPO / 'server/app/build/install/app', release / 'app')
+            shutil.copytree(source / 'server/app/build/install/app', release / 'app')
             for item in ('bridge', 'mathsvc'):
-                shutil.copytree(REPO / 'tools' / item, release / 'tools' / item,
+                shutil.copytree(source / 'tools' / item, release / 'tools' / item,
                     ignore=shutil.ignore_patterns('.venv', 'node_modules', '__pycache__', '*.pyc'))
             # copytree creates its destination; explicitly fix fixture ancestors.
             for directory in (release / 'app', release / 'tools',
                               release / 'tools/bridge', release / 'tools/mathsvc'):
                 directory.chmod(0o700)
             isolated.private_directories(release / 'tools/dev', root)
-            shutil.copy2(REPO / 'tools/dev/service-child.py', release / 'tools/dev/service-child.py')
+            shutil.copy2(source / 'tools/dev/service-child.py', release / 'tools/dev/service-child.py')
             cmd(REPO / 'tools/dev/heavy', python, '-m', 'venv', release / 'tools/bridge/.venv', env=build_env)
             cmd(REPO / 'tools/dev/heavy', release / 'tools/bridge/.venv/bin/python', '-m', 'pip', 'install',
                 '--disable-pip-version-check', '--no-deps', '-r', BRIDGE_LOCK, env=build_env)

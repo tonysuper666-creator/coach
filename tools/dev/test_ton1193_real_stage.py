@@ -10,6 +10,29 @@ from .ton1175_switch import GateError
 
 
 class PythonLockTest(unittest.TestCase):
+    def test_export_uses_requested_revision_not_current_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / 'repo'
+            repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+            git('init', '-q')
+            source = repo / 'server.txt'
+            source.write_text('old server')
+            git('add', 'server.txt')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                'commit', '-qm', 'old')
+            old = git('rev-parse', 'HEAD')
+            source.write_text('new server')
+            git('add', 'server.txt')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                'commit', '-qm', 'new')
+            exported = Path(tmp) / 'export'
+            stage.export_revision(repo, old, exported)
+            self.assertEqual((exported / 'server.txt').read_text(), 'old server')
+            self.assertEqual(source.read_text(), 'new server')
+            self.assertFalse((Path(tmp) / 'old-source.tar').exists())
+
     def test_direct_requirements_must_match_and_duplicates_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock, direct = Path(tmp) / 'lock', Path(tmp) / 'requirements'

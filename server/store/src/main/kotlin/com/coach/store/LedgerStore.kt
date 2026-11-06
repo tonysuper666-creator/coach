@@ -372,7 +372,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
     }.single()
     private fun lastSeq(): Long = query("SELECT coalesce(max(seq),0) FROM events") { it.getLong(1) }.single()
-    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? ORDER BY seq LIMIT ?",course,after,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE, through: Long = Long.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",course,after,through,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    /** Watermarks only: notification sockets never need to load historical event payloads. */
+    fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
     /** Offline CLI or server actor only: one transaction installs content and its two events. */

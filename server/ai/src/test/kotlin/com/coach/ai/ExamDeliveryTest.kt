@@ -94,6 +94,20 @@ class ExamDeliveryTest {
         assertTrue(materials.context("ECNM10119", "解释RS模型").contains("RS synthetic menu"))
     }
 
+    @Test fun aLatePlanningTableRowRetainsItsWeightWithoutEarlierRows() {
+        val rows = List(40) { "| Synthetic opening topic $it | 4 | Unrelated material |" }
+        val guidance = "**考试格式：** Synthetic exam format and weights.\n\n" +
+            "| Topic | Marks | Teaching focus |\n|---|---|---|\n" +
+            (rows + "| 夜航定价 | 17 | Compare incremental costs. |").joinToString("\n")
+        val materials = ExamMaterials.fromTexts(exams, guidance)
+        val context = materials.context("ECNM10119", "解释夜航定价")
+        assertTrue(context.contains("Synthetic exam format and weights."))
+        assertTrue(context.contains("| 夜航定价 | 17 | Compare incremental costs. |"))
+        assertFalse(context.contains("Synthetic opening topic 0"))
+        // Context selection changes no part of the whole-corpus protection.
+        assertTrue(materials.index!!.overlaps("Synthetic opening topic 0 4 Unrelated material Synthetic opening topic 1"))
+    }
+
     @Test fun aBlockedMessageStaysBlockedAcrossSafeAndUnsafeRevisions() {
         val delivery = ExamDelivery { ExamTextGuard(index) }
         delivery.push(VisibleStream.Segment.Text(exams[0]))

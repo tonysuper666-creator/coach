@@ -96,6 +96,9 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
         (root["constructed"] as? JsonObject)?.mapValues { (it.value as? JsonPrimitive)?.intOrNull ?: 0 }
     }
 
+    /** 期末押题权重（服务端私有配置）；没有配置或接口不通时返回 null，面板就只按掌握度排。 */
+    suspend fun examFocus(): ExamFocus? = ExamFocus.parse(getObject("exam-focus"))
+
     fun close() { http.close() }
 
     private fun JsonObject.s(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()

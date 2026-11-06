@@ -32,7 +32,7 @@ class ReviewSchedulingTest {
         assertTrue(v.dueReviews(noon + 86_400_000).isEmpty()) // eight days out
         val due = v.dueReviews(noon + 2 * 86_400_000).single() // seven days out
         assertEquals("K", due.kp.id)
-        assertEquals(day, due.dueDay) // last schedule was day - 3; compressed interval is 3
+        assertEquals(day + 2, due.dueDay) // first day in the exam window, not the older interval anchor
     }
 
     @Test fun finalWeekQueueReplaysIdenticallyAndExamPostponementRestoresTheSchedule() {
@@ -74,5 +74,35 @@ class ReviewSchedulingTest {
             type = "review_snoozed", payload = json("kpId" to "K", "untilDay" to day + 1))
         assertTrue(view(snoozed).dueReviews(noon).isEmpty())
         assertEquals(1, view(snoozed).dueReviews(noon + 86_400_000).size)
+    }
+
+    @Test fun queueAndChatFollowCourseBoundaryAndActiveOutline() {
+        val events = ledger(day + 9).map { e -> if (e.type == "outline_revised") e.copy(payload =
+            JsonObject(e.payload + ("course" to json("tz" to "Asia/Shanghai")))) else e }
+        val state = project(events)
+        val v = CourseView(events, state)
+        val boundary = noon / 86_400_000 * 86_400_000 + 20 * 3_600_000
+        val boundaryDay = logicalDay(boundary, "Asia/Shanghai")
+        val boundaryState = state.copy(examDay = null, review = mapOf("K" to Review(boundaryDay)))
+        val boundaryView = CourseView(events, boundaryState)
+        assertTrue(boundaryState.today(boundary - 1).dueKpIds.isEmpty())
+        assertEquals(listOf("K"), boundaryState.today(boundary).dueKpIds)
+        assertEquals(boundaryState.today(boundary).dueKpIds, boundaryView.dueReviews(boundary).map { it.kp.id })
+        for (time in listOf(boundary - 1, boundary, boundary + 86_400_000)) {
+            assertEquals(v.dueReviews(time).map { it.kp.id }, state.today(time).dueKpIds)
+        }
+        val retire = events.last().copy(seq = 5, id = "retired", idemKey = "retired", type = "outline_revised",
+            payload = json("ops" to JsonArray(listOf(json("op" to "retire", "kpId" to "K")))))
+        val retired = project(events + retire)
+        assertTrue(retired.today(noon + 3 * 86_400_000).dueKpIds.isEmpty())
+        assertTrue(CourseView(events + retire, retired).dueReviews(noon + 3 * 86_400_000).isEmpty())
+        val restore = retire.copy(seq = 6, id = "restored", idemKey = "restored",
+            payload = json("ops" to JsonArray(listOf(json("op" to "add", "kpId" to "K")))))
+        assertEquals(listOf("K"), project(events + retire + restore).today(noon + 3 * 86_400_000).dueKpIds)
+        val replaced = retire.copy(id = "replacement", idemKey = "replacement",
+            payload = json("knowledgePoints" to JsonArray(listOf(json("id" to "other", "title" to "Other")))))
+        val afterReplacement = project(events + replaced)
+        assertTrue(afterReplacement.today(noon + 3 * 86_400_000).dueKpIds.isEmpty())
+        assertTrue(CourseView(events + replaced, afterReplacement).dueReviews(noon + 3 * 86_400_000).isEmpty())
     }
 }

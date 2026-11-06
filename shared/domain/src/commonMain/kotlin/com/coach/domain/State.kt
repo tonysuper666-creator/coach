@@ -33,6 +33,7 @@ typealias JournalDay = Journal
     val version: Int = PROJECTION_VERSION, val lastSeq: Long = 0, val timeZone: String = "Europe/London",
     val taughtConceptIds: Set<String> = emptySet(), val explainedKpIds: Set<String> = emptySet(),
     val kpTitles: Map<String, String> = emptyMap(),
+    val activeKpIds: Set<String>? = null, val examDay: Long? = null,
     val quickAsks: Map<Long, QuickAskThread> = emptyMap(),
     val studyScope: StudyScope? = null,
     val position: Position = Position(), val mastery: Map<String, Mastery> = emptyMap(),

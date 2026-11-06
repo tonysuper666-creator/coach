@@ -139,11 +139,10 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     /** 到期（含逾期）的复习，最久逾期的在前；只列大纲里有的知识点。 */
     fun dueReviews(nowMillis: Long): List<DueReview> {
         val today = logicalToday(nowMillis)
-        val order = kps.withIndex().associate { it.value.id to it.index }
-        return projection.reviewsOn(today, examDay).mapNotNull { (id, review) ->
+        return projection.reviewsOn(today).mapNotNull { (id, review) ->
             val kp = kp(id) ?: return@mapNotNull null
-            if (review.dueDay > today || review.lastReviewDay == today) null else DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
-        }.sortedWith(compareBy({ it.dueDay }, { order[it.kp.id] ?: Int.MAX_VALUE }))
+            DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
+        }
     }
 
     /** 考试日（最近一次 `exam_set`）；没设就是 null。 */

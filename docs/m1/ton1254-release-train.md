@@ -82,19 +82,29 @@ No new privacy-pattern hits were introduced. No private database, token,
 course, answer, raw log or screenshot is added to the branch.
 
 The last endpoint-test fixture edit (synthetic DNS instead of a synthetic IP)
-was made after that successful build compiled its tests. Its rerun has not
-started: other acceptance work continues to own the shared heavy-work lock.
-The queued wrappers were cancelled and reaped; no pending check is reported
-as a pass. The clean compatible-baseline build and compatible rollback
-rehearsal below are also unverified. This is a partial delivery, kept draft.
+was made after that successful build compiled its tests. Neither that rerun
+nor the new JVM readback probes have been compiled or executed. The one-time
+11:01 UTC resource-window wakeup was consumed on 2026-11-06; another task
+continued to own the shared heavy-work lock. The continuation made one queued
+`tools/dev/heavy bash ../ton1254-final-gates.sh` attempt, cancelled and reaped
+it at 11:18 UTC (exit 143), before any of its three gates began. That is a
+cancelled queue, not a Gradle failure or pass. No owned work remains running,
+and no additional timed/periodic wakeup is registered. The clean compatible
+baseline check/build and compatible rollback/fault-recovery rehearsal below
+remain unverified. This is a partial delivery, kept draft.
 
-The 11:01 UTC continuation also adds the independent review's stronger gates:
+The continuation's code revision is `ac68b58077454a9e3593ece0dac3d91d5f8c8ce4`.
+It adds the independent review's stronger gates:
 the selected rollback binary's client reads candidate wrong answers and cards,
 and the first schema migration has separate zero-write/with-write scenarios.
 `python3 -W error::ResourceWarning -m unittest tools.dev.test_release_train`
 passes four tests (exit 0), including new events, same-watermark event edits,
 speech-only writes, changed credential hashes, a running server, and the wrong
-backup schema. This small guard test does not validate the JVM rehearsal.
+backup schema. The zero-write case restores the actual table schema as well
+as its version, removing the synthetic v7 visibility column. This small guard
+test does not validate the JVM rehearsal. QA-C acceptance and Architect's
+security review still require the concrete full-gate and rehearsal results;
+their earlier preliminary reviews do not establish acceptance of this head.
 
 ## Isolated deployment and rollback
 

@@ -136,10 +136,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             rawBackup(directory.resolve("backups/pre-constructed-${uid()}"))
             sql("CREATE TABLE constructed_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, reference_answer TEXT NOT NULL, rubric TEXT NOT NULL, rubric_fingerprint TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
         }
-        // The frozen paper (answers included) never leaves the server before submission.
-        sql("CREATE TABLE IF NOT EXISTS mock_sessions(mock_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,purpose TEXT NOT NULL,paper_json TEXT NOT NULL,started_at INTEGER NOT NULL,deadline INTEGER NOT NULL,answers_json TEXT NOT NULL DEFAULT '{}',submitted_at INTEGER,auto INTEGER NOT NULL DEFAULT 0,answers_seq INTEGER NOT NULL DEFAULT 0)")
-        // Tables made by earlier test builds of this feature lack the save order column.
-        if ("answers_seq" !in query("PRAGMA table_info(mock_sessions)") { it.getString(2) }) sql("ALTER TABLE mock_sessions ADD COLUMN answers_seq INTEGER NOT NULL DEFAULT 0")
+        // Tables made by earlier test builds of this feature lack the save order column; both creating and widening the table back up first.
+        if ("answers_seq" !in query("PRAGMA table_info(mock_sessions)") { it.getString(2) }) {
+            rawBackup(directory.resolve("backups/pre-mock-${uid()}"))
+            transaction {
+                // The frozen paper (answers included) never leaves the server before submission.
+                sql("CREATE TABLE IF NOT EXISTS mock_sessions(mock_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,purpose TEXT NOT NULL,paper_json TEXT NOT NULL,started_at INTEGER NOT NULL,deadline INTEGER NOT NULL,answers_json TEXT NOT NULL DEFAULT '{}',submitted_at INTEGER,auto INTEGER NOT NULL DEFAULT 0,answers_seq INTEGER NOT NULL DEFAULT 0)")
+                if ("answers_seq" !in query("PRAGMA table_info(mock_sessions)") { it.getString(2) }) sql("ALTER TABLE mock_sessions ADD COLUMN answers_seq INTEGER NOT NULL DEFAULT 0")
+            }
+        }
 
     }
 

@@ -162,12 +162,10 @@ def main():
                                         '--manifest', str(manifest), '--sha256', manifest_hash],
                   'controller': [sys.executable, '-m', 'tools.dev.ton1193_isolated_controller',
                                  '--config', str(root / 'controller.json'), '--apply'],
-                  # The verifier observes lesson/exercise evidence; a separate
-                  # isolated driver still needs to generate the real traffic.
                   'acceptanceSnapshot': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
                                          '--config', str(root / 'controller.json'), 'snapshot'],
-                  'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
-                                         '--config', str(root / 'controller.json'), 'accept']}
+                  'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_learning',
+                                         '--config', str(root / 'controller.json')]}
         switch.atomic(root / 'controller.json', json.dumps(config).encode())
         switch.stage(config, True)
         (root / 'stage/snapshot').mkdir(mode=0o700)

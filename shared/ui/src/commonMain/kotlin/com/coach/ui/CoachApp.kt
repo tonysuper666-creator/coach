@@ -44,6 +44,11 @@ class CoachController(
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
     /** 看过（或预取过）的教材页，整个会话里留着：学习页的「看原文」多半不用再等 Mac。 */
     internal val sourcePages = HashMap<PageKey, com.coach.client.SourcePage>()
+    /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
+    internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(emptyMap())
+    /** 离开考试页时补存答案的请求，不随页面一起取消；续考的保存先等它送完，免得旧答案后到覆盖新答案。 */
+    internal val mockFlushes = HashMap<String, kotlinx.coroutines.Job>()
+    internal val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
 }
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */

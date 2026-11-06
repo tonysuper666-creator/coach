@@ -24,6 +24,9 @@ import com.coach.client.CourseView
 import com.coach.client.MockReply
 import com.coach.domain.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -211,7 +214,7 @@ private sealed interface ExamRow {
 }
 
 @Composable
-private fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, onLeave: () -> Unit, onResult: (JsonObject) -> Unit) {
+internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, onLeave: () -> Unit, onResult: (JsonObject) -> Unit) {
     val mockId = exam.str("mockId")
     val paper = exam["paper"]!!.jsonObject
     val sections = (paper["sections"] as JsonArray).map { it.jsonObject }
@@ -226,8 +229,10 @@ private fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, onL
     val list = rememberLazyListState()
     val deadline = exam.num("deadline")
     val offset = remember(exam) { exam.num("serverNow") - c.nowMillis() }
-    var answers by remember { mutableStateOf(exam["answers"] as? JsonObject ?: JsonObject(emptyMap())) }
-    var edits by remember { mutableStateOf(0) }
+    // Answers the Mac never got (left mid-save, or offline) come back from the draft and are sent again.
+    val draft = remember(mockId) { c.mockDrafts.value[mockId] }
+    var answers by remember { mutableStateOf(JsonObject((exam["answers"] as? JsonObject).orEmpty() + draft.orEmpty())) }
+    var edits by remember { mutableStateOf(if (draft != null) 1 else 0) }
     var savedEdits by remember { mutableStateOf(0) }
     var saveNote by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
@@ -240,27 +245,45 @@ private fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, onL
     fun update(key: String, field: String, value: JsonElement) {
         val old = answers[key] as? JsonObject ?: JsonObject(emptyMap())
         answers = JsonObject(answers + (key to JsonObject(old + (field to value))))
+        c.mockDrafts.update { it + (mockId to answers) }
         edits++
     }
+    fun saved(sent: JsonObject) = c.mockDrafts.update { if (it[mockId] == sent) it - mockId else it }
+    fun finished(result: JsonObject) { c.mockDrafts.update { it - mockId }; onResult(result) }
     suspend fun submit(auto: Boolean) {
         if (submitting) return
         submitting = true; submitError = null
         try {
             val r = http.submitMock(mockId, answers, auto)
-            if (r.body != null) onResult(r.body!!) else submitError = r.error ?: "交卷没送到 Mac。答案还在这里，连上后再点一次交卷。"
+            if (r.body != null) finished(r.body!!) else submitError = r.error ?: "交卷没送到 Mac。答案还在这里，连上后再点一次交卷。"
         } catch (e: CancellationException) { throw e }
         finally { submitting = false }
     }
-    // Autosave a moment after typing stops; a failed save retries, so the Mac copy catches up after a dropped connection.
-    LaunchedEffect(edits, saveNote) {
-        if (edits == savedEdits) return@LaunchedEffect
-        delay(if (saveNote == null) 1200 else 8000)
-        val sent = edits
-        val r = http.saveMock(mockId, answers)
-        when {
-            r.body?.str("status") == "submitted" -> onResult(r.body!!)
-            r.body != null -> { savedEdits = sent; saveNote = null }
-            else -> saveNote = r.error ?: "未保存：连不上 Mac，答案先留在这里"
+    // Autosave a moment after typing stops. Until the Mac has the latest answers this keeps retrying, whatever the error says.
+    LaunchedEffect(mockId) {
+        while (true) {
+            snapshotFlow { edits != savedEdits }.first { it }
+            val seen = edits
+            delay(if (saveNote == null) 1200 else 8000)
+            if (saveNote == null && edits != seen) continue
+            c.mockFlushes[mockId]?.join()
+            val sent = edits
+            val payload = answers
+            val r = http.saveMock(mockId, payload)
+            when {
+                r.body?.str("status") == "submitted" -> { finished(r.body!!); return@LaunchedEffect }
+                r.body != null -> { savedEdits = sent; saveNote = null; saved(payload) }
+                else -> saveNote = r.error ?: "未保存：连不上 Mac，答案先留在这里"
+            }
+        }
+    }
+    // Any way off this page (暂离, system back, another tab) cancels the loop above; what it had not sent yet goes out from here.
+    DisposableEffect(mockId) {
+        onDispose {
+            val pending = c.mockDrafts.value[mockId] ?: return@onDispose
+            c.mockFlushes[mockId] = c.background.launch(start = CoroutineStart.UNDISPATCHED) {
+                if (http.saveMock(mockId, pending).body != null) c.mockDrafts.update { if (it[mockId] == pending) it - mockId else it }
+            }
         }
     }
     // At zero this screen hands the paper in; if that fails the Mac closes it shortly after on its own.

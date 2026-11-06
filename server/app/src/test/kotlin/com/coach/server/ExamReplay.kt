@@ -10,6 +10,7 @@ import java.nio.file.Path
 /** Opt-in. All raw responses stay private; stdout/report contain only measurements. */
 fun main(args: Array<String>): Unit = runBlocking {
     val live = "--live" in args
+    val interleaved = "--interleaved" in args
     val home = Path.of(System.getProperty("user.home"), "Coach")
     val materialDir = Path.of(System.getenv("COACH_EXAM_MATERIALS_DIR") ?: home.resolve("materials/ECNM10119-期末复习").toString())
     val documents = listOf("01-Dec2024真题详解.md", "02-Dec2025真题详解.md", "00-考点与押题.md", "03-分歧裁定表.md").map { Files.readString(materialDir.resolve(it)) }
@@ -67,67 +68,71 @@ fun main(args: Array<String>): Unit = runBlocking {
     StubTutor().use { stub ->
         val bridge = if (live) BridgeClient(BridgeConfig(checkNotNull(System.getenv("COACH_EXAM_BRIDGE_URL")), testTraffic = true, productionKeyFile = null))
             else BridgeClient(BridgeConfig(stub.baseUrl))
+        suspend fun askNormal(harness: ExamHarness, kind: String, i: Int, item: Pair<String, String>) {
+            if (!live) stub.stream(12, *item.second.chunked(12).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
+            val start = System.nanoTime()
+            val id = harness.ask("$kind-$i", if (kind == "before") "exam-control" else targetCourse, item.first, pack(item.first))
+            val result = harness.await(id)
+            val ms = harness.first[id]?.let { (it - start) / 1_000_000 } ?: -1
+            (if (kind == "before") before else after) += ms
+            val hit = checker.hit(result.str("text"))
+            Files.writeString(output.resolve("normal-$i-$kind.txt"), result.str("text"))
+            rows += "$kind\t${i + 1}\t${item.first}\t$hit\t${result.str("status")}\t$ms\t${if (!live && result.str("text") == item.second) "讲解逐字保留" else "正文${result.str("text").length}字，需私有质量复核"}"
+            if (kind == "after") {
+                check(!hit)
+                if (!live) check(result.str("text") == item.second)
+            }
+            if (result.str("status") != "complete") failures++
+        }
         // Control uses identical source packs and current non-exam prompt, without exam context/index.
         ExamHarness(data, missing, bridge, live).use { control ->
             check(control.port != 18791)
-            for ((i, item) in normal.withIndex()) {
-                if (!live) stub.stream(12, *item.second.chunked(12).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
-                val start = System.nanoTime()
-                val id = control.ask("control-$i", "exam-control", item.first, pack(item.first))
-                val result = control.await(id)
-                val ms = control.first[id]?.let { (it - start) / 1_000_000 } ?: -1
-                before += ms
-                Files.writeString(output.resolve("normal-$i-before.txt"), result.str("text"))
-                rows += "before\t${i + 1}\t${item.first}\t${checker.hit(result.str("text"))}\t${result.str("status")}\t$ms\t正文${result.str("text").length}字；私有原始输出保留本机"
-                if (result.str("status") != "complete") failures++
+            if (!interleaved) for ((i, item) in normal.withIndex()) {
+                askNormal(control, "before", i, item)
                 if (live && failures >= 2) break
             }
-        }
-        ExamHarness(data, materials, bridge, live).use { feature ->
-            check(feature.port != 18791)
-            for ((i, prompt) in prompts.withIndex()) {
-                if (live && failures >= 2) break
-                if (!live) {
-                    val words = Regex("[A-Za-z]+").findAll(documents[i % documents.size]).map { it.value }.toList()
-                    val candidates = words.windowed(12).filter { checker.hit(it.joinToString(" ")) && !TutorOutputGuard.referencesLetter(it.joinToString(" ")) }
-                    val raw = candidates[(i * candidates.size / prompts.size).coerceAtMost(candidates.lastIndex)].joinToString(" ") + "."
-                    val rendered = when (i) {
-                        prompts.lastIndex - 2 -> raw.map { "$it\u200B" }.joinToString("")
-                        prompts.lastIndex - 1 -> raw.split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" }
-                        else -> raw
+            ExamHarness(data, materials, bridge, live).use { feature ->
+                check(feature.port != 18791)
+                for ((i, prompt) in prompts.withIndex()) {
+                    if (live && failures >= 2) break
+                    if (!live) {
+                        val words = Regex("[A-Za-z]+").findAll(documents[i % documents.size]).map { it.value }.toList()
+                        val candidates = words.windowed(12).filter { checker.hit(it.joinToString(" ")) && !TutorOutputGuard.referencesLetter(it.joinToString(" ")) }
+                        val raw = candidates[(i * candidates.size / prompts.size).coerceAtMost(candidates.lastIndex)].joinToString(" ") + "."
+                        val rendered = when (i) {
+                            prompts.lastIndex - 2 -> raw.map { "$it\u200B" }.joinToString("")
+                            prompts.lastIndex - 1 -> raw.split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" }
+                            else -> raw
+                        }
+                        stub.stream(1, *rendered.chunked(3).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
                     }
-                    stub.stream(1, *rendered.chunked(3).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
+                    val start = System.nanoTime()
+                    val id = feature.ask("attack-$i", targetCourse, prompt, pack(prompt))
+                    val result = feature.await(id)
+                    val hit = checker.hit(result.str("text"))
+                    Files.writeString(output.resolve("attack-$i.txt"), result.str("text"))
+                    rows += "attack\t${i + 1}\t$prompt\t$hit\t${result.str("status")}\t${feature.first[id]?.let { (it - start) / 1_000_000 } ?: -1}\t${if (result.str("text").contains("解题思路")) "转为讲解思路" else "正文${result.str("text").length}字，需私有内容复核"}"
+                    check(!hit)
+                    if (result.str("status") != "complete") failures++
                 }
-                val start = System.nanoTime()
-                val id = feature.ask("attack-$i", targetCourse, prompt, pack(prompt))
-                val result = feature.await(id)
-                val hit = checker.hit(result.str("text"))
-                Files.writeString(output.resolve("attack-$i.txt"), result.str("text"))
-                rows += "attack\t${i + 1}\t$prompt\t$hit\t${result.str("status")}\t${feature.first[id]?.let { (it - start) / 1_000_000 } ?: -1}\t${if (result.str("text").contains("解题思路")) "转为讲解思路" else "正文${result.str("text").length}字，需私有内容复核"}"
-                check(!hit)
-                if (result.str("status") != "complete") failures++
+                for ((i, item) in normal.withIndex()) {
+                    if (live && failures >= 2) break
+                    // Adjacent matched prompts share the time window; alternate which
+                    // group goes first so warmup/order cannot consistently favor one.
+                    if (interleaved && i % 2 == 0) askNormal(control, "before", i, item)
+                    askNormal(feature, "after", i, item)
+                    if (interleaved && i % 2 != 0) askNormal(control, "before", i, item)
+                }
+                check(feature.publishedLeaks(checker) == 0) { "Published exam overlap" }
             }
-            for ((i, item) in normal.withIndex()) {
-                if (live && failures >= 2) break
-                if (!live) stub.stream(12, *item.second.chunked(12).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
-                val start = System.nanoTime()
-                val id = feature.ask("normal-$i", targetCourse, item.first, pack(item.first))
-                val result = feature.await(id)
-                val ms = feature.first[id]?.let { (it - start) / 1_000_000 } ?: -1
-                after += ms
-                val hit = checker.hit(result.str("text"))
-                Files.writeString(output.resolve("normal-$i-after.txt"), result.str("text"))
-                rows += "after\t${i + 1}\t${item.first}\t$hit\t${result.str("status")}\t$ms\t${if (!live && result.str("text") == item.second) "讲解逐字保留" else "正文${result.str("text").length}字，需私有质量复核"}"
-                check(!hit)
-                if (!live) check(result.str("text") == item.second)
-                if (result.str("status") != "complete") failures++
-            }
-            check(feature.publishedLeaks(checker) == 0) { "Published exam overlap" }
         }
     }
-    fun median(values: List<Long>): Long = values.filter { it >= 0 }.sorted().let { if (it.isEmpty()) -1 else it[it.size / 2] }
+    fun median(values: List<Long>): Double = values.filter { it >= 0 }.sorted().let {
+        when { it.isEmpty() -> -1.0; it.size % 2 == 1 -> it[it.size / 2].toDouble()
+            else -> (it[it.size / 2 - 1].toDouble() + it[it.size / 2]) / 2 }
+    }
     Files.writeString(output.resolve("report.tsv"), rows.joinToString("\n") + "\n")
-    val summary = "mode=${if (live) "isolated-live" else "private-corpus-stub"} attacks=${rows.count { it.startsWith("attack\t") }} normal=${after.size} failures=$failures windows=${materials.index!!.windowCount} beforeMedianMs=${median(before)} afterMedianMs=${median(after)} increaseMs=${median(after)-median(before)}"
+    val summary = "mode=${if (live) "isolated-live" else "private-corpus-stub"} order=${if (interleaved) "interleaved-counterbalanced" else "blocked"} attacks=${rows.count { it.startsWith("attack\t") }} normal=${after.size} failures=$failures windows=${materials.index!!.windowCount} beforeMedianMs=${median(before)} afterMedianMs=${median(after)} increaseMs=${median(after)-median(before)}"
     Files.writeString(output.resolve("summary.txt"), summary + "\n")
     println("EXAM_REPLAY $summary")
     check(failures == 0 && after.size == 10 && rows.count { it.startsWith("attack\t") } == prompts.size) { "Replay incomplete; see private sanitized report" }

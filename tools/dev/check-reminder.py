@@ -118,6 +118,8 @@ try:
     for apk in ["androidApp/build/outputs/apk/debug/androidApp-debug.apk",
                 "androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk"]:
         adb("install", "-r", ROOT / apk)
+    # Only our suffixed test package: make first-enable permission checks repeatable.
+    adb("shell", "pm", "clear", PACKAGE)
     # First enable really requests Android permission; a denied toggle must not prompt again.
     adb("shell", "pm", "revoke", PACKAGE, "android.permission.POST_NOTIFICATIONS")
     adb("shell", "pm", "clear-permission-flags", PACKAGE, "android.permission.POST_NOTIFICATIONS", "user-set", "user-fixed")

@@ -278,6 +278,12 @@ class ChatFlowTest {
                 val lessonBody = bodies.single { it.contains("Start directly with the new concepts") }
                 assertTrue(!mistakesBody.contains("Fully teach ONLY") && lessonBody.contains("Fully teach ONLY"))
                 assertTrue(!lessonBody.contains("Cover EVERY graded question"), "the lesson part carries no mistake block")
+                val stages = trace(h, end.str("msg"))
+                val preparedMs = stages.str("prepared_ms").toLong()
+                val bridgeMs = stages.str("bridge_start_ms").toLong()
+                val rawMs = stages.str("raw_first_ms").toLong()
+                val visibleMs = stages.str("visible_first_ms").toLong()
+                assertTrue(preparedMs <= bridgeMs && bridgeMs <= rawMs && rawMs <= visibleMs, stages.toString())
                 assertTrue(runBlocking { h.actor.execute { events("course-1").any { it.type == "explanation_delivered" } } })
             }
         }

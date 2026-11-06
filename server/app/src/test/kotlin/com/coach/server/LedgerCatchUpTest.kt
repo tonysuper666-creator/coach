@@ -199,6 +199,7 @@ class LedgerCatchUpTest {
         Harness().use { h ->
             val expected = h.seed(3)
             Ws(h).use { ws ->
+                ws.ledger() // Discard startup delivery; only the explicit stale-epoch replay counts.
                 ws.socket.sendText("""{"t":"hello","epoch":"before-restore","ledgerAfter":{"c":9223372036854775807}}""", true)
                     .get(5, TimeUnit.SECONDS)
                 assertEquals(expected, ws.events(expected.size).first)

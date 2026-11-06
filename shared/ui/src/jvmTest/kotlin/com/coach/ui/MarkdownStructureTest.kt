@@ -1,8 +1,14 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.dp
 import com.coach.domain.math.MathDelimiters
 import com.coach.ui.markdown.MarkdownContent
 import com.coach.ui.markdown.StreamingMarkdown
@@ -11,6 +17,26 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class MarkdownStructureTest {
+    @Test fun sealingPlainListsQuotesAndTablesKeepsTheirPixels() = runComposeUiTest {
+        val source = "## **重点**\n\n- 中文与 English 的长句在窄屏换行，保留 *强调* 与 `code`。\n- 价格是 \$100，另一件 \$200。\n\n> 引用里的 **粗体** 和长句也不能在封口时移动。\n\n| A | B |\n|---|---|\n| one | two |"
+        val blocks = StreamingMarkdown().append(source, true)
+        val sealed = mutableStateOf(false)
+        setContent {
+            MaterialTheme { Column(Modifier.width(240.dp).testTag("content")) {
+                blocks.forEach { MarkdownContent(it.copy(sealed = sealed.value), emptyMap()) }
+            } }
+        }
+        val before = onNodeWithTag("content").captureToImage().toAwtImage()
+        runOnIdle { sealed.value = true }
+        val after = onNodeWithTag("content").captureToImage().toAwtImage()
+        assertEquals(before.width, after.width)
+        assertEquals(before.height, after.height)
+        assertContentEquals(
+            before.getRGB(0, 0, before.width, before.height, null, 0, before.width),
+            after.getRGB(0, 0, after.width, after.height, null, 0, after.width),
+        )
+    }
+
     @Test fun quizTextKeepsPlainContentAndRendersStructuredContent() = runComposeUiTest {
         val math = MathAssets()
         setContent {

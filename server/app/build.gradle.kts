@@ -20,7 +20,7 @@ dependencies {
 }
 application { mainClass = "com.coach.server.MainKt" }
 tasks.test {
-    systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath)
+    doFirst { systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath) }
     systemProperty("coach.checkout", rootProject.projectDir.absolutePath)
     exclude("**/LiveChatTest*", "**/TutorLiveTest*")
     dependsOn(tasks.installDist)
@@ -73,4 +73,18 @@ tasks.register<JavaExec>("sourceReplay") {
     dependsOn(tasks.named("testClasses"))
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.server.SourceLookupReplayKt")
+}
+
+// Explicit private exam replay. No material or raw model output is printed or committed.
+tasks.register<JavaExec>("examReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.ExamReplayKt")
+}
+
+// Allows long CLI replays to run after releasing the machine's Gradle lock.
+tasks.register("examReplayClasspath") {
+    dependsOn(tasks.named("testClasses"))
+    doLast { layout.buildDirectory.file("exam-replay-classpath.txt").get().asFile.writeText(sourceSets["test"].runtimeClasspath.asPath) }
 }

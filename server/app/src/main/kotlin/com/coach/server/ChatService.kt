@@ -78,6 +78,7 @@ class ChatService(
     private val enrichSourcePages: Boolean = true,
     private val packsDirectory: java.nio.file.Path = java.nio.file.Path.of(System.getenv("COACH_PACKS_DIR")
         ?: java.io.File(System.getProperty("user.home"), "Coach/corpus/packs").path),
+    private val examMaterials: com.coach.ai.ExamMaterials = com.coach.ai.ExamMaterials.load(),
 ) {
 
     val hub = ChatHub(log)
@@ -142,6 +143,9 @@ class ChatService(
         @Volatile var lookupAllowed: Boolean = false
         @Volatile var sourceProcess: Process? = null
         var restrictedGuard: RestrictedSourceGuard? = null
+        var examDelivery: com.coach.ai.ExamDelivery? = null
+        var examContext: String = ""
+        var examIdentity: String = courseId
         @Volatile var handle: BridgeStreamHandle? = null
         @Volatile var lessonHandle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
@@ -354,6 +358,16 @@ class ChatService(
         val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mistakes.isEmpty() && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan, FirstWordTrace(messageId, null, receivedAt), receivedAt)
+        session.examIdentity = actor.execute {
+            courseContent(courseId)?.course?.let { course -> listOf(course.code, course.title).firstOrNull { examMaterials.applies(it) } }
+                ?: events(courseId).asReversed().firstNotNullOfOrNull { event ->
+                if (event.type != "outline_revised") null else (event.payload["course"] as? JsonObject)?.let { course ->
+                    listOf(course.str("code"), course.str("name"), course.str("title")).firstOrNull { examMaterials.applies(it) }
+                }
+            } ?: courseId
+        }
+        protectExams(session)
+        session.examContext = examMaterials.context(session.examIdentity, question + "\n" + sourcePack.take(1_000))
         sessions[messageId] = session
         val recent = actor.execute { recentTurns(threadId,beforeMessage=userMessageId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
@@ -380,14 +394,14 @@ class ChatService(
             if (plan?.mistakes?.isNotEmpty() == true) text.take(LessonPreparation.MAX_RETEACH_TURN_CHARS) else text } }
         if (plan != null && plan.staged) {
             // Part one needs no source pages (fast first character); part two teaches the new concepts from the pages.
-            val mistakesContext = listOf(TutorOutputGuard.modelInput(LessonPreparation.headerOnly(sourcePack)), plan.mistakeInstruction()).joinToString("\n")
+            val mistakesContext = listOf(TutorOutputGuard.modelInput(LessonPreparation.headerOnly(sourcePack)), plan.mistakeInstruction(), session.examContext).joinToString("\n")
             val lessonContext = listOf(TutorOutputGuard.modelInput(enriched), plan.copy(mistakes = emptyList()).instruction(),
-                "The graded questions are explained in a separate part of this reply that is written in parallel; do not discuss them. Start directly with the new concepts.").joinToString("\n")
+                "The graded questions are explained in a separate part of this reply that is written in parallel; do not discuss them. Start directly with the new concepts.", session.examContext).joinToString("\n")
             session.trace?.prepared()
             scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), mistakesContext, recentTurns, lessonContext) }
             return messageId
         }
-        val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
+        val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty(), session.examContext).joinToString("\n")
         session.trace?.prepared()
         scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context, recentTurns) }
         return messageId
@@ -404,6 +418,7 @@ class ChatService(
             delay(16)
         }
         for(segment in visible.finish()) emitSegment(session,segment,text)
+        finishExamDelivery(session, text)
         val status=session.forcedStatus ?: StreamStatus.fromBridge(StreamStatus.COMPLETE, false, text.isNotBlank())
         val reason=session.forcedReason ?: if (status == StreamStatus.FAILED) "empty_visible_body" else null
         if (reason == "empty_visible_body") log("COACH msg.empty msg=${session.messageId} reason=$reason")
@@ -479,12 +494,10 @@ class ChatService(
                 // A sentence can acquire a forbidden reference after its safe prefix was streamed.
                 // Replace that prefix via the existing snapshot protocol; the letter itself never streams.
                 visible = VisibleStream()
+                val candidate = completedPrefix + visible.push(revision).joinToString("") { com.coach.ai.ExamDelivery.markdown(it) }
+                val safe = session.examDelivery?.replace(candidate)?.joinToString("") { com.coach.ai.ExamDelivery.markdown(it) } ?: candidate
                 visibleText.setLength(0)
-                visibleText.append(completedPrefix)
-                for (segment in visible.push(revision)) when (segment) {
-                    is VisibleStream.Segment.Text -> visibleText.append(segment.text)
-                    is VisibleStream.Segment.Math -> visibleText.append("\$\$").append(segment.tex).append("\$\$")
-                }
+                visibleText.append(safe)
                 session.cursor = Session.Cursor(visibleText.toString(), session.cursor.index + 1)
                 session.trace?.visible(session.cursor.text)
                 hub.emit(json("t" to "msg.snapshot","msg" to session.messageId,"threadId" to session.threadId,
@@ -605,10 +618,10 @@ class ChatService(
                     outChars = partOne.length, status = first.terminal?.status ?: StreamStatus.COMPLETE, queueMs = first.call.queueMs, physicalCalls = first.call.physicalCalls) }
                 guard = newGuard()
                 visible = VisibleStream { drop ->
-                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
                 }
                 emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
-                completedPrefix = visibleText.toString()
+                completedPrefix = session.examDelivery?.source?.toString() ?: visibleText.toString()
                 partOneEndMs = elapsedMs()
                 releaseLesson()
                 val second = lessonJob.await()
@@ -637,6 +650,7 @@ class ChatService(
                 appendSourceLookup(session,question,query,visibleText)
             }
         }
+        finishExamDelivery(session, visibleText)
         session.finished.set(true)
         val forcedStatus = session.forcedStatus
         val terminal = result.terminal
@@ -761,6 +775,7 @@ class ChatService(
                     |Student question: ${TutorOutputGuard.modelInput(question)}
                     |Lookup request: ${TutorOutputGuard.modelInput(query)}
                     |${TutorOutputGuard.modelInput(pack.render())}
+                    |${session.examContext}
                 """.trimMargin(),stream=true,effort="medium")
             lookupResult = withContext(Dispatchers.IO) {
                 bridge.streamChat(request,object : BridgeStreamSink {
@@ -806,6 +821,9 @@ class ChatService(
         val messageId = UUID.randomUUID().toString()
         val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan, FirstWordTrace(messageId, previous.messageId, previous.receivedAt), previous.receivedAt)
         session.restrictedGuard = previous.restrictedGuard
+        session.examIdentity = previous.examIdentity
+        protectExams(session)
+        session.examContext = previous.examContext
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
         hub.emit(startFrame(session))
@@ -823,6 +841,7 @@ class ChatService(
         val segments = visible.push(guard.push(text) + guard.finish()) + visible.finish()
         val content = StringBuilder()
         for (segment in segments) emitSegment(session, segment, content)
+        finishExamDelivery(session, content)
         val status = if (result is BridgeResult.Success && content.isNotBlank()) StreamStatus.COMPLETE else StreamStatus.FAILED
         val reason = if (result is BridgeResult.Success && content.isBlank()) "empty_visible_body"
             else (result as? BridgeResult.Failure)?.reason
@@ -849,7 +868,27 @@ class ChatService(
      * 可见流只放行带类型的内容块（§5.8 第 4 条）：正文 `msg.delta`、公式 `msg.math`；
      * 两种都占一个 `(msg, i)` 序号，客户端按序号去重。
      */
-    private fun emitSegment(session: Session, segment: VisibleStream.Segment, text: StringBuilder): Int = when (segment) {
+    private fun protectExams(session: Session) {
+        if (examMaterials.guard(session.examIdentity) != null) {
+            session.examDelivery = com.coach.ai.ExamDelivery { checkNotNull(examMaterials.guard(session.examIdentity)) }
+        }
+        if (examMaterials.applies(session.examIdentity) && !examMaterials.available) {
+            log("COACH exam-protection unavailable; protected output uses reasoning only")
+        }
+    }
+
+    private fun finishExamDelivery(session: Session, text: StringBuilder) {
+        session.examDelivery?.finish()?.forEach { publishSegment(session, it, text) }
+        if (session.examDelivery?.blocked == true) log("COACH exam-protection blocked msg=${session.messageId}")
+    }
+
+    private fun emitSegment(session: Session, segment: VisibleStream.Segment, text: StringBuilder): Int {
+        val delivery = session.examDelivery ?: return publishSegment(session, segment, text)
+        delivery.push(segment).forEach { publishSegment(session, it, text) }
+        return session.cursor.index
+    }
+
+    private fun publishSegment(session: Session, segment: VisibleStream.Segment, text: StringBuilder): Int = when (segment) {
         is VisibleStream.Segment.Text -> {
             if (segment.text.isEmpty()) session.cursor.index
             else {

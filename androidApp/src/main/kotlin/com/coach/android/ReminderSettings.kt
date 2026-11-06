@@ -13,6 +13,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -52,7 +57,12 @@ internal fun ReminderSettings(reminder: ReviewReminder) {
                             reminder.markPermissionAsked()
                             permission.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
-                    }), verticalAlignment = Alignment.CenterVertically) {
+                    }).clearAndSetSemantics {
+                        // Expose one labelled, operable switch rather than separate text/decoration.
+                        contentDescription = "每日到期提醒"
+                        role = Role.Switch
+                        toggleableState = ToggleableState(reminder.enabled)
+                    }, verticalAlignment = Alignment.CenterVertically) {
                     Text("每日到期提醒", Modifier.weight(1f))
                     Switch(checked = reminder.enabled, onCheckedChange = null)
                 }

@@ -59,6 +59,13 @@ def instrument(phase, *extra):
     print(f"instrumentation {phase}: exit=0 OK (1 test)", flush=True)
 
 
+def save_reminder_log():
+    before_boot = OUT / "reminder-log-before-boot.txt"
+    prefix = before_boot.read_text() if before_boot.exists() else ""
+    current = adb("logcat", "-d", "-s", "CoachReminder:I", "CoachReminderTest:I")
+    (OUT / "reminder-log.txt").write_text(prefix + current)
+
+
 if OUT.exists():
     raise RuntimeError("Evidence directory exists: preserve or remove it explicitly before a new run")
 OUT.mkdir(mode=0o700)
@@ -149,6 +156,8 @@ try:
     adb("shell", "cmd", "alarm", "set-timezone", changed_zone)
     time.sleep(2)
     instrument("timezone", "-e", "expectedZone", changed_zone)
+    # Reboot clears logcat; retain the permission, real-delivery and timezone evidence.
+    (OUT / "reminder-log-before-boot.txt").write_text(adb("logcat", "-d", "-s", "CoachReminder:I", "CoachReminderTest:I"))
     adb("reboot")
     time.sleep(2)
     run([ADB, "-s", SERIAL, "wait-for-device"], timeout=120)
@@ -170,8 +179,7 @@ try:
     instrument("zero")
     with sqlite3.connect(data / "coach.sqlite") as db:
         assert db.execute("SELECT count(*) FROM ai_calls").fetchone()[0] == ai_before
-    reminder_log = adb("logcat", "-d", "-s", "CoachReminder:I", "CoachReminderTest:I")
-    (OUT / "reminder-log.txt").write_text(reminder_log)
+    save_reminder_log()
     (OUT / "result.json").write_text(json.dumps(dict(avd=AVD, package=PACKAGE, serverPort=port,
         backupEvents=event_count, productionOpened="mode=ro + SQLite backup", aiCallsAdded=0,
         phases=["permission denial", "two-minute alarm", "process death", "notification tap", "timezone change", "reboot", "disable", "zero due"],
@@ -182,7 +190,7 @@ finally:
     # server log and copied ledger remain local and must never be attached to the issue.
     if emulator is not None and emulator.poll() is None:
         try:
-            (OUT / "reminder-log.txt").write_text(adb("logcat", "-d", "-s", "CoachReminder:I", "CoachReminderTest:I"))
+            save_reminder_log()
         except (subprocess.SubprocessError, OSError):
             pass
     for process in (emulator, server):

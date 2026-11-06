@@ -1,5 +1,6 @@
 package com.coach.android
 
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.NotificationManager
 import android.content.Intent
 import android.os.SystemClock
@@ -30,6 +31,9 @@ class ReminderSmoke {
     private val manager get() = context.getSystemService(NotificationManager::class.java)
 
     @Test fun phase(): Unit = runBlocking {
+        instrumentation.uiAutomation.serviceInfo = instrumentation.uiAutomation.serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        }
         val reminder = ReviewReminder(context)
         when (args.getString("phase")) {
             "prepare" -> {
@@ -46,17 +50,33 @@ class ReminderSmoke {
                 launch()
                 click(waitNode { it.text?.toString() == "每日提醒 · 已关闭" }); waitText("复习提醒")
                 val toggle = waitNode { it.isCheckable }
+                dumpNode(instrumentation.uiAutomation.rootInActiveWindow, "root")
+                dumpNode(toggle, "selected")
+                assertTrue("Switch must be visible and operable", toggle.isVisibleToUser && toggle.isEnabled && toggle.isClickable)
                 assertTrue("Switch must expose its label", toggle.text?.contains("每日到期提醒") == true ||
                     toggle.contentDescription?.contains("每日到期提醒") == true)
+                assertFalse(toggle.isChecked)
                 click(toggle)
-                click(waitText("Don't allow"))
+                // The system label varies by locale/Android version (including its apostrophe).
+                val deny = waitNode { isPermissionDeny(it) }
+                dumpNode(deny, "permission-deny")
+                click(deny)
                 waitText("通知权限未开启或提醒通知已关闭，暂时无法提醒。请到系统设置中允许通知。")
+                assertEquals(android.content.pm.PackageManager.PERMISSION_DENIED,
+                    context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS))
                 assertTrue(reminder.permissionAsked)
                 assertTrue(reminder.enabled)
+                waitNode { it.isCheckable && it.isChecked }
+                assertTrue("Enabled choice must persist", ReviewReminder(context).enabled)
                 screenshot("permission-denied.png")
-                click(waitNode { it.isCheckable }); click(waitNode { it.isCheckable })
+                click(waitNode { it.isCheckable })
+                waitNode { it.isCheckable && !it.isChecked }
+                assertFalse("Switch click must disable the reminder", ReviewReminder(context).enabled)
+                click(waitNode { it.isCheckable })
+                waitNode { it.isCheckable && it.isChecked }
+                assertTrue("Switch click must enable the reminder", ReviewReminder(context).enabled)
                 Thread.sleep(500)
-                assertNull(find(instrumentation.uiAutomation.rootInActiveWindow) { it.text?.toString() == "Don't allow" })
+                assertNull(find(instrumentation.uiAutomation.rootInActiveWindow) { isPermissionDeny(it) })
                 waitText("复习提醒")
                 click(waitText("完成"))
                 reminder.update(enabled = false)
@@ -73,7 +93,7 @@ class ReminderSmoke {
                 waitText("提醒时间 %02d:%02d".format(time.hour, time.minute))
                 click(waitText("提醒时间 %02d:%02d".format(time.hour, time.minute)))
                 // Actual native time picker opens; leave the already selected two-minute time unchanged.
-                click(waitText("OK")); click(waitText("完成"))
+                click(waitNode { it.viewIdResourceName == "android:id/button1" }); click(waitText("完成"))
                 android.util.Log.i("CoachReminderTest", "scheduledAt=${prefs.getLong("nextAt", -1)} expected=${prefs.getInt("expectedCount", -1)}")
             }
             "tap" -> {
@@ -153,12 +173,22 @@ class ReminderSmoke {
         for (i in 0 until node.childCount) find(node.getChild(i), predicate)?.let { return it }
         return null
     }
+    private fun dumpNode(node: AccessibilityNodeInfo?, path: String) {
+        if (node == null) return
+        android.util.Log.i("CoachReminderTest", "$path class=${node.className} id=${node.viewIdResourceName} text=${node.text} description=${node.contentDescription} checkable=${node.isCheckable} checked=${node.isChecked} clickable=${node.isClickable} visible=${node.isVisibleToUser}")
+        for (i in 0 until node.childCount) dumpNode(node.getChild(i), "$path/$i")
+    }
+    private fun isPermissionDeny(node: AccessibilityNodeInfo) =
+        node.viewIdResourceName?.endsWith(":id/permission_deny_button") == true &&
+            node.packageName?.toString()?.endsWith("permissioncontroller") == true
     private fun waitNode(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
         val deadline = SystemClock.elapsedRealtime() + 20_000
         while (SystemClock.elapsedRealtime() < deadline) {
             find(instrumentation.uiAutomation.rootInActiveWindow, predicate)?.let { return it }
             Thread.sleep(50)
         }
+        dumpNode(instrumentation.uiAutomation.rootInActiveWindow, "timeout")
+        android.util.Log.i("CoachReminderTest", "timeout enabled=${ReviewReminder(context).enabled} permissionAsked=${ReviewReminder(context).permissionAsked}")
         throw AssertionError("Accessibility target did not appear")
     }
     private fun waitText(text: String) = waitNode { it.text?.toString() == text }

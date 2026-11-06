@@ -60,16 +60,19 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                 val draft = NotesCore.build(notesRequest(view, controller.courseId, selection))
                 status = if (includePdf) "正在绘制公式与分页…" else "正在保存 Markdown…"
                 var unresolved = 0
+                var unresolvedImages = 0
                 val result = withContext(Dispatchers.Default) {
                     val pdf = if (includePdf) notesPdf(draft.markdown) { tex, display ->
                         cached["$display:$tex"]?.let { RenderedMath(it.sha, it.svg) } ?: mathHttp.render(tex, display)
                     } else null
                     unresolved = pdf?.unresolved ?: 0
+                    unresolvedImages = pdf?.unresolvedImages ?: 0
                     withContext(Dispatchers.IO) { saveNotes(destination, draft, pdf?.bytes) }
                 }
                 saved = result
                 status = "已导出：${draft.attemptIds.size} 条待练错题，账本序号 ${draft.lastSeq}。"
                 if (unresolved > 0) status += " PDF 有 $unresolved 处公式未能渲染，已标注并保留原始 TeX；请检查公式服务和源资料。"
+                if (unresolvedImages > 0) status += " PDF 有 $unresolvedImages 张图片未嵌入，已标注；原引用保留在 Markdown。仅嵌入账本自带的 PNG/JPEG，不读取外部文件或网址。"
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (e: Exception) { status = e.message ?: "导出失败，请重试" }
             finally {

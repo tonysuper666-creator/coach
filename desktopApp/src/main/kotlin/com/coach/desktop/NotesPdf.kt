@@ -10,33 +10,76 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.DeflaterOutputStream
+import java.util.Base64
 import javax.imageio.ImageIO
+import javax.imageio.stream.MemoryCacheImageInputStream
 
 /** A4 at 144 dpi. Raster pages preserve the exact Compose formula painter and CJK fonts.
  * The accompanying Markdown remains searchable/editable. No browser, printer, or remote PDF service.
  */
-data class NotesPdfResult(val bytes: ByteArray, val unresolved: Int)
+data class NotesPdfResult(val bytes: ByteArray, val unresolved: Int, val unresolvedImages: Int = 0)
 
 suspend fun notesPdf(markdown: String, fetch: suspend (String, Boolean) -> RenderedMath?): NotesPdfResult {
     val layout = NotesPageLayout()
     val cache = mutableMapOf<Pair<String, Boolean>, BufferedImage>()
     var unresolved = 0
-    for (segment in MathDelimiters.tokenize(markdown).segments) {
-        val tex = segment.math
-        if (tex == null) layout.text(segment.text.orEmpty())
-        else {
-            val key = tex to segment.display
-            val image = cache[key] ?: fetch(tex, segment.display)?.let { asset ->
-                ImageIO.read(ByteArrayInputStream(rasterizeFormula(asset.sha, asset.svg, 64f))).also { cache[key] = it }
-            }
-            if (image == null || !layout.formula(image, segment.display)) {
-                unresolved++
-                layout.text("\n【公式未能清晰绘制，保留原始 TeX】\n$tex\n")
+    var unresolvedImages = 0
+    fun picture(alt: String, source: String) {
+        val image = inlineNotesImage(source)
+        if (image == null) {
+            unresolvedImages++
+            layout.text("\n【图片未嵌入，原引用保留在 Markdown】$alt\n")
+        } else {
+            layout.picture(image)
+            if (alt.isNotBlank()) layout.text("\n$alt\n")
+        }
+    }
+    suspend fun text(value: String) {
+        for (segment in MathDelimiters.tokenize(value).segments) {
+            val tex = segment.math
+            if (tex == null) layout.text(segment.text.orEmpty())
+            else {
+                val key = tex to segment.display
+                val image = cache[key] ?: fetch(tex, segment.display)?.let { asset ->
+                    MemoryCacheImageInputStream(ByteArrayInputStream(rasterizeFormula(asset.sha, asset.svg, 64f))).use { input ->
+                        val reader = ImageIO.getImageReaders(input).next()
+                        try { reader.input = input; reader.read(0) } finally { reader.dispose() }
+                    }.also { cache[key] = it }
+                }
+                if (image == null || !layout.formula(image, segment.display)) {
+                    unresolved++
+                    layout.text("\n【公式未能清晰绘制，保留原始 TeX】\n$tex\n")
+                }
             }
         }
     }
-    return NotesPdfResult(imagePdf(layout.finish()), unresolved)
+    // Parse images before math: base64 and URLs are not TeX. Never fetch a file or URL.
+    var start = 0
+    for (match in Regex("!\\[([^]\\n]*)]\\(([^)\\s]+)\\)").findAll(markdown)) {
+        text(markdown.substring(start, match.range.first))
+        picture(match.groupValues[1], match.groupValues[2])
+        start = match.range.last + 1
+    }
+    text(markdown.substring(start))
+    return NotesPdfResult(imagePdf(layout.finish()), unresolved, unresolvedImages)
 }
+
+/** Self-contained PNG/JPEG only; inspect dimensions before decoding untrusted ledger data. */
+internal fun inlineNotesImage(source: String): BufferedImage? = runCatching {
+    if (source.length > 2_800_000) return@runCatching null
+    val prefix = listOf("data:image/png;base64,", "data:image/jpeg;base64,").firstOrNull { source.startsWith(it) } ?: return@runCatching null
+    val bytes = Base64.getDecoder().decode(source.removePrefix(prefix))
+    MemoryCacheImageInputStream(ByteArrayInputStream(bytes)).use { input ->
+        val reader = ImageIO.getImageReaders(input).asSequence().firstOrNull() ?: return@use null
+        try {
+            if (reader.formatName.uppercase(java.util.Locale.ROOT) !in setOf("PNG", "JPEG", "JPG")) return@use null
+            reader.input = input
+            val width = reader.getWidth(0); val height = reader.getHeight(0)
+            if (width !in 1..16000 || height !in 1..16000 || width.toLong() * height > 16_000_000) return@use null
+            reader.read(0)
+        } finally { reader.dispose() }
+    }
+}.getOrNull()
 
 internal class NotesPageLayout {
     private val width = 1190
@@ -96,6 +139,15 @@ internal class NotesPageLayout {
         atoms += Triple(image, w, h); x += w + 6; lineHeight = maxOf(lineHeight, h + 6)
         if (display) { flush(); y += 10 }
         return true
+    }
+
+    fun picture(image: BufferedImage) {
+        flush()
+        val scale = minOf(1.0, body.toDouble() / image.width, 700.0 / image.height)
+        val w = (image.width * scale).toInt().coerceAtLeast(1)
+        val h = (image.height * scale).toInt().coerceAtLeast(1)
+        atoms += Triple(image, w, h); lineHeight = h + 12
+        flush()
     }
 
     private fun flush(blank: Boolean = false) {

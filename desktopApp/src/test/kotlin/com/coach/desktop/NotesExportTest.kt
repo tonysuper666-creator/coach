@@ -8,6 +8,40 @@ import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class NotesExportTest {
+    @Test fun syntheticEdgesKeepFivePendingAndExcludeMultipleChoice() = runBlocking {
+        val cases = Json.parseToJsonElement(java.io.File("../tools/notes/fixtures/edge-cases.json").readText()).jsonArray
+        val rows = mutableListOf<Event>()
+        fun emit(type: String, payload: JsonObject) { val n = rows.size.toLong() + 1; rows += Event(n, "edge$n", "synthetic", type, recordedAt = n, occurredAt = n, deviceId = "test", actor = "test", payload = payload) }
+        emit("outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp", "title" to "【W1·合成】边界", "week" to 1)))))
+        for (raw in cases) {
+            val c = raw.jsonObject
+            val id = c.str("id")
+            emit("question_posed", json("attemptId" to id, "questionId" to id, "kpIds" to listOf("kp"), "format" to c.str("format").ifBlank { "SINGLE_CHOICE" }, "stem" to c.str("stem"), "options" to c["options"]!!, "letterMap" to json("up" to "B", "down" to "A")))
+            emit("answer_submitted", json("attemptId" to id, "answer" to c["answer"]!!))
+            emit("attempt_graded", json("attemptId" to id, "score" to 0, "max" to 1, "feedback" to c.str("feedback")))
+        }
+        val draft = NotesCore.build(notesRequest(CourseView(rows, project(rows)), "synthetic", NotesSelection(week = 1)))
+        assertEquals(listOf("formula", "image", "long", "empty", "ordinary"), draft.attemptIds)
+        cases.take(5).forEach { raw ->
+            val c = raw.jsonObject
+            assertTrue(draft.markdown.contains(c.str("stem")))
+            assertTrue(draft.markdown.contains(c.str("feedback")))
+        }
+        assertFalse(draft.markdown.contains("合成 S6"))
+        val imageSource = Regex("data:image/png;base64,[^)]+").find(draft.markdown)!!.value
+        assertEquals(240, inlineNotesImage(imageSource)!!.width)
+        assertNull(inlineNotesImage("file:///private/image.png"))
+        assertNull(inlineNotesImage("https://example.invalid/image.png"))
+        assertNull(inlineNotesImage("data:image/png;base64,broken"))
+        val tooWide = java.io.ByteArrayOutputStream().also {
+            javax.imageio.ImageIO.write(java.awt.image.BufferedImage(16001, 1, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", it)
+        }.toByteArray()
+        assertNull(inlineNotesImage("data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(tooWide)))
+        val pdf = notesPdf("![合成图]($imageSource)\n![远程图](https://example.invalid/a.png)") { _, _ -> error("image must never reach math renderer") }
+        assertEquals(1, pdf.unresolvedImages)
+        assertEquals(0, pdf.unresolved)
+    }
+
     private fun sample(): CourseView {
         val rows = mutableListOf<Event>()
         fun emit(type: String, payload: JsonObject) { val n = rows.size.toLong() + 1; rows += Event(n, "e$n", "synthetic", type, recordedAt = n, occurredAt = n, deviceId = "test", actor = "test", payload = payload) }
@@ -68,5 +102,9 @@ class NotesExportTest {
         assertEquals(1, result.unresolved)
         assertTrue(result.bytes.toString(Charsets.ISO_8859_1).startsWith("%PDF-1.4"))
         assertFalse(NotesPageLayout().formula(java.awt.image.BufferedImage(12000, 10, java.awt.image.BufferedImage.TYPE_INT_RGB), true))
+        val rendered = notesPdf("内存解码公式 \$x\$。") { _, _ ->
+            com.coach.client.RenderedMath("synthetic-svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1ex\" height=\"1ex\" viewBox=\"0 0 100 100\"><path d=\"M10 10 L90 90 M10 90 L90 10\" stroke=\"black\"/></svg>")
+        }
+        assertEquals(0, rendered.unresolved)
     }
 }

@@ -49,6 +49,7 @@ class NotesReviewSmoke {
             assertEquals(args.getString("expectedCount")!!.toInt(), wrong.size)
             val markdown = File(context.cacheDir, "desktop-notes.md").readText()
             val grades = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.associateBy { it.payload.str("attemptId") }
+            val answers = events.filter { it.type == "answer_submitted" }.associateBy { it.payload.str("attemptId") }
             wrong.forEachIndexed { i, e ->
                 val p = e.payload
                 assertTrue("stem ${i + 1}", markdown.contains(p.str("stem")))
@@ -59,6 +60,11 @@ class NotesReviewSmoke {
                 }
                 val feedback = grades.getValue(p.str("attemptId")).payload.str("feedback")
                 assertTrue("feedback ${i + 1}", feedback.isNotBlank() && markdown.contains(feedback))
+                val answer = answers.getValue(p.str("attemptId")).payload["answer"]!!.jsonPrimitive.content
+                val mapped = map.entries.filter { it.value.jsonPrimitive.content == answer.trim().uppercase() }.singleOrNull()?.key ?: answer
+                val option = p["options"]!!.jsonArray.map { it.jsonObject }.firstOrNull { it.str("optionId") == mapped }
+                val displayed = if (option != null) "${map[mapped]!!.jsonPrimitive.content}. ${option.str("text")}" else answer
+                assertTrue("own answer ${i + 1}", markdown.contains("我的答案：$displayed"))
                 e.threadId?.let { thread ->
                     val card = view.quizGroups(thread).flatMap { it.cards }.first { it.attemptId == p.str("attemptId") }
                     assertTrue("visible card feedback ${i + 1}", card.grade?.feedback == feedback)
@@ -102,7 +108,7 @@ class NotesReviewSmoke {
             assertTrue(button.performAction(AccessibilityNodeInfo.ACTION_CLICK))
             find("第 $week 周错题")
             // Each item may be outside the LazyColumn viewport on the required AVD.
-            wrong.forEach { e ->
+            wrong.forEachIndexed { index, e ->
                 var seen = false
                 repeat(12) {
                     if (!seen) {
@@ -119,9 +125,11 @@ class NotesReviewSmoke {
                     }
                 }
                 assertTrue("visible review stem", seen)
+                capture("question-${index + 1}.png")
             }
             capture("week-mistakes.png")
             android.util.Log.i("CoachNotes", "paired=true week=$week ledgerExportAgreement=${wrong.size}/${wrong.size} reviewVisible=${wrong.size} generationCalls=0")
+            File(folder, "agreement.txt").writeText(wrong.indices.joinToString("\n") { "question-${it + 1}: stem/options/own-answer/feedback=PASS; review-visible=PASS" } + "\n")
         } finally { transport.close(); driver.close() }
     }
 }

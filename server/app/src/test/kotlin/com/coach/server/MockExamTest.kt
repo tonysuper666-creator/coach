@@ -104,6 +104,11 @@ class MockExamTest {
             val resumed = request("/mocks/$id").second
             assertEquals("active", resumed.str("status"))
             assertEquals(answers, resumed.getValue("answers"))
+            // The app numbers its saves: one held up on the network and arriving after a newer save cannot bring the older answers back.
+            val newer = JsonObject(answers + ("Q2" to json("choice" to 3)))
+            assertTrue(request("/mocks/$id/answers", json("answers" to newer, "seq" to 7)).second.flag("saved"))
+            assertFalse(request("/mocks/$id/answers", json("answers" to answers, "seq" to 6)).second.flag("saved"))
+            assertEquals(newer, request("/mocks/$id").second.getValue("answers"))
 
             val result = request("/mocks/$id/submit", json("answers" to answers)).second
             assertEquals("submitted", result.str("status"))

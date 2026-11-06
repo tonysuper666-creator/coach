@@ -71,7 +71,9 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     suspend fun startDrill(week: Int?): MockReply = mockCall("mocks", buildJsonObject { put("drill", buildJsonObject { week?.let { put("week", it) } }) })
     /** 进行中返回卷面（不含答案与细则）；交卷后返回成绩。 */
     suspend fun mock(mockId: String): MockReply = mockCall("mocks/${mockId.encodeURLPathPart()}", null)
-    suspend fun saveMock(mockId: String, answers: JsonObject): MockReply = mockCall("mocks/${mockId.encodeURLPathPart()}/answers", buildJsonObject { put("answers", answers) })
+    /** [seq] must grow with every save of this exam; the Mac ignores a save numbered no higher than one it already stored. */
+    suspend fun saveMock(mockId: String, answers: JsonObject, seq: Long): MockReply =
+        mockCall("mocks/${mockId.encodeURLPathPart()}/answers", buildJsonObject { put("answers", answers); put("seq", seq) })
     suspend fun submitMock(mockId: String, answers: JsonObject, auto: Boolean): MockReply =
         mockCall("mocks/${mockId.encodeURLPathPart()}/submit", buildJsonObject { put("answers", answers); put("auto", auto) })
 

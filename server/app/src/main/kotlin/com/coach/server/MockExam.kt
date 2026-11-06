@@ -290,12 +290,13 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         else if (s.submittedAt == null) view(store, s) else result(store, s)
     }
 
-    fun save(store: LedgerStore, course: String, id: String, answers: JsonObject): JsonObject {
+    /** [seq] orders saves from the app: one that turns up after a higher-numbered save is ignored, so the newest answers stay. */
+    fun save(store: LedgerStore, course: String, id: String, answers: JsonObject, seq: Long? = null): JsonObject {
         val s = session(store, course, id)
         if (s.submittedAt != null) throw MockError(HttpStatusCode.Conflict, "已交卷")
         if (clock() > s.deadline + graceMillis) return submit(store, course, id, null, true)
-        store.saveMockAnswers(id, clean(MockPaper(s.paper), answers))
-        return json("saved" to true, "serverNow" to clock(), "deadline" to s.deadline)
+        val stored = store.saveMockAnswers(id, clean(MockPaper(s.paper), answers), seq)
+        return json("saved" to stored, "serverNow" to clock(), "deadline" to s.deadline)
     }
 
     /** Grading, ledger facts and the session close commit as one unit; a second submit just returns the result. */
@@ -391,7 +392,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
 
     private fun view(store: LedgerStore, s: MockSession) = json("mockId" to s.id, "status" to "active", "kind" to s.kind, "purpose" to s.purpose,
         "minutes" to s.paper.int("minutes"), "startedAt" to s.startedAt, "deadline" to s.deadline, "serverNow" to clock(),
-        "paper" to MockPaper(s.paper).redacted(), "answers" to s.answers)
+        "paper" to MockPaper(s.paper).redacted(), "answers" to s.answers, "answersSeq" to s.answersSeq)
 
     /** Built from ledger facts each time, so later AI grades and reviews appear without a separate copy. */
     fun result(store: LedgerStore, s: MockSession, events: List<Event> = store.events(s.course)): JsonObject {
@@ -467,7 +468,7 @@ fun Application.mockRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>
         get("/v1/courses/{course}/mocks/{id}") { val c = call.parameters["course"]!!; call.answer(c) { engine.get(this, c, call.parameters["id"]!!) } }
         post("/v1/courses/{course}/mocks/{id}/answers") {
             val c = call.parameters["course"]!!
-            call.answer(c) { engine.save(this, c, call.parameters["id"]!!, it["answers"] as? JsonObject ?: JsonObject(emptyMap())) }
+            call.answer(c) { engine.save(this, c, call.parameters["id"]!!, it["answers"] as? JsonObject ?: JsonObject(emptyMap()), (it["seq"] as? JsonPrimitive)?.longOrNull) }
         }
         post("/v1/courses/{course}/mocks/{id}/submit") {
             val c = call.parameters["course"]!!

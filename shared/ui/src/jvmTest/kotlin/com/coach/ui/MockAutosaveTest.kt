@@ -8,6 +8,11 @@ import androidx.compose.ui.test.*
 import com.coach.client.CourseHttp
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
@@ -17,10 +22,24 @@ class MockAutosaveTest {
     private class FakeMac : AutoCloseable {
         @Volatile var online = true
         @Volatile var stored = JsonObject(emptyMap())
+        /** Saves the Mac has answered. */
+        val saves = AtomicInteger()
+        private val holding = AtomicBoolean()
+        private val released = CountDownLatch(1)
+        /** Opens once the save picked by [holdNextSave] has reached the Mac and is waiting there. */
+        val held = CountDownLatch(1)
+        /** The next save sits on the network, unanswered and not yet stored, until [release]. */
+        fun holdNextSave() = holding.set(true)
+        fun release() = released.countDown()
+        private val workers = Executors.newCachedThreadPool()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            // A held save must not stop the next one reaching the Mac.
+            executor = workers
             createContext("/v1/courses/C/mocks/M/answers") { ex ->
                 val request = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                if (holding.getAndSet(false)) { held.countDown(); released.await(10, TimeUnit.SECONDS) }
                 if (online) stored = request["answers"]!!.jsonObject
+                saves.incrementAndGet()
                 val bytes = (if (online) """{"status":"active"}""" else """{"error":"temporarily offline"}""").toByteArray()
                 ex.sendResponseHeaders(if (online) 200 else 503, bytes.size.toLong())
                 ex.responseBody.use { it.write(bytes) }
@@ -29,7 +48,7 @@ class MockAutosaveTest {
         }
         val http = CourseHttp("http://127.0.0.1:${server.address.port}", "test", "synthetic", "C")
         val choice get() = (stored["Q1"] as? JsonObject)?.get("choice")?.jsonPrimitive?.intOrNull
-        override fun close() { http.close(); server.stop(0) }
+        override fun close() { release(); http.close(); server.stop(0); workers.shutdownNow() }
     }
 
     // The exam never touches sync or the tutor; a bare instance stands in for them.
@@ -117,6 +136,35 @@ class MockAutosaveTest {
             waitUntil(timeoutMillis = 5000) { mac.choice == 0 }
             settle()
             onNodeWithText("答案已存到 Mac", substring = true).assertExists()
+        }
+    }
+
+    @Test fun leavingTwiceWhileTheFirstSaveIsStillOnTheWayKeepsTheNewerAnswer() = FakeMac().use { mac ->
+        runComposeUiTest {
+            mainClock.autoAdvance = false
+            mount(mac)
+            mac.holdNextSave()
+            onNodeWithText("Choice one").performClick()
+            mainClock.advanceTimeByFrame()
+            onNodeWithText("← 暂离").performClick()
+            mainClock.advanceTimeByFrame()
+            assertTrue(mac.held.await(5, TimeUnit.SECONDS), "leaving sends the first answer")
+            onNodeWithText("Back to exam").performClick()
+            mainClock.advanceTimeByFrame()
+            assertChoiceOneSelected()
+            onNodeWithText("Choice two").performClick()
+            mainClock.advanceTimeByFrame()
+            onNodeWithText("← 暂离").performClick()
+            mainClock.advanceTimeByFrame()
+            // The first save is still stuck on a slow network when the second leave happens; then it gets through.
+            Thread.sleep(500)
+            mac.release()
+            waitUntil(timeoutMillis = 5000) { mac.saves.get() >= 2 }
+            settle()
+            assertEquals(1, mac.choice, "the Mac ends up with the answer chosen last")
+            onNodeWithText("Back to exam").performClick()
+            mainClock.advanceTimeByFrame()
+            onNode(hasText("Choice two") and isSelected()).assertExists()
         }
     }
 

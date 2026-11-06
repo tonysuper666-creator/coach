@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import kotlin.math.roundToLong
 
@@ -190,7 +191,8 @@ private fun MockSessionPane(c: CoachController, http: CourseHttp, view: CourseVi
     val submitted = body?.str("status") == "submitted"
     // While the exam runs the pane owns the answers; refetching would overwrite unsaved typing.
     LaunchedEffect(reload, if (submitted || body == null) revision else -1L) {
-        val r = http.mock(mockId)
+        // A save from the last visit may still be on its way: read after it, or the paper comes back with older answers.
+        val r = c.mockSaving.withLock { http.mock(mockId) }
         if (r.body != null) { body = r.body; error = null } else error = r.error ?: "连不上 Mac，取不到这场考试。"
     }
     val current = body
@@ -232,8 +234,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
     // Answers the Mac never got (left mid-save, or offline) come back from the draft and are sent again.
     val draft = remember(mockId) { c.mockDrafts.value[mockId] }
     var answers by remember { mutableStateOf(JsonObject((exam["answers"] as? JsonObject).orEmpty() + draft.orEmpty())) }
-    var edits by remember { mutableStateOf(if (draft != null) 1 else 0) }
-    var savedEdits by remember { mutableStateOf(0) }
+    val unsaved = mockId in c.mockDrafts.collectAsState().value
     var saveNote by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     var submitError by remember { mutableStateOf<String?>(null) }
@@ -246,9 +247,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
         val old = answers[key] as? JsonObject ?: JsonObject(emptyMap())
         answers = JsonObject(answers + (key to JsonObject(old + (field to value))))
         c.mockDrafts.update { it + (mockId to answers) }
-        edits++
     }
-    fun saved(sent: JsonObject) = c.mockDrafts.update { if (it[mockId] == sent) it - mockId else it }
     fun finished(result: JsonObject) { c.mockDrafts.update { it - mockId }; onResult(result) }
     suspend fun submit(auto: Boolean) {
         if (submitting) return
@@ -259,32 +258,25 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
         } catch (e: CancellationException) { throw e }
         finally { submitting = false }
     }
+    // Numbered above whatever the Mac stored and close to its clock, so this page's saves outrank any still on the wire from earlier.
+    suspend fun save() = c.saveMockDraft(http, mockId, maxOf(exam.num("answersSeq") + 1, c.nowMillis() + offset))
     // Autosave a moment after typing stops. Until the Mac has the latest answers this keeps retrying, whatever the error says.
     LaunchedEffect(mockId) {
         while (true) {
-            snapshotFlow { edits != savedEdits }.first { it }
-            val seen = edits
+            val seen = c.mockDrafts.first { mockId in it }[mockId]
             delay(if (saveNote == null) 1200 else 8000)
-            if (saveNote == null && edits != seen) continue
-            c.mockFlushes[mockId]?.join()
-            val sent = edits
-            val payload = answers
-            val r = http.saveMock(mockId, payload)
+            if (saveNote == null && c.mockDrafts.value[mockId] !== seen) continue
+            val r = save()
             when {
-                r.body?.str("status") == "submitted" -> { finished(r.body!!); return@LaunchedEffect }
-                r.body != null -> { savedEdits = sent; saveNote = null; saved(payload) }
+                r?.body?.str("status") == "submitted" -> { finished(r.body!!); return@LaunchedEffect }
+                r == null || r.body != null -> saveNote = null
                 else -> saveNote = r.error ?: "未保存：连不上 Mac，答案先留在这里"
             }
         }
     }
     // Any way off this page (暂离, system back, another tab) cancels the loop above; what it had not sent yet goes out from here.
     DisposableEffect(mockId) {
-        onDispose {
-            val pending = c.mockDrafts.value[mockId] ?: return@onDispose
-            c.mockFlushes[mockId] = c.background.launch(start = CoroutineStart.UNDISPATCHED) {
-                if (http.saveMock(mockId, pending).body != null) c.mockDrafts.update { if (it[mockId] == pending) it - mockId else it }
-            }
-        }
+        onDispose { if (mockId in c.mockDrafts.value) c.background.launch(start = CoroutineStart.UNDISPATCHED) { save() } }
     }
     // At zero this screen hands the paper in; if that fails the Mac closes it shortly after on its own.
     LaunchedEffect(left <= 0) {
@@ -310,7 +302,7 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
                 label = { Text("${row.number}") }, modifier = Modifier.heightIn(min = 48.dp))
         }
     }
-    Text(saveNote ?: if (edits == savedEdits) "答案已存到 Mac · 退出不停表，可回来续考" else "正在保存…",
+    Text(saveNote ?: if (!unsaved) "答案已存到 Mac · 退出不停表，可回来续考" else "正在保存…",
         Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelSmall,
         color = if (saveNote != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
     submitError?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error) }
@@ -346,6 +338,19 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
             dismissButton = { TextButton(onClick = { confirm = false }) { Text("继续作答") } },
         )
     }
+}
+
+/**
+ * Sends the answers of [mockId] the Mac does not have yet; null when there are none. One save is on the wire at a time and it always
+ * carries the newest draft, numbered above every earlier save (and at least [floor]), so the Mac drops a request that arrives late.
+ * The draft goes only once the Mac has taken exactly what it holds.
+ */
+internal suspend fun CoachController.saveMockDraft(http: CourseHttp, mockId: String, floor: Long): MockReply? = mockSaving.withLock {
+    val pending = mockDrafts.value[mockId] ?: return null
+    val seq = maxOf(floor, (mockSeq[mockId] ?: 0) + 1).also { mockSeq[mockId] = it }
+    val r = http.saveMock(mockId, pending, seq)
+    if (r.body != null) mockDrafts.update { if (it[mockId] == pending) it - mockId else it }
+    r
 }
 
 @Composable

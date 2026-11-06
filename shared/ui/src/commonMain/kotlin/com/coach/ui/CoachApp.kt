@@ -46,8 +46,10 @@ class CoachController(
     internal val sourcePages = HashMap<PageKey, com.coach.client.SourcePage>()
     /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
     internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(emptyMap())
-    /** 离开考试页时补存答案的请求，不随页面一起取消；续考的保存先等它送完，免得旧答案后到覆盖新答案。 */
-    internal val mockFlushes = HashMap<String, kotlinx.coroutines.Job>()
+    /** 模拟考的保存和续考时读卷都排这一把锁：同一时刻只有一个请求在路上，旧答案不会后到覆盖新答案，续考读到的也是最后存上的。 */
+    internal val mockSaving = kotlinx.coroutines.sync.Mutex()
+    /** 每场考试最后发出的保存序号，只增不减（锁内读写）。 */
+    internal val mockSeq = HashMap<String, Long>()
     internal val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
 }
 

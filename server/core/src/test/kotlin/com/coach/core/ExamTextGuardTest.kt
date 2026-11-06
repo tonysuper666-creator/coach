@@ -84,4 +84,72 @@ class ExamTextGuardTest {
         assertTrue(guard.blocked)
         assertFalse(index.overlaps(seen.toString()))
     }
+
+    private val quote = "Amber badgers carry delicate emerald feathers gently home"
+    private fun assertObfuscationBlocked(input: String) {
+        assertTrue(index.overlaps(input), "Full-text checker must recognize the visible quotation")
+        // Reverse the roles too: reference text and reply must use the same folding.
+        assertTrue(ExamTextIndex(listOf(input)).overlaps(quote))
+        for (split in 0..input.length) {
+            val guard = ExamTextGuard(index)
+            val seen = StringBuilder()
+            for (chunk in listOf(input.take(split), input.drop(split))) {
+                seen.append(guard.push(chunk))
+                assertFalse(index.overlaps(seen.toString()), "split=$split")
+            }
+            seen.append(guard.finish())
+            assertTrue(guard.blocked, "split=$split")
+            assertTrue(seen.contains("解题思路"))
+            assertFalse(index.overlaps(seen.toString()), "split=$split")
+        }
+        // Each boundary may also be split in a separate delta (including commands).
+        val guard = ExamTextGuard(index)
+        val seen = StringBuilder()
+        input.forEach { char ->
+            seen.append(guard.push(char.toString()))
+            assertFalse(index.overlaps(seen.toString()))
+        }
+        seen.append(guard.finish())
+        assertTrue(guard.blocked)
+        assertFalse(index.overlaps(seen.toString()))
+    }
+
+    @Test fun zeroWidthFormattingCannotSplitVisibleWords() =
+        assertObfuscationBlocked(quote.map { "$it\u200B" }.joinToString(""))
+
+    @Test fun softHyphensCannotSplitVisibleWords() =
+        assertObfuscationBlocked(quote.map { "$it\u00AD" }.joinToString(""))
+
+    @Test fun inlineMarkdownCannotSplitVisibleWords() {
+        for (marker in listOf("**", "_", "~~", "`"))
+            assertObfuscationBlocked(quote.split(" ").joinToString(" ") { it.take(1) + marker + it.drop(1) + marker })
+    }
+
+    @Test fun texTextWrappersCannotHideVisibleWords() =
+        assertObfuscationBlocked(quote.split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" })
+
+    @Test fun cyrillicAndGreekHomoglyphsCannotHideVisibleWords() {
+        assertObfuscationBlocked(quote.replace('e', 'е').replace('a', 'а'))
+        assertObfuscationBlocked(quote.replace('A', 'Α').replace('o', 'ο'))
+    }
+
+    @Test fun accentsCannotHideVisibleWords() {
+        assertObfuscationBlocked(quote.replace('e', 'é'))
+        assertObfuscationBlocked(quote.replace("e", "e\u0301"))
+    }
+
+    @Test fun literalWordsSeparatedByMarkupRemainProtected() {
+        for (delimiter in listOf("_", "*", "~", "`"))
+            assertObfuscationBlocked(quote.replace(" ", delimiter))
+    }
+
+    @Test fun normalFormattedResponsesArePublishedUnchanged() {
+        val inputs = listOf("A\\text{b}solutely safe **explanation** with caf\u00E9 and p\u200Brice.",
+            "\$\$\\text{Marginal benefit} = x\$\$; check a_b and A\u00ADkerlof.")
+        for (input in inputs) {
+            val guard = ExamTextGuard(index)
+            assertEquals(input, input.chunked(1).joinToString("") { guard.push(it) } + guard.finish())
+            assertFalse(guard.blocked)
+        }
+    }
 }

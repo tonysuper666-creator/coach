@@ -44,8 +44,9 @@ ${documents.joinToString("\n\n") { select(it, 1_800) }}
 
     companion object {
         fun fromTexts(exams: List<String>, guidance: String = "", rulings: String = ""): ExamMaterials {
-            val index = ExamTextIndex(exams)
-            require(exams.size >= 2 && index.windowCount > 0) { "Incomplete exam corpus" }
+            val examIndex = ExamTextIndex(exams)
+            require(exams.size >= 2 && examIndex.windowCount > 0) { "Incomplete exam corpus" }
+            val index = if (guidance.isBlank() && rulings.isBlank()) examIndex else ExamTextIndex(exams + listOf(guidance, rulings))
             return ExamMaterials(exams, guidance, rulings, index)
         }
         fun load(directory: Path = Path.of(System.getenv("COACH_EXAM_MATERIALS_DIR")

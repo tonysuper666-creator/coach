@@ -9,54 +9,96 @@ class ExamTextIndex(documents: List<String>) {
         val next = HashMap<String, Node>()
     }
     internal val root = Node()
+    internal val literalRoot = Node()
     val windowCount: Int
     init {
         val unique = HashSet<List<String>>()
         documents.forEach { document ->
-            words(document).map { it.value }.windowed(8).forEach { window ->
-                unique.add(window)
-                var node = root
-                window.forEach { word -> node = node.next.getOrPut(word) { Node() } }
+            scans(document).forEach { (root, scan) ->
+                scan.words.map { it.value }.windowed(8).forEach { window ->
+                    unique.add(window)
+                    var node = root
+                    window.forEach { word -> node = node.next.getOrPut(word) { Node() } }
+                }
             }
         }
         windowCount = unique.size
     }
 
     fun overlaps(text: String): Boolean {
-        val tokens = words(text)
-        return tokens.indices.any { start ->
-            var node = root
-            var count = 0
-            for (i in start until minOf(start + 8, tokens.size)) {
-                node = node.next[tokens[i].value] ?: break
-                count++
+        return scans(text).any { (root, scan) ->
+            val tokens = scan.words
+            tokens.indices.any { start ->
+                var node = root
+                var count = 0
+                for (i in start until minOf(start + 8, tokens.size)) {
+                    node = node.next[tokens[i].value] ?: break
+                    count++
+                }
+                count == 8
             }
-            count == 8
         }
     }
 
+    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(root to scan(text), literalRoot to scan(text, visible = false))
     internal data class Word(val value: String, val start: Int, val end: Int)
+    internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int)
     companion object {
-        // Keep raw offsets through compatibility normalization. Combine marks with
-        // their base so decomposed accents have the same words as whole-text NFKC.
-        internal fun words(text: String): List<Word> {
+        internal fun words(text: String): List<Word> = scan(text).words
+
+        // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.
+        // Only the matching view is folded; normal replies are published unchanged.
+        internal fun scan(text: String, visible: Boolean = true): Scan {
             val normalized = StringBuilder()
             val starts = ArrayList<Int>()
             val ends = ArrayList<Int>()
+            var stableEnd = text.length
             var offset = 0
             while (offset < text.length) {
+                // A partial control word must not be published: the next delta can
+                // turn "\\te" into "\\text", changing how subsequent letters tokenize.
+                if (visible && text[offset] == '\\' && (offset + 1 == text.length || asciiLetter(text[offset + 1]))) {
+                    var end = offset + 1
+                    while (end < text.length && asciiLetter(text[end])) end++
+                    if (end == text.length) stableEnd = minOf(stableEnd, offset)
+                    offset = end
+                    continue
+                }
+                if (offset == text.lastIndex && text[offset].isHighSurrogate()) {
+                    stableEnd = minOf(stableEnd, offset)
+                    break
+                }
                 var end = offset + Character.charCount(text.codePointAt(offset))
-                while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
+                if (!visible) while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
                     end += Character.charCount(text.codePointAt(end))
-                val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKC).lowercase(Locale.ROOT)
-                piece.forEach { normalized.append(it); starts.add(offset); ends.add(end) }
+                val piece = Normalizer.normalize(text.substring(offset, end), if (visible) Normalizer.Form.NFKD else Normalizer.Form.NFKC)
+                piece.codePoints().forEach { cp ->
+                    if (!visible || (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && cp !in MARKUP)) {
+                        val folded = ((if (visible) CONFUSABLES[cp] else null)?.toString() ?: String(Character.toChars(cp))).lowercase(Locale.ROOT)
+                        folded.forEach { normalized.append(it); starts.add(offset); ends.add(end) }
+                    }
+                }
                 offset = end
             }
-            return Regex("[a-z]+").findAll(normalized).map {
+            val words = Regex("[a-z]+").findAll(normalized).map {
                 Word(it.value, starts[it.range.first], ends[it.range.last])
             }.toList()
+            // Ignored suffixes do not finish a word (e.g. "Am**" or "Am\u200B").
+            return Scan(words, normalized.lastOrNull()?.let { it in 'a'..'z' } == true, stableEnd)
         }
+        private fun asciiLetter(char: Char) = char in 'a'..'z' || char in 'A'..'Z'
         private val MARK_TYPES = setOf(Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt())
+        private val IGNORED_TYPES = MARK_TYPES + Character.FORMAT.toInt()
+        // Formatting can occur within a word. Braces/control words and math fences
+        // are wrappers, not visible letters. Whitespace/punctuation still separate.
+        private val MARKUP = "*_~`{}$".map { it.code }.toSet()
+        private val CONFUSABLES = buildMap<Int, Char> {
+            fun letters(from: String, to: String) { from.zip(to).forEach { (a, b) -> put(a.code, b) } }
+            letters("АВЕКМНОРСТХУІЈЅ", "ABEKMHOPCTXYIJS")
+            letters("авекмнорстхуіјѕԁԛһӏѵԝ", "abekmhopctxyijsdqhlvw")
+            letters("ΑΒΕΖΗΙΚΜΝΟΡΤΥΧ", "ABEZHIKMNOPTYX")
+            letters("αβεικνορτυχϲϳ", "abeikvoptuxcj")
+        }
     }
 }
 
@@ -82,34 +124,40 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
 
     private fun drain(end: Boolean): String {
         if (index == null) return block(0)
-        val words = ExamTextIndex.words(pending.toString())
-        // A streamed surrogate pair can normalize to an English letter. Keep its
-        // first half, and the word touching it, until the complete code point arrives.
-        val lexicalEnd = pending.length - if (!end && pending.lastOrNull()?.isHighSurrogate() == true) 1 else 0
-        val incomplete = !end && words.lastOrNull()?.end == lexicalEnd
-        val complete = words.size - if (incomplete) 1 else 0
-        for (start in 0 until complete) {
-            var node = index.root
-            var count = 0
-            for (i in start until minOf(start + 8, complete)) {
-                node = node.next[words[i].value] ?: break
-                count++
+        var cut = pending.length
+        var hitStart: Int? = null
+        // Preserve literal eight-word protection as well: joining inline markup
+        // must not create a new bypass for a quotation separated by underscores.
+        for ((root, scan) in index.scans(pending.toString())) {
+            val words = scan.words
+            val incomplete = !end && scan.openWord
+            val complete = words.size - if (incomplete) 1 else 0
+            for (start in 0 until complete) {
+                var node = root
+                var count = 0
+                for (i in start until minOf(start + 8, complete)) {
+                    node = node.next[words[i].value] ?: break
+                    count++
+                }
+                if (count == 8) hitStart = minOf(hitStart ?: pending.length, words[start].start)
             }
-            if (count == 8) { hits++; return block(words[start].start) }
+            if (!end) {
+                cut = minOf(cut, if (incomplete) words.last().start else pending.length, scan.stableEnd)
+                // An unfinished eighth word must leave the preceding seven unpublished.
+                for (start in maxOf(0, complete - 7) until complete) {
+                    var node = root
+                    var prefix = true
+                    for (i in start until complete) {
+                        val next = node.next[words[i].value]
+                        if (next == null) { prefix = false; break }
+                        node = next
+                    }
+                    if (prefix) cut = minOf(cut, words[start].start)
+                }
+            }
         }
+        hitStart?.let { hits++; return block(it) }
         if (end) return take(pending.length)
-        var cut = if (incomplete) words.last().start else lexicalEnd
-        // Even an unfinished eighth word must leave the preceding seven unpublished.
-        for (start in maxOf(0, complete - 7) until complete) {
-            var node = index.root
-            var prefix = true
-            for (i in start until complete) {
-                val next = node.next[words[i].value]
-                if (next == null) { prefix = false; break }
-                node = next
-            }
-            if (prefix) cut = minOf(cut, words[start].start)
-        }
         // Bound stalled ambiguous output without ever publishing it.
         if (pending.length - cut > 65_536) return block(cut)
         return take(cut)

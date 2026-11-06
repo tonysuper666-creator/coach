@@ -18,10 +18,13 @@ class ExamDelivery(private val newGuard: () -> ExamTextGuard) {
     fun finish(): List<VisibleStream.Segment> = typed(guard.finish(), final = true)
 
     fun replace(markdown: String): List<VisibleStream.Segment> {
-        guard = newGuard()
         pending.setLength(0)
         source.setLength(0)
         source.append(markdown)
+        // A snapshot must not reopen a message already switched to reasoning.
+        // Return a safe complete replacement while retaining the blocked guard.
+        if (blocked) return typed(ExamTextGuard.REASONING)
+        guard = newGuard()
         return typed(guard.push(markdown))
     }
 

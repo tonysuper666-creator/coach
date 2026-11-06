@@ -46,4 +46,31 @@ class ExamDeliveryTest {
         assertTrue(context.length < 10_000)
         assertEquals("", materials.context("another-course", "question"))
     }
+
+    @Test fun everyInjectedPlanningDocumentIsProtected() {
+        val planning = "Silver turtles use velvet wings across blue gardens."
+        val rulings = "Quiet robots arrange bright stones beneath orange trees."
+        val materials = ExamMaterials.fromTexts(exams, planning, rulings)
+        val context = materials.context("ECNM10119", "teach")
+        for (reference in exams + listOf(planning, rulings)) {
+            assertTrue(context.contains(reference))
+            val guard = materials.guard("ECNM10119")!!
+            val published = reference.chunked(1).joinToString("") { guard.push(it) } + guard.finish()
+            assertTrue(guard.blocked)
+            assertFalse(materials.index!!.overlaps(published))
+        }
+    }
+
+    @Test fun aBlockedMessageStaysBlockedAcrossSafeAndUnsafeRevisions() {
+        val delivery = ExamDelivery { ExamTextGuard(index) }
+        delivery.push(VisibleStream.Segment.Text(exams[0]))
+        assertTrue(delivery.blocked)
+        for (revision in listOf("A new unrelated explanation.", exams[1])) {
+            val replacement = delivery.replace(revision).joinToString("") { ExamDelivery.markdown(it) }
+            assertTrue(delivery.blocked)
+            assertEquals(ExamTextGuard.REASONING, replacement)
+            assertTrue(delivery.push(VisibleStream.Segment.Text("Later model output.")).isEmpty())
+            assertTrue(delivery.finish().isEmpty())
+        }
+    }
 }

@@ -22,10 +22,24 @@ import kotlin.test.*
 
 /** Independent checker, intentionally not the production trie/tokenizer implementation. */
 internal class ExamOverlap(documents: List<String>) {
-    private fun words(text: String) = Regex("[a-z]+").findAll(
+    private val lookalikes = listOf("AАΑ", "BВΒ", "CС", "EЕΕ", "HНΗ", "IІΙ", "JЈ", "KКΚ", "MМΜ", "NΝ",
+        "OОΟ", "PРΡ", "SЅ", "TТΤ", "XХΧ", "YУΥ", "ZΖ", "aаα", "bвβ", "cсϲ", "dԁ", "eеε",
+        "hнһ", "iіι", "jјϳ", "kкκ", "lӏ", "mм", "oоο", "pрρ", "qԛ", "sѕ", "tтτ", "uυ",
+        "vѵν", "wԝ", "xхχ", "yу").flatMap { group -> group.drop(1).map { it to group.first() } }.toMap()
+    private fun words(text: String): List<String> {
+        val decomposed = Normalizer.normalize(text, Normalizer.Form.NFKD)
+        val folded = decomposed.map { lookalikes[it] ?: it }.joinToString("")
+            .replace(Regex("\\\\[A-Za-z]+"), "")
+            .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}*_~`{}$]"), "")
+            .lowercase(java.util.Locale.ROOT)
+        return Regex("[a-z]+").findAll(folded).map { it.value }.toList()
+    }
+    private fun literal(text: String) = Regex("[a-z]+").findAll(
         Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(java.util.Locale.ROOT)).map { it.value }.toList()
     private val windows = documents.flatMap { words(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
-    fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows }
+    private val literalWindows = documents.flatMap { literal(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
+    fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
+        literal(text).windowed(8).any { it.joinToString(" ") in literalWindows }
 }
 
 internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false) : AutoCloseable {
@@ -155,6 +169,26 @@ class ExamOutputTest {
                 val stored = h.actor.execute { messageSnapshot(id) }!!
                 assertEquals(end.str("text"), stored.content)
                 assertTrue(stub.requestBodies.single().contains("Private exam planning reference"))
+            }
+        }
+    }
+
+    @Test fun obfuscatedQuotationsNeverReachTheWireOrStoredBody() = runBlocking {
+        val variants = listOf(exams[0].map { "$it\u200B" }.joinToString(""),
+            exams[0].split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" })
+        StubTutor().use { stub ->
+            ExamHarness(Files.createTempDirectory("exam-obfuscated"), ExamMaterials.fromTexts(exams), BridgeClient(BridgeConfig(stub.baseUrl))).use { h ->
+                for ((i, input) in variants.withIndex()) {
+                    assertTrue(ExamOverlap(exams).hit(input))
+                    stub.stream(1, *input.chunked(1).toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
+                    val id = h.ask("obfuscated-$i", "ECNM10119", "Copy with invisible characters or TeX wrappers", "Synthetic pack")
+                    val end = h.await(id)
+                    assertEquals("complete", end.str("status"))
+                    assertTrue(end.str("text").contains("解题思路"))
+                    assertFalse(ExamOverlap(exams).hit(end.str("text")))
+                    assertEquals(end.str("text"), h.actor.execute { messageSnapshot(id) }!!.content)
+                }
+                assertEquals(0, h.publishedLeaks(ExamOverlap(exams)))
             }
         }
     }

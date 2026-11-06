@@ -1,10 +1,10 @@
 # TON-1293：每日复习提醒
 
-2026-11-06：代码、单测及 APK 构建已验证；模拟器第一道门尚未通过，不能据此宣称可用或合并上线。
+2026-11-06（解锁后续跑）：模拟器门实际运行两次，均退出 1，停在 Switch 无障碍标签断言。通知等后续路径未执行；不能宣称可用或合并上线。已停止同因重试，交 Expert 排错。
 
 ## 行为
 
-复习页标题栏的「每日提醒」入口提供开关和 24 小时时间选择，默认关闭、19:00；入口显示已关闭、当前时间或通知未允许。今天、学习和聊天页不占额外一行。开关整行可点击，以 Switch 角色合并标签供读屏使用。首次开启申请通知权限；拒绝后保留原因说明和系统通知设置入口，后续切换不再弹权限框。关闭同时撤销闹钟和已显示通知，进入复习页也撤销旧通知。
+复习页标题栏的「每日提醒」入口提供开关和 24 小时时间选择，默认关闭、19:00；入口显示已关闭、当前时间或通知未允许。今天、学习和聊天页不占额外一行。开关整行可点击，使用 Switch 角色；设备测试尚不能证明无障碍标签正确，须修复。首次开启申请通知权限；拒绝后保留原因说明和系统通知设置入口，后续切换不再弹权限框。关闭同时撤销闹钟和已显示通知，进入复习页也撤销旧通知。
 
 接收器只在数据库事务中读取同一个 `coach-client.db` 副本，不创建 SyncEngine、不发起网络同步、不清空副本、不写投影缓存，因此不会与前台同步交错写入 epoch。按现有 projector 生成投影，遇到不支持的事件时采用已保存的服务端投影，与前台相同。通知数直接取 `CourseView.dueReviews(now).size`，不实现第二套间隔算法。文案改为「今天有 N 个知识点要复习」。零到期时不发通知。点击通知通过显式 PendingIntent 打开复习页，并保留隔离测试服务器地址。本机尚未同步到的其他设备变更，须下次打开应用同步后才能反映。
 
@@ -26,13 +26,19 @@ tools/dev/heavy ./gradlew :shared:domain:jvmTest :shared:client:jvmTest :shared:
 
 上述命令同时验证桌面编译和 APK/服务器构建。`python3 -m py_compile tools/dev/check-reminder.py`、`git diff --check` 退出码 0。
 
-## 第一门运行入口与阻塞
+## 第一门实际结果与排错交接
 
 ```sh
 tools/dev/heavy --emulator python3 tools/dev/check-reminder.py
 ```
 
-初轮命令停在 TON-1247 取锁等待，退出码 143；复核者的设备验收同样被 TON-1220 占锁阻塞。修订轮重新运行完整命令，始终未取得锁：先是 PID 70752 的服务端测试，随后是 PID 82733 的 `evidence/run-command-attention-contract.py pr93-contract`。完成独立工作后，仅停止本轮取锁 PID 93549（已核对非 daemon PID 50222），退出码 130。脚本未启动，没有私有数据库拷贝、测试服务器或模拟器残留。到点通知、零到期静默、重启 dumpsys、实际切换时区、权限拒绝这五项设备验收均未验证；不能以单测或脚本存在代替第一门。
+20:57Z 收到解锁通知后执行上述命令，取得模拟器道，启动了隔离服务器和指定 AVD。第一轮退出 1：`prepare` 的 `Switch must expose its label` 断言失败（设备测试 1 项、1 失败，10.936 秒）。已经通过配对、读取到期数、今天页无提醒入口等前置步骤，但尚未点击权限请求，不能算权限拒绝验收通过。
+
+尝试给父 Row 显式设置 `contentDescription = "每日到期提醒"`，内部 Switch 用 `clearAndSetSemantics {}` 消除重复节点。通过 `tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest -PcoachApplicationId=com.coach.android.ton1293 -Pcoach.port=18893 --console=plain` 重建，退出 0（27 秒）。再次执行完整设备门，排队后进入模拟器，同一断言仍失败，退出 1（设备测试 1 项、1 失败，8.801 秒）。原断言未删除、跳过或放宽。
+
+按同因两次失败停止重试。未奏效的产品补丁已回退，单独保存为 `ton1293-attempted-label.diff` 供排错参考；PR 产品代码仍是 `ecef5bae9c0d` 的版本。第一、二轮的 `prepare.txt` 分别保存在私有 `.reminder-evidence-attempt1/`、`.reminder-evidence/`，均可交付无内容堆栈。脚本 finally 已回收两轮自己启动的服务器和模拟器；结束后 `adb devices` 无 `emulator-5594`，没有持锁等待者残留。生产和其他持锁者未改动。
+
+交 Expert：先采集 `rootInActiveWindow` 节点树，确认 `waitNode { it.isCheckable }` 实际选中的节点，区分产品语义缺陷与选择器错误；修正后保持“真实 Switch 有标签且可开关”的验收强度。随后在同一隔离条件跑完整脚本，输出三张截图、闹钟、时区、重启和零到期证据；未覆盖情况停止并写明，禁止改弱断言冒充通过。当前到点通知、零到期静默、重启 dumpsys、实际改时区和权限拒绝五项均未验证，无成功设备截图。
 
 脚本输入为本机配置 `coach.sdkDir` / `coach.tailHost` / `coach.course`、已构建的两个后缀 APK 和服务器 installDist，以及只读模式打开的 `~/Coach/data/coach.sqlite`。输出在被 gitignore 排除、权限 0700 的 `.reminder-evidence/`。重跑前先明确保存或删除旧目录，脚本拒绝覆盖。生产数据库通过 SQLite backup 复制，只在副本清除在途 jobs、turn_leases 与 pairing_code；测试使用新设备凭据和随机独立端口，桥指向关闭的本机端口 1，不请求模型、不接触生产进程。
 

@@ -501,11 +501,18 @@ class ChatService(
         var firstVisibleMs = -1L
         var partOneEndMs = -1L
         var lessonFirstDeltaMs = -1L
+        val lastExamInputAtMs = java.util.concurrent.atomic.AtomicLong(-1)
         fun handleDelta(text: String) {
             session.trace?.raw(text)
             if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
             val previous = session.cursor
+            val previousExamChars = session.examDelivery?.source?.length ?: 0
             acceptFiltered(guard.push(text))
+            // An indexed English suffix can retain subsequent Chinese until the next
+            // English word or EOF. That is active input, not an upstream stall.
+            session.examDelivery?.let { delivery ->
+                if (!delivery.blocked && delivery.source.length > previousExamChars) lastExamInputAtMs.set(elapsedMs())
+            }
             if (session.cursor != previous && session.cursor.text.removePrefix(previous.text).isNotBlank()) {
                 session.lastDeltaAtMs = elapsedMs()
                 if (firstVisibleMs < 0) firstVisibleMs = session.lastDeltaAtMs
@@ -549,7 +556,7 @@ class ChatService(
                         session.abort(StreamStatus.TRUNCATED, "total_timeout")
                         break
                     }
-                    session.lastDeltaAtMs >= 0 && t - session.lastDeltaAtMs >= timings.stallMs -> {
+                    session.lastDeltaAtMs >= 0 && t - maxOf(session.lastDeltaAtMs, lastExamInputAtMs.get()) >= timings.stallMs -> {
                         session.abort(StreamStatus.TRUNCATED, "stall")
                         break
                     }

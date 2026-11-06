@@ -42,7 +42,8 @@ internal class ExamOverlap(documents: List<String>) {
         literal(text).windowed(8).any { it.joinToString(" ") in literalWindows }
 }
 
-internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false) : AutoCloseable {
+internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false,
+    timings: ChatTimings? = null) : AutoCloseable {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val token = "synthetic-exam-replay-token-32-characters"
     val actor = LedgerActor(scope, LedgerStore(data).also { it.enroll("exam-replay", token) })
@@ -50,7 +51,7 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
     private val wireFrames = Collections.synchronizedList(ArrayList<JsonObject>())
     val first = java.util.concurrent.ConcurrentHashMap<String, Long>()
     val chat = ChatService(actor, scope, bridge, fallbackOnFirstTokenTimeout = false,
-        timings = if (live) ChatTimings(firstTokenDeadlineMs = 90_000, totalMs = 180_000) else ChatFlowTest.defaultTimings(),
+        timings = timings ?: if (live) ChatTimings(firstTokenDeadlineMs = 90_000, totalMs = 180_000) else ChatFlowTest.defaultTimings(),
         enrichSourcePages = false, examMaterials = materials, log = {})
     private val watch = scope.launch(start = CoroutineStart.UNDISPATCHED) { chat.hub.frames.collect { frame ->
         frames.add(frame)
@@ -129,7 +130,23 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 
 class ExamOutputTest {
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
-    @Test fun protectedPreparedLessonsRequireTheCurrentPrivateReference() = runBlocking {
+    @Test fun bufferedEnglishPrefixDoesNotTurnActiveChineseStreamingIntoAStall() = runBlocking {
+        StubTutor().use { stub ->
+            ExamHarness(Files.createTempDirectory("exam-buffered-stall"), ExamMaterials.fromTexts(exams),
+                BridgeClient(BridgeConfig(stub.baseUrl)), timings = ChatTimings(firstTokenDeadlineMs = 2_000,
+                    stallMs = 600, totalMs = 6_000, pollMs = 10)).use { h ->
+                val chunks = listOf("先讲概念。", "Amber ") + List(10) { "接着用中文说明。" }
+                stub.stream(150, *chunks.toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
+                val id = h.ask("buffered", "ECNM10119", "用新例子讲解", "Synthetic pack")
+                val end = h.await(id)
+                assertEquals("complete", end.str("status"), "reason=${end.str("reason")}")
+                assertEquals(chunks.joinToString(""), end.str("text"))
+                assertEquals(0, h.publishedLeaks(ExamOverlap(exams)))
+            }
+        }
+    }
+
+    @Test fun protectedPreparedLessonsRequireTheCurrentPrivateReference() = runBlocking<Unit> {
         StubTutor().use { stub ->
             val materials = ExamMaterials.fromTexts(exams, "Synthetic format: essays 40 percent.")
             val bridge = BridgeClient(BridgeConfig(stub.baseUrl))

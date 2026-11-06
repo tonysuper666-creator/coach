@@ -81,6 +81,13 @@ one documented scan command and three synthetic test-fixture occurrences.
 No new privacy-pattern hits were introduced. No private database, token,
 course, answer, raw log or screenshot is added to the branch.
 
+The last endpoint-test fixture edit (synthetic DNS instead of a synthetic IP)
+was made after that successful build compiled its tests. Its rerun has not
+started: other acceptance work continues to own the shared heavy-work lock.
+The queued wrappers were cancelled and reaped; no pending check is reported
+as a pass. The clean compatible-baseline build and compatible rollback
+rehearsal below are also unverified. This is a partial delivery, kept draft.
+
 ## Isolated deployment and rollback
 
 The installed `5ef9989` starts against the v6 production copy. The candidate
@@ -130,8 +137,9 @@ copies/logs are deleted and all owned listeners/processes are collected.
 JVM home/temp directories are also isolated; inherited JVM option variables
 are cleared, preventing fallback to production configuration or math files.
 
-This proves binary startup, schema compatibility and data-preserving pointer
-rollback. It does not exercise launchd, real bridge/math child management,
+On success, this harness would verify binary startup, schema compatibility
+and data-preserving pointer rollback. Its compatible-baseline mode has not
+yet been run successfully. It does not exercise launchd, real bridge/math child management,
 900-second production idle evidence, phone credentials in live traffic, the
 production seal protocol, or production user-visible behavior. Keep the
 existing TON-1193/TON-1175 deployment contract and independent review gates.

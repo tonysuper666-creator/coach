@@ -128,13 +128,13 @@ the owned server were cleaned, the lease was released and ai_calls=0.
 
 The Android/server/Gradle build inputs for this run matched the successful
 `6234a50` heavy build. Reusing those matching artifacts is not a rebuild or a
-reconnection pass. Next investigation should locate why both heartbeat paths
-stop while the server remains running, including the phone/test execution and
+reconnection pass. This prompted investigation of why both heartbeat paths
+stopped while the server remained running, including the phone/test execution and
 file/log observation paths. Do not repeat JVM pauses until the unchanged healthy
 control passes, infer freezing from missing samples, or change phone power
 settings as a substitute for diagnosis. Further phone observation requires a
-new guardian grant and the same idle protection; keep waiting in the existing
-queue meanwhile.
+new guardian grant and the same idle protection; use the existing queue when
+another phone measurement is needed.
 Process snapshots also count a fixed allowlist of kernel wait symbols from only
 the card process's tasks, read under its own UID. No task IDs, thread names,
 raw wait-channel text or stack dumps are saved. Unsupported symbols are counted
@@ -152,7 +152,27 @@ confirmed absent after cleanup, the isolated server/data were removed, the
 lease was released and ai_calls=0. Source review found that the instrumentation
 had no foreground activity. The debug-only blank activity experiment described
 above subsequently built successfully with matching server and both APKs via
-the heavy lock (135 tasks, 17 seconds); it has not yet run on the phone.
+the heavy lock (135 tasks, 17 seconds).
+
+On 2026-11-06 at 07:08:36–07:09:40 UTC, head `0ae8d63` ran that foreground
+experiment on the guardian-leased, unlocked OPPO PMA120 after thirteen minutes
+idle. Run `c79f905088a0402da4512c0d38a05fa1` passed the network gate 3/3 and
+reconnection 1/1. `TEST_ACTIVITY_RESUMED` preceded READY. The unchanged healthy
+control passed with main and IO spans of 10,028 and 10,017 ms before STOP.
+The isolated JVM was confirmed paused (state Ts) for 32.126 seconds. The phone
+reached OFFLINE within the original 30-second deadline, then RECONNECTED with
+the same epoch and a newer revision; the test completed 1.133 seconds after
+resume. Both heartbeat streams continued during the controlled pause.
+The test package was confirmed absent after uninstall; the owned server,
+private synthetic data and diagnostic files were cleaned and the lease released.
+Production writes and ai_calls were zero.
+
+This establishes a pass under an explicit foreground test lifecycle. It does
+not identify the cause of the earlier background instrumentation stalls, prove
+background reliability, or measure real system sleep. Do not repeat this gate
+merely to wait for a host-interruption window. Real login startup, system sleep
+with JVM-clock/message-finalization evidence and phone reconnection, and
+Tailscale restart/rebinding still require their own guarded measurements.
 
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:

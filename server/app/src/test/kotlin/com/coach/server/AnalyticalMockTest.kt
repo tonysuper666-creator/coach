@@ -30,6 +30,12 @@ class AnalyticalMockTest {
     @Test fun exactInclusiveBoundaryBelow() = checkPart("0.995", "0.005", "1.00", "CORRECT", 4.0)
     @Test fun justBeyondBoundary() = checkPart("1.005000000000000000001", "0.005", "1.00", "INCORRECT", 0.0)
     @Test fun zeroToleranceIsNotInflated() = checkPart("1.000000001", "0", "1.00", "INCORRECT", 0.0)
+    @Test fun omittedToleranceRetainsLegacyDefault() = withPaper("1.005", null) { mocks, store, id, _ ->
+        val result = mocks.submit(store, "SYNTH", id, json("A#a" to json("final" to "1.00")), false)
+        val part = result.getValue("items").jsonArray.first().jsonObject
+        assertEquals(4.0, part.getValue("score").jsonPrimitive.double)
+        assertEquals("0.005", part.getValue("numericFinal").jsonObject.getValue("absTolerance").jsonPrimitive.content)
+    }
     @Test fun oneDecimalPlaceIsRejected() = checkPart("1.00", "0.005", "1.0", "WRONG_DECIMAL_PLACES", 0.0)
     @Test fun nonNumberIsRejected() = checkPart("1.00", "0.005", "NaN", "NOT_NUMERIC", 0.0)
     @Test fun missingFinalDoesNotFallBackToWorking() = checkPart("1.00", "0.005", "", "MISSING", 0.0)
@@ -107,15 +113,15 @@ class AnalyticalMockTest {
         }
     }
 
-    private fun withPaper(expected: String, tolerance: String, block: (MockEngine, LedgerStore, String, java.nio.file.Path) -> Unit) {
+    private fun withPaper(expected: String, tolerance: String?, block: (MockEngine, LedgerStore, String, java.nio.file.Path) -> Unit) {
         val dir = Files.createTempDirectory("analytical-mock")
         val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
         try {
             Files.writeString(dir.resolve("fig.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 50\"><text x=\"5\" y=\"20\">frozen-standard</text></svg>")
             Files.writeString(dir.resolve("paper.json"), """{"id":"synthetic-steps","title":"Synthetic steps","course":"SYNTH","kind":"paper","sections":[{"items":[
               {"id":"A","type":"analytical","stem":"Synthetic orchard arithmetic.","marks":10,"figure_svg":"fig.svg","parts":[
-              {"label":"a","prompt":"Calculate a value.","marks":4,"answer":"$expected","tolerance":$tolerance,"rubric":[]},
-              {"label":"b","prompt":"Explain the equality and calculate.","marks":6,"answer":"$expected","tolerance":$tolerance,
+              {"label":"a","prompt":"Calculate a value.","marks":4,"answer":"$expected",${tolerance?.let { "\"tolerance\":$it," }.orEmpty()}"rubric":[]},
+              {"label":"b","prompt":"Explain the equality and calculate.","marks":6,"answer":"$expected",${tolerance?.let { "\"tolerance\":$it," }.orEmpty()}
                "rubric":[{"criterion":"Set up equality","marks":3,"look_for":"Shows both sides"}]}]}]}]}""")
             val mocks = MockEngine(MockLibrary(dir))
             val started = mocks.start(store, "SYNTH", json("paperId" to "synthetic-steps"))

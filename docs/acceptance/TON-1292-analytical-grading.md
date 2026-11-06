@@ -52,7 +52,10 @@ The mock adapter uses this validator in analytical final-value fields and this
 key for numeric-only parts. Constructed jobs include `decimalPlaces: 2` and the
 original tolerance literal, and use the existing process grading/review path.
 Flattened part keys and hundredths-of-a-mark score units stay on the existing
-ledger. An empty final never falls back to working. A blank part scores zero
+ledger. Omitted mock-part `tolerance` retains the legacy absolute default `0.005`;
+an explicit `tolerance: 0` still requires exact equality. Numeric-only parts read
+only `final`, intentionally never interpreting the working `text` as a final.
+An empty final never falls back to working. A blank part scores zero
 without discarding another part's marks. The standard `figure_svg` is frozen at
 exam start and excluded from pre-submission responses, including legacy papers
 that stored it under `figure`.
@@ -124,6 +127,38 @@ afterwards. The full result survives server restart unchanged.
 A fresh independent sample of three local generated problems also matched 3/3;
 all five numeric finals matched `AnalyticalNumericKey`. No sampled material,
 answers, private filenames or copied database are committed or attached.
+
+## QA follow-up: compatibility and device runner
+
+QA-C verified head `5b70f2b` but withheld acceptance pending the emulator gate.
+The missing-tolerance change was a compatibility regression: omitted mock-part
+tolerance now again defaults to `0.005`, while explicit zero stays strict.
+The independent `omittedToleranceRetainsLegacyDefault` test failed against
+`5b70f2b` (exit 1, assertion failure), then passed after the correction (exit 0):
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.AnalyticalMockTest.omittedToleranceRetainsLegacyDefault --max-workers=2
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.AnalyticalMockTest --tests com.coach.server.MockExamTest --max-workers=2
+```
+
+The latter command passes all 14 focused tests. The full command below exits 0
+(`BUILD SUCCESSFUL in 5m 37s`): 54 domain, 50 client, 78 UI, 80 AI and 158 server
+tests, 420 total with no failures or skips. Unchanged tasks can be up to date.
+
+```sh
+tools/dev/heavy ./gradlew :shared:domain:jvmTest :shared:client:jvmTest :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:ai:test :server:app:test :server:app:installDist -PcoachApplicationId=com.coach.android.ton1292 -Pcoach.port=19292 --max-workers=2
+```
+
+`AnalyticalMockSmoke` is the prepared Android instrumentation journey, not an
+executed device result. It enters separate working/final values through the UI,
+checks format hints, submits the synthetic 4 + 3 + 0 example, captures the result
+and wrong-step explanation, and supports reopening after force-stop. It only
+accepts port 19292 and the `.ton1292` package. The issue attachment contains its
+isolated server/AVD runner; the runner uses only `coach_1128_c70_r`, switches
+between 360×640 dp portrait and 1280×800 dp landscape, restarts its own server,
+checks the result remains identical, restores window overrides and uninstalls
+both suffixed packages. It must run under `tools/dev/heavy --emulator`.
+Neither compiling this test nor preparing the runner satisfies device acceptance.
 
 ## Remaining acceptance and device handoff
 

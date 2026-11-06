@@ -100,8 +100,8 @@ internal class MockPaper(val json: JsonObject) {
                     val partMarks = p.double("marks")
                     val r = rubric(p["rubric"], "$id($label)")
                     val numeric = p.str("answer").takeIf { it.toBigDecimalOrNull() != null }
-                    // Keep original decimal literals: a Double round trip moves the inclusive boundary.
-                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.content ?: "0"
+                    // Keep original decimal literals and the legacy default; explicit zero stays strict.
+                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.content ?: "0.005"
                     if (numeric != null) AnalyticalNumericKey(numeric, tolerance)
                     val rest = partMarks - r.sumOf { it.points }
                     require(partMarks > 0 && rest > -1e-6) { "$id($label) 评分细则超出分值" }

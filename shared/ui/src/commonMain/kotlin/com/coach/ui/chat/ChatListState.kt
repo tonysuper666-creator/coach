@@ -51,7 +51,12 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
     }
 
     /** The reader sent something or asked for "回到最新": follow the tail again. */
-    suspend fun scrollToTail() { anchor.pinned = true; list.scrollToItem(0, 0) }
+    suspend fun scrollToTail() { anchor.pinned = true; ensureTailVisible() }
+
+    /** Content growth at reverse-layout offset zero already follows the tail. */
+    internal suspend fun ensureTailVisible() {
+        if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0, 0)
+    }
 
     /**
      * Bring the top of the item with [key] to the top of the viewport (a new question group is read from question 1).
@@ -121,7 +126,7 @@ fun <T> AnchoredChatList(
             androidx.compose.runtime.withFrameNanos { }
             // An explicit new-question focus supersedes the earlier follow-tail request.
             if(focusRequest==state.focusRequest) {
-                list.scrollToItem(0, 0)
+                state.ensureTailVisible()
                 anchor.pinned = true
             }
             state.followNewest = false
@@ -144,7 +149,7 @@ fun <T> AnchoredChatList(
         try {
             // This effect starts while BoxWithConstraints is still measuring; scrolling is only legal after layout has finished.
             androidx.compose.runtime.withFrameNanos { }
-            if (anchor.pinned) list.scrollToItem(0, 0)
+            if (anchor.pinned) state.ensureTailVisible()
             else {
                 val wanted = anchor.key
                 val index = currentItems.indexOfFirst { currentKey(it) == wanted }

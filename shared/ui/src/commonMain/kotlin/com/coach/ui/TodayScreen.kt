@@ -45,7 +45,7 @@ fun TodayScreen(
                         if (view.projection.studyScope == null) Text("所有知识点都已通过。", style = MaterialTheme.typography.titleMedium)
                     }
                     if (weekActions != null) {
-                        WeekPicker(view, weekActions, ui.connected)
+                        WeekPicker(view, weekActions, ui.connected, directWhenUnscoped = true)
                         WeekSummary(view, weekActions, ui.connected)
                         target?.let { view.weekProgress(it.id) }?.let { Text(it, style = MaterialTheme.typography.labelLarge) }
                     }

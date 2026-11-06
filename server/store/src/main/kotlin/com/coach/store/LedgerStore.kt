@@ -687,7 +687,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     if (correct != null) emit("attempt_graded",json("attemptId" to attemptId,
                                         "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
                                         "max" to 1,"status" to "EXACT",
-                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
+                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap),
+                                        "correctAnswer" to "${frozenMap[correct]} · ${choiceOptions(qid).first { it.optionId == correct }.text}",
+                                        "rationale" to verifiedChoiceExplanation(qid).ifBlank { "按本题已复核答案判分。" }),"attempt:$attemptId:grade:exact")
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }

@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
+import com.coach.client.TutorMessage
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -17,6 +18,26 @@ import kotlin.test.*
 /** 「看原文」：看完返回，讲解页的状态原样；资料页不等章节列表就显示锚点页；取不到时如实说。 */
 @OptIn(ExperimentalTestApi::class)
 class SourceViewTest {
+    @Test fun sourceOverlayKeepsStreamingFeedbackAndLessonInTheSameStudyPane() = runComposeUiTest {
+        var reading by mutableStateOf(false)
+        var message by mutableStateOf(TutorMessage("weekly-feedback", "stub", false, "错因：已复核"))
+        val math = MathAssets()
+        setContent {
+            val study = remember { movableContentOf { TutorBubble(message, math, {}) } }
+            Box(Modifier.size(500.dp, 500.dp)) {
+                SourceOverlay(covered = reading, base = { study() }, overlay = { Text("教材第 7 页") })
+            }
+        }
+        onNodeWithText("错因：已复核", substring = true).assertExists()
+        runOnIdle { reading = true }; waitForIdle()
+        onNodeWithText("教材第 7 页").assertExists()
+        runOnIdle { message = message.copy(text = "错因：已复核\n\n继续学习：下一知识点", status = "complete") }
+        waitForIdle()
+        runOnIdle { reading = false }; waitForIdle()
+        onNodeWithText("错因：已复核", substring = true).assertExists()
+        onNodeWithText("继续学习：下一知识点", substring = true).assertExists()
+    }
+
     /** Stand-in for the study pane: a counter that only survives if the pane stays composed (draft, chosen option, running stream). */
     private class Harness {
         var reading by mutableStateOf(false)

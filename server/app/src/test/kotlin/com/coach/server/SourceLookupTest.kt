@@ -216,6 +216,20 @@ class SourceLookupTest {
         }
     }
 
+    @Test fun restrictedInitialAnswerIsNeverPublishedOrPersisted() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute { registerSourcePage("c","answer_keys/private","Private reference",1,secret) }
+            h.stub.stream(1,"$secret. A safe conclusion.",StubTutor.terminal("complete"),StubTutor.DONE)
+            val id = h.chat.ask("t","c","Explain adverse selection")
+            val result = h.awaitEnd(id)
+            assertFalse(result.contains(secret))
+            assertFalse(h.frames.any { it.toString().contains(secret) })
+            assertFalse(h.chat.snapshot(id).toString().contains(secret))
+            assertTrue(h.stub.requestBodies.first().contains(secret))
+        }
+    }
+
     @Test fun restrictedLookupEchoIsNeverPublishedOrPersisted() = runBlocking {
         Harness().use { h ->
             val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"

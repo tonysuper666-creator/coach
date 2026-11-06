@@ -321,6 +321,10 @@ class ChatService(
         publish(tutor.settings(courseId,threadId,groupSize,mode),threadId,courseId)
     }
 
+    suspend fun retryMistakes(threadId: String, courseId: String) {
+        publish(tutor.retryMistakes(courseId,threadId),threadId,courseId)
+    }
+
     suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String, receivedAt: Long = System.nanoTime()) {
         val outcome = tutor.explain(courseId,threadId,mode)
         publish(outcome,threadId,courseId)
@@ -383,13 +387,15 @@ class ChatService(
             val mistakesContext = listOf(TutorOutputGuard.modelInput(LessonPreparation.headerOnly(sourcePack)), plan.mistakeInstruction()).joinToString("\n")
             val lessonContext = listOf(TutorOutputGuard.modelInput(enriched), plan.copy(mistakes = emptyList()).instruction(),
                 "The graded questions are explained in a separate part of this reply that is written in parallel; do not discuss them. Start directly with the new concepts.").joinToString("\n")
+            val safeQuestion = TutorOutputGuard.modelInput(question)
             session.trace?.prepared()
-            scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), mistakesContext, recentTurns, lessonContext) }
+            scope.launch(Dispatchers.IO) { run(session, safeQuestion, mistakesContext, recentTurns, lessonContext) }
             return messageId
         }
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
+        val safeQuestion = TutorOutputGuard.modelInput(question)
         session.trace?.prepared()
-        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context, recentTurns) }
+        scope.launch(Dispatchers.IO) { run(session, safeQuestion, context, recentTurns) }
         return messageId
     }
 
@@ -581,16 +587,19 @@ class ChatService(
                 }
             } catch (error: Exception) { internalFailure(error) }
         }
+        var firstResult: BridgeResult? = null
         val result = try {
             val first = withContext(Dispatchers.IO) {
-                session.trace?.bridge()
-                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed,
+                val request = teachRequest(question, pack, recent, session.model, session.lookupAllowed,
                     if (lessonPack == null) session.plan?.effort ?: "medium" else "low",
-                    if (lessonPack == null) session.plan?.reviewedBasis == true else true), sink) { handle ->
+                    if (lessonPack == null) session.plan?.reviewedBasis == true else true)
+                session.trace?.bridge()
+                bridge.streamChat(request, sink) { handle ->
                     session.attach(handle)
                     lessonStart.complete(Unit)
                 }
             }
+            firstResult = first
             if (lessonJob == null) first
             else if (first !is BridgeResult.Success || session.forcedStatus != null) {
                 session.stopLesson()
@@ -605,7 +614,7 @@ class ChatService(
                     outChars = partOne.length, status = first.terminal?.status ?: StreamStatus.COMPLETE, queueMs = first.call.queueMs, physicalCalls = first.call.physicalCalls) }
                 guard = newGuard()
                 visible = VisibleStream { drop ->
-                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
                 }
                 emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
                 completedPrefix = visibleText.toString()
@@ -685,13 +694,16 @@ class ChatService(
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
-        val rid = safeRequestId(result.call.requestId)
-        val traffic = terminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
-        val source = terminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
-        val terminalStatus = terminal?.status?.takeIf { it in setOf("complete", "failed", "cancelled", "truncated") }
-        val failure = safeDiagnosticReason((result as? BridgeResult.Failure)?.reason)
-        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${result.call.ttftMs} terminal=$terminalStatus failure=$failure")
-        session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs, rid)) }
+        // The first-word offsets describe the first upstream, even if a staged lesson finishes later.
+        val diagnosticResult = firstResult ?: result
+        val diagnosticTerminal = diagnosticResult.terminal
+        val rid = safeRequestId(diagnosticResult.call.requestId)
+        val traffic = diagnosticTerminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
+        val source = diagnosticTerminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
+        val terminalStatus = diagnosticTerminal?.status?.takeIf { it in setOf("complete", "failed", "cancelled", "truncated") }
+        val failure = safeDiagnosticReason((diagnosticResult as? BridgeResult.Failure)?.reason)
+        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${diagnosticResult.call.ttftMs} terminal=$terminalStatus failure=$failure")
+        session.trace?.let { log(it.finish(status, diagnosticTerminal?.queueMs, diagnosticTerminal?.ttftMs, rid)) }
         if (willFallback) fallback(session,question,pack)
     }
 

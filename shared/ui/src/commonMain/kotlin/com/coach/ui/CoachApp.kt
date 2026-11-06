@@ -117,7 +117,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
     // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
-    val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
+    val anchorOfOpen = open?.let { (id, _) -> view?.kpAny(id) }?.takeIf { it.anchorDoc.isNotBlank() }
     LaunchedEffect(anchorOfOpen?.id, ui.connected) {
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
@@ -145,11 +145,15 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 OfflineBanner(ui, c)
                 val current = view
-                val target = open?.let { (id, _) -> current?.kp(id) }
+                // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
+                val target = open?.let { (id, _) -> current?.kpAny(id) }
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
                 // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
                     key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
+                } }
+                val reviewPane = remember(c) { movableContentOf<CourseView> { reviewView ->
+                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" })
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }
@@ -160,14 +164,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     val contentWidth = maxWidth - layout.navWidthDp.dp
                     val wide = contentWidth >= WIDE_LAYOUT_MIN_WIDTH
                     LaunchedEffect(wide) { c.tutor.telemetry?.record("screen", if (wide) "wide" else "compact") }
-                    // Records and Resources use the whole width (Records has its own list | detail); the other tabs pair a list with the study thread.
-                    val paired = tab == AppTab.TODAY || tab == AppTab.ROUTE || tab == AppTab.REVIEW
+                    // Review, Records and Resources use the whole width; Today and Route pair a list with the study thread.
+                    val paired = tab == AppTab.TODAY || tab == AppTab.ROUTE
                     val body: @Composable () -> Unit = {
                         val tabContent: @Composable () -> Unit = {
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp)
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) reviewPane(current) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }

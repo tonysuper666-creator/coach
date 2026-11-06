@@ -3,6 +3,7 @@ package com.coach.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import kotlinx.coroutines.launch
@@ -15,11 +16,18 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 
+/**
+ * 错题卡片的标题：错题是历史，退休点上的错题仍要显示知识点名，
+ * 只有活跃队列/选点才排除退休点。
+ */
+internal fun mistakeTitle(view: CourseView, kpId: String): String = view.kpAny(kpId)?.title ?: kpId
+
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
+    var tab by remember(c.courseId) { mutableStateOf(if (due.isNotEmpty()) 1 else 0) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
@@ -27,7 +35,6 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         }
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
-        OfflinePractice(c)
         if (onOpenMock != null) Surface(onClick = onOpenMock, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 56.dp).testTag("open-mock")) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -38,25 +45,133 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 Text("›", style = MaterialTheme.typography.titleLarge)
             }
         }
-        if (due.isEmpty()) {
-            CenterMessage("今天没有到期的复习。")
-            return@Column
+        PrimaryTabRow(selectedTabIndex = tab) {
+            listOf("错题 ${view.mistakes.items.size}", "到期 ${due.size}", "离线练习").forEachIndexed { index, label ->
+                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label) })
+            }
         }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { Text("${due.size} 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            items(due, key = { it.kp.id }) { item ->
-                val (tag, main) = splitTitle(item.kp.title)
-                Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-                    Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Column(Modifier.weight(1f)) {
-                            if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                            Text(if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+        if (due.isEmpty() && tab != 1) {
+            Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        }
+        when (tab) {
+            0 -> MistakesPane(c, view)
+            2 -> OfflinePractice(c)
+            else -> {
+                if (due.isEmpty()) {
+                    CenterMessage("今天没有到期的复习。")
+                } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item { Text("${due.size} 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    items(due, key = { it.kp.id }) { item ->
+                        val (tag, main) = splitTitle(item.kp.title)
+                        Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Column(Modifier.weight(1f)) {
+                                    if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                    Text(if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                                }
+                                Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
+                            }
                         }
-                        Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MistakesPane(c: CoachController, view: CourseView) {
+    val ui by c.tutor.model.state.collectAsState()
+    var activeKp by remember { mutableStateOf<String?>(null) }
+    var priorGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val chosen = remember { mutableStateMapOf<String, String>() }
+    val listState = rememberLazyListState()
+    val thread = activeKp?.let(view::reviewThreadId).orEmpty()
+    val tv = ui.threads[thread]
+    val group = if (activeKp == null) null else view.quizGroups(thread).lastOrNull { it.groupId !in priorGroups }
+    fun retry(kpId: String) {
+        // 错题可能是已退休点上的：名称和概念仍要能取到，否则会退回原始 id。
+        val kp = view.kpAny(kpId)
+        val target = view.reviewThreadId(kpId)
+        val groups = view.quizGroups(target)
+        priorGroups = groups.filter { it.submitted }.map { it.groupId }.toSet()
+        activeKp = kpId; chosen.clear(); notice = null
+        c.tutor.model.onSent(target, "retry", null)
+        if (!c.tutor.open(target, c.courseId, kpId, kp?.conceptIds ?: listOf(kpId), kp?.title ?: kpId, review = true) ||
+            !c.tutor.retryMistakes(target, c.courseId)) {
+            c.tutor.model.onFailure(target, "Mac 未连接，连上后可再练；错题已保存在本机。")
+        }
+    }
+    LaunchedEffect(activeKp, group?.groupId) { listState.scrollToItem(0) }
+    LaunchedEffect(group, view.mistakes) {
+        if (group?.cards?.all { it.grade != null } == true && view.mistakes.items.none { it.kpId == activeKp }) {
+            activeKp = null; notice = "连续答对 3 道，这个知识点的错题已移出。"
+        }
+    }
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        item {
+            Column(Modifier.widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("同一知识点连续答对 3 道新题后，自动移出。", style = MaterialTheme.typography.bodyMedium)
+                if (!ui.connected) Text("离线可回看错题；连接 Mac 后可再练。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+                if (activeKp != null) TextButton(onClick = { activeKp = null }) { Text("← 返回错题") }
+            }
+        }
+        if (activeKp != null) {
+            if (group == null) item {
+                Column(Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
+                    Text(tv?.error ?: "正在取出同一知识点的 3 道新题…")
+                    if (tv?.error != null) Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
+                        modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
+                }
+            } else {
+                items(group.cards, key = { it.attemptId }) { card ->
+                    Box(Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
+                        QuizCardView(group.cards.indexOf(card) + 1, group.cards.size, card, group.submitted,
+                            chosen[card.attemptId], c.math) { chosen[card.attemptId] = it }
+                    }
+                }
+                item {
+                    Column(Modifier.widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        tv?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        if (!group.submitted) Button(onClick = {
+                            if (!c.tutor.answer(thread, c.courseId, group.groupId,
+                                    group.cards.associate { it.attemptId to chosen.getValue(it.attemptId) }, "retry-${group.groupId}"))
+                                c.tutor.model.onFailure(thread, "Mac 未连接，答案尚未提交，选择已保留。")
+                        }, enabled = ui.connected && group.cards.all { chosen[it.attemptId] != null },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
+                        else if (group.cards.all { it.grade != null }) {
+                            Text("本组 ${group.cards.count { it.grade?.correct == true }} / ${group.cards.size} 题正确")
+                            Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
+                                modifier = Modifier.heightIn(min = 56.dp)) { Text("再练一组") }
+                        } else Text("答案已提交，正在判分…")
+                    }
+                }
+            }
+        } else if (view.mistakes.items.isEmpty()) {
+            item { Text(view.mistakes.emptyText, Modifier.padding(vertical = 32.dp)) }
+        } else {
+            items(view.mistakes.items, key = { "${it.kpId}:${it.attemptId}" }) { mistake ->
+                MistakeCard(mistake, mistakeTitle(view, mistake.kpId), c.math, ui.connected) { retry(mistake.kpId) }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MistakeCard(mistake: com.coach.client.Mistake, title: String, math: MathAssets, online: Boolean, onRetry: () -> Unit) {
+    Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Markdown(mistake.card.stem, true, "mistake:${mistake.attemptId}", math)
+            val answer = mistake.card.answer.orEmpty()
+            Text("当时的答案：" + (mistake.card.options.firstOrNull { it.first == answer }?.let { "${it.first} · ${it.second}" } ?: answer))
+            Text("正确答案：${mistake.correctAnswer}")
+            Markdown("判分依据：${mistake.reasonSentence}", true, "reason:${mistake.attemptId}", math)
+            Button(onClick = onRetry, enabled = online, modifier = Modifier.heightIn(min = 56.dp)) { Text("再练一组") }
         }
     }
 }

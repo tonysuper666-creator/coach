@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import java.net.URI
@@ -195,17 +196,77 @@ class ChatFlowTest {
     }
 
     @Test
+    fun selectedWeekAndMistakeFeedbackCoexistWithTheStubTutorService() {
+        Harness().use { h ->
+            runBlocking {
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json("ops" to kotlinx.serialization.json.JsonArray(listOf(
+                        com.coach.domain.json("kpId" to "kp-1", "title" to "【W2·Ch3】Synthetic objective"),
+                        com.coach.domain.json("kpId" to "kp-2", "title" to "【W2·Ch3】Next objective")
+                    ))))
+                    val bytes = com.coach.domain.LedgerJson.encodeToString(com.coach.protocol.CommandBody(
+                        "set_study_scope", "course-1", 1000, com.coach.domain.json("week" to 2)))
+                    val wireCommand = com.coach.protocol.WireCommand("test", java.util.UUID.randomUUID().toString(), bytes, com.coach.store.sha256(bytes.toByteArray()))
+                    assertEquals("OK", command(wireCommand).status)
+                }
+                seedReviewed(h)
+            }
+            h.tutor.streamWhen("explains the graded mistakes only", 5, "已复核错因。", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 5, "继续学习。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                runBlocking { h.actor.execute {
+                    val all = events("course-1")
+                    assertEquals(1, com.coach.domain.weekMistakes(all, 2).size)
+                    val feedback = all.last { it.type == "attempt_graded" }.payload.str("feedback")
+                    assertTrue(feedback.contains("你的选择与已复核解析不符"), feedback)
+                    assertEquals("kp-1", snapshot("course-1").projection.studyScope?.target(snapshot("course-1").projection.mastery))
+                } }
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val (visible, end) = collectDeltas(ws)
+                assertEquals("complete", end.str("status"))
+                assertTrue(visible.contains("已复核错因。") && visible.contains("继续学习。"), visible)
+                runBlocking { h.actor.execute {
+                    fun send(type: String, payload: JsonObject): com.coach.protocol.Receipt {
+                        val bytes = com.coach.domain.LedgerJson.encodeToString(com.coach.protocol.CommandBody(type, "course-1", 1000, payload))
+                        return command(com.coach.protocol.WireCommand("test", java.util.UUID.randomUUID().toString(), bytes, com.coach.store.sha256(bytes.toByteArray())))
+                    }
+                    val wrong = com.coach.domain.weekMistakes(events("course-1"), 2).single()
+                    assertEquals("OK", send("retry_week_mistake", com.coach.domain.json("week" to 2, "attemptId" to wrong.payload.str("attemptId"))).status)
+                    val retry = events("course-1").last { it.type == "question_posed" }
+                    val right = retry.payload.getValue("letterMap").jsonObject.getValue(tutorChoiceKey(retry.payload.str("questionId")).correctOptionId)
+                    assertEquals("OK", send("submit_answer", com.coach.domain.json("attemptId" to retry.payload.str("attemptId"), "answer" to right, "posedSnapshot" to retry.payload)).status)
+                    assertTrue(com.coach.domain.weekMistakes(events("course-1"), 2).isEmpty())
+                    val scope = assertNotNull(snapshot("course-1").projection.studyScope)
+                    assertEquals("kp-2", send("advance_study_scope", com.coach.domain.json("scopeId" to scope.id, "kpId" to "kp-1")).result.str("target"))
+                } }
+            }
+        }
+    }
+
+    @Test
     fun stagedFirstExplanationStreamsMistakesThenLessonInOrderEvenWhenTheLessonFinishesFirst() {
         Harness().use { h ->
             runBlocking { seedReviewed(h) }
             val partOne = listOf("你选的「sunk expenditure」不对，","因为已花掉的钱收不回；","正确项「opportunity cost」成立。")
-            h.tutor.streamWhen("explains the graded mistakes only", 120, *partOne.toTypedArray(), StubTutor.terminal("complete"), StubTutor.DONE)
-            h.tutor.streamWhen("Start directly with the new concepts", 5, "机会成本是放弃的最佳替代。", StubTutor.terminal("complete"), StubTutor.DONE)
+            val firstTerminal = StubTutor.terminal("complete").replace("rid-stub", "rid-part-one").replace("\"x_coach\":{", "\"x_coach\":{\"traffic\":\"user\",\"source\":\"production\",")
+            val secondTerminal = StubTutor.terminal("complete").replace("rid-stub", "rid-part-two")
+            h.tutor.streamWhen("explains the graded mistakes only", 120, *partOne.toTypedArray(), firstTerminal, StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 5, "placeholder: private-staged-diagnostic-secret\n", "机会成本是放弃的最佳替代。", secondTerminal, StubTutor.DONE)
             Ws(h.port,h.token).use { ws ->
                 answerWrongBeforeTeaching(h, ws)
                 ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
                 val (visible, end) = collectDeltas(ws)
                 assertEquals("complete", end.str("status"))
+                val t = trace(h, end.str("msg"))
+                assertEquals("rid-part-one", t.str("rid"))
+                assertTrue(t.str("prepared_ms").toLong() <= t.str("bridge_start_ms").toLong())
+                assertTrue(t.str("bridge_start_ms").toLong() <= t.str("raw_first_ms").toLong())
+                assertTrue(t.str("raw_first_ms").toLong() <= t.str("visible_first_ms").toLong())
+                val logs = synchronized(h.logs) { h.logs.toList() }
+                assertTrue(logs.any { it.startsWith("COACH msg.end msg=${end.str("msg")} rid=rid-part-one traffic=user source=production") })
+                assertTrue(logs.any { it.contains("visible-drop") }, "expected staged filtering")
+                assertTrue(logs.none { it.contains("private-staged-diagnostic-secret") || it.contains("excerpt=") })
                 val first = visible.indexOf("你选的「sunk expenditure」不对")
                 val second = visible.indexOf("机会成本是放弃的最佳替代。")
                 assertTrue(first == 0 && second > visible.indexOf("正确项「opportunity cost」成立。"), "part one must come first and whole, then the lesson: $visible")

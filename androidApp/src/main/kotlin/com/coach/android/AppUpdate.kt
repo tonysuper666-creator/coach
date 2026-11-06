@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.net.Uri
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -72,8 +73,10 @@ internal class AppUpdater(private val context: Context, private val base: String
                 }
                 val current = context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode
                 if (release != null && release.code > current && release != mutable.value.release) mutable.value = UpdateState(release)
+                // Content-free outcome so acceptance can prove a foreground check actually finished.
+                Log.i("CoachUpdate", "check complete latest=${release?.code ?: "none"} current=$current")
             } catch (e: CancellationException) { throw e }
-            catch (_: Exception) { /* Offline/startup checks must not interrupt a lesson. Retry on foreground. */ }
+            catch (e: Exception) { Log.i("CoachUpdate", "check failed ${e.javaClass.simpleName}") /* Offline/startup checks must not interrupt a lesson. Retry on foreground. */ }
             finally { checking = false }
         }
     }

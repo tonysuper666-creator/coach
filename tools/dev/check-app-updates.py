@@ -228,14 +228,57 @@ def main():
             if time.monotonic() > deadline: raise RuntimeError('Installer did not upgrade package')
             time.sleep(.5)
         (out / 'version-after.txt').write_text('\n'.join(line.strip() for line in after.splitlines() if 'versionCode=' in line or 'versionName=' in line))
+        # The installer's success dialog sits over the launcher, where no update prompt could ever appear;
+        # close it so it cannot stand in for Coach's own same-version check.
+        done = find('Done'); screenshot('06-installer-success'); tap(done)
+        deadline = time.monotonic() + 20
+        while any(node.get('package', '').endswith('packageinstaller') for node in tree().iter('node')):
+            if time.monotonic() > deadline: raise RuntimeError('Installer success dialog did not close')
+            time.sleep(.3)
         instrument('upgradeRetainsKeystorePairingAndLearningDatabase')
-        launch(); time.sleep(3); screenshot('06-after-upgrade')
-        assert all('Coach 有新版本' not in node.get('text', '') for node in tree().iter('node'))
+        def logcat_mark(): return (out / 'logcat.txt').stat().st_size
+        def update_checks(mark, latest, timeout=40):
+            # The app logs one content-free line per finished check; a failed or missing check fails acceptance.
+            stage('wait update check latest=' + latest)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with (out / 'logcat.txt').open('rb') as handle:
+                    handle.seek(mark); text = handle.read().decode(errors='replace')
+                checks = re.findall(r'CoachUpdate: check (complete latest=(\S+) current=(\d+)|failed \S+)', text)
+                if any(c[0].startswith('failed') for c in checks): raise RuntimeError('Update check failed: ' + checks[-1][0])
+                if any(c[1] == latest for c in checks):
+                    stage('saw update check latest=' + latest); return [(c[1], c[2]) for c in checks]
+                time.sleep(.3)
+            raise RuntimeError('No finished update check for latest=' + latest)
+        current_code = str(valid['versionCode'])
+        mark = logcat_mark(); launch()
+        assert set(update_checks(mark, current_code)) == {(current_code, current_code)}
+        activities = adb('shell', 'dumpsys', 'activity', 'activities').stdout.decode()
+        if not re.search(r'(topResumedActivity|ResumedActivity)[=:] ?ActivityRecord\{\S+ \S+ ' + re.escape(PACKAGE + '/com.coach.android.CoachActivity'), activities):
+            raise RuntimeError('Coach is not the resumed activity after the same-version check')
+        # Leave time for a prompt to compose if one were coming; every sample must be Coach's own window.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            nodes = list(tree().iter('node'))
+            if not nodes or any(node.get('package') != PACKAGE for node in nodes):
+                raise RuntimeError('Coach is not the foreground window after upgrade')
+            if any('Coach 有新版本' in node.get('text', '') for node in nodes):
+                raise AssertionError('Same-version update prompt shown after upgrade')
+            time.sleep(.3)
+        screenshot('07-after-upgrade-foreground')
+        print('Same version after upgrade: foreground check finished without prompt: PASS', flush=True)
+        # Control: the same harness does see a prompt once a strictly newer release is published.
+        newer = dict(valid, versionCode=valid['versionCode'] + 1, versionName='0.1.N+2', sha256='1' * 64)
+        shutil.copyfile(out / 'N+1.apk', updates / ('1' * 64 + '.apk'))
+        mark = logcat_mark(); release(newer); update_checks(mark, str(newer['versionCode']))
+        screenshot('08-newer-release-offered')
+        print('Newer release still offered after upgrade: PASS', flush=True)
         snapshot_output = (out / 'snapshotLearningReplica.txt').read_text()
         event_count = int(re.search(r'Learning replica snapshot: (\d+) events', snapshot_output).group(1))
         summary = {'versionBefore': 216600001, 'versionAfter': valid['versionCode'], 'signatureRejected': True,
                    'digestRejected': True, 'pairingRetained': True, 'learningReplicaRetained': True,
-                   'learningEventCount': event_count, 'foregroundCheck': True,
+                   'learningEventCount': event_count, 'foregroundCheck': True, 'sameVersionCheck': current_code,
+                   'newerReleaseOffered': newer['versionCode'],
                    'productionWrites': 0, 'realTutorCalls': 0, 'phoneUsed': False}
         (out / 'summary.json').write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)

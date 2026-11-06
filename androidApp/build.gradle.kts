@@ -51,6 +51,10 @@ android {
         // The port is also written to the manifest (meta-data `coach.port`) so a script can read it back from an installed package.
         val coachPort = (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) }
         buildConfigField("int", "COACH_PORT", coachPort)
+        // Optional card-only launcher endpoint. Missing or invalid values fail closed at runtime.
+        val isolatedLaunchPort = providers.gradleProperty("coach.isolatedLaunchPort").orElse("-1").get()
+        require(isolatedLaunchPort.matches(Regex("-?[0-9]{1,5}"))) { "invalid coach.isolatedLaunchPort" }
+        buildConfigField("int", "COACH_ISOLATED_LAUNCH_PORT", isolatedLaunchPort)
         manifestPlaceholders["coachPort"] = coachPort
         // Isolated synthetic acceptance must not change the shared production configuration.
         val coachCourse = providers.gradleProperty("coach.course").orElse(localConfig.getProperty("coach.course", "")).get()

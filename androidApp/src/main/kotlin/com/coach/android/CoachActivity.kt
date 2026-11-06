@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -69,7 +70,7 @@ class CoachActivity : ComponentActivity() {
                     if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                     else {
                         val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) })
+                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), backHandler = { enabled, onBack -> BackHandler(enabled, onBack) }, settings = { ReminderSettings(reminder) })
                     }
                 }
             }
@@ -179,21 +180,6 @@ class CoachActivity : ComponentActivity() {
 }
 
 /** The acceptance override only selects another port on the configured Mac. */
-internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {
-    val configured = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
-    val accepted = if (BuildConfig.DEBUG) requested?.takeIf { candidate -> runCatching {
-        val uri = java.net.URI(candidate)
-        uri.scheme == "http" && uri.host == BuildConfig.COACH_TAIL_HOST && uri.port in 1..65535 &&
-            uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null && uri.rawPath.orEmpty() in setOf("", "/")
-    }.getOrDefault(false) } else null
-    // A card package must not fall back to the production port when the extra is missing or rejected.
-    if (packageName != "com.coach.android") {
-        val port = accepted?.let { java.net.URI(it).port }
-        if (accepted == null || port == 18791 || port == 8791 || port == 8790) {
-            error("Refusing production default for $packageName; coachUrl=${requested ?: "<empty>"}")
-        }
-        return accepted
-    }
-    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
-    return accepted ?: configured
-}
+internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String =
+    resolveCoachServerUrl(requested, packageName, BuildConfig.DEBUG, BuildConfig.COACH_TAIL_HOST,
+        BuildConfig.COACH_PORT, BuildConfig.COACH_ISOLATED_LAUNCH_PORT)

@@ -42,8 +42,28 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
+fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean, directWhenUnscoped: Boolean = false) {
+    if (directWhenUnscoped && view.projection.studyScope == null) {
+        if (view.weeks.isEmpty()) {
+            Text("暂无可选周次。", style = MaterialTheme.typography.bodyMedium)
+        } else {
+            if (!connected) Text("连接 Mac 后可选择周次。", style = MaterialTheme.typography.bodyMedium)
+            if (actions.busy) Text("正在更新…", style = MaterialTheme.typography.bodyMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                view.weeks.forEach { week ->
+                    val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
+                    val exempt = week in view.midtermExemptionWeeks
+                    OutlinedButton(onClick = { actions.select(week) }, enabled = connected && !actions.busy && !exempt, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(if (exempt) view.weekLabel(week) else "${view.weekLabel(week)} · $remaining 个待学")
+                    }
+                }
+            }
+        }
+        actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+        return
+    }
     var expanded by remember { mutableStateOf(false) }
     Box {
         TextButton(onClick = { expanded = true }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {
@@ -53,7 +73,8 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
             view.weeks.forEach { week ->
                 val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
                 val label = view.weekLabel(week)
-                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") }, onClick = { expanded = false; actions.select(week) })
+                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") },
+                    enabled = week !in view.midtermExemptionWeeks, onClick = { expanded = false; actions.select(week) })
             }
             if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) })
         }
@@ -70,7 +91,7 @@ fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { actions.onReview(active.week) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("再练这一周错题") }
-        view.weeks.firstOrNull { it > active.week }?.let { next ->
+        view.weeks.firstOrNull { it > active.week && it !in view.midtermExemptionWeeks }?.let { next ->
             Button(onClick = { actions.select(next) }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换下一周") }
         }
     }

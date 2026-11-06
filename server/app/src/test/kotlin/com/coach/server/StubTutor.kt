@@ -131,7 +131,7 @@ class StubTutor : AutoCloseable {
             },
         )
 
-        fun terminal(status: String, reason: String? = null): String = sse(
+        fun terminal(status: String, reason: String? = null, requestId: String = "rid-stub", queueMs: Int = 2, ttftMs: Int = 900): String = sse(
             kotlinx.serialization.json.buildJsonObject {
                 put("choices", kotlinx.serialization.json.buildJsonArray { })
                 put("model", kotlinx.serialization.json.JsonPrimitive("claude-sonnet-5-5"))
@@ -148,9 +148,9 @@ class StubTutor : AutoCloseable {
                         put("served_by", kotlinx.serialization.json.JsonPrimitive("claude-sonnet-5-5"))
                         put("fallback", kotlinx.serialization.json.JsonPrimitive(false))
                         put("physical_calls", kotlinx.serialization.json.JsonPrimitive(1))
-                        put("request_id", kotlinx.serialization.json.JsonPrimitive("rid-stub"))
-                        put("queue_ms", kotlinx.serialization.json.JsonPrimitive(2))
-                        put("ttft_ms", kotlinx.serialization.json.JsonPrimitive(900))
+                        put("request_id", kotlinx.serialization.json.JsonPrimitive(requestId))
+                        put("queue_ms", kotlinx.serialization.json.JsonPrimitive(queueMs))
+                        put("ttft_ms", kotlinx.serialization.json.JsonPrimitive(ttftMs))
                         put("elapsed_ms", kotlinx.serialization.json.JsonPrimitive(1500))
                     },
                 )

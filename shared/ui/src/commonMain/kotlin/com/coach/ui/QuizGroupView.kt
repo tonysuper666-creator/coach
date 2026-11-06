@@ -127,7 +127,7 @@ internal fun correctLetterOf(feedback: String): String? = Regex("正确答案(?:
 internal fun verdictText(grade: CardGrade): String {
     if (grade.correct) return "✓ 答对了" + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty()
     val letter = correctLetterOf(grade.feedback)
-    return "✗ 答错了" + letter?.let { "，正确答案是 $it" }.orEmpty() + extraFeedback(grade.feedback)?.let { "：$it" }.orEmpty()
+    return "✗ 答错了" + letter?.let { "，正确答案是 $it" }.orEmpty() + extraFeedback(grade.feedback)?.let { (if (it.startsWith("你选的")) "；" else "：") + it }.orEmpty()
 }
 
 /** The verdict already says right or wrong; keep the server's feedback only when it adds something (not "回答正确（B）" or "回答错误，正确答案是 B。" again). */

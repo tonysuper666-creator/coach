@@ -45,6 +45,7 @@ class TutorClient(
     private val token: String,
     val model: TutorModel,
     val telemetry: UsageTelemetry? = null,
+    private val retryTimeoutMillis: Long = 15_000,
 ) {
     init { validateCoachBaseUrl(baseUrl); model.bindDevice(deviceId) }
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
@@ -58,6 +59,7 @@ class TutorClient(
     private val lifecycle = Any()
     private var running: Job? = null
     private var closed = false
+    private val retryWaiters = mutableMapOf<String, Job>()
     // clientMsgId → 已交给连接、还没被服务端确认的发问。连接断了，出站缓冲里的帧随之丢掉；只有 msg.user 才证明送达。
     private data class Unconfirmed(val threadId: String, val frame: String, var resends: Int = 0)
     private val unconfirmed = LinkedHashMap<String, Unconfirmed>()
@@ -229,6 +231,8 @@ class TutorClient(
             live = null
             model.onConnection(false)
             running?.cancel()
+            retryWaiters.values.forEach { it.cancel() }
+            retryWaiters.clear()
         }
         http.coroutineContext.cancel()
         http.close()
@@ -313,9 +317,9 @@ class TutorClient(
 
     /** Caller holds [lifecycle]. 本设备的 msg.user（或点名这句的 msg.error）到了，这句就不用再补发；只带线程号的错误对不上具体哪句，一句也不清。 */
     private fun confirm(text: String) {
-        if (unconfirmed.isEmpty()) return
         val obj = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         fun str(key: String) = (obj[key] as? JsonPrimitive)?.contentOrNull
+        if (str("t") in setOf("tutor.cards", "msg.error")) str("threadId")?.let { retryWaiters.remove(it)?.cancel() }
         when (str("t")) {
             "msg.user" -> if (str("deviceId") == deviceId) str("clientMsgId")?.let(unconfirmed::remove)
             "msg.error" -> (str("clientMsgId") ?: str("msg"))?.let(unconfirmed::remove)
@@ -323,6 +327,28 @@ class TutorClient(
     }
 
     fun cancel(messageId: String) = send(buildJsonObject { put("t", "msg.cancel"); put("msg", messageId) })
+
+    fun retryMistakes(threadId: String, courseId: String): Boolean = synchronized(lifecycle) {
+        retryWaiters.remove(threadId)?.cancel()
+        if (closed) return@synchronized false
+        // Register before sending so a fast response cannot leave a stale timer.
+        val waiter = CoroutineScope(http.coroutineContext).launch(start = CoroutineStart.LAZY) {
+            delay(retryTimeoutMillis)
+            synchronized(lifecycle) {
+                if (retryWaiters[threadId] === coroutineContext[Job] && !closed) {
+                    retryWaiters.remove(threadId)
+                    model.onFailure(threadId, "再练请求超时，请确认 Mac 已更新并连接后重试。错题已保存在本机。")
+                }
+            }
+        }
+        retryWaiters[threadId] = waiter
+        waiter.start()
+        val sent = send(buildJsonObject {
+            put("t", "tutor.retryMistakes"); put("threadId", threadId); put("courseId", courseId)
+        })
+        if (!sent) retryWaiters.remove(threadId)?.cancel()
+        sent
+    }
 
     /** 一次提交整组；answers: attemptId → 字母。 */
     fun answer(threadId: String, courseId: String, groupId: String, answers: Map<String, String>, submissionId: String) = send(buildJsonObject {

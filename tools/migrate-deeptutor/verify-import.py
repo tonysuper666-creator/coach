@@ -18,6 +18,24 @@ def load(path):
     return json.loads(path.read_text())
 
 
+def canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, indent=4) + "\n"
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def projection_bytes(state_bytes):
+    # Preserve JVM numeric lexemes (for example 1.3E-4) rather than reformatting
+    # floats with Python. Remove only the enclosing state's four-space indent.
+    text = state_bytes.decode()
+    start = text.index('    "projection": ') + len('    "projection": ')
+    _, length = json.JSONDecoder().raw_decode(text[start:])
+    lines = text[start:start + length].splitlines()
+    return ("\n".join(line[4:] if i else line for i, line in enumerate(lines)) + "\n").encode()
+
+
 def check(value, reason):
     if not value:
         raise ValueError(reason)
@@ -82,8 +100,33 @@ def verify_normalized_tables(db, state):
         check(sorted(actual, key=key) == sorted(saved, key=key), "Normalized SQL table differs: " + table)
 
 
-def verify(snapshot, out, seed_path):
+def verify(snapshot, out, seed_path, confirmation_path=None, proposal_path=None):
     mapping, plan, seed = (load(p) for p in (out / "mapping.json", out / "import-plan.json", seed_path))
+    decision = plan["human_confirmation"] if isinstance(plan["human_confirmation"], dict) else None
+    accepted = {}
+    curriculum = None
+    if decision is not None:
+        check(confirmation_path and proposal_path, "Confirmed imports require independent --confirmation and --proposal inputs")
+        check(load(confirmation_path) == decision and load(proposal_path) == plan["proposals"], "Decision or reviewed proposal differs from supplied inputs")
+        proposal = plan["proposals"]
+        inputs = {"knowledge_points": [{k: row[k] for k in ("id", "name", "module_id", "content_hash")} for row in mapping["knowledge_points"]],
+                  "questions": [{"id": row["id"], "content_hash": row["content_hash"], "stem": row["source_record"].get("question") or row["source_record"].get("prompt", ""), "tags": row["source_record"].get("tags", [])} for row in mapping["questions"]]}
+        check(decision["input_hash"] == proposal["input_hash"] == digest(inputs) and decision["proposal_hash"] == digest(proposal), "Decision hash binding failed")
+        check(proposal["review"]["proposal_hash"] == digest({k: v for k, v in proposal.items() if k != "review"}) and proposal["review"]["status"] == "reviewed"
+              and proposal["review"]["vendor"] != proposal["proposer"]["vendor"], "Reviewed proposal provenance failed")
+        for k, v in {"question_associations": "accept_reviewed_proposal", "curriculum": "accept_reviewed_proposal", "ambiguous_answers": "preserve_verbatim_unscored",
+                     "choice_explanations": "archive_only", "passed_times": "approximate", "grading": "unreviewed_no_keys"}.items():
+            check(decision[k] == v, "Decision policy differs: " + k)
+        short = [q for q in mapping["questions"] if q["source_record"].get("question_type") == "short_answer"]
+        sample = short if len(short) <= 10 else [short[i * (len(short) - 1) // 9] for i in range(10)]
+        samples = []
+        for q in sample:
+            field = next((k for k in ("rubric", "grading_rubric", "marking_criteria", "explanation") if k in q["source_record"]), None)
+            samples.append({"id": q["id"], "content_hash": q["content_hash"], "field": field, "value": q["source_record"].get(field)})
+        check(samples == decision["short_answer_samples"], "Short-answer source material differs")
+        accepted = {q["id"]: q["kp_ids"] for q in proposal["questions"]}
+        check(set(accepted) == {q["id"] for q in mapping["questions"]}, "Accepted question coverage differs")
+        curriculum = {k: proposal[k] for k in ("concepts", "knowledge_points")}
     before, after, rollback = (connect(out / p) for p in ("before.sqlite", "coach.sqlite", "rollback.sqlite"))
     try:
         course = plan["course_id"]
@@ -94,14 +137,20 @@ def verify(snapshot, out, seed_path):
         content_tables = ("outline_kp", "source_docs", "source_pages", "blobs", "course_content", "course_modules")
         tables = {r[0] for r in before.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         # Explicit event seq inserts advance SQLite's AUTOINCREMENT bookkeeping.
-        for table in tables - {"events", "questions", "threads", "messages", "projection_cache", "migration_records", "migration_batches", "sqlite_sequence"}:
+        for table in tables - {"events", "questions", "question_kp", "outline_kp", "threads", "messages", "projection_cache", "migration_records", "migration_batches", "sqlite_sequence"}:
             check(rows(before, table) == rows(after, table), "Unrelated baseline table changed: " + table)
-        for table in ("questions", "threads", "messages"):
+        for table in ("questions", "question_kp", "threads", "messages"):
             baseline_rows = {repr(sorted(r.items())) for r in rows(before, table)}
             check(baseline_rows <= {repr(sorted(r.items())) for r in rows(after, table)}, "Existing rows changed: " + table)
         for table in content_tables:
             if table in tables:
-                check(rows(before, table) == rows(after, table), "Course content changed: " + table)
+                expected_rows = rows(before, table)
+                if table == "outline_kp" and curriculum is not None:
+                    for row in expected_rows:
+                        kp = next((k for k in curriculum["knowledge_points"] if k["id"] == row["kp_id"] and row["course_id"] == course), None)
+                        if kp:
+                            row["prereqs"] = canonical(kp["prerequisite_ids"])
+                check(expected_rows == rows(after, table), "Course content changed unexpectedly: " + table)
         for table in tables:
             check(rows(before, table) == rows(rollback, table), "Rollback differs: " + table)
         imported = {r["source_id"]: dict(r) for r in after.execute("SELECT * FROM migration_records")}
@@ -125,7 +174,13 @@ def verify(snapshot, out, seed_path):
             check(json.loads(row["source_json"]) == originals[key], "Original source value lost")
         delta = [v for k, v in actual.items() if k not in baseline]
         events = [json.loads(v["event_json"]) for v in delta]
-        check({e["payload"]["sourceId"] for e in events} == set(records), "Source lacks real ledger events")
+        curriculum_events = [e for e in events if e["payload"]["sourceId"] == "confirmation:curriculum"]
+        check({e["payload"]["sourceId"] for e in events if e not in curriculum_events} == set(records), "Source lacks real ledger events")
+        check(len(curriculum_events) == int(curriculum is not None), "Curriculum acceptance event missing or duplicated")
+        if curriculum_events:
+            e = curriculum_events[0]
+            check(e["type"] == "outline_revised" and e["payload"]["curriculum"] == curriculum and e["payload"]["decision"] == decision, "Curriculum acceptance differs")
+            check(e["payload"]["ops"] == [{"op": "setPrereq", "kpId": k["id"], "conceptIds": k["concept_ids"], "prereqs": k["prerequisite_ids"]} for k in curriculum["knowledge_points"]], "Curriculum operations differ")
         check(all(e["deviceId"] == "deeptutor-migration" and e["actor"] == "SYSTEM" for e in events), "Migration event isolation failed")
         by_source = {}
         for e in events:
@@ -177,7 +232,15 @@ def verify(snapshot, out, seed_path):
         for key, r in expected_q.items():
             q = dict(after.execute("SELECT * FROM questions WHERE question_id=?", (key,)).fetchone())
             check(q["origin"] == "LEGACY" and q["key_state"] == "UNREVIEWED", "Question activated")
-            for table in ("question_kp", "answer_keys", "pool_details", "constructed_details"):
+            ids = accepted.get(key, [])
+            check(r["payload"]["kp_ids"] == ids and r["payload"]["association_confirmed"] == bool(ids), "Planned association differs from decision")
+            actual_ids = [dict(row) for row in after.execute("SELECT kp_id,is_primary FROM question_kp WHERE question_id=? ORDER BY kp_id", (key,))]
+            check(actual_ids == sorted([{"kp_id": kp, "is_primary": int(i == 0)} for i, kp in enumerate(ids)], key=lambda r: r["kp_id"]), "SQL associations differ from decision")
+            if decision is not None:
+                check(r["payload"]["confirmation"] == {**{k: decision[k] for k in ("decision_ref", "input_hash", "proposal_hash")}, "decision_hash": digest(decision)}, "Question acceptance provenance differs")
+                sample = next((s for s in decision["short_answer_samples"] if s["id"] == key), None)
+                check(r["payload"].get("accepted_short_answer_material") == sample, "Accepted short-answer archive differs")
+            for table in ("answer_keys", "pool_details", "constructed_details"):
                 check(after.execute("SELECT count(*) FROM " + table + " WHERE question_id=?", (key,)).fetchone()[0] == 0, "Question admitted to " + table)
             if q["options"]:
                 check(json.loads(q["options"]) == r["payload"]["question"]["options"], "Option dropped or changed")
@@ -194,11 +257,14 @@ def verify(snapshot, out, seed_path):
             check(times == sorted(times), "Historical conversation order changed")
         report = load(out / "rehearsal.json")
         check(report["first"]["events_added"] == len(delta), "Reported event count differs from SQLite")
-        check(report["second"]["events_added"] == report["second"]["records_inserted"] == 0, "Second import changed data")
+        check(report["second"]["events_added"] == report["second"]["records_inserted"] == report["second"]["records_revised"] == 0, "Second import changed data")
         first_bytes, second_bytes = ((out / f).read_bytes() for f in ("first-state.json", "second-state.json"))
         check(first_bytes == second_bytes, "Normalized database changed on second import")
         check(hashlib.sha256(first_bytes).hexdigest() == report["state_sha256"], "State hash mismatch")
+        check((out / "before-state.json").read_bytes() == (out / "rollback-state.json").read_bytes(), "Rollback normalized state differs byte for byte")
         projection = json.loads(first_bytes)["projection"]
+        check(hashlib.sha256(projection_bytes(first_bytes)).hexdigest() == report["projection_sha256"], "Projection hash mismatch")
+        check(hashlib.sha256((out / "before-state.json").read_bytes()).hexdigest() == report["baseline_sha256"], "Baseline hash mismatch")
         verify_normalized_tables(after, json.loads(first_bytes))
         import_days = {str(day(e["recordedAt"] / 1000)) for e in events}
         for import_day in import_days:
@@ -236,7 +302,9 @@ def verify(snapshot, out, seed_path):
                 "state_sha256": report["state_sha256"], "projection_sha256": report["projection_sha256"],
                 "unknown_types_preserved": len(batch["unknown_types"]), "five_option_questions_quarantined": options_5,
                 "unresolved_answers_preserved": source_report["unresolved_choice_answers_preserved"],
-                "course_content_unchanged": True, "legacy_evidence_excluded": True, "existing_pending_preserved": True,
+                "confirmed_questions": sum(bool(v) for v in accepted.values()), "unmapped_questions": sum(not v for v in accepted.values()) if decision else len(expected_q),
+                "accepted_short_answer_samples": len(decision["short_answer_samples"]) if decision else 0,
+                "textbook_and_exam_weights_unchanged": True, "legacy_evidence_excluded": True, "existing_pending_preserved": True,
                 "rollback_matches_baseline": True, "integrity_check": "ok"}
     finally:
         before.close(); after.close(); rollback.close()
@@ -246,5 +314,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("snapshot", "out", "seed"):
         parser.add_argument("--" + flag, type=Path, required=True)
+    for flag in ("confirmation", "proposal"):
+        parser.add_argument("--" + flag, type=Path)
     args = parser.parse_args()
-    print(json.dumps(verify(args.snapshot.resolve(strict=True), args.out, args.seed), indent=2, sort_keys=True))
+    print(json.dumps(verify(args.snapshot.resolve(strict=True), args.out, args.seed, args.confirmation, args.proposal), indent=2, sort_keys=True))

@@ -4,6 +4,7 @@ Real loopback HTTP/WS and Unix sockets, isolated data and filesystem faults;
 only the 901-second clock interval is injected. No production bridge/phone.
 """
 import http.client
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,74 @@ from unittest import mock
 
 from .activity_coverage import Control, chain, healthy, stop_guard, verify
 from .ton1175_switch import GateError
+
+
+def startup_checkpoint(control, timeout=5):
+    """Wait for bootstrap/ResponseSent to drain before starting the idle proof.
+
+    This is test setup only: observation and stop gates still fail immediately
+    on activity. Log loss, closure and control errors must never be retried.
+    """
+    deadline = time.monotonic()+timeout
+    while True:
+        point = control.ask('snapshot')
+        if point['failures'] != 0 or point['closed'] or (point['active'] == 0 and point['workQuiet']):
+            healthy(point)
+            return point
+        remaining = deadline-time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f'startup coverage did not settle: {point}')
+        time.sleep(min(.01, remaining))
+
+
+class StartupCheckpointTests(unittest.TestCase):
+    def setUp(self):
+        self.ready = dict(failures=0, active=0, workQuiet=True, closed=False)
+
+    def test_waits_for_both_request_completion_and_detached_work(self):
+        control = mock.Mock()
+        control.ask.side_effect = [dict(self.ready, active=1), dict(self.ready, workQuiet=False), self.ready]
+        with mock.patch.object(time, 'sleep'), mock.patch.object(time, 'monotonic', return_value=0):
+            self.assertIs(self.ready, startup_checkpoint(control))
+        self.assertEqual([mock.call('snapshot')]*3, control.ask.call_args_list)
+
+    def test_ready_checkpoint_does_not_sleep(self):
+        control = mock.Mock()
+        control.ask.return_value = self.ready
+        with mock.patch.object(time, 'sleep') as sleep:
+            self.assertIs(self.ready, startup_checkpoint(control))
+        sleep.assert_not_called()
+
+    def test_sticky_log_loss_and_closure_fail_without_retry(self):
+        for fault in (dict(failures=1), dict(failures=1, active=1), dict(closed=True)):
+            with self.subTest(fault=fault):
+                control = mock.Mock()
+                control.ask.side_effect = [dict(self.ready, **fault), self.ready]
+                with mock.patch.object(time, 'sleep') as sleep, self.assertRaises(GateError):
+                    startup_checkpoint(control)
+                control.ask.assert_called_once_with('snapshot')
+                sleep.assert_not_called()
+
+    def test_control_errors_are_not_retried(self):
+        control = mock.Mock()
+        error = GateError('coverage unavailable')
+        control.ask.side_effect = error
+        with self.assertRaises(GateError) as raised:
+            startup_checkpoint(control)
+        self.assertIs(error, raised.exception)
+        control.ask.assert_called_once_with('snapshot')
+
+    def test_busy_checkpoint_times_out_with_last_state(self):
+        for busy in (dict(active=1), dict(workQuiet=False)):
+            with self.subTest(busy=busy):
+                control = mock.Mock()
+                control.ask.return_value = dict(self.ready, **busy)
+                with mock.patch.object(time, 'monotonic', side_effect=[10, 10, 15]), \
+                        mock.patch.object(time, 'sleep'), \
+                        self.assertRaisesRegex(AssertionError, 'startup coverage did not settle:') as raised:
+                    startup_checkpoint(control, timeout=5)
+                self.assertIn(str(control.ask.return_value), str(raised.exception))
+                self.assertEqual(2, control.ask.call_count)
 
 
 class Service:
@@ -404,6 +473,12 @@ if action=='start': (r/'running').write_text('b'*40)
 @unittest.skipUnless(os.environ.get('COACH_COVERAGE_BINARY'), 'Gradle supplies the installed service binary')
 class MainLifecycleTests(unittest.TestCase):
     def test_real_main_graceful_shutdown_carries_held_seal(self):
+        self.shutdown_with_held_seal()
+
+    def test_real_main_waits_for_completion_after_401(self):
+        self.shutdown_with_held_seal(block_access=True)
+
+    def shutdown_with_held_seal(self, *, block_access=False):
         import hashlib
         with tempfile.TemporaryDirectory(prefix='cm-', dir='/tmp') as tmp:
             root = Path(tmp)
@@ -417,8 +492,19 @@ class MainLifecycleTests(unittest.TestCase):
             with (root / 'output').open('wb') as output:
                 process = subprocess.Popen([os.environ['COACH_COVERAGE_BINARY']], env=env,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
+                access_reader = None
                 try:
                     deadline = time.monotonic()+20
+                    if block_access:
+                        # The initial summary reads access logs. Let it finish before
+                        # installing a FIFO that blocks ResponseSent's first write.
+                        while not list((root / 'state').glob('usage-*.md')):
+                            self.assertIsNone(process.poll(), (root / 'output').read_text()[-1500:])
+                            self.assertLess(time.monotonic(), deadline, 'initial usage summary did not finish')
+                            time.sleep(.01)
+                        day = dt.datetime.now(dt.timezone.utc).date()
+                        access = root / 'logs' / f'access-{day}.log'
+                        os.mkfifo(access, 0o600)
                     while True:
                         self.assertIsNone(process.poll(), (root / 'output').read_text()[-1500:])
                         try:
@@ -430,7 +516,27 @@ class MainLifecycleTests(unittest.TestCase):
                             self.assertLess(time.monotonic(), deadline)
                             time.sleep(.05)
                     with Control(str(root / 'control.sock')) as control:
-                        point = control.ask('snapshot');healthy(point)
+                        if block_access:
+                            busy = control.ask('snapshot')
+                            self.assertGreater(busy['active'], 0)
+                            self.assertEqual(0, busy['failures'])
+                            with self.assertRaises(GateError):
+                                healthy(busy)
+                            sleep = time.sleep
+
+                            def release_access(delay):
+                                nonlocal access_reader
+                                # Release only once the checkpoint has observed the
+                                # outstanding request; no scheduler/timing assumption.
+                                if access_reader is None:
+                                    access_reader = os.open(access, os.O_RDONLY | os.O_NONBLOCK)
+                                sleep(delay)
+
+                            with mock.patch.object(time, 'sleep', side_effect=release_access):
+                                point = startup_checkpoint(control)
+                            self.assertIsNotNone(access_reader, 'checkpoint did not wait for completion')
+                        else:
+                            point = startup_checkpoint(control)
                         seal = control.ask('seal', expected=point)['seal']
                         process.terminate();process.wait(timeout=15)
                     logs = [str(p) for p in (root / 'logs').glob('activity-*.log')]
@@ -444,3 +550,5 @@ class MainLifecycleTests(unittest.TestCase):
                 finally:
                     if process.poll() is None:
                         process.kill();process.wait()
+                    if access_reader is not None:
+                        os.close(access_reader)

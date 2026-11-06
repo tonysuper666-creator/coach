@@ -3,7 +3,7 @@ package com.coach.ai
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.*
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.nio.file.Files
 import kotlin.test.*
@@ -14,6 +14,34 @@ class PoolWorkerTest {
         "correct_text" to "Right result $i","distractors" to listOf("Wrong one $i","Wrong two $i","Wrong three $i"),
         "explanation" to "The source supports this result.","source_quote" to source) }).toString()
     private fun review()=JsonArray((0..2).map { i -> json("id" to i,"answer_text" to "Right result $i","defects" to emptyList<String>(),"note" to "Supported") }).toString()
+
+    @Test fun restrictedReferenceCanInformGenerationButCannotBecomeQuestionOrQuote() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("pool-internal-reference")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        val secret="Synthetic confidential scenario lists twenty four silver umbrellas before insurance begins"
+        try { StubBridge().use { bridge ->
+            actor.execute {
+                registerSourcePage("c","book","Synthetic textbook",1,source)
+                registerSourcePage("c","internal","Synthetic reference",1,secret,learnerVisible=false)
+            }
+            val generated=JsonArray((0..2).map { i -> json(
+                "stem" to if(i==0) secret else "Synthetic question $i asks for the uniquely correct result.",
+                "correct_text" to "Right result $i", "distractors" to listOf("Wrong one $i","Wrong two $i","Wrong three $i"),
+                "explanation" to "The source supports this result.", "source_quote" to if(i==1) secret else source)
+            }).toString()
+            bridge.enqueue(200,StubBridge.completion(generated))
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            worker.ensure("c","kp","Synthetic objective",source,3)
+            assertEquals("completed",worker.runOne()!!.state)
+            assertTrue(bridge.requests.single().contains(secret))
+            val queued=actor.execute { supplyJobs().single().subject.getValue("questions").jsonArray }
+            assertEquals(1,queued.size)
+            val retained=readStoredMcq(queued.single().jsonObject)
+            assertTrue(retained.stem.contains("question 2"))
+            assertEquals(source,retained.sourceQuote)
+            assertFalse(queued.toString().contains(secret))
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
 
     @Test fun generationReviewPersistenceAndAtomicTake() = runBlocking<Unit> {
         val dir=Files.createTempDirectory("pool-worker")
@@ -43,6 +71,54 @@ class PoolWorkerTest {
             assertEquals(3,reopened.takePoolGroup("course","essay-kp","group").events.size)
         }
         dir.toFile().deleteRecursively()
+    }
+
+    @Test fun shutdownDuringGenerationRequeuesTheJobInsteadOfRecordingAMalformedFailure() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("pool-cancel")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            val id=worker.ensure("c","kp","Objective",source,3)!!
+            // The model is still writing when the server stops (launchd restart, deploy).
+            bridge.enqueueStream(1_000,StubBridge.frame("partial"),StubBridge.frame(" text"))
+            val running=launch(Dispatchers.Default) { worker.runOne() }
+            while(bridge.requests.isEmpty()) delay(20)
+            running.cancelAndJoin()
+            assertEquals("queued",actor.execute { jobState(id)?.first },"a cancelled generation is not a malformed answer")
+            bridge.enqueue(200,StubBridge.completion(generated()))
+            assertEquals("completed",worker.runOne()!!.state)
+            assertTrue(actor.execute { events("c").none { it.type=="fallback_used" } })
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun shutdownWhileWaitingForTheLedgerStillReturnsTheClaimedJob() = runBlocking<Unit> {
+        // The ledger is busy (a backup, another device's sync) at the moment the server stops.
+        for (window in listOf("claim","source lookup")) {
+            val dir=Files.createTempDirectory("pool-cancel-ledger")
+            val actor=LedgerActor(this,LedgerStore(dir))
+            val busy=java.util.concurrent.CountDownLatch(1)
+            val stillBusy=java.util.concurrent.CountDownLatch(1)
+            try { StubBridge().use { bridge ->
+                val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+                val id=worker.ensure("c","kp","Objective",source,3)!!
+                launch(Dispatchers.Default,start=CoroutineStart.UNDISPATCHED) { actor.execute { busy.await() } }
+                // Undispatched: the worker's claim is in the mailbox, behind the busy ledger, before this returns.
+                val running=launch(Dispatchers.Default,start=CoroutineStart.UNDISPATCHED) { worker.runOne() }
+                if(window=="source lookup") {
+                    // Queued behind the claim: the claim commits, then the worker waits on its next ledger read.
+                    val reached=CompletableDeferred<Unit>()
+                    launch(Dispatchers.Default,start=CoroutineStart.UNDISPATCHED) { actor.execute { reached.complete(Unit); stillBusy.await() } }
+                    busy.countDown()
+                    reached.await(); delay(200)
+                }
+                running.cancel()
+                busy.countDown(); stillBusy.countDown()
+                running.join()
+                assertEquals("queued",actor.execute { jobState(id)?.first },"cancelled while waiting for the $window")
+                bridge.enqueue(200,StubBridge.completion(generated()))
+                assertEquals("completed",worker.runOne()!!.state)
+            } } finally { busy.countDown();stillBusy.countDown();actor.close();dir.toFile().deleteRecursively() }
+        }
     }
 
     @Test fun malformedRetriesOnceWithNewPromptAndSurvivesReopen() = runBlocking<Unit> {
@@ -206,6 +282,30 @@ class PoolWorkerTest {
         } } finally { actor.close() }
         LedgerStore(dir).use { assertEquals(1,it.constructedAvailable("c","kp")); assertEquals(2,it.constructedQuestions("c","kp").size) }
         dir.toFile().deleteRecursively()
+    }
+
+    @Test fun constructedCliStartupFailureIsNotMalformedAndDoesNotRetry() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("constructed-cli-error")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            actor.execute { append("c","legacy_passed",json("kpId" to "kp")) }
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            bridge.enqueue(200,StubBridge.completion(constructed()))
+            repeat(2) { bridge.enqueue(502,StubBridge.errorWithTerminal(502).replace("timeout","cli_exit")) }
+            worker.ensureConstructed("c","kp","Objective",source);worker.runOne()
+            val reviews=actor.execute { supplyJobs().filter { it.kind=="review_constructed" } }
+            assertEquals(2,reviews.size)
+            repeat(2) { assertEquals("failed",worker.runOne()!!.state) }
+            assertTrue(reviews.all { actor.execute { jobState(it.id)?.first } == "failed" })
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db ->
+                db.createStatement().use { st -> st.executeQuery("SELECT last_error FROM jobs WHERE kind='review_constructed'").use { rows ->
+                    while(rows.next()) assertEquals("CLI_ERROR",rows.getString(1))
+                } }
+            }
+            assertNull(worker.runOne())
+            assertEquals(0,actor.execute { constructedAvailable("c","kp") })
+            assertEquals(3,bridge.requests.size)
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 
     @Test fun rejectedConstructedReviewDoesNotEnterPool() = runBlocking<Unit> {

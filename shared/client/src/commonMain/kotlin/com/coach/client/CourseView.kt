@@ -1,5 +1,8 @@
 package com.coach.client
 
+import com.coach.domain.courseExamDay
+import com.coach.domain.reviewsOn
+import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
 import com.coach.domain.logicalDay
@@ -52,8 +55,12 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
     fun tutorThreadId(kpId: String): String = events.lastOrNull {
-        it.type == "kp_opened" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
+        it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
     }?.threadId ?: "kp:$kpId"
+
+    fun reviewThreadId(kpId: String): String = events.filter {
+        it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
+    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"
 
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
@@ -122,37 +129,52 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     fun kp(id: String): KpRow? = kps.firstOrNull { it.id == id }
 
-    /** 课程所在时区（装载内容里带），决定「今天」的逻辑日界线。 */
-    val zone: String by lazy {
-        events.firstOrNull { it.type == "outline_revised" }?.payload?.let { ((it["course"] as? JsonObject)?.get("tz") as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() } ?: "Europe/London"
-    }
+    /** Shares the projector clock, including the 04:00 logical-day boundary. */
+    val zone: String get() = projection.timeZone
 
     fun logicalToday(nowMillis: Long): Long = logicalDay(nowMillis, zone)
 
     /** 到期（含逾期）的复习，最久逾期的在前；只列大纲里有的知识点。 */
     fun dueReviews(nowMillis: Long): List<DueReview> {
         val today = logicalToday(nowMillis)
-        val order = kps.withIndex().associate { it.value.id to it.index }
-        return projection.review.mapNotNull { (id, review) ->
+        return projection.reviewsOn(today).mapNotNull { (id, review) ->
             val kp = kp(id) ?: return@mapNotNull null
-            if (review.dueDay > today) null else DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
-        }.sortedWith(compareBy({ it.dueDay }, { order[it.kp.id] ?: Int.MAX_VALUE }))
+            DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
+        }
     }
 
     /** 考试日（最近一次 `exam_set`）；没设就是 null。 */
-    val examDay: Long? by lazy {
-        events.lastOrNull { it.type == "exam_set" }?.payload?.let { p ->
-            (p["examDay"] as? JsonPrimitive)?.longOrNull ?: (p["examAt"] as? JsonPrimitive)?.longOrNull?.let { logicalDay(it, zone) }
-        }
-    }
+    val examDay: Long? by lazy { courseExamDay(events, zone) }
 
     /** 离考试还有几天；没设考试日、或已经考过返回 null。 */
     fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }
 
-    /** 「继续：<KP>」的目标：状态机定的目标优先，没有就取大纲里第一个未通过的。 */
-    val continueTarget: KpRow? by lazy {
-        projection.position.continueTarget?.let(::kp) ?: kps.firstOrNull { it.status != KpStatus.PASSED && it.status != KpStatus.SOLID }
+    val weekPoints by lazy { weekPoints(events) }
+    /** The imported ECNM10119 outline explicitly records Week 7 as a zero-point midterm exemption. */
+    val midtermExemptionWeeks: Set<Int> by lazy {
+        events.asSequence().filter { it.type == "outline_revised" }.mapNotNull { event ->
+            val week7 = event.payload["week7"] as? JsonObject ?: return@mapNotNull null
+            val count = (week7["knowledgePoints"] as? JsonPrimitive)?.intOrNull
+            val reason = (week7["reason"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            7.takeIf { count == 0 && reason.contains("Midterm Exam", ignoreCase = true) }
+        }.toSet()
     }
+    val weeks: List<Int> by lazy { (weekPoints.flatMap { it.weeks } + midtermExemptionWeeks).distinct().sorted() }
+    fun weekLabel(week: Int): String = if (week in midtermExemptionWeeks) "第 $week 周 · 期中周（无新课，豁免）" else "第 $week 周"
+    fun weekKps(week: Int): List<KpRow> = weekPoints.filter { week in it.weeks }.mapNotNull { kp(it.id) }
+    val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, kps.map { it.id }.toSet())?.let(::kp)
+    fun weekProgress(kpId: String): String? = projection.studyScope?.let { s ->
+        s.kpIds.indexOf(kpId).takeIf { it >= s.cursor }?.let { "第 ${s.week} 周 · 第 ${it + 1} / ${s.kpIds.size} 个" }
+    }
+
+    /** Pending work only wins while its KP is unfinished. A passed old thread cannot trap Continue. */
+    val continueTarget: KpRow? by lazy {
+        if (projection.studyScope != null) weekTarget else {
+            projection.position.continueTarget?.let(::kp)?.takeIf { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
+                ?: kps.firstOrNull { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
+        }
+    }
+    fun isResume(kp: KpRow): Boolean = kp.explained || events.any { it.type == "kp_opened" && it.payload.s("kpId") == kp.id }
 
     fun quizGroups(threadId: String): List<QuizGroup> {
         val posed = events.filter { it.type == "question_posed" && it.threadId == threadId && it.payload.s("format") == "SINGLE_CHOICE" }

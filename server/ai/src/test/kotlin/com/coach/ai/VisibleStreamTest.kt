@@ -47,6 +47,19 @@ class VisibleStreamTest {
         }
     }
 
+    @Test
+    fun halfOpenIntervalAtLineStartDoesNotSwallowTheRestOfTheReply() {
+        for (answer in listOf("[0, 1) 上 f 单调递增。\n因此需求弹性小于 1。\n", "[-1, 1) 是定义域。\n下一段正文。\n", "第一段。\n[0, 1) 上成立。\n结论。\n")) {
+            val recorder = Recorder()
+            answer.forEach { recorder.push(it.toString()) }
+            // Prose must stream before the reply ends, not wait for a bracket that never closes.
+            assertTrue(recorder.texts.isNotEmpty(), "nothing streamed for $answer")
+            recorder.finish()
+            assertEquals(answer, recorder.texts.toString())
+            assertTrue(recorder.drops.isEmpty(), "dropped ${recorder.drops}")
+        }
+    }
+
     private class Recorder {
         val drops = ArrayList<VisibleStream.Drop>()
         val texts = StringBuilder()

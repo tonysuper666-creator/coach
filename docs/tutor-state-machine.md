@@ -12,6 +12,22 @@
 
 题组设置只接受 1、3。提交前验证完整题组、合法字母及当前回合，再在同一数据库事务内独立提交/判分；重复同答案返回原判分，换答案拒绝。卡片和反馈共用 frozen letterMap。题池不足时排一个 `gen_mcq` job 并显示排队状态；补题 worker 由后续题池卡实现，不虚构题卡或完成时间。
 
+大纲修改概念集合后，`tutor.open` 仍按 course、KP、学习/复习用途校验线程身份。概念集合以账本中该 KP 最近一次明确携带非空 `conceptIds` 数组的 `outline_revised` 为准；后续只改顺序、标题的操作不覆盖它。字段缺失、非数组或种子序列化产生的默认空数组都会跳过，继续找更早的明确集合；都没有时沿用客户端集合，与未配置概念的 KP 回退为 `[kpId]` 的行为一致。旧客户端传来的旧集合不会回滚大纲；没有明确大纲元数据时，仍拒绝客户端自行更改已有线程的集合。隔离回放筛选受影响线程时使用同一非空数组规则。
+
+已有线程的集合变化追加 `tutor_concepts_changed`，记录 `kpId`、`previousConceptIds`、`conceptIds` 和 `outlineSeq`。重开不重置状态、待答题或正在生成的回复；重启从事件恢复当前集合。掌握度与已讲解 KP 按稳定 KP 保留，历史讲授概念按原 ID 保留：没有语义映射证据，不能把一个旧 ID 自动算成所有新概念都已讲授。正在生成的旧回复仍按原计划记证据；后续显式讲解使用新集合。
+
+TON-1327 的隔离回放只接受 SQLite 一致性备份（含已提交 WAL 内容，可用 SQLite backup API 制作）。下面任务把备份再复制到临时目录，启动独立服务，经真实 WebSocket 路由分别发送当前和过期概念集合，验证所有受影响线程可打开，并核对历史、掌握度、已讲授证据、待答位置和复习计划均未改变。它不启动 AI worker，不写输入备份，只输出聚合数字，退出时删除临时实例。备份及学习内容不得进仓库或验收附件。
+
+```sh
+# 源库和备份路径均由操作者提供；备份必须位于仓库外的私有目录。
+umask 077
+export COACH_TUTOR_BACKUP=/private/path/consistent-backup.sqlite
+sqlite3 -readonly /private/path/source.sqlite ".backup '$COACH_TUTOR_BACKUP'"
+tools/dev/heavy ./gradlew :server:app:tutorMigrationReplay --max-workers=2
+```
+
+此回放覆盖两种客户端请求的协议行为；原生 Android/macOS 界面及生产上线另行验收。
+
 WebSocket 命令（沿用 `/v1/ws` 设备鉴权）：
 
 | `t` | 参数（均带 `courseId`、`threadId`） | 结果 |

@@ -7,6 +7,7 @@ class TutorOutputGuard(
     private val pending: List<PendingChoice> = emptyList(),
     private val allowExamSection: Boolean = false,
     private val streamSafePrefixes: Boolean = false,
+    private val restrictedSources: RestrictedSourceGuard? = null,
     private val onLeak: (String) -> Unit = {},
 ) {
     private val raw = StringBuilder()
@@ -38,7 +39,7 @@ class TutorOutputGuard(
             committed.append(filter(sentence))
         }
         val tail = buffered.toString()
-        val safe = if (streamSafePrefixes && !examSection && !referencesLetter(tail)) tail.take(safeCut(tail)) else ""
+        val safe = if (streamSafePrefixes && restrictedSources == null && !examSection && !referencesLetter(tail)) tail.take(safeCut(tail)) else ""
         return updateDisplay(committed.toString() + safe)
     }
 
@@ -80,7 +81,7 @@ class TutorOutputGuard(
             if (sentence.endsWith('\n')) examLines++
             if (!allowExamSection || examLines > 3 || (examLines == 3 && !sentence.endsWith('\n'))) return ""
         }
-        return sentence
+        return if (restrictedSources?.overlaps(sentence) == true) "" else sentence
     }
 
     companion object {

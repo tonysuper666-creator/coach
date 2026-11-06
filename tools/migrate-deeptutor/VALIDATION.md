@@ -182,4 +182,80 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-import.py --snapshot "$SNAPSHO
 
 确认草稿在私有输出的 `confirmation-details.md`：108 题、49 KP / 62 条前置、10 道简答源评分依据、2 条 B/c 原回答、60 道五选项/字母依赖解析，以及 9 个通过时间的近似说明，逐项附来源、建议与依据。107 道题有归属提议，1 道仍未知；没有独立 rubric 时只引用 explanation，不伪造分值，待本人核对。修订后的题目必须重新复核；本轮未询问本人，新增模型调用 0（卡内既有 2）。
 
+选择题的解析在 `legacy_explanation_archive` 中按源文保存，不对字母做替换；`legacyLetterMap` 保存 optionId 到原字母的对应关系，`letter_map_complete` 表示映射是否完整。解析从派生 question 中移除，保守标记 `explanation_references_letters`，仅供归档；后续展示须先盲审，或在映射完整时按原字母映射展示，不能直接套用新随机顺序。题干和选项文字不变。
+
 仍未验证/完成：真实新快照的连续增量、无 ID 数组重排的人工 ID 对照、本人一次合并确认、新评分键的盲审、5 KP UI、blobs 备份及正式切换。该工具仍只写新建隔离副本；没有正式写库/激活入口，没有 DeepTutor 运行文件或 8790 访问，不结束整卡、不解锁 TON-1102。
+
+
+## 2026-11-06 已确认输入落地：Builder 隔离验收
+
+结果：部分达到。仅完成本卡“已确认输入落地及新隔离预演”，未正式写入或启用。确认依据为卡内本人确认记录，未追加模型提议、评分分值或认证记录；ai_calls 累计 2，本轮新增 0。
+
+- 108 题中 107 题写入归属、1 题保留未知（155 条 question_kp 边）；49 KP / 62 条前置接受并写入可回放 outline_revised。
+- 10 道简答保存源材料，无新分值或 VERIFIED 键；108 题仍 UNREVIEWED，无新题池。2 条未解析旧答逐字保留且不计分；60 道五选项题保留隔离，45 项原类型未知保留。
+- 首导 521 新增 / 0 修订 / 557 事件；重导 0 新增 / 0 修订 / 0 事件 / 521 未变。原有 135 个事件完整保留，合计 692。9 个通过、9 条复习、12 条笔记回放核验通过。
+- 两个新隔离输出在不同 recordedAt 下得到同一规范 state SHA 和 projection SHA。原隔离源快照及各副本均为 43 个文件，前后完整 SHA 清单一致。
+- 回退 before-state.json / rollback-state.json 逐字节一致；before.sqlite / rollback.sqlite 逐字节一致。此为隔离基线恢复，不代表已完成生产 DB/blobs 恢复演练。
+
+| 证据 | SHA-256 |
+| --- | --- |
+| state | d5a2a63911f4b670abb06ae6be3f0066a1a922e1c7058d551d125199df924b3b |
+| projection | da84ce3d186680e4a1d38c74127d5711981856dc6f4cae2108cdfede1cf89690 |
+| baseline / rollback state | cac8ed633bce496465e0b1ea2ca4a16a04d947bda3ae19e80865f91fbc7835e6 |
+| before / rollback SQLite | 677db84b4a394aa1845cba6484b518e041cc050985aed426f0fd747fc3861b4d |
+| confirmation | 4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa |
+
+实际执行：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
+  :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist \
+  :shared:domain:jvmTest :server:store:test --offline --console=plain
+# BUILD SUCCESSFUL；migration 42、domain 52、store 32，0 失败、0 跳过。
+bash tools/migrate-deeptutor/reproduce-confirmed.sh \
+  "$CAPTURED_SNAPSHOT" "$ISOLATED_BASELINE" "$SEED" "$PROPOSAL" "$CONFIRMATION" "$NEW_PRIVATE_ROOT"
+# 内含 heavy rehearse、独立 verify-import.py、3 组 cmp、原快照与副本 SHA 清单检查；exit 0。
+```
+
+新增六项回归覆盖确认首导/重导、未确认导入的确认补写及源修订、过期/篡改确认、外部归属和已提升题目保护、缺失确认不得撤销既有接受、外部课程结构保护。原测试未删除、未跳过、未放宽。
+
+公开路径检查的额外命中位于原有 DevRunGuardTest 与 test_ton1175_launchd 合成测试夹具；本次改动没有新增私人路径、语料或数据库。后续仍按 QA-C→Architect 顺序独立复核，再执行生产数据库与 blobs 备份、恢复、回退验收，之后才可正式写入和启用；TON-1102 保持锁定。
+
+## 2026-11-06 离线正式命令：当前库新副本演练
+
+结果：部分达到。新增 `apply-confirmed` / `rollback-confirmed`，在当场从当前 Coach 库取得的在线备份上验证实际命令；本轮没有写生产或启用。此切片须 QA-C 独立验收、Architect 关键复核后，才可正式写入、启用并实测生产状态。ai_calls 累计 2，本轮 0；TON-1102 保持锁定。
+
+实际执行（均退出 0）：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
+  :tools:migrate-deeptutor:test :shared:domain:jvmTest :server:store:test \
+  :tools:migrate-deeptutor:installDist
+# BUILD SUCCESSFUL；migration 47、domain 52、store 32：共 131 项，0 失败、0 跳过。
+# 迁移测试重新执行；领域和存储任务 UP-TO-DATE，读取对应 XML 核对数量。
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 bash tools/migrate-deeptutor/reproduce-formal.sh \
+  "$HOME/Coach/data" "$SNAPSHOT" "$SEED" "$PROPOSAL" "$CONFIRMATION" \
+  4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa "$NEW_PRIVATE_ROOT"
+# 包括实际 apply-confirmed、实际 rollback-confirmed、cmp、独立只读 SQL 与源文件 SHA 核对。
+bash -n tools/migrate-deeptutor/reproduce-formal.sh
+python3 -m py_compile tools/migrate-deeptutor/verify-formal.py
+git diff --check
+```
+
+私有证据目录为 `~/Coach/corpus/ton-1095/formal-2026-11-06-builder-a`。输入沿用最终批准的 43 文件快照、原种子清单及 reviewed proposal，确认文件 SHA 与上一切片相同。根目录内的 `validation.json`、`independent-verification.json` 和 `backup/` 保存完整证据，真实内容没有进入仓库。
+
+- 当前原生 135 个事件逐行保留；首导新增 521 / 修订 0 / 557 个事件，重导新增 / 修订 / 事件 0/0/0、未变 521。实际写入后的完整行状态与从备份恢复后预演的状态相同。
+- 在线备份含 24 个 blobs，恢复库 `integrity_check` 为 `ok`，外键检查为空，规范状态逐字节等于写入前。实际回退在另一个导入后副本执行，DB 文件逐字节等于本次备份，全部行及 blobs 字节相同。直接回退命令和回执在实际提交前保存于 `backup/rollback.sh` / `receipt.json`。
+- 108 道迁移题全部 `UNREVIEWED`，答案键、题池及构答详情均为 0；155 条边覆盖 107 题，所有归属 KP 活动，第 40 题无边。49 个 KP 的 `poolAvailable` / `constructedSupply` 写前写后完全相同。
+- 2 条未解析旧答原文保留且不进入窗口；源与副本 43 文件哈希前后不变。副本投影是 9/49、9 条复习；复习状态 SHA 保存为后续生产启动核对基线，此处不是生产启用验收。
+- 新增 5 项回归覆盖真实备份恢复及幂等/供给、服务锁拒绝、独立副本实际回退（含最终报告丢失）、后续原生修改与损坏备份拒绝、后续 blob 变化拒绝。原有断言未删除、未跳过、未放宽。
+
+| 证据 | SHA-256 |
+| --- | --- |
+| 当前副本导入后 state | 70e985006a0f7dae0d82cee6b3672dfd07168a671100afc44a84c32f520e7071 |
+| projection | da84ce3d186680e4a1d38c74127d5711981856dc6f4cae2108cdfede1cf89690 |
+| 当前副本写前 / 回退 state | 10c9f63337bfdec5383c7314c91f716d3802b721831e1cc6c4082457f0677fa3 |
+| 当前备份 / 回退 SQLite | bea36192233ade34e711e54453b58b9ebac8671ed33d6a882d4c81457256a0e1 |
+| 完整复习状态（Python 排序紧凑 JSON） | 6d9c67bb70b002e28556be4d5b39e5d434918df436c0109f3a422787f32a969d |
+
+新的 state / DB 哈希对应当前库的新副本，不能用上一切片的旧备份替换生产。正式命令用 JDBC 调用同一 writer，避免打开 LedgerStore 时自动迁移；持有同一 server.lock 才备份和写入。回退核对包含审计时钟和序号水位的完整状态，出现后续学习记录或 blob 变化会拒绝，不能覆盖后续活动。

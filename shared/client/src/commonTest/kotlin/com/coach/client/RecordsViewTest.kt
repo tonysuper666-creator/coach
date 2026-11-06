@@ -60,6 +60,14 @@ class RecordsViewTest {
         assertTrue(RecordsView(listOf(outline()) + choice("a1", true) + choice("a2", true)).changes.isEmpty())
     }
 
+    @Test fun migratedPassExplainsThatItsTimeIsApproximate() {
+        val change = RecordsView(listOf(outline(), event("legacy_passed", json("kpId" to "K1")))).changes.single()
+        assertEquals(ChangeKind.PASSED, change.kind)
+        assertEquals("legacy_passed", change.causeEventType)
+        assertTrue("迁移，时间近似" in change.reason, change.reason)
+        assertTrue("并非实际通过时间" in change.reason, change.reason)
+    }
+
     @Test fun orphanedAnswerShowsItsReasonAndOriginalText() {
         val view = RecordsView(listOf(outline(),
             event("answer_orphaned", json("attemptId" to "x", "reason" to "QUESTION_CHANGED", "rawAnswer" to "B", "posedSnapshot" to json("stem" to "旧题干")))))

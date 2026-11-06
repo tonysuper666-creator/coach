@@ -42,7 +42,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             }
         }
         // V5 is the combined alpha schema. Validate the known additive tables before accepting it.
-        val deployedAlpha = version in 5..6 &&
+        val deployedAlpha = version in 5..7 &&
             query("PRAGMA table_info(pool_details)") { it.getString(2) }.containsAll(listOf("question_id","pack_hash","explanation","source_quote","generator","reviewer")) &&
             query("PRAGMA table_info(pairing_code)") { it.getString(2) }.containsAll(listOf("singleton","code_sha256","expires_at","attempts"))
         require(version <= 4 || deployedAlpha) { "Database schema is newer than this server" }
@@ -111,6 +111,20 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 sql("PRAGMA user_version=6")
             }
         }
+        if (version < 7) {
+            rawBackup(directory.resolve("backups/pre-V007-${uid()}"))
+            transaction {
+                val columns = query("PRAGMA table_info(source_docs)") { it.getString(2) }
+                if ("learner_visible" !in columns) sql("ALTER TABLE source_docs ADD COLUMN learner_visible INTEGER NOT NULL DEFAULT 1")
+                // Preserve the old browse restriction on existing tutor-invisible documents.
+                sql("UPDATE source_docs SET learner_visible=0 WHERE tutor_visible=0")
+                val hidden = query("SELECT doc_id,title,kind FROM source_docs") {
+                    Triple(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())
+                }.filter { !tutorSourceAllowed(it.first,it.second,it.third) }
+                hidden.forEach { sql("UPDATE source_docs SET learner_visible=0 WHERE doc_id=?",it.first) }
+                sql("PRAGMA user_version=7")
+            }
+        }
         ensureSourceIndexes()
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='pool_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-pool-${uid()}"))
@@ -121,6 +135,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (query("SELECT name FROM sqlite_master WHERE type='table' AND name='constructed_details'") { it.getString(1) }.isEmpty()) {
             rawBackup(directory.resolve("backups/pre-constructed-${uid()}"))
             sql("CREATE TABLE constructed_details(question_id TEXT PRIMARY KEY REFERENCES questions(question_id), pack_hash TEXT NOT NULL, reference_answer TEXT NOT NULL, rubric TEXT NOT NULL, rubric_fingerprint TEXT NOT NULL, generator TEXT NOT NULL, reviewer TEXT NOT NULL)")
+        }
+        // Tables made by earlier test builds of this feature lack the save order column; both creating and widening the table back up first.
+        if ("answers_seq" !in query("PRAGMA table_info(mock_sessions)") { it.getString(2) }) {
+            rawBackup(directory.resolve("backups/pre-mock-${uid()}"))
+            transaction {
+                // The frozen paper (answers included) never leaves the server before submission.
+                sql("CREATE TABLE IF NOT EXISTS mock_sessions(mock_id TEXT PRIMARY KEY,course_id TEXT NOT NULL,kind TEXT NOT NULL,purpose TEXT NOT NULL,paper_json TEXT NOT NULL,started_at INTEGER NOT NULL,deadline INTEGER NOT NULL,answers_json TEXT NOT NULL DEFAULT '{}',submitted_at INTEGER,auto INTEGER NOT NULL DEFAULT 0,answers_seq INTEGER NOT NULL DEFAULT 0)")
+                if ("answers_seq" !in query("PRAGMA table_info(mock_sessions)") { it.getString(2) }) sql("ALTER TABLE mock_sessions ADD COLUMN answers_seq INTEGER NOT NULL DEFAULT 0")
+            }
         }
 
     }
@@ -171,6 +194,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (row == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'KP','KP',?)", thread,course,kp)
         else if (row == Triple(course,"CHAT",thread)) sql("UPDATE threads SET kind='KP',anchor_type='KP',anchor_id=? WHERE thread_id=?",kp,thread)
         else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
+    }
+
+    /** A separate course-bound review thread preserves the ordinary KP/Continue binding. */
+    fun bindReviewThread(course: String, thread: String, kp: String) {
+        require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
+        val anchor = "$course:$kp"
+        val old = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?",thread) {
+            Triple(it.getString(1),it.getString(2),it.getString(3))
+        }.singleOrNull()
+        if (old == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'REVIEW','COURSE_KP',?)",thread,course,anchor)
+        else require(old == Triple(course,"REVIEW",anchor)) { "Review thread binding mismatch" }
     }
 
     fun todayProgress(course: String, thread: String? = null): TodayProgress {
@@ -315,17 +349,44 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** Server-only answer key, never included in a card or model prompt. */
     fun tutorChoiceKey(questionId: String): ChoiceKey = ChoiceKey(choiceOptions(questionId), requireNotNull(choiceId(questionId)))
 
+    /** Available only on the server; callers expose this after submission, never in a posed card. */
+    fun verifiedChoiceExplanation(questionId: String): String = query(
+        """SELECT d.explanation FROM pool_details d JOIN questions q USING(question_id)
+           WHERE question_id=? AND q.key_state='VERIFIED' AND d.generator<>'' AND d.reviewer<>''""", questionId
+    ) { it.getString(1).trim() }.singleOrNull().orEmpty()
+
+    private fun gradedChoiceFeedback(questionId: String, correct: String, chosen: String, map: Map<String,String>): String {
+        val verdict = choiceFeedback(correct,chosen,map)
+        if (map[correct] == chosen.trim().uppercase()) return verdict
+        val options = choiceOptions(questionId)
+        val selected = options.singleOrNull { map[it.optionId] == chosen.trim().uppercase() }?.text.orEmpty()
+        val right = options.single { it.optionId == correct }.text
+        val explanation = verifiedChoiceExplanation(questionId)
+        return verdict + "\n你选的 ${chosen.trim().uppercase()}：$selected\n正确项 ${map.getValue(correct)}：$right\n" +
+            if (explanation.isNotBlank()) "你的选择与已复核解析不符：$explanation"
+            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。点「换个例子再讲」可结合原题解释。"
+    }
+
+
     fun hello(): Hello = query("SELECT epoch,backed_up_through_seq,last_seq_before FROM ledger_meta") {
         Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
     }.single()
     private fun lastSeq(): Long = query("SELECT coalesce(max(seq),0) FROM events") { it.getLong(1) }.single()
-    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? ORDER BY seq LIMIT ?",course,after,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE, through: Long = Long.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",course,after,through,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    /** Watermarks only: notification sockets never need to load historical event payloads. */
+    fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
     /** Offline CLI or server actor only: one transaction installs content and its two events. */
     fun seedContent(seed: ContentSeed): Boolean {
         val content = contentStore
         return transaction { content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob) }
+    }
+    /** Offline CLI or actor only. New points, metadata and their replay event commit together. */
+    fun addOutline(payload: JsonObject): Boolean {
+        return transaction { OutlineAdditionStore(connection).install(payload, CourseContentStore(connection)) { course, event, idem ->
+            append(course, "outline_revised", event, idem, actor="MIGRATION")
+        } }
     }
     fun courseContent(course: String): CourseContent? = contentStore.course(course)
     fun teachingPages(course: String, kp: String): List<Pair<SourceAnchor, String>> = contentStore.teachingPages(course, kp)
@@ -485,7 +546,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("DELETE FROM offline_reservations WHERE expires_at<=?",clock())
         sql("DELETE FROM offline_packs WHERE expires_at<=?",clock())
         val state = projection(course)
-        val due = state.review.entries.filter { it.value.dueDay <= logicalDay(clock(),state.timeZone) }.sortedBy { it.value.dueDay }.map { it.key }
+        val today = logicalDay(clock(), state.timeZone)
+        val due = state.reviewsOn(today).keys.toList()
         val kps = (due + listOfNotNull(state.position.continueTarget, state.position.current) +
             query("SELECT DISTINCT kp_id FROM question_kp JOIN questions USING(question_id) WHERE course_id=? ORDER BY question_kp.rowid",course) { it.getString(1) }).distinct()
         val ids = kps.flatMap { kp -> unseenPoolIds(course,kp).map { it to kp } }.distinctBy { it.first }.take(size)
@@ -560,7 +622,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         return transaction {
             val effects = mutableListOf<Long>()
             fun emit(type: String, payload: JsonObject, idem: String? = null) {
-                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited")) "LEARNER" else "SYSTEM"
+                val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited","study_scope_set","study_scope_advanced")) "LEARNER" else "SYSTEM"
                 effects.add(append(body.courseId,type,payload,idem ?: "cmd:${c.deviceId}:${c.commandId}:${effects.size}",c.deviceId,actor,c,effects.size,body.clientTime,body.payload.str("threadId").ifBlank { null }).seq)
             }
             val p = body.payload
@@ -596,7 +658,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             }
                             val reserved = query("SELECT p.device_id,p.pack_json FROM offline_reservations r JOIN offline_packs p USING(pack_id) WHERE r.question_id=? AND r.expires_at>?",qid,clock()) { it.getString(1) to LedgerJson.decodeFromString<OfflineChoicePack>(it.getString(2)) }.singleOrNull()
                             val reservedSnapshot = reserved?.second?.groups?.flatten()?.firstOrNull { it.payload.str("attemptId") == attemptId }?.payload
-                            if (reserved != null && (reserved.first != c.deviceId || reservedSnapshot != posedSnapshot)) {
+                            // Only an attempt the live pack itself handed out is bound to its device and snapshot;
+                            // late answers from an expired pack and online re-poses of the same question are not.
+                            if (reserved != null && reservedSnapshot != null && (reserved.first != c.deviceId || reservedSnapshot != posedSnapshot)) {
                                 status="REJECTED"; error="OFFLINE_RESERVATION_MISMATCH"
                             } else if (activeReply) {
                                 status="REJECTED"; error="TUTOR_BUSY"
@@ -623,10 +687,51 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     if (correct != null) emit("attempt_graded",json("attemptId" to attemptId,
                                         "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
                                         "max" to 1,"status" to "EXACT",
-                                        "feedback" to choiceFeedback(correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
+                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }
+                    }
+                }
+                "retry_week_mistake" -> {
+                    val old = weekMistakes(events(body.courseId), p.num("week").toInt()).firstOrNull { it.payload.str("attemptId") == p.str("attemptId") }
+                    if (old == null) { status="REJECTED"; error="MISTAKE_CHANGED" }
+                    else {
+                        val qid = old.payload.str("questionId")
+                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
+                        else {
+                            val thread = "week-review:${p.num("week")}:$qid"
+                            val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload - setOf("mockId", "marks") + mapOf(
+                                "attemptId" to JsonPrimitive(uid()), "purpose" to JsonPrimitive("RECALL"),
+                                // The answer was just shown in feedback; re-picking it is practice, not a spaced review.
+                                "review" to JsonPrimitive(false), "weekReview" to p.getValue("week")
+                            ))), device=c.deviceId, thread=thread)
+                            effects.addAll(posed.map { it.seq })
+                            result = json("threadId" to thread)
+                        }
+                    }
+                }
+                "set_study_scope" -> {
+                    val week = p.num("week").toInt()
+                    val points = weekPoints(events(body.courseId))
+                    if (week != 0 && points.none { week in it.weeks }) { status="REJECTED"; error="UNKNOWN_WEEK" }
+                    else {
+                        val state = snapshot(body.courseId).projection
+                        val ids = points.filter { week in it.weeks && state.mastery[it.id]?.let { m -> m.passed && !m.needsRepair } != true }.map { it.id }
+                        emit("study_scope_set", json("week" to week, "kpIds" to ids, "basis" to "COURSE_WEEK_OR_W_LABEL"))
+                        result = json("target" to ids.firstOrNull())
+                    }
+                }
+                "advance_study_scope" -> {
+                    val state = snapshot(body.courseId).projection
+                    val scope = state.studyScope
+                    val available = weekPoints(events(body.courseId)).map { it.id }.toSet()
+                    if (scope == null || scope.id != p.str("scopeId") || scope.target(state.mastery, available) != p.str("kpId")) {
+                        status="CONFLICT"; error="STUDY_SCOPE_MOVED"
+                    } else {
+                        emit("study_scope_advanced", json("scopeId" to scope.id, "kpId" to p.str("kpId")))
+                        result = json("target" to scope.copy(cursor=scope.kpIds.indexOf(p.str("kpId")) + 1).target(state.mastery, available))
                     }
                 }
                 "open_kp" -> emit("kp_opened",p)
@@ -691,8 +796,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun backup(target: Path = directory.resolve("backups/${clock()}-${uid()}")): Path {
         val seq = lastSeq()
-        rawBackup(target)
+        // Clean up only a directory this call created: an explicit target may already hold a complete backup.
+        Files.createDirectories(target.toAbsolutePath().parent)
+        val created = try { Files.createDirectory(target); true } catch(e: java.nio.file.FileAlreadyExistsException) { false }
         try {
+            // Inside the cleanup: a VACUUM INTO that fails on a full disk leaves a partial copy behind.
+            rawBackup(target)
             val blobDir = Files.createDirectories(target.resolve("blobs"))
             Files.list(directory.resolve("blobs")).use { files -> files.forEach { Files.createLink(blobDir.resolve(it.fileName),it) } }
             Files.newBufferedWriter(target.resolve("events.jsonl"),Charsets.UTF_8).use { out ->
@@ -704,7 +813,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             Files.writeString(target.resolve("complete"),seq.toString(),StandardOpenOption.CREATE_NEW)
             sql("UPDATE ledger_meta SET backed_up_through_seq=?,last_backup_at=?",seq,clock())
             return target
-        } catch(e: Throwable) { target.toFile().deleteRecursively(); throw e }
+        } catch(e: Throwable) { if(created) target.toFile().deleteRecursively(); throw e }
     }
     fun backupIfDue(): Path? {
         val at = query("SELECT last_backup_at FROM ledger_meta") { it.getLong(1) }.single()
@@ -764,10 +873,16 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun supplyCallCount(): Long = query("SELECT coalesce(sum(physical_calls),0) FROM ai_calls") { it.getLong(1) }.single()
     fun failSupply(token: Fence, reason: String): Boolean {
-        require(reason in setOf("EMPTY", "TEXT_ONLY", "MALFORMED", "TIMEOUT"))
+        require(reason in setOf("EMPTY", "TEXT_ONLY", "MALFORMED", "TIMEOUT", "CLI_ERROR"))
         if (token.epoch != hello().epoch) return false
         return sql("UPDATE jobs SET state='failed',last_error=?,updated_at=? WHERE job_id=? AND fence=? AND state='running'",
             reason,clock(),token.id,token.value) == 1
+    }
+    /** A claim abandoned by shutdown goes back to the queue without spending an attempt. */
+    fun releaseJob(token: Fence): Boolean {
+        if (token.epoch != hello().epoch) return false
+        return sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE job_id=? AND fence=? AND state='running'",
+            clock(),token.id,token.value) == 1
     }
     /** Retain the failed job, and atomically queue one fresh schema-constrained attempt. */
     fun retryMalformedSupply(token: Fence, job: SupplyJob): Boolean = transaction {
@@ -905,7 +1020,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun failGradeWork(work: GradeWork, reason: String, retry: Boolean = true): Boolean = transaction {
         val token=requireNotNull(work.token)
         if(token.epoch != hello().epoch) return@transaction false
-        val again=retry && work.kind=="review_grade" && work.attempt <= 3 && clock() < work.subject.num("deadline")
+        val again=retry && work.attempt <= 3 && clock() < work.subject.num("deadline")
         val delay=when(work.attempt) { 1 -> 60_000L; 2 -> 3_600_000L; else -> 21_600_000L }
         sql("UPDATE jobs SET state=?,last_error=?,updated_at=? WHERE job_id=? AND state='running' AND fence=?",
             if(again) "queued" else "failed",reason,if(again) minOf(clock()+delay,work.subject.num("deadline")) else clock(),work.id,token.value)==1
@@ -916,15 +1031,35 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val es=events(course).filter { it.payload.str("attemptId")==attempt }
         val answer=es.firstOrNull { it.type=="answer_submitted" } ?: return null
         val posed=es.firstOrNull { it.type=="question_posed" } ?: return null
-        val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=?",course,attempt) {
+        // Restore re-enqueues pending grades, so one attempt can own several grade_attempt rows.
+        val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at DESC,job_id DESC LIMIT 1",course,attempt) {
             LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
-        }.singleOrNull() ?: return null
+        }.firstOrNull() ?: return null
         return json("posed" to posed.payload,"answer" to answer.payload,"question" to job.getValue("question"),
             "rubricFingerprint" to job.str("rubricFingerprint"),"deadline" to job.num("deadline"),
             "jobs" to JsonArray(query("SELECT kind,state,attempts,last_error,updated_at FROM jobs WHERE kind IN ('grade_attempt','review_grade') AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at,job_id",course,attempt) {
                 json("kind" to it.getString(1),"state" to it.getString(2),"attempts" to it.getInt(3),"lastError" to it.getString(4),"updatedAt" to it.getLong(5))
             }),"grades" to JsonArray(es.filter { it.type in setOf("attempt_graded","grade_reviewed") }.map { it.payload }))
     }
+
+    fun createMock(session: MockSession) = sql("INSERT INTO mock_sessions(mock_id,course_id,kind,purpose,paper_json,started_at,deadline) VALUES(?,?,?,?,?,?,?)",
+        session.id,session.course,session.kind,session.purpose,session.paper.toString(),session.startedAt,session.deadline)
+    fun mock(id: String): MockSession? = mockRows("mock_id=?",id).singleOrNull()
+    /** Newest first; drill sampling reads recent sessions to avoid repeating the same questions. */
+    fun mocks(course: String, limit: Int = 50): List<MockSession> = mockRows("course_id=? ORDER BY started_at DESC LIMIT ?",course,limit)
+    fun courseSeq(course: String): Long = query("SELECT coalesce(max(seq),0) FROM events WHERE course_id=?",course) { it.getLong(1) }.single()
+    fun openMocks(): List<MockSession> = mockRows("submitted_at IS NULL ORDER BY deadline")
+    private fun mockRows(where: String, vararg values: Any?) = query("SELECT mock_id,course_id,kind,purpose,paper_json,started_at,deadline,answers_json,submitted_at,auto,answers_seq FROM mock_sessions WHERE $where",*values) {
+        MockSession(it.getString(1),it.getString(2),it.getString(3),it.getString(4),LedgerJson.parseToJsonElement(it.getString(5)).jsonObject,
+            it.getLong(6),it.getLong(7),LedgerJson.parseToJsonElement(it.getString(8)).jsonObject,(it.getObject(9) as? Number)?.toLong(),it.getInt(10)==1,it.getLong(11))
+    }
+    /** With [seq], a save numbered no higher than the last stored one is dropped: a request that arrives late cannot bring back older answers. */
+    fun saveMockAnswers(id: String, answers: JsonObject, seq: Long? = null): Boolean =
+        if (seq == null) sql("UPDATE mock_sessions SET answers_json=? WHERE mock_id=? AND submitted_at IS NULL",answers.toString(),id)==1
+        else sql("UPDATE mock_sessions SET answers_json=?,answers_seq=? WHERE mock_id=? AND submitted_at IS NULL AND answers_seq<?",answers.toString(),seq,id,seq)==1
+    /** Only the first submission wins; manual and deadline submissions cannot both grade. */
+    fun closeMock(id: String, at: Long, auto: Boolean): Boolean = sql("UPDATE mock_sessions SET submitted_at=?,auto=? WHERE mock_id=? AND submitted_at IS NULL",at,if(auto) 1 else 0,id)==1
+    fun questionRegistered(id: String): Boolean = query("SELECT 1 FROM questions WHERE question_id=?",id) { true }.isNotEmpty()
 
     private fun gradeTransition(course: String, thread: String?, state: String) {
         if(thread==null) return
@@ -945,7 +1080,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
     fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,
-        purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null): PoolTake = transaction {
+        purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null, review: Boolean = false): PoolTake = transaction {
         require(size in setOf(1,3) && groupId.isNotBlank())
         require(purpose in Purpose.entries.map { it.name })
         val prior=events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
@@ -966,7 +1101,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (failure != null) append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,
             "jobId" to failure.first,"from" to "TASK","reason" to failure.second),"fallback-job:${failure.first}")
         val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
-            "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught) }
+            "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught,"review" to review) }
         val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false,thread)
         PoolTake(posed,"READY",ids.size-size,jobs,null)
     }
@@ -982,7 +1117,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun renewLease(token: Fence, device: String): Boolean = token.epoch == hello().epoch && sql("UPDATE turn_leases SET expires_at=? WHERE thread_id=? AND device_id=? AND fence=? AND expires_at>?",clock()+120000,token.id,device,token.value,clock()) == 1
     fun recoverSuspension() = transaction {
         sql("UPDATE messages SET status='truncated',reason='suspended' WHERE status='streaming'")
-        sql("UPDATE jobs SET state='queued',fence=fence+1,updated_at=? WHERE state='running'",clock())
+        // The interrupted claim never reached a result; it must not use up the job's retry budget.
+        sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE state='running'",clock())
         sql("DELETE FROM turn_leases")
     }
     fun startMessage(thread: String, message: String, content: String = "") { sql("INSERT INTO messages(thread_id,mseq,message_id,status,content_md,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,'streaming',?,?)",thread,thread,message,content,clock()) }
@@ -1026,12 +1162,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** Import API keeps both language indexes in the same transaction as the source page. */
     fun registerSourcePage(course: String, doc: String, title: String, page: Int, text: String,
-        tutorVisible: Boolean = true, kind: String = "textbook") = transaction {
+        tutorVisible: Boolean = true, kind: String = "textbook", learnerVisible: Boolean = true) = transaction {
         require(page > 0 && doc.isNotBlank())
         val owner = query("SELECT course_id FROM source_docs WHERE doc_id=?",doc) { it.getString(1) }.singleOrNull()
         require(owner == null || owner == course) { "Source belongs to another course" }
-        sql("INSERT INTO source_docs(doc_id,course_id,kind,title,tutor_visible) VALUES(?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET title=excluded.title,kind=excluded.kind,tutor_visible=excluded.tutor_visible",
-            doc,course,kind,title,if(tutorVisible) 1 else 0)
+        sql("INSERT INTO source_docs(doc_id,course_id,kind,title,tutor_visible,learner_visible) VALUES(?,?,?,?,?,?) ON CONFLICT(doc_id) DO UPDATE SET title=excluded.title,kind=excluded.kind,tutor_visible=excluded.tutor_visible,learner_visible=excluded.learner_visible",
+            doc,course,kind,title,if(tutorVisible) 1 else 0,if(learnerVisible) 1 else 0)
         sql("INSERT INTO source_pages(doc_id,pdf_page,text,text_sha256) VALUES(?,?,?,?) ON CONFLICT(doc_id,pdf_page) DO UPDATE SET text=excluded.text,text_sha256=excluded.text_sha256",doc,page,text,sha256(text.toByteArray()))
     }
 
@@ -1041,7 +1177,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
      */
     fun browsableSources(course: String): JsonArray = JsonArray(query(
         """SELECT d.doc_id,d.title,d.kind,min(p.pdf_page),max(p.pdf_page),min(p.book_page),max(p.book_page) FROM source_docs d
-           JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.tutor_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
+           JOIN source_pages p ON p.doc_id=d.doc_id WHERE d.course_id=? AND d.learner_visible=1 GROUP BY d.doc_id ORDER BY min(p.pdf_page),d.title""",course) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
         else json("docId" to it.getString(1),"title" to it.getString(2),"kind" to it.getString(3),"firstPdfPage" to it.getInt(4),"lastPdfPage" to it.getInt(5),
             "firstBookPage" to it.getObject(6)?.let { _ -> it.getInt(6) },"lastBookPage" to it.getObject(7)?.let { _ -> it.getInt(7) })
@@ -1049,7 +1185,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     fun browsablePage(course: String, doc: String, pdfPage: Int): JsonObject? = query(
         """SELECT d.doc_id,d.title,d.kind,p.book_page,p.text FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
-           WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.tutor_visible=1""",course,doc,pdfPage) {
+           WHERE d.course_id=? AND d.doc_id=? AND p.pdf_page=? AND d.learner_visible=1""",course,doc,pdfPage) {
         if (!tutorSourceAllowed(it.getString(1),it.getString(2).orEmpty(),it.getString(3).orEmpty())) null
         else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
@@ -1071,12 +1207,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         for (table in listOf("fts_en","fts_zh")) {
             val expression = terms.filter { table == "fts_en" || it.length >= 3 }.joinToString(" OR ") { "\"$it\"" }
             if (expression.isBlank()) continue
-            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
-                if (tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
-                    SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4)) else null
-            }.filterNotNull()
+            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
+                SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4),
+                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
+            }
         }
-        return found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }.sortedByDescending { it.score }.take(6)
+        val unique = found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
+        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
+            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
     }
 
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()
@@ -1110,3 +1248,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
     }
 }
+
+data class MockSession(val id: String, val course: String, val kind: String, val purpose: String, val paper: JsonObject,
+    val startedAt: Long, val deadline: Long, val answers: JsonObject = JsonObject(emptyMap()), val submittedAt: Long? = null, val auto: Boolean = false,
+    val answersSeq: Long = 0)

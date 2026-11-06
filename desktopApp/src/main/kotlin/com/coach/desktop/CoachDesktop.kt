@@ -30,12 +30,17 @@ import kotlinx.coroutines.SupervisorJob
 
 private fun env(name: String, default: String) = System.getenv(name)?.takeIf { it.isNotBlank() } ?: default
 
+internal fun resolveCourse(environment: String?, packaged: String?): String =
+    sequenceOf(environment, packaged).firstOrNull { !it.isNullOrBlank() }?.trim()
+        ?: error("No course configured. Set coach.course in ~/Coach/config/local.properties when building Coach, or set COACH_COURSE.")
+
 /** 桌面端「今天 / 学习」入口：连本机（或 Tailscale 上）的 Coach 服务端，账本副本在 `~/Coach/client/`。 */
 fun runCoach() {
+    refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val home = System.getProperty("user.home")
     val baseUrl = env("COACH_URL", "http://127.0.0.1:18791")
     val deviceId = env("COACH_DEVICE_ID", "desktop")
-    val course = env("COACH_COURSE", "ECNM10119")
+    val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
     val tokenFile = File(env("COACH_TOKEN_FILE", File(home, "Coach/data/device-token").path))
     val token = tokenFile.takeIf { it.exists() }?.readText()?.trim().orEmpty()
 

@@ -43,6 +43,7 @@ class MistakeReviewSmoke {
     /** 每轮一个标识：失败图与层级必须能证明是本轮写的，不能和 09:53 那张旧图混起来。 */
     private val runId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
     private var deadline = 0L
+    private val selectedCards = mutableSetOf<Int>()
 
     /** 单轮自设预算：420 秒的进程超时会把进程直接杀掉，catch 跑不到，证据一张也写不出来。 */
     private fun beginRun() {
@@ -232,22 +233,31 @@ class MistakeReviewSmoke {
     private fun trace(line: String)=java.io.File(context.cacheDir,"review-trace.txt").appendText("${SystemClock.elapsedRealtime()} $line\n")
     private fun snap(name: String) { runCatching {
         val bitmap=ui.takeScreenshot()
-        java.io.File(context.cacheDir,"review-snap-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,60,it) }
-        bitmap.recycle() } }
+        java.io.File(context.cacheDir,"review-snap-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
+        bitmap.recycle()
+        java.io.File(context.cacheDir,"review-snap-$name.txt").writeText("elapsed=${SystemClock.elapsedRealtime()}\n"+layout()) } }
     /** The option's letter sits right before its text in the tree: "✓ B" there means this very row is chosen. */
     private fun chosen(optionText: String): Boolean {
         val nodes=visibleTexts();val want=norm(optionText).take(40)
         val at=nodes.indexOfFirst { norm(it.drop(2)).contains(want) }
-        return at>0 && nodes[at-1].contains("✓")
+        return at>=0 && (nodes[at].contains("✓") || (at>0 && nodes[at-1].contains("✓")))
     }
     private fun marks()=visibleTexts().count { it.contains("✓") }
-    /** Reveals the row and taps it. A wrong or missed tap is caught later: the submit button stays disabled
-     * ("选完 3 题后提交") until every card has a choice, and [click] refuses a disabled button. */
+    /** A touch only counts once the selected option is visible in the fresh tree. */
     private fun pick(optionText: String,card: Int) {
         step("select answer card=$card")
         repeat(3) {
             trace("pick attempt $it card=$card text=${optionText.take(50)}")
-            try { val node=scrollTo(optionText,card=card);snap("c${card}a$it-before");tap(node);Thread.sleep(400);snap("c${card}a$it-after");return }
+            try {
+                val node=scrollTo(optionText,card=card)
+                snap("c${card}a$it-before");tap(node)
+                val until=SystemClock.elapsedRealtime()+2_000
+                while(SystemClock.elapsedRealtime()<until && !chosen(optionText)) Thread.sleep(100)
+                snap("c${card}a$it-after")
+                assertTrue("第 $card 题点按后未选中",chosen(optionText))
+                selectedCards.add(card)
+                return
+            }
             catch(e: AssertionError) { if(it==2) throw e;Thread.sleep(400) }
         }
     }
@@ -275,8 +285,13 @@ class MistakeReviewSmoke {
         bitmap.recycle()
         samples.put(name+"Ms",(end-mark)/1_000_000.0).put(name+"FrameStartedMs",(start-mark)/1_000_000.0)
     }
-    private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=ui.rootInActiveWindow,anyVisibility: Boolean=false): AccessibilityNodeInfo? {
+    private fun freshRoot(): AccessibilityNodeInfo? {
+        if(android.os.Build.VERSION.SDK_INT >= 34) ui.clearCache()
+        return ui.rootInActiveWindow
+    }
+    private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=freshRoot(),anyVisibility: Boolean=false): AccessibilityNodeInfo? {
         if(node==null) return null
+        if(!node.refresh()) return null
         val shown=norm(node.text?.toString().orEmpty());val want=norm(text)
         // Option rows may merge the letter with a long Markdown body: match the body's opening too.
         val hit=if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
@@ -285,8 +300,9 @@ class MistakeReviewSmoke {
         return null
     }
     private fun norm(s: String)=s.replace('\u2019','\'').replace(Regex("\\s+")," ").trim()
-    private fun visibleTexts(node: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: MutableList<String> = mutableListOf()): List<String> {
+    private fun visibleTexts(node: AccessibilityNodeInfo?=freshRoot(),out: MutableList<String> = mutableListOf()): List<String> {
         if(node==null) return out
+        if(!node.refresh()) return out
         node.text?.toString()?.takeIf { it.isNotBlank() }?.let { out.add((if(node.isVisibleToUser) "V " else "H ")+it.take(400)) }
         for(i in 0 until node.childCount) visibleTexts(node.getChild(i),out)
         return out
@@ -325,14 +341,16 @@ class MistakeReviewSmoke {
         for(i in 1..steps) { Thread.sleep(16);send(android.view.MotionEvent.ACTION_MOVE,SystemClock.uptimeMillis(),fromY+(toY-fromY)*i/steps.toFloat()) }
         send(android.view.MotionEvent.ACTION_UP,SystemClock.uptimeMillis(),toY.toFloat())
     }
-    private fun layout(node: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: StringBuilder=StringBuilder()): String {
+    private fun layout(node: AccessibilityNodeInfo?=freshRoot(),out: StringBuilder=StringBuilder()): String {
         if(node==null) return out.toString()
-        if(!node.text.isNullOrBlank()) { val r=android.graphics.Rect();node.getBoundsInScreen(r);out.append(node.text).append('@').append(r.top).append(';') }
+        if(!node.refresh()) return out.toString()
+        if(!node.text.isNullOrBlank()) { val r=android.graphics.Rect();node.getBoundsInScreen(r);out.append(node.text).append('@').append(r.flattenToString()).append(';') }
         for(i in 0 until node.childCount) layout(node.getChild(i),out)
         return out.toString()
     }
-    private fun scrollables(n: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
+    private fun scrollables(n: AccessibilityNodeInfo?=freshRoot(),out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
         if(n==null) return out
+        if(!n.refresh()) return out
         if(n.isScrollable) out.add(n)
         for(i in 0 until n.childCount) scrollables(n.getChild(i),out)
         return out
@@ -354,6 +372,7 @@ class MistakeReviewSmoke {
         val want=norm(text)
         fun walk(n: AccessibilityNodeInfo?) {
             if(n==null) return
+            if(!n.refresh()) return
             val shown=norm(n.text?.toString().orEmpty())
             if(shown.isNotEmpty() && n.isVisibleToUser) {
                 val r=android.graphics.Rect();n.getBoundsInScreen(r)
@@ -364,7 +383,7 @@ class MistakeReviewSmoke {
             }
             for(i in 0 until n.childCount) walk(n.getChild(i))
         }
-        walk(ui.rootInActiveWindow)
+        walk(freshRoot())
         val focus=target?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
         val pageTop=pageRect?.top ?: 0;val pageBottom=pageRect?.bottom ?: 0
         return Look(ScrollView(targetFound=focus!=null,targetCenterY=focus?.centerY() ?: 0,
@@ -392,7 +411,12 @@ class MistakeReviewSmoke {
         while(true) {
             checkTime("scrollTo ${text.take(30)}")
             val before=look(text,substring)
-            when(val move=driver.next(before.view,moved)) {
+            if(text=="提交本组答案" && before.view.atFooter && find("选完",substring=true)!=null) {
+                val missing=(1..3).firstOrNull { it !in selectedCards }
+                throw AssertionError("第 ${missing ?: "未知"} 题未选中，提交按钮仍不可用")
+            }
+            val move=driver.next(before.view,moved)
+            when(move) {
                 ScrollMove.Tap -> return find(text,substring)
                     ?: throw AssertionError("目标被判定可点却找不到：${text.take(40)}；可见题号 ${before.view.visibleCards}")
                 ScrollMove.NudgeDown, ScrollMove.NudgeUp -> {
@@ -406,7 +430,9 @@ class MistakeReviewSmoke {
                         visibleTexts().take(24).joinToString(" | "))
             }
             instrumentation.waitForIdleSync();Thread.sleep(250)
-            moved=movedBy(before.anchors,look(text,substring).anchors)
+            val after=look(text,substring).anchors
+            moved=movedBy(before.anchors,after)
+            trace("movement move=$move moved=$moved before=${before.anchors} after=$after")
         }
     }
     /** 手指拖 40% 页高，只在容器不认翻页动作时用。 */

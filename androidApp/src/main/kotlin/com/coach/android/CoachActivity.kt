@@ -179,20 +179,26 @@ class CoachActivity : ComponentActivity() {
 
 /** The acceptance override only selects another port on the configured Mac. */
 internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {
-    val configured = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
-    val accepted = if (BuildConfig.DEBUG) requested?.takeIf { candidate -> runCatching {
+    return resolveCoachServerUrl(requested, packageName, BuildConfig.COACH_TAIL_HOST, BuildConfig.COACH_PORT, BuildConfig.DEBUG)
+}
+
+internal fun resolveCoachServerUrl(requested: String?, packageName: String, host: String, configuredPort: Int, debug: Boolean): String {
+    val configured = "http://$host:$configuredPort"
+    val accepted = if (debug) requested?.takeIf { candidate -> runCatching {
         val uri = java.net.URI(candidate)
-        uri.scheme == "http" && uri.host == BuildConfig.COACH_TAIL_HOST && uri.port in 1..65535 &&
+        uri.scheme == "http" && uri.host == host && uri.port in 1..65535 &&
             uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null && uri.rawPath.orEmpty() in setOf("", "/")
     }.getOrDefault(false) } else null
     // A card package must not fall back to the production port when the extra is missing or rejected.
     if (packageName != "com.coach.android") {
+        if (packageName == "com.coach.android.ton1169" && requested == null &&
+            configuredPort in 1..65535 && configuredPort !in setOf(18791, 8791, 8790)) return configured
         val port = accepted?.let { java.net.URI(it).port }
         if (accepted == null || port == 18791 || port == 8791 || port == 8790) {
             error("Refusing production default for $packageName; coachUrl=${requested ?: "<empty>"}")
         }
         return accepted
     }
-    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
+    if (!debug || requested.isNullOrBlank()) return configured
     return accepted ?: configured
 }

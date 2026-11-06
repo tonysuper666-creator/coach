@@ -3,6 +3,9 @@ package com.coach.server
 import com.coach.client.ChatItem
 import com.coach.client.TutorClient
 import com.coach.client.TutorModel
+import com.coach.client.UsageTelemetry
+import com.coach.client.db.ClientDatabase
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -15,6 +18,9 @@ import io.ktor.websocket.Frame
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
@@ -134,6 +140,36 @@ class TutorClientConnectionTest {
                 assertFalse(model.state.value.connected)
                 assertFailsWith<IllegalStateException> { client.start(scope) }
             } finally { client.close(); scope.cancel() }
+        }
+    }
+
+    @Test fun telemetryRecordsOneOfflineIntervalAndIgnoresAutomaticFrames(): Unit = runBlocking {
+        Stub(recoverOnReconnect = false).use { stub ->
+            val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).also { ClientDatabase.Schema.create(it) }
+            val db = ClientDatabase(driver)
+            val telemetry = UsageTelemetry(db, System::currentTimeMillis) { false }
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val model = TutorModel(System::currentTimeMillis, telemetry)
+            val client = TutorClient(stub.url, "device", "t".repeat(43), model, telemetry)
+            fun events() = db.ledgerQueries.usageBatch().executeAsList().map { Json.parseToJsonElement(it.payload).jsonObject }
+            try {
+                client.start(scope)
+                await { model.state.value.connected }
+                assertTrue(client.send(buildJsonObject { put("t", "client.ttft") }))
+                assertTrue(client.send(buildJsonObject { put("t", "msg.resume") }))
+                assertTrue(client.next("thread", "course", "", test = false, recordTap = false))
+                assertTrue(client.next("thread", "course", "", test = true))
+                stub.mute.set(true)
+                await { !model.state.value.connected }
+                withTimeout(20_000) { while (stub.connections.get() < 3) delay(50) }
+                stub.mute.set(false)
+                await { model.state.value.connected }
+                val observed = events().map { it.getValue("kind").jsonPrimitive.content to it.getValue("target").jsonPrimitive.content }
+                assertEquals(1, observed.count { it.first == "disconnect" }, observed.toString())
+                assertEquals(1, observed.count { it.first == "reconnect" }, observed.toString())
+                assertEquals(0, observed.count { it == ("error" to "network") }, observed.toString())
+                assertEquals(listOf("test"), observed.filter { it.first == "tap" }.map { it.second })
+            } finally { client.close(); scope.cancel(); driver.close() }
         }
     }
 }

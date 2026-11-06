@@ -474,6 +474,8 @@ class ChatService(
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
         var guard = newGuard()
+        // Text of finished parts of a staged reply; a guard revision only ever replaces what comes after it.
+        var completedPrefix = ""
         fun acceptFiltered(text: String) {
             val revision = guard.takeRevision()
             if (revision == null) {
@@ -483,6 +485,7 @@ class ChatService(
                 // Replace that prefix via the existing snapshot protocol; the letter itself never streams.
                 visible = VisibleStream()
                 visibleText.setLength(0)
+                visibleText.append(completedPrefix)
                 for (segment in visible.push(revision)) when (segment) {
                     is VisibleStream.Segment.Text -> visibleText.append(segment.text)
                     is VisibleStream.Segment.Math -> visibleText.append("\$\$").append(segment.tex).append("\$\$")
@@ -514,9 +517,7 @@ class ChatService(
             }
         }
         val sink = object : BridgeStreamSink {
-            override fun onDelta(text: String, atMs: Long) {
-                handleDelta(text)
-            }
+            override fun onDelta(text: String, atMs: Long) = handleDelta(text)
         }
         // The lesson part of a staged reply streams in parallel with part one; its text waits here until part one is done.
         val lessonLock = Any()
@@ -614,6 +615,7 @@ class ChatService(
                     log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
                 }
                 emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
+                completedPrefix = visibleText.toString()
                 partOneEndMs = elapsedMs()
                 releaseLesson()
                 val second = lessonJob.await()

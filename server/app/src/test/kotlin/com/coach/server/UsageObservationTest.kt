@@ -20,6 +20,23 @@ import java.util.Properties
 import kotlin.test.*
 
 class UsageObservationTest {
+    @Test fun addedScreensAreAcceptedAndRenderedInChinese() {
+        val root = Files.createTempDirectory("coach-usage-screens-")
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY).also { ClientDatabase.Schema.create(it) }
+        val db = ClientDatabase(driver)
+        try {
+            val telemetry = UsageTelemetry(db, System::currentTimeMillis) { true }
+            listOf("today", "route", "review", "records", "resources", "study").forEach { telemetry.record("screen", it) }
+            val events = db.ledgerQueries.usageBatch().executeAsList().map { Json.parseToJsonElement(it.payload).jsonObject }
+            assertEquals(6, events.size)
+            UsageObservation(root.resolve("logs"), root.resolve("state")).use { observer ->
+                observer.accept("phone", events)
+                val report = Files.readString(observer.summarize())
+                listOf("今天页", "路线页", "复习页", "记录页", "资料页", "学习页").forEach { assertTrue(report.contains("切屏 / $it"), report) }
+            }
+        } finally { driver.close(); root.toFile().deleteRecursively() }
+    }
+
     @Test fun upgradingExistingClientRetainsItsLedgerAndAddsDiagnosticQueue() {
         val root=Files.createTempDirectory("coach-usage-upgrade-")
         val url="jdbc:sqlite:${root.resolve("client.sqlite")}"

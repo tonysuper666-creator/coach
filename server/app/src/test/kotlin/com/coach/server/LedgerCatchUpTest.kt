@@ -5,6 +5,7 @@ import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.protocol.*
 import com.coach.store.LedgerStore
+import com.coach.store.sha256
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.*
@@ -17,6 +18,7 @@ import java.net.URI
 import java.net.http.*
 import java.nio.file.Files
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
@@ -29,7 +31,7 @@ class LedgerCatchUpTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(directory).also { it.enroll("desktop", token) }
         val actor = LedgerActor(scope, store)
-        val pushes = MutableSharedFlow<String>(extraBufferCapacity = 8)
+        val pushes = MutableSharedFlow<String>(extraBufferCapacity = 64)
         val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { ledgerRoutes(actor, pushes) }
             .start(false)
         val port get() = runBlocking { server.engine.resolvedConnectors().single().port }
@@ -136,6 +138,49 @@ class LedgerCatchUpTest {
         }
     }
 
+    @Test fun stalledSocketDoesNotBlockConcurrentCommandWritesOrAnotherSubscriber() {
+        Harness().use { h ->
+            val seeded = h.seed(2700, "x".repeat(8192))
+            val last = seeded.last().seq
+            val received = CountDownLatch(1)
+            val slow = HttpClient.newHttpClient().newWebSocketBuilder()
+                .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
+                .buildAsync(URI("ws://127.0.0.1:${h.port}/v1/ws"), object : WebSocket.Listener {
+                    override fun onOpen(ws: WebSocket) { ws.request(1) }
+                    override fun onText(ws: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
+                        received.countDown()
+                        return null // no further demand: deliberately stop reading
+                    }
+                }).get(5, TimeUnit.SECONDS)
+            try {
+                assertTrue(received.await(5, TimeUnit.SECONDS), "slow socket did not connect")
+                slow.sendText("""{"t":"hello","ledgerAfter":{"c":0}}""", true).get(5, TimeUnit.SECONDS)
+                // Let the >20 MiB replay exhaust socket buffers before the burst.
+                Thread.sleep(1500)
+                Ws(h).use { fast ->
+                    fast.hello(last)
+                    val commands = List(100) { index ->
+                        val body = LedgerJson.encodeToString(CommandBody("open_kp", "c", System.currentTimeMillis(),
+                            json("kpId" to "synthetic-$index")))
+                        WireCommand("desktop", "slow-client-$index", body, sha256(body.toByteArray()))
+                    }
+                    val request = HttpRequest.newBuilder(URI("${h.baseUrl}/v1/commands"))
+                        .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
+                        .timeout(java.time.Duration.ofSeconds(10))
+                        .POST(HttpRequest.BodyPublishers.ofString(LedgerJson.encodeToString(commands))).build()
+                    val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
+                    assertEquals(200, response.statusCode())
+                    val receipts = LedgerJson.decodeFromString<List<Receipt>>(response.body())
+                    assertEquals(100, receipts.size)
+                    assertTrue(receipts.all { it.eventSeqs.isNotEmpty() })
+                    val written = h.page(last).events
+                    assertEquals(100, written.size)
+                    assertEquals(written, fast.events(100).first)
+                }
+            } finally { slow.abort() }
+        }
+    }
+
     @Test fun noHelloSendsOnlyHintsAndOldTransportStillNoticesNewEvents() = runBlocking {
         Harness().use { h ->
             h.seed(600, "x".repeat(2500))
@@ -203,6 +248,18 @@ class LedgerCatchUpTest {
                 ws.socket.sendText("""{"t":"hello","epoch":"before-restore","ledgerAfter":{"c":9223372036854775807}}""", true)
                     .get(5, TimeUnit.SECONDS)
                 assertEquals(expected, ws.events(expected.size).first)
+            }
+        }
+    }
+
+    @Test fun repeatedHelloReplaysFromSuppliedCursor() {
+        Harness().use { h ->
+            val expected = h.seed(3)
+            Ws(h).use { ws ->
+                ws.hello()
+                assertEquals(expected, ws.events(3).first)
+                ws.hello(expected.first().seq)
+                assertEquals(expected.drop(1), ws.events(2).first)
             }
         }
     }

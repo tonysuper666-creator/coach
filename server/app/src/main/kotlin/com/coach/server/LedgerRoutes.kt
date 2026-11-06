@@ -12,12 +12,14 @@ import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
+import java.util.concurrent.atomic.AtomicReference
 
 private const val LEDGER_FRAME_BYTES = 256 * 1024
 private const val LEDGER_READ_PAGE = 128
@@ -225,8 +227,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             val httpCourses=mutableSetOf<String>()
             var streaming=false
             var epoch=""
-            val ledgerSend=Mutex()
-            suspend fun catchUpLocked() {
+            suspend fun catchUp() {
                 // Recheck revocation on established sockets before sending any learning data.
                 if (!stillAuthorized()) return
                 val (meta,heads)=actor.execute { hello() to courseHeads() }
@@ -294,9 +295,30 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     }
                 }
             }
-            suspend fun catchUp() = ledgerSend.withLock { catchUpLocked() }
-            // Receive and push concurrently; StateFlow is not a durable ledger, reconnect catches up from SQLite.
-            val sender=launch(start = CoroutineStart.UNDISPATCHED) { pushes.collect { catchUp() } }
+            // A slow socket must never suspend the shared push collector. The ledger is
+            // durable; coalesced wakeups only ask this socket's drainer to read its heads.
+            val wake=Channel<Unit>(Channel.CONFLATED)
+            val pendingHello=AtomicReference<JsonObject?>(null)
+            val sender=launch(start = CoroutineStart.UNDISPATCHED) { pushes.collect { wake.trySend(Unit) } }
+            val drainer=launch {
+                for (ignored in wake) {
+                    pendingHello.getAndSet(null)?.let { message ->
+                        val currentEpoch=actor.execute { hello().epoch }
+                        // Preserve v1's missing-epoch behavior; explicit stale epochs restart.
+                        val compatible=message.str("epoch").let { it.isEmpty() || it==currentEpoch }
+                        if(epoch!=currentEpoch) {
+                            epoch=currentEpoch;cursors.clear();notified.clear();httpCourses.clear()
+                            send(Frame.Text(LedgerJson.encodeToString(actor.execute { hello() })))
+                        }
+                        streaming=true
+                        cursors.clear();notified.clear();httpCourses.clear()
+                        if(compatible) for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) {
+                            (seq as? JsonPrimitive)?.longOrNull?.let { cursors[course]=it.coerceAtLeast(0) }
+                        }
+                    }
+                    catchUp()
+                }
+            }
             // 导师流式帧：所有连接共享（同一账号多设备看同一条回答）；重连靠 msg.resume 拿 snapshot。
             // Serialize resume snapshot creation + delivery against this socket's deltas.
             val firstWords = WsFirstWords(device, observation)
@@ -308,7 +330,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             } }
             val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
             try {
-            catchUp()
+            wake.trySend(Unit)
             for(frame in incoming) if(frame is Frame.Text) {
                 val receivedAt = System.nanoTime()
                 if (!stillAuthorized()) break
@@ -316,22 +338,10 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 firstWords.received(message)
                 try { when(message.str("t")) {
                     "hello" -> {
-                        ledgerSend.withLock {
-                            val currentEpoch=actor.execute { hello().epoch }
-                            // Missing epoch is accepted for v1 compatibility; an explicit stale
-                            // epoch must not skip restored history using a pre-restore cursor.
-                            val compatible=message.str("epoch").let { it.isEmpty() || it==currentEpoch }
-                            if(epoch!=currentEpoch) {
-                                epoch=currentEpoch;cursors.clear();notified.clear();httpCourses.clear()
-                                send(Frame.Text(LedgerJson.encodeToString(actor.execute { hello() })))
-                            }
-                            streaming=true
-                            cursors.clear();notified.clear();httpCourses.clear()
-                            if(compatible) for((course,seq) in (message["ledgerAfter"] as? JsonObject).orEmpty()) {
-                                (seq as? JsonPrimitive)?.longOrNull?.let { cursors[course]=it.coerceAtLeast(0) }
-                            }
-                            catchUpLocked()
-                        }
+                        // Latest hello replaces any pending hello while a prior replay is
+                        // blocked. The drainer owns all cursor state and applies the latest.
+                        pendingHello.set(message)
+                        wake.trySend(Unit)
                     }
                     "msg.ask" -> {
                         val service=chat
@@ -373,7 +383,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 } } catch (error: IllegalArgumentException) {
                     send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
                 }
-            } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
+            } } finally { sender.cancelAndJoin();drainer.cancelAndJoin();wake.close();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
             } finally { socketTicket?.let { observation?.coverage?.end(it) } }
         }
     }

@@ -1,14 +1,48 @@
 #!/bin/bash
+# Coach 本机重活锁。
+#   tools/dev/heavy CMD ...             Gradle 构建、测试：最多 COACH_HEAVY_BUILD_LANES（默认 3）道并行
+#   tools/dev/heavy --emulator CMD ...  模拟器会话（含会话里的构建）：只走第 1 道，一次一个
+# 第 1 道就是旧版脚本用的那把锁（$HOME/dev/.coach-heavy.lock），旧版脚本照旧只抢第 1 道，新旧可以混用。
+# 构建不占第 1 道，所以模拟器会话不会被构建挤掉。
+# 持锁进程死了（owner 里的 PID 不在、锁目录超过 60 秒）会被下一个等待者回收。
 set -eu
-if [ "$#" -eq 0 ]; then echo "usage: tools/dev/heavy COMMAND [ARG ...]" >&2; exit 64; fi
-lock="${COACH_HEAVY_LOCK:-$HOME/dev/.coach-heavy.lock}"
-mkdir -p "$(dirname "$lock")"
-while ! mkdir "$lock" 2>/dev/null; do
-    echo "Coach heavy: waiting; $(cat "$lock/owner" 2>/dev/null || echo 'owner is initializing')" >&2
+emulator=0
+if [ "${1:-}" = "--emulator" ]; then emulator=1; shift; fi
+if [ "$#" -eq 0 ]; then echo "usage: tools/dev/heavy [--emulator] COMMAND [ARG ...]" >&2; exit 64; fi
+base="${COACH_HEAVY_LOCK:-$HOME/dev/.coach-heavy.lock}"
+build_lanes="${COACH_HEAVY_BUILD_LANES:-3}"
+mkdir -p "$(dirname "$base")"
+lanes=()
+if [ "$emulator" = 1 ]; then
+    lanes=("$base")
+else
+    i=2
+    while [ "$i" -le $((build_lanes + 1)) ]; do lanes+=("$base.$i"); i=$((i + 1)); done
+fi
+reap() {
+    local dir="$1" pid age
+    [ -d "$dir" ] || return 0
+    pid=$(sed -n 's/^PID=\([0-9]*\) .*/\1/p' "$dir/owner" 2>/dev/null | head -1)
+    age=$(( $(date +%s) - $(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || date +%s) ))
+    if [ "$age" -gt 60 ] && { [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; }; then
+        echo "Coach heavy: reclaiming stale lock $dir (owner ${pid:-unknown} gone)" >&2
+        rm -f "$dir/owner"; rmdir "$dir" 2>/dev/null || true
+    fi
+}
+lock=''
+while [ -z "$lock" ]; do
+    for c in "${lanes[@]}"; do
+        if mkdir "$c" 2>/dev/null; then lock=$c; break; fi
+    done
+    [ -n "$lock" ] && break
+    for c in "${lanes[@]}"; do reap "$c"; done
+    owners=''
+    for c in "${lanes[@]}"; do owners="$owners [$(basename "$c")] $(head -1 "$c/owner" 2>/dev/null || echo 'initializing')"; done
+    echo "Coach heavy: waiting;$owners" >&2
     sleep 5
 done
 child=''
-cleanup() { rm -f "$lock/owner"; rmdir "$lock"; }
+cleanup() { rm -f "$lock/owner"; rmdir "$lock" 2>/dev/null || true; }
 stop_tree() {
     local pid="$1" descendant
     for descendant in $(pgrep -P "$pid" || true); do stop_tree "$descendant"; done

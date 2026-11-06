@@ -1,0 +1,15 @@
+{
+  "id": "sample-paper", "kind": "paper", "course": "SYNTHETIC", "minutes": 30,
+  "variant_of": "invented", "total_marks": 5,
+  "sections": [{"title": "Practice", "instructions": "Answer everything.", "choose": null,
+    "items": [
+      {"id": "q1", "type": "mcq", "kp_week": 1, "kp": "arithmetic", "marks": 2,
+       "stem": "How many objects remain?", "options": ["one", "two", "three"], "answer": 1,
+       "explanation": "Two objects remain.", "source": "invented example"},
+      {"id": "q2", "type": "analytical", "kp_week": 1, "kp": "arithmetic", "marks": 3,
+       "stem": "Calculate the result.", "source": "invented example", "parts": [
+         {"label": "a", "prompt": "Compute the total.", "marks": 3, "answer": "2.5", "tolerance": 0.01,
+          "rubric": [{"criterion": "computes", "marks": 3, "look_for": "2.5"}]}
+       ]}
+    ]}]
+}

@@ -10,6 +10,15 @@ no device probing: rejoin the existing `wait.sh` queue instead. The runner check
 the grant and the unlocked, awake, ten-minute-idle OPPO before installation.
 The phone lease does not authorize host sleep, logout, or network interruption.
 
+The reconnection instrumentation opens and later finishes a debug-only, unexported
+blank activity in its own card package. This makes the intended foreground
+client lifecycle explicit without launching the learning UI, storing pairing
+credentials, changing power settings, or keeping the display awake. A resumed
+activity is asserted before measurement. This is a lifecycle experiment after
+the background instrumentation stalled; it is not a claim that background
+operation or real system-sleep reconnection has been fixed. Both original
+heartbeat and OFFLINE gates remain unchanged.
+
 Build with JDK 17, the configured Android SDK and the global heavy lock:
 
 ```sh
@@ -133,6 +142,18 @@ as unknown, access failure stays unknown, and `0` may mean a hidden wait point.
 This observes scheduling without changing phone power settings or signalling
 the process. A snapshot still describes only that instant, and does not by itself
 identify a cause or prove a reconnection pass.
+
+On 2026-11-06 at 06:55–06:56 UTC, `976cd9a` passed the network gate 3/3
+but again failed the unchanged healthy control before STOP. Both private counters
+advanced 1 to 3 (main 4,009 ms, IO 4,004 ms). The last hello/events requests
+returned. The failure snapshot contained 33 unknown wait-channel observations
+and no recognized symbol; it did not identify a cause. The test package was
+confirmed absent after cleanup, the isolated server/data were removed, the
+lease was released and ai_calls=0. Source review found that the instrumentation
+had no foreground activity. The debug-only blank activity experiment described
+above subsequently built successfully with matching server and both APKs via
+the heavy lock (135 tasks, 17 seconds); it has not yet run on the phone.
+
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

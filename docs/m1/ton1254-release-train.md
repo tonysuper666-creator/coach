@@ -3,13 +3,20 @@
 PR #89 integrates mistake review, weekly study, mistake explanations, streaming
 rendering and Today week selection. It remains draft. The current stage verifies
 an isolated server downgrade and forward roll; full train and production
-acceptance remain open. No production database or device is used by this stage.
+acceptance remain open. No production database or physical device is used by this stage.
 
 ## Integration and review repairs
 
-The train is rebased onto main `1e2048b`. Main's unified actionable review queue,
+The follow-main candidate merges main `b1b5e49` into the existing PR #89
+head `81180a0`; neither history nor the PR is replaced. This includes #91's exam
+panel (`5f5cf55`) and #101's local reminders. Main's actionable review queue,
 04:00/timezone day calculation, review auto-start, mock entry and diagnostics
-remain. Main's `ReviewEntryTest` and `ReviewQueueSmoke` are unchanged.
+remain. Main's `ReviewEntryTest` and `ReviewQueueSmoke` assertions are retained.
+
+The three conflicts preserve both Android BackHandler and reminder settings,
+pass reminder settings into the movable review pane, and keep the route's exam
+panel review callback. StudyScreen retains panel launch/cancellation and exactly
+one `AdvanceOnNewPass`; reopening a passed point must not advance it.
 
 | Source | Pinned head | Integration |
 | --- | --- | --- |
@@ -18,13 +25,18 @@ remain. Main's `ReviewEntryTest` and `ReviewQueueSmoke` are unchanged.
 | #51 | `887a4d12ade782b1bdd8d2f1e684dbb990a05fa0` | Non-merge patches already integrated. |
 | #57 | `01f5f54400854d9ca866982435584a136d9b029c` | Integrated; source PR closed into #89. |
 | #58 | `bc24e9864e4e3804f8ebe074fc6811400a657dcf` | Integrated streaming/replay patches; source PR closed. |
-| #59 | `41b16315b3dbe4e5f730f663bd739964925374c5` | Semantic patches included; source head recorded in ancestry. |
-| #61 | `db96ae7cd31fd59a8a8676bf47b0c9a213d180b3` | Semantic patches included; source head recorded in ancestry; duplicate advancement logic retained once. |
+| #59 | `41b16315b3dbe4e5f730f663bd739964925374c5` | Semantic patches included via `cf19b08` / `f8cc642`; source SHA is provenance, not an ancestor. |
+| #61 | `db96ae7cd31fd59a8a8676bf47b0c9a213d180b3` | Semantic regression retained in `81f92fa`; duplicate advancement logic retained once. |
 | #85 | `e1ec86663e156f8a8401820a0caed129c7a1dd21` | Rendering aggregate gate and reclaim sampler integrated; source PR closed. |
 
 
-#59/#61's source heads remain recorded in ancestry after the semantic repairs.
-Duplicate auto-advance behavior is retained once. Current main's endpoint
+#59's `b5fd3a5` → `cf19b08` and `41b1631` → `f8cc642` have identical
+added/deleted patch lines after ignoring rebased context. #61's `db96ae7` →
+`81f92fa` imports the additional navigation regression; its implementation and
+helper test already came from #59. The source SHAs are not ancestors of this
+rebased history. Imported assertions remain; later adaptations only add a
+Compose height import and nullable list types. Duplicate auto-advance behavior
+is retained once. Current main's endpoint
 resolver, source lookup and first-word diagnostics are retained.
 
 - `PROJECTION_VERSION` is 8.
@@ -84,12 +96,15 @@ by forward rolling.
 
 Use JDK 17 and the installed Android SDK. All Gradle/JVM work runs through the
 current main `tools/dev/heavy --priority release`; never override its global locks.
-Build a clean c0c5bb8 checkout with `check :server:app:installDist`.
+Build the two clean pinned historical checkouts with `:server:app:installDist`
+through current main's `tools/dev/heavy --priority release`. The client probe
+uses the candidate test classes with each historical distribution's libraries;
+it does not require compiling tests in the historical checkout.
 
 ```sh
 tools/dev/heavy --priority release ./gradlew check \
-  :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:app:installDist \
-  -PcoachApplicationId=com.coach.android.ton1291 \
+  :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:app:installDist :server:app:testClasses \
+  -PcoachApplicationId=com.coach.android.ton1254 \
   -Pcoach.course=ton1291-synthetic-review \
   -Pcoach.port=29254 -Pcoach.isolatedLaunchPort=29254 --console=plain
 python3 -W error::ResourceWarning -m unittest \
@@ -106,10 +121,19 @@ tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
   --out /PRIVATE/OUTPUT/sanitized-summary.json
 ```
 
-The workdir runner `ton1254-final-gates.sh` runs candidate full gates/APKs,
-restore tests, clean installed-baseline gates and rehearsal sequentially in one
-heavy invocation. It requires explicit private input, old distribution, rollback
-checkout/head and installation-descriptor environment variables.
+For an independently generated synthetic input, prepare a new output directory
+from the built historical v6 server (do not reuse another author's private copy):
+
+```sh
+tools/dev/heavy --priority release python3 tools/dev/prepare-train-fixture.py \
+  --old-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
+  --out /PRIVATE/INDEPENDENT-SYNTHETIC-V6
+```
+
+Pass `/PRIVATE/INDEPENDENT-SYNTHETIC-V6/data` as `--private-data-dir` to both
+rehearsal and emulator runners. A synthetic installation descriptor containing
+`sourceHead=c0c5bb82510694a481351d60733b8c98d6162bb8` tests the reviewed contract;
+it is not proof of the actual installed version or an authorized learner copy.
 
 The harness backs up only an explicitly supplied private database, refuses live
 installed-tree/symlink inputs, keeps one copied database through candidate,
@@ -127,7 +151,57 @@ managed services/source lookup are disabled, JVM home/temp/math state is private
 and inherited COACH_/BRIDGE_/JVM options are cleared. All owned children are
 reaped and temporary copies deleted. Publish only sanitized metadata.
 
-## Current stage evidence
+## Follow-main evidence — 2026-11-06
+
+Code head `449bfc204899519a75718121b6db064928a05edf` contains main
+`b1b5e494ac62c4330b34f36a8df321710bc1322b` and original PR head `81180a0`.
+The full candidate command above exits 0 (221 executed tasks, 6m56s): 647
+JUnit tests in 137 suites, zero failures/errors/skips. Breakdown: UI 118,
+client 86, domain 56, server app/core/store 168/37/38, AI 71, desktop 8,
+Android unit 13, migration tools 52. Exam-panel launch/cancellation/exemption,
+review-only reminder settings, source navigation and new-pass advancement
+regressions pass. Restore/reviewer/installation-contract tests also exit 0
+(eight methods). No existing assertion was removed or weakened.
+
+The Gradle command began at `f2ea699bb5dcbccc3e21c8fced667fa260c6a5db`;
+`449bfc2` changes only the Python emulator cleanup runner. All Android,
+server and shared source trees are identical between these heads. APK manifest
+inspection confirms `com.coach.android.ton1254` and
+`com.coach.android.ton1254.test`. The runner accepts an isolated package argument,
+does not enumerate phones, and attempts removal of both APKs before reaping
+its owned emulator. Actual emulator execution/cleanup remains unverified.
+
+Both pinned historical server distributions were built locally (installDist,
+exit 0). An independent synthetic v6 fixture was generated from the newly built
+`5ef9989` distribution (exit 0), rather than reusing a previous author's copy.
+The corrected rehearsal against `c0c5bb8` exits 0 at code head `449bfc2`:
+
+- Server-only downgrade preserves all 26 candidate events, original event rows
+  and paired-token hashes; integrity is `ok`. Review rejects with zero durable
+  writes, while learning state/history remain readable.
+- Candidate/installed client Continue learning misroutes remain 0/1; the old
+  APK is not installed. Mocks returns a completed 404/error on the rollback server.
+- Injected exit 71 recovers the rollback server without restoring the database;
+  forward roll reopens the same three pending RECALL cards in that same database.
+- Original credentials authenticate on eight starts; four synthetic lecture/quiz
+  phases pass. Ten owned children are reaped without forced kill, no isolated
+  listeners remain and the temporary rehearsal copy is deleted. Real tutor calls,
+  production connections/control calls and protected-port usage are zero.
+
+Two corrected invocation failures are recorded in the issue evidence: historical
+`testClasses` hits an old Gradle configuration-resolution error (exit 1; only
+historical installDist is needed), and supplying the fixture parent instead of
+its `data` child is refused before launch (exit 1). Neither required changing
+historical code or weakening a gate. A production-shaped package is deliberately
+rejected before emulator launch (expected exit 1).
+
+At 22:34Z the emulator lane is held by a live TON-1253 process. Per the dispatch
+contract, neither `ReviewQueueSmoke` nor `MistakeReviewSmoke` was queued or run;
+there is no instrumentation success or uninstall evidence for this stage. No
+physical-device registration was made. QA-C can review the integrated candidate;
+the two emulator gates still need an available lane before advancing device gates.
+
+## Previous-stage evidence (historical)
 
 At code head `1ed7a93`, candidate full Gradle check, debug APK, instrumentation
 APK and server installDist exit 0. The JUnit reports contain 619 tests with zero
@@ -163,14 +237,23 @@ workdir; the issue attachment records commands, exits, counts and hashes only.
 
 ## Later acceptance and production gates
 
-This stage goes to QA-C for an independent **downgrade-contract re-review** after
-all required local gates exit 0. Do not dispatch whole-train final acceptance
-before that stage passes. Keep #89 draft; do not merge or change production.
+The follow-main stage goes to QA-C for independent integration acceptance;
+QA-C arranges Architect's critical review. This stage does not dispatch
+whole-train final acceptance. Keep #89 draft; do not merge or change production.
 
-Real private-copy rehearsal, `ReviewQueueSmoke` and `MistakeReviewSmoke` remain
-unverified. The current stage does not touch an emulator or a physical device.
-The smoke runners retain their existing latency/correctness assertions and must
-use isolated packages/ports and owned processes under `heavy --emulator`.
+Real authorized private-copy rehearsal and physical-device acceptance remain
+unverified. The follow-main smoke invocation is:
+
+```sh
+tools/dev/heavy --emulator --priority release python3 tools/dev/run-review-emulator.py \
+  --private-data-dir /PRIVATE/INDEPENDENT-SYNTHETIC-V6/data \
+  --application-id com.coach.android.ton1254 --out /PRIVATE/SMOKE-OUTPUT
+```
+
+The smoke runners retain their existing latency/correctness assertions and use
+isolated packages/ports and an owned emulator. The runner removes both test and
+app packages before reaping its emulator, including after a failed assertion.
+An occupied emulator lane is an unverified gate, not a reason to bypass the lock.
 
 | Owner card | Required before production |
 | --- | --- |

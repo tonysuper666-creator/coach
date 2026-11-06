@@ -279,9 +279,9 @@ class TutorClient(
 
     // ---- 协议帧（与 server `LedgerRoutes` 的 tutor.* / msg.* 对应） ----
 
-    fun open(threadId: String, courseId: String, kpId: String, conceptIds: List<String>, title: String) = send(buildJsonObject {
+    fun open(threadId: String, courseId: String, kpId: String, conceptIds: List<String>, title: String, review: Boolean = false) = send(buildJsonObject {
         put("t", "tutor.open"); put("threadId", threadId); put("courseId", courseId); put("kpId", kpId); put("title", title)
-        put("conceptIds", JsonArray(conceptIds.map(::JsonPrimitive)))
+        put("conceptIds", JsonArray(conceptIds.map(::JsonPrimitive))); put("review", review)
     })
 
     /** 「下一步」/「换个例子再讲」/ 讲解；`test=true` 是「出题」。 */

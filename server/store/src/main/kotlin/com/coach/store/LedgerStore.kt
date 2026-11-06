@@ -196,6 +196,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
     }
 
+    /** A separate course-bound review thread preserves the ordinary KP/Continue binding. */
+    fun bindReviewThread(course: String, thread: String, kp: String) {
+        require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
+        val anchor = "$course:$kp"
+        val old = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?",thread) {
+            Triple(it.getString(1),it.getString(2),it.getString(3))
+        }.singleOrNull()
+        if (old == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'REVIEW','COURSE_KP',?)",thread,course,anchor)
+        else require(old == Triple(course,"REVIEW",anchor)) { "Review thread binding mismatch" }
+    }
+
     fun todayProgress(course: String, thread: String? = null): TodayProgress {
         val state = projection(course)
         val quick = state.quickAsks.values.firstOrNull { it.threadId == thread }
@@ -361,7 +372,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
     }.single()
     private fun lastSeq(): Long = query("SELECT coalesce(max(seq),0) FROM events") { it.getLong(1) }.single()
-    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? ORDER BY seq LIMIT ?",course,after,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE, through: Long = Long.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",course,after,through,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
+    /** Watermarks only: notification sockets never need to load historical event payloads. */
+    fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
     /** Offline CLI or server actor only: one transaction installs content and its two events. */
@@ -533,7 +546,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("DELETE FROM offline_reservations WHERE expires_at<=?",clock())
         sql("DELETE FROM offline_packs WHERE expires_at<=?",clock())
         val state = projection(course)
-        val due = state.review.entries.filter { it.value.dueDay <= logicalDay(clock(),state.timeZone) }.sortedBy { it.value.dueDay }.map { it.key }
+        val today = logicalDay(clock(), state.timeZone)
+        val due = state.reviewsOn(today).keys.toList()
         val kps = (due + listOfNotNull(state.position.continueTarget, state.position.current) +
             query("SELECT DISTINCT kp_id FROM question_kp JOIN questions USING(question_id) WHERE course_id=? ORDER BY question_kp.rowid",course) { it.getString(1) }).distinct()
         val ids = kps.flatMap { kp -> unseenPoolIds(course,kp).map { it to kp } }.distinctBy { it.first }.take(size)
@@ -1066,7 +1080,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
     fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,
-        purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null): PoolTake = transaction {
+        purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null, review: Boolean = false): PoolTake = transaction {
         require(size in setOf(1,3) && groupId.isNotBlank())
         require(purpose in Purpose.entries.map { it.name })
         val prior=events(course).filter { it.type == "question_posed" && it.payload.str("groupId") == groupId }
@@ -1087,7 +1101,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (failure != null) append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,
             "jobId" to failure.first,"from" to "TASK","reason" to failure.second),"fallback-job:${failure.first}")
         val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
-            "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught) }
+            "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught,"review" to review) }
         val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false,thread)
         PoolTake(posed,"READY",ids.size-size,jobs,null)
     }

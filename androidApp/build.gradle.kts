@@ -74,7 +74,9 @@ android {
         val coachPort = (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) }
         buildConfigField("int", "COACH_PORT", coachPort)
         manifestPlaceholders["coachPort"] = coachPort
-        buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
+        // Isolated synthetic acceptance must not change the shared production configuration.
+        val coachCourse = providers.gradleProperty("coach.course").orElse(localConfig.getProperty("coach.course", "")).get()
+        buildConfigField("String", "COACH_COURSE", "\"$coachCourse\"")
         minSdk = 34
         targetSdk = 35
         versionCode = coachVersionCode
@@ -100,6 +102,7 @@ dependencies {
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(project(":shared:domain"))
     androidTestImplementation(project(":shared:client"))
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")

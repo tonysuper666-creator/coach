@@ -30,5 +30,6 @@ kotlin {
         implementation(compose.uiTest)
         implementation(compose.desktop.currentOs)
         implementation(libs.coroutines.swing)
+        implementation(libs.sqldelight.driver)
     }
 }

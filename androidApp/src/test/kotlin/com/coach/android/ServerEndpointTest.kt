@@ -5,7 +5,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ServerEndpointTest {
-    private val host = "100.64.1.2"
+    private val host = "coach.example"
     private val card = "com.coach.android.ton1173"
     private fun url(request: String? = null, pkg: String = card, debug: Boolean = true, port: Int = -1) =
         resolveCoachServerUrl(request, pkg, debug, host, 18791, port)

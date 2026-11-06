@@ -52,7 +52,7 @@ The mock adapter uses this validator in analytical final-value fields and this
 key for numeric-only parts. Constructed jobs include `decimalPlaces: 2` and the
 original tolerance literal, and use the existing process grading/review path.
 Flattened part keys and hundredths-of-a-mark score units stay on the existing
-ledger. Omitted or null mock-part `tolerance` uses the new analytical default `0.005`;
+ledger. Omitted, null or blank mock-part `tolerance` uses the new analytical default `0.005`;
 an explicit `tolerance: 0` still requires exact equality. Numeric-only parts read
 only `final`, intentionally never interpreting the working `text` as a final.
 An empty final never falls back to working. A blank part scores zero
@@ -256,3 +256,73 @@ screenshots or device ledger sequence are available. The updated synthetic
 runner is a continuation artifact, not evidence of acceptance. Keep PR100 draft
 and the issue in review pending the specified emulator journey and independent
 non-GPT review of the exact candidate head.
+
+## Sage P2 follow-up: legacy replay and shared numeric verdict
+
+The mock adapter accepts legacy answer-key notation again: surrounding spaces,
+trailing punctuation and percentages. Decimal literals retain their precision;
+percentages use exact decimal scaling. Other previously accepted key forms retain
+the existing `NumericValue.parse` interpretation. This normalization applies to
+frozen answer keys only: student final inputs still require two decimal places.
+The original key remains available as the displayed reference. Blank tolerance
+uses the analytical default, while an explicit zero remains strict.
+
+The grading and cross-review prompts now include the actual server-owned numeric
+verdict, computed by the same function that writes `numericFinal`. Review also
+receives the frozen draft's numeric fact. This covers missing, malformed and
+wrong-precision finals as well as numeric mismatches; the reviewer is instructed
+to use the server verdict for final-value criteria and preserve method credit.
+
+For a full rubric, full credit alongside a nonmatching final records
+`rubricReviewWarning: FULL_CREDIT_WITH_NONMATCHING_FINAL`. The reviewer must explain
+that allocation against the original criteria or revise it; if confirmed, the
+warning remains visible in result feedback. The worker does not invent an N
+criterion or an arbitrary deduction. An integration test starts with 4/4 despite
+an incorrect final, then records an independent review revising to 2/4 while
+preserving the same server verdict. Another test confirms that an unresolved
+full-credit discrepancy remains flagged after review and ledger reopening.
+
+The unchanged `SageBLegacyPaperProbeTest` attachment produced four failures on
+`a515fc4`. Adding server-verdict assertions to the existing full-rubric scenarios
+also failed against that implementation (8 answered scenarios failed, one blank
+scenario passed). The combined baseline command exited 1, 13 tests / 12 failures:
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.SageBLegacyPaperProbeTest --tests com.coach.server.FullRubricAnalyticalTest --max-workers=2
+```
+
+After the fix, the following command exited 0 (`BUILD SUCCESSFUL in 6s`):
+80 AI tests and 38 selected server tests, no failures/errors/skips. These include
+the unchanged four legacy probes, seven autosave/submission/frozen-replay cases,
+12 full-rubric cases, the original 14 mock regressions and Sage's full-rubric probe.
+
+```sh
+tools/dev/heavy ./gradlew :server:ai:test :server:app:test --tests '*Analytical*' --tests com.coach.server.SageBLegacyPaperProbeTest --tests com.coach.server.MockExamTest --tests com.coach.server.SageFullRubricProbeTest --max-workers=2
+```
+
+Both Sage attachments were read. The five `SageBAnalyticalProbeTest` assertions
+concern input normalization, zero-tolerance rounding and halfway rounding. They
+were not added to the regression suite: two assert mutually incompatible behavior
+for the same zero-tolerance key, and rounding would change the explicitly requested
+strict-zero and inclusive-tolerance contract. They remain separate product-policy
+questions from these two P2 fixes. No existing test was removed or weakened.
+
+The complete forced acceptance command above was rerun on `19d9ba1`, including
+main through `79f7823` and the P2 implementation `0fdb871`. Exit 0:
+`BUILD SUCCESSFUL in 6m 12s`, all 153 actionable tasks executed. Fresh JUnit XML
+records domain 57 / client 57 / UI 81 / AI 80 / server 191: **466 tests**, no
+failures, errors or skips. Both `.ton1292` APKs and the isolated server distribution
+built. This is the current follow-up's full run, rather than the historical 451
+test result above. The subsequent documentation commit changes no tested code.
+
+The emulator command was attempted again for this P2 follow-up. It remained in
+the current wrapper's queue behind live owner PID 60354 (`winvm` build task).
+After preparing the handoff, only our waiting wrapper PID 40920 was cancelled:
+exit 130. Its waiting ticket and sleep-only child were checked before signalling;
+no device runner, AVD, installation or isolated service began. No other process
+or lock was modified. Therefore there are still no device screenshots, device
+ledger sequence or portrait/tablet/reopen acceptance results. The attached runner
+now also requires the local synthetic grader/reviewer to receive the actual server
+verdict; it is a continuation artifact, not passed evidence. Keep PR100 draft and
+request independent review of the exact new head; the first device gate remains
+required before acceptance/merge. Physical follow-up stays with TON-1254.

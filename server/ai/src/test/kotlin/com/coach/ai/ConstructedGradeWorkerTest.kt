@@ -18,17 +18,19 @@ class ConstructedGradeWorkerTest {
     private fun draft(points: Int=10, evidence: String=quote)=json("items" to JsonArray(listOf(
         json("id" to "R1","points" to points,"reason" to "Synthetic explanation","evidence" to evidence))),"total" to 10,"awarded" to points).toString()
 
-    private fun LedgerStore.poseAndSubmit(attempt: String="a", numeric: Boolean=false) {
+    private fun LedgerStore.poseAndSubmit(attempt: String="a", numeric: Boolean=false,
+        numericConfig: JsonObject?=null, finalAnswer: String="0.25") {
         val base=question.copy(stem=question.stem+" "+attempt)
-        val q=if(numeric) base.copy(stem=base.stem+" Calculate the result.",rubric=rubric+RubricItem("N","Numeric final",2.0,"Synthetic basis")) else base
-        val value=if(numeric) JsonObject(storedConstructed(q)+("numeric_final" to json("rubricItemId" to "N","expected" to "0.25"))) else storedConstructed(q)
+        val key=numericConfig ?: if(numeric) json("rubricItemId" to "N","expected" to "0.25") else null
+        val q=if(key!=null) base.copy(stem=base.stem+" Calculate the result.",rubric=rubric+RubricItem("N","Numeric final",2.0,"Synthetic basis")) else base
+        val value=if(key!=null) JsonObject(storedConstructed(q)+("numeric_final" to key)) else storedConstructed(q)
         val input=json("course" to "c","kp" to "kp","generator" to BridgeClient.CLAUDE)
         val id=enqueueJob("review_constructed",input.toString(),"pack")
         check(storeConstructed(claimJob(id)!!,SupplyJob(id,"review_constructed",input,"pack"),value,GradeGate.rubricFingerprint(q.rubric),BridgeClient.CODEX))
         val card=takeConstructed("c","kp",attempt)
         assertFalse("rubric" in card.payload || "reference_answer" in card.payload)
         val bytes=LedgerJson.encodeToString(CommandBody("submit_answer","c",1793188800000,
-            json("attemptId" to attempt,"answer" to answer,"finalAnswer" to "0.25","posedSnapshot" to card.payload)))
+            json("attemptId" to attempt,"answer" to answer,"finalAnswer" to finalAnswer,"posedSnapshot" to card.payload)))
         assertEquals("OK",command(WireCommand("phone",attempt,bytes,sha256(bytes.toByteArray()))).status)
     }
 
@@ -174,6 +176,46 @@ class ConstructedGradeWorkerTest {
             assertEquals("finalAnswer",numericEvidence.str("field"))
             assertEquals("0.25",numericEvidence.str("text"))
             assertEquals("0.25",actor.execute { constructedRecord("c","a")!!.getValue("answer").jsonObject.str("finalAnswer") })
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun strictFinalIncludingMissingPartSurvivesGradingAndReviewInExistingLedger() = runBlocking<Unit> {
+        for ((submitted,status) in listOf("0.25" to "CORRECT", "0.2" to "WRONG_DECIMAL_PLACES", "" to "MISSING")) {
+            val dir=Files.createTempDirectory("strict-grade-ledger")
+            val actor=LedgerActor(this,LedgerStore(dir))
+            try { StubBridge().use { bridge ->
+                val key=json("rubricItemId" to "N","expected" to "0.25","decimalPlaces" to 2,"absTolerance" to 0.005)
+                actor.execute { poseAndSubmit(numericConfig=key,finalAnswer=submitted) }
+                bridge.enqueue(200,StubBridge.completion(draft()))
+                bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM","note":"Method checked"}"""))
+                val worker=ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge)))
+                assertTrue(worker.runOne());assertTrue(worker.runOne());assertFalse(worker.runOne())
+                val events=actor.execute { events("c") }
+                val initial=events.single { it.type=="attempt_graded" }.payload
+                val reviewed=events.single { it.type=="grade_reviewed" }.payload.getValue("revised").jsonObject
+                for (grade in listOf(initial,reviewed)) {
+                    assertEquals(if(status=="CORRECT") 1200 else 1000,grade.num("score"))
+                    assertEquals(1200,grade.num("max"))
+                    assertEquals(status,grade.getValue("numericFinal").jsonObject.str("status"))
+                }
+                val record=actor.execute { constructedRecord("c","a")!! }
+                assertEquals(submitted,record.getValue("answer").jsonObject.str("finalAnswer"))
+                assertEquals(2,record.getValue("grades").jsonArray.size)
+                assertEquals(2L,actor.execute { supplyCallCount() })
+            } } finally { actor.close();dir.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test fun malformedStrictKeyFailsBeforeCallingModel() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("strict-invalid-key")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            actor.execute { poseAndSubmit(numericConfig=json("rubricItemId" to "N","expected" to "0.25",
+                "decimalPlaces" to 3,"absTolerance" to 0.005)) }
+            assertTrue(ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge))).runOne())
+            assertTrue(bridge.requests.isEmpty())
+            assertEquals(0L,actor.execute { supplyCallCount() })
+            assertTrue(actor.execute { events("c").none { it.type=="attempt_graded" } })
         } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 }

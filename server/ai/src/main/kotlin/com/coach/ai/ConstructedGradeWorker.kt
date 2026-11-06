@@ -25,6 +25,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
             val numeric=(input.getValue("question").jsonObject["numeric_final"] as? JsonObject)
             val process=if(numeric==null) question else {
                 require(NumericValue.parse(numeric.str("expected"))!=null) { "invalid_numeric_key" }
+                analyticalNumericKey(numeric) // Validate strict keys before spending a model call.
                 require(question.rubric.count { it.id==numeric.str("rubricItemId") }==1)
                 question.copy(stem=question.stem+"\nFull frozen rubric (numeric final is server-owned, do not grade it):\n"+
                     Prompts.rubricJson(question.rubric)+"\nServer numeric criterion: $numeric"+"\nSubmitted final value (verbatim, server-owned): <<<${input.str("finalAnswer")}>>>",
@@ -89,14 +90,18 @@ internal fun gradePayload(process: DraftGrade, answer: String, numeric: JsonObje
     var numericFact: JsonObject?=null
     if(numeric!=null) {
         val item=question.rubric.single { it.id==numeric.str("rubricItemId") }
-        val rel=numeric["relTolerance"]?.jsonPrimitive?.double ?: NumericValue.DEFAULT_REL_TOLERANCE
+        val analytical=analyticalNumericKey(numeric)
+        val checked=analytical?.grade(finalAnswer)
+        val rel=numeric["relTolerance"]?.jsonPrimitive?.double ?: if(analytical!=null) 0.0 else NumericValue.DEFAULT_REL_TOLERANCE
         val abs=numeric["absTolerance"]?.jsonPrimitive?.double ?: NumericValue.DEFAULT_ABS_TOLERANCE
         require(rel.isFinite() && abs.isFinite() && rel>=0 && abs>=0)
-        val correct=NumericValue.matches(finalAnswer,numeric.str("expected"),rel,abs)
+        val correct=checked?.correct ?: NumericValue.matches(finalAnswer,numeric.str("expected"),rel,abs)
         val points=if(correct) item.points else 0.0
         grade=DraftGrade(process.items+GradeItem(item.id,points,"SERVER_NUMERIC",finalAnswer),question.rubric.sumOf { it.points },process.awarded+points)
         numericFact=json("expected" to numeric.str("expected"),"submitted" to finalAnswer,"correct" to correct,
             "relTolerance" to rel,"absTolerance" to abs,"rubricItemId" to item.id)
+        if(checked!=null) numericFact=JsonObject(numericFact + mapOf("decimalPlaces" to JsonPrimitive(2),
+            "status" to JsonPrimitive(checked.status),"absTolerance" to numeric.getValue("absTolerance")))
     }
     require(GradeGate.arithmetic(grade,question.rubric).isEmpty()) { "invalid_merged_grade" }
     val evidence=spans.map { e ->

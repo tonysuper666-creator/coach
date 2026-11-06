@@ -138,7 +138,8 @@ class PoolWorker(
             kotlin.math.abs(q.rubric.sumOf { it.points }-10.0) < 0.00001 &&
             (q.numericFinal==null || (q.rubric.count { it.id==q.numericFinal.str("rubricItemId") }==1 &&
                 com.coach.domain.grade.NumericValue.parse(q.numericFinal.str("expected"))!=null &&
-                listOf("relTolerance","absTolerance").all { field -> q.numericFinal[field]?.jsonPrimitive?.doubleOrNull?.let { it.isFinite() && it>=0 } ?: (field !in q.numericFinal) }))
+                listOf("relTolerance","absTolerance").all { field -> q.numericFinal[field]?.jsonPrimitive?.doubleOrNull?.let { it.isFinite() && it>=0 } ?: (field !in q.numericFinal) } &&
+                runCatching { analyticalNumericKey(q.numericFinal) }.isSuccess))
         fun valid(q: ConstructedQuestion): Boolean = validShape(q) &&
             q.rubric.all { QuestionGate.sourceQuoteVerbatim(it.basis,input.str("excerpt")) }
         val initial=(response as? BridgeResult.Success)?.let { runCatching { TaskParsing.constructed(it.text) }.getOrNull() }

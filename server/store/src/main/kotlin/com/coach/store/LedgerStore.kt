@@ -369,6 +369,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val content = contentStore
         return transaction { content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob) }
     }
+    /** Offline CLI or actor only. New points, metadata and their replay event commit together. */
+    fun addOutline(payload: JsonObject): Boolean {
+        return transaction { OutlineAdditionStore(connection).install(payload, CourseContentStore(connection)) { course, event, idem ->
+            append(course, "outline_revised", event, idem, actor="MIGRATION")
+        } }
+    }
     fun courseContent(course: String): CourseContent? = contentStore.course(course)
     fun teachingPages(course: String, kp: String): List<Pair<SourceAnchor, String>> = contentStore.teachingPages(course, kp)
     fun snapshot(course: String): Snapshot {

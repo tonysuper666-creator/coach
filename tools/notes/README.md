@@ -100,6 +100,13 @@ tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAnd
 设备测试还逐题核对自己的答案，保存 `cache/notes-review/question-N.png` 与不含题目内容的 `agreement.txt`。启动模拟器时将 `ANDROID_SDK_ROOT` 指向实际包含 system-images 的 SDK，不能仅凭 Gradle 的 SDK 路径猜测 emulator 路径。测试命令（在已取得 heavy 模拟器锁的前台会话内）：
 
 ```sh
+# sys.boot_completed=1 不代表网络已就绪。仅初始化自己持锁的模拟器，
+# 再有限等待以下探针返回 HTTP 响应（未认证的 401 也证明路由已经通）。
+adb -s emulator-5574 shell cmd connectivity airplane-mode disable
+adb -s emulator-5574 shell svc wifi enable
+adb -s emulator-5574 shell svc data enable
+printf 'GET /v1/hello HTTP/1.0\r\nHost: localhost\r\n\r\n' | \
+  adb -s emulator-5574 shell toybox nc -w 2 100.88.12.89 18894
 # 仅在自己的隔离包和模拟器内；先确认文件确实进入应用 cache。
 adb -s emulator-5574 push "$PRIVATE_DESKTOP_MARKDOWN" /data/local/tmp/ton1294-desktop-notes.md
 adb -s emulator-5574 shell run-as com.coach.android.ton1294 mkdir -p cache
@@ -115,3 +122,5 @@ adb -s emulator-5574 shell am instrument -w \
 ```
 
 真实副本使用 18894、合成库使用 18896，各用自己的数据目录、令牌、客户端缓存；不连接生产端口。读取两条真实题的原文截图仅在本机进行；对外证据只分享合成截图、合成 PDF 和无题目内容的逐题通过结果。
+
+补拍原题卡使用实际 Activity 类名 `com.coach.android.ton1294/com.coach.android.CoachActivity`，不能把 applicationId 后缀误用成 Kotlin 类的包名。传入 `openKp` 时不启用 `autoStart`；只阅读已有题卡和评分，不点出题或提交。

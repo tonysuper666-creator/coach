@@ -326,3 +326,49 @@ now also requires the local synthetic grader/reviewer to receive the actual serv
 verdict; it is a continuation artifact, not passed evidence. Keep PR100 draft and
 request independent review of the exact new head; the first device gate remains
 required before acceptance/merge. Physical follow-up stays with TON-1254.
+
+## Device harness follow-up after QA-C's input failure
+
+QA-C ran the device command on `756642f` and reported exit 1 at `input-a`:
+`Typed value missing`, although the screenshot showed `abc` and its validation
+message. The harness previously waited 300 ms and searched only visible editors
+for a substring. It now refreshes the original input node for up to five seconds
+and requires its text to equal the submitted value exactly. Validation-message,
+score, figure, orientation and reopen assertions remain in place.
+
+The adjacent continuation scripts now allocate a new private `isolated/session-*`
+directory for every command invocation and back up the source database read-only
+into that directory. Both server starts within one invocation reuse that same
+copy, so the restart assertion still checks persistence rather than a reset.
+Every invocation has a separate evidence directory and reinstalls only this
+card's suffixed packages to remove interrupted-run screenshot caches. No old
+database, another session's process or production data is deleted. Use the two
+scripts from the same attached continuation bundle; the server requires the
+runner's restricted session-directory environment variable.
+
+The focused build command (exit 0, `BUILD SUCCESSFUL in 9s`) was:
+
+```sh
+tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:app:installDist -PcoachApplicationId=com.coach.android.ton1292 -Pcoach.port=19292 --max-workers=2
+tools/dev/heavy --emulator python3 ../ton1292_device.py
+```
+
+The first command built the changed instrumentation APK; it is not a new run of
+the historical 466 JVM tests. Python syntax checks passed, and executing the
+runner's directory-allocation statements twice produced two distinct private
+directories without an inherited database. These checks do not prove a complete
+device rerun or reentrancy after a failed UI journey.
+
+The new device attempt exited **130** after queueing from 21:40Z to 21:50Z on
+2026-11-06 behind live QA owner PID 38700 (`qa_emulator.py --all`). Only this
+checkout's waiting wrapper PID 95315 was terminated after verifying its cwd,
+exact command and sleep-only child, and excluding daemon PID 50222. The runner
+never started: there is no new AVD, input journey, screenshot, ledger-sequence or
+server-restart evidence. The two intended complete runs (including reentrancy)
+remain unverified. QA-C should rebuild this exact candidate and run the same
+device command with the paired continuation scripts. Three new independent
+hand calculations also remain outstanding; Sage's earlier 3/3 is historical.
+Keep the PR draft. Full-rubric mark allocation still depends on model grading
+and review against the original rubric; the server records the numeric verdict
+and discrepancy warning rather than inventing a deduction. Physical follow-up
+remains TON-1254.

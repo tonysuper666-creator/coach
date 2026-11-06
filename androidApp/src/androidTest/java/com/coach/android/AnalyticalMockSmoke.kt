@@ -160,8 +160,14 @@ class AnalyticalMockSmoke {
     private fun set(node: AccessibilityNodeInfo, value: String) {
         assertTrue("Cannot type at $stage", node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,
             Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) }))
-        Thread.sleep(300)
-        assertNotNull("Typed value missing at $stage", find { it.isEditable && label(it).contains(value) })
+        // Validation can reflow the form and move this editor outside the viewport.
+        // Read back this exact node, not any visible field containing a substring.
+        val end = SystemClock.elapsedRealtime() + 5_000
+        while (SystemClock.elapsedRealtime() < end) {
+            if (node.refresh() && node.text?.toString() == value) return
+            Thread.sleep(100)
+        }
+        throw AssertionError("Typed value missing at $stage: expected <$value>, read <${node.text}>")
     }
 
     private fun tap(node: AccessibilityNodeInfo) {

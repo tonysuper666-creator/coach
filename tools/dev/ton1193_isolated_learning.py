@@ -98,7 +98,7 @@ class WebSocket:
 
 def run(config_path, baseline, started, deadline):
     config, roots, _ = isolated.fixture(config_path)
-    require(live.live_transaction(config['stateDir']) == 'switching', 'isolated switch is not active')
+    require(live.live_acceptance(config['stateDir']) == 'validating', 'isolated switch is not validating')
     require(baseline == str(Path(config['stateDir']) / 'acceptance-baseline.json'), 'baseline outside isolated stage')
     raw, _ = _read_file(baseline, directory_snapshot(config['stateDir']), 0o600)
     before = json.loads(raw)
@@ -113,7 +113,7 @@ def run(config_path, baseline, started, deadline):
     credential = token.decode('ascii').strip()
     require(digest(token) == before['tokenSha256'] and digest(credential.encode()) == before['credentialSha256']
             and credential and '\n' not in credential and '\r' not in credential, 'isolated token changed')
-    require(live.live_transaction(config['stateDir']) == 'switching', 'isolated switch changed')
+    require(live.live_acceptance(config['stateDir']) == 'validating', 'isolated switch changed')
     ws = WebSocket(int(config['adapterEnvPins']['COACH_PORT']), credential,
                    time.monotonic() + deadline - time.time())
     try:

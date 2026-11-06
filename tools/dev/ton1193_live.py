@@ -26,7 +26,7 @@ def _contended(fd):
     raise GateError('transaction lock not held')
 
 
-def live_transaction(state_dir):
+def _live_transaction(state_dir, phases):
     """Require a private journal in an allowed phase and a contended lock.
 
     Lock and journal are checked again before returning. The caller must repeat
@@ -54,7 +54,7 @@ def live_transaction(state_dir):
             phase = json.loads(journal)['phase']
         except (TypeError, ValueError, KeyError) as exc:
             raise GateError('invalid journal') from exc
-        require(phase in ('switching', 'recovering'), 'unsafe journal phase')
+        require(phase in phases, 'unsafe journal phase')
         _contended(fd)
         current = os.stat('lock', dir_fd=parent, follow_symlinks=False)
         require((node.st_dev, node.st_ino) == (current.st_dev, current.st_ino)
@@ -69,3 +69,13 @@ def live_transaction(state_dir):
         if fd >= 0:
             os.close(fd)
         os.close(parent)
+
+
+def live_transaction(state_dir):
+    """Service control is allowed only during switching or recovering."""
+    return _live_transaction(state_dir, ('switching', 'recovering'))
+
+
+def live_acceptance(state_dir):
+    """Learning is allowed only after startup, while the switch holds its lock."""
+    return _live_transaction(state_dir, ('validating',))

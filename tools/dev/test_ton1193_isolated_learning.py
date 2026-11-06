@@ -26,7 +26,7 @@ class LearningDriverTest(unittest.TestCase):
         self.fixture = mock.patch.object(learning.isolated, 'fixture', return_value=(self.config, self.roots, 'label'))
         self.fixture.start()
         self.addCleanup(self.fixture.stop)
-        self.live = mock.patch.object(learning.live, 'live_transaction', return_value='switching')
+        self.live = mock.patch.object(learning.live, 'live_acceptance', return_value='validating')
         self.live_mock = self.live.start()
         self.addCleanup(self.live.stop)
         self.observe = mock.patch.object(learning.acceptance, 'observe', return_value=dict(self.before))
@@ -62,7 +62,7 @@ class LearningDriverTest(unittest.TestCase):
         self.ws_class.assert_not_called()
         self.token = b'isolated-token\n'
         self.live_mock.return_value = 'recovering'
-        with self.assertRaisesRegex(GateError, 'switch is not active'):
+        with self.assertRaisesRegex(GateError, 'switch is not validating'):
             self.run_driver()
         self.ws_class.assert_not_called()
 

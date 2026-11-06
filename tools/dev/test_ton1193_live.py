@@ -60,6 +60,20 @@ class LiveTransactionTest(unittest.TestCase):
         with self.assertRaisesRegex(switch.GateError, 'unsafe transaction lock'):
             live.live_transaction(self.root)
 
+    def test_acceptance_and_service_control_have_disjoint_phases(self):
+        child = self.hold_lock()
+        for phase in ('staged', 'switching', 'recovering', 'switched', 'rolled_back'):
+            switch.set_journal(self.root, phase)
+            with self.assertRaisesRegex(switch.GateError, 'unsafe journal phase'):
+                live.live_acceptance(self.root)
+        switch.set_journal(self.root, 'validating')
+        self.assertEqual(live.live_acceptance(self.root), 'validating')
+        with self.assertRaisesRegex(switch.GateError, 'unsafe journal phase'):
+            live.live_transaction(self.root)
+        self.stop_child(child)
+        with self.assertRaisesRegex(switch.GateError, 'lock not held'):
+            live.live_acceptance(self.root)
+
     def test_rejects_symlink_journal(self):
         target = self.root / 'other'
         switch.atomic(target, b'{"phase":"switching"}')

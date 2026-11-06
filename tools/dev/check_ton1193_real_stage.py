@@ -182,6 +182,10 @@ def main(exercise=None):
         # Preserve dependencies/logs when cleanup cannot be proved.
         switch.require(not (root / 'retain-on-cleanup-failure').exists(),
                        'process cleanup unproved; private fixture retained')
+        if exercise is not None and 'label' in locals():
+            result = subprocess.run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'],
+                                    capture_output=True, timeout=10)
+            switch.require(result.returncode == 113, 'test label remains; private fixture retained')
         shutil.rmtree(root)
         switch.require(not root.exists(), 'private root survived cleanup')
         print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': exercise is None}), flush=True)

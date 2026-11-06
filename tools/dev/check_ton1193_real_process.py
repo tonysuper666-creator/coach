@@ -85,6 +85,21 @@ def request(config, roots, path, valid=True):
         conn.close()
 
 
+def control_diagnostic(roots, pid):
+    """Metadata only: capture the actual control failure without weakening it."""
+    home = Path(roots['home'])
+    for log in (home / 'Coach/logs').glob('activity-*.log'):
+        with log.open() as stream:
+            first = json.loads(stream.readline())
+        if first['pid'] == pid:
+            path = home / ('Coach/state/activity-' + first['lifetime'] + '.sock')
+            failed = any('COACH activity control unavailable=' in p.read_text()
+                         for p in (home / 'Coach/logs').glob('server-*.log'))
+            return dict(socketPathBytes=len(os.fsencode(path)), socketExists=path.exists(),
+                        serviceReportedControlFailure=failed, lifetime=first['lifetime'])
+    raise GateError('activity lifetime journal missing')
+
+
 def wait_ready(config, roots, label, release, kernel, owned):
     snapshot = json.loads((Path(config['adapterSnapshotDir']) / 'snapshot.json').read_text())
     side = snapshot['sides'][release.name]
@@ -125,7 +140,7 @@ def wait_ready(config, roots, label, release, kernel, owned):
                     collect(kernel, pid, owned)
                     require(job(config, label) == pid, 'isolated JVM restarted')
                     return dict(pid=pid, image=process._image(pid), services=services,
-                                identity=observed, httpHello=200)
+                                identity=observed, httpHello=200, activityControl=control_diagnostic(roots, pid))
                 except (OSError, ValueError, KeyError, GateError, http.client.HTTPException):
                     pass
         time.sleep(.2)
@@ -232,14 +247,23 @@ def worker(config_path, report_path):
                 atomic(Path(config['installation']), original_install)
                 case['cleanup'] = dict(labelAbsent=True, ownedIdentitiesAbsent=True, portsFree=True,
                                        privatePointersRestored=True, journal=json.loads((root / 'stage/journal.json').read_text()))
+    except BaseException as exc:
+        report['unexpectedFailureType'] = type(exc).__name__
+        raise
     finally:
         # Even an unexpected startup/HTTP exception must take the same cleanup.
-        stop(config, label, kernel, owned)
-        atomic(Path(config['plist']), original_plist)
-        atomic(Path(config['installation']), original_install)
-        report['ownedProcesses'] = [dict(pid=p.pid, ppid=p.ppid, started=p.started) for p in owned.values()]
-        report['cleanupVerified'] = True
-        atomic(Path(report_path), json.dumps(report, indent=2, sort_keys=True).encode())
+        try:
+            stop(config, label, kernel, owned)
+            atomic(Path(config['plist']), original_plist)
+            atomic(Path(config['installation']), original_install)
+            report['cleanupVerified'] = True
+        except BaseException as exc:
+            report['cleanupVerified'] = False
+            report['cleanupFailureType'] = type(exc).__name__
+            raise
+        finally:
+            report['ownedProcesses'] = [dict(pid=p.pid, ppid=p.ppid, started=p.started) for p in owned.values()]
+            atomic(Path(report_path), json.dumps(report, indent=2, sort_keys=True).encode())
         marker.unlink()
 
 
@@ -251,6 +275,9 @@ def main():
     args = parser.parse_args()
     require(args.apply, 'explicit --apply required')
     report = Path(args.report).absolute()
+    require(report.parent.resolve() == stage.REPO.parent and not report.parent.is_symlink()
+            and re.fullmatch(r'ton1193-[A-Za-z0-9_-]+\.json', report.name),
+            'report must be a ton1193 JSON file in this workspace')
     require(not report.exists(), 'report already exists')
     def interrupted(signum, frame):
         raise InterruptedError('isolated process probe interrupted')

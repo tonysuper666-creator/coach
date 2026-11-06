@@ -158,6 +158,8 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
         }
         hitStart?.let { hits++; return block(it) }
         if (end) return take(pending.length)
+        // A literal word can start inside a control word; never publish its backslash alone.
+        if (cut > 0 && pending[cut - 1] == '\\') cut--
         // Bound stalled ambiguous output without ever publishing it.
         if (pending.length - cut > 65_536) return block(cut)
         return take(cut)

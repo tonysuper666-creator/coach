@@ -86,32 +86,32 @@ class ExamTextGuardTest {
     }
 
     private val quote = "Amber badgers carry delicate emerald feathers gently home"
-    private fun assertObfuscationBlocked(input: String) {
-        assertTrue(index.overlaps(input), "Full-text checker must recognize the visible quotation")
+    private fun assertObfuscationBlocked(input: String, checkedIndex: ExamTextIndex = index) {
+        assertTrue(checkedIndex.overlaps(input), "Full-text checker must recognize the visible quotation")
         // Reverse the roles too: reference text and reply must use the same folding.
         assertTrue(ExamTextIndex(listOf(input)).overlaps(quote))
         for (split in 0..input.length) {
-            val guard = ExamTextGuard(index)
+            val guard = ExamTextGuard(checkedIndex)
             val seen = StringBuilder()
             for (chunk in listOf(input.take(split), input.drop(split))) {
                 seen.append(guard.push(chunk))
-                assertFalse(index.overlaps(seen.toString()), "split=$split")
+                assertFalse(checkedIndex.overlaps(seen.toString()), "split=$split")
             }
             seen.append(guard.finish())
             assertTrue(guard.blocked, "split=$split")
             assertTrue(seen.contains("解题思路"))
-            assertFalse(index.overlaps(seen.toString()), "split=$split")
+            assertFalse(checkedIndex.overlaps(seen.toString()), "split=$split")
         }
         // Each boundary may also be split in a separate delta (including commands).
-        val guard = ExamTextGuard(index)
+        val guard = ExamTextGuard(checkedIndex)
         val seen = StringBuilder()
         input.forEach { char ->
             seen.append(guard.push(char.toString()))
-            assertFalse(index.overlaps(seen.toString()))
+            assertFalse(checkedIndex.overlaps(seen.toString()))
         }
         seen.append(guard.finish())
         assertTrue(guard.blocked)
-        assertFalse(index.overlaps(seen.toString()))
+        assertFalse(checkedIndex.overlaps(seen.toString()))
     }
 
     @Test fun zeroWidthFormattingCannotSplitVisibleWords() =
@@ -127,6 +127,15 @@ class ExamTextGuardTest {
 
     @Test fun texTextWrappersCannotHideVisibleWords() =
         assertObfuscationBlocked(quote.split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" })
+
+    @Test fun literalControlWordPrefixesCannotSplitOffTheirBackslash() {
+        val commands = listOf("in", "to", "not", "max", "text")
+        val collisionIndex = ExamTextIndex(listOf(exam) + commands.map { "$it $quote." })
+        for (command in commands) for (prefixLength in 1..quote.substringBefore(' ').length) {
+            val input = " \\$command{${quote.take(prefixLength)}}${quote.drop(prefixLength)}"
+            assertObfuscationBlocked(input, collisionIndex)
+        }
+    }
 
     @Test fun cyrillicAndGreekHomoglyphsCannotHideVisibleWords() {
         assertObfuscationBlocked(quote.replace('e', 'е').replace('a', 'а'))

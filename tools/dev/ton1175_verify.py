@@ -263,14 +263,14 @@ def idle(evidence, installation, java, jcmd, lsof, stage_config=None, stage_conf
         if port is not None:
             command.append(str(port))
         measured = json.loads(captured(command))
-        require(measured['pid'] == int(pid) and measured['clientReads'] == 0
+        require(measured['pid'] == int(pid) and measured['rejectReason'] == 'NONE' and measured['clientReads'] == 0
                 and measured['socketReads'] == measured['attributedHealthReads'],
                 'JFR contains client socket activity')
     # Uptime binds the live PID to the recorded JVM start, not just a PID which
     # might have been reused since the recording. No jcmd output is disclosed.
     uptime = captured([jcmd, pid, 'VM.uptime']).decode()
     match = re.search(r'(?m)^([0-9]+(?:\.[0-9]+)?) s\s*$', uptime)
-    require(match is not None and abs(time.time()-float(match[1])-get_time(measured['jvmStart'])) < 1,
+    require(match is not None and abs(time.time()-float(match[1])-measured['jvmStartEpochMillis']/1000) < 1,
             'recording belongs to a different JVM lifetime')
     require(live_identity() == before and file_hash(installation) == p['installationSha256']
             and file_hash(recording) == p['recordingSha256'], 'identity changed during verification')

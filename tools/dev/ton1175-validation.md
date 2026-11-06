@@ -110,10 +110,18 @@ the bridge port to the active transaction's old plist and configuration hash.
 Only a non-truncated stack with the observed old `ChildServices` health frame,
 no client/routing/session frame, loopback address, matching port and at most
 1024 bytes can be attributed to health checks. SocketRead stack traces must be
-enabled throughout, and attributed reads cannot exceed `ceil(seconds/10)+2`.
+enabled throughout. Attributed reads are grouped by start time into rounds:
+reads no more than five seconds after the round's first read belong to that
+round, must come from one event thread, and are capped at four reads and 1024
+bytes in total. Consecutive round starts must be at least nine seconds apart,
+and the number of rounds cannot exceed `ceil(seconds/10)+2`.
+Two otherwise identical same-thread reads 250 ms apart cannot be distinguished
+from two reads in one probe with this data; do not treat this algorithm as proof
+that such a pair cannot be rapid retries. This ambiguity awaits Architect review.
 All other positive reads count as client reads and reject idle; evidence JSON
 cannot declare exclusions. Inspector output reports total, attributed health and
-client reads separately. The stage files, old plist and installation are read
+client reads, rounds, per-round maxima, minimum gap and a fixed rejection code,
+including on rejection. The stage files, old plist and installation are read
 without following links and rechecked around inspection. Missing
 events/settings/coverage fail closed. Old recordings made without these enabled
 events cannot be used. The unit fixture is deliberately short; it verifies the

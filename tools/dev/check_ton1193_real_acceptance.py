@@ -62,6 +62,20 @@ def wait_old(config, roots, label, kernel, owned):
     raise switch.GateError('old isolated JVM did not become ready for seed')
 
 
+COUNTS = ('socketReads', 'attributedHealthReads', 'clientReads', 'healthRounds',
+          'maxReadsPerRound', 'maxBytesPerRound', 'minRoundGapMillis')
+REASONS = {'NONE', 'CLIENT_READ', 'ROUND_THREADS', 'ROUND_READ_LIMIT', 'ROUND_BYTES_LIMIT',
+           'ROUND_GAP', 'ROUND_COUNT', 'EVIDENCE_INVALID'}
+
+
+def safe_counts(data):
+    """Retain only the inspector's fixed, non-sensitive diagnostic schema."""
+    if (not isinstance(data, dict) or any(type(data.get(k)) is not int or data[k] < 0 for k in COUNTS)
+            or data.get('rejectReason') not in REASONS):
+        raise ValueError('invalid inspector diagnostic')
+    return {**{k: data[k] for k in COUNTS}, 'rejectReason': data['rejectReason']}
+
+
 def diagnose_idle_failure(config, root, java, report):
     """Record only closed-schema gate failures from the isolated fixture."""
     args = (config['idleEvidence'], config['installation'], str(java / 'bin/java'),
@@ -81,7 +95,7 @@ def diagnose_idle_failure(config, root, java, report):
     except switch.GateError as error:
         reason = str(error)
         report['idleFailureDiagnostic'] = reason if reason in allowed else 'other gate rejection'
-        if reason == 'dependency or evidence command failed':
+        if reason in ('dependency or evidence command failed', 'JFR contains client socket activity'):
             # The verifier deliberately suppresses child output. Re-run its
             # exact inspector and retain only counts or its fixed line marker.
             try:
@@ -93,11 +107,16 @@ def diagnose_idle_failure(config, root, java, report):
                         proof['windowStart'], proof['windowEnd'], str(proof['pid']), str(port)],
                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         timeout=60, check=False)
-                if result.returncode == 0:
+                try:
                     measured = json.loads(result.stdout)
-                    report['fullSocketReads'] = {k: measured[k] for k in
-                        ('pid', 'socketReads', 'attributedHealthReads', 'clientReads')}
-                else:
+                    if 'rejectReason' in measured:
+                        report['fullSocketReads'] = safe_counts(measured)
+                    elif result.returncode == 0:
+                        report['fullSocketReads'] = {k: measured[k] for k in
+                            ('pid', 'socketReads', 'attributedHealthReads', 'clientReads')}
+                except (ValueError, TypeError, KeyError):
+                    pass
+                if result.returncode != 0:
                     marker = re.fullmatch(rb'JFR evidence rejected; inspector line ([0-9]+)\s*', result.stderr)
                     report['inspectorFailureLine'] = int(marker.group(1)) if marker else None
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, switch.GateError):
@@ -150,8 +169,15 @@ def recording(root, java, pid, control_path, config, report):
     inspector = Path(verify.__file__).with_name('Ton1175Jfr.java')
     config_hash = switch.digest(json.dumps(config, sort_keys=True).encode())
     with verify.staged_bridge_port(root / 'controller.json', config['installation'], config_hash) as port:
-        measured = json.loads(run(java / 'bin/java', inspector, sample, stamp(wall_start), stamp(sample_end),
-                                  pid, port))
+        try:
+            measured = json.loads(run(java / 'bin/java', inspector, sample, stamp(wall_start), stamp(sample_end),
+                                      pid, port))
+        except subprocess.CalledProcessError as error:
+            try:
+                report['earlySocketReads'] = safe_counts(json.loads(error.output.splitlines()[0]))
+            except (ValueError, TypeError, KeyError):
+                pass
+            raise switch.GateError('early JFR inspector rejected evidence') from error
         report['earlySocketReads'] = dict(durationSeconds=time.monotonic()-mono_start, **measured)
         switch.require(measured['pid'] == pid and measured['clientReads'] == 0
                        and measured['socketReads'] == measured['attributedHealthReads'],
@@ -177,6 +203,9 @@ def recording(root, java, pid, control_path, config, report):
     except switch.GateError:
         diagnose_idle_failure(config, root, java, report)
         raise
+    with verify.staged_bridge_port(root / 'controller.json', config['installation'], config_hash) as port:
+        measured = json.loads(run(java / 'bin/java', inspector, target, stamp(wall_start), stamp(end), pid, port))
+        report['fullSocketReads'] = safe_counts(measured)
     report['idle'] = dict(pid=pid, durationSeconds=end-wall_start, recordingSha256=proof['recordingSha256'],
                           lifetime=start['lifetime'], realJfrAndActivityVerified=True)
 

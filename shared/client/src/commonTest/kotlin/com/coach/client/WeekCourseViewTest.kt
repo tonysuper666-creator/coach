@@ -18,6 +18,22 @@ class WeekCourseViewTest {
         assertEquals(listOf(2, 3), view.weeks)
         assertEquals(listOf("B", "A"), view.weekKps(2).map { it.id })
     }
+    @Test fun explicitZeroPointMidtermExemptionKeepsWeekSevenVisible() {
+        val oldPoints = (1..6).map { w -> json("id" to "old$w", "title" to "Old week $w", "week" to w) }
+        val newPoints = listOf(8, 9, 10, 11).map { w -> json("id" to "new$w", "title" to "New week $w", "week" to w) }
+        val events = listOf(
+            e(1, "outline_revised", json("knowledgePoints" to JsonArray(oldPoints))),
+            e(2, "outline_revised", json(
+                "knowledgePoints" to JsonArray(newPoints),
+                "week7" to json("knowledgePoints" to 0, "reason" to "Handbook Week 7 is Midterm Exam; no new lecture.")
+            ))
+        )
+        val view = CourseView(events, project(events))
+        assertEquals((1..11).toList(), view.weeks)
+        assertEquals(setOf(7), view.midtermExemptionWeeks)
+        assertEquals("第 7 周 · 期中周（无新课，豁免）", view.weekLabel(7))
+        assertTrue(view.weekKps(7).isEmpty())
+    }
     @Test fun passedOldThreadCannotTrapContinueAndScopeOverridesUnfinishedWorkElsewhere() {
         val events = listOf(
             e(1, "outline_revised", json("ops" to JsonArray(listOf(json("kpId" to "old", "title" to "【W1·Ch1】Old"), json("kpId" to "next", "title" to "【W2·Ch3】Next"))))),

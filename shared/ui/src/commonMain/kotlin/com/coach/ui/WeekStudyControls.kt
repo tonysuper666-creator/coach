@@ -52,7 +52,8 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             view.weeks.forEach { week ->
                 val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
-                DropdownMenuItem(text = { Text("第 $week 周 · $remaining 个待学") }, onClick = { expanded = false; actions.select(week) })
+                val label = view.weekLabel(week)
+                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") }, onClick = { expanded = false; actions.select(week) })
             }
             if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) })
         }

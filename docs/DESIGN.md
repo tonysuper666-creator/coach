@@ -524,7 +524,7 @@ OPPO 模拟：`tools/dev/formfactor-sim.sh` 在 OPPO 上对上表每种形态各
 ### 13.2 执行约束（所有卡）
 
 - 不动 DeepTutor 的运行文件（8790 桥、数据库、补丁）。期中 2026-11-02 14:25 前它必须稳定。
-- CPU：大构建与模拟器 `nice -n 15`；Gradle `--max-workers=2`；全机同一时间最多一个重构建（`tools/dev/heavy` 锁，S0 提供）；11-02 当天 00:00–15:00 不跑模拟器、Gradle 全量构建与 live AI 测试。
+- CPU：大构建与模拟器 `nice -n 15`；Gradle `--max-workers=2`；重构建最多 3 道并行、模拟器一次一个（`tools/dev/heavy` 锁，S0 提供；2026-11-06 从一道放宽，当时 18 核只用了约 5 核）；11-02 当天 00:00–15:00 不跑模拟器、Gradle 全量构建与 live AI 测试。
 - 额度：不新增花钱；Claude 订阅也供他本人用 → 工程主力 Codex/CodeBuddy；Expert、Sage 只点名；Antigravity 不进 M0。Coach 不设本地调用次数上限，ai_calls 照常记账；Claude 官方限流时显式切换 Codex 并显示实际模型。11-02 00:00–15:00 GMT 全停。8791 由 Coach 服务端常驻管理。
 - 交付走 GitHub PR（§13.3），公开仓库纪律见 §12.1。
 - 每张卡交付首行「结果：达到/部分达到/未达到 + 数字证据」，附本卡 `ai_calls` 调用数。

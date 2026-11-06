@@ -364,7 +364,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                         chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device,receivedAt)
                     }
                     "tutor.open" -> {
-                        chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
+                        chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"),message["review"]?.jsonPrimitive?.booleanOrNull == true)
                         tutorSend.withLock { chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) } }
                     }
                     "msg.history" -> tutorSend.withLock {
@@ -387,7 +387,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                         }
                     }
                 } } catch (error: IllegalArgumentException) {
-                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
+                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"clientMsgId" to message.str("clientMsgId").ifBlank { null },"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();drainer.cancelAndJoin();wake.close();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
             } finally { socketTicket?.let { observation?.coverage?.end(it) } }

@@ -34,7 +34,7 @@ import kotlin.math.roundToLong
  * 中途退出不停表，回来接着做；到点由这里交卷，没开着的考试由 Mac 到点代交。
  */
 @Composable
-fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initialMockId: String? = null) {
+fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initialMockId: String? = null, onReviewWeek: (Int) -> Unit = {}) {
     val http = c.course
     var open by remember { mutableStateOf(initialMockId) }
     Column(Modifier.fillMaxSize()) {
@@ -43,7 +43,7 @@ fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initial
             CenterMessage("模拟考要连接 Mac。")
         } else if (open == null) MockHome(c, http, view, onBack) { open = it }
         // Opened straight from the records page: back goes back there, not to the exam list.
-        else key(open) { MockSessionPane(c, http, open!!) { if (initialMockId != null) onBack() else open = null } }
+        else key(open) { MockSessionPane(c, http, view, open!!, onReviewWeek) { if (initialMockId != null) onBack() else open = null } }
     }
 }
 
@@ -179,7 +179,7 @@ internal fun HistoryRow(c: CoachController, view: CourseView, h: JsonObject, onC
 
 /** One exam: shows the paper while it runs, the marks once it is in. Grades that arrive later (AI marking, review) refresh the result. */
 @Composable
-private fun MockSessionPane(c: CoachController, http: CourseHttp, mockId: String, onBack: () -> Unit) {
+private fun MockSessionPane(c: CoachController, http: CourseHttp, view: CourseView, mockId: String, onReviewWeek: (Int) -> Unit, onBack: () -> Unit) {
     var reload by remember { mutableStateOf(0) }
     var body by remember { mutableStateOf<JsonObject?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -200,7 +200,7 @@ private fun MockSessionPane(c: CoachController, http: CourseHttp, mockId: String
             }
         }
         current.str("status") == "active" -> MockExam(c, http, current, onBack) { body = it }
-        current.str("status") == "submitted" -> MockResult(c, current, onBack)
+        current.str("status") == "submitted" -> MockResult(c, current, view, onReviewWeek, onBack)
         else -> { BackRow(current.str("title"), "← 返回", onBack); CenterMessage("已交卷，正在判分…") }
     }
 }
@@ -368,8 +368,11 @@ private fun ExamItem(c: CoachController, row: ExamRow.Item, answers: JsonObject,
 }
 
 @Composable
-private fun MockResult(c: CoachController, result: JsonObject, onBack: () -> Unit) {
+private fun MockResult(c: CoachController, result: JsonObject, view: CourseView, onReviewWeek: (Int) -> Unit, onBack: () -> Unit) {
     val items = (result["items"] as? JsonArray).orEmpty().map { it.jsonObject }
+    // Wrong choices from this sitting that wait in a week's mistakes, so they can be redone before that week is finished.
+    val attempts = items.map { it.str("attemptId") }.filter { it.isNotBlank() }.toSet()
+    val mistakeWeeks = view.weeks.filter { w -> weekMistakes(view.events, w).any { it.payload.str("attemptId") in attempts } }
     val numbers = items.map { it.str("itemId") }.distinct().withIndex().associate { it.value to it.index + 1 }
     val lost = (result["lostByKp"] as? JsonArray).orEmpty().map { it.jsonObject }
     BackRow(result.str("title"), "← 模拟考", onBack)
@@ -392,6 +395,14 @@ private fun MockResult(c: CoachController, result: JsonObject, onBack: () -> Uni
                         Text(l.str("kp").ifBlank { "未标考点" }, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                         Text("丢 ${marks(l.dbl("lost"))} / ${marks(l.dbl("max"))} 分", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.error)
                     }
+                }
+            }
+        }
+        if (mistakeWeeks.isNotEmpty()) item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Hint("答错的选择题已进按周错题本，换个时间再做一遍。")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    mistakeWeeks.forEach { w -> OutlinedButton(onClick = { onReviewWeek(w) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("再练第 $w 周错题") } }
                 }
             }
         }

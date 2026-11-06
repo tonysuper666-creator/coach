@@ -169,9 +169,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference) } }
                         val mockId = mock
                         if (mockId != null && current != null) {
-                            key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }) }
+                            key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
                         } else if (reviewWeek != null && current != null) {
-                            WeekMistakesScreen(c, current, reviewWeek!!, onBack = { reviewWeek = null })
+                            WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
                             study = { studyPane(paneArgs!!) },
                             source = { ResourcesScreen(c, reading, onBack = { source = null }, backLabel = "✕ 关闭原文") },

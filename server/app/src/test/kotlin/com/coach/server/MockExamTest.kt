@@ -158,6 +158,7 @@ class MockExamTest {
         val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
         val mocks = MockEngine(library(dir.resolve("papers")), clock = { now.get() })
         try {
+            store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray((1..2).map { w -> json("id" to "kp-drill-$w", "title" to "drill topic", "week" to w) })))
             val byWeek = mocks.start(store, "C1", json("drill" to json("week" to 1)))
             val weekItems = byWeek.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray
             assertEquals(3, weekItems.size, "a week with three choices gives three, never repeats")
@@ -177,6 +178,55 @@ class MockExamTest {
             assertEquals(4.0, result.getValue("score").jsonPrimitive.double, "the one saved answer still counts after the automatic close")
             assertEquals(28.0, result.getValue("max").jsonPrimitive.double)
             assertEquals("TIMED", store.events("C1").last { it.type == "mock_submitted" }.payload.str("purpose"))
+            // Running out of time is not evidence about a point: only the answered question feeds mastery.
+            val posed = store.events("C1").filter { it.type == "question_posed" && it.payload.str("mockId") == id }
+            val linked = posed.filter { it.payload.getValue("kpIds").jsonArray.isNotEmpty() }.map { it.payload.str("stem") }
+            val firstStem = weighted.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.first().jsonObject.str("stem")
+            assertEquals(listOf(firstStem), linked)
+            val blank = result.getValue("items").jsonArray.map { it.jsonObject }.first { it.str("key") != keys.first() }
+            assertTrue("正确答案 A" in blank.str("feedback"), "an unanswered choice still shows which option was right")
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun drillMistakesFromACheckedPackCanBeRetriedFromTheWeekMistakes() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("mock-drill-mistakes")
+        val now = AtomicLong(1_800_000_000_000)
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
+        val papers = Files.createDirectories(dir.resolve("papers"))
+        // Names its knowledge point by outline id, the way a checked pack does.
+        Files.writeString(papers.resolve("checked.json"), JsonObject(pack() + ("id" to JsonPrimitive("checked")) + ("key_state" to JsonPrimitive("VERIFIED"))).toString()
+            .replace("\"drill topic\"", "\"kp-drill-1\""))
+        val mocks = MockEngine(MockLibrary(papers), clock = { now.get() })
+        try {
+            store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp-drill-1", "title" to "drill topic", "week" to 1)))))
+            val drill = mocks.start(store, "C1", json("drill" to json("week" to 1)))
+            val keys = drill.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.map { it.jsonObject.str("id") }
+            val result = mocks.submit(store, "C1", drill.str("mockId"), JsonObject(keys.associateWith { json("choice" to 1) }), false)
+            assertEquals(listOf("drill topic"), result.getValue("lostByKp").jsonArray.map { it.jsonObject.str("kp") }, "lost marks name the topic, not its id")
+            val mistakes = weekMistakes(store.events("C1"), 1)
+            assertEquals(keys.size, mistakes.size, "every wrong drill answer waits in that week's mistakes")
+            val body = LedgerJson.encodeToString(com.coach.protocol.CommandBody.serializer(),
+                com.coach.protocol.CommandBody("retry_week_mistake", "C1", now.get(), json("week" to 1, "attemptId" to mistakes.first().payload.str("attemptId"))))
+            val retry = store.command(com.coach.protocol.WireCommand("phone", "retry-1", body, sha256(body.toByteArray())))
+            assertEquals("OK", retry.status)
+            val again = store.events("C1").last { it.type == "question_posed" }
+            assertEquals(mistakes.first().payload.str("stem"), again.payload.str("stem"))
+            assertEquals("", again.payload.str("mockId"), "a retry is practice, not part of the timed drill")
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun drillMistakesWithAnUncheckedKeyStayOutOfTheWeekMistakes() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("mock-drill-unchecked")
+        val now = AtomicLong(1_800_000_000_000)
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
+        val mocks = MockEngine(library(dir.resolve("papers")), clock = { now.get() })
+        try {
+            store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp-drill-1", "title" to "drill topic", "week" to 1)))))
+            val drill = mocks.start(store, "C1", json("drill" to json("week" to 1)))
+            val keys = drill.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.map { it.jsonObject.str("id") }
+            mocks.submit(store, "C1", drill.str("mockId"), JsonObject(keys.associateWith { json("choice" to 1) }), false)
+            // Listing it would offer a retry the server must refuse.
+            assertEquals(emptyList(), weekMistakes(store.events("C1"), 1))
         } finally { store.close(); dir.toFile().deleteRecursively() }
     }
 }

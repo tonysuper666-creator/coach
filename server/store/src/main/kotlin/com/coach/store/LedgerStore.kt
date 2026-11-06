@@ -673,7 +673,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                         if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
                         else {
                             val thread = "week-review:${p.num("week")}:$qid"
-                            val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload + mapOf(
+                            val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload - setOf("mockId", "marks") + mapOf(
                                 "attemptId" to JsonPrimitive(uid()), "purpose" to JsonPrimitive("RECALL"),
                                 "review" to JsonPrimitive(true), "weekReview" to p.getValue("week")
                             ))), device=c.deviceId, thread=thread)

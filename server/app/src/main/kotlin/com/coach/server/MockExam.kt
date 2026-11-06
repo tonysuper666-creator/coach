@@ -27,7 +27,8 @@ import kotlin.math.roundToLong
 /** One answer slot: a choice, an essay, or one part of an analytical question. */
 internal data class MockUnit(val key: String, val itemId: String, val section: Int, val type: String, val label: String,
     val marks: Double, val kp: String, val week: Int?, val stem: String, val options: List<String>, val answer: Int,
-    val numeric: String?, val tolerance: Double, val rubric: List<RubricItem>, val reference: String, val explanation: String) {
+    val numeric: String?, val tolerance: Double, val rubric: List<RubricItem>, val reference: String, val explanation: String,
+    val keyState: String = "") {
     val serverNumeric get() = numeric != null && rubric.isEmpty()
     /** Rubric marks short of the part total belong to the server-checked final value. */
     val numericMarks get() = marks - rubric.sumOf { it.points }
@@ -81,7 +82,7 @@ internal class MockPaper(val json: JsonObject) {
                     options.map(::normalizeChoiceText).distinct().size == options.size) { "$id 选项无效" }
                 require(answer in options.indices) { "$id 答案下标越界" }
                 listOf(MockUnit(id, id, section, "mcq", "", marks, item.str("kp"), week, item.str("stem"), options, answer,
-                    null, 0.0, emptyList(), "", item.str("explanation")))
+                    null, 0.0, emptyList(), "", item.str("explanation"), item.str("key_state")))
             }
             "essay" -> {
                 val r = rubric(item["rubric"], id)
@@ -254,7 +255,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         val pool = library.packs(course).flatMap { pack ->
             val items = (pack["sections"] as JsonArray).flatMap { (it.jsonObject["items"] as? JsonArray).orEmpty() }.map { it.jsonObject }
             items.filter { it.str("type") == "mcq" && (week == null || it.int("kp_week") == week) }
-                .map { JsonObject(it + ("id" to JsonPrimitive(pack.str("id") + "." + it.str("id")))) }
+                .map { JsonObject(it + ("id" to JsonPrimitive(pack.str("id") + "." + it.str("id"))) + ("key_state" to JsonPrimitive(it.str("key_state").ifBlank { pack.str("key_state") }))) }
         }
         if (pool.isEmpty()) throw MockError(HttpStatusCode.NotFound, if (week == null) "题包里还没有单选题" else "第 $week 周还没有单选题")
         val weights = examWeights(store, course)
@@ -314,14 +315,15 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
             if (unit.key !in counted) return@mapIndexed json("key" to unit.key, "counted" to false)
             val attempt = "${s.id}-${index + 1}"
             val a = s.answers[unit.key] as? JsonObject ?: JsonObject(emptyMap())
-            val kpIds = points.filter { p -> p.id == unit.kp || (unit.week != null && unit.week in p.weeks && p.title.contains(unit.kp, ignoreCase = true) && unit.kp.isNotBlank()) }.map { it.id }.take(1)
-            val base = json("attemptId" to attempt, "kpIds" to kpIds, "purpose" to s.purpose, "keyState" to keyState, "policyVersion" to 1,
+            // A blank answer (ran out of time, or the filler of a choose-N section) says nothing about the point; it still scores 0 here.
+            val kpIds = if (!answered(unit, s.answers)) emptyList() else points.filter { p -> p.id == unit.kp || (unit.week != null && unit.week in p.weeks && p.title.contains(unit.kp, ignoreCase = true) && unit.kp.isNotBlank()) }.map { it.id }.take(1)
+            val base = json("attemptId" to attempt, "kpIds" to kpIds, "purpose" to s.purpose, "keyState" to unit.keyState.ifBlank { keyState }, "policyVersion" to 1,
                 "posedAt" to s.startedAt, "origin" to "COACH", "groupId" to s.id, "mockId" to s.id, "marks" to unit.marks, "stem" to unit.stem)
             if (unit.type == "mcq") {
                 val options = unit.options.mapIndexed { i, t -> Option("o$i", t) }
                 val fingerprint = questionFingerprint(unit.stem, options)
                 val qid = "mock-" + fingerprint.take(24)
-                if (!questionRegistered(qid)) registerQuestion(qid, course, fingerprint, "SINGLE_CHOICE", unit.stem, keyState, "o${unit.answer}", options)
+                if (!questionRegistered(qid)) registerQuestion(qid, course, fingerprint, "SINGLE_CHOICE", unit.stem, unit.keyState.ifBlank { keyState }, "o${unit.answer}", options)
                 val letters = optionLetters(options.size)
                 append(course, "question_posed", JsonObject(base + json("questionId" to qid, "format" to "SINGLE_CHOICE", "fingerprint" to fingerprint,
                     "options" to LedgerJson.encodeToJsonElement(options), "letterMap" to JsonObject(options.indices.associate { "o$it" to JsonPrimitive(letters[it]) }))),
@@ -329,8 +331,9 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
                 val choice = a.int("choice")?.takeIf { it in options.indices }
                 append(course, "answer_submitted", json("attemptId" to attempt, "answer" to (choice?.let { letters[it] } ?: ""), "finalAnswer" to ""), "attempt:$attempt:answer", occurredAt = s.submittedAt!!)
                 val right = choice == unit.answer
-                val feedback = (if (choice == null) "未作答。" else if (right) "正确。" else "你选 ${letters[choice]}，正确答案 ${letters[unit.answer]}。") +
-                    (if (right) "" else "正确项：${unit.options[unit.answer]}") + unit.explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
+                val key = "正确答案 ${letters[unit.answer]}：${unit.options[unit.answer]}"
+                val feedback = (if (choice == null) "未作答，$key" else if (right) "正确。" else "你选 ${letters[choice]}，$key") +
+                    unit.explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
                 append(course, "attempt_graded", json("attemptId" to attempt, "score" to if (right) hundredths(unit.marks) else 0, "max" to hundredths(unit.marks),
                     "status" to "EXACT", "feedback" to feedback), "attempt:$attempt:grade:exact")
             } else {
@@ -399,11 +402,14 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         val facts = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.groupBy { it.payload.str("attemptId") }
         var score = 0L; var pending = 0; var drafts = 0
         val lost = linkedMapOf<String, Pair<Long, Long>>()
+        // A pack that names its knowledge point by id shows the outline title, not the id.
+        val titles = weekPoints(events).associate { it.id to it.title }
         val items = paper.units.map { u ->
+            val kp = titles[u.kp] ?: u.kp
             val info = attempts[u.key]
             val a = s.answers[u.key] as? JsonObject ?: JsonObject(emptyMap())
             val base = mutableMapOf<String, JsonElement>("key" to JsonPrimitive(u.key), "itemId" to JsonPrimitive(u.itemId), "label" to JsonPrimitive(u.label),
-                "type" to JsonPrimitive(u.type), "section" to JsonPrimitive(u.section), "kp" to JsonPrimitive(u.kp), "stem" to JsonPrimitive(u.stem),
+                "type" to JsonPrimitive(u.type), "section" to JsonPrimitive(u.section), "kp" to JsonPrimitive(kp), "stem" to JsonPrimitive(u.stem),
                 "marks" to JsonPrimitive(u.marks), "answer" to a)
             if (u.type == "mcq") { base["options"] = JsonArray(u.options.map(::JsonPrimitive)); base["correct"] = JsonPrimitive(u.answer) }
             else base["reference"] = JsonPrimitive(u.reference)
@@ -422,7 +428,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
             if (effective == null) { pending++; return@map JsonObject(base + ("status" to JsonPrimitive(status))) }
             if (status == "DRAFT") drafts++
             val got = effective.num("score"); score += got
-            val (l, m) = lost[u.kp] ?: (0L to 0L); lost[u.kp] = (l + effective.num("max") - got) to (m + effective.num("max"))
+            val (l, m) = lost[kp] ?: (0L to 0L); lost[kp] = (l + effective.num("max") - got) to (m + effective.num("max"))
             val byId = u.gradingRubric.associateBy { it.id }
             base["status"] = JsonPrimitive(status); base["score"] = JsonPrimitive(got / 100.0)
             base["feedback"] = JsonPrimitive(effective.str("feedback"))

@@ -260,9 +260,33 @@ private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) ->
 
 private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?)
 
+/**
+ * 横幅跟的是「站稳了」的连接状态：断线持续 [DISCONNECT_GRACE_MS] 才出现，恢复后稳定 [RECONNECT_SETTLE_MS] 才收起，
+ * 连上即被踢的重连里横幅常亮而不是一闪一闪；冷启动给 [STARTUP_GRACE_MS] 去完成第一次握手。
+ */
+@Composable
+internal fun steadyConnected(connected: Boolean): Boolean {
+    var steady by remember { mutableStateOf(true) }
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(connected) {
+        kotlinx.coroutines.delay(when {
+            connected -> if (settled) RECONNECT_SETTLE_MS else 0
+            settled -> DISCONNECT_GRACE_MS
+            else -> STARTUP_GRACE_MS
+        })
+        steady = connected
+        settled = true
+    }
+    return steady
+}
+
+internal const val DISCONNECT_GRACE_MS = 700L
+internal const val RECONNECT_SETTLE_MS = 2_000L
+internal const val STARTUP_GRACE_MS = 3_000L
+
 @Composable
 private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
-    if (ui.connected) return
+    if (steadyConnected(ui.connected)) return
     val last = ui.lastSeenAtMs
     Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
         Text(

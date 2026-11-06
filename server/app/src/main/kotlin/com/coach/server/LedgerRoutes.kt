@@ -301,7 +301,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         }
                     }
                 } } catch (error: IllegalArgumentException) {
-                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
+                    send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"clientMsgId" to message.str("clientMsgId").ifBlank { null },"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
             } finally { socketTicket?.let { observation?.coverage?.end(it) } }

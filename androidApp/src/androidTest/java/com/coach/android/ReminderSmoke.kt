@@ -16,6 +16,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
 import java.time.ZonedDateTime
+import java.time.ZoneId
 import java.util.UUID
 
 /** Host runner owns the production-backup copy, isolated server and emulator lifecycle. */
@@ -38,13 +39,21 @@ class ReminderSmoke {
                 val count = countDue(sync = true)
                 assertTrue("Backup must contain due reviews for notification acceptance", count > 0)
                 prefs.edit().putInt("expectedCount", count).commit()
+                launch("TODAY")
+                waitText("今天")
+                Thread.sleep(500)
+                assertNull(find(instrumentation.uiAutomation.rootInActiveWindow) { it.text?.toString()?.startsWith("每日提醒") == true })
                 launch()
-                click(waitText("设置")); waitText("复习提醒")
-                click(waitNode { it.isCheckable })
+                click(waitNode { it.text?.toString() == "每日提醒 · 已关闭" }); waitText("复习提醒")
+                val toggle = waitNode { it.isCheckable }
+                assertTrue("Switch must expose its label", toggle.text?.contains("每日到期提醒") == true ||
+                    toggle.contentDescription?.contains("每日到期提醒") == true)
+                click(toggle)
                 click(waitText("Don't allow"))
                 waitText("通知权限未开启或提醒通知已关闭，暂时无法提醒。请到系统设置中允许通知。")
                 assertTrue(reminder.permissionAsked)
                 assertTrue(reminder.enabled)
+                screenshot("permission-denied.png")
                 click(waitNode { it.isCheckable }); click(waitNode { it.isCheckable })
                 Thread.sleep(500)
                 assertNull(find(instrumentation.uiAutomation.rootInActiveWindow) { it.text?.toString() == "Don't allow" })
@@ -60,7 +69,7 @@ class ReminderSmoke {
                 reminder.update(enabled = true, hour = time.hour, minute = time.minute)
                 val restored = ReviewReminder(context)
                 assertTrue(restored.enabled); assertEquals(time.hour, restored.hour); assertEquals(time.minute, restored.minute)
-                launch(); click(waitText("设置"))
+                launch(); click(waitText("每日提醒 %02d:%02d".format(time.hour, time.minute)))
                 waitText("提醒时间 %02d:%02d".format(time.hour, time.minute))
                 click(waitText("提醒时间 %02d:%02d".format(time.hour, time.minute)))
                 // Actual native time picker opens; leave the already selected two-minute time unchanged.
@@ -70,17 +79,24 @@ class ReminderSmoke {
             "tap" -> {
                 val count = countDue(sync = false)
                 val notification = manager.activeNotifications.single { it.id == ReviewReminder.NOTIFICATION }
-                assertEquals("今天有 $count 道到期", notification.notification.extras.getString("android.title"))
+                assertEquals("今天有 $count 个知识点要复习", notification.notification.extras.getString("android.title"))
                 instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
-                waitText("今天有 $count 道到期")
+                waitText("今天有 $count 个知识点要复习")
                 screenshot("notification.png")
-                click(waitText("今天有 $count 道到期"))
+                click(waitText("今天有 $count 个知识点要复习"))
                 // Review page, rather than Today's landing page.
                 waitText("复习")
                 waitText("$count 个知识点到期")
                 screenshot("review.png")
                 assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
                 android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count tap=REVIEW")
+            }
+            "timezone" -> {
+                val expectedZone = args.getString("expectedZone")!!
+                assertEquals(expectedZone, ZoneId.systemDefault().id)
+                val expected = nextReminderAt(System.currentTimeMillis(), reminder.hour, reminder.minute, ZoneId.of(expectedZone))
+                assertEquals("Timezone broadcast must reschedule wall-clock reminder", expected, prefs.getLong("nextAt", -1))
+                android.util.Log.i("CoachReminderTest", "timezone=$expectedZone rescheduledAt=$expected")
             }
             "restored" -> {
                 assertTrue(reminder.enabled)
@@ -120,8 +136,9 @@ class ReminderSmoke {
         } finally { transport.close(); driver.close() }
     }
 
-    private fun launch() {
+    private fun launch(tab: String = "REVIEW") {
         context.startActivity(Intent(context, CoachActivity::class.java).putExtra("coachUrl", base)
+            .putExtra("tab", tab)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
     }
     private fun screenshot(name: String) {

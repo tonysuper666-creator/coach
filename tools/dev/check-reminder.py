@@ -137,11 +137,18 @@ try:
     wait(lambda: "due=" in adb("logcat", "-d", "-s", "CoachReminder:I") and
          "notified" in adb("logcat", "-d", "-s", "CoachReminder:I"), 240)
     instrument("tap")
-    for name in ("notification.png", "review.png"):
+    for name in ("notification.png", "review.png", "permission-denied.png"):
         image = run([ADB, "-s", SERIAL, "exec-out", "run-as", PACKAGE, "cat", "cache/" + name]).stdout
         (OUT / name).write_bytes(image)
     alarm_before = adb("shell", "dumpsys", "alarm")
     assert PACKAGE in alarm_before and "REVIEW_REMINDER" in alarm_before
+    # Use the platform's timezone command, not a fabricated broadcast. The receiver must
+    # move the pending reminder to the selected wall-clock time in the new zone.
+    previous_zone = adb("shell", "getprop", "persist.sys.timezone").strip()
+    changed_zone = "America/New_York" if previous_zone != "America/New_York" else "Asia/Tokyo"
+    adb("shell", "cmd", "alarm", "set-timezone", changed_zone)
+    time.sleep(2)
+    instrument("timezone", "-e", "expectedZone", changed_zone)
     adb("reboot")
     time.sleep(2)
     run([ADB, "-s", SERIAL, "wait-for-device"], timeout=120)
@@ -167,10 +174,17 @@ try:
     (OUT / "reminder-log.txt").write_text(reminder_log)
     (OUT / "result.json").write_text(json.dumps(dict(avd=AVD, package=PACKAGE, serverPort=port,
         backupEvents=event_count, productionOpened="mode=ro + SQLite backup", aiCallsAdded=0,
-        phases=["permission denial", "two-minute alarm", "process death", "notification tap", "reboot", "disable", "zero due"],
+        phases=["permission denial", "two-minute alarm", "process death", "notification tap", "timezone change", "reboot", "disable", "zero due"],
         exitCode=0), indent=2) + "\n")
     print(f"PASS backupEvents={event_count} port={port} aiCallsAdded=0 exit=0", flush=True)
 finally:
+    # Preserve only content-free reminder diagnostics on failures as well. The private
+    # server log and copied ledger remain local and must never be attached to the issue.
+    if emulator is not None and emulator.poll() is None:
+        try:
+            (OUT / "reminder-log.txt").write_text(adb("logcat", "-d", "-s", "CoachReminder:I", "CoachReminderTest:I"))
+        except (subprocess.SubprocessError, OSError):
+            pass
     for process in (emulator, server):
         if process is not None and process.poll() is None:
             process.terminate()

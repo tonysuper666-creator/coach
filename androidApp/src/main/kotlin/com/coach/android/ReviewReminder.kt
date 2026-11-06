@@ -11,16 +11,16 @@ import android.content.Intent
 import android.util.Log
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import com.coach.client.CourseView
-import com.coach.client.HttpLedgerTransport
-import com.coach.client.SyncEngine
 import com.coach.client.db.ClientDatabase
+import com.coach.domain.Event
+import com.coach.domain.LedgerJson
+import com.coach.domain.Projection
+import com.coach.domain.project
+import kotlinx.serialization.decodeFromString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
-import java.security.MessageDigest
 import java.time.ZoneId
-import java.util.UUID
 
 /** Only local preferences, Android alarms and the existing ledger replica; no push service. */
 internal class ReviewReminder(private val context: Context) {
@@ -46,6 +46,8 @@ internal class ReviewReminder(private val context: Context) {
     }
 
     fun markPermissionAsked() { check(prefs.edit().putBoolean("permissionAsked", true).commit()) }
+
+    fun dismissNotification() { manager.cancel(NOTIFICATION) }
 
     fun update(enabled: Boolean = this.enabled, hour: Int = this.hour, minute: Int = this.minute) = synchronized(LOCK) {
         require(hour in 0..23 && minute in 0..59)
@@ -84,18 +86,18 @@ internal class ReviewReminder(private val context: Context) {
         val url = serverUrl ?: return
         // Validate the saved endpoint using the same isolated-package guard as the foreground app.
         coachServerUrl(url, context.packageName)
-        val credentials = KeystoreCredentials(context, url).load() ?: return
         val driver = AndroidSqliteDriver(ClientDatabase.Schema, context, "coach-client.db")
-        val transport = HttpLedgerTransport(url, credentials.deviceId, credentials.token)
         try {
             val db = ClientDatabase(driver)
-            val sync = SyncEngine(db, credentials.deviceId, transport, listOf(BuildConfig.COACH_COURSE),
-                { UUID.randomUUID().toString() }, { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
-            // Bound receiver work. Offline reminders use the same replica the review page opens.
-            try { withTimeoutOrNull(5_000) { sync.syncOnce() } } catch (_: Exception) { /* Local replica remains available. */ }
+            // Read one committed replica snapshot. Never sync, reset epochs or write projection caches
+            // from the receiver: the foreground SyncEngine is the sole owner of synchronization.
             val count = db.transactionWithResult {
-                CourseView(sync.localEvents(BuildConfig.COACH_COURSE), sync.projection(BuildConfig.COACH_COURSE))
-                    .dueReviews(System.currentTimeMillis()).size
+                val q = db.ledgerQueries
+                val events = q.allEvents(BuildConfig.COACH_COURSE).executeAsList().map { LedgerJson.decodeFromString<Event>(it) }
+                val local = project(events)
+                val snapshot = if (local.requiresServerSnapshot) q.getMeta("serverProjection:${BuildConfig.COACH_COURSE}")
+                    .executeAsOneOrNull()?.let { LedgerJson.decodeFromString<Projection>(it) } else null
+                CourseView(events, snapshot ?: local).dueReviews(System.currentTimeMillis()).size
             }
             synchronized(LOCK) {
                 if (!enabled || generation != revision || !notificationsAllowed()) return
@@ -105,12 +107,12 @@ internal class ReviewReminder(private val context: Context) {
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 manager.notify(NOTIFICATION, Notification.Builder(context, CHANNEL)
-                    .setSmallIcon(R.drawable.ic_review_reminder).setContentTitle("今天有 $count 道到期")
+                    .setSmallIcon(R.drawable.ic_review_reminder).setContentTitle("今天有 $count 个知识点要复习")
                     .setContentText("点开开始复习").setContentIntent(open).setAutoCancel(true)
                     .setCategory(Notification.CATEGORY_REMINDER).build())
                 Log.i("CoachReminder", "due=$count notified")
             }
-        } finally { transport.close(); driver.close() }
+        } finally { driver.close() }
     }
 
     companion object {

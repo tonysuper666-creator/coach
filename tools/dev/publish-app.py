@@ -37,7 +37,11 @@ def _publish_snapshot(apk, directory, sdk):
     def run(*args):
         return subprocess.check_output(list(map(str, args)), text=True, stderr=subprocess.PIPE)
     signatures = run(tools / 'apksigner', 'verify', '--print-certs', apk)
-    certs = sorted(re.findall(r'Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]+)', signatures))
+    # 37.0.0 prefixes ordinary signers with V1/V2/V3.0 and adds a colon.
+    # Keep legacy output compatible; never treat a source stamp as an APK signer.
+    certs = sorted(re.findall(
+        r'^(?:Signer #\d+|V(?:1|2|3\.0) Signer(?: #\d+)?:) certificate SHA-256 digest: ([a-fA-F0-9]+)$',
+        signatures, re.M))
     if not certs:
         raise ValueError('APK has no verified signers')
     badging = run(tools / 'aapt', 'dump', 'badging', apk)

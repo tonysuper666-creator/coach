@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic SDK regressions; no Gradle, Android SDK, server or device required.
 
-COACH_PUBLISHER_UNDER_TEST selects an older publisher to demonstrate the race.
+COACH_PUBLISHER_UNDER_TEST selects an older publisher to demonstrate regressions.
 The fake tools replace the original build output, never the private snapshot.
 """
 import hashlib
@@ -29,12 +29,21 @@ if os.environ.get('FAKE_REPLACE_AFTER') == tool:
     replacement = Path(os.environ['FAKE_REPLACEMENT'])
     os.replace(replacement, os.environ['FAKE_ORIGINAL'])
 if tool == 'apksigner':
+    print(os.environ.get('FAKE_SIGNER_OUTPUT',
+                         'Signer #1 certificate SHA-256 digest: ' + data['signer']))
     if not data.get('valid', True):
         sys.exit(2)
-    print('Signer #1 certificate SHA-256 digest: ' + data['signer'])
 else:
     print("package: name='%s' versionCode='%d' versionName='%s'" %
           (data['package'], data['code'], data['name']))
+'''
+
+# build-tools 37.0.0 output captured from the normal v2-only debug APK;
+# fingerprints are synthetic. DN, SHA-1 and MD5 must not supply the APK identity.
+V2_CERTIFICATES = '''V2 Signer: certificate DN: C=US, O=Android, CN=Android Debug
+V2 Signer: certificate SHA-256 digest: {signer}
+V2 Signer: certificate SHA-1 digest: 1111111111111111111111111111111111111111
+V2 Signer: certificate MD5 digest: 22222222222222222222222222222222
 '''
 
 
@@ -128,6 +137,71 @@ class PublishAppTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.published()[0]['versionCode'], 3)
         self.assert_coherent(*self.published())
+
+    def test_build_tools_37_v2_output_preserves_signing_identity(self):
+        self.assertEqual(self.run_publish().returncode, 0)
+        before = self.published()
+        output = V2_CERTIFICATES.format(signer='a' * 64)
+        for label in ('V2 Signer:', 'V1 Signer:', 'V3.0 Signer:'):
+            with self.subTest(label=label):
+                result = self.run_publish(FAKE_SIGNER_OUTPUT=output.replace('V2 Signer:', label))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.published(), before, 'output format changed an idempotent release')
+        stamped = output + 'Source Stamp Signer: certificate SHA-256 digest: ' + 'b' * 64
+        result = self.run_publish(FAKE_SIGNER_OUTPUT=stamped)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.published(), before, 'source stamp changed the APK signing identity')
+        self.apk.write_bytes(self.payload(code=3))
+        result = self.run_publish(FAKE_SIGNER_OUTPUT=output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_coherent(*self.published())
+        before = self.published()
+        for content, signatures, error in (
+                (self.payload(code=4, signer='b' * 64),
+                 V2_CERTIFICATES.format(signer='b' * 64).replace('V2 Signer:', 'V3.0 Signer:'),
+                 'Update signing identity changed'),
+                (self.payload(code=2), output, 'Update version must increase'),
+                (self.payload(code=4, valid=False), output, 'CalledProcessError')):
+            with self.subTest(error=error):
+                self.apk.write_bytes(content)
+                result = self.run_publish(FAKE_SIGNER_OUTPUT=signatures)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(self.published(), before)
+                self.assertEqual(list(self.output.glob('.publish-*')), [])
+
+    def test_source_stamp_and_other_digests_cannot_supply_apk_identity(self):
+        output = V2_CERTIFICATES.format(signer='a' * 64)
+        without_sha256 = '\n'.join(line for line in output.splitlines() if 'SHA-256' not in line)
+        for signatures in (
+                without_sha256,
+                without_sha256 + '\nSource Stamp Signer: certificate SHA-256 digest: ' + 'b' * 64,
+                'Source Stamp Signer #1 certificate SHA-256 digest: ' + 'b' * 64):
+            with self.subTest(signatures=signatures):
+                result = self.run_publish(FAKE_SIGNER_OUTPUT=signatures)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('APK has no verified signers', result.stderr)
+                self.assertEqual(list(self.output.rglob('latest.json')), [])
+                self.assertEqual(list(self.output.glob('*.apk')), [])
+                self.assertEqual(list(self.output.glob('.publish-*')), [])
+
+    def test_build_tools_37_preserves_all_signers_and_sorted_comparison(self):
+        signers = ['a' * 64, 'b' * 64]
+        legacy = '\n'.join('Signer #%d certificate SHA-256 digest: %s' % (index, signer)
+                           for index, signer in enumerate(signers, 1))
+        self.assertEqual(self.run_publish(FAKE_SIGNER_OUTPUT=legacy).returncode, 0)
+        before = self.published()
+        self.assertEqual(before[0]['signerSha256'], signers)
+        modern = '\n'.join('V2 Signer #%d: certificate SHA-256 digest: %s' % (index, signer)
+                           for index, signer in enumerate(reversed(signers), 1))
+        result = self.run_publish(FAKE_SIGNER_OUTPUT=modern)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.published(), before)
+        self.apk.write_bytes(self.payload(code=3))
+        result = self.run_publish(FAKE_SIGNER_OUTPUT=modern.replace('b' * 64, 'c' * 64))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Update signing identity changed', result.stderr)
+        self.assertEqual(self.published(), before)
 
     def test_changed_signer_and_nonincreasing_version_leave_release_unchanged(self):
         self.assertEqual(self.run_publish().returncode, 0)

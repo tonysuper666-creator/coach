@@ -59,11 +59,21 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
 
     // 每次（重新）连上都声明一次线程；服务端按 kpId 幂等。
-    LaunchedEffect(kp.id, ui.connected, tv.historyLoaded) {
+    val startRequest = c.startRequests[kp.id]
+    LaunchedEffect(kp.id, ui.connected, tv.historyLoaded, startRequest) {
         if (!ui.connected) { opened = false; return@LaunchedEffect }
         if (!opened) opened = open()
+        // 面板上点了一次就开始一次：已有历史也照样开讲 / 出题；还有没答完的题就先答题，不再另起。
+        if (startRequest != null && opened && tv.historyLoaded) {
+            c.startRequests.remove(kp.id)
+            started = true
+            if (pending == null) next(startRequest, recordTap = false)
+        }
         if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false, recordTap = false) }
     }
+
+    // 没等到开始就离开了：这次的启动作废，下次从别处打开不会突然开讲。
+    DisposableEffect(kp.id) { onDispose { c.startRequests.remove(kp.id) } }
 
     // A newly passed queue item opens its successor after grading/streaming settles.
     LaunchedEffect(kp.status, view.weekTarget?.id, tv.busy, pending) {

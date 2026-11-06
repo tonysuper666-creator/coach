@@ -48,7 +48,16 @@ sealed interface ExamCountdown {
     data class Past(val examDay: Long) : ExamCountdown
 }
 
-data class ExamPanel(val countdown: ExamCountdown, val weeks: List<WeekMastery>, val focus: List<WeekMastery>, val weighted: Boolean)
+data class ExamPanel(
+    val countdown: ExamCountdown, val weeks: List<WeekMastery>, val focus: List<WeekMastery>, val weighted: Boolean,
+    /** 还没掌握、但押题权重为 0 的周：不进前三块，要如实说出来，不能算「稳固」。 */
+    val offFocus: List<Int> = emptyList(),
+    /** 押题有权重、大纲里却还没有知识点的周：没法开讲，也不能算「稳固」。 */
+    val unplanned: List<Int> = emptyList(),
+) {
+    /** 前三块为空、并且确实是因为各周都稳固了。 */
+    val allSolid: Boolean get() = focus.isEmpty() && offFocus.isEmpty() && unplanned.isEmpty()
+}
 
 /**
  * 期末面板：距期末天数、各周掌握度（直接取账本回放出的知识点状态）、按「押题权重 × 未掌握程度」排出的前三块。
@@ -79,7 +88,19 @@ fun CourseView.examPanel(nowMillis: Long, focus: ExamFocus?): ExamPanel {
     val top = rows.filter { it.priority > 0 && it.action != null }
         .sortedWith(compareByDescending<WeekMastery> { it.priority }.thenByDescending { it.weight }.thenBy { it.week })
         .take(3)
-    return ExamPanel(countdown, rows, top, focus != null)
+    val offFocus = rows.filter { it.total > 0 && it.score < 1 && it.weight == 0.0 }.map { it.week }
+    val unplanned = rows.filter { it.total == 0 && it.weight > 0 }.map { it.week }
+    return ExamPanel(countdown, rows, top, focus != null, offFocus, unplanned)
+}
+
+/** [1, 2, 3, 5] → "W1–W3、W5"：连着的周合成一段。 */
+fun weekSpans(weeks: List<Int>): String {
+    val runs = mutableListOf<IntRange>()
+    for (w in weeks.distinct().sorted()) {
+        val last = runs.lastOrNull()
+        if (last != null && w == last.last + 1) runs[runs.lastIndex] = last.first..w else runs += w..w
+    }
+    return runs.joinToString("、") { if (it.first == it.last) "W${it.first}" else "W${it.first}–W${it.last}" }
 }
 
 /** 纪元日 → 公历年月日（不依赖日期库；Hinnant 的 civil_from_days）。 */

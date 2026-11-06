@@ -53,8 +53,8 @@ internal fun ExamPanelCard(
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
 
             Text("今天先补这三块", style = MaterialTheme.typography.titleMedium)
-            if (panel.focus.isEmpty()) Text("各周都已稳固，没有要补的。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            panel.focus.forEachIndexed { i, row -> FocusBlock(i + 1, row, onOpen, onPractice) }
+            if (panel.focus.isEmpty()) Text(emptyFocusText(panel), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            panel.focus.forEachIndexed { i, row -> FocusBlock(c, i + 1, row, onOpen, onPractice) }
             Text(
                 if (panel.weighted) "按押题权重 × 未掌握程度排序。" else "暂无押题权重，只按未掌握程度排序。",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -84,6 +84,15 @@ internal fun ExamPanelCard(
 
 private const val DAY_MILLIS = 86_400_000L
 
+/** 前三块为空时说清楚为什么：只有真的各周都稳固才这么说；没掌握但不在押题范围、押题周大纲还没排，都照实讲。 */
+internal fun emptyFocusText(panel: ExamPanel): String {
+    if (panel.allSolid) return "各周都已稳固，没有要补的。"
+    return buildList {
+        if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没掌握，但押题权重为 0，没有排进来。")
+        if (panel.unplanned.isNotEmpty()) add("押题的 ${weekSpans(panel.unplanned)} 在大纲里还没有知识点，暂时没法开讲。")
+    }.joinToString("")
+}
+
 @Composable
 private fun Countdown(countdown: ExamCountdown, busy: Boolean, onPick: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -108,7 +117,7 @@ private fun Countdown(countdown: ExamCountdown, busy: Boolean, onPick: () -> Uni
 }
 
 @Composable
-private fun FocusBlock(rank: Int, row: WeekMastery, onOpen: (String, Boolean) -> Unit, onPractice: (Int) -> Unit) {
+private fun FocusBlock(c: CoachController, rank: Int, row: WeekMastery, onOpen: (String, Boolean) -> Unit, onPractice: (Int) -> Unit) {
     val action = row.action ?: return
     val (verb, what) = when (action) {
         is ExamAction.Teach -> (if (action.repair) "修复" else "开讲") to splitTitle(action.title).second
@@ -116,8 +125,8 @@ private fun FocusBlock(rank: Int, row: WeekMastery, onOpen: (String, Boolean) ->
     }
     val go = {
         when (action) {
-            is ExamAction.Teach -> onOpen(action.kpId, true)
-            is ExamAction.Practice -> if (action.mistakes > 0) onPractice(action.week) else onOpen(action.kpId, true)
+            is ExamAction.Teach -> { c.startRequests[action.kpId] = false; onOpen(action.kpId, true) }
+            is ExamAction.Practice -> if (action.mistakes > 0) onPractice(action.week) else { c.startRequests[action.kpId] = true; onOpen(action.kpId, true) }
         }
     }
     Surface(

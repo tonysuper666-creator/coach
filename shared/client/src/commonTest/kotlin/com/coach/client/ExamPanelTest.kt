@@ -80,6 +80,27 @@ class ExamPanelTest {
         assertFalse(4 in panel.focus.map { it.week }, "a week with nothing to open cannot be one of the three blocks")
     }
 
+    @Test fun anEmptyTopThreeOnlyClaimsAllSolidWhenEveryWeekIsSolid() {
+        val solid = Mastery(passed = true, solid = true)
+        val all = mapOf("a1" to solid, "a2" to solid, "b1" to solid, "b2" to solid, "c1" to solid)
+        val done = view(mastery = all).examPanel(now, focus)
+        assertTrue(done.focus.isEmpty() && done.allSolid)
+
+        // 没学过的周权重为 0：前三块是空的，但不是「都稳固」。
+        val off = view(mastery = all - "b1" - "c1").examPanel(now, ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(2, 0.0), WeekFocus(3, 0.0))))
+        assertTrue(off.focus.isEmpty())
+        assertFalse(off.allSolid)
+        assertEquals(listOf(2, 3), off.offFocus)
+        assertEquals(emptyList(), off.unplanned)
+
+        // 押题周在大纲里还没有知识点：同样不是「都稳固」。
+        val missing = view(mastery = all).examPanel(now, ExamFocus(focus.weeks + listOf(WeekFocus(7, 2.0), WeekFocus(8, 1.0), WeekFocus(10, 1.0), WeekFocus(11, 0.0))))
+        assertTrue(missing.focus.isEmpty())
+        assertFalse(missing.allSolid)
+        assertEquals(listOf(7, 8, 10), missing.unplanned, "a zero-weight week without points is not on the exam, so it is not missing")
+        assertEquals("W7–W8、W10", weekSpans(missing.unplanned))
+    }
+
     @Test fun malformedPrivateConfigIsIgnoredRatherThanTrusted() {
         val parsed = ExamFocus.parse(json("weeks" to JsonArray(listOf(
             json("week" to 4, "weight" to 3, "topic" to "T"), json("week" to 0, "weight" to 9),

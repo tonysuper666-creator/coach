@@ -28,6 +28,26 @@ class ProcessDiagnosticsTest(unittest.TestCase):
         self.assertEqual({}, runner.process_flags(
             '*APP* UID 123 ProcessRecord{abc 45:com.coach.android.ton1094.other/u0a123}\n frozen=true'))
 
+    def test_kernel_state_excludes_identifiers_and_arbitrary_fields(self):
+        self.assertEqual('T', runner.kernel_state(
+            'Name:\tprivate-name\nState:\tT (stopped)\nUid:\t123\nToken:\tprivate-token\n'))
+        self.assertEqual('S', runner.kernel_state('State:\tS (sleeping)\n'))
+
+    def test_unknown_or_ambiguous_kernel_state_is_not_evidence(self):
+        for status in ('Permission denied', 'State: private-content',
+                       'State: S\nState: T\n', 'State: Token'):
+            with self.subTest(status=status):
+                self.assertIsNone(runner.kernel_state(status))
+
+    def test_only_current_wakefulness_survives(self):
+        self.assertEqual('Awake', runner.wakefulness(
+            'private-content\n mWakefulness=Awake\n mLastWakefulness=Asleep\n'))
+        for dump in ('Permission denied', 'mWakefulness=private-content',
+                     'mWakefulness=Awake\nmWakefulness=Asleep',
+                     'mWakefulness=Awake private-token'):
+            with self.subTest(dump=dump):
+                self.assertIsNone(runner.wakefulness(dump))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -57,6 +57,13 @@ scheduling/freezer flags from only the card package's process record help separa
 coroutine stalls from whole-process suspension. Unsupported or inaccessible
 process diagnostics remain unknown; a missing heartbeat alone does not prove
 freezing. The raw process dump is neither retained nor shared.
+At READY and failure, the runner also samples the card process's allowlisted
+Linux task-state letter and the device's current wakefulness enum. These are
+point-in-time observations, not proof of the state throughout the pause. A
+restricted `/proc` or power dump remains unknown; diagnostic failures do not
+suppress the other samples. Raw `/proc` and power output, including identifiers
+and wake-lock details, are neither retained nor shared. These read-only samples
+do not change power settings or wake the phone.
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

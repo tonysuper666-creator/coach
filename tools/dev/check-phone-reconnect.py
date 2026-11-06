@@ -42,6 +42,19 @@ def process_flags(dump):
     return flags
 
 
+def kernel_state(status):
+    """Return only a recognized Linux task-state letter, never /proc contents."""
+    states = re.findall(r'^State:\s+([RSDTtXZPI])(?:\s|$)', status, re.MULTILINE)
+    return states[0] if len(states) == 1 else None
+
+
+def wakefulness(dump):
+    """Exclude all power-dump data except the current wakefulness enum."""
+    states = re.findall(r'^\s*mWakefulness=(Awake|Asleep|Dozing|Dreaming)\s*$',
+                        dump, re.MULTILINE)
+    return states[0] if len(states) == 1 else None
+
+
 def lease_valid():
     fields = dict(line.split('=', 1) for line in (PHONE/'lease.d/info').read_text().splitlines())
     if fields.get('card') != 'TON-1094' or int(fields['until']) <= time.time():
@@ -126,10 +139,22 @@ def main():
         lease_valid()
         snapshot = dict(phase=phase, at=datetime.now(timezone.utc).isoformat())
         try:
-            snapshot['present'] = bool(device('shell', 'pidof', PACKAGE, timeout=5).strip())
+            pid = device('shell', 'pidof', PACKAGE, timeout=5).strip()
+            snapshot['present'] = bool(pid)
+            # Never interpolate unvalidated device output into a remote command.
+            if re.fullmatch(r'[1-9][0-9]*', pid):
+                snapshot['kernelState'] = kernel_state(
+                    device('shell', 'cat', '/proc/'+pid+'/status', timeout=5))
+        except Exception as error:
+            snapshot['processCaptureError'] = type(error).__name__
+        try:
             snapshot['flags'] = process_flags(device('shell', 'dumpsys', 'activity', 'processes', PACKAGE, timeout=5))
         except Exception as error:
             snapshot['captureError'] = type(error).__name__
+        try:
+            snapshot['wakefulness'] = wakefulness(device('shell', 'dumpsys', 'power', timeout=5))
+        except Exception as error:
+            snapshot['powerCaptureError'] = type(error).__name__
         summary.setdefault('phoneProcessSnapshots', []).append(snapshot)
 
     try:

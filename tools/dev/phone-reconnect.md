@@ -86,7 +86,7 @@ Normal test completion removes its files; failure cleanup force-stops the card
 package and removes only that random run's files and atomic-write sidecars before
 uninstalling `.test`, along with the test's synthetic SQLite and journal files.
 The summary's `faultInjected` field records whether STOP
-was actually reached. This independent-file diagnostic has not run on the phone.
+was actually reached.
 On 2026-11-06 at 06:22 UTC, matching server and both APKs built successfully
 through the heavy lock (135 tasks, 10 seconds), but the phone run failed during
 APK installation before any network gate or heartbeat measurement. Its installer
@@ -98,7 +98,34 @@ output. Unknown errors stay unknown. Cleanup checks the exact card test package
 before and after uninstall, so a confirmed absent package is safe to clean twice;
 an inaccessible or unexpected query is a cleanup failure, not proof of absence.
 Main-package file cleanup and test-package removal run independently. These
-installer and cleanup changes still require a guarded phone run.
+installer failure diagnostics still require a failing guarded installation to
+exercise; successful installation does not validate that failure path.
+
+On 2026-11-06 at 06:37–06:38 UTC, head `9aa6ebd` (main `8e644b5`)
+ran the independent-file diagnostic on the leased, unlocked, idle OPPO PMA120.
+The previous test package was confirmed absent before installation. Both APKs
+installed and the network gate passed 3/3. The 15-second no-fault control failed
+before STOP (`faultInjected=false`). For run
+`b123720172c24c9a8c8b1f4b740e39a2`, both private counters advanced from 1 to 3:
+the main clock advanced 4,013 ms and IO advanced 4,003 ms. Logged heartbeats
+also stopped after about four seconds; the last hello/events requests had END
+checkpoints, with no OFFLINE or SYNC_LOOP_FINISHED. Thus logcat loss alone does
+not explain the observations. File writes are also an observation path: this
+does not prove the process was frozen or identify the cause. At failure the
+process was present, kernel state S, device Awake, curProcState=4,
+cached=false and isFrozen=false; those are point-in-time samples only.
+Test-package absence after uninstall was confirmed, private synthetic data and
+the owned server were cleaned, the lease was released and ai_calls=0.
+
+The Android/server/Gradle build inputs for this run matched the successful
+`6234a50` heavy build. Reusing those matching artifacts is not a rebuild or a
+reconnection pass. Next investigation should locate why both heartbeat paths
+stop while the server remains running, including the phone/test execution and
+file/log observation paths. Do not repeat JVM pauses until the unchanged healthy
+control passes, infer freezing from missing samples, or change phone power
+settings as a substitute for diagnosis. Further phone observation requires a
+new guardian grant and the same idle protection; keep waiting in the existing
+queue meanwhile.
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

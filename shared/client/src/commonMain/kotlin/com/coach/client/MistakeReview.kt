@@ -72,7 +72,7 @@ fun mistakeReview(input: List<Event>): MistakeReview {
             if (!correct) {
                 hadMistakes = true
                 streak[kp] = 0; seenCorrect.remove(kp)
-                outstanding[kp to id] = Mistake(id, kp, card, right,
+                outstanding[kp to q.str("questionId").ifBlank { id }] = Mistake(id, kp, card, right,
                     g.str("rationale").ifBlank { feedback.ifBlank { "按本题已复核答案判分。" } })
             } else {
                 // Replaying the original weekly mistake is not a new pool question.

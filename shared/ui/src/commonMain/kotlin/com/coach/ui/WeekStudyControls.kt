@@ -54,8 +54,9 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean, direc
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 view.weeks.forEach { week ->
                     val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
-                    OutlinedButton(onClick = { actions.select(week) }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {
-                        Text("第 $week 周 · $remaining 个待学")
+                    val exempt = week in view.midtermExemptionWeeks
+                    OutlinedButton(onClick = { actions.select(week) }, enabled = connected && !actions.busy && !exempt, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(if (exempt) view.weekLabel(week) else "${view.weekLabel(week)} · $remaining 个待学")
                     }
                 }
             }
@@ -72,7 +73,8 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean, direc
             view.weeks.forEach { week ->
                 val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
                 val label = view.weekLabel(week)
-                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") }, onClick = { expanded = false; actions.select(week) })
+                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") },
+                    enabled = week !in view.midtermExemptionWeeks, onClick = { expanded = false; actions.select(week) })
             }
             if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) })
         }
@@ -89,7 +91,7 @@ fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { actions.onReview(active.week) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("再练这一周错题") }
-        view.weeks.firstOrNull { it > active.week }?.let { next ->
+        view.weeks.firstOrNull { it > active.week && it !in view.midtermExemptionWeeks }?.let { next ->
             Button(onClick = { actions.select(next) }, enabled = connected && !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) { Text("换下一周") }
         }
     }

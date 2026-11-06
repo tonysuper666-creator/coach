@@ -13,6 +13,28 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class TodayWeekSelectionTest {
+    @Test fun midtermWeekIsVisibleButCannotBeSelected() = runDesktopComposeUiTest(width = 390, height = 800) {
+        val f = Fixture(); val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        val actions = WeekActions(f.controller, scope)
+        val outline = Event(1, "outline", "C", "outline_revised", recordedAt = 1, occurredAt = 1, deviceId = "d", actor = "LEARNER", payload = json(
+            "week7" to json("knowledgePoints" to 0, "reason" to "Midterm Exam"),
+            "ops" to JsonArray(listOf(json("op" to "add", "kpId" to "kp6", "title" to "【W6】甲"), json("op" to "add", "kpId" to "kp8", "title" to "【W8】乙")))))
+        var current by mutableStateOf(CourseView(listOf(outline), project(listOf(outline))))
+        val exemption = "第 7 周 · 期中周（无新课，豁免）"
+        try {
+            setContent { CoachTheme(false) { TodayScreen(f.controller, current, TutorUiState(connected = true), null, {}, { _, _ -> }, actions) } }
+            onNodeWithText(exemption).assertIsDisplayed().assertIsNotEnabled().performClick()
+            assertTrue(f.transport.calls.isEmpty())
+            runOnIdle { current = CourseView(current.events, current.projection.copy(studyScope = StudyScope("s", 6, listOf("kp6"), cursor = 1))) }
+            onNodeWithText("第 6 周 · 换周 ▾").performClick()
+            onNodeWithText(exemption).assertIsDisplayed().assertIsNotEnabled()
+            onNodeWithText("第 8 周 · 1 个待学").performClick()
+            waitUntil(timeoutMillis = 5000) { synchronized(f.transport.calls) { f.transport.calls.isNotEmpty() } }
+            val body = LedgerJson.decodeFromString<CommandBody>(synchronized(f.transport.calls) { f.transport.calls.single() }.payloadBytes)
+            assertEquals(8, body.payload.num("week").toInt())
+            waitUntil(timeoutMillis = 5000) { !actions.busy }
+        } finally { scope.cancel(); f.close() }
+    }
     private fun view(weeks: Boolean = true, scoped: Boolean = false): CourseView {
         val titles = if (weeks) listOf("【W1】甲", "【W2】乙") else listOf("无周次")
         val event = Event(1, "outline", "C", "outline_revised", recordedAt = 1, occurredAt = 1, deviceId = "d", actor = "LEARNER", payload = json(

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Isolated binary deployment/rollback on a readonly production SQLite backup.
+"""Isolated binary deployment/rollback on an explicitly supplied private SQLite copy.
 
 No launchd, production controls, real bridge, mobile device or production writes.
-The installed distribution is copied before use. All children finish in this call.
+The explicitly supplied old distribution is copied before use. All children finish in this call.
 """
 import argparse
 from contextlib import closing, contextmanager
@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.request
 import urllib.parse
 
@@ -58,12 +59,30 @@ def distribution_digest(app):
 
 
 def durable_fingerprint(db):
-    """Exclude rebuildable projections, but protect speech and credentials too."""
+    """Protect every durable table, including future tables and binary values.
+
+    Only projection_cache is disposable. Normalize the known v6 -> v7 document
+    visibility migration on the backup; never ignore the new column on v7.
+    Empty tables may be created by startup, but any inserted row changes this hash.
+    """
     maximum = db.execute('select coalesce(max(seq),0) from events').fetchone()[0]
-    digest = hashlib.sha256(digest_events(db, maximum))
-    for table, order in [('messages', 'thread_id,mseq'), ('devices', 'device_id')]:
-        for row in db.execute(f'select * from {table} order by {order}'):
-            digest.update(json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode())
+    digest = hashlib.sha256()
+    tables = db.execute("select name from sqlite_master where type='table' and name!='projection_cache' order by name").fetchall()
+    for (table,) in tables:
+        quoted = '"' + table.replace('"', '""') + '"'
+        columns = [row[1] for row in db.execute(f'pragma table_info({quoted})')]
+        rows = []
+        for row in db.execute(f'select * from {quoted}'):
+            values = dict(zip(columns, row))
+            if table == 'source_docs' and 'learner_visible' not in values:
+                hidden = any(any(word in unicodedata.normalize('NFKC', str(values.get(field) or '')).lower()
+                                 for word in ('answer', '答案', 'sealed')) for field in ('doc_id', 'title', 'kind'))
+                values['learner_visible'] = int(values.get('tutor_visible', 1) != 0 and not hidden)
+            encoded = [(key, ['blob', value.hex()] if isinstance(value, bytes) else ['value', value])
+                       for key, value in sorted(values.items())]
+            rows.append(json.dumps(encoded, ensure_ascii=False, separators=(',', ':')).encode())
+        for row in sorted(rows):
+            digest.update(json.dumps(table).encode() + b'\0' + row + b'\n')
     return maximum, digest.digest()
 
 
@@ -139,7 +158,8 @@ def readback(port, token, courses, client_app, expected=None):
             ws = smoke.WS(port, 'desktop', token)
             try:
                 ws.send(dict(t='tutor.open', courseId=course, threadId=thread, kpId=context['kpId'],
-                             conceptIds=context['conceptIds'], title=context.get('title', '')))
+                             conceptIds=context['conceptIds'], title=context.get('title', ''),
+                             review=context.get('via') == 'REVIEW'))
                 frame(ws, 'tutor.state')
                 frame(ws, 'msg.history')
                 opened += 1
@@ -192,6 +212,10 @@ def exercise(port, token, phase):
         require(len(feedback) == 3, 'synthetic quiz missing grades')
         if phase == 'candidate':
             require(sum(g['score'] < g['max'] for g in feedback) == 1, 'candidate mistake was not recorded')
+            common['threadId'] = f'review:ton1254-{phase}:ton1254-{phase}-kp'
+            ws.send(dict(common, t='tutor.open', kpId=f'ton1254-{phase}-kp', conceptIds=['synthetic'],
+                         title='Synthetic objective', review=True))
+            frame(ws, 'tutor.state')
             ws.send(dict(common, t='tutor.retryMistakes'))
             retry = frame(ws, 'tutor.cards')['cards']
             require(len(retry) == 3 and not ({c['questionId'] for c in retry} & {c['questionId'] for c in cards}),
@@ -202,17 +226,22 @@ def exercise(port, token, phase):
         ws.close()
 
 
-def run(out, rollback_checkout=None, expected_rollback_head=None):
+def private_input(path):
+    path = path.resolve()
+    require(not path.is_relative_to((Path.home() / 'Coach').resolve()), 'private input must be outside the installed Coach tree')
+    for name in ('coach.sqlite', 'device-token'):
+        require((path / name).is_file() and not (path / name).is_symlink(), 'private input must contain regular database/token copies')
+    return path
+
+
+def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=None, expected_rollback_head=None):
     os.umask(0o077)
-    installation = Path.home() / 'Coach/service/installation.json'
-    record = installation.read_bytes()
-    installed = json.loads(record)
-    production = Path(installed['dataDir']).resolve()
+    source_data = private_input(private_data_dir)
     candidate = ROOT / 'server/app/build/install/app'
-    old = Path(installed['root']) / 'app'
+    old = old_distribution.resolve()
     require((candidate / 'bin/app').is_file() and (old / 'bin/app').is_file(), 'missing built or installed distribution')
     rollback = old
-    rollback_head = installed['sourceHead']
+    rollback_head = old_head
     if rollback_checkout is not None:
         rollback_checkout = rollback_checkout.resolve()
         rollback_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=rollback_checkout, text=True).strip()
@@ -221,7 +250,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                 'rollback checkout has tracked changes')
         rollback = rollback_checkout / 'server/app/build/install/app'
         require((rollback / 'bin/app').is_file(), 'missing compatible rollback distribution')
-    token_bytes = (production / 'device-token').read_bytes()
+    token_bytes = (source_data / 'device-token').read_bytes()
     token = token_bytes.decode().strip()
     bridge = smoke.http.server.ThreadingHTTPServer(('127.0.0.1', 0), smoke.Bridge)
     require(bridge.server_address[1] not in PROTECTED, 'protected bridge port')
@@ -238,18 +267,18 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
             data.mkdir(mode=0o700)
             (base / 'jvm-home').mkdir(mode=0o700)
             (base / 'jvm-tmp').mkdir(mode=0o700)
-            with database((production / 'coach.sqlite').as_uri() + '?mode=ro', uri=True) as source:
+            with database((source_data / 'coach.sqlite').as_uri() + '?mode=ro', uri=True) as source:
                 with database(data / 'coach.sqlite') as db:
                     source.backup(db)
             (data / 'device-token').write_bytes(token_bytes)
             (data / 'device-token').chmod(0o600)
             with database(data / 'coach.sqlite') as db:
-                require(db.execute('pragma integrity_check').fetchone()[0] == 'ok', 'invalid production snapshot')
+                require(db.execute('pragma integrity_check').fetchone()[0] == 'ok', 'invalid private snapshot')
                 maximum = db.execute('select coalesce(max(seq),0) from events').fetchone()[0]
                 original = digest_events(db, maximum)
                 devices = dict(db.execute('select device_id,token_sha256 from devices'))
                 real_courses = [row[0] for row in db.execute("select distinct course_id from events where course_id!='__system__'")]
-                require(real_courses, 'production copy has no course to read back')
+                require(real_courses, 'private copy has no course to read back')
                 # Cancel only copied work; no real content may be sent to any bridge.
                 db.execute("update jobs set state='cancelled', last_error='isolated_release_train' where state in ('queued','running')")
                 for phase in ('old', 'candidate', 'rollback', 'fault-recovery'):
@@ -381,7 +410,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                     unchanged()
                     require(smoke.Bridge.calls == calls, 'migration check called bridge')
                     return dict(noWriteRestore='old binary authenticated on restored v6', withWriteRestore='refused; v7 writes retained',
-                                checks=['event max sequence', 'full event digest', 'messages', 'device credentials'], bridgeCalls=0)
+                                checks=['event max sequence', 'all durable table rows', 'device credentials'], bridgeCalls=0)
                 finally:
                     stop()
                     data = train_data
@@ -460,7 +489,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                 with database(data / 'coach.sqlite') as db:
                     kept = db.execute("select count(*) from events where course_id='ton1254-candidate'").fetchone()[0]
                     require(kept > 0, 'candidate writes lost on rollback')
-                summary = dict(productionHead=installed['sourceHead'], candidateHead=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                summary = dict(oldHead=old_head, candidateHead=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                                candidateSourceTrees={area: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + area], cwd=ROOT, text=True).strip() for area in ('server', 'shared')},
                                rehearsalSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                rollbackHead=rollback_head, originalRollbackRejected=rollback_checkout is not None,
@@ -470,7 +499,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
                                originalTokenAcceptedStarts=authenticated_starts, syntheticLectureQuizPasses=4, candidateEventsRetained=kept,
                                originalEventsUnchanged=True, pairedTokenHashesUnchanged=True, copyIntegrity='ok',
                                startupAndLectureQuizSeconds=timings, databaseRestoredOnRollback=False,
-                               productionConnections='readonly SQLite backup only', productionControlCalls=0,
+                               inputKind='explicit private copy', productionConnections=0, productionControlCalls=0,
                                protectedPortsUsed=False, realTutorCalls=0, launchdRehearsed=False)
             finally:
                 stop()
@@ -478,8 +507,7 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
         bridge.shutdown()
         bridge_thread.join()
         bridge.server_close()
-    require(installation.read_bytes() == record, 'installation changed concurrently; baseline needs review')
-    require((production / 'device-token').read_bytes() == token_bytes, 'production token changed concurrently')
+    require((source_data / 'device-token').read_bytes() == token_bytes, 'private input token changed concurrently')
     for port in ports + [bridge.server_address[1]]:
         with socket.socket() as sock:
             require(sock.connect_ex(('127.0.0.1', port)) != 0, 'isolated listener survived cleanup')
@@ -491,9 +519,12 @@ def run(out, rollback_checkout=None, expected_rollback_head=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path, help='sanitized metadata report; no private data')
+    parser.add_argument('--private-data-dir', required=True, type=Path, help='previously prepared private database/token copies; never the live dataDir')
+    parser.add_argument('--old-distribution', required=True, type=Path, help='built pre-v7 app distribution')
+    parser.add_argument('--old-head', required=True, help='source commit of the old distribution')
     parser.add_argument('--rollback-checkout', type=Path, help='clean checkout with a built compatible rollback distribution')
     parser.add_argument('--rollback-head', help='exact full commit of the compatible rollback checkout')
     args = parser.parse_args()
     if bool(args.rollback_checkout) != bool(args.rollback_head):
         parser.error('--rollback-checkout and --rollback-head must be provided together')
-    run(args.out, args.rollback_checkout, args.rollback_head)
+    run(args.out, args.private_data_dir, args.old_distribution, args.old_head, args.rollback_checkout, args.rollback_head)

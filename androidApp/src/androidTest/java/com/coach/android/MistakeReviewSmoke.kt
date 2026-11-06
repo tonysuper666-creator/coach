@@ -92,7 +92,7 @@ class MistakeReviewSmoke {
             waitText("第 1 / 3 题")
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
-            val retry = group("mistakes:$kp")
+            val retry = group("review:$course:$kp")
             val oldIds = (0 until first.length()).map { first.getJSONObject(it).getJSONObject("payload").getString("questionId") }.toSet()
             assertEquals(3,retry.length())
             for (i in 0 until retry.length()) assertFalse(oldIds.contains(retry.getJSONObject(i).getJSONObject("payload").getString("questionId")))

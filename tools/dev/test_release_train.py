@@ -69,6 +69,32 @@ class MigrationRestoreTest(unittest.TestCase):
             train.restore_before_v7(self.data, self.backup, server_stopped=False)
         self.assertEqual(self.fingerprint(), before)
 
+    def test_future_table_binary_updates_deletes_and_visibility_are_protected(self):
+        mutations = [
+            "create table future_table(id integer, content blob); insert into future_table values(1,x'00ff')",
+            "delete from devices",
+            "insert into source_docs values('public',0)",
+            "update messages set content='changed without a new event'",
+        ]
+        for sql in mutations:
+            with self.subTest(sql=sql):
+                with train.database(self.current) as db:
+                    db.executescript(sql)
+                before = self.fingerprint()
+                with self.assertRaisesRegex(RuntimeError, 'durable writes'):
+                    self.restore()
+                self.assertEqual(self.fingerprint(), before)
+                with train.database(self.backup) as backup, train.database(self.current) as db:
+                    backup.backup(db)
+                    db.execute('alter table source_docs add column learner_visible integer not null default 1')
+                    db.execute('pragma user_version=7')
+
+    def test_only_rebuildable_projection_cache_is_disposable(self):
+        with train.database(self.current) as db:
+            db.executescript("create table projection_cache(course text, payload blob); insert into projection_cache values('C',x'00ff')")
+        self.restore()
+        self.assertEqual(self.fingerprint()[0], 6)
+
     def test_wrong_backup_schema_is_refused(self):
         with train.database(self.backup) as db:
             db.execute('pragma user_version=5')

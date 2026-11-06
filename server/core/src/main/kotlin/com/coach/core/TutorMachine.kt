@@ -159,7 +159,8 @@ class TutorMachine(private val actor: LedgerActor) {
             val existing = pending(c)
             if (existing.isNotEmpty()) return@tutorTransaction outcome(c,cards=existing)
             val take = takePoolGroup(course,c.kp,uid(),3,thread=thread,
-                untaught=!snapshot(course).projection.explainedKpIds.contains(c.kp))
+                untaught=!snapshot(course).projection.explainedKpIds.contains(c.kp),
+                purpose=if (c.review) "RECALL" else "PRACTICE",review=c.review)
             require(take.status == "READY") { "这个知识点暂时不足 3 道新题，请稍后再练。错题仍会保留。" }
             transition(c,TutorState.AWAIT_ANSWER)
             outcome(c,cards=take.events)

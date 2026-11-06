@@ -7,7 +7,7 @@ import org.junit.Test
 class CardServerUrlTest {
     private val card = "com.coach.android.ton1169"
     private fun url(requested: String?, port: Int = 29169, packageName: String = card) =
-        resolveCoachServerUrl(requested, packageName, "coach.example", port, true)
+        resolveCoachServerUrl(requested, packageName, true, "coach.example", 18791, port)
 
     @Test fun cardUsesIsolatedConfiguredPortWhenNoOverrideIsProvided() {
         assertEquals("http://coach.example:29169", url(null))
@@ -20,6 +20,6 @@ class CardServerUrlTest {
         }
         assertThrows(IllegalStateException::class.java) { url("http://coach.example:18791") }
         assertThrows(IllegalStateException::class.java) { url("http://other.example:29169") }
-        assertThrows(IllegalStateException::class.java) { url(null, packageName = "com.coach.android.ton1149") }
+        assertThrows(IllegalStateException::class.java) { url(null, port = -1, packageName = "com.coach.android.ton1149") }
     }
 }

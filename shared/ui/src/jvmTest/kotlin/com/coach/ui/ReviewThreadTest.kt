@@ -27,7 +27,7 @@ class ReviewThreadTest {
         }
         val events = mutableListOf(
             event("outline_revised", json("ops" to JsonArray(listOf(json("op" to "add", "kpId" to "a", "title" to "知识点 A")))), null),
-            event("kp_opened", json("kpId" to "a", "title" to "知识点 A")),
+            event("kp_opened", json("kpId" to "a", "title" to "知识点 A", "via" to "REVIEW")),
             event("question_posed", json("attemptId" to "a1", "questionId" to "q1", "groupId" to "g1",
                 "format" to "SINGLE_CHOICE", "kpIds" to listOf("a"), "stem" to "问题",
                 "options" to JsonArray(listOf(json("optionId" to "o1", "text" to "一"), json("optionId" to "o2", "text" to "二"))),
@@ -72,6 +72,7 @@ class ReviewThreadTest {
                 assertEquals(thread, open["threadId"]?.jsonPrimitive?.content)
                 assertEquals(thread, retry["threadId"]?.jsonPrimitive?.content)
                 assertEquals("a", open["kpId"]?.jsonPrimitive?.content)
+                assertEquals(true, open["review"]?.jsonPrimitive?.boolean)
                 onNodeWithText("← 返回错题").performClick()
             }
             onNodeWithText("再练一组").performScrollTo().performClick()
@@ -81,6 +82,6 @@ class ReviewThreadTest {
         } finally { tutor.close() }
     }
 
-    @Test fun reviewReusesCanonicalThread() = checkReviewThread("kp:a")
-    @Test fun reviewReusesLegacyThreadAfterReplay() = checkReviewThread("old-custom-thread")
+    @Test fun reviewReusesCanonicalThread() = checkReviewThread("review:C:a")
+    @Test fun reviewReusesLegacyThreadAfterReplay() = checkReviewThread("old-custom-review-thread")
 }

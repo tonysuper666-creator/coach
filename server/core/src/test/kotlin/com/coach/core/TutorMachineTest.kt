@@ -46,6 +46,18 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun mistakeRetryUsesIndependentRecallThreadAndPreservesLearningState() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(count = 9); f.open(); f.teach()
+            val learningBefore = f.events().filter { it.threadId == "thread" }
+            f.machine.open("course", "review:course:kp-1", "kp-1", setOf("cost"), "Synthetic objective", review = true)
+            val retry = f.machine.retryMistakes("course", "review:course:kp-1")
+            assertEquals(3, retry.cards.size)
+            assertTrue(retry.cards.all { it.threadId == "review:course:kp-1" && it.payload.str("purpose") == "RECALL" && it.payload.flag("review") })
+            assertEquals(learningBefore, f.events().filter { it.threadId == "thread" })
+            assertEquals(3, f.machine.next("course", "thread").cards.size)
+        }
+    }
     @Test fun gradedMistakesUseReviewedExplanationsAndNeverLeakPendingKeys() = runBlocking {
         TutorFixture().use { f ->
             f.actor.execute {

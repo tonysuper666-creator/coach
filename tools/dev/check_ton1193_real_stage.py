@@ -1,7 +1,8 @@
 """Build and preflight two disposable releases with real locked dependencies.
 
-This stage-only check never starts launchd or runs a switch. It deletes its
-private fixture on exit; it is not evidence of a successful switch/rollback.
+The command-line entry point only stages; it never starts launchd or switches.
+Internal isolated exercises may use the fixture before or after staging and
+must prove cleanup before the private fixture can be removed.
 """
 import json
 import os
@@ -74,7 +75,8 @@ def export_revision(repo, revision, destination):
         archive.unlink(missing_ok=True)
 
 
-def main(exercise=None):
+def main(exercise=None, unstaged_exercise=None):
+    switch.require(exercise is None or unstaged_exercise is None, 'multiple exercises selected')
     switch.require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=REPO).strip(),
                    'checkout must be clean')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
@@ -181,30 +183,36 @@ def main(exercise=None):
                   'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_learning',
                                          '--config', str(root / 'controller.json')]}
         switch.atomic(root / 'controller.json', json.dumps(config).encode())
-        switch.stage(config, True)
-        (root / 'stage/snapshot').mkdir(mode=0o700)
-        snapshot = isolated.run(root / 'controller.json', 'preflight', True)
-        metadata = {'head': head, 'oldHead': old, 'stage': 'staged',
+        metadata = {'head': head, 'oldHead': old,
                           'candidateRealDependencies': True, 'oldRealDependencies': True,
-                          'snapshotSha256': snapshot, 'switchAttempted': False,
+                          'switchAttempted': False,
                           'nonce': ident, 'socketPathBytes': len(os.fsencode(isolated.activity_socket(home))),
                           'environmentKeys': sorted(env), 'environmentKeyCount': len(env)}
-        print(json.dumps(metadata), flush=True)
-        if exercise is not None:
-            exercise(root, config, metadata)
+        if unstaged_exercise is not None:
+            # A live JVM creates the lifetime-specific access log. The caller
+            # binds that path into config before staging and hashing it.
+            unstaged_exercise(root, config, metadata)
+        else:
+            switch.stage(config, True)
+            (root / 'stage/snapshot').mkdir(mode=0o700)
+            snapshot = isolated.run(root / 'controller.json', 'preflight', True)
+            metadata.update(stage='staged', snapshotSha256=snapshot)
+            print(json.dumps(metadata), flush=True)
+            if exercise is not None:
+                exercise(root, config, metadata)
     finally:
         # A process exercise creates this marker BEFORE bootstrap and removes it
         # only after proving its label, kernel identities and ports are gone.
         # Preserve dependencies/logs when cleanup cannot be proved.
         switch.require(not (root / 'retain-on-cleanup-failure').exists(),
                        'process cleanup unproved; private fixture retained')
-        if exercise is not None and 'label' in locals():
+        if (exercise is not None or unstaged_exercise is not None) and 'label' in locals():
             result = subprocess.run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'],
                                     capture_output=True, timeout=10)
             switch.require(result.returncode == 113, 'test label remains; private fixture retained')
         shutil.rmtree(root)
         switch.require(not root.exists(), 'private root survived cleanup')
-        print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': exercise is None}), flush=True)
+        print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': exercise is None and unstaged_exercise is None}), flush=True)
 
 
 if __name__ == '__main__':

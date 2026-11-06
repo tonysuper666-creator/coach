@@ -1,0 +1,86 @@
+import json
+from pathlib import Path
+import plistlib
+import tempfile
+import unittest
+from unittest import mock
+
+from . import check_ton1193_real_acceptance as driver
+from .ton1175_switch import GateError
+
+
+class LiveConfigurationTest(unittest.TestCase):
+    def test_binds_exact_lifetime_log_and_real_verifiers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / 'home/Coach/logs'
+            logs.mkdir(parents=True)
+            log = logs / 'activity-1234-2026-11-06.log'
+            log.write_text('{}\n')
+            plist = root / 'service.plist'
+            plist.write_bytes(plistlib.dumps({'EnvironmentVariables': {'JAVA_HOME': '/java'}}))
+            path = root / 'controller.json'
+            config = {'plist': str(plist)}
+            with mock.patch.object(driver.probe, 'control_diagnostic', return_value={'lifetime': '1234'}):
+                diagnostic, java = driver.configure(path, config, {'home': str(root / 'home')}, 123, {})
+            stored = json.loads(path.read_text())
+            self.assertEqual(stored['accessLogs'], [str(log)])
+            self.assertEqual(stored['idleEvidence'], str(root / 'idle.json'))
+            self.assertEqual(stored['idleVerifier'][2:4], ['tools.dev.ton1175_verify', 'idle'])
+            self.assertEqual(stored['logVerifier'][2:], ['tools.dev.ton1175_verify', 'logs'])
+            self.assertEqual(str(java), '/java')
+            self.assertEqual(diagnostic['lifetime'], '1234')
+
+    def test_ambiguous_or_linked_lifetime_log_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / 'home/Coach/logs'
+            logs.mkdir(parents=True)
+            log = logs / 'activity-1234-2026-11-06.log'
+            log.write_text('{}\n')
+            with mock.patch.object(driver.probe, 'control_diagnostic', return_value={'lifetime': '1234'}):
+                (logs / 'activity-1234-2026-11-07.log').write_text('{}\n')
+                with self.assertRaises(GateError):
+                    driver.configure(root / 'controller.json', {}, {'home': str(root / 'home')}, 123, {})
+                (logs / 'activity-1234-2026-11-07.log').unlink()
+                log.unlink()
+                log.symlink_to(root / 'anything')
+                with self.assertRaises(GateError):
+                    driver.configure(root / 'controller.json', {}, {'home': str(root / 'home')}, 123, {})
+
+
+class IdleRecordingTest(unittest.TestCase):
+    def test_positive_socket_read_fails_before_writing_idle_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = {}
+
+            def execute(argv, **kwargs):
+                if 'JFR.dump' in argv:
+                    Path(next(v.split('=', 1)[1] for v in argv if v.startswith('filename='))).touch()
+                if 'jdk.CPULoad' in argv:
+                    return json.dumps({'recording': {'events': [{'values': {
+                        'startTime': '1970-01-01T00:16:41Z'}}]}}).encode()
+                if 'jdk.SocketRead' in argv:
+                    return json.dumps({'recording': {'events': [{'values': {
+                        'startTime': '1970-01-01T00:16:41Z', 'bytesRead': 12, 'port': 41500}}]}}).encode()
+                return b'identity'
+
+            control = mock.MagicMock()
+            control.__enter__.return_value.ask.return_value = {}
+            with mock.patch.object(driver.subprocess, 'check_output', side_effect=execute), \
+                 mock.patch.object(driver.coverage, 'Control', return_value=control), \
+                 mock.patch.object(driver.coverage, 'healthy'), \
+                 mock.patch.object(driver.time, 'sleep'), \
+                 mock.patch.object(driver.time, 'time', return_value=1000), \
+                 mock.patch.object(driver.time, 'monotonic', return_value=10):
+                with self.assertRaisesRegex(GateError, 'SocketRead'):
+                    driver.recording(root, root / 'java', 123, 'activity.sock',
+                        {'adapterEnvPins': {'BRIDGE_PORT': '41500'}, 'idleEvidence': str(root / 'idle.json')}, report)
+            self.assertEqual(report['earlySocketReads']['count'], 1)
+            self.assertEqual(report['earlySocketReads']['bridgePortReads'], 1)
+            self.assertFalse((root / 'idle.json').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

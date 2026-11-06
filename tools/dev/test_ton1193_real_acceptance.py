@@ -51,6 +51,16 @@ class LiveConfigurationTest(unittest.TestCase):
 
 
 class IdleRecordingTest(unittest.TestCase):
+    def test_diagnostic_keeps_only_allowlisted_errors(self):
+        config = {'idleEvidence': 'idle', 'installation': 'installation'}
+        report = {}
+        with mock.patch.object(driver.verify, 'idle', side_effect=GateError('JFR recording changed')):
+            driver.diagnose_idle_failure(config, Path('/fixture'), Path('/java'), report)
+        self.assertEqual(report['idleFailureDiagnostic'], 'JFR recording changed')
+        with mock.patch.object(driver.verify, 'idle', side_effect=GateError('private content')):
+            driver.diagnose_idle_failure(config, Path('/fixture'), Path('/java'), report)
+        self.assertEqual(report['idleFailureDiagnostic'], 'other gate rejection')
+
     def test_positive_socket_read_fails_before_writing_idle_proof(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

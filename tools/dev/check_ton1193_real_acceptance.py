@@ -62,6 +62,29 @@ def wait_old(config, roots, label, kernel, owned):
     raise switch.GateError('old isolated JVM did not become ready for seed')
 
 
+def diagnose_idle_failure(config, root, java, report):
+    """Record only closed-schema gate failures from the isolated fixture."""
+    args = (config['idleEvidence'], config['installation'], str(java / 'bin/java'),
+            str(java / 'bin/jcmd'), '/usr/sbin/lsof', str(root / 'controller.json'),
+            switch.digest(json.dumps(config, sort_keys=True).encode()))
+    allowed = {
+        'JFR installation mismatch', 'JFR window is short, stale or future',
+        'JFR recording changed', 'recorded JVM process identity changed',
+        'live JVM is not the installed server', 'recorded JVM does not exclusively own server lock',
+        'dependency or evidence command failed', 'JFR contains client socket activity',
+        'recording belongs to a different JVM lifetime', 'identity changed during verification',
+        'stage config and transaction digest required together',
+    }
+    try:
+        verify.idle(*args)
+        report['idleFailureDiagnostic'] = 'verifier passed on diagnostic retry'
+    except switch.GateError as error:
+        reason = str(error)
+        report['idleFailureDiagnostic'] = reason if reason in allowed else 'other gate rejection'
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        report['idleFailureDiagnostic'] = 'evidence unreadable or dependency unavailable'
+
+
 def recording(root, java, pid, control_path, config, report):
     settings = '<configuration version="2.0" label="TON1193 isolated">'
     for event in ('SocketRead', 'ActiveSetting', 'DataLoss', 'CPULoad', 'JVMInformation'):
@@ -128,7 +151,11 @@ def recording(root, java, pid, control_path, config, report):
                  latestClientRead=None, coverage=dict(protocol=1, socket=control_path, start=start, end=finish))
     coverage.observed(proof)
     switch.atomic(config['idleEvidence'], json.dumps(proof).encode())
-    switch.check_idle(config, config['expectedSourceHead'])
+    try:
+        switch.check_idle(config, config['expectedSourceHead'])
+    except switch.GateError:
+        diagnose_idle_failure(config, root, java, report)
+        raise
     report['idle'] = dict(pid=pid, durationSeconds=end-wall_start, recordingSha256=proof['recordingSha256'],
                           lifetime=start['lifetime'], realJfrAndActivityVerified=True)
 

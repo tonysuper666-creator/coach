@@ -6,6 +6,7 @@ Build preparation uses heavy separately; only the short process exercise owns
 a heavy lane. Failure injection is after candidate HTTP/seed verification.
 """
 import argparse
+from datetime import datetime
 import http.client
 import importlib.util
 import json
@@ -20,6 +21,7 @@ import sys
 import time
 
 from . import check_ton1193_real_stage as stage
+from . import activity_coverage as coverage
 from . import ton1193_isolated_acceptance as acceptance
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_isolated_seed as seed
@@ -85,18 +87,40 @@ def request(config, roots, path, valid=True):
         conn.close()
 
 
-def control_diagnostic(roots, pid):
-    """Metadata only: capture the actual control failure without weakening it."""
+def activity_paths(roots, owned):
+    """Find exact lifetime endpoints, including a JVM that failed before ready.
+
+    Never unlink here: a surviving or occupied endpoint must fail cleanup.
+    The log's JVM start instant is independently bound to the kernel birth.
+    """
     home = Path(roots['home'])
+    paths = {}
     for log in (home / 'Coach/logs').glob('activity-*.log'):
+        require(not log.is_symlink(), 'activity journal is a symlink')
         with log.open() as stream:
             first = json.loads(stream.readline())
-        if first['pid'] == pid:
-            path = home / ('Coach/state/activity-' + first['lifetime'] + '.sock')
-            failed = any('COACH activity control unavailable=' in p.read_text()
-                         for p in (home / 'Coach/logs').glob('server-*.log'))
-            return dict(socketPathBytes=len(os.fsencode(path)), socketExists=path.exists(),
-                        serviceReportedControlFailure=failed, lifetime=first['lifetime'])
+        birth = owned.get(first['pid'])
+        if birth is None:
+            continue
+        seconds, micros = birth.started
+        require(abs(datetime.fromisoformat(first['jvmStart'].replace('Z', '+00:00')).timestamp()
+                    - (seconds + micros / 1e6)) < .001, 'activity JVM birth mismatch')
+        path = isolated.activity_socket(home, first['lifetime'])
+        paths[str(path)] = first
+    return paths
+
+
+def control_diagnostic(roots, pid, owned):
+    for name, first in activity_paths(roots, owned).items():
+        if first['pid'] != pid:
+            continue
+        with coverage.Control(name) as control:
+            snapshot = control.ask('snapshot')
+        coverage.same_lifetime(first, snapshot)
+        require(snapshot['protocol'] == 1 and snapshot['failures'] == 0
+                and not snapshot['closed'], 'activity control unhealthy')
+        return dict(socketPath=name, socketPathBytes=len(os.fsencode(name)), socketExists=True,
+                    lifetime=first['lifetime'], snapshot=snapshot)
     raise GateError('activity lifetime journal missing')
 
 
@@ -140,14 +164,14 @@ def wait_ready(config, roots, label, release, kernel, owned):
                     collect(kernel, pid, owned)
                     require(job(config, label) == pid, 'isolated JVM restarted')
                     return dict(pid=pid, image=process._image(pid), services=services,
-                                identity=observed, httpHello=200, activityControl=control_diagnostic(roots, pid))
+                                identity=observed, httpHello=200, activityControl=control_diagnostic(roots, pid, owned))
                 except (OSError, ValueError, KeyError, GateError, http.client.HTTPException):
                     pass
         time.sleep(.2)
     raise GateError('real managed services/HTTP identity did not become ready')
 
 
-def stop(config, label, kernel, owned):
+def stop(config, label, kernel, owned, sockets=None):
     pid = job(config, label)
     if pid is not None:
         if pid:
@@ -163,6 +187,11 @@ def stop(config, label, kernel, owned):
         time.sleep(.2)
     else:
         raise GateError('isolated label or owned descendants survived cleanup')
+    if sockets is not None:
+        home = Path(config['plist']).parents[2]
+        sockets.update(activity_paths({'home': str(home)}, owned))
+        require(all(not os.path.lexists(path) for path in sockets),
+                'owned activity socket survived cleanup')
     for name in ('COACH_PORT', 'BRIDGE_PORT'):
         with socket.socket() as probe:
             # Completed HTTP connections leave TIME_WAIT tuples; a new listener
@@ -177,12 +206,13 @@ def worker(config_path, report_path):
     root = Path(config_path).parent
     marker = root / 'retain-on-cleanup-failure'
     require(not marker.exists() and job(config, label) is None, 'isolated label occupied')
-    kernel, owned = processes(), {}
+    kernel, owned, sockets = processes(), {}, {}
     original_plist = Path(config['plist']).read_bytes()
     original_install = Path(config['installation']).read_bytes()
     cases = []
-    report = dict(head=config['candidateHead'], nonce=root.name.removeprefix('ton1193-'),
+    report = dict(head=config['candidateHead'], nonce=isolated.fixture_nonce(root),
                   label=label, ports=config['adapterEnvPins'], cases=cases,
+                  environmentKeys=sorted(plistlib.loads(original_plist)['EnvironmentVariables']),
                   gatedSwitchAttempted=False, productionTouched=False,
                   unverified=['900s idle/JFR gate', 'gated switch', 'subscription lecture and three graded answers',
                               'transaction rollback', 'device UI', 'production'])
@@ -208,6 +238,7 @@ def worker(config_path, report_path):
                     install.update(root=str(release), sourceHead=(release / 'source-head.txt').read_text().strip())
                     atomic(Path(config['installation']), json.dumps(install).encode())
                     require(job(config, label) is None, 'isolated label unexpectedly occupied')
+                    isolated.activity_socket(env['HOME'])
                     require(command('/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', config['plist']).returncode == 0,
                             'isolated bootstrap failed')
                     observed = wait_ready(config, roots, label, release, kernel, owned)
@@ -237,23 +268,24 @@ def worker(config_path, report_path):
                         if inject:
                             case['injected'] = True
                             raise InjectedFailure('candidate ready')
-                    stop(config, label, kernel, owned)
+                    stop(config, label, kernel, owned, sockets)
                 case['outcome'] = 'passed'
             except InjectedFailure:
                 case['outcome'] = 'injected-failure-caught'
             finally:
-                stop(config, label, kernel, owned)
+                stop(config, label, kernel, owned, sockets)
                 atomic(Path(config['plist']), original_plist)
                 atomic(Path(config['installation']), original_install)
                 case['cleanup'] = dict(labelAbsent=True, ownedIdentitiesAbsent=True, portsFree=True,
-                                       privatePointersRestored=True, journal=json.loads((root / 'stage/journal.json').read_text()))
+                                       ownedSocketsAbsent=True, privatePointersRestored=True,
+                                       journal=json.loads((root / 'stage/journal.json').read_text()))
     except BaseException as exc:
         report['unexpectedFailureType'] = type(exc).__name__
         raise
     finally:
         # Even an unexpected startup/HTTP exception must take the same cleanup.
         try:
-            stop(config, label, kernel, owned)
+            stop(config, label, kernel, owned, sockets)
             atomic(Path(config['plist']), original_plist)
             atomic(Path(config['installation']), original_install)
             report['cleanupVerified'] = True
@@ -263,6 +295,7 @@ def worker(config_path, report_path):
             raise
         finally:
             report['ownedProcesses'] = [dict(pid=p.pid, ppid=p.ppid, started=p.started) for p in owned.values()]
+            report['activitySockets'] = sorted(sockets)
             atomic(Path(report_path), json.dumps(report, indent=2, sort_keys=True).encode())
         marker.unlink()
 

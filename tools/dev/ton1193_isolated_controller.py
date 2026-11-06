@@ -5,6 +5,7 @@ substituted. Transaction, snapshot, capability, process and launchd checks use
 the real implementation. It does not create a fixture or prove a switch.
 """
 import argparse
+import base64
 from contextlib import ExitStack
 import json
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 import plistlib
 import pwd
 import re
+import secrets
 import stat
 import sys
 from unittest.mock import patch
@@ -24,22 +26,76 @@ from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
 
 ISOLATED_ENV_KEYS = preflight.ENV_KEYS | frozenset(('COACH_TRAFFIC', 'COACH_BRIDGE_URL'))
+SOCKET_BUDGET = 101
+
+
+def fixture_nonce(root):
+    raw = os.fspath(root)
+    root = Path(raw)
+    require(root.is_absolute() and str(root) == raw
+            and root.parent == Path('/tmp').resolve()
+            and re.fullmatch(r't[A-Za-z0-9_-]{22}', root.name),
+            'invalid isolated fixture path')
+    token = root.name[1:]
+    nonce = base64.b64decode(token + '==', altchars=b'-_', validate=True)
+    require(len(nonce) == 16 and base64.urlsafe_b64encode(nonce).decode().rstrip('=') == token,
+            'noncanonical fixture nonce')
+    return nonce.hex()
+
+
+def activity_socket(home, lifetime='00000000-0000-0000-0000-000000000000'):
+    raw = os.fspath(home)
+    require(Path(raw).is_absolute() and str(Path(raw)) == raw
+            and '..' not in Path(raw).parts, 'invalid isolated HOME')
+    require(re.fullmatch(r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', lifetime),
+            'invalid activity lifetime')
+    path = Path(raw) / ('Coach/state/activity-' + lifetime + '.sock')
+    require(len(os.fsencode(path)) <= SOCKET_BUDGET, 'isolated activity socket exceeds byte budget')
+    require(raw.isascii(), 'isolated HOME must be ASCII')
+    return path
+
+
+def new_root():
+    while True:
+        token = base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip('=')
+        root = Path('/tmp').resolve() / ('t' + token)
+        fixture_nonce(root)
+        activity_socket(root / 'h')
+        try:
+            root.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return root
+
+
+def private_directories(path, root):
+    """Create every fixture ancestor explicitly private, independent of umask."""
+    require(path.is_absolute() and '..' not in path.parts, 'invalid fixture directory')
+    path.relative_to(root)
+    directory_snapshot(str(root))
+    current = root
+    for part in path.relative_to(root).parts:
+        current /= part
+        current.mkdir(mode=0o700, exist_ok=True)
+        directory_snapshot(str(current))
+        require(stat.S_IMODE(current.stat().st_mode) == 0o700, 'fixture directory must be private')
 
 
 def fixture(path):
+    raw = os.fspath(path)
     path = Path(path)
     root = path.parent
     # A random root and matching label prevent this helper from targeting an
     # existing launchd job or any production pointer. No caller supplies roots.
-    match = re.fullmatch(r'ton1193-([0-9a-f]{32})', root.name)
-    require(path.is_absolute() and path.name == 'controller.json' and match
-            and root.parent == Path('/tmp').resolve(), 'invalid isolated fixture path')
+    require(str(path) == raw and path.name == 'controller.json', 'invalid isolated fixture path')
+    nonce = fixture_nonce(root)
+    activity_socket(root / 'h')
     identity = directory_snapshot(str(root))
     require(stat.S_IMODE(root.stat().st_mode) == 0o700, 'fixture root must be private')
     data, _ = _read_file(path, identity, 0o600)
     config = json.loads(data)
     require(isinstance(config, dict), 'invalid fixture config')
-    home = root / 'home'
+    home = root / 'h'
     roots = preflight._paths(home)
     # Toolchain roots remain the same trusted host locations as production.
     roots['node'] = str(Path(pwd.getpwuid(os.getuid()).pw_dir) / '.nvm/versions/node')
@@ -56,7 +112,7 @@ def fixture(path):
     ports = [int(pins['COACH_PORT']), int(pins['BRIDGE_PORT'])]
     require(len(set(ports)) == 2 and all(1024 <= p <= 65535 and p not in FORBIDDEN_PORTS
                                          for p in ports), 'unsafe fixture ports')
-    label = 'local.coach.ton1193.test.' + match.group(1)
+    label = 'local.coach.ton1193.test.' + nonce
     return config, roots, label
 
 
@@ -79,6 +135,7 @@ def run(path, action, apply=False):
         allowed = (['bootout', target], ['bootstrap', f'gui/{os.getuid()}', config['plist']])
         require(argv in allowed, 'isolated launchctl target mismatch')
         if argv[0] == 'bootstrap':
+            activity_socket(roots['home'])
             parent = directory_snapshot(str(Path(config['plist']).parent))
             data, _ = _read_file(config['plist'], parent, 0o600)
             require(plistlib.loads(data)['Label'] == label, 'fixture plist label changed')

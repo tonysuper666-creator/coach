@@ -7,9 +7,9 @@ import threading
 import time
 import unittest
 from unittest import mock
-import uuid
 
 from tools.dev import ton1193_isolated_acceptance as acceptance
+from tools.dev import ton1193_isolated_controller as isolated
 from tools.dev.ton1175_switch import GateError, atomic, digest
 
 
@@ -31,12 +31,11 @@ class Hello(http.server.BaseHTTPRequestHandler):
 
 class AcceptanceTest(unittest.TestCase):
     def setUp(self):
-        self.root = Path('/tmp').resolve() / ('ton1193-' + uuid.uuid4().hex)
-        self.root.mkdir(mode=0o700)
+        self.root = isolated.new_root()
         self.addCleanup(shutil.rmtree, self.root)
-        home = self.root / 'home'
+        home = self.root / 'h'
         data = home / 'Coach/data'
-        data.mkdir(parents=True, mode=0o700)
+        isolated.private_directories(data, self.root)
         self.token = data / 'device-token'
         atomic(self.token, b'isolated-test-token')
         self.db = sqlite3.connect(data / 'coach.sqlite')
@@ -137,21 +136,21 @@ class AcceptanceTest(unittest.TestCase):
         before = json.loads(Path(self.baseline).read_text())
         started = time.time()
         self.learning(started, count=2)
-        with acceptance.ledger({'home': str(self.root / 'home')}) as db:
+        with acceptance.ledger({'home': str(self.root / 'h')}) as db:
             self.assertFalse(acceptance.learning_evidence(db, before, started, started + 300))
         self.db.execute('DELETE FROM events WHERE seq>7')
         self.db.execute('DELETE FROM messages')
         self.db.commit()
         self.learning(started, answer_device='other')
-        with acceptance.ledger({'home': str(self.root / 'home')}) as db:
+        with acceptance.ledger({'home': str(self.root / 'h')}) as db:
             self.assertFalse(acceptance.learning_evidence(db, before, started, started + 300))
         self.db.execute("UPDATE events SET device_id='desktop', thread_id='other' WHERE type='answer_submitted'")
         self.db.commit()
-        with acceptance.ledger({'home': str(self.root / 'home')}) as db:
+        with acceptance.ledger({'home': str(self.root / 'h')}) as db:
             self.assertFalse(acceptance.learning_evidence(db, before, started, started + 300))
 
     def test_linked_ledger_is_rejected(self):
-        path = self.root / 'home/Coach/data/coach.sqlite'
+        path = self.root / 'h/Coach/data/coach.sqlite'
         self.db.close()
         path.rename(path.with_suffix('.saved'))
         path.symlink_to(path.with_suffix('.saved'))

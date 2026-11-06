@@ -5,20 +5,19 @@ import shutil
 import sqlite3
 import unittest
 from unittest import mock
-import uuid
 
 from tools.dev import ton1193_isolated_seed as seed
+from tools.dev import ton1193_isolated_controller as isolated
 from tools.dev.ton1175_switch import GateError, atomic, digest
 
 
 class SeedTest(unittest.TestCase):
     def setUp(self):
-        self.root = Path('/tmp').resolve() / ('ton1193-' + uuid.uuid4().hex)
-        self.root.mkdir(mode=0o700)
+        self.root = isolated.new_root()
         self.addCleanup(shutil.rmtree, self.root)
-        home = self.root / 'home'
+        home = self.root / 'h'
         data = home / 'Coach/data'
-        data.mkdir(parents=True, mode=0o700)
+        isolated.private_directories(data, self.root)
         self.path = data / 'coach.sqlite'
         self.db = sqlite3.connect(self.path)
         migration = Path(__file__).resolve().parents[2] / 'server/store/src/main/resources/migrations/V001__ledger.sql'

@@ -12,8 +12,8 @@ import socket
 import subprocess
 import sys
 import time
-import uuid
 
+from . import ton1193_isolated_controller as isolated
 from .rehearse_ton1175_launchd import port
 from .ton1175_switch import atomic, require
 
@@ -23,28 +23,27 @@ def command(*args):
 
 
 def main():
-    name = uuid.uuid4().hex
-    root = Path('/tmp').resolve() / ('ton1193-' + name)
-    root.mkdir(mode=0o700)
+    root = isolated.new_root()
+    name = isolated.fixture_nonce(root)
     label = 'local.coach.ton1193.test.' + name
     target = f'gui/{os.getuid()}/{label}'
-    plist = root / 'home/Library/LaunchAgents/service.plist'
+    plist = root / 'h/Library/LaunchAgents/service.plist'
     pid = None
     child_pids = []
     service_port = None
     clean = False
     try:
-        for relative in ('home/Library/LaunchAgents', 'home/Coach/service/releases/old',
-                         'home/Coach/data', 'home/Coach/logs', 'home/Coach/run',
-                         'home/Coach/bridge', 'stage'):
-            (root / relative).mkdir(mode=0o700, parents=True, exist_ok=True)
-        release = root / 'home/Coach/service/releases/old'
+        for relative in ('h/Library/LaunchAgents', 'h/Coach/service/releases/old',
+                         'h/Coach/data', 'h/Coach/logs', 'h/Coach/run',
+                         'h/Coach/bridge', 'stage'):
+            isolated.private_directories(root / relative, root)
+        release = root / 'h/Coach/service/releases/old'
         shutil.copytree('server/app/build/install/app', release / 'app')
         java = subprocess.check_output(['/usr/libexec/java_home', '-v', '21'], text=True).strip()
         service_port, bridge_port = port(), port()
         while service_port == bridge_port:
             bridge_port = port()
-        home = root / 'home'
+        home = root / 'h'
         env = dict(HOME=str(home), JAVA_HOME=java,
             JAVA_OPTS=f'-Xmx128m -XX:ActiveProcessorCount=2 -Duser.home={home}',
             COACH_DATA_DIR=str(home / 'Coach/data'), COACH_TOKEN_FILE=str(home / 'Coach/data/token'),
@@ -67,6 +66,7 @@ def main():
         atomic(root / 'controller.json', json.dumps(config).encode())
         atomic(root / 'stage/lock', b'')
         atomic(root / 'stage/journal.json', b'{"phase":"switching"}')
+        isolated.activity_socket(home)
         result = command('/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist))
         require(result.returncode == 0, 'isolated launchd bootstrap failed')
         from . import ton1193_controller as controller, ton1193_started as started

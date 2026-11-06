@@ -1,4 +1,10 @@
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import shutil
 import socket
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -39,6 +45,7 @@ class RealProcessRegressionTest(unittest.TestCase):
         with mock.patch.object(probe, 'job', return_value=None):
             probe.stop(config, 'isolated-label', mock.Mock(), {})
 
+
     def test_cleanup_allows_http_time_wait_after_service_has_exited(self):
         with socket.socket() as listener:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -53,6 +60,89 @@ class RealProcessRegressionTest(unittest.TestCase):
         config = {'adapterEnvPins': {'COACH_PORT': str(port), 'BRIDGE_PORT': str(port)}}
         with mock.patch.object(probe, 'job', return_value=None):
             probe.stop(config, 'isolated-label', mock.Mock(), {})
+
+
+class ActivityControlTest(unittest.TestCase):
+    def setUp(self):
+        self.root = probe.isolated.new_root()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.home = self.root / 'h'
+        self.path = probe.isolated.activity_socket(self.home)
+        probe.isolated.private_directories(self.path.parent, self.root)
+        probe.isolated.private_directories(self.home / 'Coach/logs', self.root)
+        self.pid = os.getpid()
+        birth = probe.processes().get(self.pid)
+        seconds, micros = birth.started
+        self.first = dict(protocol=1, pid=self.pid, lifetime='00000000-0000-0000-0000-000000000000',
+                          jvmStart=datetime.fromtimestamp(seconds + micros / 1e6, timezone.utc).isoformat(),
+                          failures=0, closed=False)
+        (self.home / 'Coach/logs/activity-test.log').write_text(json.dumps(self.first) + '\n')
+        self.owned = {self.pid: birth}
+        self.config = {'plist': str(self.home / 'Library/LaunchAgents/service.plist'),
+                       'adapterEnvPins': {'COACH_PORT': '0', 'BRIDGE_PORT': '0'}}
+
+    def reply(self, value):
+        server = socket.socket(socket.AF_UNIX)
+        server.settimeout(5)
+        server.bind(str(self.path)); server.listen(1)
+        self.path.chmod(0o600)
+        errors = []
+        def respond():
+            try:
+                peer, _ = server.accept()
+                with peer, peer.makefile('rwb', buffering=0) as stream:
+                    self.assertEqual(json.loads(stream.readline()), {'command': 'snapshot'})
+                    stream.write((json.dumps(value) + '\n').encode())
+            except BaseException as exc:
+                errors.append(exc)
+        worker = threading.Thread(target=respond)
+        worker.start()
+        try:
+            return probe.control_diagnostic({'home': str(self.home)}, self.pid, self.owned)
+        finally:
+            worker.join(6)
+            server.close()
+            self.path.unlink()
+            self.assertFalse(worker.is_alive())
+            if errors:
+                raise errors[0]
+
+    def test_snapshot_requires_real_exchange_and_exact_lifetime(self):
+        result = self.reply(self.first)
+        self.assertEqual(result['snapshot'], self.first)
+        for key, bad in (('protocol', 2), ('pid', self.pid + 1), ('lifetime', 'other'),
+                         ('jvmStart', 'other'), ('failures', 1), ('closed', True)):
+            with self.subTest(key=key), self.assertRaises(GateError):
+                self.reply(dict(self.first, **{key: bad}))
+
+    def test_missing_control_and_forged_birth_fail_closed(self):
+        with self.assertRaises(OSError):
+            probe.control_diagnostic({'home': str(self.home)}, self.pid, self.owned)
+        self.owned[self.pid] = process(self.pid, 1, started=(1, 0))
+        with self.assertRaisesRegex(GateError, 'birth mismatch'):
+            probe.control_diagnostic({'home': str(self.home)}, self.pid, self.owned)
+
+    def test_cleanup_checks_exact_socket_even_when_ready_never_returned(self):
+        kernel = mock.Mock()
+        kernel.get.return_value = None
+        with socket.socket(socket.AF_UNIX) as occupied:
+            occupied.bind(str(self.path)); occupied.listen(1)
+            with mock.patch.object(probe, 'job', return_value=None):
+                with self.assertRaisesRegex(GateError, 'socket survived'):
+                    probe.stop(self.config, 'private-label', kernel, self.owned, {})
+            self.assertTrue(self.path.exists())
+            # Another owner remains connectable; cleanup never unlinks it.
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(self.path))
+                peer, _ = occupied.accept()
+                peer.close()
+        self.path.unlink()
+        sockets = {}
+        with mock.patch.object(probe, 'job', return_value=None):
+            probe.stop(self.config, 'private-label', kernel, self.owned, sockets)
+        self.assertEqual(list(sockets), [str(self.path)])
+        self.assertFalse(os.path.lexists(self.path))
+
 
 
 if __name__ == '__main__':

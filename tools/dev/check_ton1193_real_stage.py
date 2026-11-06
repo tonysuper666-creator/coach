@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import sys
-import uuid
 
 from . import ton1175_switch as switch, ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
@@ -83,17 +82,17 @@ def main(exercise=None):
     python = Path('/opt/homebrew/bin/python3.15')
     switch.require(python.is_file() and os.access(python, os.X_OK), 'Python 3.15 missing')
     build_env = dict(os.environ, JAVA_HOME=str(java_home), PYTHONDONTWRITEBYTECODE='1')
-    cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
-        cwd=REPO, env=build_env)
-    ident = uuid.uuid4().hex
-    root = Path('/tmp').resolve() / ('ton1193-' + ident)
-    root.mkdir(mode=0o700)
+    root = isolated.new_root()  # Budget checked before the first heavy workload.
+    ident = isolated.fixture_nonce(root)
     try:
-        home = root / 'home'
+        home = root / 'h'
+        isolated.activity_socket(home)
+        cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
+            cwd=REPO, env=build_env)
         releases = home / 'Coach/service/releases'
         for rel in ('Library/LaunchAgents', 'Coach/service/releases', 'Coach/data',
                     'Coach/logs', 'Coach/run', 'Coach/bridge'):
-            (home / rel).mkdir(mode=0o700, parents=True, exist_ok=True)
+            isolated.private_directories(home / rel, root)
         for name, source_head in (('old', old), ('new', head)):
             release = releases / name
             release.mkdir(mode=0o700)
@@ -101,7 +100,11 @@ def main(exercise=None):
             for item in ('bridge', 'mathsvc'):
                 shutil.copytree(REPO / 'tools' / item, release / 'tools' / item,
                     ignore=shutil.ignore_patterns('.venv', 'node_modules', '__pycache__', '*.pyc'))
-            (release / 'tools/dev').mkdir(parents=True)
+            # copytree creates its destination; explicitly fix fixture ancestors.
+            for directory in (release / 'app', release / 'tools',
+                              release / 'tools/bridge', release / 'tools/mathsvc'):
+                directory.chmod(0o700)
+            isolated.private_directories(release / 'tools/dev', root)
             shutil.copy2(REPO / 'tools/dev/service-child.py', release / 'tools/dev/service-child.py')
             cmd(REPO / 'tools/dev/heavy', python, '-m', 'venv', release / 'tools/bridge/.venv', env=build_env)
             cmd(REPO / 'tools/dev/heavy', release / 'tools/bridge/.venv/bin/python', '-m', 'pip', 'install',
@@ -172,7 +175,9 @@ def main(exercise=None):
         snapshot = isolated.run(root / 'controller.json', 'preflight', True)
         metadata = {'head': head, 'oldHead': old, 'stage': 'staged',
                           'candidateRealDependencies': True, 'oldRealDependencies': True,
-                          'snapshotSha256': snapshot, 'switchAttempted': False}
+                          'snapshotSha256': snapshot, 'switchAttempted': False,
+                          'nonce': ident, 'socketPathBytes': len(os.fsencode(isolated.activity_socket(home))),
+                          'environmentKeys': sorted(env), 'environmentKeyCount': len(env)}
         print(json.dumps(metadata), flush=True)
         if exercise is not None:
             exercise(root, config, metadata)

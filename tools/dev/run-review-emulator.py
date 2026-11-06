@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -15,8 +16,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--private-data-dir', required=True, type=Path)
+    parser.add_argument('--application-id', default='com.coach.android.ton1291', help='isolated TON-specific APK package')
     parser.add_argument('--out', required=True, type=Path)
     args = parser.parse_args()
+    assert re.fullmatch(r'com\.coach\.android\.ton[0-9]+', args.application_id), 'Use an isolated TON-specific APK package'
     os.umask(0o077)
     sdk = Path(os.environ['ANDROID_SDK_ROOT'])
     adb = str(sdk / 'platform-tools/adb')
@@ -42,12 +45,20 @@ def main():
                 subprocess.run([adb, '-s', serial, 'shell', 'settings', 'put', 'global', name, '0'], check=True, capture_output=True)
             for name, flags in [('queue', []), ('mistakes', ['--mistakes'])]:
                 command = [sys.executable, str(ROOT / 'tools/dev/check-review-copy.py'), '--private-data-dir', str(args.private_data_dir.resolve()),
-                           '--android', serial, '--screenshots', str(args.out.resolve() / name)] + flags
+                           '--application-id', args.application_id, '--android', serial, '--screenshots', str(args.out.resolve() / name)] + flags
                 with (args.out / (name + '-summary.log')).open('w') as output:
                     result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT)
                 print(json.dumps(dict(suite=name, exitCode=result.returncode)), flush=True)
                 assert result.returncode == 0, 'Synthetic emulator suite failed: ' + name
         finally:
+            # The test APK must not survive the smoke, including assertion failures.
+            if process.poll() is None:
+                for package in (args.application_id + '.test', args.application_id):
+                    try:
+                        removed = subprocess.run([adb, '-s', serial, 'uninstall', package], capture_output=True, timeout=30)
+                        print(json.dumps(dict(package=package, uninstallExitCode=removed.returncode)), flush=True)
+                    except subprocess.TimeoutExpired:
+                        print(json.dumps(dict(package=package, uninstallTimedOut=True)), flush=True)
             if process.poll() is None:
                 process.terminate()
                 try:

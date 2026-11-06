@@ -2,15 +2,22 @@ package com.coach.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.websocket.WebSockets
-import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.client.plugins.websocket.ClientWebSocketSession
+import io.ktor.client.request.prepareRequest
 import io.ktor.client.request.header
 import io.ktor.websocket.Frame
-import io.ktor.websocket.readText
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -38,10 +45,14 @@ class TutorClient(
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
         followRedirects = false
-        install(WebSockets) { pingIntervalMillis = 5_000 }
+        install(WebSockets) { maxFrameSize = MAX_MESSAGE_BYTES.toLong() }
+        install(HttpTimeout) { connectTimeoutMillis = 5_000; requestTimeoutMillis = 5_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }
     @kotlin.concurrent.Volatile private var live: Channel<String>? = null
+    private val lifecycle = Any()
+    private var running: Job? = null
+    private var closed = false
 
     // 在线缺号由模型发现，续传帧走当前连接的发送队列（非阻塞 trySend，满了/断线返回 false 由模型重试）。
     init { model.resumeSender = { id -> send(resumeFrame(id)) } }
@@ -55,55 +66,137 @@ class TutorClient(
         }) }
     }
 
-    // Handshake nonce initialization can block; keep CPU workers free on two-core Android devices.
-    fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
-        telemetry?.record("open")
-        val reporting = telemetry?.start(this)
-        var backoff = 250L
-        try {
-            while (isActive) {
-                val queue = Channel<String>(capacity = 64)
-                try {
-                    http.webSocket(urlString = url) {
-                        live = queue
-                        telemetry?.record("reconnect", "connection")
-                        model.onConnection(true)
-                        backoff = 250
-                        // The stream may have finished while the network was absent. Request its
-                        // authoritative snapshot before consuming new deltas on this connection.
-                        model.unfinishedMessageIds().forEach { id ->
-                            send(Frame.Text(resumeFrame(id).toString()))
-                            model.noteResumeSent(id)
-                        }
-                        val sender = launch { for (text in queue) send(Frame.Text(text)) }
-                        // 补发没发出去/没等到快照的续传，并对长时间无帧的消息主动对一次快照。
-                        val ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
-                        try {
-                            for (frame in incoming) if (frame is Frame.Text) {
-                                model.onFrame(frame.readText())
+    // One owner runs every connection attempt and its children. A second start is idempotent,
+    // including while cancellation is still unwinding: an old reader cannot outlive its successor.
+    fun start(scope: CoroutineScope): Job = synchronized(lifecycle) {
+        check(!closed) { "TutorClient is closed" }
+        running?.takeUnless { it.isCompleted } ?: scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            telemetry?.record("open")
+            val reporting = telemetry?.start(this)
+            var backoff = 250L
+            try {
+                while (isActive) {
+                    val queue = Channel<String>(capacity = 64)
+                    try {
+                        // Receive raw control frames so the watchdog observes this socket's pong,
+                        // independently of Ktor's default session close handshake (which can stall).
+                        http.prepareRequest(url).body<ClientWebSocketSession, Unit> { socket ->
+                            try {
+                                conversation(socket, queue) { backoff = 250 }
+                            } finally {
+                                queue.cancel()
+                                // Abort the transport; never wait for a frozen peer to acknowledge close.
+                                socket.cancel()
                             }
-                        } finally { sender.cancel(); ticker.cancel() }
+                        }
+                    } catch (error: CancellationException) {
+                        // A heartbeat/handshake timeout retires only this attempt. Owner cancellation exits.
+                        if (!isActive) throw error
+                        telemetry?.record("error", "network")
+                    } catch (_: Exception) {
+                        telemetry?.record("error", "network")
+                    } finally {
+                        queue.cancel()
                     }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    telemetry?.record("error", "network")
-                    // 下面统一标记离线并退避重连
-                } finally {
-                    live = null
-                    queue.close()
-                    telemetry?.record("disconnect", "connection")
-                    model.onConnection(false)
+                    delay(backoff)
+                    backoff = (backoff * 2).coerceAtMost(3_000)
                 }
-                delay(backoff)
-                backoff = (backoff * 2).coerceAtMost(3_000)
-            }
-        } finally { reporting?.cancel() }
+            } finally { reporting?.cancel() }
+        }.also { running = it; it.start() }
     }
 
-    fun close() { http.close() }
+    private suspend fun conversation(socket: ClientWebSocketSession, queue: Channel<String>, onReady: () -> Unit) = coroutineScope {
+        // Only messages carried over from the previous connection need a bootstrap resume.
+        // The reader may receive fresh history before the first pong; its gaps use resumeSender.
+        val carriedMessages = model.unfinishedMessageIds().toSet()
+        val pongs = Channel<ByteArray>(Channel.CONFLATED)
+        val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val reader = launch {
+            var body = ByteArray(0)
+            for (frame in socket.incoming) when (frame) {
+                is Frame.Ping -> socket.send(Frame.Pong(frame.data))
+                is Frame.Pong -> pongs.trySend(frame.data)
+                is Frame.Close -> break
+                is Frame.Text -> {
+                    check(body.size + frame.data.size <= MAX_MESSAGE_BYTES) { "Tutor frame too large" }
+                    body += frame.data
+                    if (frame.fin) {
+                        val text = body.decodeToString(throwOnInvalidSequence = true)
+                        body = ByteArray(0)
+                        synchronized(lifecycle) { if (!closed) model.onFrame(text) }
+                    }
+                }
+                else -> error("Unexpected binary tutor frame")
+            }
+        }
+        val heartbeat = launch {
+            var sequence = 0L
+            while (isActive) {
+                val nonce = "coach:${sequence++}".encodeToByteArray()
+                // Include sending in the deadline: a backed-up outgoing socket is also unusable.
+                check(withTimeoutOrNull(PONG_TIMEOUT_MS) {
+                    socket.send(Frame.Ping(nonce))
+                    while (!pongs.receive().contentEquals(nonce)) { /* Ignore unsolicited/stale pong. */ }
+                    true
+                } == true) { "Tutor pong timed out" }
+                verified.complete(Unit)
+                delay(PING_INTERVAL_MS)
+            }
+        }
+        var sender: Job? = null
+        var ticker: Job? = null
+        try {
+            // An upgrade alone does not prove the socket can exchange frames.
+            withTimeout(PONG_TIMEOUT_MS) { verified.await() }
+            val reconnectResumes = synchronized(lifecycle) {
+                check(!closed)
+                model.onConnection(true)
+                val ids = model.unfinishedMessageIds().filter { it in carriedMessages }
+                // Register before publishing the queue, under the reader's lifecycle lock.
+                ids.forEach { model.noteResumeSent(it) }
+                live = queue
+                telemetry?.record("reconnect", "connection")
+                ids
+            }
+            onReady()
+            reconnectResumes.forEach { id ->
+                socket.send(Frame.Text(resumeFrame(id).toString()))
+            }
+            sender = launch { for (text in queue) socket.send(Frame.Text(text)) }
+            ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
+            reader.join()
+        } finally {
+            // Publish offline before coroutine/transport cleanup, even if close cannot finish.
+            synchronized(lifecycle) {
+                if (live === queue) {
+                    live = null
+                    model.onConnection(false)
+                    telemetry?.record("disconnect", "connection")
+                }
+            }
+            sender?.cancel(); ticker?.cancel(); heartbeat.cancel(); reader.cancel(); pongs.cancel()
+            socket.cancel()
+        }
+    }
 
-    private companion object { const val RESUME_TICK_MS = 1_000L }
+    fun close() {
+        synchronized(lifecycle) {
+            closed = true
+            live?.cancel()
+            live = null
+            model.onConnection(false)
+            running?.cancel()
+        }
+        http.coroutineContext.cancel()
+        http.close()
+    }
+
+    private companion object {
+        const val RESUME_TICK_MS = 1_000L
+        const val PING_INTERVAL_MS = 5_000L
+        const val PONG_TIMEOUT_MS = 5_000L
+        const val MAX_MESSAGE_BYTES = 1_048_576
+    }
 
     /** 发出一帧；没有在线连接返回 false。 */
     fun send(frame: JsonObject): Boolean {

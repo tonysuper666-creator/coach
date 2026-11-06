@@ -1,6 +1,7 @@
 package com.coach.migrate
 
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.io.path.*
 import kotlinx.serialization.json.*
 
@@ -33,6 +34,11 @@ fun mapSnapshot(snap:Path):Result {
     val pathRow=ranked.first().first
     val mainPath=pathRow.str("path_id")
     val state=parseText(pathRow.str("state_json")).jsonObject
+    // Captured source mtimes are immutable snapshot evidence, unlike the import clock.
+    val snapshotAt=parseFile(root.resolve("copy-stats.json")).jsonObject.obj("before").values
+        .map { it.jsonPrimitive.content }.filter { it!="absent" }
+        .map { Instant.parse(it.substringAfter(':')).toEpochMilli() }.maxOrNull()
+        ?: error("Snapshot has no captured source timestamps")
     val modules=state.array("modules").map { it.jsonObject }
     val evidence=state.obj("lesson_evidence")
     val kps=modules.flatMap { module -> module.array("knowledge_points").map { kp ->
@@ -173,6 +179,11 @@ fun mapSnapshot(snap:Path):Result {
     val mapping=buildJsonObject {
         put("schema_version",1);put("dry_run",true);put("counts",count)
         put("path_id",mainPath)
+        put("history_time",buildJsonObject {
+            put("snapshot_at",snapshotAt)
+            put("snapshot_time_basis","latest captured source mtime in copy-stats.json.before")
+            put("mastery_updated_at",state["updated_at"] ?: pathRow["updated_at"] ?: JsonNull)
+        })
         put("courses",record("courses.json","courses","root",courses))
         put("course_records",JsonArray(courses.jsonObject.array("courses").map { value ->
             val course=value.jsonObject

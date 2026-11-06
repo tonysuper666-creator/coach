@@ -22,7 +22,9 @@ import java.sql.DriverManager
 import java.util.UUID
 import kotlin.test.*
 import kotlin.time.measureTime
+import kotlin.time.Duration.Companion.days
 
+@OptIn(kotlin.time.ExperimentalTime::class)
 class OfflinePackTest {
     private val token = "isolated-offline-pack-test-token-32-chars"
     private val options = (1..4).map { Option("o$it","Synthetic option $it") }
@@ -45,7 +47,8 @@ class OfflinePackTest {
         suspend fun url() = "http://127.0.0.1:${engine.engine.resolvedConnectors().first().port}"
         suspend fun close() { engine.stopSuspend(0,1000);actor.close();scope.cancel() }
     }
-    private fun client(db: ClientDatabase, transport: LedgerTransport) = SyncEngine(db,"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256)
+    private val retentionClock=kotlin.time.TestTimeSource()
+    private fun client(db: ClientDatabase, transport: LedgerTransport) = SyncEngine(db,"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256,retentionClock)
 
     @Test fun downloadDisconnectRestartGradeThirtyAndReconcileWithoutLossOrDuplicate() = runBlocking {
         downloadAndReconcile(firstDevice="phone")
@@ -167,7 +170,10 @@ class OfflinePackTest {
             assertTrue(sync.offlineGroups("course",System.currentTimeMillis()).flatMap { it.cards }.all { it.grade?.note=="服务端已确认" })
             val seq=server.actor.execute { hello().lastSeq };sync.syncOnce();assertEquals(seq,server.actor.execute { hello().lastSeq })
             assertEquals(before.continueTarget,sync.projection("course").position.continueTarget)
-            server.actor.execute { backup(root.resolve("backup")) };sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
+            server.actor.execute { backup(root.resolve("backup")) };sync.syncOnce()
+            assertEquals(immutable,sync.retainedCommands())
+            retentionClock += 70.days
+            sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
             val conn=URI(server.url()+"/offline-pack?size=10").toURL().openConnection() as HttpURLConnection
             assertEquals(401,conn.responseCode);conn.disconnect()
             println("OFFLINE_HTTP first=$firstDevice allocated=60 distinctTriples=58/58 n=30 agreement=30/30 lost=0 duplicateFirstAnswers=0 outboxPending=0 devicesOverlap=0 startMs=${openTime.inWholeMilliseconds} restart=true continueUnchanged=true")

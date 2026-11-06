@@ -10,8 +10,11 @@ import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.util.UUID
 import kotlin.test.*
+import kotlin.time.TestTimeSource
+import kotlin.time.Duration.Companion.days
 
 /** Regression from the independent review: real SQLite stores with an in-process transport adapter. */
+@OptIn(kotlin.time.ExperimentalTime::class)
 class TwoRestoresOfflineTest {
     private val options = listOf(Option("one","First synthetic option"), Option("two","Second synthetic option"),
         Option("three","Third synthetic option"), Option("four","Fourth synthetic option"))
@@ -33,6 +36,7 @@ class TwoRestoresOfflineTest {
     @Test fun retainedCommandAlreadyInRestoredBackupIsDeduplicated(): Unit = runBlocking { exercise(true) }
 
     private suspend fun exercise(answerInBackup: Boolean) {
+        val retentionClock=TestTimeSource()
         val root=Files.createTempDirectory("coach-two-restores-")
         var store=LedgerStore(root.resolve("server"))
         val driver=JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
@@ -42,7 +46,7 @@ class TwoRestoresOfflineTest {
             val initial=store.backup(root.resolve("b0"))
             val transport=Direct(store)
             ClientDatabase.Schema.create(driver)
-            val client=SyncEngine(ClientDatabase(driver),"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256)
+            val client=SyncEngine(ClientDatabase(driver),"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256,retentionClock)
             client.syncOnce()
             val command=client.enqueue(submit("q1"));client.syncOnce()
             val acked=store.hello().lastSeq
@@ -65,7 +69,7 @@ class TwoRestoresOfflineTest {
             assertEquals(store.snapshot("course").projection.bytes(),client.projection("course").bytes())
             if(answerInBackup) {
                 assertEquals("DUPLICATE",client.receipt(command.commandId)!!.status)
-                assertTrue(client.retainedCommands().isEmpty())
+                assertEquals(command,client.retainedCommands().single())
             } else {
                 assertEquals(command,client.retainedCommands().single())
                 assertEquals("OK",client.receipt(command.commandId)!!.status)
@@ -73,6 +77,9 @@ class TwoRestoresOfflineTest {
             val seq=store.hello().lastSeq
             client.syncOnce();assertEquals(seq,store.hello().lastSeq)
             store.backup(root.resolve("recovered"));client.syncOnce()
+            assertEquals(command,client.retainedCommands().single())
+            retentionClock += 70.days
+            client.syncOnce()
             assertTrue(client.retainedCommands().isEmpty())
             println("TWO_RESTORES alreadyInBackup=$answerInBackup recovered=1 lost=0 duplicateFirstAnswers=0 backupCoveredPruning=true")
         } finally { driver.close();store.close();root.toFile().deleteRecursively() }

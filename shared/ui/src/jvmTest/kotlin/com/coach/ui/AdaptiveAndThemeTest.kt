@@ -40,6 +40,27 @@ class AdaptiveAndThemeTest {
         assertTrue(l.shortHeight); assertEquals(NavStyle.IconRail, l.nav); assertFalse(l.showHeader); assertEquals(AsidePlacement.None, l.aside)
     }
 
+    // Published panel sizes (DESIGN §8.1); the default densityDpi is not published, so every dpi in the plausible range must give the same layout.
+    private fun at(widthPx: Int, heightPx: Int, dpi: Int) = LayoutRules.compute(WindowSpec(widthPx * 160f / dpi, heightPx * 160f / dpi))
+
+    @Test fun realScreensKeepTheirLayoutAcrossTheirDensityRange() {
+        for (dpi in 374..450) {
+            val portrait = at(1848, 2448, dpi); val landscape = at(2448, 1848, dpi)
+            assertEquals(WidthClass.Medium, portrait.widthClass, "Fold8 inner portrait @$dpi"); assertEquals(AsidePlacement.Overlay, portrait.aside)
+            assertEquals(WidthClass.Expanded, landscape.widthClass, "Fold8 inner landscape @$dpi"); assertEquals(AsidePlacement.Docked, landscape.aside)
+        }
+        for (dpi in 450..520) {
+            val portrait = at(1248, 1972, dpi); val landscape = at(1972, 1248, dpi)
+            assertEquals(WidthClass.Compact, portrait.widthClass, "Fold8 cover portrait @$dpi"); assertFalse(portrait.shortHeight)
+            assertTrue(landscape.shortHeight, "Fold8 cover landscape @$dpi"); assertEquals(NavStyle.IconRail, landscape.nav)
+        }
+        for (dpi in 280..320) {
+            val portrait = at(1680, 2520, dpi); val landscape = at(2520, 1680, dpi)
+            assertEquals(WidthClass.Expanded, portrait.widthClass, "Pad Mini portrait @$dpi"); assertEquals(AsidePlacement.Docked, portrait.aside)
+            assertEquals(WidthClass.Large, landscape.widthClass, "Pad Mini landscape @$dpi"); assertTrue(landscape.outlineDocked)
+        }
+    }
+
     @Test fun conversationNeverDropsBelowItsMinimumWhenPanesAreDocked() {
         var w = 360f
         while (w <= 1700f) {

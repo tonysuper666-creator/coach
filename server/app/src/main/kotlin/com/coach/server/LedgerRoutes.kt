@@ -204,6 +204,12 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             call.respondText(response,ContentType.Application.Json,status)
         }
         webSocket("/v1/ws") {
+            val socketTicket = observation?.coverage?.begin("ws")
+            if (observation != null && socketTicket == null) {
+                close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Service switching"))
+                return@webSocket
+            }
+            try {
             val device=call.request.header("X-Coach-Device")!!
             val token=call.request.header("Authorization")!!.removePrefix("Bearer ")
             suspend fun stillAuthorized(): Boolean {
@@ -237,6 +243,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             } }
             val revocation = launch { while (isActive) { delay(1000); if (!stillAuthorized()) break } }
             try { for(frame in incoming) if(frame is Frame.Text) {
+                val receivedAt = System.nanoTime()
                 if (!stillAuthorized()) break
                 val message=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
                 firstWords.received(message)
@@ -253,11 +260,11 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         if(service==null) Unit
                         else if(threadId.isBlank()||courseId.isBlank()||question.isBlank()) {
                             send(Frame.Text(LedgerJson.encodeToString(json("t" to "msg.error","msg" to message.str("clientMsgId"),"error" to "missing_field"))))
-                        } else service.ask(threadId,courseId,question,message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device)
+                        } else service.ask(threadId,courseId,question,message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device,receivedAt)
                     }
                     "quick.ask" -> {
                         require(message.str("courseId").isNotBlank() && message.str("text").isNotBlank()) { "Missing quick-ask fields" }
-                        chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device)
+                        chat?.quickAsk(message.str("courseId"),message.str("text"),message.str("pack"),message.str("clientMsgId").ifBlank { java.util.UUID.randomUUID().toString() },device,receivedAt)
                     }
                     "tutor.open" -> {
                         chat?.openTutor(message.str("threadId"),message.str("courseId"),message.str("kpId"),message.strings("conceptIds").toSet(),message.str("title"))
@@ -266,10 +273,10 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     "msg.history" -> tutorSend.withLock {
                         chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) }
                     }
-                    "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test")
+                    "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test",receivedAt=receivedAt)
                     "tutor.settings" -> chat?.configureTutor(message.str("threadId"),message.str("courseId"),
                         message["groupSize"]?.jsonPrimitive?.int, message["mode"]?.jsonPrimitive?.content?.let { TeachingMode.valueOf(it) })
-                    "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"))
+                    "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"),receivedAt)
                     "tutor.answer" -> chat?.submitGroup(message.str("threadId"),message.str("courseId"),message.str("groupId"),
                         (message["answers"] as? JsonObject).orEmpty().mapValues { it.value.jsonPrimitive.content },device,message.str("submissionId"))
                     "client.ttft" -> chat?.reportClientTtft(device,message.str("courseId"),message.str("threadId"),
@@ -286,6 +293,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     send(Frame.Text(json("t" to "msg.error","threadId" to message.str("threadId"),"error" to (error.message ?: "invalid_command")).toString()))
                 }
             } } finally { sender.cancelAndJoin();tutor?.cancelAndJoin();revocation.cancelAndJoin() }
+            } finally { socketTicket?.let { observation?.coverage?.end(it) } }
         }
     }
 }

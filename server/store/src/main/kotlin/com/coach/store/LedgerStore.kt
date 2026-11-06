@@ -767,6 +767,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
     fun backup(target: Path = directory.resolve("backups/${clock()}-${uid()}")): Path {
         val seq = lastSeq()
+        // Clean up only a directory this call created: an explicit target may already hold a complete backup.
+        Files.createDirectories(target.toAbsolutePath().parent)
+        val created = try { Files.createDirectory(target); true } catch(e: java.nio.file.FileAlreadyExistsException) { false }
         try {
             // Inside the cleanup: a VACUUM INTO that fails on a full disk leaves a partial copy behind.
             rawBackup(target)
@@ -781,7 +784,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             Files.writeString(target.resolve("complete"),seq.toString(),StandardOpenOption.CREATE_NEW)
             sql("UPDATE ledger_meta SET backed_up_through_seq=?,last_backup_at=?",seq,clock())
             return target
-        } catch(e: Throwable) { target.toFile().deleteRecursively(); throw e }
+        } catch(e: Throwable) { if(created) target.toFile().deleteRecursively(); throw e }
     }
     fun backupIfDue(): Path? {
         val at = query("SELECT last_backup_at FROM ledger_meta") { it.getLong(1) }.single()

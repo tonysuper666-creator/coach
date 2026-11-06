@@ -23,15 +23,27 @@ class PoolWorker(
     data class Step(val jobId: String, val kind: String, val state: String, val inserted: Int = 0)
 
     suspend fun runOne(course: String? = null, kp: String? = null): Step? {
-        val claimed = actor.execute {
-            supplyJobs(course,kp).firstNotNullOfOrNull { job -> claimJob(job.id)?.let { job to it } }
-        } ?: return null
-        val (job, token) = claimed
+        // The actor commits a claim even when this caller is cancelled while waiting; keep the token either way.
+        var claimed: Pair<SupplyJob,Fence>? = null
+        try {
+            withContext(NonCancellable) {
+                claimed = actor.execute { supplyJobs(course,kp).firstNotNullOfOrNull { job -> claimJob(job.id)?.let { job to it } } }
+            }
+            val (job, token) = claimed ?: return null
+            return work(job, token)
+        } catch (e: CancellationException) {
+            // Shutdown is not a verdict on the source; the next worker should pick the job up again.
+            claimed?.let { release(it.second) }
+            throw e
+        }
+    }
+
+    private suspend fun work(job: SupplyJob, token: Fence): Step {
         val input = job.subject
         val background = input.flag("background")
         val type = requestType ?: if (background) "background" else "foreground"
         if (job.kind in setOf("gen_constructed","review_constructed")) return try { runConstructed(job,token,type) }
-        catch(e: CancellationException) { release(token); throw e }
+        catch(e: CancellationException) { throw e }
         catch(e: Exception) { actor.execute { failSupply(token,"MALFORMED") }; throw e }
         val pool = QuestionPool(client)
         if (job.kind == "gen_mcq") {
@@ -47,7 +59,6 @@ class PoolWorker(
                         internalReference=reference.joinToString("\n\n"))
                 }
             } catch (e: CancellationException) {
-                release(token)
                 throw e
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
@@ -72,7 +83,6 @@ class PoolWorker(
                         input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
                         false,background=background,maxTokens=2500))
                 } } catch (e: CancellationException) {
-                    release(token)
                     throw e
                 } catch (e: Exception) {
                     actor.execute { failSupply(token,"MALFORMED") }
@@ -102,7 +112,6 @@ class PoolWorker(
                     background=background)
             }
         } catch (e: CancellationException) {
-            release(token)
             throw e
         } catch (e: Exception) {
             actor.execute { failSupply(token,"MALFORMED") }
@@ -132,7 +141,6 @@ class PoolWorker(
         return Step(job.id,job.kind,if(failed) "failed" else "stale")
     }
 
-    // Shutdown is not a verdict on the source; the next worker should pick the job up again.
     private suspend fun release(token: Fence) {
         withContext(NonCancellable) { withTimeoutOrNull(5_000) { actor.execute { releaseJob(token) } } }
     }

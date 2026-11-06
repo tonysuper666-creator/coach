@@ -198,6 +198,42 @@ class ChatFlowTest {
     }
 
     @Test
+    fun crossReviewSecondStageLetterRevisionMustPreserveCompletedMistakeBlock() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            val partOne = "你选的「sunk expenditure」不对，因为已花掉的钱收不回。"
+            h.tutor.streamWhen("explains the graded mistakes only", 10, partOne, StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 100,
+                "第二段先说明，", "选 ", "B。", "机会成本是放弃的最佳替代。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val start = ws.await("msg.start")
+                val id = start.str("msg")
+                val assembler = ChatStreamAssembler()
+                assembler.handle(start)
+                val snapshotTexts = mutableListOf<String>()
+                while (true) {
+                    val frame = ws.await("msg.delta", "msg.snapshot", "msg.end", timeoutMs = 8_000)
+                    if (frame.str("t") == "msg.snapshot") snapshotTexts += frame.str("text")
+                    assembler.handle(frame)
+                    if (frame.str("t") == "msg.end") break
+                }
+                val snapshots = snapshotTexts.size
+                // The letter is only removed through a revision snapshot, so the replacement path really ran.
+                assertTrue(snapshots >= 1, "expected a second-part revision snapshot")
+                assertTrue(snapshotTexts.all { it.startsWith(partOne) }, "a snapshot dropped part one: ${snapshotTexts.map { "「$it」" }}")
+                val stored = runBlocking { h.snapshot(id) }!!
+                assertEquals(stored.content, assembler.text(id))
+                assertTrue(stored.content.startsWith(partOne),
+                    "Completed mistake block disappeared; snapshots=$snapshots status=${stored.status} content=${stored.content}")
+                assertTrue("机会成本是放弃的最佳替代。" in stored.content)
+                assertTrue(!stored.content.contains("B"))
+            }
+        }
+    }
+
+    @Test
     fun stagedLessonFailureKeepsPartOneAndEndsTruncatedWithARetryableReason() {
         Harness().use { h ->
             runBlocking { seedReviewed(h) }

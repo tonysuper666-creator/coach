@@ -96,12 +96,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         }
     }
     var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
+    var reviewMode by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(initialTab) }
     var source by remember { mutableStateOf<SourceJump?>(null) }
     var reviewWeek by remember { mutableStateOf<Int?>(null) }
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewWeek = null; source = null; open = id to start }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; source = null; open = id to start }
+    val practiceReview: (String, Boolean) -> Unit = { id, _ -> reviewMode = true; source = null; reviewWeek = null; open = id to true }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
     val select: (AppTab) -> Unit = { reviewWeek = null; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
@@ -111,7 +113,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
     SideEffect {
-        weekActions.onOpen = { id -> source = null; reviewWeek = null; tab = AppTab.TODAY; open = id?.let { it to true } }
+        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; tab = AppTab.TODAY; open = id?.let { it to true } }
         weekActions.onReview = { week -> reviewWeek = week; open = null; source = null }
     }
     LaunchedEffect(open, tab, source) {
@@ -138,7 +140,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
                 // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
-                    key(args.kp.id) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, weekActions) }
+                    key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }
@@ -156,7 +158,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp)
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = openKp, onBack = null) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
@@ -164,7 +166,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val reading = source
                         // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
                         val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
-                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference) } }
+                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference, reviewMode) } }
                         if (reviewWeek != null && current != null) {
                             WeekMistakesScreen(c, current, reviewWeek!!, onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
@@ -246,7 +248,7 @@ private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) ->
     }
 }
 
-private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?)
+private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?, val reviewMode: Boolean)
 
 @Composable
 private fun OfflineBanner(ui: TutorUiState, c: CoachController) {

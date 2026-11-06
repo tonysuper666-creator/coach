@@ -14,19 +14,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 
-/**
- * 复习：先看队列，点「开始」才进入该知识点的题。队列来自账本里的复习日程（到期或逾期）。
- * 「开始」打开该知识点的学习线程（出题仍由导师状态机发）；服务端还没有专门的复习出题流程，所以这里不假装有。
- */
+/** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?) {
-    val due = view.dueReviews(c.nowMillis())
+    val now = rememberCourseNow(c)
+    val due = view.dueReviews(now)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
             Text("复习", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
         }
         HorizontalDivider()
+        Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
         OfflinePractice(c)
         if (due.isEmpty()) {
             CenterMessage("今天没有到期的复习。")
@@ -43,7 +42,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                             Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                             Text(if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
                         }
-                        Button(onClick = { onOpenKp(item.kp.id, false) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
+                        Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
                     }
                 }
             }

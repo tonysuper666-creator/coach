@@ -96,23 +96,6 @@ class ClientAuditTest {
         } finally { driver.close() }
     }
 
-    /** 每 2 秒一次的轮询即使什么都没变也让界面从整份账本重算课程视图；只有真有变化才该刷新。 */
-    @Test fun quietPollDoesNotRefreshTheScreen() = runBlocking {
-        val ledger = FakeLedger().apply { add("note_saved") }
-        val (driver, db) = clientDb()
-        val sync = SyncEngine(db, "phone", ledger, listOf("course"), { UUID.randomUUID().toString() }, ::sha256)
-        try {
-            sync.syncOnce()
-            val settled = sync.revision.value
-            assertTrue(settled > 0, "首次同步后界面要刷新")
-            repeat(3) { sync.syncOnce() }
-            assertEquals(settled, sync.revision.value, "没有任何变化，界面却重算了 ${sync.revision.value - settled} 次")
-            ledger.add("note_saved")
-            sync.syncOnce()
-            assertTrue(sync.revision.value > settled, "有新事实时界面必须刷新")
-        } finally { driver.close() }
-    }
-
     /**
      * 发问进了发送队列，但连接随即断开（半开连接、出站缓冲里的帧随 socket 丢掉）：
      * 修前这句话在界面上像已发出，服务端却从没收到，重连后也不补发。服务端按 clientMsgId 去重，补发是安全的。

@@ -7,7 +7,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
@@ -62,7 +61,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             }
             pack.keys.forEach { q.putOfflineKey(it.attemptId,it.correctOptionId) }
         }
-        _revision.update { it + 1 }
+        _revision.value += 1
     }
 
     fun offlineGroups(course: String, now: Long): List<QuizGroup> {
@@ -114,7 +113,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putLocalGrade(if(correct) 1L else 0L,row.attempt_id)
             }
         }
-        _revision.update { it + 1 }
+        _revision.value += 1
     }
 
     fun retainedCommands(): List<WireCommand> = q.allCommands().executeAsList().map { WireCommand(it.device_id,it.command_id,it.payload_bytes,it.payload_sha256) }
@@ -164,8 +163,6 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     }
 
     suspend fun syncOnce() = mutex.withLock {
-        // 界面按 revision 从整份账本重算；只在真有变化（或第一次同步完成）时才刷新。
-        var changed = _revision.value == 0L
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
         if(previousEpoch != hello.epoch) {
@@ -180,7 +177,6 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 for(s in snapshots) { save(s.events); q.putMeta("cursor:${s.courseId}",s.hello.lastSeq.toString());q.putMeta("serverProjection:${s.courseId}",LedgerJson.encodeToString(s.projection)) }
                 q.putMeta("epoch",hello.epoch)
             }
-            changed = true
         }
         retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
@@ -195,11 +191,10 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt))
             }
             retainOrPrune(hello.epoch,receipt.backedUpThroughSeq)
-            changed = true
         }
-        if(pullCourses(hello.epoch)) changed = true
+        pullCourses(hello.epoch)
         _connection.value = "online"
-        if(changed) _revision.update { it + 1 }
+        _revision.value += 1
     }
 
     /** Event pages carry their epoch. A push with no outbox work needs one read, not
@@ -208,10 +203,10 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         val caughtUp=mutex.withLock {
             val epoch=meta("epoch") ?: return@withLock false
             if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
-            val changed=try { pullCourses(epoch) }
+            try { pullCourses(epoch) }
             catch(e: EpochChanged) { return@withLock false }
             _connection.value="online"
-            if(changed) _revision.update { it + 1 }
+            _revision.value+=1
             true
         }
         if(!caughtUp) syncOnce()
@@ -219,9 +214,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
 
     private class EpochChanged: IllegalStateException("Epoch changed during catch-up")
 
-    /** Caller holds mutex, for both full synchronization and push catch-up. Returns whether any course changed. */
-    private suspend fun pullCourses(epoch: String): Boolean {
-        var changed = false
+    /** Caller holds mutex, for both full synchronization and push catch-up. */
+    private suspend fun pullCourses(epoch: String) {
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
@@ -230,7 +224,6 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 val quizThreads=if(PoolTrace.enabled) page.events.filter { it.type=="question_posed" }.mapNotNull { it.threadId }.distinct() else emptyList()
                 quizThreads.forEach { PoolTrace.mark(it,"events_read") }
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
-                if(page.events.isNotEmpty()) changed = true
                 quizThreads.forEach { PoolTrace.mark(it,"events_saved") }
                 cursor = page.throughSeq
             } while(page.hasMore)
@@ -245,10 +238,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                     q.putMeta("serverProjectionSeq:$course","$epoch:$seq")
                     cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
-                changed = true
             }
         }
-        return changed
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         // One quiz publishes several durable/state/card hints. Do not make the WS reader

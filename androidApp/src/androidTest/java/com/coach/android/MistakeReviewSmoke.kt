@@ -6,11 +6,15 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.coach.client.Anchors
 import com.coach.client.LedgerPage
 import com.coach.client.PairedCredentials
+import com.coach.client.RowText
 import com.coach.client.ScrollDriver
 import com.coach.client.ScrollMove
 import com.coach.client.ScrollView
+import com.coach.client.anchorsOf
+import com.coach.client.cardNumberIn
 import com.coach.client.drainLedger
 import com.coach.client.movedBy
 import okhttp3.OkHttpClient
@@ -308,15 +312,15 @@ class MistakeReviewSmoke {
     private fun page(): AccessibilityNodeInfo? = scrollables().maxByOrNull(::area)
 
     /** 一次观察：题号、目标位置、页底栏，外加几个稳定锚点的屏幕坐标（判断“真的前进了”）。 */
-    private class Look(val view: ScrollView,val anchors: List<Int>,val pageNode: AccessibilityNodeInfo?)
+    private class Look(val view: ScrollView,val anchors: Anchors,val pageNode: AccessibilityNodeInfo?)
     /**
      * 只走一遍树。13:36 的旧实现每轮读两次整树（实测约 2.7 秒/次），三次重试就吃掉 420 秒，
      * 而判据还是“任意文字位置变了”——吸附回弹的十几像素也算前进，于是题号停在 2 也不认输。
-     * [Look.anchors] 只认题号那一行的位置：它们随题页滚动而移动，标题栏不动，拿标题当锚点会误判“没前进”。
+     * 锚点交给 [anchorsOf]：只用落在题页矩形内的行，题号行优先，出视口的题号与固定页眉都不参与。
      */
     private fun look(text: String,substring: Boolean): Look {
         val list=page();val pageRect=list?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
-        val cards=ArrayList<Int>();val cardTops=ArrayList<Int>();val textTops=ArrayList<Int>()
+        val rows=ArrayList<RowText>()
         var target: AccessibilityNodeInfo?=null;var atFooter=false
         val want=norm(text)
         fun walk(n: AccessibilityNodeInfo?) {
@@ -324,9 +328,8 @@ class MistakeReviewSmoke {
             val shown=norm(n.text?.toString().orEmpty())
             if(shown.isNotEmpty() && n.isVisibleToUser) {
                 val r=android.graphics.Rect();n.getBoundsInScreen(r)
-                cardNumber.find(shown)?.groupValues?.get(1)?.toInt()?.let { cards.add(it);cardTops.add(r.top) }
+                rows.add(RowText(shown,r.top,r.centerY()))
                 if(shown.contains("选完") || shown.contains("提交本组答案")) atFooter=true
-                if(textTops.size<6) textTops.add(r.top)
                 val hit=if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
                 if(hit && target==null) target=n
             }
@@ -334,15 +337,15 @@ class MistakeReviewSmoke {
         }
         walk(ui.rootInActiveWindow)
         val focus=target?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+        val pageTop=pageRect?.top ?: 0;val pageBottom=pageRect?.bottom ?: 0
         return Look(ScrollView(targetFound=focus!=null,targetCenterY=focus?.centerY() ?: 0,
-            pageTop=pageRect?.top ?: 0,pageBottom=pageRect?.bottom ?: 0,visibleCards=cards,atFooter=atFooter,
-            pageScrollable=list!=null),if(cardTops.isNotEmpty()) cardTops else textTops,list)
+            pageTop=pageTop,pageBottom=pageBottom,visibleCards=rows.mapNotNull { cardNumberIn(it.text) },atFooter=atFooter,
+            pageScrollable=list!=null),anchorsOf(rows,pageTop,pageBottom),list)
     }
     /** 容器自己的翻页：不依赖手指拖多远，也不再拿“布局动没动”当判据。 */
     private fun scrollPage(list: AccessibilityNodeInfo,forward: Boolean) {
         list.performAction(if(forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
     }
-    private val cardNumber=Regex("第 (\\d+) / \\d+ 题")
     /** 看图说话：目标在不在页内、哪些题号在屏幕上；[card] 是目标所属的题号，[text] 只用来在失败时写清要找什么。 */
     private fun scrollTo(text: String,substring: Boolean=false,card: Int?=null): AccessibilityNodeInfo {
         // 先请已组合的行自己滚进来：短拖会被吸附回原位，这一步最省。

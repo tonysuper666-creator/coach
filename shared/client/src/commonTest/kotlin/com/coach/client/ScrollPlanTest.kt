@@ -13,6 +13,11 @@ import kotlin.test.assertTrue
  * 这里用合成题页复现同一形状：三张长卡、容器带吸附，手指拖 40% 屏高只换来十几像素回弹。
  * 旧的拖动策略在上面用满 40 次也到不了第 3 题；新驱动让容器自己翻页，几步就到；
  * 两个手段都推不动时有界退出，并把当时可见的题号带进证据。
+ *
+ * 15:35 QA-C 复核追加的两类用例：
+ * - 锚点本身（[anchorsOf] / [movedBy]）必须单测，不能只测驱动决策：长卡中段题号行滚出视口、
+ *   固定页眉不随内容移动，旧口径「整棵树前 6 个文本」会把真实翻页看成停滞。
+ * - 回退不能一次探空就永久失效，手指拖也不能只剩两次机会。
  */
 class ScrollPlanTest {
     /** 合成题页：内容坐标从 0 起，视口 1600，页眉从 400 开始。 */
@@ -23,13 +28,20 @@ class ScrollPlanTest {
         private val pageTop: Int = 400,
         private val targetOffsetInCard: Int = 900,
         private val pageScrollWorks: Boolean = true,
+        /** 前几次翻页动作故意不生效：模拟「列表到头」或探测误差，之后恢复。 */
+        private val pageWorksAfter: Int = 0,
         private val dragWorks: Boolean = false,
+        private val dragStep: Int = viewport * 4 / 10,
         startOffset: Int = 0,
     ) {
         var offset = startOffset
             private set
         /** 旧实现看到的“布局变了”帧数：吸附回弹也算，和真机 trace 里每轮都不一样。 */
         var layoutChanges = 0
+            private set
+        var pageCalls = 0
+            private set
+        var dragCalls = 0
             private set
         private var jitterUp = false
         private val cardTops = heights.runningFold(0) { sum, h -> sum + h }
@@ -58,26 +70,28 @@ class ScrollPlanTest {
 
         /** 容器自身的翻页动作：整屏推进，和 ACTION_SCROLL_FORWARD 一样诚实。 */
         fun scrollPage(forward: Boolean) {
-            if (!pageScrollWorks) return
+            pageCalls++
+            if (!pageScrollWorks || pageCalls <= pageWorksAfter) return
             offset = (if (forward) offset + viewport else offset - viewport).coerceIn(0, maxOffset)
         }
 
         /** 手指拖 40% 屏高。吸附让它原地回弹：布局变了，题号没动。 */
         fun drag(forward: Boolean) {
+            dragCalls++
             layoutChanges++
             if (!dragWorks) {
                 offset = (offset + if (jitterUp) -16 else 16).coerceIn(0, maxOffset)
                 jitterUp = !jitterUp
                 return
             }
-            offset = (offset + viewport * 4 / 10 * (if (forward) 1 else -1)).coerceIn(0, maxOffset)
+            offset = (offset + dragStep * (if (forward) 1 else -1)).coerceIn(0, maxOffset)
         }
 
         fun nudge(down: Boolean) {
             offset = (offset + if (down) 120 else -120).coerceIn(0, maxOffset)
         }
 
-        fun drive(driver: ScrollDriver, budget: Int = 40): Pair<Boolean, List<ScrollMove>> {
+        fun drive(driver: ScrollDriver, budget: Int = 60): Pair<Boolean, List<ScrollMove>> {
             val moves = mutableListOf<ScrollMove>()
             var moved: Boolean? = null
             repeat(budget) {
@@ -126,6 +140,8 @@ class ScrollPlanTest {
         }
     }
 
+    // ---- 旧策略与容器翻页 ----------------------------------------------------
+
     @Test fun legacyDragPolicyNeverReachesTheThirdCard() {
         // 13:36 那一刻：第 2 题在屏幕上，目标在第 3 题，页面被吸附在卡 2 附近。
         val page = FakePage(card = 3, startOffset = 2040)
@@ -135,6 +151,7 @@ class ScrollPlanTest {
         assertTrue(page.layoutChanges >= 40, "每轮布局都在变，旧实现因此从不判定“卡住”")
         assertFalse(movedBy(listOf(100, 200), listOf(116, 184)), "十六像素的回弹不是进展")
     }
+
     @Test fun pagingReachesTheThirdCardWithoutFingerDrags() {
         val page = FakePage(card = 3)
         val (found, moves) = page.drive(ScrollDriver(card = 3))
@@ -155,12 +172,42 @@ class ScrollPlanTest {
         val page = FakePage(card = 3, pageScrollWorks = false, dragWorks = false)
         val (found, moves) = page.drive(ScrollDriver(card = 3))
         assertFalse(found, "页面推不动就不能假装在进展")
-        assertTrue(moves.size <= 5, "必须有界退出：$moves")
+        assertTrue(moves.size <= 8, "必须有界退出：$moves")
         val stop = moves.last()
         assertTrue(stop is ScrollMove.Unreachable, "要以 Unreachable 结束：$stop")
         val reason = (moves.last() as ScrollMove.Unreachable).reason
-        assertTrue(reason.contains("推不动"), reason)
+        assertTrue(reason.contains("推不动") || reason.contains("没有进展"), reason)
         assertTrue(reason.contains("[1]"), "证据里要写清当时可见的题号：$reason")
+    }
+
+    // ---- 15:35 复核：回退不能只剩两次机会 ------------------------------------
+
+    /** 手指拖这条路径在真机上用过 36 次，回退后只给两三次机会等于不可用。 */
+    @Test fun fingerDragFallbackGetsFarMoreThanTwoChances() {
+        val page = FakePage(card = 3, pageScrollWorks = false, dragWorks = true, dragStep = 200)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertTrue(found, "手指拖要能一直拖到目标：$moves")
+        val drags = moves.count { it is ScrollMove.Drag }
+        assertTrue(drags >= 10, "这条路径要给出足够机会，而不是拖两次就判死：$drags")
+        assertTrue(drags <= ScrollDriver.DRAG_LIMIT, "但仍然有界：$drags")
+    }
+
+    /** 一次探空可能只是列表到头/探测误差，不能把翻页整个会话判死。 */
+    @Test fun oneDeadPageProbeDoesNotDisablePagingForTheSession() {
+        val page = FakePage(card = 3, pageWorksAfter = 2, dragWorks = true, dragStep = 200)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertTrue(found, "回退几步后要能再试翻页并成功：$moves")
+        assertTrue(moves.first() is ScrollMove.ScrollPage, "一开始就该先试翻页：$moves")
+        assertTrue(moves.drop(3).any { it is ScrollMove.ScrollPage }, "判死之后要回试翻页：$moves")
+        assertTrue(moves.any { it is ScrollMove.Drag }, "两次翻页之间要有回退动作：$moves")
+    }
+
+    @Test fun pagingBudgetStopsARunawayPage() {
+        val page = FakePage(card = 99, dragWorks = true, dragStep = 200)
+        val (found, moves) = page.drive(ScrollDriver(card = 99, pageLimit = 3, dragLimit = 2))
+        assertFalse(found)
+        assertTrue(moves.size <= 6, "预算用完就退出：$moves")
+        assertTrue(moves.last() is ScrollMove.Unreachable)
     }
 
     /** 目标已经可见却压在输入条下：先请它让开，让不开就按贴近的边缘点，而不是继续翻页。 */
@@ -172,11 +219,61 @@ class ScrollPlanTest {
         assertEquals(ScrollMove.Tap, driver.next(settled, moved = true))
     }
 
-    @Test fun attemptBudgetStopsARunawayPage() {
-        val page = FakePage(card = 99)
-        val (found, moves) = page.drive(ScrollDriver(card = 99, maxAttempts = 6))
-        assertFalse(found)
-        assertTrue(moves.size <= 7, "预算用完就退出：$moves")
-        assertTrue(moves.last() is ScrollMove.Unreachable)
+    // ---- 15:35 复核：锚点必须只取容器内的行 ----------------------------------
+
+    /** 2600px 长卡滚到中段：题号行已出视口，页眉固定不动。 */
+    private val midCardRows = listOf(
+        RowText("← 今天", top = 8, centerY = 30),                            // 固定页眉
+        RowText("错题 3 道", top = 40, centerY = 60),                        // 固定页眉
+        RowText("共 3 题", top = 90, centerY = 110),                         // 固定页眉
+        RowText("第 2 / 3 题", top = -760, centerY = -720),                  // 题号行滚出视口
+        RowText("A transaction or reallocation of resources", top = 520, centerY = 560),
+        RowText("B …", top = 760, centerY = 800),
+        RowText("正确答案：A", top = 1_200, centerY = 1_240),
+        RowText("提交本组答案", top = 1_880, centerY = 1_920),
+    )
+
+    @Test fun anchorsIgnoreTheFixedHeaderAndUseRowsInsideThePage() {
+        val anchors = anchorsOf(midCardRows, pageTop = 400, pageBottom = 2_000)
+        assertEquals(emptyList(), anchors.cards, "题号行不在视口里，就不该冒出一个题号锚点")
+        assertEquals(listOf(520, 760, 1_200, 1_880), anchors.tops, "锚点只能是容器内的行：${anchors.tops}")
+        assertFalse(anchors.tops.contains(40), "固定页眉不能进锚点集合：${anchors.tops}")
+    }
+
+    @Test fun aFixedHeaderAsAnchorWouldHideRealPaging() {
+        // 内容整体上移 120px（一次真翻页），页眉那几行一动不动。
+        val afterRows = midCardRows.map {
+            if (it.centerY in 400..2_000) it.copy(top = it.top - 120, centerY = it.centerY - 120) else it
+        }
+        val before = anchorsOf(midCardRows, 400, 2_000)
+        val after = anchorsOf(afterRows, 400, 2_000)
+        assertTrue(movedBy(before, after), "容器内的行上移 120px 就是前进：$before -> $after")
+
+        // 旧的回退口径：整棵树可见文本的前几个。它们全是固定页眉，永远“没动”。
+        val chromeOnly = Anchors(emptyList(), listOf(8, 40, 90))
+        assertFalse(movedBy(chromeOnly, chromeOnly), "固定页眉当锚点永远看不出翻页：$chromeOnly")
+    }
+
+    @Test fun anchorsFollowTheCardHeaderWhileItIsVisible() {
+        val rows = listOf(
+            RowText("第 2 / 3 题", top = 420, centerY = 460),
+            RowText("A …", top = 700, centerY = 740),
+            RowText("第 3 / 3 题", top = 1_500, centerY = 1_540),
+        )
+        val anchors = anchorsOf(rows, pageTop = 400, pageBottom = 2_000)
+        assertEquals(listOf(2, 3), anchors.cards)
+        assertEquals(listOf(420, 1_500), anchors.tops, "有题号行时就用题号行做锚点：${anchors.tops}")
+    }
+
+    @Test fun turningThePageCountsAsMovement() {
+        val before = Anchors(cards = listOf(2), tops = listOf(420))
+        val after = Anchors(cards = listOf(3), tops = listOf(420))
+        assertTrue(movedBy(before, after), "换了题号就是换了内容，不能因为坐标相同算停滞")
+    }
+
+    @Test fun unknownAnchorsNeverCountAsAStall() {
+        assertTrue(movedBy(Anchors(), Anchors()), "没有锚点就无从判断，不能因此判停滞")
+        assertTrue(movedBy(Anchors(tops = listOf(500)), Anchors()), "一侧没有锚点同样不算停滞")
+        assertTrue(movedBy(emptyList(), listOf(500)), "位置列表为空也不算停滞")
     }
 }

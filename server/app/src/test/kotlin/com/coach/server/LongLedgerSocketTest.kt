@@ -51,6 +51,8 @@ class LongLedgerSocketTest {
             }).get(5, TimeUnit.SECONDS)
         val tutor = TutorClient("http://127.0.0.1:$port", "phone", token, TutorModel(System::currentTimeMillis))
         try {
+            // The ledger reader opts into replay; the tutor socket below stays hint-only.
+            socket.sendText("""{"t":"hello","ledgerAfter":{}}""", true).get(5, TimeUnit.SECONDS)
             var delivered = 0
             var largest = 0
             while (delivered < events) {

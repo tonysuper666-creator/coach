@@ -8,7 +8,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.LedgerPage
 import com.coach.client.PairedCredentials
+import com.coach.client.ScrollDriver
+import com.coach.client.ScrollMove
+import com.coach.client.ScrollView
 import com.coach.client.drainLedger
+import com.coach.client.movedBy
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -32,6 +36,21 @@ class MistakeReviewSmoke {
     private lateinit var device: String
     private lateinit var course: String
     private lateinit var keys: JSONObject
+    /** 每轮一个标识：失败图与层级必须能证明是本轮写的，不能和 09:53 那张旧图混起来。 */
+    private val runId = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+    private var deadline = 0L
+
+    /** 单轮自设预算：420 秒的进程超时会把进程直接杀掉，catch 跑不到，证据一张也写不出来。 */
+    private fun beginRun() {
+        deadline = SystemClock.elapsedRealtime() + RUN_BUDGET_MS
+        listOf("review-fail.png", "review-fail.txt", "review-fail-run.txt").forEach { java.io.File(context.cacheDir, it).delete() }
+        context.cacheDir.listFiles { f -> f.name.startsWith("review-snap-") }?.forEach { it.delete() }
+    }
+
+    private fun checkTime(where: String) {
+        if (SystemClock.elapsedRealtime() > deadline)
+            throw AssertionError("time budget ${RUN_BUDGET_MS / 1000}s exhausted at $where")
+    }
 
     private fun step(name: String) {
         val message = "COACH_STEP ${System.currentTimeMillis()} elapsed=${SystemClock.elapsedRealtime()} $name"
@@ -39,8 +58,23 @@ class MistakeReviewSmoke {
         trace(message)
     }
 
+    @get:org.junit.Rule val failureEvidence = object : org.junit.rules.TestRule {
+        override fun apply(base: org.junit.runners.model.Statement, description: org.junit.runner.Description) =
+            object : org.junit.runners.model.Statement() {
+                override fun evaluate() {
+                    try {
+                        base.evaluate()
+                    } catch (t: Throwable) {
+                        recordFailure(t)
+                        throw t
+                    }
+                }
+            }
+    }
+
     @Test fun wrongAnswersRetryAndClear() {
         step("wrongAnswersRetryAndClear started")
+        beginRun()
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
         require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
@@ -110,9 +144,6 @@ class MistakeReviewSmoke {
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
-        } catch(t: Throwable) {
-            runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")) }
-            throw t
         } finally {
             java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
         }
@@ -120,6 +151,7 @@ class MistakeReviewSmoke {
 
     @Test fun cachedMistakesSurviveRestartWithoutMac() {
         step("cachedMistakesSurviveRestartWithoutMac started")
+        beginRun()
         require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
         val port=requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790,8791,18791,3790))
@@ -195,6 +227,21 @@ class MistakeReviewSmoke {
             catch(e: AssertionError) { if(it==2) throw e;Thread.sleep(400) }
         }
     }
+    /** 失败一定落下本轮的新图与层级：文件名带 [runId]，`review-fail.png` 只在本轮截图成功后覆盖。 */
+    private fun recordFailure(t: Throwable) {
+        val shot=runCatching { settleAndCapture("fail-$runId",SystemClock.elapsedRealtimeNanos()) }
+        runCatching {
+            val dump=java.io.File(context.cacheDir,"review-fail-$runId.txt")
+            dump.writeText("run=$runId elapsed=${SystemClock.elapsedRealtime()} port=${runCatching { base }.getOrNull()}\n"+
+                "error=${t.javaClass.simpleName}: ${t.message}\n\n"+
+                visibleTexts().joinToString("\n")+"\n\nLAYOUT\n"+layout()+"\n")
+            dump.copyTo(java.io.File(context.cacheDir,"review-fail.txt"),overwrite=true)
+            java.io.File(context.cacheDir,"review-fail-run.txt").writeText("$runId ${t.message}\n")
+            // settleAndCapture 写的是 review-fail-<runId>.png（name = "fail-$runId"），这里必须搬同一份。
+            if(shot.isSuccess) java.io.File(context.cacheDir,"review-fail-$runId.png")
+                .copyTo(java.io.File(context.cacheDir,"review-fail.png"),overwrite=true)
+        }
+    }
     private fun settleAndCapture(name: String,mark: Long) {
         instrumentation.waitForIdleSync();Thread.sleep(100)
         val start=SystemClock.elapsedRealtimeNanos()
@@ -258,64 +305,84 @@ class MistakeReviewSmoke {
         return out
     }
     private fun area(n: AccessibilityNodeInfo): Int { val r=android.graphics.Rect();n.getBoundsInScreen(r);return r.width()*r.height() }
-    private var scrollNote=""
-    /** One bounded drag in the page's largest scroll container; false when the content did not move. */
-    private fun scroll(forward: Boolean): Boolean {
-        val list=scrollables().maxByOrNull(::area) ?: run { scrollNote="no scrollable node";return false }
-        val rect=android.graphics.Rect();list.getBoundsInScreen(rect)
-        scrollNote="scrollable $rect of ${scrollables().size}"
-        val x=rect.centerX()
-        val high=rect.top+rect.height()*7/10
-        val low=rect.top+rect.height()*3/10
-        val from=if(forward) high else low
-        val to=if(forward) low else high
-        // Every card is composed even when off screen, so only positions show whether the page really moved.
-        val before=layout()
-        drag(x,from,to)
-        instrumentation.waitForIdleSync();Thread.sleep(400)
-        return layout()!=before
+    private fun page(): AccessibilityNodeInfo? = scrollables().maxByOrNull(::area)
+
+    /** 一次观察：题号、目标位置、页底栏，外加几个稳定锚点的屏幕坐标（判断“真的前进了”）。 */
+    private class Look(val view: ScrollView,val anchors: List<Int>,val pageNode: AccessibilityNodeInfo?)
+    /**
+     * 只走一遍树。13:36 的旧实现每轮读两次整树（实测约 2.7 秒/次），三次重试就吃掉 420 秒，
+     * 而判据还是“任意文字位置变了”——吸附回弹的十几像素也算前进，于是题号停在 2 也不认输。
+     * [Look.anchors] 只认题号那一行的位置：它们随题页滚动而移动，标题栏不动，拿标题当锚点会误判“没前进”。
+     */
+    private fun look(text: String,substring: Boolean): Look {
+        val list=page();val pageRect=list?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+        val cards=ArrayList<Int>();val cardTops=ArrayList<Int>();val textTops=ArrayList<Int>()
+        var target: AccessibilityNodeInfo?=null;var atFooter=false
+        val want=norm(text)
+        fun walk(n: AccessibilityNodeInfo?) {
+            if(n==null) return
+            val shown=norm(n.text?.toString().orEmpty())
+            if(shown.isNotEmpty() && n.isVisibleToUser) {
+                val r=android.graphics.Rect();n.getBoundsInScreen(r)
+                cardNumber.find(shown)?.groupValues?.get(1)?.toInt()?.let { cards.add(it);cardTops.add(r.top) }
+                if(shown.contains("选完") || shown.contains("提交本组答案")) atFooter=true
+                if(textTops.size<6) textTops.add(r.top)
+                val hit=if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
+                if(hit && target==null) target=n
+            }
+            for(i in 0 until n.childCount) walk(n.getChild(i))
+        }
+        walk(ui.rootInActiveWindow)
+        val focus=target?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+        return Look(ScrollView(targetFound=focus!=null,targetCenterY=focus?.centerY() ?: 0,
+            pageTop=pageRect?.top ?: 0,pageBottom=pageRect?.bottom ?: 0,visibleCards=cards,atFooter=atFooter,
+            pageScrollable=list!=null),if(cardTops.isNotEmpty()) cardTops else textTops,list)
+    }
+    /** 容器自己的翻页：不依赖手指拖多远，也不再拿“布局动没动”当判据。 */
+    private fun scrollPage(list: AccessibilityNodeInfo,forward: Boolean) {
+        list.performAction(if(forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
     }
     private val cardNumber=Regex("第 (\\d+) / \\d+ 题")
-    /** Card numbers whose header is on screen; the page is a column of cards, so these say which way to drag. */
-    private fun shownCards()=visibleTexts().mapNotNull { cardNumber.find(it)?.groupValues?.get(1)?.toInt() }
-    /** Looks for [text] by dragging toward it. [card] (1-based) names the card the text belongs to when known;
-     * otherwise the drag reverses whenever the content stops moving. A fling can carry past a long option, so
-     * direction is re-decided after every drag from what is on screen, never assumed. */
+    /** 看图说话：目标在不在页内、哪些题号在屏幕上；[card] 是目标所属的题号，[text] 只用来在失败时写清要找什么。 */
     private fun scrollTo(text: String,substring: Boolean=false,card: Int?=null): AccessibilityNodeInfo {
-        // Every card is composed, so the row can be asked to bring itself on screen; the page's own anchoring
-        // pulls back short drags, which made drag-and-search unreliable on long cards.
-        repeat(4) {
+        // 先请已组合的行自己滚进来：短拖会被吸附回原位，这一步最省。
+        repeat(3) {
             val node=find(text,substring,anyVisibility=true) ?: return@repeat
-            val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+            val pageRect=page()?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             val r=android.graphics.Rect();node.getBoundsInScreen(r)
-            trace("reveal #$it ${text.take(30)} at ${r.centerY()} page=${page?.top}-${page?.bottom}")
-            if(page!=null && r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) return node
+            trace("reveal #$it ${text.take(30)} at ${r.centerY()} page=${pageRect?.top}-${pageRect?.bottom}")
+            if(pageRect!=null && r.centerY()>=pageRect.top+60 && r.centerY()<=pageRect.bottom-60) return node
             node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
-            instrumentation.waitForIdleSync();Thread.sleep(700)
+            instrumentation.waitForIdleSync();Thread.sleep(400)
         }
-        var forward=true;var stuck=0;val seen=linkedSetOf<String>()
-        repeat(40) {
-            val hit=find(text,substring)
-            // A row half under the composer or the header would take the tap meant for it: only a row well inside the page counts.
-            val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
-            if(hit!=null) {
-                val r=android.graphics.Rect();hit.getBoundsInScreen(r)
-                if(page==null || (r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) || (stuck>=2 && r.centerY()>=page.top+20 && r.centerY()<=page.bottom-30)) { trace("found after $it drags: ${text.take(40)}");return hit }
-                trace("found at ${r.centerY()} outside page ${page.top}-${page.bottom}; nudging")
-                val down=r.centerY()>page.bottom-60
-                // At the very end of the page the row cannot rise further; after two fruitless nudges tap it where it is.
-                if(!scroll(down)) stuck++ else stuck=0
-                return@repeat
+        val driver=ScrollDriver(card)
+        var moved: Boolean?=null
+        while(true) {
+            checkTime("scrollTo ${text.take(30)}")
+            val before=look(text,substring)
+            when(val move=driver.next(before.view,moved)) {
+                ScrollMove.Tap -> return find(text,substring)
+                    ?: throw AssertionError("目标被判定可点却找不到：${text.take(40)}；可见题号 ${before.view.visibleCards}")
+                ScrollMove.NudgeDown, ScrollMove.NudgeUp -> {
+                    trace("nudge ${if(move==ScrollMove.NudgeDown) "down" else "up"} ${text.take(30)} at ${before.view.targetCenterY}")
+                    find(text,substring,anyVisibility=true)?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+                }
+                is ScrollMove.ScrollPage -> { trace("page forward=${move.forward} cards=${before.view.visibleCards}");before.pageNode?.let { scrollPage(it,move.forward) } }
+                is ScrollMove.Drag -> { trace("drag forward=${move.forward} cards=${before.view.visibleCards}");before.pageNode?.let { dragIn(it,move.forward) } }
+                is ScrollMove.Unreachable ->
+                    throw AssertionError("Cannot scroll to: ${text.take(60)}; ${move.reason}; seen: "+
+                        visibleTexts().take(24).joinToString(" | "))
             }
-            val now=visibleTexts();seen.addAll(now)
-            val cards=shownCards()
-            val atFooter=now.any { it.contains("选完") || it.contains("提交本组答案") }
-            if(card!=null && cards.isNotEmpty()) forward=cards.max()<=card && !(cards.max()==card && atFooter)
-            else if(card!=null && atFooter) forward=false
-            trace("drag #$it forward=$forward cards=$cards footer=$atFooter want=$card")
-            if(!scroll(forward)) { forward=!forward;scroll(forward) }
+            instrumentation.waitForIdleSync();Thread.sleep(250)
+            moved=movedBy(before.anchors,look(text,substring).anchors)
         }
-        throw AssertionError("Cannot scroll to: $text; "+scrollNote+"; every node seen while scrolling: "+seen.joinToString(" | "))
+    }
+    /** 手指拖 40% 页高，只在容器不认翻页动作时用。 */
+    private fun dragIn(list: AccessibilityNodeInfo,forward: Boolean) {
+        val rect=android.graphics.Rect();list.getBoundsInScreen(rect)
+        val high=rect.top+rect.height()*7/10
+        val low=rect.top+rect.height()*3/10
+        drag(rect.centerX(),if(forward) high else low,if(forward) low else high)
     }
     /** A real touch at the option's centre: the same path a finger takes, so it also proves the row is on screen. */
     private fun tap(node: AccessibilityNodeInfo) {
@@ -329,5 +396,10 @@ class MistakeReviewSmoke {
         while(!target.isClickable) target=target.parent ?: throw AssertionError("No clickable ancestor")
         assertTrue(target.isEnabled)
         assertTrue(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+    }
+
+    private companion object {
+        /** 外层 tools/dev/check-mistake-review.py 在 420 秒直接杀进程：留 120 秒把本轮新图与新层级写完再失败。 */
+        const val RUN_BUDGET_MS=300_000L
     }
 }

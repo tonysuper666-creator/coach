@@ -1,6 +1,6 @@
 # TON-1293：每日复习提醒
 
-2026-11-06（Expert 排错）：修正实际操作行缺少自身标签的问题，并消除系统按钮选择器对英文标点的依赖。完整模拟器第一门退出 0，六个设备测试阶段全部通过；201 项本地测试通过。PR 保持 Draft，交 QA-C 独立验收。
+2026-11-06（Expert 排错）：修正实际操作行缺少自身标签的问题，并消除系统按钮选择器对英文标点的依赖。合入主线后，224 项本地测试和完整模拟器第一门均通过；六个设备测试阶段全部退出 0。PR 保持 Draft，交 QA-C 独立验收。
 
 ## 行为
 
@@ -28,7 +28,18 @@ tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAnd
   :androidApp:testDebugUnitTest -PcoachApplicationId=com.coach.android.ton1293 -Pcoach.port=18893 --console=plain
 ```
 
-本轮分别退出 0（36 / 44 / 15 秒）。domain 55 项、client 59 项、ui 79 项、安卓调度 8 项，合计 201 项、0 失败、0 跳过；第三条在产品语义修复后重建 APK/设备测试包并复跑安卓单测。覆盖零到期、课程日界线和调度跨年/时区/夏令时；桌面编译通过。`python3 -m py_compile tools/dev/check-reminder.py`、`git diff --check` 退出码 0。
+合入主线前分别退出 0（36 / 44 / 15 秒）。domain 55 项、client 59 项、ui 79 项、安卓调度 8 项，合计 201 项、0 失败、0 跳过；第三条在产品语义修复后重建 APK/设备测试包并复跑安卓单测。覆盖零到期、课程日界线和调度跨年/时区/夏令时；桌面编译通过。`python3 -m py_compile tools/dev/check-reminder.py`、`git diff --check` 退出码 0。
+
+交接前 PR 报告与主线冲突，已合入 `main` 的 `5f5cf55`。唯一冲突在 `CoachApp.kt` 相邻的两个入口：保留主线的路线页复习回调，同时保留本卡的复习页提醒设置。合并后实际执行：
+
+```sh
+tools/dev/heavy ./gradlew :shared:domain:jvmTest :shared:client:jvmTest :shared:ui:jvmTest \
+  :androidApp:testDebugUnitTest :desktopApp:compileKotlin :androidApp:assembleDebug \
+  :androidApp:assembleDebugAndroidTest :server:app:installDist \
+  -PcoachApplicationId=com.coach.android.ton1293 -Pcoach.port=18893 --console=plain
+```
+
+退出 0，`BUILD SUCCESSFUL in 51s`；domain 56、client 73、ui 87、Android 8，合计 224 项、0 失败、0 错误、0 跳过。桌面编译、双 APK 和服务端 installDist 均通过，使用主线更新后的到期队列算法。
 
 ## 无障碍定位与设备门
 
@@ -36,24 +47,30 @@ tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAnd
 
 父操作行改用 `clearAndSetSemantics` 后，设备导出的同一节点为 `description=每日到期提醒 checkable=true clickable=true`，原标签断言通过。随后在查找英文 `Don't allow` 处超时（`prepare`：25.332 秒）。本轮成功运行的实际权限节点为 `com.android.permissioncontroller:id/permission_deny_button`、文字 `Don’t allow`（U+2019 弯引号），不匹配原 ASCII 引号选择器。测试改为按系统权限控制器资源 ID 选择实际拒绝按钮，开启 view ID 报告，并在超时时记录节点树；原生时间选择器确认按钮同样按 `android:id/button1` 定位。仍要求真实拒绝、系统权限为 DENIED、拒绝原因可见、再次切换不重复请求，以及开关实际改变持久化状态。
 
-本轮实际执行下列组合命令，构建设备测试包成功（13 秒），完整脚本退出 0：
+修复后首次实际执行下列组合命令，构建设备测试包成功（13 秒），完整脚本退出 0：
 
 ```sh
 tools/dev/heavy --emulator bash -c './gradlew :androidApp:assembleDebugAndroidTest -PcoachApplicationId=com.coach.android.ton1293 -Pcoach.port=18893 --console=plain && python3 tools/dev/check-reminder.py'
 ```
 
+随后合入主线、重建所有产物后，再次实际执行原设备门命令，退出 0。下表、截图及日志均来自这次合并后的运行：
+
+```sh
+tools/dev/heavy --emulator python3 tools/dev/check-reminder.py
+```
+
 | 设备阶段 | 项数 / 失败 | 秒 |
 | --- | --- | --- |
-| prepare | 1 / 0 | 6.640 |
-| schedule | 1 / 0 | 2.486 |
-| tap | 1 / 0 | 4.024 |
-| timezone | 1 / 0 | 0.080 |
-| restored | 1 / 0 | 0.038 |
-| zero | 1 / 0 | 0.238 |
+| prepare | 1 / 0 | 6.023 |
+| schedule | 1 / 0 | 2.143 |
+| tap | 1 / 0 | 3.807 |
+| timezone | 1 / 0 | 0.040 |
+| restored | 1 / 0 | 0.067 |
+| zero | 1 / 0 | 0.154 |
 
-只读备份包含 736 条事件，隔离服务端端口 50589，`aiCallsAdded=0`。开启通知后设为两分钟后的时间并回收应用进程，等待真实 AlarmManager 投递，日志为 `due=9 notified`；通知与点开后的复习页均显示 9 个到期知识点。首次拒绝说明、后续不重弹、开关实际点击和持久化均通过。
+只读备份包含 736 条事件，隔离服务端端口 63506，`aiCallsAdded=0`。开启通知后设为两分钟后的时间并回收应用进程，等待真实 AlarmManager 投递，日志为 `due=9 notified`；通知与点开后的复习页均显示 9 个到期知识点。首次拒绝说明、后续不重弹、开关实际点击和持久化均通过。
 
-系统命令改时区到 `America/New_York` 后，设备断言重排时间与该时区计算结果相等（`1794020340000`）。重启后 `dumpsys alarm` 保留本包的 `RTC_WAKEUP` / `REVIEW_REMINDER`，设备断言开关仍开启且调度在未来（`1794088740000`）；关闭后无本包活动闹钟并撤销通知。停掉隔离服务端、清空一次性本地副本后，`due=0 skipped`，关闭后的过期投递也保持静默。
+系统命令改时区到 `America/New_York` 后，设备断言重排时间与该时区计算结果相等（`1794021060000`）。重启后 `dumpsys alarm` 保留本包的 `RTC_WAKEUP` / `REVIEW_REMINDER`，设备断言开关仍开启且调度在未来（`1794089460000`）；关闭后无本包活动闹钟并撤销通知。停掉隔离服务端、清空一次性本地副本后，`due=0 skipped`，关闭后的过期投递也保持静默。
 
 三张截图已逐张查看，只有通知、复习知识点列表和权限拒绝说明，未打开题目或生成卷。脚本在系统重启前保存提醒日志，最终合并重启后的日志，保留权限、真实投递和时区证据。截图和脱敏后的设备记录通过任务附件交付，不进入仓库。
 

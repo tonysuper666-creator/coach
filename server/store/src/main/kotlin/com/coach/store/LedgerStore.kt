@@ -547,8 +547,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("DELETE FROM offline_packs WHERE expires_at<=?",clock())
         val state = projection(course)
         val today = logicalDay(clock(), state.timeZone)
-        val due = state.reviewsOn(today, courseExamDay(events(course), state.timeZone)).entries
-            .filter { it.value.dueDay <= today && it.value.lastReviewDay != today }.sortedBy { it.value.dueDay }.map { it.key }
+        val due = state.reviewsOn(today).keys.toList()
         val kps = (due + listOfNotNull(state.position.continueTarget, state.position.current) +
             query("SELECT DISTINCT kp_id FROM question_kp JOIN questions USING(question_id) WHERE course_id=? ORDER BY question_kp.rowid",course) { it.getString(1) }).distinct()
         val ids = kps.flatMap { kp -> unseenPoolIds(course,kp).map { it to kp } }.distinctBy { it.first }.take(size)

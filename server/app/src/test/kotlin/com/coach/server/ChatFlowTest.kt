@@ -46,6 +46,31 @@ private fun JsonObject.str(key: String): String =
  */
 class ChatFlowTest {
     @Test
+    fun migratedTutorReopensThroughWebSocketWithCurrentAndStaleConcepts() {
+        Harness().use { h ->
+            runBlocking {
+                h.chat.tutor.open("course-1", "thread-1", "kp-1", setOf("kp-1"), "Synthetic")
+                h.actor.execute {
+                    append("course-1", "outline_revised", com.coach.domain.json(
+                        "knowledgePoints" to kotlinx.serialization.json.JsonArray(listOf(
+                            com.coach.domain.json("id" to "kp-1", "conceptIds" to listOf("concept:current"))))))
+                }
+            }
+            for (concept in listOf("concept:current", "kp-1")) Ws(h.port, h.token).use { ws ->
+                ws.send("""{"t":"tutor.open","threadId":"thread-1","courseId":"course-1","kpId":"kp-1","conceptIds":["$concept"],"title":"Synthetic"}""")
+                val frame = ws.await("tutor.state", "msg.error")
+                assertEquals("tutor.state", frame.str("t"))
+                assertEquals("IDLE", frame.str("state"))
+            }
+            runBlocking {
+                val plan = h.chat.tutor.followup("course-1", "thread-1")
+                assertEquals(setOf("concept:current"), plan.context.concepts)
+                assertEquals(1, h.actor.execute { events("course-1").count { it.type == "tutor_concepts_changed" } })
+            }
+        }
+    }
+
+    @Test
     fun clientFirstTokenReportIsLoggedWithKnowledgePointAndRequestKind() {
         Harness().use { h ->
             runBlocking {

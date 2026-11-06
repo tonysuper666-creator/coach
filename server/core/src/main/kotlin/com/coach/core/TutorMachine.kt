@@ -91,10 +91,32 @@ class TutorMachine(private val actor: LedgerActor) {
             require(concepts.isNotEmpty() && concepts.all { it.isNotBlank() }) { "Missing concept IDs" }
             if (review) bindReviewThread(course,thread,kp) else bindTutorThread(course,thread,kp)
             val old = contextOrNull(course,thread)
+            // Requests can come from an offline replica. Only the ledger's explicit outline
+            // metadata may revise concepts; a client cannot change or roll back the syllabus.
+            // Serialized seeds include default empty arrays: like CourseView, ignore those.
+            val revision = events(course).asReversed().firstNotNullOfOrNull { event ->
+                if (event.type != "outline_revised") null else {
+                    val points = (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
+                    val ops = (event.payload["ops"] as? JsonArray).orEmpty()
+                    (ops.asReversed() + points.asReversed()).mapNotNull { it as? JsonObject }
+                        .firstOrNull { it.str("kpId",it.str("id")) == kp &&
+                            (it["conceptIds"] as? JsonArray)?.isNotEmpty() == true }
+                        ?.let { event.seq to it.strings("conceptIds").toSet() }
+                }
+            }
+            val currentConcepts = revision?.second ?: concepts
+            require(currentConcepts.isNotEmpty() && currentConcepts.all { it.isNotBlank() }) { "Missing outline concept IDs" }
             if (old == null) {
-                append(course,"kp_opened",json("kpId" to kp,"conceptIds" to concepts.sorted(),"title" to title,"via" to if (review) "REVIEW" else "LEARN"), thread=thread, actor="LEARNER")
-                transition(TutorThread(course,thread,kp,concepts,title,review),TutorState.IDLE)
-            } else require(old.kp == kp && old.concepts == concepts && old.review == review) { "KP thread identity changed" }
+                append(course,"kp_opened",json("kpId" to kp,"conceptIds" to currentConcepts.sorted(),"title" to title,"via" to if (review) "REVIEW" else "LEARN"), thread=thread, actor="LEARNER")
+                transition(TutorThread(course,thread,kp,currentConcepts,title,review),TutorState.IDLE)
+            } else {
+                require(old.kp == kp && old.review == review) { "KP thread identity changed" }
+                require(revision != null || old.concepts == concepts) { "KP thread identity changed" }
+                if (old.concepts != currentConcepts) append(course,"tutor_concepts_changed",json(
+                    "kpId" to kp,"previousConceptIds" to old.concepts.sorted(),
+                    "conceptIds" to currentConcepts.sorted(),"outlineSeq" to requireNotNull(revision).first
+                ),thread=thread)
+            }
             outcome(context(course,thread))
         }
     }
@@ -268,9 +290,13 @@ class TutorMachine(private val actor: LedgerActor) {
         return outcome(c,cards=cards)
     }
 
-    private fun LedgerStore.contextOrNull(course: String, thread: String): TutorThread? = events(course).lastOrNull {
-        it.threadId == thread && it.type == "kp_opened" && it.payload.strings("conceptIds").isNotEmpty()
-    }?.let { TutorThread(course,thread,it.payload.str("kpId"),it.payload.strings("conceptIds").toSet(),it.payload.str("title"),it.payload.str("via") == "REVIEW") }
+    private fun LedgerStore.contextOrNull(course: String, thread: String): TutorThread? {
+        val es = events(course).filter { it.threadId == thread }
+        val opened = es.lastOrNull { it.type == "kp_opened" && it.payload.strings("conceptIds").isNotEmpty() } ?: return null
+        val revised = es.lastOrNull { it.seq > opened.seq && it.type == "tutor_concepts_changed" && it.payload.str("kpId") == opened.payload.str("kpId") }
+        return TutorThread(course,thread,opened.payload.str("kpId"),
+            (revised ?: opened).payload.strings("conceptIds").toSet(),opened.payload.str("title"),opened.payload.str("via") == "REVIEW")
+    }
     private fun LedgerStore.context(course: String, thread: String) = requireNotNull(contextOrNull(course,thread)) { "请先打开知识点" }
     private fun LedgerStore.threadEvents(c: TutorThread) = events(c.course).filter { it.threadId == c.thread }
     private fun LedgerStore.stateEvent(c: TutorThread) = threadEvents(c).lastOrNull { it.type == "tutor_state_changed" }

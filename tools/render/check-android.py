@@ -13,6 +13,12 @@ def observe_reclaim(pid_samples):
 def combine_exits(*codes):
     return int(any(code != 0 for code in codes))
 
+def aggregate_acceptance(shape_exit, perf_exit, diagnostic_exit):
+    """Total acceptance code. 2 is this file's reclaim-not-observed code and must not be folded into 1 by combine_exits."""
+    if shape_exit == 2:
+        return 2
+    return combine_exits(shape_exit, perf_exit, diagnostic_exit)
+
 def wait_for_reclaim():
     def pid_samples():
         for _ in range(16):
@@ -43,6 +49,16 @@ if __name__ == '__main__' and sys.argv[1:] == ['--self-test']:
             self.assertEqual(combine_exits(0, 1, 0), 1)
             self.assertEqual(combine_exits(0, 0), 0)
             self.assertEqual(combine_exits(0, 2), 1)
+
+        def test_aggregate_acceptance(self):
+            self.assertEqual(aggregate_acceptance(0, 0, 0), 0)
+            self.assertEqual(aggregate_acceptance(1, 0, 0), 1)
+            self.assertEqual(aggregate_acceptance(0, 1, 0), 1)
+            self.assertEqual(aggregate_acceptance(0, 0, 1), 1)
+            # combine_exits turns 2 into 1; the reclaim-not-observed code has to survive the aggregation.
+            self.assertEqual(combine_exits(2, 0, 0), 1)
+            self.assertEqual(aggregate_acceptance(2, 0, 0), 2)
+            self.assertEqual(aggregate_acceptance(2, 1, 1), 2)
 
         @patch('time.sleep')
         @patch('subprocess.run')

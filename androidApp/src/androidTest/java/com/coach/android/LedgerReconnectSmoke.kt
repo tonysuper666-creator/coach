@@ -8,6 +8,8 @@ import com.coach.client.db.ClientDatabase
 import com.coach.protocol.*
 import kotlinx.coroutines.*
 import org.junit.Test
+import org.junit.Before
+import org.junit.After
 import org.junit.runner.RunWith
 import org.junit.Assert.*
 import java.security.MessageDigest
@@ -16,6 +18,26 @@ import java.util.UUID
 /** Host runner pauses only its isolated JVM. This is not evidence of real OS sleep. */
 @RunWith(AndroidJUnit4::class)
 class LedgerReconnectSmoke {
+    private var foreground: ReconnectSmokeActivity? = null
+
+    @Before fun openIsolatedForegroundSurface() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val intent = android.content.Intent(instrumentation.targetContext,
+            ReconnectSmokeActivity::class.java).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        foreground = instrumentation.startActivitySync(intent) as ReconnectSmokeActivity
+        instrumentation.waitForIdleSync()
+        instrumentation.runOnMainSync {
+            assertTrue("Isolated test activity must be resumed", foreground?.resumed == true)
+        }
+    }
+
+    @After fun closeIsolatedForegroundSurface() {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            foreground?.finishAndRemoveTask()
+            foreground = null
+        }
+    }
+
     @Test fun reconnectAfterServerSuspension(): Unit = runBlocking {
         val context=InstrumentationRegistry.getInstrumentation().targetContext
         val name="synthetic-reconnect.sqlite"
@@ -28,6 +50,7 @@ class LedgerReconnectSmoke {
         val runId=args.getString("coachRunId", "")
         assertTrue("A random diagnostic run ID is required", runId.matches(Regex("[0-9a-f]{32}")))
         fun mark(message: String) = android.util.Log.i("CoachReconnect","$runId $message port=${BuildConfig.COACH_PORT} elapsedMs=${android.os.SystemClock.elapsedRealtime()}")
+        mark("TEST_ACTIVITY_RESUMED")
         // Independent of logcat: save only this synthetic run's heartbeat counters.
         // Separate atomic files avoid a reader observing partial or mixed-channel data.
         val heartbeatFiles=listOf("main", "io").associateWith { channel ->

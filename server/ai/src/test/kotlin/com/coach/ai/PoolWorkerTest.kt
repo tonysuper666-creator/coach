@@ -3,7 +3,7 @@ package com.coach.ai
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.*
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.nio.file.Files
 import kotlin.test.*
@@ -71,6 +71,24 @@ class PoolWorkerTest {
             assertEquals(3,reopened.takePoolGroup("course","essay-kp","group").events.size)
         }
         dir.toFile().deleteRecursively()
+    }
+
+    @Test fun shutdownDuringGenerationRequeuesTheJobInsteadOfRecordingAMalformedFailure() = runBlocking<Unit> {
+        val dir=Files.createTempDirectory("pool-cancel")
+        val actor=LedgerActor(this,LedgerStore(dir))
+        try { StubBridge().use { bridge ->
+            val worker=PoolWorker(actor,BridgeClient(stubConfig(bridge)))
+            val id=worker.ensure("c","kp","Objective",source,3)!!
+            // The model is still writing when the server stops (launchd restart, deploy).
+            bridge.enqueueStream(1_000,StubBridge.frame("partial"),StubBridge.frame(" text"))
+            val running=launch(Dispatchers.Default) { worker.runOne() }
+            while(bridge.requests.isEmpty()) delay(20)
+            running.cancelAndJoin()
+            assertEquals("queued",actor.execute { jobState(id)?.first },"a cancelled generation is not a malformed answer")
+            bridge.enqueue(200,StubBridge.completion(generated()))
+            assertEquals("completed",worker.runOne()!!.state)
+            assertTrue(actor.execute { events("c").none { it.type=="fallback_used" } })
+        } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 
     @Test fun malformedRetriesOnceWithNewPromptAndSurvivesReopen() = runBlocking<Unit> {

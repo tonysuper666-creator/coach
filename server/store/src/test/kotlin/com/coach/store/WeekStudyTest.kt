@@ -79,4 +79,45 @@ class WeekStudyTest {
             assertFalse(db.snapshot("C").projection.mastery.getValue("b").passed)
         } } finally { dir.toFile().deleteRecursively() }
     }
+
+    @Test fun repickingTheAnswerJustShownDoesNotRepairAPassedPointOrPushItsReview() {
+        val dir = Files.createTempDirectory("coach-week-repair-")
+        try { LedgerStore(dir).use { db ->
+            seed(db)
+            db.append("C", "kp_overridden", json("kpId" to "b", "kind" to "MARK_PASSED"))
+            val options = listOf(Option("yes", "Right"), Option("no", "Wrong"))
+            db.registerQuestion("q", "C", "", "SINGLE_CHOICE", "Original prompt", "VERIFIED", "yes", options, listOf("b"))
+            val original = db.poseChoiceGroup("C", "g", listOf(json("attemptId" to "old", "questionId" to "q", "kpIds" to listOf("b"), "purpose" to "PRACTICE", "policyVersion" to 1))).single()
+            val wrong = (original.payload["letterMap"] as kotlinx.serialization.json.JsonObject).str("no")
+            assertEquals("OK", db.command(wire("submit_answer", json("attemptId" to "old", "answer" to wrong, "posedSnapshot" to original.payload))).status)
+            val repair = db.snapshot("C").projection
+            assertTrue(repair.mastery.getValue("b").needsRepair)
+            assertEquals("OK", db.command(wire("retry_week_mistake", json("week" to 2, "attemptId" to "old"))).status)
+            val posed = db.events("C").last { it.type == "question_posed" }
+            val right = (posed.payload["letterMap"] as kotlinx.serialization.json.JsonObject).str("yes")
+            assertEquals("OK", db.command(wire("submit_answer", json("attemptId" to posed.payload.str("attemptId"), "answer" to right, "posedSnapshot" to posed.payload))).status)
+            // The feedback just showed the right option; picking it again is not a spaced review.
+            val after = db.snapshot("C").projection
+            assertTrue(after.mastery.getValue("b").needsRepair, "repair cleared by re-picking the shown answer")
+            assertEquals(repair.review["b"], after.review["b"])
+        } } finally { dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun weekMistakeFromAnOfflinePackCanBeRetriedWhileThePackIsLive() {
+        val dir = Files.createTempDirectory("coach-week-offline-")
+        try { LedgerStore(dir).use { db ->
+            seed(db)
+            val options = (1..4).map { Option("o$it", "Option $it") }
+            db.registerQuestion("q", "C", "", "SINGLE_CHOICE", "Pack prompt", "VERIFIED", "o1", options, listOf("b"))
+            val card = db.downloadOfflinePack("C", "a").groups.flatten().single { it.payload.str("questionId") == "q" }.payload
+            val wrong = (card["letterMap"] as kotlinx.serialization.json.JsonObject).str("o2")
+            assertEquals("OK", db.command(wire("submit_answer", json("attemptId" to card.str("attemptId"), "answer" to wrong, "offline" to true, "posedSnapshot" to card))).status)
+            assertEquals("OK", db.command(wire("retry_week_mistake", json("week" to 2, "attemptId" to card.str("attemptId")))).status)
+            val posed = db.events("C").last { it.type == "question_posed" }
+            val right = (posed.payload["letterMap"] as kotlinx.serialization.json.JsonObject).str("o1")
+            val retried = db.command(wire("submit_answer", json("attemptId" to posed.payload.str("attemptId"), "answer" to right, "posedSnapshot" to posed.payload)))
+            assertEquals("OK", retried.status, "retry rejected: ${retried.error}")
+            assertTrue(weekMistakes(db.events("C"), 2).isEmpty())
+        } } finally { dir.toFile().deleteRecursively() }
+    }
 }

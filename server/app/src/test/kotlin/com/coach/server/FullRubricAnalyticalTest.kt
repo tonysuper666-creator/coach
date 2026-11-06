@@ -25,9 +25,13 @@ class FullRubricAnalyticalTest {
     @Test fun aboveToleranceOnFullRubric() = check("Working only", "1.00", "INCORRECT", 2, "1.005000000000000000001")
     @Test fun nullToleranceUsesAnalyticalDefault() = check("", "1.00", "CORRECT", 4, "1.005", "null")
     @Test fun entirelyBlankStillRecordsMissingFinal() = check("", "", "MISSING", 0)
+    @Test fun reviewReconcilesFullCreditWithWrongFinal() = check("Working only", "7.77", "INCORRECT", 2, draftPoints = 4)
+    @Test fun confirmedFullCreditWithWrongFinalRemainsFlagged() = check("Working only", "7.77", "INCORRECT", 4)
+    @Test fun fullRubricExplicitZeroRemainsStrictDuringReview() = check("Working only", "1.00", "INCORRECT", 2,
+        expected = "1.000000000000000001", tolerance = "0")
 
     private fun check(working: String, final: String, status: String, points: Int,
-        expected: String = "1.00", tolerance: String = "0.005") = runBlocking {
+        expected: String = "1.00", tolerance: String = "0.005", draftPoints: Int = points) = runBlocking {
         val dir = Files.createTempDirectory("full-rubric")
         val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
         val requests = CopyOnWriteArrayList<JsonObject>()
@@ -36,8 +40,11 @@ class FullRubricAnalyticalTest {
         bridge.createContext("/v1/chat/completions") { exchange ->
             val request = LedgerJson.parseToJsonElement(exchange.requestBody.readBytes().decodeToString()).jsonObject
             requests.add(request)
-            val grade = if (requests.size == 1) json("items" to JsonArray(listOf(json("id" to "R1", "points" to points,
-                "reason" to "Synthetic rubric judgment", "evidence" to evidence))), "total" to 4, "awarded" to points)
+            fun grade(awarded: Int) = json("items" to JsonArray(listOf(json("id" to "R1", "points" to awarded,
+                "reason" to "Synthetic rubric judgment", "evidence" to evidence))), "total" to 4, "awarded" to awarded)
+            val grade = if (requests.size == 1) grade(draftPoints)
+                else if(draftPoints != points) json("verdict" to "REVISE", "note" to "Method credit retained; final criterion not met",
+                    "revised_grade" to grade(points))
                 else json("verdict" to "CONFIRM", "note" to "Synthetic independent review")
             val response = json("model" to request.str("model"), "choices" to JsonArray(listOf(json("index" to 0,
                 "message" to json("role" to "assistant", "content" to grade.toString())))),
@@ -64,6 +71,16 @@ class FullRubricAnalyticalTest {
                 assertTrue(worker.runOne())
                 assertEquals(2, requests.size)
                 requests.forEach { assertTrue("Submitted final value (verbatim, server-owned): <<<$final>>>" in it.toString()) }
+                requests.forEach { request ->
+                    val prompt = request.getValue("messages").jsonArray.joinToString("\n") { it.jsonObject.str("content") }
+                    assertTrue("Server numeric verdict (authoritative):" in prompt)
+                    assertTrue("\"status\":\"$status\"" in prompt)
+                    assertTrue("\"correct\":${status == "CORRECT"}" in prompt)
+                }
+                if (draftPoints == 4 && status != "CORRECT") {
+                    val reviewPrompt = requests[1].getValue("messages").jsonArray.joinToString("\n") { it.jsonObject.str("content") }
+                    assertTrue("FULL_CREDIT_WITH_NONMATCHING_FINAL" in reviewPrompt)
+                }
                 assertNotEquals(requests[0].str("model"), requests[1].str("model"))
             }
             assertFalse(worker.runOne())
@@ -72,11 +89,20 @@ class FullRubricAnalyticalTest {
             assertEquals(points.toDouble(), part.getValue("score").jsonPrimitive.double)
             assertEquals(4.0, result.getValue("max").jsonPrimitive.double)
             assertEquals(status, part.getValue("numericFinal").jsonObject.str("status"))
+            assertEquals(if (points == 4 && status != "CORRECT") "FULL_CREDIT_WITH_NONMATCHING_FINAL" else "",
+                part.getValue("numericFinal").jsonObject.str("rubricReviewWarning"))
+            if (points == 4 && status != "CORRECT") assertTrue("细则获满分" in part.str("feedback"))
             assertTrue(part.str("feedback").isNotBlank())
             assertEquals(1, part.getValue("reasons").jsonArray.size, "no invented numeric points")
             val events = actor.execute { events("SYNTH") }
             val fact = events.single { it.type == "attempt_graded" }.payload
-            assertEquals(points * 100L, fact.num("score"))
+            assertEquals(draftPoints * 100L, fact.num("score"))
+            if (draftPoints != points) {
+                val review = events.single { it.type == "grade_reviewed" }.payload
+                assertEquals("REVISE", review.str("decision"))
+                assertEquals(points * 100L, review.getValue("revised").jsonObject.num("score"))
+                assertEquals("FULL_CREDIT_WITH_NONMATCHING_FINAL", fact.getValue("numericFinal").jsonObject.str("rubricReviewWarning"))
+            }
             if (working.isBlank() && final.isNotBlank()) {
                 val span = fact.getValue("evidence").jsonArray.first { it.jsonObject.str("rubricItemId") == "R1" }.jsonObject
                 assertEquals("finalAnswer", span.str("field"))

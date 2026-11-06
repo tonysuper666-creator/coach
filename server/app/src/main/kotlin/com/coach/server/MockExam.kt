@@ -5,6 +5,7 @@ import com.coach.ai.AnalyticalNumericKey
 import com.coach.ai.RubricItem
 import com.coach.core.LedgerActor
 import com.coach.domain.*
+import com.coach.domain.grade.NumericValue
 import com.coach.store.LedgerStore
 import com.coach.store.MockSession
 import com.coach.store.sha256
@@ -99,9 +100,9 @@ internal class MockPaper(val json: JsonObject) {
                     val label = p.str("label"); require(label.isNotBlank()) { "$id 小问缺少 label" }
                     val partMarks = p.double("marks")
                     val r = rubric(p["rubric"], "$id($label)")
-                    val numeric = p.str("answer").takeIf { it.toBigDecimalOrNull() != null }
+                    val numeric = analyticalAnswerLiteral(p.str("answer"))
                     // Analytical default; missing/null values agree, explicit zero stays strict.
-                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.contentOrNull ?: "0.005"
+                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) ?: "0.005"
                     if (numeric != null) AnalyticalNumericKey(numeric, tolerance)
                     val rest = partMarks - r.sumOf { it.points }
                     require(partMarks > 0 && rest > -1e-6) { "$id($label) 评分细则超出分值" }
@@ -162,6 +163,17 @@ private fun JsonObject.int(key: String): Int? = (get(key) as? JsonPrimitive)?.in
 private fun JsonObject.double(key: String): Double = (get(key) as? JsonPrimitive)?.doubleOrNull ?: 0.0
 private fun hundredths(marks: Double) = (marks * 100).roundToLong()
 
+/** Preserve exact decimal keys; normalize legacy key notation, never student input. */
+private fun analyticalAnswerLiteral(answer: String): String? {
+    val literal = answer.trim().trimEnd { it in "。.，,；;！!？?、 \t" }
+    if (literal.toBigDecimalOrNull() != null) return literal
+    if (literal.endsWith('%')) literal.dropLast(1).trim().toBigDecimalOrNull()?.let {
+        return it.movePointLeft(2).toPlainString()
+    }
+    // Other pre-existing keys (fractions/Chinese numerals) retain NumericValue's semantics.
+    return NumericValue.parse(answer)?.toString()
+}
+
 private fun numericFact(unit: MockUnit, submitted: String): JsonObject {
     val grade = AnalyticalNumericKey(unit.numeric!!, unit.tolerance).grade(submitted)
     return json("expected" to unit.numeric, "submitted" to submitted, "correct" to grade.correct, "status" to grade.status,
@@ -171,13 +183,13 @@ private fun numericFact(unit: MockUnit, submitted: String): JsonObject {
 }
 
 /** Explains the numeric step; method explanations stay with their individual rubric criteria. */
-private fun numericFeedback(fact: JsonObject): String = when (fact.str("status")) {
+private fun numericFeedback(fact: JsonObject): String = (when (fact.str("status")) {
     "MISSING" -> "最终数值未填写；步骤分按评分细则另计。"
     "NOT_NUMERIC" -> "最终数值不是有效数字，请填写十进制数；步骤分按评分细则另计。"
     "WRONG_DECIMAL_PLACES" -> "最终数值须保留两位小数（例如 1.00）；步骤分按评分细则另计。"
     else -> (if (fact.flag("correct")) "最终数值正确" else "最终数值不符：你答 ${fact.str("submitted").trim()}") +
         "，参考答案 ${fact.str("expected")}（允许绝对误差 ±${fact["absTolerance"]?.jsonPrimitive?.content.orEmpty()}，含边界）。"
-}
+}) + if (fact.str("rubricReviewWarning").isNotBlank()) "\n终值核对未通过但细则获满分，请核对复核说明。" else ""
 
 /** Papers are read from a private directory outside the repository; nothing here is ever committed. */
 class MockLibrary(val directory: Path?, val minutesOverride: Int? = null) {

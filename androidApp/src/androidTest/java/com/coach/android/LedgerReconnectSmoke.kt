@@ -25,14 +25,37 @@ class LedgerReconnectSmoke {
         val token=args.getString("coachToken","")
         assertTrue("Isolated server token is required",token.length>=32)
         assertTrue("Use a non-production build", BuildConfig.COACH_PORT !in setOf(8790,8791,18791))
-        val runId=args.getString("coachRunId", "manual")
+        val runId=args.getString("coachRunId", "")
+        assertTrue("A random diagnostic run ID is required", runId.matches(Regex("[0-9a-f]{32}")))
         fun mark(message: String) = android.util.Log.i("CoachReconnect","$runId $message port=${BuildConfig.COACH_PORT} elapsedMs=${android.os.SystemClock.elapsedRealtime()}")
+        // Independent of logcat: save only this synthetic run's heartbeat counters.
+        // Separate atomic files avoid a reader observing partial or mixed-channel data.
+        val heartbeatFiles=listOf("main", "io").associateWith { channel ->
+            android.util.AtomicFile(java.io.File(context.cacheDir,"ton1094-$runId-$channel.json"))
+        }
+        fun saveHeartbeat(channel: String, count: Long, connection: String?=null, active: Boolean?=null) {
+            val file=heartbeatFiles.getValue(channel)
+            var stream: java.io.FileOutputStream?=null
+            try {
+                val record=org.json.JSONObject().put("runId",runId).put("channel",channel)
+                    .put("count",count).put("elapsedMs",android.os.SystemClock.elapsedRealtime())
+                if (connection!=null) record.put("connection",connection).put("active",active)
+                stream=file.startWrite()
+                stream.write(record.toString().toByteArray(Charsets.UTF_8))
+                file.finishWrite(stream)
+            } catch (error: Exception) {
+                if (stream!=null) file.failWrite(stream)
+                mark("HEARTBEAT_FILE_FAILED channel=$channel type=${error.javaClass.simpleName}")
+            }
+        }
         // A main-looper heartbeat distinguishes coroutine-pool stalls from whole-process suspension.
         val handler=android.os.Handler(android.os.Looper.getMainLooper())
         val heartbeatActive=java.util.concurrent.atomic.AtomicBoolean(true)
         val heartbeat=object : Runnable {
+            var count=0L
             override fun run() {
                 if (!heartbeatActive.get()) return
+                saveHeartbeat("main",++count)
                 mark("MAIN_HEARTBEAT");handler.postDelayed(this,2000)
             }
         }
@@ -58,7 +81,9 @@ class LedgerReconnectSmoke {
         val loop=engine.start(this)
         loop.invokeOnCompletion { mark("SYNC_LOOP_FINISHED type=${it?.javaClass?.simpleName ?: "completed"}") }
         val status=launch(Dispatchers.IO) {
+            var count=0L
             while(isActive) {
+                saveHeartbeat("io",++count,engine.connection.value,loop.isActive)
                 mark("SYNC_STATUS connection=${engine.connection.value} revision=${engine.revision.value} active=${loop.isActive}")
                 delay(2000)
             }
@@ -88,6 +113,7 @@ class LedgerReconnectSmoke {
             heartbeatActive.set(false)
             handler.removeCallbacks(heartbeat)
             status.cancelAndJoin();loop.cancelAndJoin();wire.close();driver.close();context.deleteDatabase(name)
+            heartbeatFiles.values.forEach { it.delete() }
         }
     }
 }

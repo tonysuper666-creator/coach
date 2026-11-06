@@ -33,7 +33,11 @@ and requires both main-thread and IO heartbeats to span at least ten seconds,
 with no gap over four seconds and every sampled sync status online/active.
 Failure aborts before STOP: it shows a diagnostic failure without JVM pause,
 not a reconnection pass or proof of freezing. This additional control does not
-extend the original 30-second OFFLINE deadline. It has not yet run on the phone.
+extend the original 30-second OFFLINE deadline. On 2026-11-06 at 06:06–06:07 UTC,
+head `9ea336c` failed this control before any JVM pause: both logged heartbeat
+streams stopped after about four seconds, while the final HTTP requests returned.
+This rules out JVM pause as a necessary trigger for the observed diagnostic stall;
+it does not distinguish process scheduling from a log collection failure.
 The script never uses the general `check-android.py` runner,
 which also has emulator and Tailscale Serve side effects.
 
@@ -70,6 +74,19 @@ restricted `/proc` or power dump remains unknown; diagnostic failures do not
 suppress the other samples. Raw `/proc` and power output, including identifiers
 and wake-lock details, are neither retained nor shared. These read-only samples
 do not change power settings or wake the phone.
+The test now also saves each channel's count and elapsed-realtime reading in
+separate atomic cache files before writing to logcat. IO adds only connection
+and loop-active state. READY/failure snapshots read these files through `run-as`
+only for the card package, and reject other run IDs, channels, types or fields.
+Missing or unreadable files remain unknown; no raw private data is shared.
+Compare these independent counters with logged heartbeats on the next phone run
+to distinguish logging loss from execution stopping. These counters are diagnostic
+only: they cannot replace or relax the existing heartbeat or OFFLINE gates.
+Normal test completion removes its files; failure cleanup force-stops the card
+package and removes only that random run's files and atomic-write sidecars before
+uninstalling `.test`, along with the test's synthetic SQLite and journal files.
+The summary's `faultInjected` field records whether STOP
+was actually reached. This independent-file diagnostic has not run on the phone.
 A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 

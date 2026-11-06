@@ -1,4 +1,45 @@
-# DeepTutor 迁移只读对账
+# DeepTutor 迁移工具
+
+## 已确认迁移：离线写入、在线备份和回退（TON-1095）
+
+`apply-confirmed` 直接在指定的现有 Coach 库调用经复核的 `writeHistory`，不会用旧预演库替换生产库，也不会启动服务。`rollback-confirmed` 只恢复本次导入之前的备份。真实材料、备份和输出必须放在仓库及 DeepTutor 外的私有目录。备份、目标库和输入目录必须相互分离。
+
+先在当前生产库的新副本上独立验收，再交 Architect 关键复核；两轮通过后才能执行下面的正式操作。复跑入口只以只读 SQLite online backup 捕获当前 Coach，不停止生产服务，所有写入都在 `NEW_ROOT`：
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :shared:domain:jvmTest :server:store:test :tools:migrate-deeptutor:installDist
+bash tools/migrate-deeptutor/reproduce-formal.sh \
+  "$HOME/Coach/data" "$SNAPSHOT" "$SEED" "$PROPOSAL" "$CONFIRMATION" \
+  4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa "$NEW_ROOT"
+```
+
+它保留当前原生事件，从新副本执行实际 `apply-confirmed`，再在另一个导入后副本执行实际 `rollback-confirmed`。`validation.json` 包含首次/重复导入计数、规范状态和投影 SHA、评分隔离、每个 KP 的供给、恢复验证及回退的物理字节核对。快照逐文件 SHA 前后不变。确认文件必须是已复核的原样 UTF-8 文件（含结尾换行），不是重新序列化出的文件。
+
+正式操作须在上述两轮验收通过之后执行。先退出 Coach 客户端并停止 `local.coach.server`，防止 launchd 自动重启争抢锁。不要停止 DeepTutor，也不要碰 8790。先用 `launchctl print gui/$(id -u)/local.coach.server` 确认当前服务配置和 plist，再对该标签 `launchctl bootout`。导入命令在备份之前获取服务端同一把 `server.lock`，持锁直到整个操作结束；锁被占用时立即拒绝。
+
+```sh
+export COACH_MIGRATE_LAUNCHER="$PWD/tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor"
+# BACKUP 必须是新的私有目录；不要用预演库覆盖 COACH_DATA_DIR。
+tools/dev/heavy "$COACH_MIGRATE_LAUNCHER" apply-confirmed \
+  --database "$COACH_DATA_DIR" --backup "$BACKUP" --snapshot "$SNAPSHOT" \
+  --seed-manifest "$SEED" --proposal "$PROPOSAL" --confirmation "$CONFIRMATION" \
+  --confirmation-sha256 4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa
+```
+
+命令当场在线备份 DB、复制全部 blobs，检查数据库完整性、外键和每个引用 blob 的大小/哈希，恢复到 `BACKUP/restored`，核对规范状态逐字节及 DB/blobs 物理字节，再用同一 writer 预演两次。预演和实际导入冻结同一个审计时钟，实际目标必须与预演的完整行状态一致。恢复回执在实际写入之前保存；进程即使在提交之后退出，回退的期望状态也已落盘。实际写入后再次导入必须新增/修订/事件均为零，逐题验证 `UNREVIEWED`、无评分详情、归属与确认完全相同且 KP 活动，并验证每个 KP 的 `poolAvailable`、`constructedSupply` 不变。供给比较冻结同一个预约时钟，避免自然过期造成假差异。
+
+`BACKUP/result.json` 和标准输出提供证据，标准输出还提供已正确转义的直接回退命令；也可执行：
+
+```sh
+bash "$BACKUP/rollback.sh"
+# 等价：
+"$COACH_MIGRATE_LAUNCHER" rollback-confirmed --database "$COACH_DATA_DIR" --backup "$BACKUP"
+```
+
+回退同样要求停服及持锁，核对备份哈希、完整性和所有 blob，以及目标的完整行状态（含迁移审计时钟、序号水位）。任何后续学习事件、行编辑或 blob 变化都会拒绝回退，避免丢掉新记录；这种情形需另行对账恢复，不能绕过保护。导入不写 blobs，回退核对它们仍与备份逐文件字节一致。DB 在检查点关闭后原子替换为本次备份，再核对物理字节和规范状态；不改设备令牌、不改变 epoch。
+
+恢复/回退验收通过后，正式写入仍要单独只读复查迁移题 108 个全部未认证、无评分详情、155 边覆盖 107 题、第 40 题无归属，并保留写前/写后每个 KP 的供给证据。恢复先前确认的 Coach launchd 配置，启动后实测 9/49 及复习到期日不变，再交原验收链；工具通过或 PR 合并都不代表整卡完成，也不自动解锁 TON-1102。
 
 ## M1-α：只装课程内容（TON-1127）
 
@@ -232,4 +273,4 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
 
 确认后将归属写入 `question_kp`；概念及前置写入标准 `outline_revised` 账本事件，并同步前置 SQL。首次确认也可修订此前未确认的导入记录。题目仍为 LEGACY/UNREVIEWED，不进入题池，不创建答案键，历史作答不计分。题目源内容变化需要针对新输入的确认；提升过的题目、外部改过的归属或课程结构会拒绝覆盖，并整笔回滚。相同输入重复导入不增加记录、修订或事件；后续原生课程编辑不会被同一已接受决定重置。
 
-`confirmation.md` 输出已记录回执；详细清单保留原稿并注明其待确认措辞为历史记录。`rollback-state.json` 对比规范化全状态，数据库回退另以 `cmp before.sqlite rollback.sqlite` 验证物理字节一致。此工具仍仅允许新建隔离输出，不提供生产写入入口。正式写入与启用须另行完成 QA-C、Architect 两轮复核及数据库/blobs 备份、恢复、回退验收。
+`confirmation.md` 输出已记录回执；详细清单保留原稿并注明其待确认措辞为历史记录。`rollback-state.json` 对比规范化全状态，数据库回退另以 `cmp before.sqlite rollback.sqlite` 验证物理字节一致。`rehearse` 仍仅允许新建隔离输出。独立的正式写入入口见下节；正式写入与启用须先完成 QA-C、Architect 两轮复核及数据库/blobs 备份、恢复、回退验收。

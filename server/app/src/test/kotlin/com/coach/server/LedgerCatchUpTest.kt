@@ -17,27 +17,37 @@ import kotlinx.serialization.json.*
 import java.net.URI
 import java.net.http.*
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CompletionStage
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 /** Real loopback Netty + disposable SQLite; no production ports, bridge or model calls. */
 class LedgerCatchUpTest {
-    private class Harness : AutoCloseable {
+    private class Harness(
+        prepare: (Path, String) -> LedgerStore = { dir, token -> LedgerStore(dir).also { it.enroll("desktop", token) } },
+        beforeLedgerFrame: suspend (String) -> Unit = {}
+    ) : AutoCloseable {
         val directory = Files.createTempDirectory("coach-ton1261-")
         val token = "ton1261-synthetic-token-32-characters"
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val store = LedgerStore(directory).also { it.enroll("desktop", token) }
+        val store = prepare(directory, token)
         val actor = LedgerActor(scope, store)
         val pushes = MutableSharedFlow<String>(extraBufferCapacity = 64)
-        val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { ledgerRoutes(actor, pushes) }
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { ledgerRoutes(actor, pushes, null, "desktop", null, beforeLedgerFrame) }
             .start(false)
         val port get() = runBlocking { server.engine.resolvedConnectors().single().port }
         val baseUrl get() = "http://127.0.0.1:$port"
         fun seed(n: Int, text: String = "small", course: String = "c"): List<Event> = runBlocking {
             actor.execute { List(n) { append(course, "sync_fixture", json("text" to text)) } }
+        }
+        fun epoch(): String {
+            val request = HttpRequest.newBuilder(URI("$baseUrl/v1/hello"))
+                .header("X-Coach-Device", "desktop").header("Authorization", "Bearer $token").build()
+            val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, response.statusCode())
+            return LedgerJson.parseToJsonElement(response.body()).jsonObject.getValue("epoch").jsonPrimitive.content
         }
         fun page(after: Long, limit: Int = 500): EventsPage {
             val request = HttpRequest.newBuilder(URI("$baseUrl/v1/courses/c/events?after=$after&limit=$limit"))
@@ -54,10 +64,10 @@ class LedgerCatchUpTest {
         }
     }
 
-    private class Ws(h: Harness) : AutoCloseable {
+    private class Ws(private val h: Harness, device: String = "desktop") : AutoCloseable {
         val frames = LinkedBlockingQueue<String>()
         val socket = HttpClient.newHttpClient().newWebSocketBuilder()
-            .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
+            .header("X-Coach-Device", device).header("Authorization", "Bearer ${h.token}")
             .buildAsync(URI("ws://127.0.0.1:${h.port}/v1/ws"), object : WebSocket.Listener {
                 val pending = StringBuilder()
                 override fun onText(ws: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
@@ -68,7 +78,7 @@ class LedgerCatchUpTest {
                 }
             }).get(5, TimeUnit.SECONDS)
         fun hello(after: Long = 0) {
-            socket.sendText("""{"t":"hello","ledgerAfter":{"c":$after}}""", true).get(5, TimeUnit.SECONDS)
+            socket.sendText("""{"t":"hello","epoch":"${h.epoch()}","ledgerAfter":{"c":$after}}""", true).get(5, TimeUnit.SECONDS)
         }
         fun next(): String = assertNotNull(frames.poll(10, TimeUnit.SECONDS), "timed out waiting for ledger")
         fun ledger(): JsonObject {
@@ -85,8 +95,9 @@ class LedgerCatchUpTest {
             val sizes = mutableListOf<Int>()
             while (events.size < n) {
                 val frame = ledger()
-                sizes += frame.toString().toByteArray(Charsets.UTF_8).size
-                events += LedgerJson.decodeFromJsonElement<LedgerFrame>(frame).events
+                val batch = LedgerJson.decodeFromJsonElement<LedgerFrame>(frame).events
+                if (batch.isNotEmpty()) sizes += frame.toString().toByteArray(Charsets.UTF_8).size
+                events += batch
             }
             return events to sizes
         }
@@ -138,46 +149,45 @@ class LedgerCatchUpTest {
         }
     }
 
-    @Test fun stalledSocketDoesNotBlockConcurrentCommandWritesOrAnotherSubscriber() {
-        Harness().use { h ->
-            val seeded = h.seed(2700, "x".repeat(8192))
-            val last = seeded.last().seq
-            val received = CountDownLatch(1)
-            val slow = HttpClient.newHttpClient().newWebSocketBuilder()
-                .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
-                .buildAsync(URI("ws://127.0.0.1:${h.port}/v1/ws"), object : WebSocket.Listener {
-                    override fun onOpen(ws: WebSocket) { ws.request(1) }
-                    override fun onText(ws: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
-                        received.countDown()
-                        return null // no further demand: deliberately stop reading
-                    }
-                }).get(5, TimeUnit.SECONDS)
+    @Test fun stalledSocketDoesNotBlockConcurrentCommandWritesOrAnotherSubscriber() = runBlocking {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        Harness(beforeLedgerFrame = { device ->
+            if (device == "slow") { reached.complete(Unit); release.await() }
+        }).use { h ->
+            h.store.enroll("slow", h.token)
+            val last = h.seed(3).last().seq
             try {
-                assertTrue(received.await(5, TimeUnit.SECONDS), "slow socket did not connect")
-                slow.sendText("""{"t":"hello","ledgerAfter":{"c":0}}""", true).get(5, TimeUnit.SECONDS)
-                // Let the >20 MiB replay exhaust socket buffers before the burst.
-                Thread.sleep(1500)
-                Ws(h).use { fast ->
-                    fast.hello(last)
-                    val commands = List(100) { index ->
-                        val body = LedgerJson.encodeToString(CommandBody("open_kp", "c", System.currentTimeMillis(),
-                            json("kpId" to "synthetic-$index")))
-                        WireCommand("desktop", "slow-client-$index", body, sha256(body.toByteArray()))
+                Ws(h, "slow").use { slow ->
+                    slow.hello()
+                    withTimeout(10_000) { reached.await() }
+                    Ws(h).use { fast ->
+                        fast.hello(last)
+                        val commands = List(100) { index ->
+                            val body = LedgerJson.encodeToString(CommandBody("open_kp", "c", System.currentTimeMillis(),
+                                json("kpId" to "synthetic-$index")))
+                            WireCommand("desktop", "slow-client-$index", body, sha256(body.toByteArray()))
+                        }
+                        val request = HttpRequest.newBuilder(URI("${h.baseUrl}/v1/commands"))
+                            .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
+                            .POST(HttpRequest.BodyPublishers.ofString(LedgerJson.encodeToString(commands))).build()
+                        val pending = HttpClient.newHttpClient().sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                        try {
+                            // Timeout only bounds a failure; the latch proves the slow send is still blocked.
+                            val response = pending.get(10, TimeUnit.SECONDS)
+                            assertFalse(release.isCompleted)
+                            assertEquals(200, response.statusCode())
+                            val receipts = LedgerJson.decodeFromString<List<Receipt>>(response.body())
+                            assertEquals(100, receipts.size)
+                            assertTrue(receipts.all { it.eventSeqs.isNotEmpty() })
+                            val written = h.page(last).events
+                            assertEquals(100, written.size)
+                            assertEquals(written, fast.events(100).first)
+                            println("TON1261 gated_slow_send=true second_subscriber_events=${written.size}")
+                        } finally { release.complete(Unit); pending.cancel(true) }
                     }
-                    val request = HttpRequest.newBuilder(URI("${h.baseUrl}/v1/commands"))
-                        .header("X-Coach-Device", "desktop").header("Authorization", "Bearer ${h.token}")
-                        .timeout(java.time.Duration.ofSeconds(10))
-                        .POST(HttpRequest.BodyPublishers.ofString(LedgerJson.encodeToString(commands))).build()
-                    val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
-                    assertEquals(200, response.statusCode())
-                    val receipts = LedgerJson.decodeFromString<List<Receipt>>(response.body())
-                    assertEquals(100, receipts.size)
-                    assertTrue(receipts.all { it.eventSeqs.isNotEmpty() })
-                    val written = h.page(last).events
-                    assertEquals(100, written.size)
-                    assertEquals(written, fast.events(100).first)
                 }
-            } finally { slow.abort() }
+            } finally { release.complete(Unit) }
         }
     }
 
@@ -248,6 +258,38 @@ class LedgerCatchUpTest {
                 ws.socket.sendText("""{"t":"hello","epoch":"before-restore","ledgerAfter":{"c":9223372036854775807}}""", true)
                     .get(5, TimeUnit.SECONDS)
                 assertEquals(expected, ws.events(expected.size).first)
+            }
+        }
+    }
+
+    @Test fun legacyCursorAfterBackupRestoreReplaysNewReusedSequences() {
+        var oldCursor = 0L
+        var oldEpoch = ""
+        Harness(prepare = { directory, token ->
+            val original = LedgerStore(directory)
+            original.enroll("desktop", token)
+            original.append("c", "sync_fixture", json("text" to "before-backup"))
+            val backup = original.backup(directory.resolve("fixture-backup"))
+            repeat(10) { original.append("c", "sync_fixture", json("text" to "discarded-$it")) }
+            oldCursor = original.hello().lastSeq
+            oldEpoch = original.hello().epoch
+            original.close()
+            LedgerStore.restore(directory, backup)
+        }).use { h ->
+            assertNotEquals(oldEpoch, h.epoch())
+            val fresh = h.seed(2, "after-restore")
+            assertTrue(fresh.last().seq <= oldCursor)
+            val expected = h.page(0).events
+            Ws(h).use { ws ->
+                val meta = LedgerJson.parseToJsonElement(ws.next()).jsonObject
+                assertEquals(h.epoch(), meta.getValue("epoch").jsonPrimitive.content)
+                ws.ledger() // discard the unnegotiated HTTP hint
+                ws.socket.sendText("""{"t":"hello","ledgerAfter":{"c":$oldCursor}}""", true)
+                    .get(5, TimeUnit.SECONDS)
+                val actual = ws.events(expected.size).first
+                assertEquals(expected, actual)
+                assertTrue(actual.containsAll(fresh))
+                println("TON1261 legacy_cursor=$oldCursor restored_new_events=${fresh.size}")
             }
         }
     }

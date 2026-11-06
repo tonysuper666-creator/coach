@@ -32,7 +32,11 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) {
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) =
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation) { }
+
+// Test seam: pause an individual connection at the point its nonempty frame is sent.
+internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
@@ -273,6 +277,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                         suspend fun flush(): Boolean {
                             if(encoded.isEmpty()) return true
                             if(!stillAuthorized()) return false
+                            beforeLedgerFrame(device)
                             send(Frame.Text(prefix+encoded.joinToString(",")+"]}"))
                             cursors[course]=through
                             encoded.clear();bytes=envelopeBytes
@@ -304,8 +309,9 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 for (ignored in wake) {
                     pendingHello.getAndSet(null)?.let { message ->
                         val currentEpoch=actor.execute { hello().epoch }
-                        // Preserve v1's missing-epoch behavior; explicit stale epochs restart.
-                        val compatible=message.str("epoch").let { it.isEmpty() || it==currentEpoch }
+                        // A cursor without its epoch cannot distinguish a restored ledger.
+                        // Replay from zero so newly reused sequence numbers are not skipped.
+                        val compatible=message.str("epoch") == currentEpoch
                         if(epoch!=currentEpoch) {
                             epoch=currentEpoch;cursors.clear();notified.clear();httpCourses.clear()
                             send(Frame.Text(LedgerJson.encodeToString(actor.execute { hello() })))

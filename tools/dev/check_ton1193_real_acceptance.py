@@ -81,6 +81,27 @@ def diagnose_idle_failure(config, root, java, report):
     except switch.GateError as error:
         reason = str(error)
         report['idleFailureDiagnostic'] = reason if reason in allowed else 'other gate rejection'
+        if reason == 'dependency or evidence command failed':
+            # The verifier deliberately suppresses child output. Re-run its
+            # exact inspector and retain only counts or its fixed line marker.
+            try:
+                proof = json.loads(Path(config['idleEvidence']).read_text())
+                config_hash = switch.digest(json.dumps(config, sort_keys=True).encode())
+                inspector = Path(verify.__file__).with_name('Ton1175Jfr.java')
+                with verify.staged_bridge_port(root / 'controller.json', config['installation'], config_hash) as port:
+                    result = subprocess.run([str(java / 'bin/java'), str(inspector), proof['recording'],
+                        proof['windowStart'], proof['windowEnd'], str(proof['pid']), str(port)],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        timeout=60, check=False)
+                if result.returncode == 0:
+                    measured = json.loads(result.stdout)
+                    report['fullSocketReads'] = {k: measured[k] for k in
+                        ('pid', 'socketReads', 'attributedHealthReads', 'clientReads')}
+                else:
+                    marker = re.fullmatch(rb'JFR evidence rejected; inspector line ([0-9]+)\s*', result.stderr)
+                    report['inspectorFailureLine'] = int(marker.group(1)) if marker else None
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, switch.GateError):
+                report['inspectorDiagnostic'] = 'unavailable'
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         report['idleFailureDiagnostic'] = 'evidence unreadable or dependency unavailable'
 

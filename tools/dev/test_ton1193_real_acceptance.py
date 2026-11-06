@@ -51,6 +51,32 @@ class LiveConfigurationTest(unittest.TestCase):
 
 
 class IdleRecordingTest(unittest.TestCase):
+    def test_inspector_diagnostic_retains_only_fixed_line_or_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evidence = root / 'idle.json'
+            evidence.write_text(json.dumps({'recording': str(root / 'recording.jfr'),
+                'windowStart': 'start', 'windowEnd': 'end', 'pid': 123}))
+            config = {'idleEvidence': str(evidence), 'installation': 'installation'}
+            result = mock.Mock(returncode=1, stderr=b'JFR evidence rejected; inspector line 144\n')
+            with mock.patch.object(driver.verify, 'idle', side_effect=GateError('dependency or evidence command failed')), \
+                 mock.patch.object(driver.verify, 'staged_bridge_port', return_value=contextlib.nullcontext(41500)), \
+                 mock.patch.object(driver.subprocess, 'run', return_value=result) as run:
+                report = {}
+                driver.diagnose_idle_failure(config, root, Path('/java'), report)
+                self.assertEqual(report['inspectorFailureLine'], 144)
+                self.assertEqual(run.call_args.args[0][-1], '41500')
+                result.stderr = b'private data 144'
+                driver.diagnose_idle_failure(config, root, Path('/java'), report)
+                self.assertIsNone(report['inspectorFailureLine'])
+                result.returncode = 0
+                result.stdout = json.dumps({'pid': 123, 'socketReads': 2,
+                    'attributedHealthReads': 2, 'clientReads': 0, 'private': 'secret'}).encode()
+                report = {}
+                driver.diagnose_idle_failure(config, root, Path('/java'), report)
+                self.assertEqual(report['fullSocketReads'], {'pid': 123, 'socketReads': 2,
+                    'attributedHealthReads': 2, 'clientReads': 0})
+
     def test_diagnostic_keeps_only_allowlisted_errors(self):
         config = {'idleEvidence': 'idle', 'installation': 'installation'}
         report = {}

@@ -174,6 +174,14 @@ class ExamTextGuardTest {
             assertObfuscationBlocked(input)
     }
 
+    @Test fun referenceAndReplyCanRequireDifferentMatchingViews() {
+        val references = listOf(quote.replace("Amber ", "Amber α "), quote.replace("Amber", "Am**ber"))
+        val replies = listOf(quote, quote.split(" ").joinToString(" ") { "\\$it" },
+            quote.split(" ").joinToString(" \\frac{Q_2}{P_2} "))
+        for (reference in references) for (reply in replies)
+            assertObfuscationBlocked(reply, ExamTextIndex(listOf(reference)))
+    }
+
     @Test fun literalControlWordPrefixesCannotSplitOffTheirBackslash() {
         val commands = listOf("in", "to", "not", "max", "text")
         val collisionIndex = ExamTextIndex(listOf(exam) + commands.map { "$it $quote." })

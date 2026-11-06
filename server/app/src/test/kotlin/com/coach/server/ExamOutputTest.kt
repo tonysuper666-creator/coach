@@ -41,10 +41,10 @@ internal class ExamOverlap(documents: List<String>) {
     }
     private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKC)
         .lowercase(java.util.Locale.ROOT))
-    private val windows = documents.flatMap { words(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
-    private val literalWindows = documents.flatMap { literal(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
+    private val windows = documents.flatMap { text -> listOf(words(text), literal(text))
+        .flatMap { it.windowed(8).map { w -> w.joinToString(" ") } } }.toHashSet()
     fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
-        literal(text).windowed(8).any { it.joinToString(" ") in literalWindows }
+        literal(text).windowed(8).any { it.joinToString(" ") in windows }
 }
 
 internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false,
@@ -155,6 +155,15 @@ class ExamOutputTest {
         assertTrue(checker.hit(everyWord))
         assertTrue(checker.hit(words.mapIndexed { i, word -> if (i % 2 == 0) "\\$word" else word }.joinToString(" ")))
         assertTrue(checker.hit("`$everyWord`"))
+    }
+
+    @Test fun independentCheckerMatchesAcrossReferenceAndReplyFormatting() {
+        val quote = exams.first()
+        val reference = quote.replace("Amber", "Am**ber")
+        val reply = quote.split(" ").joinToString(" ") { "\\$it" }
+        val checker = ExamOverlap(listOf(reference))
+        assertTrue(checker.hit(reply))
+        assertTrue(checker.hit("`$reply`"))
     }
 
     @Test fun bufferedEnglishPrefixDoesNotTurnActiveChineseStreamingIntoAStall() = runBlocking {

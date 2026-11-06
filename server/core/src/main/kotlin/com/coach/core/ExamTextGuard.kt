@@ -9,7 +9,6 @@ class ExamTextIndex(documents: List<String>) {
         val next = HashMap<String, Node>()
     }
     internal val root = Node()
-    internal val literalRoot = Node()
     val windowCount: Int
     init {
         val unique = HashSet<List<String>>()
@@ -40,7 +39,9 @@ class ExamTextIndex(documents: List<String>) {
         }
     }
 
-    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(root to scan(text), literalRoot to scan(text, visible = false))
+    // A reference and a reply may use different formatting. Both reply views
+    // must match every reference view, including literal words in TeX wrappers.
+    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(root to scan(text), root to scan(text, visible = false))
     internal data class Word(val value: String, val start: Int, val end: Int, val matchable: Boolean)
     internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int)
     companion object {

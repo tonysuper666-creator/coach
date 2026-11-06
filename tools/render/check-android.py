@@ -1,7 +1,71 @@
 """Foreground, isolated emulator replay; owns and cleans up only the emulator it starts."""
-import os, re, subprocess, time, signal, json, xml.etree.ElementTree as ET
+import os, re, subprocess, time, signal, json, sys, xml.etree.ElementTree as ET
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+def observe_reclaim(pid_samples):
+    """Return the one-based first empty sample, or None if none is observed."""
+    for sample_number, pid in enumerate(pid_samples, 1):
+        if not pid.strip():
+            return sample_number
+    return None
+
+def combine_exits(*codes):
+    return int(any(code != 0 for code in codes))
+
+def wait_for_reclaim():
+    def pid_samples():
+        for _ in range(16):
+            time.sleep(.5)
+            result = subprocess.run([adb, '-s', serial, 'shell', 'pidof', package],
+                                    capture_output=True, text=True, timeout=30)
+            if result.returncode not in (0, 1) or result.stderr.strip():
+                raise RuntimeError('pidof failed: ' + result.stderr.strip())
+            yield result.stdout
+    if observe_reclaim(pid_samples()) is None:
+        print('reclaim_not_observed restoration_not_executed', flush=True)
+        raise SystemExit(2)
+
+if __name__ == '__main__' and sys.argv[1:] == ['--self-test']:
+    import unittest
+    from unittest.mock import patch
+    from io import StringIO
+
+    adb, serial, package = 'adb', 'test-device', 'test.package'
+
+    class HostTests(unittest.TestCase):
+        def test_observe_reclaim(self):
+            self.assertIsNone(observe_reclaim(['999']))
+            self.assertEqual(observe_reclaim(['999', '']), 2)
+            self.assertEqual(observe_reclaim(['']), 1)
+
+        def test_combine_exits(self):
+            self.assertEqual(combine_exits(0, 1, 0), 1)
+            self.assertEqual(combine_exits(0, 0), 0)
+            self.assertEqual(combine_exits(0, 2), 1)
+
+        @patch('time.sleep')
+        @patch('subprocess.run')
+        def test_poll_stops_when_reclaimed(self, run_mock, sleep_mock):
+            run_mock.side_effect = [subprocess.CompletedProcess([], 0, '999', ''),
+                                    subprocess.CompletedProcess([], 1, '', '')]
+            wait_for_reclaim()
+            self.assertEqual(run_mock.call_count, 2)
+            self.assertEqual(sleep_mock.call_count, 2)
+
+        @patch('time.sleep')
+        @patch('subprocess.run')
+        def test_poll_exits_when_not_reclaimed(self, run_mock, sleep_mock):
+            run_mock.return_value = subprocess.CompletedProcess([], 0, '999', '')
+            with patch('sys.stdout', new_callable=StringIO) as output:
+                with self.assertRaises(SystemExit) as raised:
+                    wait_for_reclaim()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertEqual(output.getvalue().strip(), 'reclaim_not_observed restoration_not_executed')
+            self.assertEqual(run_mock.call_count, 16)
+            self.assertEqual(sleep_mock.call_count, 16)
+
+    unittest.main(argv=[sys.argv[0]])
 
 repo = Path(__file__).resolve().parents[2]
 root = Path(os.environ.get('COACH_RENDER_CORPUS', str(Path.home() / 'Coach/corpus/render')))
@@ -84,9 +148,7 @@ try:
         results.append({'shape':name,'size':size,'state':s});before=s
     # Real background kill: verify process is gone, then reload the same private state.
     home();before=snapshot()
-    shell('am','kill',package);time.sleep(.5)
-    pid=text('shell','pidof',package) if subprocess.run([adb,'-s',serial,'shell','pidof',package],capture_output=True).returncode==0 else ''
-    assert not pid.strip(),'am kill did not reclaim process'
+    shell('am','kill',package);wait_for_reclaim()
     launch();time.sleep(.7);home();after=snapshot()
     for k in ['draft','option','message']: assert before[k]==after[k],(k,before,after)
     assert after['cursor']>=before['cursor']
@@ -165,8 +227,7 @@ try:
         capture('stream-'+name+'.png');stream.append({'shape':name,'size':size,**now});prev=now
     # Kill while still streaming and read the same place after the restart (state is restored from private storage).
     before=reading();assert before['state']['cursor']<total and before['state']['running'],before['state']
-    home();shell('am','kill',package);time.sleep(.5)
-    assert subprocess.run([adb,'-s',serial,'shell','pidof',package],capture_output=True).returncode!=0,'am kill did not reclaim process'
+    home();shell('am','kill',package);wait_for_reclaim()
     device('logcat','-c');launch();time.sleep(3)
     after=reading();capture('stream-restored.png')
     assert after['live']['key']==before['live']['key'] and after['top']==before['top'],(before,after)

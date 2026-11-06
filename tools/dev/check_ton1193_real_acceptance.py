@@ -101,7 +101,8 @@ def recording(root, java, pid, control_path, config, report):
     # proof. In particular, managed child health checks may cause such reads.
     time.sleep(22)
     sample = heartbeat()
-    data = json.loads(run(java / 'bin/jfr', 'print', '--json', '--events', 'jdk.SocketRead', sample))
+    data = json.loads(run(java / 'bin/jfr', 'print', '--json', '--stack-depth', '128',
+                          '--events', 'jdk.SocketRead', sample))
     reads = []
     for event in data['recording']['events']:
         values = event['values']

@@ -62,6 +62,7 @@ class IdleRecordingTest(unittest.TestCase):
                     return json.dumps({'recording': {'events': [{'values': {
                         'startTime': '1970-01-01T00:16:41Z'}}]}}).encode()
                 if 'jdk.SocketRead' in argv:
+                    self.assertEqual(argv[argv.index('--stack-depth') + 1], '128')
                     return json.dumps({'recording': {'events': [{'values': {
                         'startTime': '1970-01-01T00:16:41Z', 'bytesRead': 12, 'port': 41500,
                         'address': '127.0.0.1', 'stackTrace': {'truncated': False,

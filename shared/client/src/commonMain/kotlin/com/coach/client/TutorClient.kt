@@ -26,7 +26,10 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlin.time.TimeSource
 import kotlin.uuid.Uuid
@@ -34,6 +37,7 @@ import kotlin.uuid.Uuid
 /**
  * 到 Mac 服务端 `/v1/ws` 的导师连接（与账本同步各用一条 socket，服务端按帧广播）。
  * 断线就是断线：没连上时 [send] 直接返回 false，由界面如实提示，不排队、不假装已发出。
+ * 已交给连接、但服务端还没回 `msg.user` 确认的发问，会在下一条连接上补发（服务端按 clientMsgId 去重）。
  */
 class TutorClient(
     baseUrl: String,
@@ -54,6 +58,9 @@ class TutorClient(
     private val lifecycle = Any()
     private var running: Job? = null
     private var closed = false
+    // clientMsgId → 已交给连接、还没被服务端确认的发问。连接断了，出站缓冲里的帧随之丢掉；只有 msg.user 才证明送达。
+    private data class Unconfirmed(val threadId: String, val frame: String, var resends: Int = 0)
+    private val unconfirmed = LinkedHashMap<String, Unconfirmed>()
     // null means no outcome yet; retries while offline must not create new events.
     private var observedConnection: Boolean? = null
 
@@ -136,7 +143,7 @@ class TutorClient(
                     if (frame.fin) {
                         if (!oversized) {
                             val text = body.decodeToString(throwOnInvalidSequence = true)
-                            synchronized(lifecycle) { if (!closed) model.onFrame(text) }
+                            synchronized(lifecycle) { if (!closed) { confirm(text); model.onFrame(text) } }
                         }
                         body = ByteArray(0)
                         oversized = false
@@ -178,6 +185,11 @@ class TutorClient(
             reconnectResumes.forEach { id ->
                 socket.send(Frame.Text(resumeFrame(id).toString()))
             }
+            val resends = synchronized(lifecycle) {
+                unconfirmed.values.removeAll { it.resends >= MAX_ASK_RESENDS }
+                unconfirmed.values.onEach { it.resends++ }.map { it.frame }
+            }
+            resends.forEach { socket.send(Frame.Text(it)) }
             sender = launch { for (text in queue) socket.send(Frame.Text(text)) }
             ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
             reader.join()
@@ -212,6 +224,8 @@ class TutorClient(
         const val PING_INTERVAL_MS = 5_000L
         const val PONG_TIMEOUT_MS = 5_000L
         const val MAX_MESSAGE_BYTES = 1_048_576
+        const val MAX_UNCONFIRMED_ASKS = 16
+        const val MAX_ASK_RESENDS = 3
         const val MAX_SOCKET_FRAME_BYTES = 64L * 1_048_576
     }
 
@@ -244,12 +258,34 @@ class TutorClient(
     fun ask(threadId: String, courseId: String, text: String, pack: String, clientMsgId: String = Uuid.random().toString()): Boolean {
         if (live == null) return false
         model.onSent(threadId,"ask",text,clientMsgId)
-        val sent = send(buildJsonObject {
+        val frame = buildJsonObject {
             put("t", "msg.ask"); put("threadId", threadId); put("courseId", courseId); put("text", text); put("pack", pack)
             put("clientMsgId",clientMsgId)
-        })
-        if (!sent) model.onSendRejected(threadId,clientMsgId)
+        }
+        synchronized(lifecycle) {
+            unconfirmed[clientMsgId] = Unconfirmed(threadId, frame.toString())
+            while (unconfirmed.size > MAX_UNCONFIRMED_ASKS) unconfirmed.remove(unconfirmed.keys.first())
+        }
+        val sent = send(frame)
+        if (!sent) {
+            synchronized(lifecycle) { unconfirmed.remove(clientMsgId) }
+            model.onSendRejected(threadId,clientMsgId)
+        }
         return sent
+    }
+
+    /** Caller holds [lifecycle]. 本设备的 msg.user（或针对这句的 msg.error）到了，这句就不用再补发。 */
+    private fun confirm(text: String) {
+        if (unconfirmed.isEmpty()) return
+        val obj = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        fun str(key: String) = (obj[key] as? JsonPrimitive)?.contentOrNull
+        when (str("t")) {
+            "msg.user" -> if (str("deviceId") == deviceId) str("clientMsgId")?.let(unconfirmed::remove)
+            "msg.error" -> {
+                str("msg")?.let(unconfirmed::remove)
+                str("threadId")?.let { thread -> unconfirmed.values.removeAll { it.threadId == thread } }
+            }
+        }
     }
 
     fun cancel(messageId: String) = send(buildJsonObject { put("t", "msg.cancel"); put("msg", messageId) })

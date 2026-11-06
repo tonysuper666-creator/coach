@@ -2,6 +2,8 @@ package com.coach.client
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -73,7 +75,9 @@ class ChatStreamAssembler(
                 states[messageId] = obj.str("status")
                 val held = deferredEnd.remove(messageId)
                 val snapshotIsLive = obj.str("status") == "streaming"
-                val closing = held?.takeIf { snapshotIsLive && it.str("chars").toIntOrNull() == text.length }
+                // 落库的终态快照不带出答模型与原因：先到的终态帧照样要交出去，状态与字数以快照为准。
+                val closing = if (!snapshotIsLive) held?.let { JsonObject(it + mapOf("status" to JsonPrimitive(obj.str("status")), "chars" to JsonPrimitive(text.length))) }
+                    else held?.takeIf { it.str("chars").toIntOrNull() == text.length }
                 listOf(ChatUpdate.Snapshot(messageId, index, text, obj.str("status"))) +
                     (if (obj.str("phase") == "source_lookup") listOf(ChatUpdate.Progress(messageId,"source_lookup","导师去翻原文了")) else emptyList()) +
                     (closing?.let { listOf(ended(messageId, it)) } ?: emptyList())
@@ -123,6 +127,7 @@ class ChatStreamAssembler(
         return true
     }
 
+    // JSON null（如失败时没有原因）读作空，不能变成字面量 "null" 显示给学习者。
     private fun JsonObject.str(key: String): String =
-        (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
+        (this[key] as? JsonPrimitive)?.contentOrNull ?: ""
 }

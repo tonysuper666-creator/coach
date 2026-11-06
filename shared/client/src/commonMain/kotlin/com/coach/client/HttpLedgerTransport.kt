@@ -15,6 +15,9 @@ import kotlinx.serialization.decodeFromString
 
 class DeviceAuthorizationException : IllegalStateException("Device pairing required")
 
+/** 服务端永久拒收这条命令（格式、设备不符、超过大小上限）：重发也不会成功，不能挡住后面的同步。 */
+class CommandRefused(val status: Int) : IllegalStateException("Command refused: HTTP $status")
+
 class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     private val token: String) : LedgerTransport {
     private val baseUrl = baseUrl.trimEnd('/')
@@ -36,6 +39,13 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     override suspend fun events(course: String, after: Long): EventsPage = LedgerJson.decodeFromString(client.get("$baseUrl/v1/courses/${course.encodeURLPathPart()}/events") { parameter("after",after) }.bodyAsText())
     override suspend fun command(command: WireCommand): Receipt {
         val response = client.post("$baseUrl/v1/commands") { expectSuccess=false; contentType(ContentType.Application.Json);setBody(LedgerJson.encodeToString(command)) }
+        // 409 带回执；400/403/413 没有回执体，是永久拒收；其余（5xx 等）是暂时故障，下次再传。
+        when (response.status) {
+            HttpStatusCode.Unauthorized -> throw DeviceAuthorizationException()
+            HttpStatusCode.BadRequest, HttpStatusCode.Forbidden, HttpStatusCode.PayloadTooLarge -> throw CommandRefused(response.status.value)
+            HttpStatusCode.Conflict -> {}
+            else -> if (!response.status.isSuccess()) error("Command upload failed: HTTP ${response.status.value}")
+        }
         return LedgerJson.decodeFromString(response.bodyAsText())
     }
     override suspend fun offlinePack(course: String, size: Int): OfflineChoicePack = LedgerJson.decodeFromString(

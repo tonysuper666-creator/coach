@@ -7,6 +7,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
@@ -61,7 +62,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             }
             pack.keys.forEach { q.putOfflineKey(it.attemptId,it.correctOptionId) }
         }
-        _revision.value += 1
+        _revision.update { it + 1 }
     }
 
     fun offlineGroups(course: String, now: Long): List<QuizGroup> {
@@ -113,7 +114,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putLocalGrade(if(correct) 1L else 0L,row.attempt_id)
             }
         }
-        _revision.value += 1
+        _revision.update { it + 1 }
     }
 
     fun retainedCommands(): List<WireCommand> = q.allCommands().executeAsList().map { WireCommand(it.device_id,it.command_id,it.payload_bytes,it.payload_sha256) }
@@ -163,6 +164,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     }
 
     suspend fun syncOnce() = mutex.withLock {
+        // 界面按 revision 从整份账本重算；只在真有变化（或第一次同步完成）时才刷新。
+        var changed = _revision.value == 0L
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
         if(previousEpoch != hello.epoch) {
@@ -177,11 +180,14 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 for(s in snapshots) { save(s.events); q.putMeta("cursor:${s.courseId}",s.hello.lastSeq.toString());q.putMeta("serverProjection:${s.courseId}",LedgerJson.encodeToString(s.projection)) }
                 q.putMeta("epoch",hello.epoch)
             }
+            changed = true
         }
         retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
         for(row in pending) {
-            val receipt = transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256))
+            // 永久拒收的命令（如换过配对留下的旧设备命令、超过 1 MiB 的笔记）记为 REJECTED，不能挡住后面的命令和拉取。
+            val receipt = try { transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256)) }
+                catch(e: CommandRefused) { Receipt(row.command_id,"REJECTED",error="HTTP_${e.status}",epoch=hello.epoch,backedUpThroughSeq=hello.backedUpThroughSeq) }
             check(receipt.epoch == hello.epoch) { "Epoch changed during upload" }
             db.transaction {
                 q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id)
@@ -189,10 +195,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 q.putMeta("receipt:${row.command_id}",LedgerJson.encodeToString(receipt))
             }
             retainOrPrune(hello.epoch,receipt.backedUpThroughSeq)
+            changed = true
         }
-        pullCourses(hello.epoch)
+        if(pullCourses(hello.epoch)) changed = true
         _connection.value = "online"
-        _revision.value += 1
+        if(changed) _revision.update { it + 1 }
     }
 
     /** Event pages carry their epoch. A push with no outbox work needs one read, not
@@ -201,10 +208,10 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         val caughtUp=mutex.withLock {
             val epoch=meta("epoch") ?: return@withLock false
             if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
-            try { pullCourses(epoch) }
+            val changed=try { pullCourses(epoch) }
             catch(e: EpochChanged) { return@withLock false }
             _connection.value="online"
-            _revision.value+=1
+            if(changed) _revision.update { it + 1 }
             true
         }
         if(!caughtUp) syncOnce()
@@ -212,8 +219,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
 
     private class EpochChanged: IllegalStateException("Epoch changed during catch-up")
 
-    /** Caller holds mutex, for both full synchronization and push catch-up. */
-    private suspend fun pullCourses(epoch: String) {
+    /** Caller holds mutex, for both full synchronization and push catch-up. Returns whether any course changed. */
+    private suspend fun pullCourses(epoch: String): Boolean {
+        var changed = false
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
@@ -222,19 +230,25 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 val quizThreads=if(PoolTrace.enabled) page.events.filter { it.type=="question_posed" }.mapNotNull { it.threadId }.distinct() else emptyList()
                 quizThreads.forEach { PoolTrace.mark(it,"events_read") }
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
+                if(page.events.isNotEmpty()) changed = true
                 quizThreads.forEach { PoolTrace.mark(it,"events_saved") }
                 cursor = page.throughSeq
             } while(page.hasMore)
-            if(projection(course).requiresServerSnapshot) {
+            // 不认识的事实类型要靠服务端投影；整份快照只在本地副本前进后重下，不是每次轮询都下。
+            val replicaSeq=q.replicaSeq(course).executeAsOne()
+            if(projection(course).requiresServerSnapshot && meta("serverProjectionSeq:$course") != "$epoch:$replicaSeq") {
                 val snapshot=transport.snapshot(course)
                 if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
                     q.putMeta("serverProjection:$course",LedgerJson.encodeToString(snapshot.projection))
                     val seq=q.replicaSeq(course).executeAsOne()
+                    q.putMeta("serverProjectionSeq:$course","$epoch:$seq")
                     cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
+                changed = true
             }
         }
+        return changed
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         // One quiz publishes several durable/state/card hints. Do not make the WS reader

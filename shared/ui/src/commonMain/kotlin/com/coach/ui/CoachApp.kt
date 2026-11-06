@@ -96,7 +96,7 @@ enum class AppTab(val label: String, val glyph: String) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }, settings: @Composable () -> Unit = {}) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}) {
     val currentSettings by rememberUpdatedState(settings)
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
@@ -152,6 +152,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                 OfflineBanner(ui, c)
                 val current = view
+                if (current != null) courseActions(current)
                 // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
                 val target = open?.let { (id, _) -> current?.kpAny(id) }
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the

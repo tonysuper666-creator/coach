@@ -50,6 +50,11 @@ fun weekPoints(events: List<Event>): List<WeekPoint> {
 /** Latest answered version of each choice; a successful retry removes it from the week's mistakes. A choice whose key nobody checked cannot be re-posed, so it is not listed. */
 fun weekMistakes(events: List<Event>, week: Int): List<Event> {
     val ids = weekPoints(events).filter { week in it.weeks }.map { it.id }.toSet()
+    return pendingChoiceMistakes(events, ids)
+}
+
+/** Also used by a knowledge-point export; exactly the week-review selection rules. */
+fun pendingChoiceMistakes(events: List<Event>, ids: Set<String>): List<Event> {
     val answered = events.filter { it.type == "answer_submitted" }.map { it.payload.str("attemptId") }.toSet()
     val voided = events.filter { it.type == "attempt_voided" }.map { it.payload.str("attemptId") }.toSet()
     val grades = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.associateBy { it.payload.str("attemptId") }

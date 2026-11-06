@@ -1,0 +1,99 @@
+[
+  {
+    "id": "formula",
+    "coverage": "带公式",
+    "stem": "【合成 S1·公式】需求函数 $Q=12-2P$，当 $P=3$ 时，$Q$ 是多少？",
+    "options": [
+      {
+        "optionId": "up",
+        "text": "$Q=18$"
+      },
+      {
+        "optionId": "down",
+        "text": "$Q=6$"
+      }
+    ],
+    "answer": "up",
+    "feedback": "合成讲解 S1：代入得到 $Q=12-2\\times3=6$。"
+  },
+  {
+    "id": "image",
+    "coverage": "带图",
+    "stem": "【合成 S2·带图】按下图蓝色线判断，价格增加时数量如何变化？\n\n![合成价格—数量示意图](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAPAAAACgCAIAAAC9uXYyAAADJ0lEQVR4nO3YPXLbMBSFUa/EdeqsMyvJJpmJiUkcRZbEHxDAxTmDUgJYfM17bwsEeWv9AXAmQRNF0EQRNFEETRRBE0XQRBE0UQRNFEETRdBEETRRBE0UQRNF0ESpGPT7t+/1Loe7BE0UQRNF0EQRNFEETRRBE0XQRGkZ9PuPn/VeZ06Ng15PvW9gNl0ELWvO0lHQsua4xkPh3aZlzW5dbDk0zVm6CLr8XtYc1lHQ5V+y5oDugi7/lTW7dBr0Yl5kl36DLpdomi16D7pcJWteM0bQ5UJZ88xIQZdrZc3Xxgu6XC5r7hk16MUahHsGDrq8omk+GT7o8pas+RASdHlR1tOLCrq8K+uJBQa9mBcnlhl0+QBNzyc56JWsp5If9ErWk5gl6JWs480V9ErWwWYMerEGyTVp0CtN55k66JWskwi6kHUGQf9D1qMT9C3z4tAEfZ+mByXoR2Q9HEE/J+uBCPpVsh6CoLeRdecEvZk1SM8EvZOm+yToQ2TdG0GfQNb9EPRpZN0DQZ/JvNicoM+n6YYEXYusmxB0XbK+mKCvIOvLCPo6sr6AoC9lDVKboBvQdD2CbkbWNQi6MVmfS9BdkPVZBN0L8+IpBN0XTR8k6B7JejdB90vWOwi6d7LeRNBjkPWLBD0Ma5BXCHowmn5M0EOS9VcEPTBZ/0/Qw5P1Z4JOYF78Q9A5NL0IOs/kWQs607RZCzrZhFkLOt9UWQt6CvOsQQQ9kRmaFvR0srMW9KRSsxb01PKyFvTswuZFQfNbTNOC5q+ArAXNraGzFjT3DZq1oHlkuKwFzRNjrUEEzUtGaVrQbNB/1oJms56zFjQ79Zm1oNmvw3lR0BzVVdOC5hydZC1oztQ8a0FzvoZZC5pammQtaCq6fg0iaKq7smlBc5FrshY0l6qdtaBpoF7WgqaNSk0LmpYETSBBE0jQcEvQRBE0UQRNFEETRdBEETRRBE0UQRNF0EQRNFEETRRBE0XQRBE0USoGvXw07TgHz6bk6gYNFxM0UQRNFEETRdBEETRRBE0UQRNF0EQRNFEETRRBE0XQRBE0UQRNFEETRdBEETRRBE2UX7ICrHeGoH3dAAAAAElFTkSuQmCC)",
+    "options": [
+      {
+        "optionId": "up",
+        "text": "数量上升"
+      },
+      {
+        "optionId": "down",
+        "text": "数量下降"
+      }
+    ],
+    "answer": "up",
+    "feedback": "合成讲解 S2：图中的蓝色线表示价格与数量反向变化；仅为合成示意图。"
+  },
+  {
+    "id": "long",
+    "coverage": "超长题干",
+    "stem": "【合成 S3·超长题干】第1段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第2段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第3段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第4段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第5段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第6段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第7段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第8段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第9段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第10段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第11段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第12段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第13段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第14段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第15段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第16段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第17段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第18段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第19段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第20段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第21段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第22段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第23段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第24段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第25段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第26段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第27段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第28段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第29段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。第30段合成条件：保持其他因素不变，沿同一条向下倾斜的需求曲线观察价格和数量。最终问题：价格上升时数量如何变化？【长题干结束】",
+    "options": [
+      {
+        "optionId": "up",
+        "text": "数量上升"
+      },
+      {
+        "optionId": "down",
+        "text": "数量下降"
+      }
+    ],
+    "answer": "up",
+    "feedback": "合成讲解 S3：三十段条件都说明其他因素不变，数量下降。"
+  },
+  {
+    "id": "empty",
+    "coverage": "空选项",
+    "stem": "【合成 S4·空选项】历史合成记录未保存选项，禁止补造选项。",
+    "options": [],
+    "answer": "未保存选项的原作答",
+    "feedback": "合成讲解 S4：保留原作答和讲解，不生成不存在的选项。"
+  },
+  {
+    "id": "ordinary",
+    "coverage": "普通单选基准",
+    "stem": "【合成 S5·普通单选】价格上升且需求曲线向下，数量如何变化？",
+    "options": [
+      {
+        "optionId": "up",
+        "text": "数量上升"
+      },
+      {
+        "optionId": "down",
+        "text": "数量下降"
+      }
+    ],
+    "answer": "up",
+    "feedback": "合成讲解 S5：价格与数量反向变化。"
+  },
+  {
+    "id": "multiple",
+    "coverage": "多选排除",
+    "format": "MULTIPLE_CHOICE",
+    "stem": "【合成 S6·多选】选择所有下降的数量；此多选题须与周错题页同步排除。",
+    "options": [
+      {
+        "optionId": "up",
+        "text": "数量上升"
+      },
+      {
+        "optionId": "down",
+        "text": "数量下降"
+      }
+    ],
+    "answer": [
+      "up",
+      "down"
+    ],
+    "feedback": "合成讲解 S6：本应用周错题仅选择单选；不得由导出擅自扩大集合。"
+  }
+]

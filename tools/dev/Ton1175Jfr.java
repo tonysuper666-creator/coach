@@ -8,6 +8,35 @@ import jdk.jfr.consumer.RecordingFile;
 
 /** Closed-schema inspection of the recording itself, never a caller's count flag. */
 class Ton1175Jfr {
+    // Observed in the old 8d3608f managed JVM's real, untruncated recording.
+    // This classifier is not wired into the idle gate yet: that must first
+    // bind bridgePort to the trusted staged plist rather than caller evidence.
+    static final String HEALTH_FRAME = "com.coach.server.ChildServices$supervise$1#invokeSuspend";
+    static final long MAX_HEALTH_BYTES = 1024;
+
+    static boolean healthRead(String address, int port, long bytes, boolean truncated,
+                              List<String> frames, int bridgePort) {
+        if (!"127.0.0.1".equals(address) || bridgePort <= 0 || bridgePort > 65535
+                || port != bridgePort || bytes <= 0 || bytes > MAX_HEALTH_BYTES
+                || truncated || frames == null || frames.isEmpty()) return false;
+        boolean health = false;
+        for (String raw : frames) {
+            if (raw == null) return false;
+            String frame = raw.replace('/', '.');
+            String lower = frame.toLowerCase(Locale.ROOT);
+            if (lower.contains("bridgeclient") || lower.contains("io.ktor.server")
+                    || lower.contains("routing") || lower.contains("session")) return false;
+            if (HEALTH_FRAME.equals(frame)) health = true;
+        }
+        return health;
+    }
+
+    static long healthReadLimit(long windowNanos) {
+        need(windowNanos > 0);
+        long period = Duration.ofSeconds(10).toNanos();
+        return Math.addExact(Math.floorDiv(Math.addExact(windowNanos, period - 1), period), 2);
+    }
+
     static void need(boolean condition) {
         if (!condition) throw new IllegalArgumentException("JFR evidence rejected");
     }

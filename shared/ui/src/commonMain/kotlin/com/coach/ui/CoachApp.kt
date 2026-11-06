@@ -95,7 +95,7 @@ enum class AppTab(val label: String, val glyph: String) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
@@ -169,7 +169,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }

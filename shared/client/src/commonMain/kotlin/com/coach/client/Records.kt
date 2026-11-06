@@ -126,7 +126,7 @@ class RecordsView(private val events: List<Event>) {
     }
 
     private fun passedReason(m: Mastery, cause: Event) = when (m.passedBy) {
-        "LEGACY" -> "来自 DeepTutor 的已通过（迁移时锁存），不依赖新的作答。"
+        "LEGACY" -> "来自 DeepTutor 的已通过（迁移，时间近似），不依赖新的作答。显示的时间并非实际通过时间。"
         "LEARNER" -> "你手动标记为已通过。"
         else -> "最近 3 次有效首答全部答对，且 3 道题互不相同。"
     }

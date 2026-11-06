@@ -31,7 +31,7 @@ private const val CATCH_UP_PAGE = 64
 // Half the client limit, measured as UTF-16 length x 3, which never undercounts UTF-8 bytes.
 private const val CATCH_UP_BYTES = 512 * 1024
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) {
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null, updates: AppUpdates = AppUpdates()) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
@@ -64,6 +64,7 @@ fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
         return false
     }
     routing {
+        appUpdates(updates)
         post("/v1/usage") {
             val observer = observation ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
             // Bound streamed/chunked bodies as well as Content-Length before parsing.

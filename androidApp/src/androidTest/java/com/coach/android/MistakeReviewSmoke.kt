@@ -108,8 +108,8 @@ class MistakeReviewSmoke {
             submitAnswers()
             scrollTo("本组 ${3 - wrongCount} / 3 题正确",substring=true)
             step("initial answers graded")
-            click(waitText("← 今天"))
-            } else click(waitText("← 今天",15_000))
+            returnToToday()
+            } else returnToToday()
             val first = group("kp:$kp")
             val reviewButton = waitText("到期复习")
             step("open mistake list")
@@ -334,6 +334,16 @@ class MistakeReviewSmoke {
             Thread.sleep(100)
         }
         throw AssertionError("提交按钮未出现")
+    }
+    /** On wide layouts Today remains alongside the study pane and needs no back button. */
+    private fun returnToToday() {
+        val end=SystemClock.elapsedRealtime()+15_000
+        while(SystemClock.elapsedRealtime()<end) {
+            find("到期复习")?.let { return }
+            find("← 今天")?.let { click(it);return }
+            Thread.sleep(100)
+        }
+        throw AssertionError("无法返回今天：未找到今天面板或返回按钮")
     }
     /** The list can preserve its scroll position: any visible card establishes that the page loaded. */
     private fun waitQuestionPage(timeout: Long=10_000) {

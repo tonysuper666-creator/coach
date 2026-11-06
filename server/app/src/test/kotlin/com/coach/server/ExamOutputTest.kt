@@ -26,16 +26,20 @@ internal class ExamOverlap(documents: List<String>) {
         "OОΟ", "PРΡ", "SЅ", "TТΤ", "XХΧ", "YУΥ", "ZΖ", "aаα", "bвβ", "cсϲ", "dԁ", "eеε",
         "hнһ", "iіι", "jјϳ", "kкκ", "lӏ", "mм", "oоο", "pрρ", "qԛ", "sѕ", "tтτ", "uυ",
         "vѵν", "wԝ", "xхχ", "yу").flatMap { group -> group.drop(1).map { it to group.first() } }.toMap()
+    // Independent regex implementation of the English-word criterion: formula
+    // variables and control names are not prose; articles/pronouns still count.
+    private fun english(text: String) = Regex("[a-z]+").findAll(text).map { it.value }
+        .filter { it.length > 1 || it == "a" || it == "i" }.toList()
     private fun words(text: String): List<String> {
         val decomposed = Normalizer.normalize(text, Normalizer.Form.NFKD)
         val folded = decomposed.map { lookalikes[it] ?: it }.joinToString("")
             .replace(Regex("\\\\[A-Za-z]+"), "")
             .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}*_~`{}$]"), "")
             .lowercase(java.util.Locale.ROOT)
-        return Regex("[a-z]+").findAll(folded).map { it.value }.toList()
+        return english(folded)
     }
-    private fun literal(text: String) = Regex("[a-z]+").findAll(
-        Normalizer.normalize(text, Normalizer.Form.NFKC).lowercase(java.util.Locale.ROOT)).map { it.value }.toList()
+    private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKC)
+        .replace(Regex("\\\\[A-Za-z]+"), "").lowercase(java.util.Locale.ROOT))
     private val windows = documents.flatMap { words(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
     private val literalWindows = documents.flatMap { literal(it).windowed(8).map { w -> w.joinToString(" ") } }.toHashSet()
     fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
@@ -130,6 +134,19 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 
 class ExamOutputTest {
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
+    @Test fun independentCheckerCountsEnglishWordsAndDetectsInsertedFormulaFillers() {
+        val formula = "\$\$\\frac{Q_2-Q_1}{Q_2+Q_1} / \\frac{P_2-P_1}{P_2+P_1}\$\$"
+        val sentence = "I saw a bright comet cross the horizon."
+        val checker = ExamOverlap(exams + formula + sentence)
+        assertFalse(checker.hit(formula))
+        assertTrue(checker.hit(sentence))
+        assertTrue(checker.hit(exams.first()))
+        for (filler in listOf("x", "\$Q_2\$", "\\frac{Q_2}{P_2}"))
+            assertTrue(checker.hit(exams.first().split(" ").joinToString(" $filler ")))
+        assertTrue(checker.hit(exams.first().split(" ").joinToString(" ") { "\\text{$it}" }))
+        assertTrue(checker.hit(exams.first().replace(" ", "_")))
+    }
+
     @Test fun bufferedEnglishPrefixDoesNotTurnActiveChineseStreamingIntoAStall() = runBlocking {
         StubTutor().use { stub ->
             ExamHarness(Files.createTempDirectory("exam-buffered-stall"), ExamMaterials.fromTexts(exams),

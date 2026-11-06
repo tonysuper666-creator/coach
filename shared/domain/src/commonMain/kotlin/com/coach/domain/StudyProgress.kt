@@ -33,7 +33,7 @@ fun Projection.today(epochMillis: Long, kpId: String? = position.current): Today
     val text = if (points.total == 0) "尚未设置期中分值，暂不能计算覆盖分。"
         else "按期中分值：已通过覆盖 ${points.passed} / ${points.total} 分，稳固 ${points.solid} 分"
     return TodayProgress(day, lastSeq, points, text,
-        review.filterValues { it.dueDay <= day }.entries.sortedWith(compareBy({ it.value.dueDay }, { it.key })).map { it.key },
+        reviewsOn(day).keys.toList(),
         kpId, kpId?.let { mastery[it] },kpTitles)
 }
 

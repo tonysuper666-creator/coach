@@ -50,6 +50,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val journal = mutableMapOf<Long, Journal>()
     val firstReview = mutableMapOf<Pair<String,Long>, String>()
     val outline = mutableListOf<Kp>()
+    val activeKpIds = linkedSetOf<String>()
     val overrides = mutableMapOf<String, String>()
     val legacy = mutableSetOf<String>()
     val pending = mutableMapOf<String, Attempt>()
@@ -213,8 +214,23 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             }
             "quick_ask_opened" -> quickAsks[p.num("day")] = QuickAskThread(requireNotNull(e.threadId), e.courseId, p.num("day"), p.str("kpId").ifBlank { null })
             "outline_revised" -> {
+                (p["knowledgePoints"] as? JsonArray)?.let { points ->
+                    activeKpIds.clear()
+                    for (v in points) {
+                        val point = v as? JsonObject ?: continue
+                        val id = point.str("id", point.str("kpId"))
+                        if (id.isNotBlank()) {
+                            activeKpIds.add(id)
+                            point.str("title", point.str("name")).takeIf { it.isNotBlank() }?.let { kpTitles[id] = it }
+                        }
+                    }
+                }
                 for (v in (p["ops"] as? JsonArray).orEmpty()) {
                     val o = v.jsonObject; val id = o.str("kpId", o.str("id"))
+                    when (o.str("op", "add")) {
+                        "add" -> if (id.isNotBlank()) activeKpIds.add(id)
+                        "retire", "remove", "delete" -> activeKpIds.remove(id)
+                    }
                     o.str("title").takeIf { it.isNotBlank() }?.let { kpTitles[id] = it }
                     val i = outline.indexOfFirst { it.id == id }
                     when(o.str("op", "add")) {
@@ -323,7 +339,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
-    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
+    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),

@@ -11,7 +11,7 @@ class ReviewScheduleTest {
         assertEquals(3, compressed.intervalDays)
         assertEquals(103, compressed.dueDay)
         assertEquals(compressed, compressed.onDay(103, 110))
-        assertEquals(101, compressed.onDay(109, 110).dueDay)
+        assertEquals(103, compressed.onDay(109, 110).dueDay) // overdue since entering the window, not since the old anchor
         assertEquals(1, compressed.onDay(110, 110).intervalDays)
         assertEquals(normal, compressed.onDay(111, 110))
         assertEquals(normal, compressed.onDay(103, 130))
@@ -39,5 +39,13 @@ class ReviewScheduleTest {
         val normal = Review(day + 10, 15)
         assertEquals(15, normal.onDay(day - 1, day + 7).intervalDays)
         assertEquals(3, normal.onDay(day, day + 7).intervalDays)
+    }
+
+    @Test fun compressionPreservesRealOverdueAndAccumulatesFromWindowEntry() {
+        val normal = Review(dueDay = 120, intervalDays = 30, lastReviewDay = 90)
+        assertEquals(113, normal.onDay(113, 120).dueDay)
+        assertEquals(113, normal.onDay(116, 120).dueDay)
+        assertEquals(111, Review(dueDay = 111, intervalDays = 30).onDay(113, 120).dueDay)
+        assertEquals(115, normal.copy(snoozedUntilDay = 115).onDay(113, 120).dueDay)
     }
 }

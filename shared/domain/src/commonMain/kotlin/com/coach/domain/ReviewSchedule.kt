@@ -23,7 +23,8 @@ fun courseExamDay(events: List<Event>, zone: String): Long? =
 /**
  * Exam compression is a date-dependent overlay, never a destructive change to the normal schedule.
  * During days 7..0, cap the interval at max(1, floor((daysToExam - 1) / 2)) and
- * bring the due date forward from the normal interval's anchor, no later than the day before exam.
+ * bring the due date forward from the normal interval's anchor, no earlier than entry into
+ * the window unless the normal schedule was already due before then.
  * Outside that window (including after exam), restore the normal schedule. Reapplying is idempotent.
  */
 fun Review.onDay(day: Long, examDay: Long?): Review {
@@ -34,8 +35,14 @@ fun Review.onDay(day: Long, examDay: Long?): Review {
         dueDay = normalDue, intervalDays = normalInterval, baseDueDay = null, baseIntervalDays = null)
     val interval = normalInterval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1))
     return copy(dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE,
-        minOf(normalDue, normalDue - normalInterval + interval, examDay - 1)),
+        minOf(normalDue, maxOf(examDay - 7, minOf(normalDue - normalInterval + interval, examDay - 1)))),
         intervalDays = interval, baseDueDay = normalDue, baseIntervalDays = normalInterval)
 }
 
-fun Projection.reviewsOn(day: Long, examDay: Long?): Map<String, Review> = review.mapValues { it.value.onDay(day, examDay) }
+/** The actionable queue for a course day, shared by chat, UI and offline selection. */
+fun Projection.reviewsOn(day: Long): Map<String, Review> = review
+    .filterKeys { it in (activeKpIds ?: kpTitles.keys) }
+    .mapValues { it.value.onDay(day, examDay) }
+    .filterValues { it.dueDay <= day && it.lastReviewDay != day }
+    .entries.sortedWith(compareBy({ it.value.dueDay }, { it.key }))
+    .associate { it.key to it.value }

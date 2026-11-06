@@ -1,234 +1,213 @@
 # Five-feature release train (TON-1254)
 
-This branch combines mistake review, weekly study, mistake explanations, streaming
-rendering, and week selection on Today. This delivery covers integration and an
-isolated binary deployment/rollback rehearsal. Production remains on its existing
-release until the device and deployment gates below have passed.
+PR #89 integrates mistake review, weekly study, mistake explanations, streaming
+rendering and Today week selection. It remains draft. This document records the
+integration and isolated rehearsal; production acceptance is still blocked.
 
-## Pinned train
+## Pins and integration
 
-Base: `8e644b587ad2760e918574d07dc6af3d62e3a4b6` (main, including PR84).
-Heads were read from GitHub on 2026-11-06. The PR numbers alone are not pins.
+The reviewed train was rebased from `12bad60` onto the requested main commit
+`37f89eda20068e2197137b3d3f8aaa814fca5a7d`. Later main commits are outside this
+review pin. No production switch or physical-device operation is part of this run.
 
-| PR | Pinned head | Treatment/order |
+| Source | Pinned head | Integration |
 | --- | --- | --- |
-| #42 | `8f0459a190d6014c6a1e89a4ee674e55f7ad4521` | Earlier mistake review; ancestor of the integrated train. No additional merge. |
-| #50 | `ab139bf48f70f020479fd7acb4f6af2dd947537d` | Earlier review/trace integration; ancestor. No additional merge. |
-| #51 | `887a4d12ade782b1bdd8d2f1e684dbb990a05fa0` | Its non-merge patches are already included. Its merge commit need not be replayed. |
-| #57 | `01f5f54400854d9ca866982435584a136d9b029c` | Weekly study/retired titles integrated upstream; two remaining commits are patch-equivalent (`git cherry` reports `-`), zero unique patches. |
-| #58 | `bc24e9864e4e3804f8ebe074fc6811400a657dcf` | Streaming/replay optimization; ancestor of #59 and #61. |
-| #61 | `d5a8e5accf05195a2d4737efb11bf89e22d27261` | Merge first onto main: Today week selection, integrated study/review/rendering and newer endpoint guard. |
-| #59 | `8a49430a0bbb99baa016983f6890991d6c572212` | Merge second: latest canonical review-thread fix and regression tests. |
-| #85 | `e1ec86663e156f8a8401820a0caed129c7a1dd21` | Merge third: rendering aggregate gate, including reclaim sampler `7e150d6`. |
+| #42 | `8f0459a190d6014c6a1e89a4ee674e55f7ad4521` | Included earlier mistake-review patches. |
+| #50 | `ab139bf48f70f020479fd7acb4f6af2dd947537d` | Included earlier trace/review patches. |
+| #51 | `887a4d12ade782b1bdd8d2f1e684dbb990a05fa0` | Non-merge patches already integrated. |
+| #57 | `01f5f54400854d9ca866982435584a136d9b029c` | Integrated; source PR closed into #89. |
+| #58 | `bc24e9864e4e3804f8ebe074fc6811400a657dcf` | Integrated streaming/replay patches; source PR closed. |
+| #59 | `41b16315b3dbe4e5f730f663bd739964925374c5` | Earlier integration plus `b5fd3a5` and `41b16315` cherry-picked as `6615f98` / `d9013ed`. |
+| #61 | `db96ae7cd31fd59a8a8676bf47b0c9a213d180b3` | Earlier integration plus `db96ae7` cherry-picked as `4e0b457`; duplicate advancement logic retained once. |
+| #85 | `e1ec86663e156f8a8401820a0caed129c7a1dd21` | Rendering aggregate gate and reclaim sampler integrated; source PR closed. |
 
-The final branch must have #42/#50/#58/#59/#61/#85 as ancestors, no unique
-non-merge patches from #51/#57, and the newest main changes retained.
+After the semantic cherry-picks, ancestry merges `001f07f` and `3b3b790`
+record the #59/#61 source heads. Both merges have the same tree as their first
+parent: all source behavior had already been integrated, with the current main
+navigation and corrected test imports/types preserved. `git cherry HEAD` for
+both latest source heads emits zero unique patches.
 
-## Conflict decisions
+## Review repairs and conflict decisions
 
-Three files conflicted while merging #59 after #61:
+- `CourseView` retains main's timezone/04:00 logic-day behavior and adds a separate
+  `reviewThreadId`. `PROJECTION_VERSION` is **8**, invalidating older projections.
+- `CoachApp` retains main's mock-exam entry and review routing, plus study back
+  navigation imported from #59. `ReviewScreen` selects Due when due questions
+  exist, otherwise Mistakes. Main's `ReviewEntryTest` and `ReviewQueueSmoke` are
+  unchanged. Its due auto-start, exam notice and mock-exam entry remain present.
+- Mistake retry opens the independent review thread with `review=true`, chooses
+  unseen RECALL questions and leaves the learning Continue thread unchanged.
+  The client shows a visible timeout after 15 seconds if an old server silently
+  ignores `tutor.retryMistakes`; cards/errors cancel that timer.
+- Mistake cards deduplicate by question ID. The unchanged reviewer duplicate
+  test is included. Week 7 remains visible but unavailable during the midterm
+  exemption; both direct buttons and dropdown obey the same availability rule.
+- `CoachActivity` retains main's shared endpoint resolver and requires an explicit
+  isolated launch port. Invalid intents fail closed. Rejected-host/port tests
+  remain, adapted only to the resolver's current signature.
+- `ChatService` retains staged preparation/bridge/first-word diagnostics and
+  privacy filtering. Both sets of `ChatFlowTest` regression tests remain.
+- #59/#61's compact layout, source page, accessibility and passed-point navigation
+  tests are retained. Test-only fixes import `DpRect.height` and type nullable
+  expected lists explicitly; their assertions are preserved.
 
-- `CoachActivity.kt`: retain #61's shared `ServerEndpoint.kt` resolver and
-  `COACH_ISOLATED_LAUNCH_PORT`. Card builds require an explicit safe launcher port
-  or a valid intent. Invalid intents fail closed. Adapt #59's additional tests
-  to the shared resolver, retaining their rejected-destination cases.
-- `ChatService.kt`: retain the newer staged diagnostics from #61 (`e418ba9`).
-  Model input preparation occurs before `prepared`; bridge request preparation
-  occurs before `bridge_start`; first-word diagnostics stay tied to the first
-  upstream when the parallel lesson finishes earlier.
-- `ChatFlowTest.kt`: retain both staged diagnostic regression tests, including
-  #59's queue/TTFT correlation and filtered-content privacy assertions.
+The private migration helper now compares every durable SQLite table, including
+question/key/source/offline-pack/thread data, future tables, binary values and
+SQLite/FTS bookkeeping. Only rebuildable `projection_cache` is excluded. The
+known v6-to-v7 visibility backfill is normalized on the v6 side only. A durable
+write after migration refuses restoration, even if the event watermark did not
+change. Restoration requires a stopped server, a valid v6 backup and current v7;
+no manual `user_version` downgrade is used. This is an exclusively owned private
+rehearsal helper, not a production restore or seal-protocol alternative.
 
-`ReviewScreen.kt` and its canonical-thread test merge cleanly. A bound KP uses
-the existing ledger thread, avoiding the server's one-thread-per-KP rejection.
-No server guard is relaxed. The imported endpoint test uses a synthetic DNS name.
+## Reproduce the gates
 
-## Reproduce local gates
-
-Use JDK 17 and the local SDK/configuration already installed on the build host.
-Do not use a production package or port for the train APK.
+Use JDK 17 and the installed Android SDK. All Gradle, JVM rehearsal and emulator
+work goes through `tools/dev/heavy`; its shared lock must never be bypassed.
 
 ```sh
-tools/dev/heavy ./gradlew check :androidApp:assembleDebug \
-  :androidApp:assembleDebugAndroidTest :server:app:installDist \
-  -PcoachApplicationId=com.coach.android.ton1254 \
+tools/dev/heavy --priority release ./gradlew check \
+  :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:app:installDist \
+  -PcoachApplicationId=com.coach.android.ton1291 \
+  -Pcoach.course=ton1291-synthetic-review \
   -Pcoach.port=29254 -Pcoach.isolatedLaunchPort=29254 --console=plain
+python3 -W error::ResourceWarning -m unittest \
+  tools.dev.test_release_train tools.dev.test_release_train_review
 python3 tools/render/check-android.py --self-test
 python3 tools/render/acceptance.py --self-test
-npm ci --omit=dev --prefix tools/mathsvc
+python3 tools/render/selftest.py
 python3 -m unittest tools.dev.test_ton1175_switch tools.dev.test_ton1175_verify \
   tools.dev.test_ton1175_launchd tools.dev.test_ton1175_supervise \
   tools.dev.test_service_child tools.dev.test_first_word_report
 ```
 
-`check` includes the real isolated HTTP/WS activity-coverage protocol suite.
-That suite ran 22 tests successfully (exit 0).
-Opt-in real CLI/source replays and live device tests are separate gates.
-An initial offline attempt lacked three cached Android dependencies; resolve
-them normally rather than removing checks. Python tests must be invoked as
-modules so relative imports resolve; the dependency verifier needs local npm
-dependencies. These setup failures do not count as passes.
+Current results are recorded below and in the sanitized issue attachment. Raw
+build logs, test reports, private copies and command outputs remain in workdir.
+Historical 510-test results from before this rebase are not current-head evidence.
 
-Recorded on 2026-11-06: the complete Gradle command exits 0 in 5m43s
-(221 tasks). Its 102 JUnit suites contain 510 tests, with zero failures,
-errors or skips. Deployment/tool Python tests: 91 passed (exit 0).
-Both rendering verifier self-tests: 5 passed each (exit 0). The installed
-render environment's `python tools/render/selftest.py`: 265 formulas,
-zero missed mutations (exit 0). Android instrumentation APK assembly passes;
-instrumentation tests have not been executed on a device by this delivery.
-DESIGN 12.1's tracked-file scan has the same four hits as the pinned main:
-one documented scan command and three synthetic test-fixture occurrences.
-No new privacy-pattern hits were introduced. No private database, token,
-course, answer, raw log or screenshot is added to the branch.
+| Gate at code head `7eb9d66` | Result |
+| --- | --- |
+| Full Gradle check + debug APK + instrumentation APK + installDist | **exit 0**, 221 tasks; 600 JUnit tests, 0 failures/errors/skips. |
+| Server app / core / store | 167 / 28 / 38 tests, all passed (included in 600). |
+| Shared UI / client / domain | 109 / 70 / 55 tests, all passed (included in 600). |
+| ReviewEntry / TodayWeekSelection / reviewer mistake dedup / client retry timeout | 3 / 5 / 1 / 3 tests, all passed; main ReviewEntry and ReviewQueueSmoke unchanged. |
+| Restore helper + unchanged reviewer fixture | **exit 0**, 7 test methods, including all five reviewer non-event-write cases. |
+| Deployment tooling | **exit 0**, 91 tests. |
+| Render self-tests / formula mutation | **exit 0**, 5 + 5 self-tests; 265 formulas, zero missed mutations. |
+| Clean fixed `8e644b5` full check + installDist | **exit 0**, 156 tasks. |
+| Clean additional `37f89ed` full check + installDist | **exit 0**, 156 tasks. |
+| Fixed `8e644b5` synthetic private-copy rollback | **exit 1**, independent review-context readback fails (details below). |
+| Additional `37f89ed` synthetic private-copy rollback + failure recovery | **exit 0**, metadata below; baseline not yet approved. |
+| ReviewQueueSmoke + MistakeReviewSmoke emulator | **unverified**: global emulator lane unavailable; owned queued process cancelled/reaped, **exit 130** before launch. |
+| Actual learner private-copy data and credential acceptance | **unverified**: no authorized existing copy supplied. Production dataDir was not read. |
 
-The last endpoint-test fixture edit (synthetic DNS instead of a synthetic IP)
-was made after that successful build compiled its tests. Neither that rerun
-nor the new JVM readback probes have been compiled or executed. The one-time
-11:01 UTC resource-window wakeup was consumed on 2026-11-06; another task
-continued to own the shared heavy-work lock. The continuation made one queued
-`tools/dev/heavy bash ../ton1254-final-gates.sh` attempt, cancelled and reaped
-it at 11:18 UTC (exit 143), before any of its three gates began. That is a
-cancelled queue, not a Gradle failure or pass. No owned work remains running,
-and no additional timed/periodic wakeup is registered. The clean compatible
-baseline check/build and compatible rollback/fault-recovery rehearsal below
-remain unverified. This is a partial delivery, kept draft.
+The Gradle result aggregates the final successful incremental invocation and its
+up-to-date successful test reports; all source changes were compiled/tested, and
+both APKs were built. Earlier test compilation and Today-card matcher failures
+were corrected without weakening assertions. The final code run is `7eb9d66`;
+the following delivery change updates this document only.
 
-The continuation's code revision is `ac68b58077454a9e3593ece0dac3d91d5f8c8ce4`.
-It adds the independent review's stronger gates:
-the selected rollback binary's client reads candidate wrong answers and cards,
-and the first schema migration has separate zero-write/with-write scenarios.
-`python3 -W error::ResourceWarning -m unittest tools.dev.test_release_train`
-passes four tests (exit 0), including new events, same-watermark event edits,
-speech-only writes, changed credential hashes, a running server, and the wrong
-backup schema. The zero-write case restores the actual table schema as well
-as its version, removing the synthetic v7 visibility column. This small guard
-test does not validate the JVM rehearsal. QA-C acceptance and Architect's
-security review still require the concrete full-gate and rehearsal results;
-their earlier preliminary reviews do not establish acceptance of this head.
+The additional `37f89ed` rehearsal retained 26 candidate events, the original
+synthetic event and paired-token hashes, with integrity `ok`. Original credentials
+were accepted on seven starts. Four successful phases each completed a lecture
+and three-question quiz. One wrong answer and three unseen retry cards remained
+readable after rollback and injected exit-71 recovery. The original v6 binary's
+v7 refusal was observed (exit 1). Nine owned JVM children were reaped, no forced
+kill was needed, and zero isolated listeners remained. Temporary rehearsal copies
+were removed. This is synthetic input evidence; it does not validate real learner
+records or approve `37f89ed` as the new fallback.
 
-## Isolated deployment and rollback
+## Rollback compatibility and private inputs
 
-The installed `5ef9989` starts against the v6 production copy. The candidate
-also starts and completes the lecture/quiz, then upgrades that copy to v7.
-Returning to the installed binary exits 1 with
-`Database schema is newer than this server`. This is a real failed rehearsal,
-not a usable rollback path. The v7 source-visibility migration already exists
-on the pinned main, rather than being introduced by these train merges.
-Do not lower `user_version` or restore an older snapshot to mask this failure.
+The former fixed fallback `8e644b587ad2760e918574d07dc6af3d62e3a4b6` builds
+successfully but **fails** the strengthened rehearsal: candidate-period mistake
+retry creates an independent review context, and that baseline's `tutor.open`
+ignores `review=true`. Reopening that context triggers the one-learning-thread
+per-KP guard and returns `msg.error`. Do not drop the context/readback check or
+relax the server guard to make rollback pass.
 
-### Two-stage production transition and paired phone rollback
+The installed old binary `5ef99895d9fad277bfbdbb97b64eda6a551242e9` is still
+incompatible with v7 and must reject it. Do not lower the version or discard
+candidate writes by restoring an earlier snapshot. The requested rebase main
+`37f89ed` includes independent review threads and passed as an additional
+synthetic fallback candidate. It does not silently replace the previously fixed fallback;
+its choice and deployment still need coordinator/Architect acceptance.
 
-Stage A must first take the installed v6 release to the independently accepted
-`8e644b5` main baseline. Before admitting writes, its automatic
-`backups/pre-V007-*/coach.sqlite` is a possible migration fallback: stop the
-server, require the same maximum event sequence **and full event-row digest**,
-and require unchanged speech and credential rows. Only this zero-write window
-may restore that exact pre-migration backup and restart the original binary.
-Any event append, edit, message, or credential change closes the window; refuse
-restoration and retain the v7 data for forward repair. Never edit `user_version`.
-The harness tests both outcomes on a separate private clone, including actual
-old-binary authentication after the zero-write restore. Its helper is for a
-stopped, exclusively owned private rehearsal, not a production restore tool or
-an alternative to TON-1193/TON-1175's approved switch/seal protocol.
+The harness **requires** an explicit `--private-data-dir`, `--old-distribution`
+and `--old-head`. It never discovers the production data directory or installed
+release descriptor. A live production path and symlinked inputs are refused.
+No production dataDir was read in this repair run. An existing authorized private
+production copy was unavailable, so current rehearsal input is **synthetic v6**:
+one original synthetic event and an original paired credential hash. This proves
+the machinery, not compatibility with the learner's actual original data/token.
+The latter acceptance remains unverified until a private copy is supplied.
 
-After Stage A is accepted and at least one real learning session has completed
-successfully on that baseline, Stage B may install the feature train. Stage B's
-fallback is the compatible baseline on the **same current v7 database**; retain
-every train-period learner write. `8e644b5` is not yet a proven production
-baseline, and neither stage is authorized by this document alone.
-
-Server and phone versions must roll back together. The baseline server does
-not handle the train APK's `tutor.retryMistakes` command; it silently ignores
-that command and the new phone can wait without feedback. Do not leave the
-train APK paired with the baseline after rollback. Prepare the reviewed,
-matching prior APK and preserve its local state/credentials; paired rollback
-and user-visible recovery still require the owning device cards' acceptance.
-This rehearsal neither installs an APK nor claims that device gate passed.
-
-Build a compatible fallback from the clean, pinned main baseline, keeping
-the installed binary separately. This fallback contains main's schema and
-source-visibility fixes, without this train's additional feature merges.
+Build a clean fallback checkout with `check :server:app:installDist`, then run:
 
 ```sh
-git worktree add --detach ../coach-rollback-base 8e644b587ad2760e918574d07dc6af3d62e3a4b6
-# In that checkout, with the installed SDK configuration and JDK 17:
-tools/dev/heavy ./gradlew check :server:app:installDist --console=plain
-# Back in the train checkout:
 tools/dev/heavy python3 tools/dev/rehearse-release-train.py \
-  --rollback-checkout ../coach-rollback-base \
-  --rollback-head 8e644b587ad2760e918574d07dc6af3d62e3a4b6 \
-  --out release-train-report.json
+  --private-data-dir /PRIVATE/COPY/data \
+  --old-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
+  --old-head 5ef99895d9fad277bfbdbb97b64eda6a551242e9 \
+  --rollback-checkout /PRIVATE/CLEAN-BASELINE \
+  --rollback-head FULL_ACCEPTED_BASELINE_SHA \
+  --out /PRIVATE/OUTPUT/sanitized-summary.json
 ```
 
-The command reads the installed release descriptor, copies that distribution,
-copies the candidate distribution, takes a SQLite online backup through a
-readonly connection, and copies the token into a private temporary directory.
-It cancels queued/running jobs **only in the copy**. All exercised courses,
-questions, answers and bridge completions are synthetic. Pending original
-course work is never sent to a bridge. Source lookup and managed services are
-disabled, listeners bind only loopback, and protected ports are rejected.
+The untracked workdir runner `ton1254-final-gates.sh` likewise requires explicit
+private input/distribution/baseline environment variables. It runs candidate
+full gates, clean baseline gates and the rehearsal sequentially in one heavy
+invocation. It has no production-directory fallback.
 
-A temporary atomic `current` symlink selects installed → candidate. The
-installed binary's schema rejection is explicitly reproduced, then the
-pointer selects the compatible main baseline. Each
-successful phase starts a real JVM, authenticates with the original desktop
-token, completes a synthetic lecture and a three-card quiz within 300 seconds,
-then stops and reaps that child. An injected exit-71 release fails readiness;
-the pointer returns to the compatible baseline and a fourth lecture/quiz
-succeeds. The same copied
-database is used throughout: rollback never restores an earlier database.
-All original event rows and paired-device token hashes must remain unchanged,
-candidate events must survive rollback, and SQLite integrity must remain `ok`.
-The candidate deliberately answers one question incorrectly, then explicitly
-requests three unseen retry questions. After both rollback and failure
-recovery, the harness reads its full event payloads, pending retry attempts,
-using the selected distribution's actual shared client projector. The train
-client separately reconstructs its retained mistake and explanation from the
-rollback server's response (the old client has no new mistake list). It also
-reads every original course's snapshot, today progress and
-mistake projection, and opens each pre-existing tutor context/history without
-asking for teaching or sending a bridge request. Responses stay private;
-only counts leave the copy. A `msg.error` fails these protocol checks.
-The report contains only metadata, hashes and aggregate counts. Temporary
-copies/logs are deleted and all owned listeners/processes are collected.
-JVM home/temp directories are also isolated; inherited JVM option variables
-are cleared, preventing fallback to production configuration or math files.
+The real JVM rehearsal keeps one copied database across old, candidate, rollback
+and injected-failure recovery. Each successful phase performs a synthetic lecture
+and three-question quiz. Candidate also answers one question incorrectly and
+requests three unseen RECALL questions on its review thread. Rollback/recovery
+must read candidate wrong answers, pending retry cards, full event payloads,
+original-course projections and existing learn/review histories without bridge
+calls. It checks integrity, original event rows and credential hashes, and keeps
+all candidate-period writes. An exit-71 binary must automatically restore the
+fallback pointer and recover. Migration has separate zero-write restore+old-token
+authentication and with-write restore-refusal cases.
 
-On success, this harness would verify binary startup, schema compatibility
-and data-preserving pointer rollback. Its compatible-baseline mode has not
-yet been run successfully. It does not exercise launchd, real bridge/math child management,
-900-second production idle evidence, phone credentials in live traffic, the
-production seal protocol, or production user-visible behavior. Keep the
-existing TON-1193/TON-1175 deployment contract and independent review gates.
+Binary-rehearsal listeners bind loopback on isolated ports; the emulator runner
+also uses the configured allowlisted host on its isolated port. Source lookup/managed services are disabled,
+bridge output is synthetic, JVM home/temp/math/cache state is private, inherited
+COACH_/BRIDGE_/JVM options are cleared, and owned children are reaped. Temporary
+copies and raw responses are removed. Only hashes, counts and other safe metadata
+may be attached to Multica/GitHub.
 
-## Remaining release gates
+Server and phone rollback must use a reviewed matching APK while retaining local
+credentials/state. The timeout protects a new client's retry button against old
+servers, but does not establish paired-phone rollback acceptance.
+
+## Emulator and later production gates
+
+`run-review-emulator.py` runs under `heavy --emulator` on an owned read-only AVD;
+only that serial is addressed. `check-review-copy.py` also requires the explicit
+private copy and exercises a synthetic course with the isolated package above.
+ReviewQueueSmoke and MistakeReviewSmoke retain their main latency/correctness
+assertions. Mistake smoke covers live retry, offline cache after server stop and
+restart/resume with the learning thread preserved. All owned JVM/emulator children
+must be collected before delivery. Do not claim a queued/cancelled run as passed.
 
 | Owner card | Required before production |
 | --- | --- |
-| TON-1146 | OPPO review list, retry latency, correct-answer removal and four-form behavior on the reviewed head. |
-| TON-1164 | OPPO week selection/switching, retired-point route/history and exact package/head acceptance. |
-| TON-1167 | OPPO four forms, actual process reclaim/restoration, performance and aggregate diagnostic exits. `phone-acceptance.py` outside this repo is not yet proven to propagate the aggregate result. |
-| TON-1169 | Independent latest-head review and OPPO integrated study/review/mistake explanation/rendering acceptance. |
-| TON-1173 | OPPO normal icon launch against an isolated service and week selection within two taps. |
-| TON-1242 | All five candidates' emulator preacceptance with exact package/head/server provenance. |
-| TON-1094 | Resident-service/sleep recovery acceptance and its rollback evidence. |
-| TON-1193 / TON-1175 | Production adapter review and legacy first-migration decision; installed `5ef9989` lacks the v1 coverage/seal protocol. An isolated binary rollback does not authorize a production bypass. |
+| TON-1146 | OPPO review list, retry latency, correct-answer removal and four-form behavior. |
+| TON-1164 | OPPO week switch, retired-point route/history and exact package/head. |
+| TON-1167 | OPPO four forms, actual reclaim/restoration, rendering/performance aggregate exits. |
+| TON-1169 | Independent integrated study/review/explanation/rendering acceptance. |
+| TON-1173 | OPPO normal-icon isolated launch and week selection within two taps. |
+| TON-1242 | All five emulator preacceptance gates with exact package/head/server provenance. |
+| TON-1094 | Resident service/sleep recovery and rollback acceptance. |
+| TON-1193 / TON-1175 | Approved production switch/seal/first-migration protocol. |
 
-The production rollback target must be the independently reviewed compatible
-baseline, with its original-token/data rehearsal accepted before switching.
-Returning directly to the installed `5ef9989` after v7 migration is blocked.
-
-After any device fixes, rebuild and rerun affected train gates on the resulting
-head. Independent QA-C acceptance and Architect's critical deployment review
-are required. Keep the train PR draft while production gates remain open.
-Do not merge it early via a reviewer automation.
-
-At production handoff record the last actual learning activity and the same
-process's required idle/coverage proof; calendar time or an unanswered message
-does not establish that the learner is inactive. Keep old binaries/config and
-original data/token available. Use the reviewed production switch transaction;
-within its 300-second budget verify the original credentials and all five
-features, capture sanitized screenshots, and immediately roll back on failure
-without discarding candidate-period learner writes. No production switch,
-launchd change, phone installation or device acceptance is performed by this
-integration delivery.
+TON-1298 remains the first train; #89 is the later train. QA-C independently
+accepts this integration and Architect reviews the critical rollback path once
+the complete required evidence exists. Previous preliminary review does not
+accept this head. Keep draft, do not merge, switch production, touch physical
+devices/protected ports, create periodic wakeups or repeat an ongoing review.
+A proposed baseline also needs independent acceptance and at least one real
+learning session before the feature train can rely on it. Before any later
+production switch, preserve binaries/config/data/token and prove actual same-
+process learner idle/coverage; calendar time or an unanswered message is not proof.

@@ -47,3 +47,15 @@ the lease still belongs to TON-1094, remove its `.test` package and release with
 
 Share only `summary.json`, `network.txt`, `reconnect.txt` and `checkpoints.txt`.
 There is no need to deploy or upgrade production to run this test.
+
+On failure, keep the original deadlines. The checkpoints include safe operation
+names, exception classes and periodic sync-loop state, so an exited loop can be
+distinguished from a pending request. They contain no request bodies, tokens,
+exception messages or personal URLs. The summary also records when the owned
+JVM was paused and its process state. A host-only companion regression runs the
+ledger without a tutor socket; it does not substitute for the real-phone gate:
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test \
+  --tests com.coach.server.LedgerClientStopResumeTest --offline
+```

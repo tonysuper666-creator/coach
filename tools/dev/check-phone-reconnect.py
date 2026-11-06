@@ -60,7 +60,7 @@ def main():
     data = out/'private-data'
     data.mkdir(mode=0o700)
     adb = str(Path(value('coach.sdkDir')).expanduser()/'platform-tools/adb')
-    device_env = dict(os.environ, COACH_TESTPHONE=args.serial)
+    device_env = dict(os.environ, COACH_TESTPHONE=args.serial, COACH_IDLE_MIN='10')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
     env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data/'device-token'),
                COACH_LOG_DIR=str(data/'logs'), COACH_STATE_DIR=str(data/'state'),
@@ -101,12 +101,12 @@ def main():
             return None
 
     def report():
-        if instrument.poll() is not None:
-            raise RuntimeError('Instrumentation exited before its checkpoint')
         log = device('logcat', '-d', '-s', 'CoachReconnect:I', '*:S')
         checkpoints = '\n'.join(line for line in log.splitlines() if run_id in line)
         if checkpoints:
             (out/'checkpoints.txt').write_text(checkpoints+'\n')
+        if instrument.poll() is not None:
+            raise RuntimeError('Instrumentation exited before its checkpoint')
         return checkpoints
 
     try:
@@ -155,6 +155,8 @@ def main():
         start = time.monotonic()
         os.killpg(server.pid, signal.SIGSTOP)
         paused = True
+        summary['pauseStartedAt'] = datetime.now(timezone.utc).isoformat()
+        summary['pausedProcessState'] = run(['ps', '-o', 'stat=', '-p', server.pid]).strip()
         summary['phase'] = 'phone offline checkpoint during isolated JVM pause'
         wait_for(lambda: 'OFFLINE' in report(), 30)
         # Match the historical controlled JVM pause without claiming actual system sleep.
@@ -179,6 +181,13 @@ def main():
                                             for key in ('READY', 'OFFLINE', 'RECONNECTED')})
     except Exception as error:
         summary['failureType'] = type(error).__name__
+        if instrument is not None:
+            # Preserve the last safe diagnostics even when instrumentation has exited.
+            try:
+                lease_valid()
+                report()
+            except Exception:
+                pass
         raise
     finally:
         cleanup_errors = []
@@ -194,6 +203,7 @@ def main():
             if server and server.poll() is None:
                 if paused:
                     os.killpg(server.pid, signal.SIGCONT)
+                    summary['controlledPauseSeconds'] = round(time.monotonic()-start, 3)
                 os.killpg(server.pid, signal.SIGTERM)
                 try:
                     server.wait(timeout=20)

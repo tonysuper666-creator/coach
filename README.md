@@ -21,7 +21,7 @@ COACH_URL=http://127.0.0.1:<测试端口> COACH_TOKEN_FILE=<测试令牌> COACH_
 
 首次联网同步包括 Compose 安卓构件与桌面打包的 JDK probe。以后桌面运行可 `--offline`。**开发版桌面（`:desktopApp:run`，或带 `COACH_AUTOPLAY` / `COACH_RENDER_STATE` / `-Dcoach.capturePath` 等测量开关的任何启动）不再默认连生产**：必须显式给 `COACH_URL`（端口不得是 18791 / 8791 / 8790）、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`，否则启动即失败；打包的 `Coach.app` 日常使用不受影响。渲染回放用 `COACH_MODE=spike`，不连服务端。产物为 `androidApp/build/outputs/apk/debug/androidApp-debug.apk` 和 `desktopApp/build/compose/binaries/main/app/Coach.app`。
 
-**每个重命令都用 `tools/dev/heavy COMMAND ...`**（包括 Gradle、SDK 安装）；**模拟器会话用 `tools/dev/heavy --emulator COMMAND ...`**（会话里的 APK 编译、adb 安装和验收都放在这一条命令里）。锁是 `mkdir` 原子锁：构建最多 `COACH_HEAVY_BUILD_LANES`（默认 3）道并行，用 `~/dev/.coach-heavy.lock.2` 起的几个目录；模拟器只用 `~/dev/.coach-heavy.lock` 这一道，一次一个，旧版脚本也只抢这一道，所以新旧脚本可以混用。等待时打印各道持有者的 PID 与命令；子进程以 `nice -n 15` 运行，退出或中断时释放锁；持有者 PID 已不在且锁目录超过 60 秒的，下一个等待者会自动回收。Gradle 默认 `org.gradle.workers.max=2`。不要绕过锁，也不要写「拿到锁以后一直等」的占位脚本。测试可用 `COACH_HEAVY_LOCK` 指定隔离锁目录。
+**每个重命令都用 `tools/dev/heavy COMMAND ...`**（包括 Gradle、SDK 安装）；**模拟器会话用 `tools/dev/heavy --emulator COMMAND ...`**（会话里的 APK 编译、adb 安装和验收都放在这一条命令里）。锁是 `mkdir` 原子锁：构建最多 `COACH_HEAVY_BUILD_LANES`（默认 3）道并行，用 `~/dev/.coach-heavy.lock.2` 起的几个目录；模拟器只用 `~/dev/.coach-heavy.lock` 这一道，一次一个，旧版脚本也只抢这一道，所以新旧脚本可以混用。等待时打印各道持有者的 PID 与命令；子进程以 `nice -n 15` 运行，退出或中断时释放锁；持有者 PID 已不在且锁目录超过 60 秒的，下一个等待者会自动回收。构建道数会跟着本机负载变：守护进程把允许的道数写进 `~/dev/.coach-heavy.lanes`（内存吃紧时 1 道，宽松时最多 4 道），等待者每 5 秒重读，只限制新拿锁、不打断在跑的；没有这个文件就按 `COACH_HEAVY_BUILD_LANES`。Gradle 默认 `org.gradle.workers.max=2`。不要绕过锁，也不要写「拿到锁以后一直等」的占位脚本。测试可用 `COACH_HEAVY_LOCK` 指定隔离锁目录。
 
 2026-11-02 00:00–15:00 不跑模拟器、Gradle 全量构建或 live AI。预计超过 10 分钟的命令放进 `screen -dmS`，启动它的前台调用仍须收集退出码与日志后才能交付。
 

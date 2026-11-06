@@ -39,7 +39,12 @@ def main():
     if args.android:
         assert args.screenshots, '--screenshots is required with --android'
         assert args.android.startswith('emulator-'), 'Physical devices are forbidden'
-        adb = str(Path.home() / 'Library/Android/sdk/platform-tools/adb')
+        sdk_roots = [Path(value) for key in ('ANDROID_SDK_ROOT', 'ANDROID_HOME')
+                     if (value := os.environ.get(key))]
+        sdk_roots += [Path.home() / 'Library/Android/sdk', Path.home() / 'android-sdk']
+        adb = next((str(sdk / 'platform-tools/adb') for sdk in sdk_roots
+                    if (sdk / 'platform-tools/adb').is_file()), shutil.which('adb'))
+        assert adb, 'Set ANDROID_SDK_ROOT/ANDROID_HOME or put adb on PATH'
         avd = subprocess.check_output([adb, '-s', args.android, 'emu', 'avd', 'name'], text=True).splitlines()[0].strip()
         assert avd == 'coach_1128_c70_r', 'Wrong emulator'
         config = (Path.home() / 'Coach/config/local.properties').read_text().splitlines()

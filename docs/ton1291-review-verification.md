@@ -61,7 +61,8 @@ tools/dev/heavy --emulator python3 tools/dev/check-review-copy.py \
 ```
 
 Replace the serial with the running **coach_1128_c70_r** emulator's serial. The
-harness refuses physical devices and other AVD names. It installs only the card
+harness finds adb through `ANDROID_SDK_ROOT`, `ANDROID_HOME`, the local SDK or PATH,
+and refuses physical devices and other AVD names. It installs only the card
 package, backs up production SQLite through a readonly connection, cancels queued
 jobs only in the copy, and seeds a synthetic course. The copy server uses an
 ephemeral port and a synthetic bridge. Production processes, protected ports and
@@ -76,6 +77,13 @@ results are exported; answer submission in this harness is through WebSocket,
 not Android taps. An interactive answering check remains useful for device release.
 
 ## Integration and device handoff
+
+Main `9ea6b51` includes TON-1247's mock exam flow. The merged Review page retains
+its mock entry alongside the live due queue; CoachApp preserves mock/records/week
+navigation and resets review mode when opening ordinary learning. A CoachApp-level
+regression checks mock entry/back, direct review entry and returning to ordinary
+learning. This is host UI coverage; emulator evidence must be collected on the
+merged head, replacing the earlier head's screenshots and protocol results.
 
 PR #91 adds the exam panel: preserve its shared exam fact and the queue's live
 course clock when resolving CoachApp/Today overlaps. PR #57 defaults Review to

@@ -33,7 +33,7 @@ class ReviewEntryTest {
             recordedAt = now, occurredAt = now, deviceId = "synthetic", actor = "SYSTEM", payload = payload) }
     }
 
-    private fun entry(width: Int, height: Int, examKnown: Boolean) {
+    private fun entry(width: Int, height: Int, examKnown: Boolean, integrated: Boolean = false) {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val db = ClientDatabase(driver)
@@ -55,23 +55,41 @@ class ReviewEntryTest {
         try {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { Box(Modifier.size(width.dp, height.dp)) {
-                    when (page) {
+                    if (integrated) CoachApp(c, dark = false) else when (page) {
                         "today" -> TodayScreen(c, view, TutorUiState(), null, { page = "review" }, { _, _ -> })
                         "review" -> ReviewScreen(c, view, { id, start -> assertEquals("K", id); startNow = start; page = "study" }, { page = "today" })
                         else -> StudyScreen(c, view.kp("K")!!, view, TutorUiState(), autoStart = startNow, onBack = { page = "review" }, reviewMode = true)
                     }
                 } } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("1 个知识点到期").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
                 if (!examKnown) onNodeWithText("日期未公布", substring = true).assertIsDisplayed()
-                capture("review-today-$width")
+                capture("review-today-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("到期复习").performClick()
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
-                capture("review-queue-$width")
+                if (integrated) {
+                    onNodeWithTag("open-mock").assertIsDisplayed().performClick()
+                    onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
+                    onNodeWithText("← 复习").performClick()
+                    onNodeWithTag("open-mock").assertIsDisplayed()
+                    onNodeWithText("1 个知识点到期").assertIsDisplayed()
+                }
+                capture("review-queue-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("开始", substring = false).performClick()
-                assertTrue(startNow, "Queue starts practice immediately on both layouts")
+                if (!integrated) assertTrue(startNow, "Queue starts practice immediately on both layouts")
                 onNodeWithText("到期复习").assertExists()
+                onNodeWithText("开始复习").assertExists()
                 onNodeWithText("开始讲解").assertDoesNotExist()
                 onNodeWithText("← 复习").assertExists()
+                if (integrated) {
+                    onNodeWithText("← 复习").performClick()
+                    onNodeWithTag("open-mock").assertIsDisplayed()
+                    onNode(hasText("今天") and hasClickAction()).performClick()
+                    onNodeWithText("复习知识点", substring = true).performClick()
+                    onNodeWithText("开始讲解").assertExists()
+                    onNodeWithText("开始复习").assertDoesNotExist()
+                    onNodeWithText("到期复习").assertDoesNotExist()
+                }
             }
         } finally { tutor.close(); driver.close() }
     }
@@ -82,4 +100,5 @@ class ReviewEntryTest {
     }
     @Test fun phoneQueueStartsReviewAndShowsUnknownDate() = entry(420, 880, false)
     @Test fun desktopQueueStartsReviewInTheFinalWeek() = entry(1000, 800, true)
+    @Test fun appKeepsMockEntryAndIsolatesReviewFromOrdinaryLearning() = entry(420, 880, true, integrated = true)
 }

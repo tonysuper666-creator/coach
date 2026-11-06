@@ -11,12 +11,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     Column(Modifier.fillMaxSize()) {
@@ -27,6 +28,16 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
         OfflinePractice(c)
+        if (onOpenMock != null) Surface(onClick = onOpenMock, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 56.dp).testTag("open-mock")) {
+            Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("模拟考与单选速刷", style = MaterialTheme.typography.bodyLarge)
+                    Text("限时整卷看现在能拿几分、丢在哪；单选 7 题 14 分钟", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("›", style = MaterialTheme.typography.titleLarge)
+            }
+        }
         if (due.isEmpty()) {
             CenterMessage("今天没有到期的复习。")
             return@Column

@@ -26,13 +26,18 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import kotlin.time.TimeSource
 import kotlin.uuid.Uuid
 
 /**
  * 到 Mac 服务端 `/v1/ws` 的导师连接（与账本同步各用一条 socket，服务端按帧广播）。
  * 断线就是断线：没连上时 [send] 直接返回 false，由界面如实提示，不排队、不假装已发出。
+ * 已交给连接、但服务端还没回 `msg.user` 确认的发问，会在下一条连接上补发（服务端按 clientMsgId 去重）。
  */
 class TutorClient(
     baseUrl: String,
@@ -45,7 +50,7 @@ class TutorClient(
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
         followRedirects = false
-        install(WebSockets) { maxFrameSize = MAX_MESSAGE_BYTES.toLong() }
+        install(WebSockets) { maxFrameSize = MAX_SOCKET_FRAME_BYTES }
         install(HttpTimeout) { connectTimeoutMillis = 5_000; requestTimeoutMillis = 5_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
     }
@@ -53,6 +58,9 @@ class TutorClient(
     private val lifecycle = Any()
     private var running: Job? = null
     private var closed = false
+    // clientMsgId → 已交给连接、还没被服务端确认的发问。连接断了，出站缓冲里的帧随之丢掉；只有 msg.user 才证明送达。
+    private data class Unconfirmed(val threadId: String, val frame: String, var resends: Int = 0)
+    private val unconfirmed = LinkedHashMap<String, Unconfirmed>()
     // null means no outcome yet; retries while offline must not create new events.
     private var observedConnection: Boolean? = null
 
@@ -83,16 +91,17 @@ class TutorClient(
         running?.takeUnless { it.isCompleted } ?: scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             telemetry?.record("open")
             val reporting = telemetry?.start(this)
-            var backoff = 250L
+            val backoff = ReconnectBackoff()
             try {
                 while (isActive) {
                     val queue = Channel<String>(capacity = 64)
+                    var readyAt: TimeSource.Monotonic.ValueTimeMark? = null
                     try {
                         // Receive raw control frames so the watchdog observes this socket's pong,
                         // independently of Ktor's default session close handshake (which can stall).
                         http.prepareRequest(url).body<ClientWebSocketSession, Unit> { socket ->
                             try {
-                                conversation(socket, queue) { backoff = 250 }
+                                conversation(socket, queue) { readyAt = TimeSource.Monotonic.markNow() }
                             } finally {
                                 queue.cancel()
                                 // Abort the transport; never wait for a frozen peer to acknowledge close.
@@ -108,8 +117,7 @@ class TutorClient(
                     } finally {
                         queue.cancel()
                     }
-                    delay(backoff)
-                    backoff = (backoff * 2).coerceAtMost(3_000)
+                    delay(backoff.next(readyAt?.elapsedNow()?.inWholeMilliseconds ?: 0))
                 }
             } finally { reporting?.cancel() }
         }.also { running = it; it.start() }
@@ -122,18 +130,37 @@ class TutorClient(
         val pongs = Channel<ByteArray>(Channel.CONFLATED)
         val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
         val reader = launch {
-            var body = ByteArray(0)
+            var parts = ArrayList<ByteArray>()
+            var size = 0L
+            // 服务端按帧广播：连上时整份账本也走这条 socket。导师用不上的超大账本推送丢掉即可，不能为它断线；
+            // 导师自己的消息（长对话的 msg.history）再大也要交给模型，装不下就在线程里明说，不能静默吞掉。
+            var keep = true
+            var sniffed = false
             for (frame in socket.incoming) when (frame) {
                 is Frame.Ping -> socket.send(Frame.Pong(frame.data))
                 is Frame.Pong -> pongs.trySend(frame.data)
                 is Frame.Close -> break
                 is Frame.Text -> {
-                    check(body.size + frame.data.size <= MAX_MESSAGE_BYTES) { "Tutor frame too large" }
-                    body += frame.data
+                    if (keep) {
+                        parts += frame.data
+                        size += frame.data.size
+                        if (!sniffed && size > MAX_MESSAGE_BYTES) { sniffed = true; keep = messageType(parts) != "ledger" }
+                        if (keep && size > MAX_SOCKET_FRAME_BYTES) {
+                            keep = false
+                            val thread = messageThread(parts)
+                            synchronized(lifecycle) { if (!closed) model.onMessageTooLarge(thread) }
+                        }
+                        if (!keep) parts = ArrayList()
+                    }
                     if (frame.fin) {
-                        val text = body.decodeToString(throwOnInvalidSequence = true)
-                        body = ByteArray(0)
-                        synchronized(lifecycle) { if (!closed) model.onFrame(text) }
+                        if (keep) {
+                            val text = join(parts, size).decodeToString(throwOnInvalidSequence = true)
+                            synchronized(lifecycle) { if (!closed) { confirm(text); model.onFrame(text) } }
+                        }
+                        parts = ArrayList()
+                        size = 0
+                        keep = true
+                        sniffed = false
                     }
                 }
                 else -> error("Unexpected binary tutor frame")
@@ -172,6 +199,12 @@ class TutorClient(
             reconnectResumes.forEach { id ->
                 socket.send(Frame.Text(resumeFrame(id).toString()))
             }
+            val resends = synchronized(lifecycle) {
+                val exhausted = unconfirmed.filterValues { it.resends >= MAX_ASK_RESENDS }
+                exhausted.forEach { (id, ask) -> unconfirmed.remove(id); model.onAskUndelivered(ask.threadId, id) }
+                unconfirmed.values.onEach { it.resends++ }.map { it.frame }
+            }
+            resends.forEach { socket.send(Frame.Text(it)) }
             sender = launch { for (text in queue) socket.send(Frame.Text(text)) }
             ticker = launch { while (isActive) { delay(RESUME_TICK_MS); model.resumeTick() } }
             reader.join()
@@ -202,10 +235,32 @@ class TutorClient(
     }
 
     private companion object {
+        /** 只看消息开头：服务端的帧都把 `t`、`threadId` 写在大字段（events / messages）之前。 */
+        private fun head(parts: List<ByteArray>): String {
+            val out = ByteArray(minOf(HEAD_BYTES, parts.sumOf { it.size }))
+            var at = 0
+            for (part in parts) { if (at == out.size) break; val n = minOf(part.size, out.size - at); part.copyInto(out, at, 0, n); at += n }
+            return out.decodeToString()
+        }
+        private fun field(parts: List<ByteArray>, name: String) =
+            Regex("\"$name\"\\s*:\\s*\"([^\"]*)\"").find(head(parts))?.groupValues?.get(1).orEmpty()
+        private fun messageType(parts: List<ByteArray>) = field(parts, "t")
+        private fun messageThread(parts: List<ByteArray>) = field(parts, "threadId")
+        private fun join(parts: List<ByteArray>, size: Long): ByteArray {
+            if (parts.size == 1) return parts[0]
+            val out = ByteArray(size.toInt())
+            var at = 0
+            for (part in parts) { part.copyInto(out, at); at += part.size }
+            return out
+        }
+        const val HEAD_BYTES = 512
         const val RESUME_TICK_MS = 1_000L
         const val PING_INTERVAL_MS = 5_000L
         const val PONG_TIMEOUT_MS = 5_000L
         const val MAX_MESSAGE_BYTES = 1_048_576
+        const val MAX_UNCONFIRMED_ASKS = 16
+        const val MAX_ASK_RESENDS = 3
+        const val MAX_SOCKET_FRAME_BYTES = 64L * 1_048_576
     }
 
     /** 发出一帧；没有在线连接返回 false。 */
@@ -237,12 +292,34 @@ class TutorClient(
     fun ask(threadId: String, courseId: String, text: String, pack: String, clientMsgId: String = Uuid.random().toString()): Boolean {
         if (live == null) return false
         model.onSent(threadId,"ask",text,clientMsgId)
-        val sent = send(buildJsonObject {
+        val frame = buildJsonObject {
             put("t", "msg.ask"); put("threadId", threadId); put("courseId", courseId); put("text", text); put("pack", pack)
             put("clientMsgId",clientMsgId)
-        })
-        if (!sent) model.onSendRejected(threadId,clientMsgId)
+        }
+        synchronized(lifecycle) {
+            unconfirmed[clientMsgId] = Unconfirmed(threadId, frame.toString())
+            while (unconfirmed.size > MAX_UNCONFIRMED_ASKS) {
+                val oldest = unconfirmed.keys.first()
+                unconfirmed.remove(oldest)?.let { model.onAskUndelivered(it.threadId, oldest) }
+            }
+        }
+        val sent = send(frame)
+        if (!sent) {
+            synchronized(lifecycle) { unconfirmed.remove(clientMsgId) }
+            model.onSendRejected(threadId,clientMsgId)
+        }
         return sent
+    }
+
+    /** Caller holds [lifecycle]. 本设备的 msg.user（或点名这句的 msg.error）到了，这句就不用再补发；只带线程号的错误对不上具体哪句，一句也不清。 */
+    private fun confirm(text: String) {
+        if (unconfirmed.isEmpty()) return
+        val obj = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        fun str(key: String) = (obj[key] as? JsonPrimitive)?.contentOrNull
+        when (str("t")) {
+            "msg.user" -> if (str("deviceId") == deviceId) str("clientMsgId")?.let(unconfirmed::remove)
+            "msg.error" -> (str("clientMsgId") ?: str("msg"))?.let(unconfirmed::remove)
+        }
     }
 
     fun cancel(messageId: String) = send(buildJsonObject { put("t", "msg.cancel"); put("msg", messageId) })

@@ -213,6 +213,26 @@ class OfflinePackTest {
         } finally { store.close();root.toFile().deleteRecursively() }
     }
 
+    @Test fun lateAnswerFromAnExpiredPackSurvivesAnotherDevicesReservation() {
+        val root=Files.createTempDirectory("offline-late-sync-")
+        var now=1_800_000_000_000L
+        val store=LedgerStore(root) { now }
+        try {
+            seed(store,30)
+            val card=store.downloadOfflinePack("course","phone",10,1000).groups.first().first().payload
+            val letter=(card["letterMap"] as JsonObject).values.first().jsonPrimitive.content
+            val body=CommandBody("submit_answer","course",now,json("attemptId" to card.str("attemptId"),"answer" to letter,"offline" to true,"posedSnapshot" to card))
+            val bytes=canonicalJson(LedgerJson.encodeToJsonElement(body))
+            // The phone stays off the tailnet past the pack lifetime; meanwhile the desktop starts offline practice.
+            now+=1000
+            val desktop=store.downloadOfflinePack("course","tablet",10,1000)
+            assertTrue(desktop.groups.flatten().any { it.payload.str("questionId")==card.str("questionId") })
+            val receipt=store.command(WireCommand("phone","late-sync",bytes,sha256(bytes.toByteArray())))
+            assertEquals("OK",receipt.status,"phone answer rejected: ${receipt.error}")
+            assertTrue(store.events("course").any { it.type=="answer_submitted" && it.payload.str("attemptId")==card.str("attemptId") })
+        } finally { store.close();root.toFile().deleteRecursively() }
+    }
+
     @Test fun existingClientMigrationRetainsOutboxBytes() {
         val driver=JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         try {

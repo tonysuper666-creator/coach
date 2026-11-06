@@ -52,7 +52,7 @@ The mock adapter uses this validator in analytical final-value fields and this
 key for numeric-only parts. Constructed jobs include `decimalPlaces: 2` and the
 original tolerance literal, and use the existing process grading/review path.
 Flattened part keys and hundredths-of-a-mark score units stay on the existing
-ledger. Omitted mock-part `tolerance` retains the legacy absolute default `0.005`;
+ledger. Omitted or null mock-part `tolerance` uses the new analytical default `0.005`;
 an explicit `tolerance: 0` still requires exact equality. Numeric-only parts read
 only `final`, intentionally never interpreting the working `text` as a final.
 An empty final never falls back to working. A blank part scores zero
@@ -131,8 +131,10 @@ answers, private filenames or copied database are committed or attached.
 ## QA follow-up: compatibility and device runner
 
 QA-C verified head `5b70f2b` but withheld acceptance pending the emulator gate.
-The missing-tolerance change was a compatibility regression: omitted mock-part
-tolerance now again defaults to `0.005`, while explicit zero stays strict.
+This PR defines an analytical default of `0.005` for omitted mock-part tolerance,
+while explicit zero stays strict. This is new semantics, not restoration of main
+behavior: main used zero with a `1e-9` floor. Earlier handoffs incorrectly called
+it a restored legacy default; the existing regression test name is historical.
 The independent `omittedToleranceRetainsLegacyDefault` test failed against
 `5b70f2b` (exit 1, assertion failure), then passed after the correction (exit 0):
 
@@ -182,3 +184,35 @@ The consolidated release card TON-1254 should repeat these on a physical device:
    learner's work, with usable scrolling in phone portrait and tablet landscape.
 5. Reopen the graded attempt and verify answers, explanations, figures and totals
    survive reload and process review.
+
+
+## Sage full-rubric correction
+
+A full rubric previously suppressed `numeric_final`, so the separate final field
+was neither checked by the server nor sent to grading. This affected the normal
+full-rubric shape, not just an edge case. Every analytical numeric part now
+records the same exact server check, including entirely blank parts.
+
+When rubric points already cover the maximum, the frozen numeric configuration
+sets `feedbackOnly: true`. The worker retains all original rubric criteria and
+points; it does not invent a numeric allocation or deduct arbitrary method
+marks. Both working and verbatim final fields reach grading and cross-vendor
+review. Rubric evidence can quote either field, with stored offsets mapped back
+to `answer` or `finalAnswer` rather than the concatenated grading input.
+`numericFinal` records the independent check and result feedback displays it.
+Rubric scoring remains model-reviewed; the HTTP fixtures verify transport and
+ledger behavior rather than the correctness of a live model judgment.
+
+When rubric points leave a numeric allocation, the existing server-owned N
+criterion still supplies only those remaining points. Missing or invalid finals
+continue to preserve earned method marks. Null tolerance now follows the same
+analytical default as missing tolerance instead of parsing the literal `null`.
+
+Sage's unchanged assertion reproduced on `2826a82`: exit 1, neither final input
+in the grading request nor a numeric fact. The corrected implementation passes
+that probe alongside the existing 14 tests. Independent full-rubric regressions
+cover final-only rubric credit and correct evidence offsets, wrong final with
+method credit, invalid input, precision, missing final, a completely blank part,
+exact 0.005 boundary, above-boundary precision, null tolerance, reviewed facts,
+and reopening the ledger. The device fixture now uses a full-rubric first part
+with final-only input, plus the existing partial-credit and blank parts (7/12).

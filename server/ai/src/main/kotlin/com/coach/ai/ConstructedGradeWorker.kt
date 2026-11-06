@@ -20,16 +20,22 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
             val input=work.subject
             val question=TaskParsing.constructed(JsonArray(listOf(input.getValue("question"))).toString()).single()
             require(GradeGate.rubricFingerprint(question.rubric)==work.fingerprint) { "rubric_changed" }
-            val answer=input.str("answer")
-            require(sha256(json("answer" to answer,"finalAnswer" to input.str("finalAnswer")).toString().toByteArray(Charsets.UTF_8))==work.answerHash) { "answer_changed" }
+            val working=input.str("answer")
+            require(sha256(json("answer" to working,"finalAnswer" to input.str("finalAnswer")).toString().toByteArray(Charsets.UTF_8))==work.answerHash) { "answer_changed" }
             val numeric=(input.getValue("question").jsonObject["numeric_final"] as? JsonObject)
+            val feedbackOnly=numeric?.flag("feedbackOnly")==true
+            // Full rubrics can award marks based on either field. Keep both available for
+            // evidence validation; map the resulting spans back to their original fields.
+            val answer=if(feedbackOnly) working+FINAL_SEPARATOR+input.str("finalAnswer") else working
             val process=if(numeric==null) question else {
                 require(NumericValue.parse(numeric.str("expected"))!=null) { "invalid_numeric_key" }
-                analyticalNumericKey(numeric) // Validate strict keys before spending a model call.
-                require(question.rubric.count { it.id==numeric.str("rubricItemId") }==1)
-                question.copy(stem=question.stem+"\nFull frozen rubric (numeric final is server-owned, do not grade it):\n"+
+                val strict=analyticalNumericKey(numeric) // Validate before spending a model call.
+                require(if(feedbackOnly) strict!=null else question.rubric.count { it.id==numeric.str("rubricItemId") }==1)
+                question.copy(stem=question.stem+(if(feedbackOnly)
+                    "\nFull frozen rubric: grade both submitted fields against these criteria. The server independently checks final format and value without adding marks.\n"
+                    else "\nFull frozen rubric (numeric final is server-owned, do not grade it):\n")+
                     Prompts.rubricJson(question.rubric)+"\nServer numeric criterion: $numeric"+"\nSubmitted final value (verbatim, server-owned): <<<${input.str("finalAnswer")}>>>",
-                    rubric=question.rubric.filter { it.id!=numeric.str("rubricItemId") })
+                    rubric=question.rubric.filter { feedbackOnly || it.id!=numeric.str("rubricItemId") })
             }
             require(process.rubric.isNotEmpty()) { "missing_process_rubric" }
             val pipeline=GradePipeline(client)
@@ -50,7 +56,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                     actor.execute { failGradeWork(work,draft.defects.joinToString(),outage) };return true
                 }
                 val grader=draft.calls.last().servedBy ?: error("missing_grader_identity")
-                val payload=gradePayload(requireNotNull(draft.draft),answer,numeric,question,input.str("finalAnswer"),draft.evidenceSpans)
+                val payload=gradePayload(requireNotNull(draft.draft),working,numeric,question,input.str("finalAnswer"),draft.evidenceSpans)
                 val stored=JsonObject(payload + json("status" to "AI_UNREVIEWED","graderModel" to grader,
                     "rubricFingerprint" to work.fingerprint,"processGrade" to storedDraft(draft.draft),
                     "callIds" to draft.calls.map { it.callId },"notice" to fallbackNotice))
@@ -68,7 +74,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 if(!reviewed.written || served.isNullOrBlank() || modelVendor(served)==modelVendor(grader)) {
                     actor.execute { failGradeWork(work,reviewed.defects.joinToString().ifBlank { "review_vendor_mismatch" }) };return true
                 }
-                val final=gradePayload(requireNotNull(reviewed.draft),answer,numeric,question,input.str("finalAnswer"),reviewed.evidenceSpans)
+                val final=gradePayload(requireNotNull(reviewed.draft),working,numeric,question,input.str("finalAnswer"),reviewed.evidenceSpans)
                 val decision=requireNotNull(reviewed.crossReview).verdict
                 val committed=actor.execute { persistGradeReview(work,json("decision" to decision,"note" to reviewed.crossReview.note,
                     "reviewerModel" to served,"graderModel" to grader,"rubricFingerprint" to work.fingerprint,
@@ -85,31 +91,46 @@ internal fun storedDraft(draft: DraftGrade): JsonObject = json("items" to JsonAr
     json("id" to it.id,"points" to it.points,"reason" to it.reason,"evidence" to it.evidence)
 }),"total" to draft.total,"awarded" to draft.awarded)
 
+// Keep descriptive labels in the prompt, outside quotable student evidence.
+private const val FINAL_SEPARATOR="\n\n"
+
 /** Only the separate final-value field is compared; the model receives no authority over its points. */
 internal fun gradePayload(process: DraftGrade, answer: String, numeric: JsonObject?, question: ConstructedQuestion,
     finalAnswer: String, spans: List<GradedEvidence>): JsonObject {
     var grade=process
     var numericFact: JsonObject?=null
     if(numeric!=null) {
-        val item=question.rubric.single { it.id==numeric.str("rubricItemId") }
+        val item=if(numeric.flag("feedbackOnly")) null else question.rubric.single { it.id==numeric.str("rubricItemId") }
         val analytical=analyticalNumericKey(numeric)
         val checked=analytical?.grade(finalAnswer)
         val rel=numeric["relTolerance"]?.jsonPrimitive?.double ?: if(analytical!=null) 0.0 else NumericValue.DEFAULT_REL_TOLERANCE
         val abs=numeric["absTolerance"]?.jsonPrimitive?.double ?: NumericValue.DEFAULT_ABS_TOLERANCE
         require(rel.isFinite() && abs.isFinite() && rel>=0 && abs>=0)
         val correct=checked?.correct ?: NumericValue.matches(finalAnswer,numeric.str("expected"),rel,abs)
-        val points=if(correct) item.points else 0.0
-        grade=DraftGrade(process.items+GradeItem(item.id,points,"SERVER_NUMERIC",finalAnswer),question.rubric.sumOf { it.points },process.awarded+points)
+        if(item!=null) {
+            val points=if(correct) item.points else 0.0
+            grade=DraftGrade(process.items+GradeItem(item.id,points,"SERVER_NUMERIC",finalAnswer),question.rubric.sumOf { it.points },process.awarded+points)
+        }
         numericFact=json("expected" to numeric.str("expected"),"submitted" to finalAnswer,"correct" to correct,
-            "relTolerance" to rel,"absTolerance" to abs,"rubricItemId" to item.id)
+            "relTolerance" to rel,"absTolerance" to abs,"rubricItemId" to item?.id,"feedbackOnly" to (item==null))
         if(checked!=null) numericFact=JsonObject(numericFact + mapOf("decimalPlaces" to JsonPrimitive(2),
             "status" to JsonPrimitive(checked.status),"absTolerance" to numeric.getValue("absTolerance")))
     }
     require(GradeGate.arithmetic(grade,question.rubric).isEmpty()) { "invalid_merged_grade" }
-    val evidence=spans.map { e ->
-        require(answer.substring(e.span.start,e.span.end)==e.span.text)
-        json("rubricItemId" to e.rubricItemId,"field" to "answer","start" to e.span.start,"end" to e.span.end,"text" to e.span.text)
-    } + if(numeric!=null && finalAnswer.isNotEmpty()) listOf(json("rubricItemId" to numeric.str("rubricItemId"),
+    val feedbackOnly=numeric?.flag("feedbackOnly")==true
+    val gradingAnswer=if(feedbackOnly) answer+FINAL_SEPARATOR+finalAnswer else answer
+    val finalOffset=answer.length+FINAL_SEPARATOR.length
+    val evidence=spans.flatMap { e ->
+        require(gradingAnswer.substring(e.span.start,e.span.end)==e.span.text)
+        val fields=if(feedbackOnly) listOf(Triple("answer",0,answer),Triple("finalAnswer",finalOffset,finalAnswer))
+            else listOf(Triple("answer",0,answer))
+        fields.mapNotNull { (field,offset,value) ->
+            val start=maxOf(e.span.start,offset)-offset
+            val end=minOf(e.span.end,offset+value.length)-offset
+            if(start>=end) null else json("rubricItemId" to e.rubricItemId,"field" to field,
+                "start" to start,"end" to end,"text" to value.substring(start,end))
+        }
+    } + if(numeric!=null && finalAnswer.isNotEmpty()) listOf(json("rubricItemId" to if(feedbackOnly) null else numeric.str("rubricItemId"),
         "field" to "finalAnswer","start" to 0,"end" to finalAnswer.length,"text" to finalAnswer,"method" to "SERVER_NUMERIC")) else emptyList()
     return json("score" to kotlin.math.round(grade.awarded*100).toLong(),"max" to kotlin.math.round(grade.total*100).toLong(),
         "items" to storedDraft(grade).getValue("items"),"numericFinal" to numericFact,

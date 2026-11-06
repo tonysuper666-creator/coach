@@ -49,8 +49,8 @@ class AnalyticalMockSmoke {
                 await { it.text?.toString()?.startsWith("开始「TON-1292 合成分步验收") == true }
                 tap(await { it.text?.toString() == "开考" })
                 stage = "input-a"
-                val workingA = seek { it.isEditable && label(it).contains("(a) 解题步骤") }
-                set(workingA, "20 - 2P = 4 + 2P; P = 4")
+                seek { it.isEditable && label(it).contains("(a) 解题步骤") }
+                // Full rubric: final-only credit must work without any working text.
                 // Move the current part's final field into view without choosing the next part.
                 finalAfter("(a) 解题步骤").let { set(it, "abc") }
                 await { it.text?.toString()?.startsWith("请输入十进制数") == true }

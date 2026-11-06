@@ -100,8 +100,8 @@ internal class MockPaper(val json: JsonObject) {
                     val partMarks = p.double("marks")
                     val r = rubric(p["rubric"], "$id($label)")
                     val numeric = p.str("answer").takeIf { it.toBigDecimalOrNull() != null }
-                    // Keep original decimal literals and the legacy default; explicit zero stays strict.
-                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.content ?: "0.005"
+                    // Analytical default; missing/null values agree, explicit zero stays strict.
+                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.contentOrNull ?: "0.005"
                     if (numeric != null) AnalyticalNumericKey(numeric, tolerance)
                     val rest = partMarks - r.sumOf { it.points }
                     require(partMarks > 0 && rest > -1e-6) { "$id($label) 评分细则超出分值" }
@@ -165,7 +165,9 @@ private fun hundredths(marks: Double) = (marks * 100).roundToLong()
 private fun numericFact(unit: MockUnit, submitted: String): JsonObject {
     val grade = AnalyticalNumericKey(unit.numeric!!, unit.tolerance).grade(submitted)
     return json("expected" to unit.numeric, "submitted" to submitted, "correct" to grade.correct, "status" to grade.status,
-        "absTolerance" to unit.tolerance, "relTolerance" to 0, "decimalPlaces" to 2, "rubricItemId" to "N")
+        "absTolerance" to unit.tolerance, "relTolerance" to 0, "decimalPlaces" to 2,
+        "rubricItemId" to if (unit.serverNumeric || unit.gradingRubric.any { it.id == "N" }) "N" else null,
+        "feedbackOnly" to (!unit.serverNumeric && unit.gradingRubric.none { it.id == "N" }))
 }
 
 /** Explains the numeric step; method explanations stay with their individual rubric criteria. */
@@ -374,11 +376,12 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
                 } else if (!answered(unit, s.answers)) {
                     append(course, "attempt_graded", json("attemptId" to attempt, "score" to 0, "max" to hundredths(unit.marks), "status" to "EXACT", "feedback" to "未作答。",
                         "items" to JsonArray(rubric.map { json("id" to it.id, "points" to 0, "reason" to if (it.id == "N") "SERVER_NUMERIC" else "未作答，未提供这一步的证据。") }),
-                        "numericFinal" to if (rubric.any { it.id == "N" }) numericFact(unit, "") else null), "attempt:$attempt:grade:exact")
+                        "numericFinal" to if (unit.numeric != null) numericFact(unit, "") else null), "attempt:$attempt:grade:exact")
                 } else {
                     val question = json("kp_id" to unit.kp, "stem" to unit.stem, "reference_answer" to unit.reference,
                         "rubric" to JsonArray(rubric.map { json("id" to it.id, "text" to it.text, "points" to it.points, "basis" to it.basis) }),
-                        "numeric_final" to if (rubric.any { it.id == "N" }) json("expected" to unit.numeric, "rubricItemId" to "N", "relTolerance" to 0.0,
+                        "numeric_final" to if (unit.numeric != null) json("expected" to unit.numeric, "rubricItemId" to "N", "relTolerance" to 0.0,
+                            "feedbackOnly" to rubric.none { it.id == "N" },
                             "absTolerance" to unit.tolerance, "decimalPlaces" to 2) else null)
                     val subject = json("course" to course, "attempt" to attempt, "questionId" to qid, "thread" to null, "answer" to text,
                         "finalAnswer" to final, "question" to question, "rubricFingerprint" to fingerprint, "deadline" to (now + 86_400_000), "mockId" to s.id)
@@ -458,7 +461,11 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
             base["status"] = JsonPrimitive(status); base["score"] = JsonPrimitive(got / 100.0)
             base["feedback"] = JsonPrimitive(effective.str("feedback"))
             val numeric = effective["numericFinal"] as? JsonObject
-            numeric?.let { base["numericFinal"] = it }
+            numeric?.let {
+                base["numericFinal"] = it
+                if (u.numeric != null && byId["N"] == null && !u.serverNumeric)
+                    base["feedback"] = JsonPrimitive(listOf(effective.str("feedback"), numericFeedback(it)).filter(String::isNotBlank).joinToString("\n"))
+            }
             base["reasons"] = JsonArray((effective["items"] as? JsonArray).orEmpty().map { it.jsonObject }.map { g ->
                 json("criterion" to (byId[g.str("id")]?.text ?: if (g.str("id") == "N") "最终数值" else g.str("id")),
                     "points" to g["points"], "max" to (byId[g.str("id")]?.points ?: if (u.serverNumeric) u.marks else null),

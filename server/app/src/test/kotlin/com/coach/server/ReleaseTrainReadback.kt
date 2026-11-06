@@ -1,9 +1,10 @@
 package com.coach.server
 
-import com.coach.client.mistakeReview
+import com.coach.client.CourseView
 import com.coach.domain.Event
 import com.coach.domain.str
 import com.coach.domain.LedgerJson
+import com.coach.domain.project
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.*
 
@@ -11,11 +12,14 @@ import kotlinx.serialization.json.*
 fun main() {
     val input = LedgerJson.parseToJsonElement(System.`in`.bufferedReader().readText()).jsonObject
     val events = LedgerJson.decodeFromJsonElement(ListSerializer(Event.serializer()), input.getValue("events"))
-    val review = mistakeReview(events)
+    val view = CourseView(events, project(events))
+    val cards = events.mapNotNull { it.threadId }.distinct().flatMap { view.quizGroups(it) }.flatMap { it.cards }
     val expected = input.str("expectedMistake")
     if (expected.isNotBlank()) {
-        val mistake = requireNotNull(review.items.singleOrNull { it.attemptId == expected }) { "Candidate mistake missing" }
-        require(mistake.correctAnswer.isNotBlank() && mistake.reason.isNotBlank()) { "Candidate explanation missing" }
+        val card = requireNotNull(cards.singleOrNull { it.attemptId == expected }) { "Candidate card missing" }
+        require(card.answer != null && card.grade?.correct == false) { "Candidate wrong answer missing" }
+        val retry = input.getValue("retryAttempts").jsonArray.map { it.jsonPrimitive.content }.toSet()
+        require(cards.filter { it.attemptId in retry }.size == 3 && cards.filter { it.attemptId in retry }.all { it.answer == null })
     }
-    println(buildJsonObject { put("mistakes", review.items.size) })
+    println(buildJsonObject { put("wrongCards", cards.count { it.grade?.correct == false }) })
 }

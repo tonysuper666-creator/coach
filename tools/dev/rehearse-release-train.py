@@ -102,7 +102,7 @@ def readback(port, token, courses, client_app, expected=None):
     Only pre-existing KP threads are opened; no lesson or real-data write is sent.
     """
     calls = smoke.Bridge.calls
-    opened = mistakes = 0
+    opened = mistakes = wrong_cards = 0
     for course in courses:
         snapshot = request(port, token, course, 'snapshot')
         require(isinstance(snapshot.get('projection'), dict), 'missing course projection')
@@ -119,12 +119,17 @@ def readback(port, token, courses, client_app, expected=None):
         require(events == snapshot['events'], 'course event/snapshot disagreement')
         # The probe class comes from this checkout; all client/domain/protocol
         # libraries come from the binary actually selected for rollback.
-        probe = subprocess.run(['java', '-cp', str(ROOT / 'server/app/build/classes/kotlin/test') + os.pathsep + str(client_app / 'lib/*'),
-                                'com.coach.server.ReleaseTrainReadbackKt'],
-                               input=json.dumps({'events': events, 'expectedMistake': (expected or {}).get('wrongAttempt', '')}),
-                               text=True, capture_output=True, timeout=45)
-        require(probe.returncode == 0, 'selected client mistake projection failed')
-        mistakes += json.loads(probe.stdout)['mistakes']
+        probes = {}
+        for name, app in [('ReleaseTrainReadback', client_app), ('ReleaseTrainMistakeReadback', ROOT / 'server/app/build/install/app')]:
+            probe = subprocess.run(['java', '-cp', str(ROOT / 'server/app/build/classes/kotlin/test') + os.pathsep + str(app / 'lib/*'),
+                                    'com.coach.server.' + name + 'Kt'],
+                                   input=json.dumps({'events': events, 'expectedMistake': (expected or {}).get('wrongAttempt', ''),
+                                                     'retryAttempts': (expected or {}).get('retryAttempts', [])}),
+                                   text=True, capture_output=True, timeout=45)
+            require(probe.returncode == 0, 'client course/mistake projection failed')
+            probes[name] = json.loads(probe.stdout)
+        mistakes += probes['ReleaseTrainMistakeReadback']['mistakes']
+        wrong_cards += probes['ReleaseTrainReadback']['wrongCards']
         contexts = {}
         for event in events:
             if event['type'] == 'kp_opened' and event['payload'].get('conceptIds'):
@@ -147,7 +152,7 @@ def readback(port, token, courses, client_app, expected=None):
                 e['payload']['attemptId'] for e in events if e['type'] in ('answer_submitted', 'attempt_voided')}
             require(pending == set(expected['retryAttempts']), 'candidate retry group lost')
     require(smoke.Bridge.calls == calls, 'readback unexpectedly called bridge')
-    return dict(courses=len(courses), tutorOpens=opened, mistakes=mistakes, bridgeCalls=0)
+    return dict(courses=len(courses), tutorOpens=opened, trainClientMistakes=mistakes, rollbackClientWrongCards=wrong_cards, bridgeCalls=0)
 
 
 def seed(db, phase):

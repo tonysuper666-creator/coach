@@ -89,7 +89,7 @@ as a pass. The clean compatible-baseline build and compatible rollback
 rehearsal below are also unverified. This is a partial delivery, kept draft.
 
 The 11:01 UTC continuation also adds the independent review's stronger gates:
-the selected rollback binary's own client projector reads candidate mistakes,
+the selected rollback binary's client reads candidate wrong answers and cards,
 and the first schema migration has separate zero-write/with-write scenarios.
 `python3 -W error::ResourceWarning -m unittest tools.dev.test_release_train`
 passes four tests (exit 0), including new events, same-watermark event edits,
@@ -172,8 +172,10 @@ candidate events must survive rollback, and SQLite integrity must remain `ok`.
 The candidate deliberately answers one question incorrectly, then explicitly
 requests three unseen retry questions. After both rollback and failure
 recovery, the harness reads its full event payloads, pending retry attempts,
-and retained mistake through the selected distribution's actual shared client
-projector. It also reads every original course's snapshot, today progress and
+using the selected distribution's actual shared client projector. The train
+client separately reconstructs its retained mistake and explanation from the
+rollback server's response (the old client has no new mistake list). It also
+reads every original course's snapshot, today progress and
 mistake projection, and opens each pre-existing tutor context/history without
 asking for teaching or sending a bridge request. Responses stay private;
 only counts leave the copy. A `msg.error` fails these protocol checks.

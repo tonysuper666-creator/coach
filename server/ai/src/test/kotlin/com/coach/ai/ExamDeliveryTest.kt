@@ -34,6 +34,30 @@ class ExamDeliveryTest {
         assertEquals("x = 2", (segments.single() as VisibleStream.Segment.Math).tex)
     }
 
+    @Test fun aBlockedUnpublishedFormulaIsDiscardedWithoutAHalfOpenFence() {
+        val input = "先算一个新例子。\$\$x = 2 + Amber badgers carry delicate emerald feathers gently home.\$\$后续内容"
+        for (split in 0..input.length) {
+            val delivery = ExamDelivery { ExamTextGuard(index) }
+            val published = StringBuilder()
+            for (chunk in listOf(input.take(split), input.drop(split))) {
+                published.append(delivery.push(VisibleStream.Segment.Text(chunk)).joinToString("") { ExamDelivery.markdown(it) })
+                assertFalse(index.overlaps(published.toString()), "split=$split")
+                assertFalse(published.contains("\$\$"), "split=$split")
+            }
+            published.append(delivery.finish().joinToString("") { ExamDelivery.markdown(it) })
+            assertTrue(delivery.blocked)
+            assertEquals("先算一个新例子。" + ExamTextGuard.REASONING, published.toString(), "split=$split")
+        }
+    }
+
+    @Test fun aCompleteSafeFormulaBeforeABlockedFormulaIsPreserved() {
+        val delivery = ExamDelivery { ExamTextGuard(index) }
+        val segments = delivery.push(VisibleStream.Segment.Text("\$\$x = 2\$\$\n\$\$Amber badgers carry delicate emerald feathers gently home.\$\$")) + delivery.finish()
+        assertTrue(delivery.blocked)
+        assertEquals(VisibleStream.Segment.Math("x = 2", true), segments.first())
+        assertEquals("\n" + ExamTextGuard.REASONING, segments.drop(1).joinToString("") { ExamDelivery.markdown(it) })
+    }
+
     @Test fun missingPrivateFilesProtectTheCourseAndPromptReferencesAreBounded() {
         val missing = ExamMaterials.load(Files.createTempDirectory("empty-exam"))
         assertFalse(missing.available)

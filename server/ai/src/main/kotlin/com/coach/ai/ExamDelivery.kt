@@ -30,6 +30,7 @@ class ExamDelivery(private val newGuard: () -> ExamTextGuard) {
 
     // Only restore typed formulas. Removing any text after the final word check
     // could join previously separated words into an unchecked exam quotation.
+    // An unpublished, blocked formula may be discarded in full with its fence.
     private fun typed(text: String, final: Boolean = false): List<VisibleStream.Segment> {
         pending.append(text)
         val out = ArrayList<VisibleStream.Segment>()
@@ -43,7 +44,13 @@ class ExamDelivery(private val newGuard: () -> ExamTextGuard) {
             if (open > 0) { out += VisibleStream.Segment.Text(pending.substring(0, open)); pending.delete(0, open) }
             val close = pending.indexOf("\$\$", 2)
             if (close < 0) {
-                if (final) { out += VisibleStream.Segment.Text(pending.toString()); pending.setLength(0) }
+                if (blocked) {
+                    out += VisibleStream.Segment.Text(ExamTextGuard.REASONING)
+                    pending.setLength(0)
+                } else if (final) {
+                    out += VisibleStream.Segment.Text(pending.toString())
+                    pending.setLength(0)
+                }
                 break
             }
             out += VisibleStream.Segment.Math(pending.substring(2, close), true)

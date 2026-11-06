@@ -15,7 +15,7 @@ class ExamTextIndex(documents: List<String>) {
         val unique = HashSet<List<String>>()
         documents.forEach { document ->
             scans(document).forEach { (root, scan) ->
-                scan.words.map { it.value }.windowed(8).forEach { window ->
+                scan.words.filter { it.matchable }.map { it.value }.windowed(8).forEach { window ->
                     unique.add(window)
                     var node = root
                     window.forEach { word -> node = node.next.getOrPut(word) { Node() } }
@@ -27,7 +27,7 @@ class ExamTextIndex(documents: List<String>) {
 
     fun overlaps(text: String): Boolean {
         return scans(text).any { (root, scan) ->
-            val tokens = scan.words
+            val tokens = scan.words.filter { it.matchable }
             tokens.indices.any { start ->
                 var node = root
                 var count = 0
@@ -41,7 +41,7 @@ class ExamTextIndex(documents: List<String>) {
     }
 
     internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(root to scan(text), literalRoot to scan(text, visible = false))
-    internal data class Word(val value: String, val start: Int, val end: Int)
+    internal data class Word(val value: String, val start: Int, val end: Int, val matchable: Boolean)
     internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int)
     companion object {
         internal fun words(text: String): List<Word> = scan(text).words
@@ -81,7 +81,13 @@ class ExamTextIndex(documents: List<String>) {
                 offset = end
             }
             val words = Regex("[a-z]+").findAll(normalized).map {
-                Word(it.value, starts[it.range.first], ends[it.range.last])
+                val start = starts[it.range.first]
+                // Formula variables and literal TeX command names are not English
+                // words. Keep their offsets for streaming: a partial variable can
+                // still grow into a word in the next delta.
+                val matchable = (it.value.length > 1 || it.value == "a" || it.value == "i") &&
+                    (visible || start == 0 || text[start - 1] != '\\')
+                Word(it.value, start, ends[it.range.last], matchable)
             }.toList()
             // Ignored suffixes do not finish a word (e.g. "Am**" or "Am\u200B").
             return Scan(words, normalized.lastOrNull()?.let { it in 'a'..'z' } == true, stableEnd)
@@ -129,9 +135,10 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
         // Preserve literal eight-word protection as well: joining inline markup
         // must not create a new bypass for a quotation separated by underscores.
         for ((root, scan) in index.scans(pending.toString())) {
-            val words = scan.words
             val incomplete = !end && scan.openWord
-            val complete = words.size - if (incomplete) 1 else 0
+            val rawComplete = scan.words.size - if (incomplete) 1 else 0
+            val words = scan.words.take(rawComplete).filter { it.matchable }
+            val complete = words.size
             for (start in 0 until complete) {
                 var node = root
                 var count = 0
@@ -142,7 +149,7 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
                 if (count == 8) hitStart = minOf(hitStart ?: pending.length, words[start].start)
             }
             if (!end) {
-                cut = minOf(cut, if (incomplete) words.last().start else pending.length, scan.stableEnd)
+                cut = minOf(cut, if (incomplete) scan.words.last().start else pending.length, scan.stableEnd)
                 // An unfinished eighth word must leave the preceding seven unpublished.
                 for (start in maxOf(0, complete - 7) until complete) {
                     var node = root

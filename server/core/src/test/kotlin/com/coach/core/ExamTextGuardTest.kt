@@ -72,6 +72,44 @@ class ExamTextGuardTest {
         }
     }
 
+    @Test fun referenceFormulasDoNotTurnVariablesOrCommandsIntoEnglishQuotations() {
+        val formulas = listOf(
+            "\$\$E = (Q_2-Q_1)/((Q_2+Q_1)/2) / ((P_2-P_1)/((P_2+P_1)/2))\$\$",
+            "\$\$\\frac{Q_2-Q_1}{Q_2+Q_1} / \\frac{P_2-P_1}{P_2+P_1}\$\$",
+            "\$\$ICER = (C_B-C_A)/(Q_B-Q_A); Q = S_1 U_1 + S_2 U_2\$\$",
+        )
+        val formulaIndex = ExamTextIndex(listOf(exam) + formulas)
+        for (formula in formulas) {
+            assertFalse(formulaIndex.overlaps(formula))
+            val guard = ExamTextGuard(formulaIndex)
+            assertEquals(formula, formula.chunked(1).joinToString("") { guard.push(it) } + guard.finish())
+            assertFalse(guard.blocked)
+        }
+    }
+
+    @Test fun singleLetterAndFormulaFillersCannotHideAQuotation() {
+        for (filler in listOf("x", "e\u0301", "\$Q_2\$", "\\frac{Q_2}{P_2}"))
+            assertObfuscationBlocked(quote.split(" ").joinToString(" $filler "))
+    }
+
+    @Test fun englishArticlesAndPronounsStillCountAndPartialVariablesStayUnpublished() {
+        val sentence = "I saw a bright comet cross the horizon."
+        val sentenceIndex = ExamTextIndex(listOf(sentence))
+        assertTrue(sentenceIndex.overlaps(sentence))
+        val guard = ExamTextGuard(index)
+        assertEquals("", guard.push("A"))
+        assertEquals("", guard.push("mber badgers carry delicate emerald feathers gently h"))
+        val published = guard.push("ome.") + guard.finish()
+        assertTrue(guard.blocked)
+        assertFalse(index.overlaps(published))
+        // 'h' is ignored for matching until the next delta makes it 'home'.
+        val lastWord = ExamTextGuard(index)
+        val prefix = lastWord.push("Amber badgers carry delicate emerald feathers gently ")
+        assertEquals("", prefix + lastWord.push("h"))
+        assertTrue(lastWord.push("ome.").contains("解题思路"))
+        assertTrue(lastWord.blocked)
+    }
+
     @Test fun splitSurrogatePairCannotEscapeTheWordIndex() {
         val input = "𝔄mber badgers carry delicate emerald feathers gently home."
         val guard = ExamTextGuard(index)

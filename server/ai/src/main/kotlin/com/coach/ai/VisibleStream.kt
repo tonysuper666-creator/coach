@@ -46,8 +46,8 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
                     if (final) { buffer.setLength(0); drop("raw_json", s) }
                     return out
                 }
-                val candidate = s.substring(0, end)
-                if (runCatching { kotlinx.serialization.json.Json.parseToJsonElement(candidate) }.isSuccess) {
+                val candidate = if (end == NOT_JSON) "" else s.substring(0, end)
+                if (end != NOT_JSON && runCatching { kotlinx.serialization.json.Json.parseToJsonElement(candidate) }.isSuccess) {
                     // A closed JSON prefix can still be ordinary prose: "[1] Citation".
                     // Wait for newline/EOF before discarding it; whitespace may arrive separately.
                     val suffix = s.substring(end)
@@ -115,7 +115,10 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
         return cut.coerceAtLeast(0)
     }
 
-    /** Find the end of a JSON-shaped block without ever publishing its partial prefix. */
+    /**
+     * Find the end of a JSON-shaped block without ever publishing its partial prefix.
+     * Prose such as the interval `[0, 1)` is reported as [NOT_JSON] instead of waiting for a close that never comes.
+     */
     private fun structuredEnd(s: String): Int? {
         var depth = 0
         var quoted = false
@@ -129,6 +132,7 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
                 '"' -> quoted = true
                 '{', '[' -> depth++
                 '}', ']' -> { depth--; if (depth == 0) return i + 1 }
+                else -> if (!c.isWhitespace() && c !in JSON_BARE) return NOT_JSON
             }
         }
         return null
@@ -198,5 +202,10 @@ class VisibleStream(private val onDrop: (Drop) -> Unit = {}) {
         val TOKENS = listOf("placeholder", "malformed", "tool_call", "<tool_calls>", "x_coach", "finish_reason")
 
         private const val MAX_LENGTH = 24
+
+        private const val NOT_JSON = -1
+
+        /** Characters JSON allows outside strings besides brackets, quotes and whitespace. */
+        private const val JSON_BARE = "0123456789+-.eE,:truefalsn"
     }
 }

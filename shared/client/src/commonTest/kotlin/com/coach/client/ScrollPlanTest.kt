@@ -161,6 +161,14 @@ class ScrollPlanTest {
         assertEquals(0, moves.count { it is ScrollMove.Drag }, "容器能翻页时不该退回手指拖：$moves")
     }
 
+    @Test fun transientFirstPageFailureStillReachesThirdCard() {
+        // 首次翻页被吸附吞掉，下一次即可恢复；手指拖始终无效。
+        val page = FakePage(card = 3, pageWorksAfter = 1, dragWorks = false)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertTrue(found, "一次翻页探空后应再次翻页并到达第 3 题：$moves")
+        assertEquals(0, page.dragCalls, "不能因一次探空就转入无效的手指拖：$moves")
+    }
+
     @Test fun dragsRemainTheFallbackWhenTheContainerCannotPage() {
         val page = FakePage(card = 3, pageScrollWorks = false, dragWorks = true)
         val (found, moves) = page.drive(ScrollDriver(card = 3))

@@ -22,8 +22,8 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = 600.dp
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null) {
-    val thread = view.tutorThreadId(kp.id)
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null, reviewMode: Boolean = false) {
+    val thread = if (reviewMode) view.reviewThreadId(kp.id) else view.tutorThreadId(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
     SideEffect { if(groups.isNotEmpty()) PoolTrace.mark(thread,"composed") }
@@ -39,15 +39,15 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     var pinned by remember(kp.id) { mutableStateOf(false) }
     val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
-    fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
+    fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title, review = reviewMode)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
-    fun next(test: Boolean) {
+    fun next(test: Boolean, recordTap: Boolean = true) {
         pinned = true
         focus.clearFocus()
         if (!open()) return fail()
         pinned = true
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
-        if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
+        if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test, recordTap)) fail()
     }
     fun send(text: String): Boolean {
         if (tv.busy || !ui.connected) return false
@@ -59,17 +59,27 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
 
     // 每次（重新）连上都声明一次线程；服务端按 kpId 幂等。
-    LaunchedEffect(kp.id, ui.connected, tv.historyLoaded) {
+    LaunchedEffect(thread, ui.connected, tv.historyLoaded, tv.busy) {
         if (!ui.connected) { opened = false; return@LaunchedEffect }
         if (!opened) opened = open()
-        if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false) }
+        if (autoStart && !started && opened && tv.historyLoaded && !tv.busy) {
+            started = true
+            if (pending == null && (reviewMode || tv.items.isEmpty())) next(false, recordTap = false)
+        }
+    }
+
+    // A newly passed queue item opens its successor after grading/streaming settles.
+    LaunchedEffect(kp.status, view.weekTarget?.id, tv.busy, pending) {
+        if (weekActions != null && view.weekProgress(kp.id) != null && kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID) && !tv.busy && pending == null) {
+            weekActions.onOpen(view.weekTarget?.id)
+        }
     }
 
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
             Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
                 // Back button and the title's first line sit on one row; the scope toggle lines up with the title's left edge.
-                if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
+                if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (reviewMode) "← 复习" else "← 今天") }
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
                     Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
@@ -84,9 +94,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
                         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }
+                    if (reviewMode) Text("到期复习", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    view.weekProgress(kp.id)?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) }
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)
                         additionalScope.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                        if (weekActions != null) WeekPicker(view, weekActions, ui.connected)
                     }
                 }
             }
@@ -135,7 +148,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         Box(Modifier.weight(1f).widthIn(max = READING_WIDTH).fillMaxWidth()) {
             if (rows.isEmpty()) Text(
-                if (kp.explained) "这个知识点讲过了。点「下一步」继续出题，或直接提问。" else "还没开始。点下面的「开始讲解」。",
+                if (reviewMode) "正在准备复习题；也可以点「开始复习」。" else if (kp.explained) "这个知识点讲过了。点「下一步」继续出题，或直接提问。" else "还没开始。点下面的「开始讲解」。",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -170,6 +183,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             if (!imeOpen && pending == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 // 服务端只在需要时给特殊文字（「换个例子再讲」）；还没讲过、线程里什么都没有时按钮就叫「开始讲解」。
                 val nextText = when {
+                    reviewMode -> "开始复习"
                     tv.nextLabel == "换个例子再讲" -> "换个例子再讲"
                     !kp.explained && tv.items.isEmpty() && groups.isEmpty() -> "开始讲解"
                     else -> "下一步"
@@ -178,6 +192,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
+            }
+            if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
+                OutlinedButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一个知识点 →") }
+                weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
             // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。

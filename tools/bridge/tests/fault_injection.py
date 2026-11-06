@@ -9,7 +9,8 @@
   4. max_output_tokens      → truncated / max_output_tokens / length（不再报 stop）
   5. 4 个请求排队           → 全部 complete、同一时刻最多 1 个桩在跑、queue_ms 单列
 另外验证：/health 登录状态与 true_stream 能力表、X-Request-Id 回显、X-Coach-Fallback 默认 off、
-后台转派 Codex、额度紧张时后台 429。
+后台转派 Codex、额度紧张时后台 429。取消回归另带一个「不回收」负例（leak 桩派生脱离进程组的
+孙进程），用来证明这条判定不是空断言。
 
 每项断言都看最后一帧（x_coach）的 status / reason / finish_reason / served_by / physical_calls。
 跑法：tools/bridge/.venv/bin/python tools/bridge/tests/fault_injection.py
@@ -20,6 +21,7 @@ import http.client
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -46,16 +48,32 @@ def stub_procs(stub_dir: Path) -> int:
     return len([x for x in out.stdout.split() if x.strip()])
 
 
-def abort_after(port: int, body: dict, delay: float) -> None:
-    """发一个请求，delay 秒后直接断开（模拟客户端取消），一句话都不读。"""
+def open_request(port: int, body: dict) -> socket.socket:
+    """发一个流式请求后把连接留着：不读、不关，供调用方随后 close()（模拟客户端取消）。"""
     s = socket.create_connection(("127.0.0.1", port), timeout=30)
     payload = json.dumps(body, ensure_ascii=False).encode()
     head = ("POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
             "Content-Type: application/json\r\nX-Coach-Traffic: test\r\n"
             f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n")
     s.sendall(head.encode() + payload)
+    return s
+
+
+def abort_after(port: int, body: dict, delay: float) -> None:
+    """发一个请求，delay 秒后直接断开（模拟客户端取消），一句话都不读。"""
+    s = open_request(port, body)
     time.sleep(delay)
     s.close()
+
+
+def wait_stub_count(stub_dir: Path, want, timeout: float) -> int:
+    """轮询桩进程数直到 want(n) 成立或超时，返回最后一次采样值。"""
+    deadline = time.monotonic() + timeout
+    n = stub_procs(stub_dir)
+    while not want(n) and time.monotonic() < deadline:
+        time.sleep(0.02)
+        n = stub_procs(stub_dir)
+    return n
 
 
 def free_port() -> int:
@@ -230,16 +248,46 @@ def main() -> int:
         check("hang: finish_reason=error", oc and oc["finish_reason"] == "error")
 
         # ---- 2c. 出字前取消：CLI 必须被杀掉，2 秒内无残留 ----
+        # 采样时序：连接还开着的时候确认桩真的跑起来，再关连接量回收。
+        # 先 close 再采 during 会和桥的取消竞态：桩已经按取消被回收，采样照样是 0，
+        # 于是把「正确回收」误判成「桩根本没跑过」。
+        cancel_body = {"model": "claude-sonnet-5-5", "stream": True,
+                       "messages": [{"role": "user", "content": "取消测试"}]}
         b.set_mode("hang")
         before = stub_procs(stub_dir)
-        abort_after(b.port, {"model": "claude-sonnet-5-5", "stream": True,
-                             "messages": [{"role": "user", "content": "取消测试"}]}, delay=1.0)
-        during = stub_procs(stub_dir)
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and stub_procs(stub_dir) > before:
-            time.sleep(0.05)
-        check("取消（出字前）: 桩确实在跑过，之后 2 秒内回到基线", during > before and stub_procs(stub_dir) <= before,
-              f"before={before} during={during} after={stub_procs(stub_dir)}")
+        conn = open_request(b.port, cancel_body)
+        during = wait_stub_count(stub_dir, lambda n: n > before, 1.5)   # 连接此时仍然打开
+        conn.close()
+        cancelled_at = time.monotonic()
+        after = wait_stub_count(stub_dir, lambda n: n <= before, 2.0)
+        recovered_ms = round((time.monotonic() - cancelled_at) * 1000)
+        check("取消（出字前）: 桩确实在跑过，之后 2 秒内回到基线", during > before and after <= before,
+              f"before={before} during={during} after={after} {recovered_ms}ms")
+
+        # ---- 2d. 负例：同一个判定必须抓得住「不回收」 ----
+        # leak 模式的桩派生一个脱离进程组的孙进程，桥的 killpg 打不到它，取消后必有残留。
+        leak_pid_file = stub_dir / "leak.pid"
+        b.set_mode("leak")
+        before = stub_procs(stub_dir)
+        conn = open_request(b.port, cancel_body)
+        during = wait_stub_count(stub_dir, lambda n: n > before, 1.5)
+        conn.close()
+        after = wait_stub_count(stub_dir, lambda n: n <= before, 2.0)
+        check("负例：不回收的桩必须被判失败（该判定不是空断言）", during > before and after > before,
+              f"before={before} during={during} after={after}")
+        pid = 0
+        try:
+            pid = int(leak_pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pass
+        if pid:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        after_clean = wait_stub_count(stub_dir, lambda n: n <= before, 3.0)
+        check("负例清理: 注入的残留已清干净", after_clean <= before, f"after={after_clean} pid={pid}")
+        b.set_mode("hang")
 
         # ---- 2b. 挂起（出字后）→ truncated / timeout ----
         b.set_mode("hang_after")

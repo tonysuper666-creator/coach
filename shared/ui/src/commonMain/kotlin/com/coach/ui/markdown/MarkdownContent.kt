@@ -38,13 +38,23 @@ fun MarkdownContent(block: MarkdownBlock, assets: Map<String, MathAsset>, model:
     }
 }
 
+/**
+ * One text measurer for all the formulas of a message. Each `rememberTextMeasurer()` is a separate instance with its own small layout cache,
+ * so a list of eight formula lines used to measure the same probe strings eight times when its block sealed.
+ */
+val LocalMarkdownMeasurer = compositionLocalOf<TextMeasurer?> { null }
+@Composable
+fun ProvideMarkdownMeasurer(content: @Composable () -> Unit) = CompositionLocalProvider(LocalMarkdownMeasurer provides rememberTextMeasurer(cacheSize = 64), content = content)
+@Composable
+private fun sharedMeasurer(): TextMeasurer = LocalMarkdownMeasurer.current ?: rememberTextMeasurer()
+
 /** Test hook: scroll every display formula to its right end (used to prove the end of a wide formula is reachable). */
 val LocalScrollMathToEnd = compositionLocalOf { false }
 
 /** One display formula: natural size, horizontally scrollable so a formula wider than the screen is never cut off. */
 @Composable
 fun ScrollableMath(document: MathSvgDocument, tex: String, emPx: Float, color: Color, modifier: Modifier = Modifier) {
-    val measurer = rememberTextMeasurer()
+    val measurer = sharedMeasurer()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val scroll = rememberScrollState()
     if (LocalScrollMathToEnd.current) LaunchedEffect(scroll.maxValue) { if (scroll.maxValue > 0) scroll.scrollTo(scroll.maxValue) }
@@ -123,15 +133,22 @@ private fun BlockNodes(source: String, nodes: List<ASTNode>, assets: Map<String,
 /** One paragraph of text: display formulas on their own scrollable row, text and inline formulas flowing as one wrapped paragraph. */
 @Composable
 private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolean, live: Boolean, style: TextStyle, onFailure: (String) -> Unit, modifier: Modifier = Modifier, failed: Set<String> = emptySet()) {
-    if (live) {
+    val tokens = if (live) emptyList() else remember(text, model) { layoutMathSegments(MathDelimiters.tokenize(text, model).segments) }
+    if (live || (tokens.isNotEmpty() && tokens.all { it.text != null })) {
         // Still streaming: structure and emphasis are shown, formulas stay as written until the block seals (no half-typed LaTeX flicker).
-        Text(remember(text) { renderMarkdownText(text) }, modifier.fillMaxWidth(), style = style)
+        // A sealed paragraph without formulas keeps this same Text and its measured layout. It needs neither width subcomposition nor baseline probes.
+        val plain = if (live) text else remember(tokens) { tokens.joinToString("") { it.text.orEmpty() } }
+        Text(remember(plain) { renderMarkdownText(plain) }, modifier.fillMaxWidth(), style = style)
         return
     }
-    val tokens = remember(text, model) { layoutMathSegments(MathDelimiters.tokenize(text, model).segments) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val em = with(density) { style.fontSize.toPx() }
     val foreground = LocalContentColor.current
+    // Only display formulas can move to a separate row depending on the available width.
+    if (tokens.none { it.math != null && it.display }) {
+        MathRunsContent(listOf(tokens.withIndex().toList()).filter { it.isNotEmpty() }, assets, onFailure, style, em, foreground, failed, modifier)
+        return
+    }
     val widths = remember { HashMap<String, Float>() }
     BoxWithConstraints(modifier) {
         val available = with(density) { maxWidth.toPx() }
@@ -141,19 +158,24 @@ private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolea
                 runCatching { MathSvgDocument.parse(asset.sha, asset.svg).widthEm }.getOrDefault(Float.POSITIVE_INFINITY)
             } * em <= available
         }
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            runs.forEachIndexed { runIndex, run ->
-                val first = run.first().value
-                val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
-                val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
-                if (document != null) ScrollableMath(document, first.math!!, em, foreground)
-                else if (run.size == 1 && first.math != null && first.display && mathKey(first.math!!, true) in failed) FailedFormula(first.math!!)
-                else InlineRun(run, assets, onFailure, style, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
-            }
-            // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
-            if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
-                Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+        MathRunsContent(runs, assets, onFailure, style, em, foreground, failed)
+    }
+}
+
+@Composable
+private fun MathRunsContent(runs: List<List<IndexedValue<MathSegment>>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit, style: TextStyle, em: Float, foreground: Color, failed: Set<String>, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        runs.forEachIndexed { runIndex, run ->
+            val first = run.first().value
+            val asset = if (run.size == 1 && first.math != null && first.display) assets[mathKey(first.math!!, true)] else null
+            val document = remember(asset) { asset?.let { runCatching { MathSvgDocument.parse(it.sha, it.svg) }.getOrNull() } }
+            if (document != null) ScrollableMath(document, first.math!!, em, foreground)
+            else if (run.size == 1 && first.math != null && first.display && mathKey(first.math!!, true) in failed) FailedFormula(first.math!!)
+            else InlineRun(run, assets, onFailure, style, trimLeadingSpace = runIndex > 0 && runs[runIndex - 1].singleOrNull()?.value?.display == true)
+        }
+        // Inline formulas that could not be drawn stay in the sentence as ⟦source⟧; say once what those marks are.
+        if (runs.any { run -> run.any { it.value.math != null && mathKey(it.value.math!!, it.value.display) in failed && !(run.size == 1 && it.value.display) } }) {
+            Text(FORMULA_FAILED_INLINE_NOTE, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -175,7 +197,7 @@ private fun FailedFormula(tex: String) {
 @Composable
 private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, MathAsset>, onFailure: (String) -> Unit, style: TextStyle, trimLeadingSpace: Boolean = false) {
     val source = run.joinToString("") { it.index.toString() }
-    val measurer = rememberTextMeasurer()
+    val measurer = sharedMeasurer()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val foreground = LocalContentColor.current
     // Fixed line height keeps the line box constant, but the baseline inside it depends on whether the line holds CJK
@@ -188,7 +210,10 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     val inline = mutableMapOf<String, InlineTextContent>()
     val text = buildAnnotatedString {
         run.forEachIndexed { part, (index, token) ->
-            if (token.text != null) append(renderMarkdownText(if (trimLeadingSpace && part == 0) token.text!!.trimStart(' ', '\t') else token.text!!))
+            if (token.text != null) {
+                val plain = if (trimLeadingSpace && part == 0) token.text!!.trimStart(' ', '\t') else token.text!!
+                append(remember(plain) { renderMarkdownText(plain) })
+            }
             else {
                 val tex = token.math!!
                 val asset = assets[mathKey(tex, token.display)]
@@ -223,6 +248,9 @@ private fun InlineRun(run: List<IndexedValue<MathSegment>>, assets: Map<String, 
     })
 }
 
+/** Building the GFM flavour is not free and every live paragraph is re-rendered on each delta; the parser itself keeps no state between calls. */
+private val inlineParser = MarkdownParser(GFMFlavourDescriptor())
+
 internal fun renderMarkdownText(source: String): AnnotatedString = buildAnnotatedString { appendStyledMarkdown(source) }
 
 /** Render inline AST styles; reference definitions/links and raw HTML stay literal. */
@@ -230,7 +258,7 @@ private fun AnnotatedString.Builder.appendStyledMarkdown(raw: String) {
     // Math is handled before this point (MathDelimiters), so every `$` that arrives here is a plain character, usually currency.
     // The GFM parser would pair two of them as inline LaTeX and swallow the emphasis between them (`**$20**，… $80` showed its asterisks).
     val source = escapeDollars(raw)
-    val root = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(source)
+    val root = inlineParser.buildMarkdownTreeFromString(source)
     fun visit(node: ASTNode) {
         val type = node.type.name
         val value = source.substring(node.startOffset, node.endOffset)

@@ -93,6 +93,29 @@ class NightlyBackupTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun repeatingAnExplicitBackupTargetKeepsTheBackupAlreadyThere() {
+        val root = Files.createTempDirectory("coach-backup-repeat-")
+        val data = root.resolve("live")
+        val target = root.resolve("manual")
+        try {
+            LedgerStore(data).use { store ->
+                store.append("synthetic-course", "note_saved", json("noteId" to "kept"))
+                store.putBlob("synthetic immutable attachment".toByteArray(), "text/plain")
+                store.backup(target)
+                store.append("synthetic-course", "note_saved", json("noteId" to "later"))
+                // SQLite refuses to VACUUM INTO an existing file; that failure must not take the first copy with it.
+                assertFails { store.backup(target) }
+            }
+            assertTrue(Files.isRegularFile(target.resolve("complete")))
+            integrity(target.resolve("coach.sqlite"))
+            assertEquals(1L, Files.list(target.resolve("blobs")).use { it.count() })
+            LedgerStore.restore(data, target).use { restored ->
+                assertEquals(listOf("kept"), restored.events("synthetic-course").map { it.payload["noteId"].toString().trim('"') })
+            }
+            println("NIGHTLY repeatedTargetRejected=true existingBackupRestores=true")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun failedExportCannotAdvanceBackupWatermarkAndIncompleteRestoreIsRejected() {
         val root = Files.createTempDirectory("coach-backup-failure-")
         val data = root.resolve("live")

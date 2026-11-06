@@ -1,4 +1,61 @@
-# DeepTutor 迁移只读对账
+# DeepTutor 迁移工具
+
+## 离线追加大纲（TON-1262）
+
+`add-outline` 给已有课程追加知识点。先从只读生产连接做 SQLite online backup，在新副本上验收；命令要求显式指定已有数据库目录，并持有服务端的 `server.lock`。不要对正在使用的库导入。
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :server:store:test :tools:migrate-deeptutor:installDist
+tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor add-outline \
+  --input "$PRIVATE_OUTLINE_JSON" --database "$OFFLINE_DATABASE_DIR"
+```
+
+输入沿用本地大纲清单：`course.id`、`additive:true`、`retiresExisting:false`、`modules`（`id/ordinal/name`）和 `knowledgePoints`（`id/moduleId/ordinal/title/week/examFormats/prerequisiteIds/anchors`）。标题用既有 `【W8·…】` 周次标记，须与 `week` 一致；锚点包含 `docId/pdfPage`，可带 `bookPage`，只引用同课程已有、可见且有正文的教材页。可选 `sourceAnchor` 必须属于 `anchors`。不导入源文档或新考试权重，不生成虚构的无教学内容周知识点。
+
+新 ID 和模块不得覆盖已有记录，顺序必须接在旧点之后，先修必须存在且无环。工具从新点生成安全的 `add` 操作，忽略输入 `ops`，在同一事务写入 `outline_kp`、模块、可选的既有 `course_content` 元数据及一条 `outline_revised` 事件。旧装载库没有 `course_content` 时继续沿用事件与 packs 路径。原有点、学习事实、教材和考试权重保留；任何写入失败全部回滚。相同规范化事件哈希重复导入输出 `unchanged`，同 ID 内容冲突则拒绝，不作修订。
+
+真实输入、隔离副本及报告存放在仓库和 DeepTutor 之外的私有目录；仓库只收合成测试数据。此入口的验证不替代开讲、开练、模拟器及上线验收。
+
+## 已确认迁移：离线写入、在线备份和回退（TON-1095）
+
+`apply-confirmed` 直接在指定的现有 Coach 库调用经复核的 `writeHistory`，不会用旧预演库替换生产库，也不会启动服务。`rollback-confirmed` 只恢复本次导入之前的备份。真实材料、备份和输出必须放在仓库及 DeepTutor 外的私有目录。备份、目标库和输入目录必须相互分离。
+
+先在当前生产库的新副本上独立验收，再交 Architect 关键复核；两轮通过后才能执行下面的正式操作。复跑入口只以只读 SQLite online backup 捕获当前 Coach，不停止生产服务，所有写入都在 `NEW_ROOT`：
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :shared:domain:jvmTest :server:store:test :tools:migrate-deeptutor:installDist
+bash tools/migrate-deeptutor/reproduce-formal.sh \
+  "$HOME/Coach/data" "$SNAPSHOT" "$SEED" "$PROPOSAL" "$CONFIRMATION" \
+  4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa "$NEW_ROOT"
+```
+
+它保留当前原生事件，从新副本执行实际 `apply-confirmed`，再在另一个导入后副本执行实际 `rollback-confirmed`。`validation.json` 包含首次/重复导入计数、规范状态和投影 SHA、评分隔离、每个 KP 的供给、恢复验证及回退的物理字节核对。快照逐文件 SHA 前后不变。确认文件必须是已复核的原样 UTF-8 文件（含结尾换行），不是重新序列化出的文件。
+
+正式操作须在上述两轮验收通过之后执行。先退出 Coach 客户端并停止 `local.coach.server`，防止 launchd 自动重启争抢锁。不要停止 DeepTutor，也不要碰 8790。先用 `launchctl print gui/$(id -u)/local.coach.server` 确认当前服务配置和 plist，再对该标签 `launchctl bootout`。导入命令在备份之前获取服务端同一把 `server.lock`，持锁直到整个操作结束；锁被占用时立即拒绝。
+
+```sh
+export COACH_MIGRATE_LAUNCHER="$PWD/tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor"
+# BACKUP 必须是新的私有目录；不要用预演库覆盖 COACH_DATA_DIR。
+tools/dev/heavy "$COACH_MIGRATE_LAUNCHER" apply-confirmed \
+  --database "$COACH_DATA_DIR" --backup "$BACKUP" --snapshot "$SNAPSHOT" \
+  --seed-manifest "$SEED" --proposal "$PROPOSAL" --confirmation "$CONFIRMATION" \
+  --confirmation-sha256 4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa
+```
+
+命令当场在线备份 DB、复制全部 blobs，检查数据库完整性、外键和每个引用 blob 的大小/哈希，恢复到 `BACKUP/restored`，核对规范状态逐字节及 DB/blobs 物理字节，再用同一 writer 预演两次。预演和实际导入冻结同一个审计时钟，实际目标必须与预演的完整行状态一致。恢复回执在实际写入之前保存；进程即使在提交之后退出，回退的期望状态也已落盘。实际写入后再次导入必须新增/修订/事件均为零，逐题验证 `UNREVIEWED`、无评分详情、归属与确认完全相同且 KP 活动，并验证每个 KP 的 `poolAvailable`、`constructedSupply` 不变。供给比较冻结同一个预约时钟，避免自然过期造成假差异。
+
+`BACKUP/result.json` 和标准输出提供证据，标准输出还提供已正确转义的直接回退命令；也可执行：
+
+```sh
+bash "$BACKUP/rollback.sh"
+# 等价：
+"$COACH_MIGRATE_LAUNCHER" rollback-confirmed --database "$COACH_DATA_DIR" --backup "$BACKUP"
+```
+
+回退同样要求停服及持锁，核对备份哈希、完整性和所有 blob，以及目标的完整行状态（含迁移审计时钟、序号水位）。任何后续学习事件、行编辑或 blob 变化都会拒绝回退，避免丢掉新记录；这种情形需另行对账恢复，不能绕过保护。导入不写 blobs，回退核对它们仍与备份逐文件字节一致。DB 在检查点关闭后原子替换为本次备份，再核对物理字节和规范状态；不改设备令牌、不改变 epoch。
+
+恢复/回退验收通过后，正式写入仍要单独只读复查迁移题 108 个全部未认证、无评分详情、155 边覆盖 107 题、第 40 题无归属，并保留写前/写后每个 KP 的供给证据。恢复先前确认的 Coach launchd 配置，启动后实测 9/49 及复习到期日不变，再交原验收链；工具通过或 PR 合并都不代表整卡完成，也不自动解锁 TON-1102。
 
 ## M1-α：只装课程内容（TON-1127）
 
@@ -200,3 +257,36 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-incremental.py \
 固定快照预演不能证明源之后的新数据已同步。独立 QA-C 验收、随后异源复核通过后，把归属/学习顺序与 10 道简答源采分点合成一次本人事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。仍须完成新快照增量、5 个 KP 界面对照、blobs 备份与正式切换/恢复验证，不能因工具 PR 合并而结束整张迁移卡。
 
 切换不放在考试前 7 天内；连续两次增量对账零差异后再切换。切换前记录备份和课程清单哈希。切换后 DeepTutor 原样只读可开，保留至少两周；需要回退时停止 Coach 写入、保存 Coach 切换后的新增记录，重新打开 DeepTutor，必要时恢复切换前 Coach 备份。不得把 Coach 数据反写 DeepTutor，也不得删除源数据。正式切换/备份恢复尚未演练。
+
+
+## 接受已确认输入（TON-1095，2026-11-06）
+
+以上“空归属 / 待确认”说明描述未传入确认文件的旧流程。已确认模式必须显式传入 `--confirmation FILE`；该文件与完整已复核提议及当前 `proposal-input.json` 的规范 JSON SHA-256 绑定。`decision_ref` 指向实际本人确认记录，不是评分复核签名。
+
+确认文件 schema_version=1，包含 `decision_ref`、`input_hash`、`proposal_hash`，以及以下固定策略：
+
+```json
+{
+  "question_associations": "accept_reviewed_proposal",
+  "curriculum": "accept_reviewed_proposal",
+  "ambiguous_answers": "preserve_verbatim_unscored",
+  "choice_explanations": "archive_only",
+  "passed_times": "approximate",
+  "grading": "unreviewed_no_keys"
+}
+```
+
+另有 `short_answer_samples` 数组，逐项记录清单中相同的十道抽样题 `id`、`content_hash`、源 `field` 和 `value` 原文。没有源 rubric 时接受 explanation 原文，不生成分值或 VERIFIED 结构化评分键。
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
+  :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist \
+  :shared:domain:jvmTest :server:store:test --offline --console=plain
+# 在原 rehearse 命令附加：
+# --confirmation "$PRIVATE/confirmation.json"
+# 独立 verify-import.py 同时附加 --proposal FILE --confirmation FILE。
+```
+
+确认后将归属写入 `question_kp`；概念及前置写入标准 `outline_revised` 账本事件，并同步前置 SQL。首次确认也可修订此前未确认的导入记录。题目仍为 LEGACY/UNREVIEWED，不进入题池，不创建答案键，历史作答不计分。题目源内容变化需要针对新输入的确认；提升过的题目、外部改过的归属或课程结构会拒绝覆盖，并整笔回滚。相同输入重复导入不增加记录、修订或事件；后续原生课程编辑不会被同一已接受决定重置。
+
+`confirmation.md` 输出已记录回执；详细清单保留原稿并注明其待确认措辞为历史记录。`rollback-state.json` 对比规范化全状态，数据库回退另以 `cmp before.sqlite rollback.sqlite` 验证物理字节一致。`rehearse` 仍仅允许新建隔离输出。独立的正式写入入口见下节；正式写入与启用须先完成 QA-C、Architect 两轮复核及数据库/blobs 备份、恢复、回退验收。

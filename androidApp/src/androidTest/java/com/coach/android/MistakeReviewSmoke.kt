@@ -89,7 +89,9 @@ class MistakeReviewSmoke {
         keys = JSONObject(java.io.File(context.cacheDir,"review-keys.json").readText())
         val kp = requireNotNull(args.getString("coachKp"))
         KeystoreCredentials(context,base).save(PairedCredentials(device,token))
-        val resume = args.getString("coachPhase") == "resume"
+        val phase = args.getString("coachPhase")
+        val wrongCount = if (phase == "prepare3" || phase == "resume3") 3 else 2
+        val resume = phase == "resume" || phase == "resume3"
         if (!resume) context.deleteDatabase("coach-client.db")
         try {
             step("launch activity")
@@ -101,9 +103,9 @@ class MistakeReviewSmoke {
             waitText("第 1 / 3 题",15_000)
             val first = group("kp:$kp")
             step("answer initial questions")
-            answer(first, wrong = 2)
+            answer(first, wrong = wrongCount)
             scrollTo("提交本组答案").let(::click)
-            scrollTo("本组 1 / 3 题正确",substring=true)
+            scrollTo("本组 ${3 - wrongCount} / 3 题正确",substring=true)
             step("initial answers graded")
             click(waitText("← 今天"))
             } else click(waitText("← 今天",15_000))
@@ -112,16 +114,16 @@ class MistakeReviewSmoke {
             step("open mistake list")
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
-            waitText("错题 2")
+            waitText("错题 $wrongCount")
             waitText(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
             settleAndCapture("wrong-list",reviewMark)
             step("mistake list captured")
-            samples.put("wrongCount",2)
-            if (args.getString("coachPhase") == "prepare") {
+            samples.put("wrongCount",wrongCount)
+            if (phase == "prepare" || phase == "prepare3") {
                 samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
                 return
             }
-            // Both entries and their original answers remain in the replica, even without a new request.
+            // Entries and their original answers remain in the replica, even without a new request.
             scrollTo("当时的答案：",substring=true)
             scrollTo("正确答案：",substring=true)
             scrollTo("判分依据：",substring=true)
@@ -144,7 +146,7 @@ class MistakeReviewSmoke {
             waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
-            samples.put("newQuestions",3).put("clearedCount",2)
+            samples.put("newQuestions",3).put("clearedCount",wrongCount)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)

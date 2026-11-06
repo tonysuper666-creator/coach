@@ -28,7 +28,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val events = input.distinctBy { it.id }.sortedWith(compareBy<Event> { it.seq }.thenBy { it.id })
     require(events.map { it.courseId }.distinct().size <= 1) { "Project one course at a time" }
     require(events.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
-    val effectiveZone = zone ?: events.lastOrNull { it.type == "course_configured" && it.schema == 1 }?.payload?.str("timeZone") ?: "Europe/London"
+    val effectiveZone = zone ?: courseTimeZone(events)
     val quickThreads = events.filter { it.type == "quick_ask_opened" }.mapNotNull { it.threadId }.toSet()
     val kpTitles = mutableMapOf<String,String>()
     val quickAsks = mutableMapOf<Long, QuickAskThread>()
@@ -57,7 +57,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val unsupported = mutableSetOf<String>()
     val weights = mutableMapOf<String, Int>()
     var current: String? = null
-    var examDay: Long? = null
+    var studyScope: StudyScope? = null
     var previousTime: Long? = null
     var previousDay: Long? = null
     val seenIdem = mutableSetOf<String>()
@@ -69,22 +69,15 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         journal[day] = block(journal[day] ?: Journal())
         if (processingType != "journal_summarized") journalLatest[day] = processingSeq
     }
-    fun cap(day: Long, interval: Int): Int {
-        val days = examDay?.minus(day) ?: return interval
-        return if (days > 0) interval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1)) else interval
-    }
-    fun due(day: Long, interval: Int): Long {
-        val exam=examDay
-        return if(exam!=null && exam>day) minOf(day+interval,exam-1) else day+interval
-    }
+    fun due(day: Long, interval: Int): Long = day + interval
     fun schedule(kp: String, day: Long, result: String) {
         val old = review[kp] ?: return
         if (old.lastReviewDay == day) return
         val interval = when(result) { "PASS" -> floor(old.intervalDays * old.ease).toInt().coerceAtLeast(1); "NEEDS_WORK" -> (old.intervalDays / 2).coerceAtLeast(1); else -> 1 }
         val ease = round((when(result) { "PASS" -> (old.ease + .1).coerceAtMost(3.0); "NEEDS_WORK" -> (old.ease - .15).coerceAtLeast(1.3); else -> (old.ease - .2).coerceAtLeast(1.3) }) * 1000) / 1000
-        val n = cap(day, interval)
+        val n = interval
         review[kp] = old.copy(dueDay = due(day,n), intervalDays = n, ease = ease,
-            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day)
+            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day, snoozedUntilDay = null)
         updateJournal(day) { j -> when(result) { "PASS" -> j.copy(reviewPass = j.reviewPass + 1); "NEEDS_WORK" -> j.copy(reviewNeedsWork = j.reviewNeedsWork + 1); else -> j.copy(reviewFail = j.reviewFail + 1) } }
         mastery[kp] = (mastery[kp] ?: Mastery()).copy(needsRepair = result != "PASS")
     }
@@ -160,13 +153,13 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             tail.map { it.id }, support, progress, revokedSeq, reason, solidLatch)
         val day = logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)
         if (!old.passed && passed) {
-            val n = cap(day, if (solid) 3 else 1)
+            val n = if (solid) 3 else 1
             review.putIfAbsent(kp, Review(due(day,n), n))
             updateJournal(day) { it.copy(newlyPassed = (it.newlyPassed + kp).distinct()) }
         }
         if (!old.solid && solid) {
             updateJournal(day) { it.copy(newlySolid = (it.newlySolid + kp).distinct()) }
-            val n = cap(day, 3)
+            val n = 3
             review[kp]?.let { review[kp] = it.copy(dueDay = due(day,n), intervalDays = n) }
         }
         if (!passed) review.remove(kp)
@@ -213,6 +206,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         }
         if (e.type != "journal_summarized") journalLatest[day] = e.seq
         when (e.type) {
+            "study_scope_set" -> studyScope = if (p.num("week") > 0) StudyScope(e.id, p.num("week").toInt(), p.strings("kpIds")) else null
+            "study_scope_advanced" -> studyScope?.let { scope ->
+                val index = scope.kpIds.indexOf(p.str("kpId"))
+                if (scope.id == p.str("scopeId") && index >= scope.cursor) studyScope = scope.copy(cursor = index + 1)
+            }
             "quick_ask_opened" -> quickAsks[p.num("day")] = QuickAskThread(requireNotNull(e.threadId), e.courseId, p.num("day"), p.str("kpId").ifBlank { null })
             "outline_revised" -> {
                 for (v in (p["ops"] as? JsonArray).orEmpty()) {
@@ -302,11 +300,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                 val kp = p.str("kpId")
                 if (mastery[kp]?.passed == true) schedule(kp, day, p.str("result"))
             }
-            "review_snoozed" -> review[p.str("kpId")]?.let { val due = p.num("untilDay"); review[p.str("kpId")] = it.copy(dueDay = due(day,cap(day,(due-day).toInt().coerceAtLeast(1)))) }
-            "exam_set" -> {
-                examDay = if (p.containsKey("examDay")) p.num("examDay") else logicalDay(p.num("examAt"),effectiveZone)
-                for ((kp,r) in review.toMap()) { val n = cap(day,(r.dueDay-day).toInt().coerceAtLeast(1)); review[kp] = r.copy(dueDay = minOf(r.dueDay,due(day,n)), intervalDays = cap(day,r.intervalDays)) }
+            "review_snoozed" -> review[p.str("kpId")]?.let {
+                val until = maxOf(day + 1, p.num("untilDay"))
+                review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until)
             }
+            // exam_set only changes the overlay; normal intervals must survive postponement/removal.
             "exam_weights_set" -> { weights.clear(); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
             "note_saved" -> updateJournal(day) { it.copy(notes = it.notes + 1) }
             "journal_edited" -> updateJournal(p.num("day",day)) { it.copy(rev = p.num("rev"), manual = p.str("content", it.manual)) }
@@ -323,8 +321,10 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         ?: outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") }
     val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
-    return Projection(timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
-        mastery = mastery.ordered(), review = review.ordered(), journal = journal.ordered(),
+    val exam = courseExamDay(events, effectiveZone)
+    val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
+    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
+        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())

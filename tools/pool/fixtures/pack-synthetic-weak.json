@@ -1,0 +1,120 @@
+{
+  "id": "pack-synthetic-weak",
+  "kind": "pack",
+  "course": "SYN",
+  "minutes": 5,
+  "variant_of": "synthetic",
+  "kp_id": "kp-synthetic",
+  "sections": [
+    {
+      "title": "Practice",
+      "instructions": "Synthetic items only.",
+      "choose": null,
+      "items": [
+        {
+          "id": "S1",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the first fixture?",
+          "options": ["red token", "blue token", "green token", "yellow token"],
+          "answer": 2,
+          "explanation": "The green token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S2",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the second fixture?",
+          "options": ["north token", "east token", "south token", "west token"],
+          "answer": 0,
+          "explanation": "The north token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S3",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the third fixture?",
+          "options": ["one token", "two token", "three token", "four token"],
+          "answer": 3,
+          "explanation": "The four token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S4",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the fourth fixture?",
+          "options": ["circle token", "square token", "triangle token", "diamond token"],
+          "answer": 1,
+          "explanation": "The square token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S5",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the fifth fixture?",
+          "options": ["oak token", "pine token", "elm token", "ash token"],
+          "answer": 2,
+          "explanation": "The elm token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S6",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the sixth fixture?",
+          "options": ["dawn token", "noon token", "dusk token", "night token"],
+          "answer": 3,
+          "explanation": "The night token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S7",
+          "type": "mcq",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "Which token is the synthetic marker for the seventh fixture?",
+          "options": ["river token", "lake token", "pond token", "sea token"],
+          "answer": 0,
+          "explanation": "The river token is the marker in this fixture.",
+          "source": "synthetic fixture"
+        },
+        {
+          "id": "S8",
+          "type": "analytical",
+          "kp_week": 1,
+          "kp": "synthetic",
+          "marks": 4,
+          "stem": "A synthetic counter starts at 4 and then adds 3.",
+          "source": "synthetic fixture",
+          "parts": [
+            {
+              "label": "a",
+              "prompt": "What is the total?",
+              "marks": 4,
+              "answer": "7",
+              "tolerance": 0.005,
+              "rubric": [{"criterion": "adds the two counts", "marks": 4, "look_for": "7"}]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

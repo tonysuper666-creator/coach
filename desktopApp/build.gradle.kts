@@ -13,6 +13,7 @@ dependencies {
     implementation(libs.serialization.json)
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)
+    testImplementation(kotlin("test"))
 }
 compose.desktop {
     application {

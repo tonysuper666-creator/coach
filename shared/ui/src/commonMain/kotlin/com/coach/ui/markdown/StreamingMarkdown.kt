@@ -27,7 +27,8 @@ class StreamingMarkdown {
             consumed = node.endOffset
         }
         if (consumed > 0) { tail = tail.substring(consumed); offset += consumed }
-        val pending = if (tail.isNotBlank()) listOf(MarkdownBlock(offset, tail, parser.buildMarkdownTreeFromString(tail), end)) else emptyList()
+        // Nothing sealed: the tail is the string already parsed above, so its tree is the pending block's tree (one parse per tick, not two).
+        val pending = if (tail.isNotBlank()) listOf(MarkdownBlock(offset, tail, if (consumed == 0) tree else parser.buildMarkdownTreeFromString(tail), end)) else emptyList()
         if (end) { tail = "" }
         return frozen.toList() + pending
     }

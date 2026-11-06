@@ -1,14 +1,59 @@
 #!/bin/bash
+# Coach 本机重活锁。
+#   tools/dev/heavy CMD ...             Gradle 构建、测试：最多 COACH_HEAVY_BUILD_LANES（默认 3）道并行
+#   tools/dev/heavy --emulator CMD ...  模拟器会话（含会话里的构建）：只走第 1 道，一次一个
+# 第 1 道就是旧版脚本用的那把锁（$HOME/dev/.coach-heavy.lock），旧版脚本照旧只抢第 1 道，新旧可以混用。
+# 构建不占第 1 道，所以模拟器会话不会被构建挤掉。
+# 持锁进程死了（owner 里的 PID 不在、锁目录超过 60 秒）会被下一个等待者回收。
+# 本机负载守护会把允许的构建道数写进 $HOME/dev/.coach-heavy.lanes（内存吃紧时 1 道，宽松时最多 4 道）；
+# 等待者每 5 秒重读一次，只限制新拿锁，不打断已经在跑的。没有这个文件就用 COACH_HEAVY_BUILD_LANES（默认 3）。
 set -eu
-if [ "$#" -eq 0 ]; then echo "usage: tools/dev/heavy COMMAND [ARG ...]" >&2; exit 64; fi
-lock="${COACH_HEAVY_LOCK:-$HOME/dev/.coach-heavy.lock}"
-mkdir -p "$(dirname "$lock")"
-while ! mkdir "$lock" 2>/dev/null; do
-    echo "Coach heavy: waiting; $(cat "$lock/owner" 2>/dev/null || echo 'owner is initializing')" >&2
-    sleep 5
+emulator=0
+priority=${COACH_HEAVY_PRIORITY:-normal}
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --emulator) emulator=1; shift ;;
+        --priority) priority=${2:-}; [ "$#" -ge 2 ] || exit 64; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
 done
-child=''
-cleanup() { rm -f "$lock/owner"; rmdir "$lock"; }
+case "$priority" in normal|release) ;; *) echo 'priority must be normal or release' >&2; exit 64 ;; esac
+if [ "$#" -eq 0 ]; then echo "usage: tools/dev/heavy [--emulator] [--priority normal|release] COMMAND [ARG ...]" >&2; exit 64; fi
+base="${COACH_HEAVY_LOCK:-$HOME/dev/.coach-heavy.lock}"
+lanes_file="${COACH_HEAVY_LANES_FILE:-$(dirname "$base")/.coach-heavy.lanes}"
+mkdir -p "$(dirname "$base")"
+lanes=()
+pick_lanes() {
+    local n
+    n=$(head -c 8 "$lanes_file" 2>/dev/null | tr -cd '0-9')
+    [ -n "$n" ] || n="${COACH_HEAVY_BUILD_LANES:-3}"
+    [ "$n" -ge 1 ] 2>/dev/null || n=1
+    [ "$n" -le 8 ] || n=8
+    lanes=()
+    if [ "$emulator" = 1 ]; then
+        lanes=("$base")
+    else
+        local i=2
+        while [ "$i" -le $((n + 1)) ]; do lanes+=("$base.$i"); i=$((i + 1)); done
+    fi
+}
+pick_lanes
+reap() {
+    local dir="$1" pid age
+    [ -d "$dir" ] || return 0
+    pid=$(sed -n 's/^PID=\([0-9]*\) .*/\1/p' "$dir/owner" 2>/dev/null | head -1)
+    age=$(( $(date +%s) - $(stat -f %m "$dir" 2>/dev/null || stat -c %Y "$dir" 2>/dev/null || date +%s) ))
+    if [ "$age" -gt 60 ] && { [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; }; then
+        echo "Coach heavy: reclaiming stale lock $dir (owner ${pid:-unknown} gone)" >&2
+        rm -f "$dir/owner"; rmdir "$dir" 2>/dev/null || true
+    fi
+}
+lock=''; child=''; ticket=''
+cleanup() {
+    [ -z "$ticket" ] || rm -f "$ticket"
+    if [ -n "$lock" ]; then rm -f "$lock/owner"; rmdir "$lock" 2>/dev/null || true; fi
+}
 stop_tree() {
     local pid="$1" descendant
     for descendant in $(pgrep -P "$pid" || true); do stop_tree "$descendant"; done
@@ -17,6 +62,54 @@ stop_tree() {
 stop() { if [ -n "$child" ]; then stop_tree "$child"; wait "$child" || true; fi; exit 130; }
 trap cleanup EXIT
 trap stop INT TERM HUP
+# Separate queues: an emulator waiting for lane 1 must not block build lanes.
+queue="$base.waiters/build"
+[ "$emulator" = 0 ] || queue="$base.waiters/emulator"
+mkdir -p "$queue"
+# mktemp publishes the ticket atomically; the PID is in its name, so a killed
+# waiter never blocks the queue. Within a priority, filesystem mtime is FIFO.
+ticket=$(mktemp "$queue/$$.$priority.XXXXXX")
+turn() {
+    local f pid stamp chosen='' release='' chosen_stamp='' release_stamp=''
+    for f in "$queue"/*; do
+        [ -f "$f" ] || continue
+        pid=${f##*/}; pid=${pid%%.*}
+        if ! kill -0 "$pid" 2>/dev/null; then rm -f "$f"; continue; fi
+        # macOS Bash 3's -ot truncates to seconds. Read full timestamps so
+        # waiters published in the same second retain their arrival order.
+        if ! stamp=$(stat -f '%Fm' "$f" 2>/dev/null); then
+            stamp=$(stat -c '%y' "$f" 2>/dev/null) || continue
+        fi
+        if [ -z "$chosen" ] || [[ "$stamp" < "$chosen_stamp" ]]; then
+            chosen=$f; chosen_stamp=$stamp
+        fi
+        case "$f" in *.release.*)
+            if [ -z "$release" ] || [[ "$stamp" < "$release_stamp" ]]; then
+                release=$f; release_stamp=$stamp
+            fi ;;
+        esac
+    done
+    [ "${release:-$chosen}" = "$ticket" ]
+}
+while [ -z "$lock" ]; do
+    if turn; then
+        for c in "${lanes[@]}"; do
+            if mkdir "$c" 2>/dev/null; then
+                # A release ticket may have arrived during mkdir.
+                if turn; then lock=$c; break; fi
+                rmdir "$c" 2>/dev/null || true
+            fi
+        done
+    fi
+    [ -n "$lock" ] && break
+    for c in "${lanes[@]}"; do reap "$c"; done
+    owners=''
+    for c in "${lanes[@]}"; do owners="$owners [$(basename "$c")] $(head -1 "$c/owner" 2>/dev/null || echo 'initializing')"; done
+    echo "Coach heavy: waiting;$owners" >&2
+    sleep 5
+    pick_lanes
+done
+rm -f "$ticket"; ticket=''
 printf 'PID=%s command=' "$$" > "$lock/owner"
 printf '%q ' "$@" >> "$lock/owner"
 printf '\n' >> "$lock/owner"

@@ -5,6 +5,14 @@ COACH_REVIEW_SNAPSHOT, COACH_REVIEW_INVENTORY, COACH_REVIEW_OUT, COACH_REVIEW_SE
 COACH_REVIEW_BRIDGE_PYTHON (an existing environment with FastAPI/uvicorn).
 All child processes are collected and stopped before this foreground command exits.
 """
+import sys
+if __name__ == '__main__' and '--emulator' in sys.argv[1:]:
+    # The outer tools/dev/heavy --emulator owns the lock for build and replay.
+    import os
+    from pathlib import Path
+    os.execv(sys.executable, [sys.executable, str(Path(__file__).with_name('check-mistake-review-emulator.py')),
+                              *[arg for arg in sys.argv[1:] if arg != '--emulator']])
+
 import hashlib
 import json
 import os

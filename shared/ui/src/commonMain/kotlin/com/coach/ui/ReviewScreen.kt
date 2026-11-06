@@ -21,7 +21,8 @@ import com.coach.client.CourseView
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
-    var tab by remember { mutableStateOf(0) }
+    // Keep the existing due-review entry usable when there are no mistakes.
+    var tab by remember { mutableStateOf(if (view.mistakes.items.isEmpty() && due.isNotEmpty()) 1 else 0) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
@@ -49,10 +50,13 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             2 -> OfflinePractice(c)
             else -> if (due.isEmpty()) CenterMessage("今天没有到期的复习。") else {
                 LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item { Text("${due.size} 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     items(due, key = { it.kp.id }) { item ->
+                        val (tag, main) = splitTitle(item.kp.title)
                         Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(item.kp.title, style = MaterialTheme.typography.bodyLarge)
+                                if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                 Text(if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天")
                                 Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
                             }

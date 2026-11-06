@@ -8,7 +8,8 @@ val localConfig = Properties().apply {
     val file = File(System.getProperty("user.home"), "Coach/config/local.properties")
     if (file.exists()) file.inputStream().use { load(it) }
 }
-val coachTailHost = localConfig.getProperty("coach.tailHost", "")
+// Rehearsals may target an emulator without changing the shared machine configuration.
+val coachTailHost = providers.gradleProperty("coach.tailHost").orElse(localConfig.getProperty("coach.tailHost", "")).get()
 require(coachTailHost.isEmpty() || coachTailHost.matches(Regex("[0-9]+(\\.[0-9]+){3}"))) {
     "coach.tailHost must be an IPv4 literal in ~/Coach/config/local.properties"
 }

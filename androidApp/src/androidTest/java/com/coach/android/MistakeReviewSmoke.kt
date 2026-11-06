@@ -175,6 +175,24 @@ class MistakeReviewSmoke {
         java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
     }
 
+    /** After the isolated server restarts, read the cleared state from the ledger again. */
+    @Test fun clearedMistakesSurviveServerRestart() {
+        step("clearedMistakesSurviveServerRestart started")
+        beginRun()
+        require(context.packageName == "com.coach.android.ton1146")
+        val port = requireNotNull(args.getString("coachPort")).toInt()
+        require(port !in setOf(8790, 8791, 18791, 3790))
+        context.startActivity(Intent(context, CoachActivity::class.java)
+            .putExtra("coachUrl", "http://${BuildConfig.COACH_TAIL_HOST}:$port")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        click(waitText("到期复习", 15_000))
+        waitText("错题 0")
+        waitText("错题都已掌握，继续保持。")
+        settleAndCapture("restart-cleared", SystemClock.elapsedRealtimeNanos())
+        samples.put("restartClearedCount", 0)
+        java.io.File(context.cacheDir, "review-metrics.json").writeText(samples.toString(2))
+    }
+
     /** 一页最多 500 条：副本已有 700+ 条时只读第一页就看不到刚出的题，所以按 throughSeq 读到末端。 */
     private fun events(): JSONArray {
         val all=JSONArray()

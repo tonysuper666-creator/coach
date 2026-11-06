@@ -64,13 +64,13 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
     var notice by remember { mutableStateOf<String?>(null) }
     val chosen = remember { mutableStateMapOf<String, String>() }
     val listState = rememberLazyListState()
-    val thread = activeKp?.let { "mistakes:$it" }.orEmpty()
+    val thread = activeKp?.let(view::tutorThreadId).orEmpty()
     val tv = ui.threads[thread]
     val group = if (activeKp == null) null else view.quizGroups(thread).lastOrNull { it.groupId !in priorGroups }
     fun retry(kpId: String) {
         // 错题可能是已退休点上的：名称和概念仍要能取到，否则会退回原始 id。
         val kp = view.kpAny(kpId)
-        val target = "mistakes:$kpId"
+        val target = view.tutorThreadId(kpId)
         val groups = view.quizGroups(target)
         priorGroups = groups.filter { it.submitted }.map { it.groupId }.toSet()
         activeKp = kpId; chosen.clear(); notice = null

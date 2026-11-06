@@ -34,6 +34,19 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def private_token(path, token):
+    with open(path, "x", opener=lambda p, flags: os.open(p, flags, 0o600)) as out:
+        out.write(token)
+
+
+def input_file(path):
+    # Preserve a virtualenv interpreter's final symlink and hence sys.prefix.
+    path = path.absolute()
+    if not path.is_file():
+        raise ValueError("missing file")
+    return path
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -345,8 +358,7 @@ class Seed {
         assert status == 200
         self.secrets.append(paired["token"])
         token_file = self.work / "paired-token"
-        with token_file.open("x", opener=lambda p, flags: os.open(p, flags, 0o600)) as out:
-            out.write(paired["token"])
+        private_token(token_file, paired["token"])
         assert token_file.stat().st_mode & 0o777 == 0o600
         assert paired["token"] != self.secrets[0]
         self.result["pairing"] = dict(status=status, device=paired["deviceId"], token_mode="0600",
@@ -451,12 +463,10 @@ def main():
     parser.add_argument("--evidence-dir", required=True, type=Path)
     args = parser.parse_args()
     for key in ("dmg", "configured_dmg", "bridge_python"):
-        # A venv interpreter is normally a symlink: resolving its final component
-        # silently switches sys.prefix to the system installation.
-        path = getattr(args, key).absolute()
-        if not path.is_file():
+        try:
+            setattr(args, key, input_file(getattr(args, key)))
+        except ValueError:
             parser.error(f"{key}: missing file")
-        setattr(args, key, path)
     acceptance = Acceptance(args)
     try:
         acceptance.execute()

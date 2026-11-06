@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 import socket
 import socketserver
+import subprocess
 import tempfile
 import threading
 import unittest
 import urllib.request
+import venv
 
 spec = importlib.util.spec_from_file_location("ton1326", Path(__file__).with_name("check-ton1326-online.py"))
 check = importlib.util.module_from_spec(spec)
@@ -28,6 +30,24 @@ class Upstream(socketserver.BaseRequestHandler):
 
 
 class RecorderTest(unittest.TestCase):
+    def test_venv_interpreter_keeps_its_own_import_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "venv"
+            venv.create(root, with_pip=False, symlinks=True)
+            interpreter = check.input_file(root / "bin/python")
+            prefix = subprocess.check_output([interpreter, "-c", "import sys; print(sys.prefix)"], text=True).strip()
+            self.assertEqual(Path(prefix).resolve(), root.resolve())
+
+    def test_paired_token_is_private_and_existing_credentials_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "paired-token"
+            check.private_token(path, "private-fixture-token")
+            self.assertEqual(path.read_text(), "private-fixture-token")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                check.private_token(path, "replacement")
+            self.assertEqual(path.read_text(), "private-fixture-token")
+
     def test_http_and_websocket_pass_through_without_logging_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
             upstream = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Upstream)

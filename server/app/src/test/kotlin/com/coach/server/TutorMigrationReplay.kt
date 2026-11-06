@@ -45,7 +45,8 @@ fun main() = runBlocking(Dispatchers.IO) {
                 ((event.payload["knowledgePoints"] as? JsonArray).orEmpty() +
                     (event.payload["ops"] as? JsonArray).orEmpty()).forEach { raw ->
                     val point = raw.jsonObject
-                    if ("conceptIds" in point) metadata[point.str("kpId", point.str("id"))] = point.strings("conceptIds").toSet()
+                    if ((point["conceptIds"] as? JsonArray)?.isNotEmpty() == true)
+                        metadata[point.str("kpId", point.str("id"))] = point.strings("conceptIds").toSet()
                 }
             }
             snapshot.events.filter { it.type == "kp_opened" && it.threadId != null && it.payload.strings("conceptIds").isNotEmpty() }

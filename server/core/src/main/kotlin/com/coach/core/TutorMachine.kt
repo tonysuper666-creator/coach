@@ -93,12 +93,14 @@ class TutorMachine(private val actor: LedgerActor) {
             val old = contextOrNull(course,thread)
             // Requests can come from an offline replica. Only the ledger's explicit outline
             // metadata may revise concepts; a client cannot change or roll back the syllabus.
+            // Serialized seeds include default empty arrays: like CourseView, ignore those.
             val revision = events(course).asReversed().firstNotNullOfOrNull { event ->
                 if (event.type != "outline_revised") null else {
                     val points = (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
                     val ops = (event.payload["ops"] as? JsonArray).orEmpty()
                     (ops.asReversed() + points.asReversed()).mapNotNull { it as? JsonObject }
-                        .firstOrNull { it.str("kpId",it.str("id")) == kp && it.containsKey("conceptIds") }
+                        .firstOrNull { it.str("kpId",it.str("id")) == kp &&
+                            (it["conceptIds"] as? JsonArray)?.isNotEmpty() == true }
                         ?.let { event.seq to it.strings("conceptIds").toSet() }
                 }
             }

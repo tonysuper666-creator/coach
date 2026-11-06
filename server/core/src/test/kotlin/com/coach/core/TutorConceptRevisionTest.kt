@@ -4,6 +4,7 @@ import com.coach.domain.*
 import com.coach.store.LedgerStore
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -12,6 +13,39 @@ class TutorConceptRevisionTest {
         val point = json((if (seeded) "id" else "kpId") to "kp-1", "conceptIds" to concepts.sorted())
         append("course", "outline_revised", json(
             (if (seeded) "knowledgePoints" else "ops") to JsonArray(listOf(point))))
+    }
+
+    private suspend fun TutorFixture.seedWithoutConcepts() = actor.execute {
+        val point = LedgerJson.encodeToJsonElement(KnowledgePoint.serializer(),
+            KnowledgePoint("kp-1", "module", 0, "Synthetic")).jsonObject
+        // Match CourseContentStore's real serialization, including encodeDefaults.
+        assertEquals(JsonArray(emptyList()), point["conceptIds"])
+        append("course", "outline_revised", json("knowledgePoints" to JsonArray(listOf(point))))
+    }
+
+    @Test fun serializedEmptySeedAllowsNewThreadToUseKpFallback() = runBlocking {
+        TutorFixture().use { f ->
+            f.seedWithoutConcepts()
+            assertEquals(TutorState.IDLE, f.open(concepts = setOf("kp-1")).state)
+            assertEquals(setOf("kp-1"), f.machine.followup("course", "thread").context.concepts)
+            assertTrue(f.events().none { it.type == "tutor_concepts_changed" })
+        }
+    }
+
+    @Test fun serializedEmptyReseedKeepsEarlierExplicitConceptsForExistingThread() = runBlocking {
+        TutorFixture().use { f ->
+            f.open(concepts = setOf("kp-1"))
+            f.revise(setOf("concept:a"))
+            f.open(concepts = setOf("concept:a"))
+            val before = f.events()
+            f.seedWithoutConcepts()
+            assertEquals(TutorState.IDLE, f.open(concepts = setOf("concept:a")).state)
+            // An old replica also keeps the earlier authoritative ops revision.
+            f.open(concepts = setOf("kp-1"))
+            assertEquals(setOf("concept:a"), f.machine.followup("course", "thread").context.concepts)
+            assertEquals(before, f.events().take(before.size))
+            assertEquals(1, f.events().count { it.type == "tutor_concepts_changed" })
+        }
     }
 
     @Test fun revisedOutlineReopensWithoutChangingHistoryOrEvidence() = runBlocking {

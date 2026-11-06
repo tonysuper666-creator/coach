@@ -451,7 +451,11 @@ def main():
     parser.add_argument("--evidence-dir", required=True, type=Path)
     args = parser.parse_args()
     for key in ("dmg", "configured_dmg", "bridge_python"):
-        path = getattr(args, key).resolve(strict=True)
+        # A venv interpreter is normally a symlink: resolving its final component
+        # silently switches sys.prefix to the system installation.
+        path = getattr(args, key).absolute()
+        if not path.is_file():
+            parser.error(f"{key}: missing file")
         setattr(args, key, path)
     acceptance = Acceptance(args)
     try:

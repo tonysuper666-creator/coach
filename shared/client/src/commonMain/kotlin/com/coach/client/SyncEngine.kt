@@ -22,6 +22,8 @@ interface LedgerTransport {
     suspend fun command(command: WireCommand): Receipt
     suspend fun offlinePack(course: String, size: Int): OfflineChoicePack = error("Offline packs unavailable")
     suspend fun watch(onLedger: suspend () -> Unit)
+    /** 同 [watch]；连接真正建立（握手完成）时调用 [onOpen]。重连退避只按建立之后的时长算，握手再慢也不算「用过」。 */
+    suspend fun watch(onOpen: () -> Unit, onLedger: suspend () -> Unit) { onOpen(); watch(onLedger) }
 }
 
 /** Device-specific immutable outbox and disposable ledger replica. Database survives process restarts. */
@@ -181,7 +183,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
         for(row in pending) {
-            val receipt = transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256))
+            // 永久拒收的命令（如换过配对留下的旧设备命令、超过 1 MiB 的笔记）记为 REJECTED，不能挡住后面的命令和拉取。
+            val receipt = try { transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256)) }
+                catch(e: CommandRefused) { Receipt(row.command_id,"REJECTED",error="HTTP_${e.status}",epoch=hello.epoch,backedUpThroughSeq=hello.backedUpThroughSeq) }
             check(receipt.epoch == hello.epoch) { "Epoch changed during upload" }
             db.transaction {
                 q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id)
@@ -225,12 +229,15 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 quizThreads.forEach { PoolTrace.mark(it,"events_saved") }
                 cursor = page.throughSeq
             } while(page.hasMore)
-            if(projection(course).requiresServerSnapshot) {
+            // 不认识的事实类型要靠服务端投影；整份快照只在本地副本前进后重下，不是每次轮询都下。
+            val replicaSeq=q.replicaSeq(course).executeAsOne()
+            if(projection(course).requiresServerSnapshot && meta("serverProjectionSeq:$course") != "$epoch:$replicaSeq") {
                 val snapshot=transport.snapshot(course)
                 if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
                     q.putMeta("serverProjection:$course",LedgerJson.encodeToString(snapshot.projection))
                     val seq=q.replicaSeq(course).executeAsOne()
+                    q.putMeta("serverProjectionSeq:$course","$epoch:$seq")
                     cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
             }
@@ -253,12 +260,13 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             while(isActive) { try { syncOnce() } catch(e: CancellationException) { throw e } catch(e: Exception) { _connection.value="offline" };delay(2000) }
         }
         try {
-            var backoff = 250L
+            val backoff=ReconnectBackoff()
             while(isActive) {
-                try { transport.watch { hints.trySend(Unit) };backoff=250 }
+                var opened: TimeMark?=null
+                try { transport.watch(onOpen={ opened=TimeSource.Monotonic.markNow() }) { hints.trySend(Unit) } }
                 catch(e: CancellationException) { throw e }
                 catch(e: Exception) { _connection.value="offline" }
-                delay(backoff);backoff=(backoff*2).coerceAtMost(5000)
+                delay(backoff.next(opened?.elapsedNow()?.inWholeMilliseconds ?: 0))
             }
         } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }
     }

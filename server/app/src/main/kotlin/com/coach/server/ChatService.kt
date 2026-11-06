@@ -243,8 +243,8 @@ class ChatService(
         return JsonObject(stored + ("messages" to JsonArray(messages)))
     }
 
-    suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String) {
-        publish(tutor.open(courseId,threadId,kpId,concepts,title),threadId,courseId)
+    suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String, review: Boolean = false) {
+        publish(tutor.open(courseId,threadId,kpId,concepts,title,review),threadId,courseId)
     }
 
     /** Button actions retain §2.6's recap; text intents pass allowExample=false (§5.8). */

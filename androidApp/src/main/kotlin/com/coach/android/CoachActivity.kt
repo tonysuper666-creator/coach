@@ -103,7 +103,7 @@ class CoachActivity : ComponentActivity() {
                 }
             }
         }
-        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源。
+        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源，只多一层去抖（断线持续 0.7 秒才出现，见 steadyConnected）。
         scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
         val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model, telemetry)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)

@@ -22,6 +22,7 @@ fun TodayScreen(
     onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit, weekActions: WeekActions? = null,
 ) {
     if (view == null) return CenterMessage("正在加载课程…")
+    val now = rememberCourseNow(c)
     val kps = view.kps
     if (kps.isEmpty()) {
         return CenterMessage(
@@ -36,7 +37,7 @@ fun TodayScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("今天", style = MaterialTheme.typography.headlineMedium)
                     // 分值口径的「学了多少」：和聊天里问「我学了多少」得到的是同一个数（TON-1092）。
-                    Text(view.projection.today(c.nowMillis()).coverageText, style = MaterialTheme.typography.titleMedium)
+                    Text(view.projection.today(now).coverageText, style = MaterialTheme.typography.titleMedium)
                     Text("已通过 $passed / ${kps.size} 个知识点", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (target != null) {
                         ContinueCard(target, view.isResume(target)) { onOpen(target.id, true) }
@@ -48,12 +49,8 @@ fun TodayScreen(
                         WeekSummary(view, weekActions, ui.connected)
                         target?.let { view.weekProgress(it.id) }?.let { Text(it, style = MaterialTheme.typography.labelLarge) }
                     }
-                    val now = c.nowMillis()
                     ReviewCard(view.dueReviews(now).size, onOpenReview)
-                    // 考前 7 天内显示倒计时；没设考试日就不显示（不猜日期）。
-                    view.daysToExam(now)?.takeIf { it <= 7 }?.let { days ->
-                        Text(if (days == 0) "今天考试" else "距考试还有 $days 天", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
-                    }
+                    Text(examReviewNotice(view, now), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.height(4.dp))
                     Text("全部知识点", style = MaterialTheme.typography.titleSmall)
                 }

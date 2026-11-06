@@ -129,7 +129,8 @@ class TodayWeekSelectionTest {
         var current by mutableStateOf(view(scoped = true))
         try {
             setContent { CoachTheme(false) { TodayScreen(f.controller, current, TutorUiState(connected = true), null, {}, { _, _ -> }, actions) } }
-            onNodeWithText("开始下一个：甲").assertIsDisplayed()
+            onNodeWithText("开始下一个").assertIsDisplayed()
+            onNodeWithText("甲").assertIsDisplayed()
             onNodeWithText("第 1 周 · 换周 ▾").performClick()
             onNodeWithText("第 2 周 · 1 个待学").assertIsDisplayed()
             onNodeWithText("全部课程").assertIsDisplayed()

@@ -86,6 +86,27 @@ def healthy_control(log, run_id, port):
     return result
 
 
+def heartbeat_record(raw, run_id, channel):
+    """Reject unrelated runs and every field outside the synthetic counter schema."""
+    if not re.fullmatch(r'[0-9a-f]{32}', run_id) or channel not in ('main', 'io'):
+        raise ValueError('Invalid heartbeat identity')
+    record = json.loads(raw)
+    keys = {'runId', 'channel', 'count', 'elapsedMs'}
+    if channel == 'io':
+        keys.update(('connection', 'active'))
+    if not isinstance(record, dict) or set(record) != keys:
+        raise ValueError('Invalid heartbeat fields')
+    if record['runId'] != run_id or record['channel'] != channel:
+        raise ValueError('Unrelated heartbeat')
+    for key, minimum in (('count', 1), ('elapsedMs', 0)):
+        if type(record[key]) is not int or not minimum <= record[key] <= 2**63-1:
+            raise ValueError('Invalid heartbeat counter')
+    if channel == 'io' and (record['connection'] not in ('online', 'offline')
+                            or type(record['active']) is not bool):
+        raise ValueError('Invalid heartbeat status')
+    return record
+
+
 def lease_valid():
     fields = dict(line.split('=', 1) for line in (PHONE/'lease.d/info').read_text().splitlines())
     if fields.get('card') != 'TON-1094' or int(fields['until']) <= time.time():
@@ -133,7 +154,8 @@ def main():
     summary = dict(runId=run_id, startedAt=datetime.now(timezone.utc).isoformat(),
                    head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                    scope='real OPPO; isolated JVM SIGSTOP/CONT; not OS sleep or Tailscale restart',
-                   package=PACKAGE, port=args.port, productionWrites=0, result='failed')
+                   package=PACKAGE, port=args.port, productionWrites=0,
+                   faultInjected=False, result='failed')
 
     def run(command, timeout=30, **kwargs):
         result = subprocess.run(list(map(str, command)), capture_output=True, text=True,
@@ -188,6 +210,18 @@ def main():
             snapshot['powerCaptureError'] = type(error).__name__
         summary.setdefault('phoneProcessSnapshots', []).append(snapshot)
 
+    def heartbeat_snapshot(phase):
+        lease_valid()
+        snapshot = dict(phase=phase, at=datetime.now(timezone.utc).isoformat())
+        for channel in ('main', 'io'):
+            try:
+                raw = device('shell', 'run-as', PACKAGE, 'cat',
+                             f'cache/ton1094-{run_id}-{channel}.json', timeout=5)
+                snapshot[channel] = heartbeat_record(raw, run_id, channel)
+            except Exception as error:
+                snapshot[channel+'CaptureError'] = type(error).__name__
+        summary.setdefault('phoneHeartbeatSnapshots', []).append(snapshot)
+
     try:
         summary['phase'] = 'authorization'
         lease_valid()
@@ -233,13 +267,17 @@ def main():
         # A no-fault control separates a phone/test/logging stall from a reaction
         # to JVM pause. It cannot pass or extend the original 30-second OFFLINE gate.
         summary['phase'] = 'phone heartbeat control with isolated JVM running'
+        control_started = time.monotonic()
+        heartbeat_snapshot('ready before no-fault control')
         summary['healthyControl'] = wait_for(
-            lambda: healthy_control(report(), run_id, args.port), 15)
+            lambda: healthy_control(report(), run_id, args.port),
+            max(0, 15-(time.monotonic()-control_started)))
         process_snapshot('ready before JVM pause')
         lease_valid()
         start = time.monotonic()
         os.killpg(server.pid, signal.SIGSTOP)
         paused = True
+        summary['faultInjected'] = True
         summary['pauseStartedAt'] = datetime.now(timezone.utc).isoformat()
         summary['pausedProcessState'] = run(['ps', '-o', 'stat=', '-p', server.pid]).strip()
         summary['phase'] = 'phone offline checkpoint during isolated JVM pause'
@@ -275,6 +313,10 @@ def main():
                 pass
             try:
                 process_snapshot('failure before cleanup')
+            except Exception:
+                pass
+            try:
+                heartbeat_snapshot('failure before cleanup')
             except Exception:
                 pass
         raise
@@ -314,6 +356,13 @@ def main():
                 return
             lease_valid()
             device('shell', 'am', 'force-stop', PACKAGE)
+            # Remove only this run's diagnostic files, including AtomicFile sidecars.
+            files = [f'cache/ton1094-{run_id}-{channel}.json'+suffix
+                     for channel in ('main', 'io') for suffix in ('', '.new', '.bak')]
+            files += ['databases/synthetic-reconnect.sqlite'+suffix
+                      for suffix in ('', '-wal', '-shm', '-journal')]
+            cleanup_step('phone synthetic files',
+                         lambda: device('shell', 'run-as', PACKAGE, 'rm', '-f', *files))
             cleanup = device('uninstall', PACKAGE+'.test')
             summary['testPackageRemoved'] = cleanup.strip() == 'Success'
             if not summary['testPackageRemoved']:

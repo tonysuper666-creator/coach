@@ -61,6 +61,15 @@ class ExamDeliveryTest {
         }
     }
 
+    @Test fun chineseQuestionsAndShortModelNamesFindTopicsBeyondTheOverview() {
+        val unrelated = List(12) { "Unrelated synthetic overview paragraph $it. ".repeat(20) }.joinToString("\n\n")
+        val guidance = unrelated + "\n\n夜航定价：先比较两种合成航线的增量成本，再检查预算。" +
+            "\n\nRS synthetic menu: compare both types' incentives before accepting an equilibrium."
+        val materials = ExamMaterials.fromTexts(exams, guidance)
+        assertTrue(materials.context("ECNM10119", "请用夜航定价讲一个新例子").contains("夜航定价"))
+        assertTrue(materials.context("ECNM10119", "解释RS模型").contains("RS synthetic menu"))
+    }
+
     @Test fun aBlockedMessageStaysBlockedAcrossSafeAndUnsafeRevisions() {
         val delivery = ExamDelivery { ExamTextGuard(index) }
         delivery.push(VisibleStream.Segment.Text(exams[0]))

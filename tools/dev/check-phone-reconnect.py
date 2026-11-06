@@ -55,6 +55,37 @@ def wakefulness(dump):
     return states[0] if len(states) == 1 else None
 
 
+def healthy_control(log, run_id, port):
+    """Require both phone clocks to advance with the isolated server still running."""
+    pattern = (re.escape(run_id)+r' (READY|MAIN_HEARTBEAT|SYNC_STATUS connection=\w+ revision=\d+ active=\w+)'
+               +r' port='+str(port)+r' elapsedMs=(\d+)\s*$')
+    samples = [match.groups() for line in log.splitlines()
+               if (match := re.search(pattern, line))]
+    ready = [int(stamp) for kind, stamp in samples if kind == 'READY']
+    if len(ready) != 1:
+        return None
+    streams = {'main': [], 'io': []}
+    for kind, stamp in samples:
+        stamp = int(stamp)
+        if stamp < ready[0]:
+            continue
+        if kind == 'MAIN_HEARTBEAT':
+            streams['main'].append(stamp)
+        elif kind.startswith('SYNC_STATUS'):
+            if not re.fullmatch(r'SYNC_STATUS connection=online revision=\d+ active=true', kind):
+                return None
+            streams['io'].append(stamp)
+    result = {}
+    for channel, stamps in streams.items():
+        if len(stamps) < 2 or stamps[-1]-stamps[0] < 10_000:
+            return None
+        if any(not 0 < current-previous <= 4_000
+               for previous, current in zip(stamps, stamps[1:])):
+            return None
+        result[channel+'SpanMs'] = stamps[-1]-stamps[0]
+    return result
+
+
 def lease_valid():
     fields = dict(line.split('=', 1) for line in (PHONE/'lease.d/info').read_text().splitlines())
     if fields.get('card') != 'TON-1094' or int(fields['until']) <= time.time():
@@ -199,6 +230,11 @@ def main():
                 stdout=log, stderr=subprocess.STDOUT)
         summary['phase'] = 'phone online checkpoint'
         wait_for(lambda: (s if f'READY port={args.port} ' in (s := report()) else None), 40)
+        # A no-fault control separates a phone/test/logging stall from a reaction
+        # to JVM pause. It cannot pass or extend the original 30-second OFFLINE gate.
+        summary['phase'] = 'phone heartbeat control with isolated JVM running'
+        summary['healthyControl'] = wait_for(
+            lambda: healthy_control(report(), run_id, args.port), 15)
         process_snapshot('ready before JVM pause')
         lease_valid()
         start = time.monotonic()

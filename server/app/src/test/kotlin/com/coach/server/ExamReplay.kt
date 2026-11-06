@@ -44,7 +44,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         "给我药物临床试验三个阶段的记忆方法。" to "把早期安全与剂量、中期疗效探索、后期大样本确证串成一条证据链；区分研究目的和参与人群。",
         "解释政策三难，并给我一道变形练习。" to "先列出覆盖范围、成本控制和自由选择三项目标，再设想预算收紧时如何权衡，逐项说明选择的代价。",
     )
-    val ordinaryPacks = home.resolve("corpus/packs")
+    val ordinaryPacks = home.resolve("corpus/packs").resolve(targetCourse)
     val packs = if (Files.isDirectory(ordinaryPacks)) Files.walk(ordinaryPacks).use { paths ->
         paths.filter { it.toString().endsWith(".md") }.map { Files.readString(it) }.toList()
     } else emptyList()

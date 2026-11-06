@@ -6,7 +6,9 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.coach.client.LedgerPage
 import com.coach.client.PairedCredentials
+import com.coach.client.drainLedger
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -135,20 +137,29 @@ class MistakeReviewSmoke {
         java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
     }
 
+    /** 一页最多 500 条：副本已有 700+ 条时只读第一页就看不到刚出的题，所以按 throughSeq 读到末端。 */
     private fun events(): JSONArray {
-        val req=Request.Builder().url("$base/v1/courses/$course/events?after=0")
-            .header("Authorization","Bearer $token").header("X-Coach-Device",device).build()
-        return http.newCall(req).execute().use { response ->
-            assertTrue(response.isSuccessful)
-            JSONObject(response.body!!.string()).getJSONArray("events")
+        val all=JSONArray()
+        drainLedger(0L) { after ->
+            val req=Request.Builder().url("$base/v1/courses/$course/events?after=$after&limit=500")
+                .header("Authorization","Bearer $token").header("X-Coach-Device",device).build()
+            http.newCall(req).execute().use { response ->
+                assertTrue("events after=$after -> HTTP ${response.code}",response.isSuccessful)
+                val body=JSONObject(response.body!!.string())
+                val page=body.getJSONArray("events")
+                val cards=(0 until page.length()).map { page.getJSONObject(it) }
+                cards.forEach { all.put(it) }
+                LedgerPage(cards,body.getLong("throughSeq"),body.optBoolean("hasMore",false))
+            }
         }
+        return all
     }
     private fun group(thread: String): JSONArray {
         val all=events();val cards=JSONArray()
         for(i in 0 until all.length()) all.getJSONObject(i).let {
             if(it.optString("type")=="question_posed" && it.optString("threadId")==thread) cards.put(it)
         }
-        assertEquals(3,cards.length())
+        assertEquals("question_posed for $thread among ${all.length()} ledger events",3,cards.length())
         return cards
     }
     private fun answer(cards: JSONArray, wrong: Int) {

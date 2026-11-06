@@ -30,7 +30,7 @@ def device(*a, timeout=30): return subprocess.run([adb, '-s', serial, *[str(x) f
 def shell(cmd, timeout=30): return device('shell', cmd, timeout=timeout)
 def snapshot():
     cpu = [l.strip() for l in shell('dumpsys cpuinfo | head -8').splitlines() if '%' in l][:5]
-    battery = dict(re.findall(r'(level|temperature): (\d+)', shell('dumpsys battery')))
+    battery = dict(re.findall(r'^  (level|temperature): (\d+)\s*$', shell('dumpsys battery'), re.MULTILINE))
     thermal = re.findall(r'Thermal Status: (\d+)', shell('dumpsys thermalservice | head -20'))
     return {'mac_load': [round(x, 2) for x in os.getloadavg()], 'battery_level': battery.get('level'), 'battery_temp_tenth_c': battery.get('temperature'),
             'thermal_status': thermal[0] if thermal else None, 'phone_top': cpu}

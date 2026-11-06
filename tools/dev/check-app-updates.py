@@ -131,6 +131,8 @@ def main():
         while adb('shell', 'getprop', 'sys.boot_completed', check=False, timeout=5).stdout.strip() != b'1':
             if emulator.poll() is not None or time.monotonic() > deadline: raise RuntimeError('Emulator boot failed')
             time.sleep(1)
+        adb('shell', 'wm', 'dismiss-keyguard')
+        adb('shell', 'settings', 'put', 'system', 'screen_off_timeout', '1800000')
         adb('uninstall', PACKAGE, check=False)
         adb('install', out / 'N.apk', timeout=90)
         adb('install', '-r', out / 'test.apk', timeout=90)
@@ -203,7 +205,8 @@ def main():
         # Android's first-use permission is changed through the actual settings UI.
         tap(find('Allow from this source')); screenshot('04-install-permission')
         adb('shell', 'input', 'keyevent', '4')
-        screenshot('05-system-installer'); tap(install_button())
+        button = install_button()
+        screenshot('05-system-installer'); tap(button)
         deadline = time.monotonic() + 90
         while True:
             after = adb('shell', 'dumpsys', 'package', PACKAGE).stdout.decode()
@@ -213,6 +216,7 @@ def main():
         (out / 'version-after.txt').write_text('\n'.join(line.strip() for line in after.splitlines() if 'versionCode=' in line or 'versionName=' in line))
         instrument('upgradeRetainsKeystorePairingAndLearningDatabase')
         launch(); time.sleep(3); screenshot('06-after-upgrade')
+        assert all('Coach 有新版本' not in node.get('text', '') for node in tree().iter('node'))
         snapshot_output = (out / 'snapshotLearningReplica.txt').read_text()
         event_count = int(re.search(r'Learning replica snapshot: (\d+) events', snapshot_output).group(1))
         summary = {'versionBefore': 216600001, 'versionAfter': valid['versionCode'], 'signatureRejected': True,

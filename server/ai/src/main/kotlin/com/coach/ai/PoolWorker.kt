@@ -4,8 +4,11 @@ import com.coach.core.LedgerActor
 import com.coach.core.RestrictedSourceGuard
 import com.coach.domain.*
 import com.coach.store.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
@@ -28,6 +31,7 @@ class PoolWorker(
         val background = input.flag("background")
         val type = requestType ?: if (background) "background" else "foreground"
         if (job.kind in setOf("gen_constructed","review_constructed")) return try { runConstructed(job,token,type) }
+        catch(e: CancellationException) { release(token); throw e }
         catch(e: Exception) { actor.execute { failSupply(token,"MALFORMED") }; throw e }
         val pool = QuestionPool(client)
         if (job.kind == "gen_mcq") {
@@ -42,6 +46,9 @@ class PoolWorker(
                         avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"),
                         internalReference=reference.joinToString("\n\n"))
                 }
+            } catch (e: CancellationException) {
+                release(token)
+                throw e
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
                 throw e
@@ -64,7 +71,10 @@ class PoolWorker(
                         "Return ONLY [{\"id\":0,\"source_quote\":\"exact contiguous supporting source text\"}, ...] for every candidate. Copy at least eight words verbatim, including HTML/LaTeX/Markdown; do not render symbols, paraphrase or join fragments. Do not change any question or key.\nSource:\n"+
                         input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
                         false,background=background,maxTokens=2500))
-                } } catch (e: Exception) {
+                } } catch (e: CancellationException) {
+                    release(token)
+                    throw e
+                } catch (e: Exception) {
                     actor.execute { failSupply(token,"MALFORMED") }
                     throw e
                 }
@@ -91,6 +101,9 @@ class PoolWorker(
                 pool.reviewGroup(listOf(QuestionPool.ReviewEntry(input.str("kp"),input.str("excerpt"),questions,0)),
                     background=background)
             }
+        } catch (e: CancellationException) {
+            release(token)
+            throw e
         } catch (e: Exception) {
             actor.execute { failSupply(token,"MALFORMED") }
             throw e
@@ -117,6 +130,11 @@ class PoolWorker(
             return Step(job.id,job.kind,"retrying")
         val failed=actor.execute { jobState(job.id)?.first=="failed" || failSupply(token,reason) }
         return Step(job.id,job.kind,if(failed) "failed" else "stale")
+    }
+
+    // Shutdown is not a verdict on the source; the next worker should pick the job up again.
+    private suspend fun release(token: Fence) {
+        withContext(NonCancellable) { withTimeoutOrNull(5_000) { actor.execute { releaseJob(token) } } }
     }
 
     private suspend fun runConstructed(job: SupplyJob, token: Fence, type: String): Step {

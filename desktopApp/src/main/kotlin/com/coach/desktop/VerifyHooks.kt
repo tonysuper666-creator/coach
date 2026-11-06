@@ -18,6 +18,10 @@ import java.awt.Container
  * - `COACH_AUTOPILOT=test,next,answer`：3 秒后发「出题」、开讲 8 秒后发一次「下一步」；看到未提交的题组，等 3 秒后用第一个选项提交（验证提交与判分链路，不替代真人点按）。
  */
 object VerifyHooks {
+    fun capture(window: Container, file: File) {
+        val bitmap = checkNotNull(window.skiaLayers().first().screenshot())
+        bitmap.use { Image.makeFromBitmap(it).use { image -> image.encodeToData()!!.use { data -> file.writeBytes(data.bytes) } } }
+    }
     private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
         if (this@skiaLayers is SkiaLayer) yield(this@skiaLayers)
         if (this@skiaLayers is Container) for (child in components) yieldAll(child.skiaLayers())

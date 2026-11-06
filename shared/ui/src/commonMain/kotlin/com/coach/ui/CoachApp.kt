@@ -114,9 +114,18 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         weekActions.onOpen = { id -> source = null; reviewWeek = null; tab = AppTab.TODAY; open = id?.let { it to true } }
         weekActions.onReview = { week -> reviewWeek = week; open = null; source = null }
     }
-    // Closed telemetry vocabulary (TON-1140): only the screens it already names are reported.
     LaunchedEffect(open, tab, source) {
-        val screen = when { open != null -> "study"; source != null -> null; tab == AppTab.TODAY -> "today"; tab == AppTab.REVIEW -> "review"; else -> null }
+        val screen = when {
+            open != null -> "study"
+            source != null -> null
+            else -> when (tab) {
+                AppTab.TODAY -> "today"
+                AppTab.ROUTE -> "route"
+                AppTab.REVIEW -> "review"
+                AppTab.RECORDS -> "records"
+                AppTab.RESOURCES -> "resources"
+            }
+        }
         if (screen != null) c.tutor.telemetry?.record("screen", screen)
     }
 

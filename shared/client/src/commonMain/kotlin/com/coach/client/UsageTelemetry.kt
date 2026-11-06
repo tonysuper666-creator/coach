@@ -15,7 +15,7 @@ import kotlin.random.Random
 /** Closed vocabulary: no question, answer, title, URL, exception or free-form text. */
 object UsageVocabulary {
     val kinds = setOf("open", "screen", "tap", "error", "disconnect", "reconnect", "first_word")
-    val targets = setOf("app", "today", "study", "review", "compact", "wide", "connection",
+    val targets = setOf("app", "today", "study", "review", "route", "records", "resources", "compact", "wide", "connection",
         "open_kp", "next", "test", "ask", "answer", "cancel", "settings", "explain", "quick_ask",
         "select_option", "scope", "offline_pack", "journal", "network", "server", "unknown")
     fun valid(event: JsonObject): Boolean = runCatching {

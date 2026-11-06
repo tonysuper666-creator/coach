@@ -53,6 +53,16 @@ class TutorClient(
     private val lifecycle = Any()
     private var running: Job? = null
     private var closed = false
+    // null means no outcome yet; retries while offline must not create new events.
+    private var observedConnection: Boolean? = null
+
+    private fun observeConnection(connected: Boolean) = synchronized(lifecycle) {
+        if (observedConnection != connected) {
+            if (!connected) telemetry?.record("disconnect", "connection")
+            else if (observedConnection == false) telemetry?.record("reconnect", "connection")
+            observedConnection = connected
+        }
+    }
 
     // 在线缺号由模型发现，续传帧走当前连接的发送队列（非阻塞 trySend，满了/断线返回 false 由模型重试）。
     init { model.resumeSender = { id -> send(resumeFrame(id)) } }
@@ -92,9 +102,9 @@ class TutorClient(
                     } catch (error: CancellationException) {
                         // A heartbeat/handshake timeout retires only this attempt. Owner cancellation exits.
                         if (!isActive) throw error
-                        telemetry?.record("error", "network")
+                        observeConnection(false)
                     } catch (_: Exception) {
-                        telemetry?.record("error", "network")
+                        if (isActive) observeConnection(false)
                     } finally {
                         queue.cancel()
                     }
@@ -155,7 +165,7 @@ class TutorClient(
                 // Register before publishing the queue, under the reader's lifecycle lock.
                 ids.forEach { model.noteResumeSent(it) }
                 live = queue
-                telemetry?.record("reconnect", "connection")
+                observeConnection(true)
                 ids
             }
             onReady()
@@ -171,7 +181,7 @@ class TutorClient(
                 if (live === queue) {
                     live = null
                     model.onConnection(false)
-                    telemetry?.record("disconnect", "connection")
+                    if (isActive) observeConnection(false)
                 }
             }
             sender?.cancel(); ticker?.cancel(); heartbeat.cancel(); reader.cancel(); pongs.cancel()
@@ -199,14 +209,14 @@ class TutorClient(
     }
 
     /** 发出一帧；没有在线连接返回 false。 */
-    fun send(frame: JsonObject): Boolean {
+    fun send(frame: JsonObject, recordTap: Boolean = true): Boolean {
         val target = when ((frame["t"] as? JsonPrimitive)?.content) {
             "tutor.open" -> "open_kp"; "tutor.next" -> "next"; "tutor.test" -> "test"
             "msg.ask" -> "ask"; "tutor.answer" -> "answer"; "msg.cancel" -> "cancel"
             "tutor.settings" -> "settings"; "tutor.explain" -> "explain"; "quick.ask" -> "quick_ask"
-            else -> "unknown"
+            else -> null
         }
-        if (target != "open_kp") telemetry?.record("tap", target)
+        if (recordTap && target != null && target != "open_kp") telemetry?.record("tap", target)
         val sent = live?.trySend(frame.toString())?.isSuccess == true
         if (!sent) telemetry?.record("error", "connection")
         return sent
@@ -220,9 +230,9 @@ class TutorClient(
     })
 
     /** 「下一步」/「换个例子再讲」/ 讲解；`test=true` 是「出题」。 */
-    fun next(threadId: String, courseId: String, pack: String, test: Boolean) = send(buildJsonObject {
+    fun next(threadId: String, courseId: String, pack: String, test: Boolean, recordTap: Boolean = true) = send(buildJsonObject {
         put("t", if (test) "tutor.test" else "tutor.next"); put("threadId", threadId); put("courseId", courseId); put("pack", pack)
-    })
+    }, recordTap)
 
     fun ask(threadId: String, courseId: String, text: String, pack: String, clientMsgId: String = Uuid.random().toString()): Boolean {
         if (live == null) return false

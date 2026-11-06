@@ -34,7 +34,7 @@ fun validateProposal(mapping:JsonObject, proposal:JsonObject) {
     require(questions.map { it.str("id") }.toSet()==questionIds && questions.size==questionIds.size) { "Proposal must cover every question exactly once" }
     fun ids(item:JsonObject,key:String)=item.array(key).map { it.jsonPrimitive.content }
     questions.forEach { q ->
-        require(ids(q,"kp_ids").all { it in kpIds } && q.str("reason").isNotBlank()) { "Question needs supported KP IDs and a reason" }
+        require(ids(q,"kp_ids").distinct()==ids(q,"kp_ids") && ids(q,"kp_ids").all { it in kpIds } && q.str("reason").isNotBlank()) { "Question needs unique supported KP IDs and a reason" }
         require(ids(q,"kp_ids").isNotEmpty() || (q.str("status")=="unresolved" && q.str("warning").isNotBlank())) { "Unmapped question must explicitly preserve the unresolved reason" }
     }
     val concepts=proposal.array("concepts").map { it.jsonObject }
@@ -89,9 +89,12 @@ fun plannedRecord(source:JsonObject,kind:String,payload:JsonObject):JsonObject =
     put("payload",payload);put("payload_hash",sha(canonical(payload)))
 }
 
-fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObject {
+fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):JsonObject {
     validateSeed(mapping,seed)
     if(proposal!=null) validateProposal(mapping,proposal)
+    if(confirmation!=null) validateConfirmation(mapping,requireNotNull(proposal) { "Confirmation needs a reviewed proposal" },confirmation)
+    val associations=if(confirmation!=null) requireNotNull(proposal).array("questions").map { it.jsonObject }.associateBy { it.str("id") } else emptyMap()
+    val samples=if(confirmation!=null) shortAnswerSamples(mapping).map { it.jsonObject }.associateBy { it.str("id") } else emptyMap()
     val courseId=seed.obj("course").str("id")
     val records=mutableListOf<JsonObject>()
     fun add(section:String,kind:String=section,transform:(JsonObject)->JsonObject={ it.obj("source_record") }) {
@@ -101,7 +104,15 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
         put("question",row.obj("question"));put("keyState","UNREVIEWED")
         val raw=row.obj("source_record")
         if(isChoice(raw)) put("legacy_explanation_archive",legacyChoiceArchive(raw))
-        put("kp_ids",JsonArray(emptyList()));put("association_confirmed",false)
+        val ids=JsonArray(associations[row.str("id")]?.array("kp_ids") ?: emptyList())
+        put("kp_ids",ids);put("association_confirmed",ids.isNotEmpty())
+        if(confirmation!=null) {
+            put("confirmation",buildJsonObject {
+                for(key in listOf("decision_ref","input_hash","proposal_hash")) put(key,confirmation.getValue(key))
+                put("decision_hash",sha(canonical(confirmation)))
+            })
+            samples[row.str("id")]?.let { put("accepted_short_answer_material",it) }
+        }
     } }
     add("legacy_attempts","legacy_attempt") { row ->
         val raw=row.obj("source_record");val q=parseText(raw.str("question_json")).jsonObject
@@ -143,7 +154,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
         put("input_hash",sha(canonical(proposalInput(mapping))));put("seed_hash",sha(canonical(seed)))
         put("content_action","reference_existing_only");put("exam_weights_action","reuse_existing_event")
         put("exam_weights",seed.obj("exam_weights"))
-        put("human_confirmation","pending");put("proposals",proposal ?: JsonNull)
+        put("human_confirmation",confirmation ?: JsonPrimitive("pending"));put("proposals",proposal ?: JsonNull)
         put("unknown_types",JsonArray(mapping.array("knowledge_points").map { it.jsonObject }.filter { it["original_type_available"]==JsonPrimitive(false) }))
         put("records",JsonArray(records.sortedBy { it.str("id") }))
         put("counts",buildJsonObject {
@@ -151,7 +162,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
             put("question_proposals",proposal?.array("questions")?.count { it.jsonObject.array("kp_ids").isNotEmpty() } ?: 0)
             put("questions_without_proposals",mapping.array("questions").size-(proposal?.array("questions")?.count { it.jsonObject.array("kp_ids").isNotEmpty() } ?: 0))
             put("unresolved_historical_choice_answers",records.count { it.str("kind")=="legacy_attempt" && it.obj("payload")["answer_unresolved"]==JsonPrimitive(true) })
-            put("confirmed_question_associations",0);put("content_inserts",0)
+            put("confirmed_question_associations",associations.values.count { it.array("kp_ids").isNotEmpty() });put("content_inserts",0)
         })
         put("archive_only",buildJsonObject {
             for(key in listOf("legacy_attempt_groups","excluded_path_archives")) put(key,mapping.getValue(key))
@@ -177,7 +188,11 @@ fun simulatePlan(plan:JsonObject,prior:JsonObject=JsonObject(emptyMap())):Simula
     return Simulation(JsonObject(state.toSortedMap()),inserted,revised,unchanged)
 }
 
-fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildString {
+fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):String = buildString {
+    if(confirmation!=null) {
+        append(confirmationReceipt(mapping,requireNotNull(proposal),confirmation))
+        append("\n---\n\n以下保留当时确认清单的历史原稿；其中待确认措辞为历史记录，当前状态以以上回执及 import-plan.json 为准。\n\n")
+    }
     append("# 学习记录搬家确认草稿\n\n这份清单只供核对；隔离副本预演通过后再合并请你确认。正式库尚未导入学习记录。旧作答永远只作历史展示，不计入新学习成绩。\n\n")
     if(proposal==null) { append("题目归属、概念与建议先学的内容尚未完成异厂复核。\n");return@buildString }
     validateProposal(mapping,proposal)
@@ -238,7 +253,8 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
     append("\n本文仅准备一次确认材料，尚未发出确认请求；正式增量源快照若改变题目或 KP 内容，必须重新提议并异厂复核，再替换本文对应项。\n")
 }
 
-fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?):String = buildString {
+fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):String = buildString {
+    if(confirmation!=null) { append(confirmationReceipt(mapping,requireNotNull(proposal),confirmation));return@buildString }
     append("# 学习记录搬家：确认草稿\n\n隔离副本预演通过后再确认，正式库目前没有导入学习记录。\n\n")
     val counts=mapping.obj("counts")
     append("保留 ${counts.str("passed")} 个已通过、${counts.str("attempts")} 条旧作答、${counts.str("schedules")} 条复习、${counts.str("notes")} 条笔记。旧作答只展示，不计入新成绩；${counts.str("original_types_missing")} 项缺失的原类型保留未知。\n\n")

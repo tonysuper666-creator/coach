@@ -200,3 +200,36 @@ nice -n 15 python3 tools/migrate-deeptutor/verify-incremental.py \
 固定快照预演不能证明源之后的新数据已同步。独立 QA-C 验收、随后异源复核通过后，把归属/学习顺序与 10 道简答源采分点合成一次本人事实确认；未确认的题不计入任何层。原类型不猜，缺证据的数据保留未知。仍须完成新快照增量、5 个 KP 界面对照、blobs 备份与正式切换/恢复验证，不能因工具 PR 合并而结束整张迁移卡。
 
 切换不放在考试前 7 天内；连续两次增量对账零差异后再切换。切换前记录备份和课程清单哈希。切换后 DeepTutor 原样只读可开，保留至少两周；需要回退时停止 Coach 写入、保存 Coach 切换后的新增记录，重新打开 DeepTutor，必要时恢复切换前 Coach 备份。不得把 Coach 数据反写 DeepTutor，也不得删除源数据。正式切换/备份恢复尚未演练。
+
+
+## 接受已确认输入（TON-1095，2026-11-06）
+
+以上“空归属 / 待确认”说明描述未传入确认文件的旧流程。已确认模式必须显式传入 `--confirmation FILE`；该文件与完整已复核提议及当前 `proposal-input.json` 的规范 JSON SHA-256 绑定。`decision_ref` 指向实际本人确认记录，不是评分复核签名。
+
+确认文件 schema_version=1，包含 `decision_ref`、`input_hash`、`proposal_hash`，以及以下固定策略：
+
+```json
+{
+  "question_associations": "accept_reviewed_proposal",
+  "curriculum": "accept_reviewed_proposal",
+  "ambiguous_answers": "preserve_verbatim_unscored",
+  "choice_explanations": "archive_only",
+  "passed_times": "approximate",
+  "grading": "unreviewed_no_keys"
+}
+```
+
+另有 `short_answer_samples` 数组，逐项记录清单中相同的十道抽样题 `id`、`content_hash`、源 `field` 和 `value` 原文。没有源 rubric 时接受 explanation 原文，不生成分值或 VERIFIED 结构化评分键。
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
+  :tools:migrate-deeptutor:test :tools:migrate-deeptutor:installDist \
+  :shared:domain:jvmTest :server:store:test --offline --console=plain
+# 在原 rehearse 命令附加：
+# --confirmation "$PRIVATE/confirmation.json"
+# 独立 verify-import.py 同时附加 --proposal FILE --confirmation FILE。
+```
+
+确认后将归属写入 `question_kp`；概念及前置写入标准 `outline_revised` 账本事件，并同步前置 SQL。首次确认也可修订此前未确认的导入记录。题目仍为 LEGACY/UNREVIEWED，不进入题池，不创建答案键，历史作答不计分。题目源内容变化需要针对新输入的确认；提升过的题目、外部改过的归属或课程结构会拒绝覆盖，并整笔回滚。相同输入重复导入不增加记录、修订或事件；后续原生课程编辑不会被同一已接受决定重置。
+
+`confirmation.md` 输出已记录回执；详细清单保留原稿并注明其待确认措辞为历史记录。`rollback-state.json` 对比规范化全状态，数据库回退另以 `cmp before.sqlite rollback.sqlite` 验证物理字节一致。此工具仍仅允许新建隔离输出，不提供生产写入入口。正式写入与启用须另行完成 QA-C、Architect 两轮复核及数据库/blobs 备份、恢复、回退验收。

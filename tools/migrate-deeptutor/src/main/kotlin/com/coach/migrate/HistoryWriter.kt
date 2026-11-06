@@ -110,6 +110,12 @@ private fun historicalTime(row:JsonObject,plan:JsonObject,mapping:JsonObject):Lo
 internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:JsonObject,clock:()->Long=System::currentTimeMillis):JsonObject {
     require(db.autoCommit) { "Writer owns its transaction" }
     val course=plan.str("course_id");require(course==seed.obj("course").str("id"))
+    val confirmation=plan["human_confirmation"] as? JsonObject
+    if(confirmation!=null) require(plan==importPlan(mapping,seed,plan.obj("proposals"),confirmation)) { "Confirmed plan differs from its validated inputs" }
+    else require(plan.array("records").filter { it.jsonObject.str("kind")=="legacy_question" }.all {
+        val p=it.jsonObject.obj("payload")
+        p.array("kp_ids").isEmpty() && p["association_confirmed"]==JsonPrimitive(false) && !p.containsKey("confirmation")
+    }) { "Question associations require an explicit validated decision" }
     validateInstalledCourse(db,seed)
     val nativeReview=project(db.query("SELECT event_json FROM events WHERE course_id=? AND device_id!='deeptutor-migration' ORDER BY seq",course)
         .map { LedgerJson.decodeFromString<Event>(it.str("event_json")) }).review.keys
@@ -189,8 +195,12 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
             if(old!=null) {
                 require(old.str("course_id")==course && old.str("kind")==kind) { "Source identity changed course or kind: $id" }
                 if(old.str("source_hash")==row.str("source_hash")) {
-                    require(old.str("payload_hash")==row.str("payload_hash") && old.str("payload_json")==canonical(p) && old.str("source_json")==canonical(raw)) { "Unchanged source has conflicting derived data: $id" }
-                    continue
+                    require(old.str("source_json")==canonical(raw)) { "Unchanged source has conflicting original data: $id" }
+                    if(old.str("payload_hash")==row.str("payload_hash") && old.str("payload_json")==canonical(p)) continue
+                    require(kind=="legacy_question" && confirmation!=null) { "Unchanged source has conflicting derived data: $id" }
+                    val previous=parseText(old.str("payload_json")).jsonObject
+                    require(JsonObject(previous.filterKeys { it !in setOf("kp_ids","association_confirmed","confirmation","accepted_short_answer_material") })==
+                        JsonObject(p.filterKeys { it !in setOf("kp_ids","association_confirmed","confirmation","accepted_short_answer_material") })) { "Confirmation changed source-derived question data" }
                 }
                 revisionFacts=mutableListOf()
                 revised++
@@ -204,11 +214,19 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
                     val seq=emit(row,"legacy_imported",p)
                     if(old!=null) {
                         require(db.query("SELECT question_id FROM questions WHERE question_id=? AND course_id=? AND origin='LEGACY' AND key_state='UNREVIEWED'",id,course).size==1 &&
-                            listOf("question_kp","answer_keys","pool_details","constructed_details").all { table -> db.query("SELECT question_id FROM $table WHERE question_id=?",id).isEmpty() }) { "Cannot revise a promoted legacy question" }
+                            listOf("answer_keys","pool_details","constructed_details").all { table -> db.query("SELECT question_id FROM $table WHERE question_id=?",id).isEmpty() }) { "Cannot revise a promoted legacy question" }
+                        val previous=parseText(old.str("payload_json")).jsonObject
+                        val expected=previous.array("kp_ids").mapIndexed { index,kp -> buildJsonObject { put("kp_id",kp);put("is_primary",if(index==0) 1 else 0) } }.sortedBy { it.str("kp_id") }
+                        require(db.query("SELECT kp_id,is_primary FROM question_kp WHERE question_id=? ORDER BY kp_id",id)==expected) { "Cannot overwrite externally changed question associations" }
                         db.exec("UPDATE questions SET format=?,stem_md=?,options=? WHERE question_id=?",if(isChoice(q)) "SINGLE_CHOICE" else "SHORT_ANSWER",stem,q["options"]?.let(::canonical),id)
                     } else db.exec("INSERT INTO questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state,created_seq) VALUES(?,?,?,?,?,'LEGACY',?,'UNREVIEWED',?)",
                         id,course,if(isChoice(q)) "SINGLE_CHOICE" else "SHORT_ANSWER",stem,q["options"]?.let(::canonical),"legacy:"+sha(id),seq)
-                    // Deliberately no question_kp, answer_keys or pool_details.
+                    db.exec("DELETE FROM question_kp WHERE question_id=?",id)
+                    p.array("kp_ids").forEachIndexed { index,kp ->
+                        require(db.query("SELECT kp_id FROM outline_kp WHERE kp_id=? AND course_id=? AND retired=0",kp.jsonPrimitive.content,course).size==1)
+                        db.exec("INSERT INTO question_kp VALUES(?,?,?)",id,kp.jsonPrimitive.content,if(index==0) 1 else 0)
+                    }
+                    // Human acceptance never creates a VERIFIED key or an eligible question pool row.
                 }
                 "legacy_attempt" -> {
                     val attempt="legacy-attempt:"+sha(id)
@@ -268,8 +286,10 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
             db.exec("INSERT INTO migration_records VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_hash=excluded.source_hash,payload_hash=excluded.payload_hash,payload_json=excluded.payload_json,source_json=excluded.source_json",
                 id,course,kind,row.str("source_hash"),row.str("payload_hash"),canonical(p),canonical(raw))
         }
+        val curriculumEvents=writeConfirmedCurriculum(db,plan,seed,now,snapshotAt)
+        addedEvents+=curriculumEvents
         // Stable chronological ordering inside migration-owned threads, including late arrivals.
-        if(inserted+revised>0) {
+        if(inserted+revised+curriculumEvents>0) {
             for(thread in db.query("SELECT DISTINCT m.thread_id FROM messages m JOIN migration_records r ON r.source_id=m.message_id WHERE r.course_id=? AND r.kind='legacy_message'",course)) {
                 val messages=db.query("SELECT message_id FROM messages WHERE thread_id=? ORDER BY created_at,message_id",thread.str("thread_id"))
                 require(messages.all { it.str("message_id") in sourceIds }) { "Legacy thread contains a native message; cannot reorder" }
@@ -288,10 +308,11 @@ internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:
 
 /** No production writer switch. Every invocation starts from a read-only online backup. */
 fun rehearseCommand(args:List<String>) {
-    val allowed=setOf("--snapshot","--coach-db","--seed-manifest","--proposal","--out")
+    val required=setOf("--snapshot","--coach-db","--seed-manifest","--proposal","--out")
+    val allowed=required+"--confirmation"
     require(args.size%2==0) { "rehearse requires --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR" }
     val options=args.chunked(2).associate { (k,v) -> require(k in allowed) { "Unknown rehearsal option: $k" };k to v }
-    require(options.size*2==args.size && options.keys==allowed) { "Supply each rehearsal option exactly once" }
+    require(options.size*2==args.size && options.keys.containsAll(required)) { "Supply each rehearsal option exactly once" }
     val home=Path.of(System.getProperty("user.home"))
     val source=Path.of(options.getValue("--coach-db")).toRealPath()
     val snap=Path.of(options.getValue("--snapshot")).toRealPath()
@@ -306,12 +327,13 @@ fun rehearseCommand(args:List<String>) {
     val seed=parseFile(Path.of(options.getValue("--seed-manifest"))).jsonObject
     require(seed.obj("exam_weights")==prepareSeed(snap).manifest.obj("exam_weights"))
     val proposal=parseFile(Path.of(options.getValue("--proposal"))).jsonObject
-    val plan=importPlan(mapped.mapping,seed,proposal)
+    val confirmation=options["--confirmation"]?.let { parseFile(Path.of(it)).jsonObject }
+    val plan=importPlan(mapped.mapping,seed,proposal,confirmation)
     privateDir(out)
     mapped.let { out.resolve("mapping.json").writeText(canonical(it.mapping));out.resolve("report.md").writeText(it.report) }
     out.resolve("import-plan.json").writeText(canonical(plan))
-    out.resolve("confirmation.md").writeText(confirmationSummary(mapped.mapping,proposal))
-    out.resolve("confirmation-details.md").writeText(confirmationSheet(mapped.mapping,proposal))
+    out.resolve("confirmation.md").writeText(confirmationSummary(mapped.mapping,proposal,confirmation))
+    out.resolve("confirmation-details.md").writeText(confirmationSheet(mapped.mapping,proposal,confirmation))
     val baseline=out.resolve("before.sqlite");backupDatabase(source,baseline)
     val target=out.resolve("coach.sqlite");backupDatabase(baseline,target)
     val course=plan.str("course_id")
@@ -322,7 +344,7 @@ fun rehearseCommand(args:List<String>) {
         val state=databaseState(db,course);out.resolve("first-state.json").writeText(canonical(state))
         val second=writeHistory(db,plan,seed,mapped.mapping)
         val repeated=databaseState(db,course);out.resolve("second-state.json").writeText(canonical(repeated))
-        check(state==repeated && second["records_inserted"]==JsonPrimitive(0) && second["events_added"]==JsonPrimitive(0)) { "Database import is not idempotent" }
+        check(state==repeated && listOf("records_inserted","records_revised","events_added").all { second[it]==JsonPrimitive(0) }) { "Database import is not idempotent" }
         val report=buildJsonObject {
             put("first",first);put("second",second);put("state_sha256",sha(canonical(state)));put("projection_sha256",sha(canonical(state.getValue("projection"))))
             put("baseline_sha256",sha(out.resolve("before-state.json").readText()))
@@ -335,6 +357,8 @@ fun rehearseCommand(args:List<String>) {
     // An independently restorable rollback copy, never replace the live database.
     backupDatabase(baseline,out.resolve("rollback.sqlite"))
     openReadOnly(out.resolve("rollback.sqlite")).use { db ->
-        check(canonical(databaseState(db,course))==out.resolve("before-state.json").readText()) { "Rollback copy differs from baseline" }
+        val restored=canonical(databaseState(db,course))
+        out.resolve("rollback-state.json").writeText(restored)
+        check(restored==out.resolve("before-state.json").readText()) { "Rollback copy differs from baseline" }
     }
 }

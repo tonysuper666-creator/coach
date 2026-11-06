@@ -216,3 +216,43 @@ method credit, invalid input, precision, missing final, a completely blank part,
 exact 0.005 boundary, above-boundary precision, null tolerance, reviewed facts,
 and reopening the ledger. The device fixture now uses a full-rubric first part
 with final-only input, plus the existing partial-credit and blank parts (7/12).
+
+## Final correction verification (2026-11-06)
+
+The final implementation, including main through `37f89ed`, was tested from a
+clean worktree at `dc3ef7a`. The following documentation commit changes no code.
+
+```sh
+tools/dev/heavy ./gradlew :shared:domain:jvmTest :shared:client:jvmTest :shared:ui:jvmTest :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:ai:test :server:app:test :server:app:installDist -PcoachApplicationId=com.coach.android.ton1292 -Pcoach.port=19292 --max-workers=2 --rerun-tasks
+```
+
+Exit 0: `BUILD SUCCESSFUL in 6m 10s`, all 153 tasks executed. JUnit XML records
+57 domain, 57 client, 81 UI, 80 AI and 176 server tests: 451 total, no failures,
+errors or skips. Both suffixed APKs and the isolated server distribution built.
+One earlier local rerun was cancelled (exit 130) to incorporate main's newly
+landed ledger replay patch; the complete run above followed that merge.
+
+The standalone reproduction was then repeated after the full run:
+
+```sh
+tools/dev/heavy ./gradlew :server:app:test --tests com.coach.server.SageFullRubricProbeTest --max-workers=2
+```
+
+Exit 0, `BUILD SUCCESSFUL in 6s`; its output reports both
+`grader-request contains final 7.77: true` and
+`numericFinal present after grading: true`. Before the fix, the same assertion
+failed on `2826a82` (exit 1, 8s). The full run includes the original 14 focused
+tests, this probe and nine additional full-rubric regression cases.
+
+The actual device command was:
+
+```sh
+tools/dev/heavy --emulator python3 ../ton1292_device.py
+```
+
+It remained queued behind live owner PID 68950. Only this run's waiting wrapper
+was cancelled (exit 130); no AVD command or device assertion ran. No device
+screenshots or device ledger sequence are available. The updated synthetic
+runner is a continuation artifact, not evidence of acceptance. Keep PR100 draft
+and the issue in review pending the specified emulator journey and independent
+non-GPT review of the exact candidate head.

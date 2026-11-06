@@ -1,4 +1,4 @@
-"""Safety cases for the unwired JFR health-read classifier."""
+"""Safety cases for the JFR health-read classifier."""
 import os
 import json
 from pathlib import Path

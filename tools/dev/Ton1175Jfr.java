@@ -11,8 +11,7 @@ import jdk.jfr.consumer.RecordingFile;
 /** Closed-schema inspection of the recording itself, never a caller's count flag. */
 class Ton1175Jfr {
     // Observed in the old 8d3608f managed JVM's real, untruncated recording.
-    // This classifier is not wired into the idle gate yet: that must first
-    // bind bridgePort to the trusted staged plist rather than caller evidence.
+    // The verifier binds bridgePort to the staged old plist, not idle evidence.
     static final String HEALTH_FRAME = "com.coach.server.ChildServices$supervise$1#invokeSuspend";
     static final long MAX_HEALTH_BYTES = 1024;
 

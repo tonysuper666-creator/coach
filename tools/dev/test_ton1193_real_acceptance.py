@@ -1,4 +1,5 @@
 import json
+import contextlib
 from pathlib import Path
 import plistlib
 import tempfile
@@ -61,12 +62,9 @@ class IdleRecordingTest(unittest.TestCase):
                 if 'jdk.CPULoad' in argv:
                     return json.dumps({'recording': {'events': [{'values': {
                         'startTime': '1970-01-01T00:16:41Z'}}]}}).encode()
-                if 'jdk.SocketRead' in argv:
-                    self.assertEqual(argv[argv.index('--stack-depth') + 1], '128')
-                    return json.dumps({'recording': {'events': [{'values': {
-                        'startTime': '1970-01-01T00:16:41Z', 'bytesRead': 12, 'port': 41500,
-                        'address': '127.0.0.1', 'stackTrace': {'truncated': False,
-                                                              'frames': [{'type': 'fixture'}]}}}]}}).encode()
+                if any(x.endswith('Ton1175Jfr.java') for x in argv):
+                    return json.dumps({'pid': 123, 'socketReads': 1,
+                                       'attributedHealthReads': 0, 'clientReads': 1}).encode()
                 return b'identity'
 
             control = mock.MagicMock()
@@ -74,15 +72,14 @@ class IdleRecordingTest(unittest.TestCase):
             with mock.patch.object(driver.subprocess, 'check_output', side_effect=execute), \
                  mock.patch.object(driver.coverage, 'Control', return_value=control), \
                  mock.patch.object(driver.coverage, 'healthy'), \
+                 mock.patch.object(driver.verify, 'staged_bridge_port', return_value=contextlib.nullcontext(41500)), \
                  mock.patch.object(driver.time, 'sleep'), \
                  mock.patch.object(driver.time, 'time', return_value=1000), \
                  mock.patch.object(driver.time, 'monotonic', return_value=10):
                 with self.assertRaisesRegex(GateError, 'SocketRead'):
                     driver.recording(root, root / 'java', 123, 'activity.sock',
-                        {'adapterEnvPins': {'BRIDGE_PORT': '41500'}, 'idleEvidence': str(root / 'idle.json')}, report)
-            self.assertEqual(report['earlySocketReads']['count'], 1)
-            self.assertEqual(report['earlySocketReads']['bridgePortReads'], 1)
-            self.assertEqual(report['earlySocketReadStacks'][0]['stackTrace']['frames'], [{'type': 'fixture'}])
+                        {'installation': str(root / 'installation.json'), 'idleEvidence': str(root / 'idle.json')}, report)
+            self.assertEqual(report['earlySocketReads']['clientReads'], 1)
             self.assertIn('<setting name="stackTrace">true</setting>', (root / 'idle.jfc').read_text())
             self.assertFalse((root / 'idle.json').exists())
 

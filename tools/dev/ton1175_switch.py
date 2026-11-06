@@ -150,7 +150,12 @@ def check_idle(c, old_head, stopped=False, coverage_seal=None):
     # The verifier must fail closed if it cannot check the JFR, same PID and
     # identity, recording coverage and unchanged installation. No output leaks.
     if not stopped:
-        run(c['idleVerifier'] + [c['idleEvidence'], c['installation']])
+        verifier = list(c['idleVerifier'])
+        if '--stage-config' in verifier:
+            require(verifier.count('--stage-config') == 1 and '--stage-config-sha256' not in verifier,
+                    'ambiguous stage verifier configuration')
+            verifier += ['--stage-config-sha256', digest(json.dumps(c, sort_keys=True).encode())]
+        run(verifier + [c['idleEvidence'], c['installation']])
     logs = c['accessLogs']
     require(isinstance(logs, list) and logs, 'access log coverage missing')
     for name in logs:

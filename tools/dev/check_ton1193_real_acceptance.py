@@ -22,6 +22,7 @@ from . import activity_coverage as coverage
 from . import check_ton1193_real_process as probe
 from . import check_ton1193_real_stage as stage
 from . import ton1175_switch as switch
+from . import ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_isolated_seed as seed
 
@@ -38,7 +39,7 @@ def configure(config_path, config, roots, pid, owned):
                   accessLogs=[str(logs[0])],
                   idleVerifier=[sys.executable, '-m', 'tools.dev.ton1175_verify', 'idle',
                                 '--java', str(java / 'bin/java'), '--jcmd', str(java / 'bin/jcmd'),
-                                '--lsof', '/usr/sbin/lsof'],
+                                '--lsof', '/usr/sbin/lsof', '--stage-config', str(config_path)],
                   logVerifier=[sys.executable, '-m', 'tools.dev.ton1175_verify', 'logs'])
     switch.atomic(config_path, json.dumps(config).encode())
     return diagnostic, java
@@ -96,25 +97,21 @@ def recording(root, java, pid, control_path, config, report):
     time.sleep(2)
     wall_start, mono_start = time.time(), time.monotonic()
     identity = switch.digest(run('/bin/ps', '-p', pid, '-o', 'lstart=', '-o', 'command=').strip())
-    # A single observed read already makes a zero-read 900s proof impossible.
-    # Detect it early without relaxing the normal verifier or reporting an idle
-    # proof. In particular, managed child health checks may cause such reads.
+    # Short-window sampling uses the same inspector and trusted stage pin as
+    # the full gate; it is only an early failure check, never an idle proof.
     time.sleep(22)
-    sample = heartbeat()
-    data = json.loads(run(java / 'bin/jfr', 'print', '--json', '--stack-depth', '128',
-                          '--events', 'jdk.SocketRead', sample))
-    reads = []
-    for event in data['recording']['events']:
-        values = event['values']
-        at = dt.datetime.fromisoformat(values['startTime'].replace('Z', '+00:00')).timestamp()
-        if at >= wall_start and values.get('bytesRead', 0) > 0:
-            reads.append(values)
-    report['earlySocketReads'] = dict(durationSeconds=time.monotonic()-mono_start, count=len(reads),
-                                     bridgePortReads=sum(x.get('port') == int(config['adapterEnvPins']['BRIDGE_PORT'])
-                                                         for x in reads))
-    report['earlySocketReadStacks'] = [dict(bytesRead=x.get('bytesRead'), address=x.get('address'),
-                                          port=x.get('port'), stackTrace=x.get('stackTrace')) for x in reads]
-    switch.require(not reads, 'real JFR recorded SocketRead during idle window')
+    sample_end = time.time()
+    sample = heartbeat(sample_end)
+    stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
+    inspector = Path(verify.__file__).with_name('Ton1175Jfr.java')
+    config_hash = switch.digest(json.dumps(config, sort_keys=True).encode())
+    with verify.staged_bridge_port(root / 'controller.json', config['installation'], config_hash) as port:
+        measured = json.loads(run(java / 'bin/java', inspector, sample, stamp(wall_start), stamp(sample_end),
+                                  pid, port))
+        report['earlySocketReads'] = dict(durationSeconds=time.monotonic()-mono_start, **measured)
+        switch.require(measured['pid'] == pid and measured['clientReads'] == 0
+                       and measured['socketReads'] == measured['attributedHealthReads'],
+                       'real JFR recorded client SocketRead during idle window')
     # Foreground wait; no requests to the server while measuring the window.
     while time.monotonic() - mono_start < 903:
         time.sleep(min(30, 903 - (time.monotonic() - mono_start)))
@@ -124,7 +121,6 @@ def recording(root, java, pid, control_path, config, report):
         finish = control.ask('snapshot')
     target = root / 'idle.jfr'
     os.replace(heartbeat(end), target)
-    stamp = lambda value: dt.datetime.fromtimestamp(value, dt.timezone.utc).isoformat()
     proof = dict(windowStart=stamp(wall_start), windowEnd=stamp(end), verifiedAtEpoch=time.time(),
                  sourceHead=config['expectedSourceHead'], pid=pid, recording=str(target),
                  recordingSha256=switch.file_hash(target), processIdentitySha256=identity,

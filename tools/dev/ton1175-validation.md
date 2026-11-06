@@ -104,8 +104,17 @@ fail closed. Other platforms retain the `lsof` whole-file lock check.
 requires enabled `SocketRead`, `ActiveSetting`, `DataLoss`, `CPULoad` and
 `JVMInformation` evidence, zero socket threshold, no disabling during the window,
 no data loss, and CPU heartbeat coverage bracketing the window with at most
-two-second gaps. Every positive socket read overlapping the window counts,
-including hello/bridge traffic; there are no asserted JSON exclusions. Missing
+two-second gaps. By default every positive socket read overlapping the window
+counts, including hello and bridge traffic. A staged managed verifier may bind
+the bridge port to the active transaction's old plist and configuration hash.
+Only a non-truncated stack with the observed old `ChildServices` health frame,
+no client/routing/session frame, loopback address, matching port and at most
+1024 bytes can be attributed to health checks. SocketRead stack traces must be
+enabled throughout, and attributed reads cannot exceed `ceil(seconds/10)+2`.
+All other positive reads count as client reads and reject idle; evidence JSON
+cannot declare exclusions. Inspector output reports total, attributed health and
+client reads separately. The stage files, old plist and installation are read
+without following links and rechecked around inspection. Missing
 events/settings/coverage fail closed. Old recordings made without these enabled
 events cannot be used. The unit fixture is deliberately short; it verifies the
 real parser and proves the Python entrypoint rejects it as a production idle proof.

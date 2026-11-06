@@ -220,3 +220,42 @@ bash tools/migrate-deeptutor/reproduce-confirmed.sh \
 新增六项回归覆盖确认首导/重导、未确认导入的确认补写及源修订、过期/篡改确认、外部归属和已提升题目保护、缺失确认不得撤销既有接受、外部课程结构保护。原测试未删除、未跳过、未放宽。
 
 公开路径检查的额外命中位于原有 DevRunGuardTest 与 test_ton1175_launchd 合成测试夹具；本次改动没有新增私人路径、语料或数据库。后续仍按 QA-C→Architect 顺序独立复核，再执行生产数据库与 blobs 备份、恢复、回退验收，之后才可正式写入和启用；TON-1102 保持锁定。
+
+## 2026-11-06 离线正式命令：当前库新副本演练
+
+结果：部分达到。新增 `apply-confirmed` / `rollback-confirmed`，在当场从当前 Coach 库取得的在线备份上验证实际命令；本轮没有写生产或启用。此切片须 QA-C 独立验收、Architect 关键复核后，才可正式写入、启用并实测生产状态。ai_calls 累计 2，本轮 0；TON-1102 保持锁定。
+
+实际执行（均退出 0）：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew \
+  :tools:migrate-deeptutor:test :shared:domain:jvmTest :server:store:test \
+  :tools:migrate-deeptutor:installDist
+# BUILD SUCCESSFUL；migration 47、domain 52、store 32：共 131 项，0 失败、0 跳过。
+# 迁移测试重新执行；领域和存储任务 UP-TO-DATE，读取对应 XML 核对数量。
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 bash tools/migrate-deeptutor/reproduce-formal.sh \
+  "$HOME/Coach/data" "$SNAPSHOT" "$SEED" "$PROPOSAL" "$CONFIRMATION" \
+  4357ca47f82f2ed81f03e5c8a36bb2f990b153e162f14ed0ff0a66d36f46bffa "$NEW_PRIVATE_ROOT"
+# 包括实际 apply-confirmed、实际 rollback-confirmed、cmp、独立只读 SQL 与源文件 SHA 核对。
+bash -n tools/migrate-deeptutor/reproduce-formal.sh
+python3 -m py_compile tools/migrate-deeptutor/verify-formal.py
+git diff --check
+```
+
+私有证据目录为 `~/Coach/corpus/ton-1095/formal-2026-11-06-builder-a`。输入沿用最终批准的 43 文件快照、原种子清单及 reviewed proposal，确认文件 SHA 与上一切片相同。根目录内的 `validation.json`、`independent-verification.json` 和 `backup/` 保存完整证据，真实内容没有进入仓库。
+
+- 当前原生 135 个事件逐行保留；首导新增 521 / 修订 0 / 557 个事件，重导新增 / 修订 / 事件 0/0/0、未变 521。实际写入后的完整行状态与从备份恢复后预演的状态相同。
+- 在线备份含 24 个 blobs，恢复库 `integrity_check` 为 `ok`，外键检查为空，规范状态逐字节等于写入前。实际回退在另一个导入后副本执行，DB 文件逐字节等于本次备份，全部行及 blobs 字节相同。直接回退命令和回执在实际提交前保存于 `backup/rollback.sh` / `receipt.json`。
+- 108 道迁移题全部 `UNREVIEWED`，答案键、题池及构答详情均为 0；155 条边覆盖 107 题，所有归属 KP 活动，第 40 题无边。49 个 KP 的 `poolAvailable` / `constructedSupply` 写前写后完全相同。
+- 2 条未解析旧答原文保留且不进入窗口；源与副本 43 文件哈希前后不变。副本投影是 9/49、9 条复习；复习状态 SHA 保存为后续生产启动核对基线，此处不是生产启用验收。
+- 新增 5 项回归覆盖真实备份恢复及幂等/供给、服务锁拒绝、独立副本实际回退（含最终报告丢失）、后续原生修改与损坏备份拒绝、后续 blob 变化拒绝。原有断言未删除、未跳过、未放宽。
+
+| 证据 | SHA-256 |
+| --- | --- |
+| 当前副本导入后 state | 70e985006a0f7dae0d82cee6b3672dfd07168a671100afc44a84c32f520e7071 |
+| projection | da84ce3d186680e4a1d38c74127d5711981856dc6f4cae2108cdfede1cf89690 |
+| 当前副本写前 / 回退 state | 10c9f63337bfdec5383c7314c91f716d3802b721831e1cc6c4082457f0677fa3 |
+| 当前备份 / 回退 SQLite | bea36192233ade34e711e54453b58b9ebac8671ed33d6a882d4c81457256a0e1 |
+| 完整复习状态（Python 排序紧凑 JSON） | 6d9c67bb70b002e28556be4d5b39e5d434918df436c0109f3a422787f32a969d |
+
+新的 state / DB 哈希对应当前库的新副本，不能用上一切片的旧备份替换生产。正式命令用 JDBC 调用同一 writer，避免打开 LedgerStore 时自动迁移；持有同一 server.lock 才备份和写入。回退核对包含审计时钟和序号水位的完整状态，出现后续学习记录或 blob 变化会拒绝，不能覆盖后续活动。

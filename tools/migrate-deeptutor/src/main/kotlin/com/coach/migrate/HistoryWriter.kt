@@ -106,7 +106,7 @@ private fun historicalTime(row:JsonObject,plan:JsonObject,mapping:JsonObject):Lo
     return (listOfNotNull(dayTime)+candidates.mapNotNull(::sourceTimestamp)).firstOrNull { it<=cutoff } ?: cutoff
 }
 
-/** Transactional source revisions. The CLI can only write newly created rehearsal copies. */
+/** Transactional source revisions shared by isolated rehearsal and the offline confirmed importer. */
 internal fun writeHistory(db:Connection,plan:JsonObject,seed:JsonObject,mapping:JsonObject,clock:()->Long=System::currentTimeMillis):JsonObject {
     require(db.autoCommit) { "Writer owns its transaction" }
     val course=plan.str("course_id");require(course==seed.obj("course").str("id"))

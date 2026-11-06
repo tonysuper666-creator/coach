@@ -11,10 +11,12 @@ private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only 
        migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
        migrate-deeptutor rehearse --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE [--confirmation FILE] --out NEW_DIR
        migrate-deeptutor rehearse-incremental --snapshot DIR --next-snapshot DIR --second-snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
+       migrate-deeptutor apply-confirmed --database DIR --backup NEW_DIR --snapshot DIR --seed-manifest FILE --proposal FILE --confirmation FILE --confirmation-sha256 SHA
+       migrate-deeptutor rollback-confirmed --database DIR --backup DIR
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
 seed-content defaults: data ~/Coach/data, corpus ~/Coach/corpus/ECNM10119-健康经济学/教材.
 rehearse writes learning history twice into a NEW isolated online backup, never into --coach-db.
-No production import or activation switch exists. See README for independent verification.
+apply-confirmed requires an offline server, verified confirmation and a new backup directory. It does not activate services.
 """
 fun resolvedDestination(path: Path): Path {
     val absolute=path.toAbsolutePath().normalize()
@@ -30,6 +32,7 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 }
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
+    if(args.firstOrNull() in setOf("apply-confirmed","rollback-confirmed")) { formalImportCommand(args[0],args.drop(1));return }
     if(args.firstOrNull()=="rehearse") { rehearseCommand(args.drop(1));return }
     if(args.firstOrNull()=="rehearse-incremental") { incrementalRehearsalCommand(args.drop(1));return }
     // Keep the established corpus/manifest entry point used by TON-1095 and integration.
@@ -67,7 +70,7 @@ fun main(args: Array<String>) {
         require(key !in options) { "Duplicate option: $key" }
         options[key] = if(key in setOf("--dry-run", "--capture-only")) "true" else args.getOrElse(i++) { error("Missing value for $key") }
     }
-    require(options.containsKey("--dry-run")) { "Only --dry-run is supported; no formal import is permitted\n$USAGE" }
+    require(options.containsKey("--dry-run")) { "Use --dry-run or an explicit subcommand\n$USAGE" }
     require(!(options.containsKey("--capture-only") && options.containsKey("--snapshot"))) { "Choose capture-only or an existing snapshot" }
     require(!options.containsKey("--proposal") || options.containsKey("--seed-manifest")) { "Proposal needs the existing seeded course manifest" }
     require(!options.containsKey("--confirmation") || options.containsKey("--proposal")) { "Confirmation needs a reviewed proposal" }

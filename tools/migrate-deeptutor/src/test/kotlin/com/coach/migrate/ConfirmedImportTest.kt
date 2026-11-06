@@ -21,12 +21,12 @@ class ConfirmedImportTest {
         }
         return JsonObject(pairs.associate { (k,v) -> k to value(v) })
     }
-    private val seed=json("course" to json("id" to "course"),"knowledge_points" to listOf(
+    internal val seed=json("course" to json("id" to "course"),"knowledge_points" to listOf(
         json("id" to "k1","name" to "One","module_id" to "m","prerequisites" to emptyList<String>()),
         json("id" to "k2","name" to "Two","module_id" to "m","prerequisites" to emptyList<String>())
     ),"exam_weights" to json("k1" to 10,"k2" to 0))
     private fun source(id:String,raw:JsonObject)=json("id" to id,"source_record" to raw,"content_hash" to sourceContentHash(id,raw))
-    private fun mapping(stem:String="Synthetic choice"):JsonObject {
+    internal fun mapping(stem:String="Synthetic choice"):JsonObject {
         val choice=json("question_type" to "choice","question" to stem,"options" to json("A" to "First","B" to "Second"),"correct_answer" to "B","explanation" to "B, not A.")
         val short=json("question_type" to "short_answer","question" to "Explain","explanation" to "Original points, no weights.")
         val qs=listOf(choice,short,choice).mapIndexed { i,raw ->
@@ -53,8 +53,8 @@ class ConfirmedImportTest {
         "question_associations" to "accept_reviewed_proposal","curriculum" to "accept_reviewed_proposal",
         "ambiguous_answers" to "preserve_verbatim_unscored","choice_explanations" to "archive_only","passed_times" to "approximate",
         "grading" to "unreviewed_no_keys","short_answer_samples" to shortAnswerSamples(mapping))
-    private fun plan(m:JsonObject):JsonObject { val p=proposal(m);return importPlan(m,seed,p,decision(m,p)) }
-    private fun withDatabase(block:(Connection)->Unit) {
+    internal fun plan(m:JsonObject):JsonObject { val p=proposal(m);return importPlan(m,seed,p,decision(m,p)) }
+    internal fun withDatabase(block:(Connection)->Unit) {
         val dir=Files.createTempDirectory("confirmed-import-test")
         try {
             LedgerStore(dir).use { store ->

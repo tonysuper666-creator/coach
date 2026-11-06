@@ -100,6 +100,14 @@ tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAnd
 设备测试还逐题核对自己的答案，保存 `cache/notes-review/question-N.png` 与不含题目内容的 `agreement.txt`。启动模拟器时将 `ANDROID_SDK_ROOT` 指向实际包含 system-images 的 SDK，不能仅凭 Gradle 的 SDK 路径猜测 emulator 路径。测试命令（在已取得 heavy 模拟器锁的前台会话内）：
 
 ```sh
+# 仅在自己的隔离包和模拟器内；先确认文件确实进入应用 cache。
+adb -s emulator-5574 push "$PRIVATE_DESKTOP_MARKDOWN" /data/local/tmp/ton1294-desktop-notes.md
+adb -s emulator-5574 shell run-as com.coach.android.ton1294 mkdir -p cache
+adb -s emulator-5574 shell run-as com.coach.android.ton1294 cp \
+  /data/local/tmp/ton1294-desktop-notes.md cache/desktop-notes.md
+adb -s emulator-5574 shell rm -f /data/local/tmp/ton1294-desktop-notes.md
+adb -s emulator-5574 exec-out run-as com.coach.android.ton1294 cat cache/desktop-notes.md > "$PRIVATE_CHECK_COPY"
+cmp "$PRIVATE_DESKTOP_MARKDOWN" "$PRIVATE_CHECK_COPY"
 adb -s emulator-5574 shell am instrument -w \
   -e coachPort 18894 -e pairingCode "$PAIRING_CODE" -e week 1 -e expectedCount 2 \
   -e class com.coach.android.NotesReviewSmoke \

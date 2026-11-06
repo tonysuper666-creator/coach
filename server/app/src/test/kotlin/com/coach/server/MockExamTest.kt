@@ -93,12 +93,12 @@ class MockExamTest {
             val sent = started.toString()
             for (secret in listOf("SECRET-EXPLANATION-Q1", "SECRET-MODEL-E1", "SECRET-LOOKFOR", "SECRET-PART-B", "\"answer\":1", "1.25", "rubric", "tolerance"))
                 assertFalse(secret in sent, "the exam view must not leak $secret before submission")
-            assertTrue("<svg" in sent, "figures travel with the exam")
+            assertFalse("<svg" in sent, "standard analytical figures stay hidden until submission")
             assertEquals(409, request("/mocks", json("paperId" to "synthetic-paper")).first, "one exam at a time")
 
             // Leave mid-exam, then come back: the saved answers return with the remaining time.
             val answers = json("Q1" to json("choice" to 1), "Q2" to json("choice" to 0), "E2" to json("text" to "A bridge toll prices congestion; costs fall on commuters."),
-                "X#a" to json("text" to "average", "final" to "2.5"), "X#b" to json("text" to "Indifference holds where values meet.", "final" to "1.30"))
+                "X#a" to json("text" to "average", "final" to "2.50"), "X#b" to json("text" to "Indifference holds where values meet.", "final" to "1.30"))
             assertEquals(200, request("/mocks/$id/answers", json("answers" to answers)).first)
             now.addAndGet(30 * 60_000)
             val resumed = request("/mocks/$id").second
@@ -116,7 +116,8 @@ class MockExamTest {
             assertEquals(4.0, items.getValue("Q1").getValue("score").jsonPrimitive.double)
             assertEquals(0.0, items.getValue("Q2").getValue("score").jsonPrimitive.double)
             assertTrue("SECRET-EXPLANATION-Q2" in items.getValue("Q2").str("feedback"), "after submission the explanation is shown")
-            assertEquals(4.0, items.getValue("X#a").getValue("score").jsonPrimitive.double, "2.5 matches 2.50 within tolerance")
+            assertEquals(4.0, items.getValue("X#a").getValue("score").jsonPrimitive.double, "two-place input matches the frozen key")
+            assertTrue("<svg" in items.getValue("X#a").str("standardFigure"))
             assertEquals("SKIPPED", items.getValue("E1").str("status"), "the unanswered essay is not the chosen one")
             assertEquals("SKIPPED", items.getValue("Y#a").str("status"))
             assertEquals("PENDING", items.getValue("E2").str("status"))

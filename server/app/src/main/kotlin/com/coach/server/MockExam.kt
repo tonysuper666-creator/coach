@@ -1,10 +1,10 @@
 package com.coach.server
 
 import com.coach.ai.GradeGate
+import com.coach.ai.AnalyticalNumericKey
 import com.coach.ai.RubricItem
 import com.coach.core.LedgerActor
 import com.coach.domain.*
-import com.coach.domain.grade.NumericValue
 import com.coach.store.LedgerStore
 import com.coach.store.MockSession
 import com.coach.store.sha256
@@ -27,13 +27,13 @@ import kotlin.math.roundToLong
 /** One answer slot: a choice, an essay, or one part of an analytical question. */
 internal data class MockUnit(val key: String, val itemId: String, val section: Int, val type: String, val label: String,
     val marks: Double, val kp: String, val week: Int?, val stem: String, val options: List<String>, val answer: Int,
-    val numeric: String?, val tolerance: Double, val rubric: List<RubricItem>, val reference: String, val explanation: String,
+    val numeric: String?, val tolerance: String, val rubric: List<RubricItem>, val reference: String, val explanation: String,
     val keyState: String = "") {
     val serverNumeric get() = numeric != null && rubric.isEmpty()
     /** Rubric marks short of the part total belong to the server-checked final value. */
     val numericMarks get() = marks - rubric.sumOf { it.points }
     val gradingRubric get() = if (numeric != null && rubric.isNotEmpty() && numericMarks > 1e-9)
-        rubric + RubricItem("N", "Final value", numericMarks, "Server-checked against the frozen key") else rubric
+        rubric + RubricItem("N", "最终数值", numericMarks, "Server-checked against the frozen key") else rubric
 }
 
 internal class MockPaper(val json: JsonObject) {
@@ -82,14 +82,14 @@ internal class MockPaper(val json: JsonObject) {
                     options.map(::normalizeChoiceText).distinct().size == options.size) { "$id 选项无效" }
                 require(answer in options.indices) { "$id 答案下标越界" }
                 listOf(MockUnit(id, id, section, "mcq", "", marks, item.str("kp"), week, item.str("stem"), options, answer,
-                    null, 0.0, emptyList(), "", item.str("explanation"), item.str("key_state")))
+                    null, "0", emptyList(), "", item.str("explanation"), item.str("key_state")))
             }
             "essay" -> {
                 val r = rubric(item["rubric"], id)
                 require(r.isNotEmpty() && kotlin.math.abs(r.sumOf { it.points } - marks) < 1e-6) { "$id 评分细则合计不等于分值" }
                 val target = item.int("word_target")
                 listOf(MockUnit(id, id, section, "essay", "", marks, item.str("kp"), week,
-                    item.str("stem") + (target?.let { "\n\n（建议约 $it 词）" } ?: ""), emptyList(), -1, null, 0.0, r,
+                    item.str("stem") + (target?.let { "\n\n（建议约 $it 词）" } ?: ""), emptyList(), -1, null, "0", r,
                     item.str("model_answer"), ""))
             }
             "analytical" -> {
@@ -99,13 +99,16 @@ internal class MockPaper(val json: JsonObject) {
                     val label = p.str("label"); require(label.isNotBlank()) { "$id 小问缺少 label" }
                     val partMarks = p.double("marks")
                     val r = rubric(p["rubric"], "$id($label)")
-                    val numeric = p.str("answer").takeIf { NumericValue.parse(it) != null }
+                    val numeric = p.str("answer").takeIf { it.toBigDecimalOrNull() != null }
+                    // Keep original decimal literals: a Double round trip moves the inclusive boundary.
+                    val tolerance = (p["tolerance"] as? JsonPrimitive)?.content ?: "0"
+                    if (numeric != null) AnalyticalNumericKey(numeric, tolerance)
                     val rest = partMarks - r.sumOf { it.points }
                     require(partMarks > 0 && rest > -1e-6) { "$id($label) 评分细则超出分值" }
                     require(rest < 1e-6 || numeric != null) { "$id($label) 细则不足分值且没有数值答案" }
                     MockUnit("$id#$label", id, section, "part", label, partMarks, item.str("kp"), week,
                         item.str("stem") + "\n\n(" + label + ") " + p.str("prompt"), emptyList(), -1, numeric,
-                        (p["tolerance"] as? JsonPrimitive)?.doubleOrNull ?: 0.0, r, p.str("answer"), "")
+                        tolerance, r, p.str("answer"), "")
                 }
                 require(marks <= 0 || kotlin.math.abs(built.sumOf { it.marks } - marks) < 1e-6) { "$id 小问分值合计不等于总分" }
                 built
@@ -127,7 +130,7 @@ internal class MockPaper(val json: JsonObject) {
                         for (k in listOf("id", "type", "kp", "stem")) put(k, item.str(k))
                         put("marks", unitsOf(item.str("id"), index).sumOf { it.marks })
                         item.int("word_target")?.let { put("word_target", it) }
-                        item.str("figure").takeIf { it.isNotBlank() }?.let { put("figure", it) }
+                        if (item.str("type") != "analytical") item.str("figure").takeIf { it.isNotBlank() }?.let { put("figure", it) }
                         if (item.str("type") == "mcq") put("options", JsonArray(item.strings("options").map(::JsonPrimitive)))
                         if (item.str("type") == "analytical") put("parts", JsonArray(unitsOf(item.str("id"), index).map { u ->
                             json("key" to u.key, "label" to u.label, "marks" to u.marks, "numeric" to (u.numeric != null),
@@ -159,6 +162,21 @@ private fun JsonObject.int(key: String): Int? = (get(key) as? JsonPrimitive)?.in
 private fun JsonObject.double(key: String): Double = (get(key) as? JsonPrimitive)?.doubleOrNull ?: 0.0
 private fun hundredths(marks: Double) = (marks * 100).roundToLong()
 
+private fun numericFact(unit: MockUnit, submitted: String): JsonObject {
+    val grade = AnalyticalNumericKey(unit.numeric!!, unit.tolerance).grade(submitted)
+    return json("expected" to unit.numeric, "submitted" to submitted, "correct" to grade.correct, "status" to grade.status,
+        "absTolerance" to unit.tolerance, "relTolerance" to 0, "decimalPlaces" to 2, "rubricItemId" to "N")
+}
+
+/** Explains the numeric step; method explanations stay with their individual rubric criteria. */
+private fun numericFeedback(fact: JsonObject): String = when (fact.str("status")) {
+    "MISSING" -> "最终数值未填写；步骤分按评分细则另计。"
+    "NOT_NUMERIC" -> "最终数值不是有效数字，请填写十进制数；步骤分按评分细则另计。"
+    "WRONG_DECIMAL_PLACES" -> "最终数值须保留两位小数（例如 1.00）；步骤分按评分细则另计。"
+    else -> (if (fact.flag("correct")) "最终数值正确" else "最终数值不符：你答 ${fact.str("submitted").trim()}") +
+        "，参考答案 ${fact.str("expected")}（允许绝对误差 ±${fact["absTolerance"]?.jsonPrimitive?.content.orEmpty()}，含边界）。"
+}
+
 /** Papers are read from a private directory outside the repository; nothing here is ever committed. */
 class MockLibrary(val directory: Path?, val minutesOverride: Int? = null) {
     data class Entry(val file: String, val paper: JsonObject?, val error: String?)
@@ -179,7 +197,8 @@ class MockLibrary(val directory: Path?, val minutesOverride: Int? = null) {
             val item = i.jsonObject
             val ref = item.str("figure_svg")
             val file = ref.takeIf { it.isNotBlank() }?.let { base.resolve(it).normalize() }?.takeIf { it.startsWith(base) && Files.isRegularFile(it) }
-            if (file == null) item else JsonObject(item + ("figure" to JsonPrimitive(Files.readString(file))))
+            val svg = if (ref.trimStart().startsWith("<svg")) ref else file?.let(Files::readString)
+            if (svg == null) item else JsonObject(item + ((if (item.str("type") == "analytical") "standardFigure" else "figure") to JsonPrimitive(svg)))
         })))
     })))
     fun papers(course: String) = entries(course).mapNotNull { it.paper }.filter { it.str("kind") == "paper" }
@@ -346,19 +365,21 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
                     "rubricFingerprint" to fingerprint)), "attempt:$attempt", occurredAt = s.startedAt)
                 val text = a.str("text"); val final = a.str("final")
                 append(course, "answer_submitted", json("attemptId" to attempt, "answer" to text, "finalAnswer" to final), "attempt:$attempt:answer", occurredAt = s.submittedAt!!)
-                if (!answered(unit, s.answers)) {
-                    append(course, "attempt_graded", json("attemptId" to attempt, "score" to 0, "max" to hundredths(unit.marks), "status" to "EXACT", "feedback" to "未作答。"), "attempt:$attempt:grade:exact")
-                } else if (unit.serverNumeric) {
-                    val submitted = final.ifBlank { text }
-                    val right = NumericValue.matches(submitted, unit.numeric!!, 0.0, unit.tolerance.coerceAtLeast(NumericValue.DEFAULT_ABS_TOLERANCE))
+                if (unit.serverNumeric) {
+                    val numeric = numericFact(unit, final)
+                    val right = numeric.flag("correct")
                     append(course, "attempt_graded", json("attemptId" to attempt, "score" to if (right) hundredths(unit.marks) else 0, "max" to hundredths(unit.marks),
-                        "status" to "EXACT", "feedback" to if (right) "数值正确。" else "数值不符：你答 ${submitted.trim()}，参考答案 ${unit.numeric}（允许误差 ±${unit.tolerance}）。",
-                        "numericFinal" to json("expected" to unit.numeric, "submitted" to submitted, "correct" to right, "absTolerance" to unit.tolerance)), "attempt:$attempt:grade:exact")
+                        "status" to "EXACT", "feedback" to numericFeedback(numeric), "numericFinal" to numeric,
+                        "items" to JsonArray(listOf(json("id" to "N", "points" to if (right) unit.marks else 0.0, "reason" to "SERVER_NUMERIC")))), "attempt:$attempt:grade:exact")
+                } else if (!answered(unit, s.answers)) {
+                    append(course, "attempt_graded", json("attemptId" to attempt, "score" to 0, "max" to hundredths(unit.marks), "status" to "EXACT", "feedback" to "未作答。",
+                        "items" to JsonArray(rubric.map { json("id" to it.id, "points" to 0, "reason" to if (it.id == "N") "SERVER_NUMERIC" else "未作答，未提供这一步的证据。") }),
+                        "numericFinal" to if (rubric.any { it.id == "N" }) numericFact(unit, "") else null), "attempt:$attempt:grade:exact")
                 } else {
                     val question = json("kp_id" to unit.kp, "stem" to unit.stem, "reference_answer" to unit.reference,
                         "rubric" to JsonArray(rubric.map { json("id" to it.id, "text" to it.text, "points" to it.points, "basis" to it.basis) }),
                         "numeric_final" to if (rubric.any { it.id == "N" }) json("expected" to unit.numeric, "rubricItemId" to "N", "relTolerance" to 0.0,
-                            "absTolerance" to unit.tolerance.coerceAtLeast(NumericValue.DEFAULT_ABS_TOLERANCE)) else null)
+                            "absTolerance" to unit.tolerance, "decimalPlaces" to 2) else null)
                     val subject = json("course" to course, "attempt" to attempt, "questionId" to qid, "thread" to null, "answer" to text,
                         "finalAnswer" to final, "question" to question, "rubricFingerprint" to fingerprint, "deadline" to (now + 86_400_000), "mockId" to s.id)
                     enqueueJob("grade_attempt", subject.toString(), fingerprint, sha256(json("answer" to text, "finalAnswer" to final).toString().toByteArray(Charsets.UTF_8)))
@@ -414,6 +435,9 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
                 "marks" to JsonPrimitive(u.marks), "answer" to a)
             if (u.type == "mcq") { base["options"] = JsonArray(u.options.map(::JsonPrimitive)); base["correct"] = JsonPrimitive(u.answer) }
             else base["reference"] = JsonPrimitive(u.reference)
+            if (u.type == "part") paper.sections[u.section]["items"]?.jsonArray?.map { it.jsonObject }?.firstOrNull { it.str("id") == u.itemId }?.let { item ->
+                item.str("standardFigure").ifBlank { item.str("figure") }.takeIf { it.isNotBlank() }?.let { base["standardFigure"] = JsonPrimitive(it) }
+            }
             if (info == null || !info.flag("counted")) return@map JsonObject(base + ("status" to JsonPrimitive("SKIPPED")))
             val attempt = info.str("attemptId"); base["attemptId"] = JsonPrimitive(attempt)
             val graded = facts[attempt].orEmpty()
@@ -433,9 +457,12 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
             val byId = u.gradingRubric.associateBy { it.id }
             base["status"] = JsonPrimitive(status); base["score"] = JsonPrimitive(got / 100.0)
             base["feedback"] = JsonPrimitive(effective.str("feedback"))
+            val numeric = effective["numericFinal"] as? JsonObject
+            numeric?.let { base["numericFinal"] = it }
             base["reasons"] = JsonArray((effective["items"] as? JsonArray).orEmpty().map { it.jsonObject }.map { g ->
-                json("criterion" to (byId[g.str("id")]?.text ?: g.str("id")), "points" to g["points"], "max" to byId[g.str("id")]?.points,
-                    "reason" to if (g.str("reason") == "SERVER_NUMERIC") "最终数值由服务器按参考答案核对" else g.str("reason"))
+                json("criterion" to (byId[g.str("id")]?.text ?: if (g.str("id") == "N") "最终数值" else g.str("id")),
+                    "points" to g["points"], "max" to (byId[g.str("id")]?.points ?: if (u.serverNumeric) u.marks else null),
+                    "reason" to if (g.str("reason") == "SERVER_NUMERIC") numeric?.let(::numericFeedback) ?: "最终数值由服务器按参考答案核对" else g.str("reason"))
             })
             review?.str("note")?.takeIf { it.isNotBlank() }?.let { base["reviewNote"] = JsonPrimitive(it) }
             JsonObject(base)

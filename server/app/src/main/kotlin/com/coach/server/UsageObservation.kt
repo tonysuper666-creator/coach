@@ -22,7 +22,7 @@ private val activityTicket = AttributeKey<Long>("activity-ticket")
 private val usageLabels = mapOf(
     "open" to "打开应用", "screen" to "切屏", "tap" to "点按", "error" to "错误", "disconnect" to "断线",
     "reconnect" to "连接恢复", "first_word" to "首字", "app" to "应用", "today" to "今天页", "study" to "学习页",
-    "review" to "复习页", "compact" to "窄屏", "wide" to "宽屏", "connection" to "连接", "open_kp" to "打开知识点",
+    "review" to "复习页", "route" to "路线页", "records" to "记录页", "resources" to "资料页", "compact" to "窄屏", "wide" to "宽屏", "connection" to "连接", "open_kp" to "打开知识点",
     "next" to "讲解或下一步", "test" to "出题", "ask" to "追问", "answer" to "提交答案", "cancel" to "停止回答",
     "settings" to "学习设置", "explain" to "换个方式讲解", "quick_ask" to "随手问", "select_option" to "选择选项",
     "scope" to "学习范围", "offline_pack" to "离线练习包", "journal" to "学习日志", "network" to "网络", "server" to "服务端", "unknown" to "其他操作")

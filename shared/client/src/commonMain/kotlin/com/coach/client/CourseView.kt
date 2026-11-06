@@ -151,7 +151,17 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }
 
     val weekPoints by lazy { weekPoints(events) }
-    val weeks: List<Int> by lazy { weekPoints.flatMap { it.weeks }.distinct().sorted() }
+    /** The imported ECNM10119 outline explicitly records Week 7 as a zero-point midterm exemption. */
+    val midtermExemptionWeeks: Set<Int> by lazy {
+        events.asSequence().filter { it.type == "outline_revised" }.mapNotNull { event ->
+            val week7 = event.payload["week7"] as? JsonObject ?: return@mapNotNull null
+            val count = (week7["knowledgePoints"] as? JsonPrimitive)?.intOrNull
+            val reason = (week7["reason"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            7.takeIf { count == 0 && reason.contains("Midterm Exam", ignoreCase = true) }
+        }.toSet()
+    }
+    val weeks: List<Int> by lazy { (weekPoints.flatMap { it.weeks } + midtermExemptionWeeks).distinct().sorted() }
+    fun weekLabel(week: Int): String = if (week in midtermExemptionWeeks) "第 $week 周 · 期中周（无新课，豁免）" else "第 $week 周"
     fun weekKps(week: Int): List<KpRow> = weekPoints.filter { week in it.weeks }.mapNotNull { kp(it.id) }
     val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, kps.map { it.id }.toSet())?.let(::kp)
     fun weekProgress(kpId: String): String? = projection.studyScope?.let { s ->

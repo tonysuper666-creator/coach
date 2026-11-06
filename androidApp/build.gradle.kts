@@ -51,6 +51,10 @@ android {
         // The port is also written to the manifest (meta-data `coach.port`) so a script can read it back from an installed package.
         val coachPort = (providers.gradleProperty("coach.port").orNull ?: localConfig.getProperty("coach.port", "18791")).also { require(it.matches(Regex("[0-9]{2,5}"))) }
         buildConfigField("int", "COACH_PORT", coachPort)
+        // Optional card-only launcher endpoint. Missing or invalid values fail closed at runtime.
+        val isolatedLaunchPort = providers.gradleProperty("coach.isolatedLaunchPort").orElse("-1").get()
+        require(isolatedLaunchPort.matches(Regex("-?[0-9]{1,5}"))) { "invalid coach.isolatedLaunchPort" }
+        buildConfigField("int", "COACH_ISOLATED_LAUNCH_PORT", isolatedLaunchPort)
         manifestPlaceholders["coachPort"] = coachPort
         buildConfigField("String", "COACH_COURSE", "\"${localConfig.getProperty("coach.course", "")}\"")
         minSdk = 34
@@ -75,6 +79,7 @@ dependencies {
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(project(":shared:domain"))
     androidTestImplementation(project(":shared:client"))
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")

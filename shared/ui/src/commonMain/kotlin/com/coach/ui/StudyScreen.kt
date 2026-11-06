@@ -41,13 +41,13 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
     fun open() = c.tutor.open(thread, c.courseId, kp.id, kp.conceptIds, kp.title)
     fun fail() = c.tutor.model.onFailure(thread, "Mac 未连接，这一步没有发出去。")
-    fun next(test: Boolean) {
+    fun next(test: Boolean, recordTap: Boolean = true) {
         pinned = true
         focus.clearFocus()
         if (!open()) return fail()
         pinned = true
         c.tutor.model.onSent(thread, if (test) "test" else "next", null)
-        if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test)) fail()
+        if (!c.tutor.next(thread, c.courseId, c.packFor(kp.id), test, recordTap)) fail()
     }
     fun send(text: String): Boolean {
         if (tv.busy || !ui.connected) return false
@@ -62,7 +62,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     LaunchedEffect(kp.id, ui.connected, tv.historyLoaded) {
         if (!ui.connected) { opened = false; return@LaunchedEffect }
         if (!opened) opened = open()
-        if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false) }
+        if (autoStart && !started && opened && tv.historyLoaded && tv.items.isEmpty() && pending == null) { started = true; next(false, recordTap = false) }
     }
 
     // A newly passed queue item opens its successor after grading/streaming settles.

@@ -52,7 +52,12 @@ On failure, keep the original deadlines. The checkpoints include safe operation
 names, exception classes and periodic sync-loop state, so an exited loop can be
 distinguished from a pending request. They contain no request bodies, tokens,
 exception messages or personal URLs. The summary also records when the owned
-JVM was paused and its process state. A host-only companion regression runs the
+JVM was paused and its process state. A main-looper heartbeat and allowlisted
+scheduling/freezer flags from only the card package's process record help separate
+coroutine stalls from whole-process suspension. Unsupported or inaccessible
+process diagnostics remain unknown; a missing heartbeat alone does not prove
+freezing. The raw process dump is neither retained nor shared.
+A host-only companion regression runs the
 ledger without a tutor socket; it does not substitute for the real-phone gate:
 
 ```sh

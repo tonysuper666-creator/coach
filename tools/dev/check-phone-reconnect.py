@@ -29,6 +29,19 @@ PACKAGE = 'com.coach.android.ton1094'
 FORBIDDEN = {8790, 8791, 18791}
 
 
+def process_flags(dump):
+    """Keep only scheduling flags from our process record, never arbitrary dump text."""
+    flags = {}
+    for record in re.split(r'(?=^\s*\*APP\*)', dump, flags=re.MULTILINE):
+        header = next((line for line in record.splitlines() if '*APP*' in line), '')
+        if not re.search(r'\d+:'+re.escape(PACKAGE)+r'/', header):
+            continue
+        for key, val in re.findall(
+                r'\b(isFrozen|frozen|pendingFreeze|curProcState|setProcState|curAdj|setAdj|cached|empty|hasForegroundActivities)\s*[=:]\s*(true|false|-?\d+)\b', record):
+            flags[key] = val
+    return flags
+
+
 def lease_valid():
     fields = dict(line.split('=', 1) for line in (PHONE/'lease.d/info').read_text().splitlines())
     if fields.get('card') != 'TON-1094' or int(fields['until']) <= time.time():
@@ -109,6 +122,16 @@ def main():
             raise RuntimeError('Instrumentation exited before its checkpoint')
         return checkpoints
 
+    def process_snapshot(phase):
+        lease_valid()
+        snapshot = dict(phase=phase, at=datetime.now(timezone.utc).isoformat())
+        try:
+            snapshot['present'] = bool(device('shell', 'pidof', PACKAGE, timeout=5).strip())
+            snapshot['flags'] = process_flags(device('shell', 'dumpsys', 'activity', 'processes', PACKAGE, timeout=5))
+        except Exception as error:
+            snapshot['captureError'] = type(error).__name__
+        summary.setdefault('phoneProcessSnapshots', []).append(snapshot)
+
     try:
         summary['phase'] = 'authorization'
         lease_valid()
@@ -151,6 +174,7 @@ def main():
                 stdout=log, stderr=subprocess.STDOUT)
         summary['phase'] = 'phone online checkpoint'
         wait_for(lambda: (s if f'READY port={args.port} ' in (s := report()) else None), 40)
+        process_snapshot('ready before JVM pause')
         lease_valid()
         start = time.monotonic()
         os.killpg(server.pid, signal.SIGSTOP)
@@ -186,6 +210,10 @@ def main():
             try:
                 lease_valid()
                 report()
+            except Exception:
+                pass
+            try:
+                process_snapshot('failure before cleanup')
             except Exception:
                 pass
         raise

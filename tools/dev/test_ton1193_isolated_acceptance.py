@@ -16,8 +16,10 @@ from tools.dev.ton1175_switch import GateError, atomic, digest
 class Hello(http.server.BaseHTTPRequestHandler):
     epoch = 'isolated-epoch'
     sequence = 7
+    requests = 0
 
     def do_GET(self):
+        type(self).requests += 1
         allowed = (self.path == '/v1/hello' and self.headers.get('X-Coach-Device') == 'desktop'
                    and self.headers.get('Authorization') == 'Bearer isolated-test-token')
         body = json.dumps({'epoch': self.epoch, 'lastSeq': self.sequence}).encode()
@@ -31,6 +33,7 @@ class Hello(http.server.BaseHTTPRequestHandler):
 
 class AcceptanceTest(unittest.TestCase):
     def setUp(self):
+        Hello.requests = 0
         self.root = isolated.new_root()
         self.addCleanup(shutil.rmtree, self.root)
         home = self.root / 'h'
@@ -86,6 +89,24 @@ class AcceptanceTest(unittest.TestCase):
         with mock.patch.object(acceptance, 'time', clock):
             with self.assertRaisesRegex(GateError, 'lecture and exercise'):
                 acceptance.run(str(self.path), 'accept', self.baseline, now, now + 300)
+
+    def test_snapshot_after_hello_does_not_generate_ingress(self):
+        config, roots, _ = isolated.fixture(str(self.path))
+        acceptance.observe(config, roots)
+        self.assertEqual(Hello.requests, 1)
+        # Any HTTP request here invalidates the idle coverage captured immediately before snapshot.
+        with mock.patch.object(acceptance.http.client, 'HTTPConnection',
+                               side_effect=AssertionError('snapshot created HTTP ingress')):
+            acceptance.run(str(self.path), 'snapshot', self.baseline)
+        before = json.loads(Path(self.baseline).read_text())
+        self.assertEqual((before['epoch'], before['lastSeq'], before['seq']), ('isolated-epoch', 7, 7))
+        self.assertEqual(Hello.requests, 1)
+
+    def test_snapshot_rejects_token_missing_from_ledger(self):
+        atomic(self.token, b'different-token')
+        with self.assertRaisesRegex(GateError, 'ledger identity'):
+            acceptance.run(str(self.path), 'snapshot', self.baseline)
+        self.assertFalse(Path(self.baseline).exists())
 
     def test_changed_token_and_outside_baseline_are_refused(self):
         acceptance.run(str(self.path), 'snapshot', self.baseline)

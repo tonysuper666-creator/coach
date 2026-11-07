@@ -73,13 +73,18 @@ def learning_evidence(db, before, started, deadline):
     return lecture and any(count >= 3 for _, count in groups)
 
 
-def observe(config, roots):
+def token_identity(roots):
     data = Path(roots['home']) / 'Coach/data'
     identity = directory_snapshot(str(data))
     token, _ = _read_file(data / 'device-token', identity, 0o600)
     credential = token.decode('ascii').strip()
     require(bool(credential) and '\n' not in credential and '\r' not in credential,
             'invalid isolated token')
+    return credential, digest(token), digest(credential.encode())
+
+
+def observe(config, roots):
+    credential, token_hash, credential_hash = token_identity(roots)
     connection = http.client.HTTPConnection('127.0.0.1', int(config['adapterEnvPins']['COACH_PORT']), timeout=5)
     try:
         connection.request('GET', '/v1/hello', headers={
@@ -91,8 +96,8 @@ def observe(config, roots):
         require(isinstance(hello['epoch'], str) and bool(hello['epoch'])
                 and type(hello['lastSeq']) is int and hello['lastSeq'] >= 0,
                 'invalid isolated hello')
-        return {'epoch': hello['epoch'], 'lastSeq': hello['lastSeq'], 'tokenSha256': digest(token),
-                'credentialSha256': digest(credential.encode())}
+        return {'epoch': hello['epoch'], 'lastSeq': hello['lastSeq'], 'tokenSha256': token_hash,
+                'credentialSha256': credential_hash}
     finally:
         connection.close()
 
@@ -103,10 +108,17 @@ def run(config_path, action, baseline, started=None, deadline=None):
             'baseline outside isolated stage')
     state_id = directory_snapshot(config['stateDir'])
     if action == 'snapshot':
-        before = observe(config, roots)
+        # The idle window has already closed.  An HTTP hello here is ingress,
+        # so use the private ledger and original token just as the production
+        # snapshot does; actual authentication remains in the post-start check.
+        _, token_hash, credential_hash = token_identity(roots)
         with ledger(roots) as db:
+            epoch = db.execute('SELECT epoch FROM ledger_meta WHERE singleton=1').fetchone()
+            require(epoch is not None and isinstance(epoch[0], str) and bool(epoch[0]),
+                    'invalid isolated ledger epoch')
+            before = {'epoch': epoch[0], 'tokenSha256': token_hash, 'credentialSha256': credential_hash}
             before['seq'] = ledger_identity(db, before)
-            require(before['seq'] >= before['lastSeq'], 'isolated ledger behind hello')
+            before['lastSeq'] = before['seq']
         before['createdAt'] = time.time()
         atomic(Path(baseline), json.dumps(before, sort_keys=True).encode())
         return

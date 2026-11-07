@@ -18,6 +18,9 @@ class DeviceAuthorizationException : IllegalStateException("Device pairing requi
 /** 服务端永久拒收这条命令（格式、设备不符、超过大小上限）：重发也不会成功，不能挡住后面的同步。 */
 class CommandRefused(val status: Int) : IllegalStateException("Command refused: HTTP $status")
 
+/** A 5xx may follow a committed transaction. Keep the original command for deduplicated retry. */
+class CommandUploadDeferred(val status: Int) : IllegalStateException("Command upload deferred: HTTP $status")
+
 class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     private val token: String) : LedgerTransport {
     private val baseUrl = baseUrl.trimEnd('/')
@@ -44,7 +47,10 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
             HttpStatusCode.Unauthorized -> throw DeviceAuthorizationException()
             HttpStatusCode.BadRequest, HttpStatusCode.Forbidden, HttpStatusCode.PayloadTooLarge -> throw CommandRefused(response.status.value)
             HttpStatusCode.Conflict -> {}
-            else -> if (!response.status.isSuccess()) error("Command upload failed: HTTP ${response.status.value}")
+            else -> {
+                if (response.status.value in 500..599) throw CommandUploadDeferred(response.status.value)
+                if (!response.status.isSuccess()) error("Command upload failed: HTTP ${response.status.value}")
+            }
         }
         return LedgerJson.decodeFromString(response.bodyAsText())
     }

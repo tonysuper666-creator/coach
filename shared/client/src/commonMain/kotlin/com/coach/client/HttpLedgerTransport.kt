@@ -2,7 +2,6 @@ package com.coach.client
 import com.coach.domain.*
 import com.coach.protocol.*
 import io.ktor.client.*
-import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
 import io.ktor.client.plugins.websocket.*
 import io.ktor.client.request.*
@@ -12,6 +11,7 @@ import io.ktor.websocket.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.decodeFromString
+import kotlin.time.TimeSource
 
 class DeviceAuthorizationException : IllegalStateException("Device pairing required")
 
@@ -22,7 +22,7 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
     private val token: String) : LedgerTransport {
     private val baseUrl = baseUrl.trimEnd('/')
     init { validateCoachBaseUrl(baseUrl) }
-    private val client = HttpClient(CIO) {
+    private val client = HttpClient(ledgerHttpEngine()) {
         followRedirects = false
         install(WebSockets) { pingIntervalMillis=5000 }
         install(HttpTimeout) { requestTimeoutMillis=10000;connectTimeoutMillis=3000;socketTimeoutMillis=10000 }
@@ -36,7 +36,16 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
         throw error
     }
     override suspend fun snapshot(course: String): Snapshot = LedgerJson.decodeFromString(client.get("$baseUrl/v1/courses/${course.encodeURLPathPart()}/snapshot").bodyAsText())
-    override suspend fun events(course: String, after: Long): EventsPage = LedgerJson.decodeFromString(client.get("$baseUrl/v1/courses/${course.encodeURLPathPart()}/events") { parameter("after",after) }.bodyAsText())
+    override suspend fun events(course: String, after: Long): EventsPage {
+        val started=if(PoolTrace.enabled) TimeSource.Monotonic.markNow() else null
+        val response=client.get("$baseUrl/v1/courses/${course.encodeURLPathPart()}/events") {
+            parameter("after",after)
+        }
+        started?.let { PoolTrace.markActive("http_total_ms_${it.elapsedNow().inWholeMilliseconds}") }
+        val body=response.bodyAsText()
+        PoolTrace.markActive("http_body_read")
+        return LedgerJson.decodeFromString(body)
+    }
     override suspend fun command(command: WireCommand): Receipt {
         val response = client.post("$baseUrl/v1/commands") { expectSuccess=false; contentType(ContentType.Application.Json);setBody(LedgerJson.encodeToString(command)) }
         // 409 带回执；400/403/413 没有回执体，是永久拒收；其余（5xx 等）是暂时故障，下次再传。

@@ -57,6 +57,8 @@ class ScrollDriver(
     private val pageLimit: Int = PAGE_LIMIT,
     private val dragLimit: Int = DRAG_LIMIT,
     private val stallLimit: Int = STALL_LIMIT,
+    /** 已知位于题页末尾的提交/判分摘要，不因异步重排时的一次探空而掉头。 */
+    private val towardEnd: Boolean = false,
 ) {
     private var pageTries = 0
     private var dragTries = 0
@@ -122,6 +124,7 @@ class ScrollDriver(
     /** 题号说方向：目标卡还没出现就往下；已经是目标卡且到了底部才回头找别的东西。
      *  没有题号可依时（列表里的说明文字）先往下，推不动就掉头试一次，只试一次。 */
     private fun direction(view: ScrollView): Boolean {
+        if (towardEnd) return true
         val cards = view.visibleCards
         if (card == null) {
             if (stallsSeen() > 0 && !reversed) {

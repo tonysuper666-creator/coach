@@ -145,6 +145,9 @@ class MistakeReviewSmoke {
             for (i in 0 until retry.length()) assertFalse(oldIds.contains(retry.getJSONObject(i).getJSONObject("payload").getString("questionId")))
             step("answer retry questions")
             answer(retry,wrong=0)
+            samples.put("retryStagesMs", JSONObject(PoolTrace.snapshot("mistakes:$kp")))
+            samples.put("retryTimelineMs", JSONArray(PoolTrace.timeline("mistakes:$kp").map { (stage,ms) -> JSONObject().put("stage",stage).put("ms",ms) }))
+            PoolTrace.begin("mistakes:$kp")
             val clearMark=SystemClock.elapsedRealtimeNanos()
             submitAnswers()
             waitText("错题 0")
@@ -156,7 +159,8 @@ class MistakeReviewSmoke {
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
         } finally {
-            samples.put("retryStagesMs", JSONObject(PoolTrace.snapshot("mistakes:$kp")))
+            samples.put("lastStagesMs", JSONObject(PoolTrace.snapshot("mistakes:$kp")))
+            samples.put("lastTimelineMs", JSONArray(PoolTrace.timeline("mistakes:$kp").map { (stage,ms) -> JSONObject().put("stage",stage).put("ms",ms) }))
             PoolTrace.enabled = false
             java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
         }
@@ -430,7 +434,7 @@ class MistakeReviewSmoke {
             node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
             instrumentation.waitForIdleSync();Thread.sleep(400)
         }
-        val driver=ScrollDriver(card)
+        val driver=ScrollDriver(card, towardEnd=text=="提交本组答案" || text.startsWith("本组 "))
         var moved: Boolean?=null
         while(true) {
             checkTime("scrollTo ${text.take(30)}")

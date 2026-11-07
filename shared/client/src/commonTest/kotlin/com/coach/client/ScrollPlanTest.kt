@@ -33,6 +33,7 @@ class ScrollPlanTest {
         private val dragWorks: Boolean = false,
         private val dragStep: Int = viewport * 4 / 10,
         startOffset: Int = 0,
+        private val footerTarget: Boolean = false,
     ) {
         var offset = startOffset
             private set
@@ -48,7 +49,8 @@ class ScrollPlanTest {
         private val footerY = heights.sum() + 40
         private val maxOffset = (heights.sum() + FOOTER_HEIGHT - viewport).coerceAtLeast(0)
         /** 目标卡不在本页时给一个永远到不了的位置：驱动必须靠预算退出。 */
-        private val targetY = if (card in 1..heights.size) cardTops[card - 1] + targetOffsetInCard else heights.sum() + 9_000
+        private val targetY = if (footerTarget) footerY
+            else if (card in 1..heights.size) cardTops[card - 1] + targetOffsetInCard else heights.sum() + 9_000
 
         fun view(): ScrollView {
             val top = offset
@@ -167,6 +169,18 @@ class ScrollPlanTest {
         val (found, moves) = page.drive(ScrollDriver(card = 3))
         assertTrue(found, "一次翻页探空后应再次翻页并到达第 3 题：$moves")
         assertEquals(0, page.dragCalls, "不能因一次探空就转入无效的手指拖：$moves")
+    }
+
+    @Test fun gradingFooterStillReachableAfterOldLayoutRejectsFirstScroll() {
+        // 真实失败：提交时已在旧题页底部，首个向下动作不动；判分反馈随后撑高三张卡。
+        // 摘要在新页末尾，通用文字搜索掉头后会永远停在页首。
+        fun page() = FakePage(card = 3, footerTarget = true, startOffset = 3900, pageWorksAfter = 1)
+        assertFalse(page().drive(ScrollDriver()).first, "旧的无题号文字搜索会在首次探空后掉头而漏掉摘要")
+        val page = page()
+        val (found, moves) = page.drive(ScrollDriver(towardEnd = true))
+        assertTrue(found, "判分摘要应在异步重排后仍可找到：$moves")
+        assertTrue(moves.filterIsInstance<ScrollMove.ScrollPage>().all { it.forward },
+            "已知页尾目标不能因旧布局的一次探空而反向搜索：$moves")
     }
 
     @Test fun dragsRemainTheFallbackWhenTheContainerCannotPage() {

@@ -29,6 +29,7 @@ class WeekMistakePreviewTest {
         val formula = "\$\\frac{\\Delta Q}{\\Delta P}\$"
         val preview = mistakePreview("合成题 $formula " + "长题".repeat(300))
         assertTrue(preview.length <= 181)
+        assertTrue(preview.length < ("合成题 $formula " + "长题".repeat(300)).length)
         assertTrue(preview.endsWith("…"))
         assertEquals("\\frac{\\Delta Q}{\\Delta P}", MathDelimiters.tokenize(preview).segments.single { it.math != null }.math)
         assertFalse(mistakePreview("a".repeat(175) + formula).contains("\\frac"))
@@ -55,7 +56,7 @@ class WeekMistakePreviewTest {
         onNodeWithText("合成图片 ［图片］", substring = true).assertExists()
         onNodeWithTag("week-mistake-attempt-1").assertIsDisplayed()
         onNodeWithText("data:image", substring = true).assertDoesNotExist()
-        onNodeWithText("点按查看完整题目").assertExists()
+        onAllNodesWithText("点按再练原题").assertAny(hasClickAction())
         onNodeWithTag("mistakes").performScrollToIndex(4)
         onNodeWithTag("week-mistake-attempt-4").assertIsDisplayed()
         onNodeWithText("合成后续 S5").assertIsDisplayed().performClick()
@@ -65,7 +66,7 @@ class WeekMistakePreviewTest {
         assertEquals("attempt-1", selected)
     }
 
-    @Test fun screenSendsSelectedAttemptAndShowsTheFullRetriedQuestion() {
+    @Test fun missingOptionsS4ShowsAReasonThenS5OpensTheSelectedFullOriginal() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val db = ClientDatabase(driver)
@@ -77,29 +78,36 @@ class WeekMistakePreviewTest {
         val facts = listOf(
             event(1, "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "k1", "title" to "【W1】合成要点"))))),
             event(2, "question_posed", posed), event(3, "answer_submitted", json("attemptId" to "original", "answer" to "A")),
-            event(4, "attempt_graded", json("attemptId" to "original", "score" to 0, "max" to 1)))
-        val retry = event(5, "question_posed", json("attemptId" to "retry", "questionId" to "q1", "stem" to stem,
+            event(4, "attempt_graded", json("attemptId" to "original", "score" to 0, "max" to 1)),
+            event(5, "question_posed", json("attemptId" to "legacy4", "questionId" to "q4", "kpIds" to listOf("k1"),
+                "stem" to "Synthetic S4", "format" to "SINGLE_CHOICE", "keyState" to "VERIFIED", "options" to emptyList<String>())),
+            event(6, "answer_submitted", json("attemptId" to "legacy4", "answer" to "historical answer")),
+            event(7, "attempt_graded", json("attemptId" to "legacy4", "score" to 0, "max" to 1)))
+        val retry = event(8, "question_posed", json("attemptId" to "retry", "questionId" to "q1", "stem" to stem,
             "format" to "SINGLE_CHOICE", "groupId" to "retry-group"), "retry-thread")
-        val hello = Hello("synthetic", 4, 0, 0)
+        val hello = Hello("synthetic", 7, 0, 0)
         val sent = AtomicReference<CommandBody?>()
         val transport = object : LedgerTransport {
             override suspend fun hello(epoch: String?) = hello
             override suspend fun snapshot(course: String) = Snapshot(hello, course, facts, project(facts))
-            override suspend fun events(course: String, after: Long) = EventsPage("synthetic", emptyList(), 4)
+            override suspend fun events(course: String, after: Long) = EventsPage("synthetic", emptyList(), 7)
             override suspend fun command(command: WireCommand): Receipt {
                 sent.set(LedgerJson.decodeFromString(CommandBody.serializer(), command.payloadBytes))
+                if (sent.get()!!.payload.str("attemptId") == "legacy4") return Receipt(command.commandId, "REJECTED", error = "QUESTION_OPTIONS_UNAVAILABLE", epoch = "synthetic", backedUpThroughSeq = 0)
                 return Receipt(command.commandId, "OK", result = json("threadId" to "retry-thread"), epoch = "synthetic", backedUpThroughSeq = 0)
             }
             override suspend fun watch(onLedger: suspend () -> Unit) = error("not used")
         }
         val tutor = TutorClient("http://127.0.0.1:18941", "synthetic", "synthetic", TutorModel({ 1L }))
-        val controller = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { "command-1" }, { "hash" }), tutor, formatClock = { "" })
+        val controller = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { java.util.UUID.randomUUID().toString() }, { "hash" }), tutor, formatClock = { "" })
         try {
             runComposeUiTest {
                 var view by mutableStateOf(CourseView(facts, project(facts)))
                 setContent { CoachTheme(false) { WeekMistakesScreen(controller, view, 1, onBack = {}) } }
-                onNodeWithText("合成完整原题", substring = true).performClick()
-                waitUntil(timeoutMillis = 10_000) { sent.get() != null }
+                onNodeWithTag("week-mistake-legacy4").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("这道历史题没有可用的选项，无法再练。请继续其他错题。").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("week-mistake-original").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) { sent.get()?.payload?.str("attemptId") == "original" }
                 assertEquals("retry_week_mistake", sent.get()!!.type)
                 assertEquals("original", sent.get()!!.payload.str("attemptId"))
                 assertEquals(1, sent.get()!!.payload.num("week").toInt())

@@ -9,6 +9,60 @@ import java.util.UUID
 import kotlin.test.*
 
 class WeekStudyTest {
+    @Test fun legacyEmptyOptionsAreDurablyRejectedAndTheNextMistakeStillWorks() {
+        val dir = Files.createTempDirectory("coach-week-legacy-")
+        try {
+            val retry = wire("retry_week_mistake", json("week" to 2, "attemptId" to "legacy"))
+            LedgerStore(dir).use { db ->
+                seed(db)
+                db.registerQuestion("q4", "C", "", "SINGLE_CHOICE", "Synthetic S4", "VERIFIED", "yes",
+                    listOf(Option("yes", "Right"), Option("no", "Wrong")), listOf("b"))
+                db.append("C", "question_posed", json("attemptId" to "legacy", "questionId" to "q4", "kpIds" to listOf("b"),
+                    "format" to "SINGLE_CHOICE", "keyState" to "VERIFIED", "options" to emptyList<String>(), "stem" to "Synthetic S4",
+                    "groupId" to "legacy-group", "letterMap" to json("yes" to "A", "no" to "B")))
+                db.append("C", "answer_submitted", json("attemptId" to "legacy", "answer" to "historical answer"))
+                db.append("C", "attempt_graded", json("attemptId" to "legacy", "score" to 0, "max" to 1))
+                // Reproduce a historical row, which current registration correctly disallows.
+                java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { connection ->
+                    connection.createStatement().use { it.executeUpdate("UPDATE questions SET options='[]' WHERE question_id='q4'") }
+                }
+                val receipt = db.command(retry)
+                assertEquals("REJECTED", receipt.status)
+                assertEquals("QUESTION_OPTIONS_UNAVAILABLE", receipt.error)
+                assertTrue(receipt.eventSeqs.isEmpty())
+            }
+            LedgerStore(dir).use { db ->
+                assertEquals("QUESTION_OPTIONS_UNAVAILABLE", db.command(retry).error)
+                assertEquals("REJECTED", db.command(retry).status)
+                db.registerQuestion("q5", "C", "", "SINGLE_CHOICE", "Synthetic S5", "VERIFIED", "yes",
+                    listOf(Option("yes", "Right"), Option("no", "Wrong")), listOf("b"))
+                val original = db.poseChoiceGroup("C", "g5", listOf(json("attemptId" to "old5", "questionId" to "q5", "kpIds" to listOf("b"), "purpose" to "PRACTICE", "policyVersion" to 1))).single()
+                db.append("C", "answer_submitted", json("attemptId" to "old5", "answer" to "wrong"))
+                db.append("C", "attempt_graded", json("attemptId" to "old5", "score" to 0, "max" to 1))
+                assertEquals("OK", db.command(wire("retry_week_mistake", json("week" to 2, "attemptId" to "old5"))).status)
+                assertEquals(original.payload.str("questionId"), db.events("C").last().payload.str("questionId"))
+                assertEquals(2, weekMistakes(db.events("C"), 2).size)
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun twoOptionQuestionsKeepAlternatingAcrossRepeatedRetries() {
+        val dir = Files.createTempDirectory("coach-week-two-options-")
+        try { LedgerStore(dir).use { db ->
+            seed(db)
+            db.registerQuestion("q", "C", "", "SINGLE_CHOICE", "Synthetic prompt", "VERIFIED", "yes",
+                listOf(Option("yes", "Right"), Option("no", "Wrong")), listOf("b"))
+            db.poseChoiceGroup("C", "original", listOf(json("attemptId" to "old", "questionId" to "q", "kpIds" to listOf("b"), "purpose" to "PRACTICE", "policyVersion" to 1)))
+            db.append("C", "answer_submitted", json("attemptId" to "old", "answer" to "wrong"))
+            db.append("C", "attempt_graded", json("attemptId" to "old", "score" to 0, "max" to 1))
+            repeat(12) { assertEquals("OK", db.command(wire("retry_week_mistake", json("week" to 2, "attemptId" to "old"))).status) }
+            val letters = db.events("C").filter { it.type == "question_posed" }.map { (it.payload["letterMap"] as kotlinx.serialization.json.JsonObject).str("yes") }
+            assertEquals(13, letters.size)
+            assertTrue(letters.zipWithNext().all { (a,b) -> a != b })
+            assertEquals(setOf("A", "B"), letters.toSet())
+        } } finally { dir.toFile().deleteRecursively() }
+    }
+
     private fun wire(type: String, payload: kotlinx.serialization.json.JsonObject, device: String = "a"): WireCommand {
         val bytes = LedgerJson.encodeToString(CommandBody(type, "C", 1000, payload))
         return WireCommand(device, UUID.randomUUID().toString(), bytes, sha256(bytes.toByteArray()))

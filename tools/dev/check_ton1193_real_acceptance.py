@@ -291,6 +291,10 @@ def worker(config_path, report_path, inject):
                     report['sealDiagnostic'] = seal_diagnostic(config)
                 if not inject or journal['phase'] != 'rolled_back':
                     raise
+                diagnostic = root / 'injected-diagnostic.json'
+                if diagnostic.exists():
+                    report['injectedDiagnostic'] = json.loads(diagnostic.read_text())
+                    raise switch.GateError('injected verifier refused before authenticated failure')
                 injected = json.loads((root / 'injected-acceptance.json').read_text())
                 switch.require(all(injected[k] == old['identity'][k] for k in
                                    ('epoch', 'tokenSha256', 'credentialSha256')),

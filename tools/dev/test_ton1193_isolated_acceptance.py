@@ -1,4 +1,5 @@
 import http.server
+import errno
 import json
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ from unittest import mock
 
 from tools.dev import ton1193_isolated_acceptance as acceptance
 from tools.dev import ton1193_isolated_controller as isolated
+from tools.dev import ton1193_isolated_injected_failure as injected
 from tools.dev.ton1175_switch import GateError, atomic, digest
 
 
@@ -107,6 +109,24 @@ class AcceptanceTest(unittest.TestCase):
         with self.assertRaisesRegex(GateError, 'ledger identity'):
             acceptance.run(str(self.path), 'snapshot', self.baseline)
         self.assertFalse(Path(self.baseline).exists())
+
+    def test_injected_failure_records_only_closed_diagnostic(self):
+        now = time.time()
+        with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'), \
+             mock.patch.object(acceptance, 'observe', side_effect=ConnectionRefusedError(errno.ECONNREFUSED, 'private detail')):
+            self.assertFalse(injected.verify(str(self.path), self.baseline, now, now + 300))
+        diagnostic = (self.root / 'injected-diagnostic.json').read_text()
+        self.assertEqual(json.loads(diagnostic), {'step': 'HELLO', 'reason': 'CONNECTION_REFUSED'})
+        self.assertNotIn('private detail', diagnostic)
+        self.assertFalse((self.root / 'injected-acceptance.json').exists())
+
+    def test_injected_failure_records_authenticated_evidence(self):
+        now = time.time()
+        with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'):
+            self.assertTrue(injected.verify(str(self.path), self.baseline, now, now + 300))
+        self.assertEqual(Hello.requests, 1)
+        self.assertEqual(json.loads((self.root / 'injected-acceptance.json').read_text())['epoch'], 'isolated-epoch')
+        self.assertFalse((self.root / 'injected-diagnostic.json').exists())
 
     def test_changed_token_and_outside_baseline_are_refused(self):
         acceptance.run(str(self.path), 'snapshot', self.baseline)

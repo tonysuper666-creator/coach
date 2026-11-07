@@ -20,6 +20,16 @@ internal data class MainlineItem(val unit: MockUnit, val tier: String, val factI
     val options get() = unit.options.mapIndexed { i, t -> Option("o$i", t) }
     val fingerprint get() = questionFingerprint(unit.stem, options)
 }
+/**
+ * Display order for one showing of a question: `order[shown] = index in the pack`. The pack is not shuffled (the model tends to put the
+ * key first), so the order is a fixed shuffle of the fingerprint and how many times the question was posed: the same showing always
+ * lays out the same way, and the next look at it is reshuffled.
+ */
+internal fun optionOrder(fingerprint: String, round: Int, size: Int): List<Int> {
+    val seed = java.nio.ByteBuffer.wrap(java.security.MessageDigest.getInstance("SHA-256").digest("mainline-order:$fingerprint:$round".toByteArray())).long
+    return (0 until size).shuffled(java.util.Random(seed))
+}
+
 internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>)
 
 private val tiers = listOf("setup", "detail", "bridge")
@@ -118,6 +128,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts)
     }
 
+    private fun round(events: List<Event>, item: MainlineItem) = events.count { it.type == "question_posed" && it.payload.str("fingerprint") == item.fingerprint }
+
     private fun coverage(week: MainlineWeek, history: ChoiceHistory): JsonObject {
         val status = week.items.associate { it.unit.itemId to history.status(it) }
         val linked = week.facts.associate { f -> f.id to week.items.filter { f.id in it.factIds } }
@@ -144,19 +156,25 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
             "items" to JsonArray(week.items.map { item ->
-                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem, "options" to item.unit.options,
+                val layout = round(events, item)
+                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem,
+                    "options" to optionOrder(item.fingerprint, layout, item.unit.options.size).map { item.unit.options[it] }, "layout" to layout,
                     "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" })
             }))
     }
 
-    /** One answer is one attempt: posed, submitted and graded commit together, then the explanation is returned at once. */
+    /**
+     * One answer is one attempt: posed, submitted and graded commit together, then the explanation is returned at once.
+     * `choice`, `answer` and the per-option reasons are positions on screen; `layout` says which shuffle was on screen, and a client
+     * that sends none showed the pack order.
+     */
     fun answer(store: LedgerStore, course: String, number: Int, input: JsonObject): JsonObject = store.tutorTransaction {
         val events = events(course)
         val week = find(courseNames(events, course), number)
         val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这道题")
         val unit = item.unit
-        val choice = (input["choice"] as? JsonPrimitive)?.intOrNull?.takeIf { it in unit.options.indices } ?: throw MockError(HttpStatusCode.BadRequest, "请选一个选项")
-        val guessed = input.flag("guessed")
+        var choice = (input["choice"] as? JsonPrimitive)?.intOrNull?.takeIf { it in unit.options.indices } ?: throw MockError(HttpStatusCode.BadRequest, "请选一个选项")
+        var guessed = input.flag("guessed")
         val submission = input.str("submissionId").filter { it.isLetterOrDigit() || it == '-' }.take(64)
         val attempt = "mainline-" + submission.ifBlank { ulid(clock(), ByteArray(10).also(random::nextBytes)).lowercase() }
         val keyState = unit.keyState.ifBlank { "UNREVIEWED" }
@@ -164,11 +182,22 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val fingerprint = item.fingerprint
         val qid = "mock-" + fingerprint.take(24)
         val letters = optionLetters(options.size)
+        val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == attempt }
+        val order = if (posed != null) {
+            // A resend answers with what was recorded the first time, whatever layout it carries now.
+            val shown = (posed.payload["letterMap"] as? JsonObject).orEmpty().mapValues { (it.value as? JsonPrimitive)?.contentOrNull.orEmpty() }
+            letters.map { l -> shown.entries.first { it.value == l }.key.drop(1).toInt() }.also {
+                val sent = events.first { it.type == "answer_submitted" && it.payload.str("attemptId") == attempt }.payload
+                choice = letters.indexOf(sent.str("answer")); guessed = sent.flag("guessed")
+            }
+        } else (input["layout"] as? JsonPrimitive)?.intOrNull?.let { optionOrder(fingerprint, it, options.size) } ?: options.indices.toList()
+        val picked = order[choice]
+        val shownAnswer = order.indexOf(unit.answer)
         val points = weekPoints(events)
         val kpIds = points.filter { it.id == unit.kp }.ifEmpty {
             points.filter { p -> unit.week != null && unit.week in p.weeks && unit.kp.isNotBlank() && p.title.contains(unit.kp, ignoreCase = true) }
         }.map { it.id }.take(1)
-        if (events.none { it.type == "question_posed" && it.payload.str("attemptId") == attempt }) {
+        if (posed == null) {
             if (!questionRegistered(qid)) registerQuestion(qid, course, fingerprint, "SINGLE_CHOICE", unit.stem, keyState, "o${unit.answer}", options)
             // The checked key in the pack is the source of truth; the ledger follows it so retries and mastery see the same state.
             val ledgerKey = events.lastOrNull { it.type == "question_key_changed" && it.payload.str("questionId") == qid }?.payload?.str("keyState")
@@ -178,13 +207,17 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             append(course, "question_posed", json("attemptId" to attempt, "kpIds" to kpIds, "purpose" to "RECALL", "keyState" to keyState, "policyVersion" to 1,
                 "posedAt" to now, "origin" to "COACH", "groupId" to attempt, "mainline" to true, "mainlineWeek" to week.week, "mainlineItem" to unit.itemId,
                 "tier" to item.tier, "marks" to unit.marks, "stem" to unit.stem, "questionId" to qid, "format" to "SINGLE_CHOICE", "fingerprint" to fingerprint,
-                "options" to LedgerJson.encodeToJsonElement(options), "letterMap" to JsonObject(options.indices.associate { "o$it" to JsonPrimitive(letters[it]) })),
+                "options" to LedgerJson.encodeToJsonElement(options), "letterMap" to JsonObject(order.withIndex().associate { (shown, i) -> "o$i" to JsonPrimitive(letters[shown]) })),
                 "attempt:$attempt", occurredAt = now)
             append(course, "answer_submitted", json("attemptId" to attempt, "answer" to letters[choice], "finalAnswer" to "", "guessed" to guessed), "attempt:$attempt:answer", occurredAt = now)
-            val right = choice == unit.answer
-            val key = "正确答案 ${letters[unit.answer]}：${unit.options[unit.answer]}"
+            val right = picked == unit.answer
+            val key = "正确答案 ${letters[shownAnswer]}：${unit.options[unit.answer]}"
+            // The pack numbers distractors by pack position; the record names them by the letter that was on screen.
+            val explanation = unit.explanation.replace(Regex("(?m)^(\\s*)错项\\s*(\\d+)")) { m ->
+                m.groupValues[2].toInt().takeIf { it in order.indices }?.let { "${m.groupValues[1]}错项 ${letters[order.indexOf(it)]}" } ?: m.value
+            }
             val feedback = (if (right) "正确。" else "你选 ${letters[choice]}，$key") + (if (guessed) "（标记为猜的）" else "") +
-                unit.explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
+                explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
             val max = (unit.marks * 100).roundToLong()
             append(course, "attempt_graded", json("attemptId" to attempt, "score" to if (right) max else 0, "max" to max, "status" to "EXACT", "feedback" to feedback),
                 "attempt:$attempt:grade:exact")
@@ -197,8 +230,10 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val status = history.status(item)
         val book = (status == "missed" || status == "guessed") && kp != null && weekMistakes(after, unit.week ?: number).any { it.payload.str("questionId") == qid }
         val index = week.items.indexOf(item)
-        json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to unit.answer, "guessed" to guessed,
-            "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to explanationParts(unit.explanation),
+        val parts = explanationParts(unit.explanation)
+        val reasons = (parts["options"] as JsonObject).mapNotNull { (i, why) -> i.toIntOrNull()?.takeIf { it in order.indices }?.let { "${order.indexOf(it)}" to why } }.toMap()
+        json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed,
+            "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
             "source" to item.source, "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
             "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history))
     }

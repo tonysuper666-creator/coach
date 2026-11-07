@@ -22,7 +22,7 @@ import kotlin.random.Random
 
 /**
  * 选择题主线：选一周，按铺垫 → 细节 → 桥接一道一道做。答完讲解就在同一页展开，不用再点；
- * 题和答案键都在 Mac 上，答之前手机拿不到答案。
+ * 题和答案键都在 Mac 上，答之前手机拿不到答案。选项顺序由 Mac 打乱，这里照收到的顺序显示、按屏幕位置提交。
  */
 @Composable
 fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
@@ -125,7 +125,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         c.tutor.telemetry?.record("tap", if (guessed) "mainline_guess" else "mainline_answer")
         scope.launch {
             try {
-                val r = http.answerMainline(number, item.str("id"), choice, guessed, submission)
+                val r = http.answerMainline(number, item.str("id"), choice, guessed, submission, (item["layout"] as? JsonPrimitive)?.intOrNull)
                 val b = r.body
                 if (b != null) { result = b; (b["coverage"] as? JsonObject)?.let { coverage = it } }
                 else error = r.error ?: "连不上 Mac，这次没交上；再点一次会接着交，不会算两次。"

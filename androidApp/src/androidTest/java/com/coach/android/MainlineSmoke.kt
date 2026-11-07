@@ -97,7 +97,7 @@ class MainlineSmoke {
         fun answer(option: String, guessed: Boolean, outcome: String, shot: String) {
             click(waitFor(option, contains = true))
             clickWhenEnabled(if (guessed) "我是猜的" else "提交")
-            waitFor("为什么对：", contains = true)
+            show("为什么对：", contains = true)
             screenshot(shot)
             show(outcome)
         }
@@ -112,7 +112,8 @@ class MainlineSmoke {
         // A miss on the setup question: the reasons for every option are already on the page.
         waitFor("铺垫题 · 第 1/3 题")
         answer("Synthetic apples are grown there", guessed = false, outcome = "答错了。", shot = "explained")
-        waitFor("为什么不选：Synthetic plums ripen after", contains = true)
+        // Options are shuffled on the Mac, so the plums row may sit below the fold.
+        show("为什么不选：Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")
         show("Synthetic lecture 1, slide 4", contains = true)
         screenshot("explained-bottom")

@@ -100,6 +100,22 @@ class PersistentSnapshotTest(unittest.TestCase):
         self.assertEqual(calls, ['stop', 'start'])
         self.assertEqual(json.loads((self.ops / 'journal.json').read_text())['phase'], 'recovery_required')
 
+    def test_recovery_rejects_replaced_data_directory_even_with_identical_content(self):
+        data = self.root / 'data'
+        data.mkdir()
+        (data / 'coach.sqlite').write_bytes(b'isolated fixture')
+        saved = self.root / 'data.pre-fixture'
+        shutil.copytree(data, saved)
+        private = self.root / 'private-data'
+        private.mkdir(mode=0o700)
+        identity, pin = snapshots.capture(self.config, str(private), [str(self.root), str(data)],
+                                          self.sides, self.roots)
+        os.rename(data, self.root / 'data.candidate-fixture')
+        os.rename(saved, data)
+        switch.set_journal(self.ops, 'recovering')
+        with self.assertRaisesRegex(switch.GateError, 'stable directory changed'):
+            snapshots.revalidate(self.config, str(private), identity, pin, 'start')
+
     def test_toolchain_replacement_leaf_stub_and_snapshot_tampering_rejected(self):
         node = Path(self.sides['new']['node'])
         replacement = node.with_name('replacement')

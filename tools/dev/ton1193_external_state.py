@@ -9,9 +9,42 @@ import json
 import os
 from pathlib import Path
 import stat
+import re
 
 from .ton1175_switch import GateError
 from .ton1193_trust import _open_path
+from . import ton1193_usage_schema as usage_schema
+
+
+def utc_today():
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def usage_category(path):
+    return (path == 'state/diagnostics' or path.startswith('state/diagnostics/')
+            or re.fullmatch(r'state/usage-[^/]*\.(md|tmp)', path) is not None)
+
+
+def usage_stat(path, node):
+    if (not stat.S_ISREG(node.st_mode) or node.st_nlink != 1
+            or node.st_uid != os.getuid() or node.st_mode & 0o022):
+        reject(6, path)
+    if path.startswith('state/usage-'):
+        match = re.fullmatch(r'state/usage-([0-9]{8})\.md', path)
+        try:
+            if not match or datetime.datetime.strptime(match[1], '%Y%m%d').strftime('%Y%m%d') != match[1]:
+                reject(6, path)
+        except ValueError:
+            reject(6, path)
+        limit = 1024 * 1024
+    else:
+        if path not in ('state/diagnostics/usage.sqlite', 'state/diagnostics/usage.sqlite-wal',
+                        'state/diagnostics/usage.sqlite-shm'):
+            reject(6, path)
+        limit = 64 * 1024 * 1024
+    if node.st_size > limit:
+        reject(6, path)
+    return [node.st_dev, node.st_ino, node.st_size, node.st_mtime_ns]
 
 
 def category(path):
@@ -36,15 +69,19 @@ def reject(kind, path):
     raise GateError(f'EXTERNAL_STATE_CHANGED category={kind} path={path}')
 
 
-def inventory(data):
+def inventory(data, usage_proof=None):
     base = Path(data).parent
     result = {'other': {}, 'logs': {}, 'budget': None, 'key': None}
+    if usage_schema.enabled(usage_proof):
+        result['usage'] = dict(day=utc_today().isoformat(), files={}, diagnostics=False)
     root = _open_path(str(base), directory=True)
 
     def walk(fd, prefix=''):
         for name in sorted(os.listdir(fd)):
             rel = prefix + name
             kind = category(rel)
+            if 'usage' in result and usage_category(rel):
+                kind = 6
             if kind == 0:
                 continue
             node = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -52,8 +89,12 @@ def inventory(data):
                 # This subtree is deliberately opaque; never follow its links.
                 continue
             if stat.S_ISDIR(node.st_mode):
-                if kind in (3, 4):
+                if kind in (3, 4) or kind == 6 and rel != 'state/diagnostics':
                     reject(kind, rel)
+                if kind == 6:
+                    if stat.S_IMODE(node.st_mode) != 0o700 or node.st_uid != os.getuid():
+                        reject(6, rel)
+                    result['usage']['diagnostics'] = True
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 try:
                     if (os.fstat(child).st_dev, os.fstat(child).st_ino) != (node.st_dev, node.st_ino):
@@ -68,6 +109,8 @@ def inventory(data):
                 continue
             elif kind == 4:
                 result['key'] = [node.st_dev, node.st_ino, node.st_size, node.st_mtime_ns]
+            elif kind == 6:
+                result['usage']['files'][rel] = usage_stat(rel, node)
             else:
                 if rel == 'bridge/state/daily.tmp':
                     reject(3, rel)
@@ -112,7 +155,31 @@ def inventory(data):
     return result
 
 
+def compare_usage(before, after):
+    if ('usage' in before) != ('usage' in after):
+        reject(6, 'state/diagnostics')
+    if 'usage' not in before:
+        return {'changedFiles': 0, 'sizeDelta': 0}
+    old, new = before['usage'], after['usage']
+    if new['day'] < old['day'] or old['diagnostics'] != new['diagnostics']:
+        reject(6, 'state/diagnostics')
+    for path in sorted(old['files'].keys() | new['files'].keys()):
+        a, b = old['files'].get(path), new['files'].get(path)
+        if path.startswith('state/usage-'):
+            if b is None:
+                reject(6, path)
+            day = datetime.datetime.strptime(path[12:20], '%Y%m%d').date().isoformat()
+            if not old['day'] <= day <= new['day'] and a != b:
+                reject(6, path)
+        elif path == 'state/diagnostics/usage.sqlite' and (a is None or b is None or a[:2] != b[:2]):
+            reject(6, path)
+    return dict(changedFiles=sum(old['files'].get(p) != new['files'].get(p)
+                                for p in old['files'].keys() | new['files'].keys()),
+                sizeDelta=sum(v[2] for v in new['files'].values()) - sum(v[2] for v in old['files'].values()))
+
+
 def compare(before, after):
+    compare_usage(before, after)
     for path, old in before['logs'].items():
         new = after['logs'].get(path)
         if new and old[:2] == new[:2] and new[2] < old[2]:

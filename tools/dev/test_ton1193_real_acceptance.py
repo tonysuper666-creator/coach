@@ -1,5 +1,7 @@
 import json
 import contextlib
+import datetime
+import os
 from pathlib import Path
 import plistlib
 import tempfile
@@ -11,6 +13,27 @@ from .ton1175_switch import GateError
 
 
 class LiveConfigurationTest(unittest.TestCase):
+    def test_usage_summary_must_be_regenerated_without_unavailable_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, logs = root / 'Coach/state', root / 'Coach/logs'
+            state.mkdir(parents=True)
+            logs.mkdir()
+            start = datetime.datetime.now(datetime.timezone.utc)
+            ready = {'activityControl': {'snapshot': {'jvmStart': start.isoformat()}}}
+            summary = state / ('usage-' + start.strftime('%Y%m%d') + '.md')
+            summary.write_text('synthetic')
+            os.utime(summary, (start.timestamp() + 1, start.timestamp() + 1))
+            self.assertEqual(driver.usage_health({'home': str(root)}, ready),
+                             {'summaryRegenerated': True, 'summaryUnavailable': False})
+            os.utime(summary, (start.timestamp() - 1, start.timestamp() - 1))
+            with self.assertRaisesRegex(GateError, 'not regenerated'):
+                driver.usage_health({'home': str(root)}, ready)
+            os.utime(summary, (start.timestamp() + 1, start.timestamp() + 1))
+            (logs / 'stdout.log').write_text('COACH usage summary unavailable=SQLException')
+            with self.assertRaisesRegex(GateError, 'summary unavailable'):
+                driver.usage_health({'home': str(root)}, ready)
+
     def test_controller_diagnostics_rejects_unclosed_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

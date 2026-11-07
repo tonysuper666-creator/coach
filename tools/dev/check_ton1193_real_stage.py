@@ -16,6 +16,7 @@ import sys
 from . import ton1175_switch as switch, ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_synthetic_cli as synthetic
+from . import ton1193_usage_schema as usage_schema
 from .rehearse_ton1175_launchd import port
 
 REPO = Path(__file__).resolve().parents[2]
@@ -170,6 +171,7 @@ def main(exercise=None, unstaged_exercise=None):
         cli_proof = synthetic.install(root)
         proof = json.loads(manifest.read_bytes())
         proof['isolatedSyntheticCli'] = cli_proof
+        proof['usageObservationSchema'] = usage_schema.attest(old_source, REPO, old, head)
         switch.atomic(manifest, json.dumps(proof, sort_keys=True).encode())
         manifest_hash = switch.file_hash(manifest)
         config = {'stateDir': str(root / 'stage'), 'adapterSnapshotDir': str(root / 'stage/snapshot'),
@@ -191,6 +193,7 @@ def main(exercise=None, unstaged_exercise=None):
         metadata = {'head': head, 'oldHead': old,
                           'candidateRealDependencies': True, 'oldRealDependencies': True,
                           'switchAttempted': False, 'cli': 'SYNTHETIC', 'syntheticCliSha256': cli_proof['sha256'],
+                          'usageSchemaEqual': proof['usageObservationSchema']['equal'],
                           'nonce': ident, 'socketPathBytes': len(os.fsencode(isolated.activity_socket(home))),
                           'environmentKeys': sorted(env), 'environmentKeyCount': len(env)}
         if unstaged_exercise is not None:

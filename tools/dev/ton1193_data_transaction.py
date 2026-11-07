@@ -20,6 +20,7 @@ import sys
 
 from . import ton1193_data_snapshot as clone, ton1193_receipt as receipt
 from . import ton1193_external_state as external
+from . import ton1193_usage_schema as usage_schema
 from .ton1175_switch import atomic, digest, require, GateError
 from .ton1193_live import _live_transaction
 from .ton1193_transaction import _read_file, load_bound_state
@@ -63,7 +64,7 @@ def load(c):
     raw, _ = _read_file(private / NAME, identity, 0o600)
     require(digest(raw) == journal['dataSnapshotHash'], 'data snapshot descriptor changed')
     value = json.loads(raw)
-    require(value['version'] == 1 and value['pinHash'] == pin_hash
+    require(value['version'] == 2 and value['pinHash'] == pin_hash
             and value['dataPath'] == str(data) and value['dataId'] == snap['stable'][str(data)]
             and re.fullmatch(r'[0-9a-f]{32}', value['nonce'])
             and journal['dataState'] in STATES, 'invalid data snapshot binding')
@@ -188,10 +189,10 @@ def capture(c, seal):
     saved = data.with_name('data.pre-' + nonce)
     require(counts(saved) == before, 'snapshot ledger differs')
     _quiescent(c, [data, saved])
-    value = dict(version=1, pinHash=pin_hash, nonce=nonce, sealHash=digest(seal.encode()),
+    value = dict(version=2, pinHash=pin_hash, nonce=nonce, sealHash=digest(seal.encode()),
                  dataPath=str(data), dataId=directory_snapshot(data), parentId=directory_snapshot(data.parent),
                  snapshotId=directory_snapshot(saved), manifest=manifest, before=before,
-                 outsideState=external.inventory(data))
+                 outsideState=external.inventory(data, usage_schema.bound(c)))
     # Exclusive descriptor then journal publication. A crash before publication
     # never authorizes an unbound clone; it requires inspection and a new stage.
     from .ton1193_preflight import _exclusive_file
@@ -273,8 +274,10 @@ def restore(c):
         require(directory_snapshot(data) == tuple(value['dataId']), 'candidate directory changed')
     paths = ([data] if active else []) + ([saved] if saved_exists else []) + ([candidate] if quarantined else [])
     _quiescent(c, paths)
-    delta = external.compare(value['outsideState'], external.inventory(data))
-    checks = dict(journal['externalChecks'], restore=dict(passed=True, budgetDelta=delta))
+    outside = external.inventory(data, usage_schema.bound(c))
+    delta = external.compare(value['outsideState'], outside)
+    checks = dict(journal['externalChecks'], restore=dict(passed=True, budgetDelta=delta,
+                  usageDelta=external.compare_usage(value['outsideState'], outside)))
     _checkpoint(c, journal['dataState'], externalChecks=checks)
     if not quarantined:
         observation = candidate_observation(data, value['before'])
@@ -307,6 +310,8 @@ def commit(c):
     require(directory_snapshot(value['dataPath']) == tuple(value['dataId'])
             and directory_snapshot(_path(value, 'pre')) == tuple(value['snapshotId'])
             and clone.fingerprint(_path(value, 'pre')) == value['manifest'], 'retained snapshot changed')
-    delta = external.compare(value['outsideState'], external.inventory(value['dataPath']))
-    checks = dict(journal['externalChecks'], commit=dict(passed=True, budgetDelta=delta))
+    outside = external.inventory(value['dataPath'], usage_schema.bound(c))
+    delta = external.compare(value['outsideState'], outside)
+    checks = dict(journal['externalChecks'], commit=dict(passed=True, budgetDelta=delta,
+                  usageDelta=external.compare_usage(value['outsideState'], outside)))
     _checkpoint(c, 'committed', externalChecks=checks)

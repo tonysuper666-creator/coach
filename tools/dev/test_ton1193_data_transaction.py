@@ -209,6 +209,41 @@ class DataTransactionTest(unittest.TestCase):
         self.capture()
         self.assertEqual(data._journal(self.c)['proof'], 'keep')
 
+    def test_legacy_descriptor_cannot_resume_under_new_inventory(self):
+        value = self.capture()
+        value['version'] = 1
+        raw = data._json(value)
+        switch.atomic(self.private / data.NAME, raw)
+        journal = data._journal(self.c)
+        journal['dataSnapshotHash'] = switch.digest(raw)
+        switch.atomic(self.ops / 'journal.json', data._json(journal))
+        with self.assertRaisesRegex(switch.GateError, 'invalid data snapshot binding'):
+            data.load(self.c)
+
+    def test_bound_usage_inventory_is_used_at_capture_and_restore(self):
+        from .test_ton1193_usage_observation import SOURCE
+        from . import ton1193_usage_schema as schema
+        for name in ('old-source', 'new-source'):
+            path = self.root / name / schema.SOURCE
+            path.parent.mkdir(parents=True)
+            path.write_text(SOURCE)
+        proof = schema.attest(self.root / 'old-source', self.root / 'new-source', 'old', 'new')
+        diagnostics = self.active.parent / 'state/diagnostics'
+        diagnostics.mkdir(parents=True, mode=0o700)
+        switch.atomic(diagnostics / 'usage.sqlite', b'synthetic diagnostic')
+        import datetime
+        summary = diagnostics.parent / ('usage-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d') + '.md')
+        switch.atomic(summary, b'old summary')
+        with patch.object(data.usage_schema, 'bound', return_value=proof) as bound:
+            value = self.capture()
+            self.migrate()
+            switch.atomic(summary, b'new summary')
+            data.restore(self.c)
+            self.assertEqual(bound.call_count, 2)
+        self.assert_restored(value)
+        self.assertEqual(summary.read_bytes(), b'new summary')
+        self.assertEqual(data._journal(self.c)['externalChecks']['restore']['usageDelta']['changedFiles'], 1)
+
     def test_pending_candidate_wal_is_quarantined_without_blocking_restore(self):
         value = self.capture()
         self.migrate()

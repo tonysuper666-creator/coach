@@ -2,6 +2,8 @@ package com.coach.server
 
 import com.coach.ai.*
 import com.coach.core.LedgerActor
+import com.coach.core.ExamTextGuard
+import com.coach.core.ExamTextIndex
 import com.coach.domain.*
 import com.coach.store.LedgerStore
 import io.ktor.server.engine.embeddedServer
@@ -31,11 +33,11 @@ internal class ExamOverlap(documents: List<String>) {
     // retains readable backslash-prefixed words, even inside code spans.
     private fun english(text: String) = Regex("[a-z]+").findAll(text).map { it.value }
         .filter { it.length > 1 || it == "a" || it == "i" }.toList()
-    private fun words(text: String, controlWords: Boolean = true): List<String> {
+    private fun words(text: String, controlWords: Boolean = true, markupSeparates: Boolean = false): List<String> {
         val decomposed = Normalizer.normalize(text, Normalizer.Form.NFKD)
         val mapped = decomposed.map { lookalikes[it] ?: it }.joinToString("")
         val folded = (if (controlWords) mapped.replace(Regex("\\\\[A-Za-z]+"), "") else mapped)
-            .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}*_~`{}$]"), "")
+            .replace(Regex(if (markupSeparates) "[\\p{Cf}\\p{M}\\x{00AD}]" else "[\\p{Cf}\\p{M}\\x{00AD}*_~`{}$]"), "")
             .lowercase(java.util.Locale.ROOT)
         return english(folded)
     }
@@ -44,11 +46,60 @@ internal class ExamOverlap(documents: List<String>) {
         .lowercase(java.util.Locale.ROOT))
     // The third view retains backslash-prefixed letters while joining markup
     // and folding lookalikes. It covers readable words split by both techniques.
-    private val windows = documents.flatMap { text -> listOf(words(text), literal(text), words(text, controlWords = false))
-        .flatMap { it.windowed(8).map { w -> w.joinToString(" ") } } }.toHashSet()
-    fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
+    private var referenceOverflow = false
+    private fun softReferenceWindows(text: String): Set<String> {
+        data class Reading(val words: List<String>, val fragment: String)
+        val result = mutableSetOf<String>()
+        fun finish(reading: Reading): Reading {
+            val fragment = reading.fragment
+            if (fragment.isEmpty() || (fragment.length == 1 && fragment != "a" && fragment != "i"))
+                return reading.copy(fragment = "")
+            val words = reading.words + fragment
+            if (words.size == 8) result.add(words.joinToString(" "))
+            return Reading(words.takeLast(7), "")
+        }
+        for (control in listOf(true, false)) {
+            val source = softText(text, control)
+            if (source.none { it in "*_~`{}\$" }) continue
+            var readings = setOf(Reading(emptyList(), ""))
+            for (token in Regex("[a-z]+|[*_~`{}\\$]|[^a-z*_~`{}\\$]+").findAll(source)) {
+                val value = token.value
+                readings = when {
+                    value[0] in 'a'..'z' -> readings.mapTo(mutableSetOf()) { it.copy(fragment = it.fragment + value) }
+                    value.length == 1 && value[0] in "*_~`{}\$" -> readings.flatMapTo(mutableSetOf()) { listOf(it, finish(it)) }
+                    else -> readings.mapTo(mutableSetOf(), ::finish)
+                }
+                if (readings.size > 16_384 || readings.any { it.fragment.length > 1024 }) {
+                    referenceOverflow = true
+                    return result
+                }
+            }
+            readings.forEach(::finish)
+        }
+        return result
+    }
+    private val windows = documents.flatMap { text -> listOf(words(text), literal(text), words(text, controlWords = false), words(text, markupSeparates = true), words(text, false, true))
+        .flatMap { it.windowed(8).map { w -> w.joinToString(" ") } } }.toHashSet().apply {
+            documents.forEach { addAll(softReferenceWindows(it)) }
+        }
+    // Separate regex oracle for mixed within-word and between-word marks.
+    private val softPatterns = windows.map { window ->
+        val wordPatterns = window.split(' ').map { word ->
+            word.map { Regex.escape(it.toString()) }.joinToString("[*_~`{}\\$]*")
+        }
+        Regex("(?<![a-z])" + wordPatterns.joinToString("(?:[^a-z]+(?:[b-hj-z][^a-z]+)*)") + "(?![a-z])")
+    }
+    private fun softText(text: String, controlWords: Boolean): String {
+        val mapped = Normalizer.normalize(text, Normalizer.Form.NFKD).map { lookalikes[it] ?: it }.joinToString("")
+        return (if (controlWords) mapped.replace(Regex("\\\\[A-Za-z]+"), "") else mapped)
+            .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}]"), "").lowercase(java.util.Locale.ROOT)
+    }
+    fun hit(text: String) = referenceOverflow || words(text).windowed(8).any { it.joinToString(" ") in windows } ||
         literal(text).windowed(8).any { it.joinToString(" ") in windows } ||
-        words(text, controlWords = false).windowed(8).any { it.joinToString(" ") in windows }
+        words(text, controlWords = false).windowed(8).any { it.joinToString(" ") in windows } ||
+        words(text, markupSeparates = true).windowed(8).any { it.joinToString(" ") in windows } ||
+        words(text, false, true).windowed(8).any { it.joinToString(" ") in windows } ||
+        listOf(true, false).any { control -> val source = softText(text, control); softPatterns.any { it.containsMatchIn(source) } }
 }
 
 internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false,
@@ -138,6 +189,35 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 }
 
 class ExamOutputTest {
+    @Test fun independentCheckerDetectsMixedSoftBoundaries() {
+        val checker = ExamOverlap(listOf("Ivory jaguars keep lemons near old purple quails"))
+        assertTrue(checker.hit("Ivory j_aguars keep lemons near old purple quаils*next"))
+        assertTrue(checker.hit("prev_Ivory jaguars keep lemons near old purple quаils"))
+        assertFalse(checker.hit("Ivory jaguars keep lemons near old purple foxes"))
+        val mixedReference = ExamOverlap(listOf("Ivory j_aguars keep lemons near old purple quails*Rivers"))
+        assertTrue(mixedReference.hit("Ivory jaguars keep lemons near old purple quails"))
+    }
+
+    @Test fun independentCheckerAgreesWithStreamingOnMixedBoundaries() {
+        val reference = "Ivory jaguars keep lemons near old purple quails"
+        val checker = ExamOverlap(listOf(reference))
+        val index = ExamTextIndex(listOf(reference))
+        val words = reference.split(' ')
+        val marks = listOf("_", "*", "`", "\$")
+        repeat(256) { seed ->
+            val random = kotlin.random.Random(seed)
+            val input = words.map { word ->
+                val position = random.nextInt(1, word.length)
+                (word.take(position) + marks[random.nextInt(marks.size)] + word.drop(position)).replace('a', 'а')
+            }.joinToString(marks[random.nextInt(marks.size)])
+            assertTrue(checker.hit(input), "oracle seed=$seed")
+            assertTrue(index.overlaps(input), "index seed=$seed")
+            val guard = ExamTextGuard(index)
+            val output = input.chunked(seed % 5 + 1).joinToString("") { guard.push(it) } + guard.finish()
+            assertTrue(guard.blocked, "guard seed=$seed")
+            assertFalse(checker.hit(output.substringBefore(ExamTextGuard.REASONING)), "published seed=$seed")
+        }
+    }
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
     private fun backslashMarkupVariants(text: String): List<String> {
         val lookalikes = mapOf('a' to 'а', 'c' to 'с', 'e' to 'е', 'h' to 'һ', 'm' to 'м', 'o' to 'о')

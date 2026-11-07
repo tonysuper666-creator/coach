@@ -7,25 +7,36 @@ import java.util.Locale
 class ExamTextIndex(documents: List<String>) {
     internal class Node {
         val next = HashMap<String, Node>()
+        private val prefixes: Set<String> by lazy {
+            next.keys.flatMapTo(HashSet()) { word -> (1..word.length).map { word.substring(0, it) } }
+        }
+        fun hasPrefix(word: String): Boolean =
+            if (next.size < 64) next.keys.any { it.startsWith(word) } else word in prefixes
     }
     internal val root = Node()
+    internal var incompleteIndex = false
+        private set
     val windowCount: Int
     init {
         val unique = HashSet<List<String>>()
+        fun add(window: List<String>) {
+            if (!unique.add(window)) return
+            var node = root
+            window.forEach { word -> node = node.next.getOrPut(word) { Node() } }
+        }
         documents.forEach { document ->
-            scans(document).forEach { (root, scan) ->
+            scans(document).forEach { (_, scan) ->
                 scan.words.filter { it.matchable }.map { it.value }.windowed(8).forEach { window ->
-                    unique.add(window)
-                    var node = root
-                    window.forEach { word -> node = node.next.getOrPut(word) { Node() } }
+                    add(window)
                 }
             }
+            if (!indexSoftReference(document, ::add)) incompleteIndex = true
         }
         windowCount = unique.size
     }
 
     fun overlaps(text: String): Boolean {
-        return scans(text).any { (root, scan) ->
+        return incompleteIndex || softMatches(text, true).hit != null || scans(text).any { (root, scan) ->
             val tokens = scan.words.filter { it.matchable }
             tokens.indices.any { start ->
                 var node = root
@@ -42,16 +53,102 @@ class ExamTextIndex(documents: List<String>) {
     // A reference and a reply may use different formatting. All reply views
     // must match every reference view, including literal words in TeX wrappers.
     internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(
-        root to scan(text), root to scan(text, visible = false), root to scan(text, controlWords = false)
+        root to scan(text), root to scan(text, visible = false), root to scan(text, controlWords = false),
+        root to scan(text, markupSeparates = true), root to scan(text, controlWords = false, markupSeparates = true)
     )
     internal data class Word(val value: String, val start: Int, val end: Int, val matchable: Boolean)
-    internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int)
+    internal data class Symbol(val char: Char, val start: Int)
+    internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int, val symbols: List<Symbol>)
+    internal data class SoftResult(val hit: Int?, val hold: Int?)
+
+    // Reference formatting is ambiguous too. Index every reachable eight-word
+    // window, bounded to avoid unbounded work on adversarial markup. If the
+    // bound is reached, protection fails closed instead of using a partial index.
+    private fun indexSoftReference(text: String, add: (List<String>) -> Unit): Boolean {
+        if (Normalizer.normalize(text, Normalizer.Form.NFKD).none { it.code in MARKUP }) return true
+        data class RefState(val history: List<String>, val partial: String)
+        for (controlWords in listOf(true, false)) {
+            var states = setOf(RefState(emptyList(), ""))
+            fun finish(state: RefState): RefState {
+                val word = state.partial
+                if (word.isEmpty() || (word.length == 1 && word != "a" && word != "i"))
+                    return state.copy(partial = "")
+                val words = state.history + word
+                if (words.size == 8) add(words)
+                return RefState(words.takeLast(7), "")
+            }
+            for (symbol in scan(text, controlWords = controlWords, softMarkup = true).symbols) {
+                states = when (val c = symbol.char) {
+                    in 'a'..'z' -> states.mapTo(mutableSetOf()) { it.copy(partial = it.partial + c) }
+                    '\u0001' -> states.flatMapTo(mutableSetOf()) { listOf(it, finish(it)) }
+                    else -> states.mapTo(mutableSetOf(), ::finish)
+                }
+                if (states.size > 16_384 || states.any { it.partial.length > 1024 }) return false
+            }
+            states.forEach(::finish)
+        }
+        return true
+    }
+
+    // A formatting mark can either join letters in a word or separate two
+    // words. Traverse only paths that can still reach an indexed window; this
+    // avoids enumerating the exponential set of formatting interpretations.
+    internal fun softMatches(text: String, end: Boolean): SoftResult {
+        data class State(val node: Node, val partial: String, val start: Int)
+        var hit: Int? = null
+        var hold: Int? = null
+        for (controlWords in listOf(true, false)) {
+            val scan = scan(text, controlWords = controlWords, softMarkup = true)
+            var states = emptySet<State>()
+            var boundary = true
+            fun advance(state: State): State? {
+                val word = state.partial
+                if (word.isEmpty()) return state
+                if (word.length == 1 && word != "a" && word != "i") return state.copy(partial = "")
+                val next = state.node.next[word] ?: return null
+                if (next.next.isEmpty()) {
+                    hit = minOf(hit ?: text.length, state.start)
+                    return null
+                }
+                return State(next, "", state.start)
+            }
+            for (symbol in scan.symbols) {
+                val c = symbol.char
+                if (c in 'a'..'z') {
+                    val candidates = states.toMutableSet()
+                    if (boundary) candidates.add(State(root, "", symbol.start))
+                    states = candidates.mapNotNullTo(mutableSetOf()) { state ->
+                        val word = state.partial + c
+                        val possible = state.node.hasPrefix(word)
+                        val ignoredVariable = state.node !== root && word.length == 1 && word != "a" && word != "i"
+                        if (possible || ignoredVariable) state.copy(partial = word) else null
+                    }
+                    boundary = false
+                } else if (c == '\u0001') {
+                    val joined = states.toMutableSet()
+                    states.mapNotNullTo(joined, ::advance)
+                    states = joined
+                    boundary = true
+                } else {
+                    states = states.mapNotNullTo(mutableSetOf(), ::advance)
+                    boundary = true
+                }
+            }
+            if (end) states.forEach(::advance)
+            else for (state in states) {
+                // A state with no indexed word yet is handled by the normal
+                // open-word guard; keep only an actual indexed prefix here.
+                if (state.node !== root) hold = minOf(hold ?: text.length, state.start)
+            }
+        }
+        return SoftResult(hit, hold)
+    }
     companion object {
         internal fun words(text: String): List<Word> = scan(text).words
 
         // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.
         // Only the matching view is folded; normal replies are published unchanged.
-        internal fun scan(text: String, visible: Boolean = true, controlWords: Boolean = visible): Scan {
+        internal fun scan(text: String, visible: Boolean = true, controlWords: Boolean = visible, markupSeparates: Boolean = !visible, softMarkup: Boolean = false): Scan {
             val normalized = StringBuilder()
             val starts = ArrayList<Int>()
             val ends = ArrayList<Int>()
@@ -78,7 +175,9 @@ class ExamTextIndex(documents: List<String>) {
                 // any view, including words immediately following a backslash.
                 val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKD)
                 piece.codePoints().forEach { cp ->
-                    if (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && (!visible || cp !in MARKUP)) {
+                    if (softMarkup && cp in MARKUP) {
+                        normalized.append('\u0001'); starts.add(offset); ends.add(end)
+                    } else if (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && (markupSeparates || cp !in MARKUP)) {
                         val folded = ((if (visible) CONFUSABLES[cp] else null)?.toString() ?: String(Character.toChars(cp))).lowercase(Locale.ROOT)
                         folded.forEach { normalized.append(it); starts.add(offset); ends.add(end) }
                     }
@@ -94,7 +193,8 @@ class ExamTextIndex(documents: List<String>) {
                 Word(it.value, start, ends[it.range.last], matchable)
             }.toList()
             // Ignored suffixes do not finish a word (e.g. "Am**" or "Am\u200B").
-            return Scan(words, normalized.lastOrNull()?.let { it in 'a'..'z' } == true, stableEnd)
+            return Scan(words, normalized.lastOrNull()?.let { it in 'a'..'z' } == true, stableEnd,
+                normalized.indices.map { Symbol(normalized[it], starts[it]) })
         }
         private fun asciiLetter(char: Char) = char in 'a'..'z' || char in 'A'..'Z'
         private val MARK_TYPES = setOf(Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt())
@@ -150,10 +250,13 @@ class ExamTextGuard @JvmOverloads constructor(
     fun finish(): String = if (blocked) "" else drain(true)
 
     private fun drain(end: Boolean): String {
-        if (index == null) return block(0)
+        if (index == null || index.incompleteIndex) return block(0)
         var cut = pending.length
         val reasons = if (onHold == null) null else mutableSetOf<String>()
         var hitStart: Int? = null
+        val soft = index.softMatches(pending.toString(), end)
+        hitStart = soft.hit
+        if (!end && soft.hold != null) { cut = minOf(cut, soft.hold); reasons?.add("indexed_prefix") }
         // Preserve literal eight-word protection as well: joining inline markup
         // must not create a new bypass for a quotation separated by underscores.
         for ((root, scan) in index.scans(pending.toString())) {
@@ -191,7 +294,7 @@ class ExamTextGuard @JvmOverloads constructor(
                     if (prefix && incomplete && scan.stableEnd == pending.length) {
                         val partial = scan.words.last().value
                         val alwaysMatchable = partial.length > 1 || partial == "a" || partial == "i"
-                        if (alwaysMatchable && node.next.keys.none { it.startsWith(partial) }) prefix = false
+                        if (alwaysMatchable && !node.hasPrefix(partial)) prefix = false
                     }
                     if (prefix) { reasons?.add("indexed_prefix"); cut = minOf(cut, words[start].start) }
                 }

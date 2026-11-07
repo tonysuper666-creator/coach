@@ -379,8 +379,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     private val contentStore by lazy { CourseContentStore(connection) }
     /** Private generated essay prompts; Main points this at the materials directory, tests at a fixture. */
     var essays: EssayBank = EssayBank(null)
-    private fun courseName(course: String): String = events(course).lastOrNull { it.type == "outline_revised" }
-        ?.payload?.get("course")?.let { it as? JsonObject }?.str("name").orEmpty()
+    /** Later revisions (the DeepTutor migration's prerequisite ops) carry no `course`; the name is the latest one any revision gave. */
+    private fun courseName(course: String): String = events(course).asReversed().filter { it.type == "outline_revised" }
+        .firstNotNullOfOrNull { (it.payload["course"] as? JsonObject)?.str("name")?.takeIf(String::isNotBlank) }.orEmpty()
     /** Bank prompts the learner can pick now; prompts whose week has no knowledge point yet stay hidden. */
     fun essayPrompts(course: String): JsonObject {
         val points = weekPoints(events(course))

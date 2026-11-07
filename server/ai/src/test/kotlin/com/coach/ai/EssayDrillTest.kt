@@ -165,6 +165,16 @@ class EssayDrillTest {
         assertNull(Essay.sharedRun(draft.toString(), reference))
     }
 
+    @Test fun aLaterOutlineRevisionWithoutACourseNameKeepsTheBank() = run { _, _ ->
+        // Shaped like the DeepTutor migration's revision: prerequisite ops and a curriculum, but no `course` object.
+        execute { append("c", "outline_revised", json("sourceId" to "confirmation:curriculum", "curriculum" to json("concepts" to JsonArray(emptyList())),
+            "ops" to JsonArray(listOf(json("kpId" to "w1b", "op" to "setPrereq", "prereqs" to JsonArray(listOf(JsonPrimitive("w1"))))))), actor = "SYSTEM") }
+        val prompts = execute { essayPrompts("c") }["prompts"] as JsonArray
+        assertEquals(listOf("toy-pack/e1"), prompts.map { it.jsonObject.str("id") }, "the bank still matches the course named by the first revision")
+        assertEquals("OK", execute { pose("after-migration") }.status)
+        assertEquals(2, execute { events("c").count { it.type == "outline_revised" } }, "no ledger event is dropped to make the bank match")
+    }
+
     @Test fun invalidEssayRequestsAreRejectedWithoutPosingAnything() = run { _, _ ->
         assertEquals("INVALID_ESSAY", execute { pose("") }.error)
         assertEquals("ESSAY_UNAVAILABLE", execute { pose("x1", essayId = "toy-pack/missing") }.error)

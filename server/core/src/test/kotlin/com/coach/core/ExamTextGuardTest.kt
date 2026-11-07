@@ -20,6 +20,27 @@ class ExamTextGuardTest {
             }
     }
 
+    @Test fun sharedSimpleViewMatchesEveryOriginalViewAndSoftResult() {
+        val random = Random(125001)
+        val alphabet = "Amber badgers carry delicate emerald feathers gently home. 中文学习123\n，。！？：；、（）《》“”‘’"
+        val allSimpleChars = (0..127).map { it.toChar() }.filter { ExamTextIndex.hasOneScanView(it.toString()) }
+            .joinToString("") + ('\u4e00'..'\u9fff').joinToString("")
+        val inputs = listOf(allSimpleChars, exam, "中文 $exam") +
+            List(300) { List(random.nextInt(120)) { alphabet[random.nextInt(alphabet.length)] }.joinToString("") }
+        for (input in inputs) {
+            assertTrue(ExamTextIndex.hasOneScanView(input))
+            val shared = ExamTextIndex.scan(input, softMarkup = true)
+            for (visible in listOf(false, true)) for (control in listOf(false, true)) {
+                assertEquals(shared, ExamTextIndex.scan(input, visible, control, softMarkup = true))
+            }
+            for ((_, scan) in index.scans(input)) assertEquals(shared, scan)
+            for (end in listOf(false, true))
+                assertEquals(index.softMatches(input, end), index.softMatches(input, end, shared))
+        }
+        for (special in listOf("a_b", "a\\text", "α", "а", "a\u0301", "\u200b", "😀"))
+            assertFalse(ExamTextIndex.hasOneScanView(special))
+    }
+
     @Test fun divergingPartialWordReleasesEarlierWithoutReleasingAnIndexedWindow() {
         val guard = ExamTextGuard(index)
         assertEquals("", guard.push("Amber "))

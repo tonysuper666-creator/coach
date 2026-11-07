@@ -52,7 +52,8 @@ class ExamTextIndex(documents: List<String>) {
 
     // A reference and a reply may use different formatting. All reply views
     // must match every reference view, including literal words in TeX wrappers.
-    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(
+    internal fun scans(text: String, sharedScan: Scan? = null): List<Pair<Node, Scan>> = if (sharedScan != null)
+        listOf(root to sharedScan) else listOf(
         root to scan(text), root to scan(text, visible = false), root to scan(text, controlWords = false),
         root to scan(text, markupSeparates = true), root to scan(text, controlWords = false, markupSeparates = true)
     )
@@ -93,12 +94,12 @@ class ExamTextIndex(documents: List<String>) {
     // A formatting mark can either join letters in a word or separate two
     // words. Traverse only paths that can still reach an indexed window; this
     // avoids enumerating the exponential set of formatting interpretations.
-    internal fun softMatches(text: String, end: Boolean): SoftResult {
+    internal fun softMatches(text: String, end: Boolean, sharedScan: Scan? = null): SoftResult {
         data class State(val node: Node, val partial: String, val start: Int)
         var hit: Int? = null
         var hold: Int? = null
-        for ((controlWords, visible) in SOFT_VIEWS) {
-            val scan = scan(text, visible, controlWords, softMarkup = true)
+        for ((controlWords, visible) in if (sharedScan != null) SOFT_VIEWS.take(1) else SOFT_VIEWS) {
+            val scan = sharedScan ?: scan(text, visible, controlWords, softMarkup = true)
             var states = emptySet<State>()
             var boundary = true
             fun advance(state: State): State? {
@@ -146,6 +147,13 @@ class ExamTextIndex(documents: List<String>) {
     companion object {
         private val SOFT_VIEWS = listOf(true to true, false to true, true to false, false to false)
         internal fun words(text: String): List<Word> = scan(text).words
+
+        // These characters have the same normalization and offsets in every
+        // view. Be conservative: formatting, control words, confusables,
+        // combining marks and other Unicode always use all independent views.
+        internal fun hasOneScanView(text: String): Boolean = text.all { c ->
+            (c.code < 128 && c != '\\' && c.code !in MARKUP) || c in '\u4e00'..'\u9fff' || c in "，。！？：；、（）《》“”‘’"
+        }
 
         // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.
         // Only the matching view is folded; normal replies are published unchanged.
@@ -269,12 +277,14 @@ class ExamTextGuard @JvmOverloads constructor(
         var cut = pending.length
         val reasons = if (onHold == null) null else mutableSetOf<String>()
         var hitStart: Int? = null
-        val soft = index.softMatches(pending.toString(), end)
+        val raw = pending.toString()
+        val sharedScan = if (ExamTextIndex.hasOneScanView(raw)) ExamTextIndex.scan(raw, softMarkup = true) else null
+        val soft = index.softMatches(raw, end, sharedScan)
         hitStart = soft.hit
         if (!end && soft.hold != null) { cut = minOf(cut, soft.hold); reasons?.add("indexed_prefix") }
         // Preserve literal eight-word protection as well: joining inline markup
         // must not create a new bypass for a quotation separated by underscores.
-        for ((root, scan) in index.scans(pending.toString())) {
+        for ((root, scan) in index.scans(raw, sharedScan)) {
             val incomplete = !end && scan.openWord
             val rawComplete = scan.words.size - if (incomplete) 1 else 0
             val words = scan.words.take(rawComplete).filter { it.matchable }

@@ -23,6 +23,7 @@ import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.MockReply
 import com.coach.domain.*
+import com.coach.domain.grade.AnalyticalNumber
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.first
@@ -386,11 +387,54 @@ private fun ExamItem(c: CoachController, row: ExamRow.Item, answers: JsonObject,
                     val a = answers[key] as? JsonObject
                     Text("(${part.str("label")}) ${marks(part.dbl("marks"))} 分", style = MaterialTheme.typography.titleSmall)
                     QuizText(part.str("prompt"), "mock:$key", c.math)
-                    OutlinedTextField(a?.str("text").orEmpty(), { update(key, "text", JsonPrimitive(it)) }, Modifier.fillMaxWidth(), minLines = 3, placeholder = { Text("写出步骤") })
-                    if (part.flag("numeric")) OutlinedTextField(a?.str("final").orEmpty(), { update(key, "final", JsonPrimitive(it)) }, Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("最终数值（保留两位小数）") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(a?.str("text").orEmpty(), { update(key, "text", JsonPrimitive(it)) }, Modifier.fillMaxWidth().testTag("mock-working:$key"),
+                        minLines = 3, label = { Text("(${part.str("label")}) 解题步骤") }, placeholder = { Text("写出计算过程和理由") })
+                    if (part.flag("numeric")) AnalyticalFinalInput(key, a?.str("final").orEmpty()) { update(key, "final", JsonPrimitive(it)) }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun AnalyticalFinalInput(key: String, value: String, onChange: (String) -> Unit) {
+    val error = AnalyticalNumber.inputError(value)
+    OutlinedTextField(value, onChange, Modifier.fillMaxWidth().testTag("mock-final:$key"), singleLine = true,
+        label = { Text("最终数值（保留两位小数）") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        isError = error != null && error != AnalyticalNumber.InputError.MISSING,
+        supportingText = { Text(when (error) {
+            AnalyticalNumber.InputError.MISSING -> "未填写最终数值；交卷时数值项计 0 分，步骤另计。"
+            AnalyticalNumber.InputError.NOT_NUMERIC -> "请输入十进制数，不支持文字、分数、百分号或科学记数法。"
+            AnalyticalNumber.InputError.WRONG_DECIMAL_PLACES -> "须保留两位小数，例如 1.00。"
+            null -> "格式正确；判分按本小问的绝对容差。"
+        }) })
+}
+
+/** Stack on a phone; compare in two columns when there is room for both the figure and the work. */
+@Composable
+internal fun AnalyticalComparison(answer: JsonObject, standardFigure: String) {
+    val work: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth().testTag("mock-submitted-work"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("你的作答", style = MaterialTheme.typography.labelLarge)
+            Text(answer.str("text").ifBlank { "（步骤未填写）" }, style = MaterialTheme.typography.bodyMedium)
+            Text("最终数值：${answer.str("final").ifBlank { "（未填写）" }}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        }
+    }
+    val figure: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth().testTag("mock-standard-figure"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("标准图 · 交卷后对照", style = MaterialTheme.typography.labelLarge)
+            FigureSvg(standardFigure)
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (standardFigure.isNotBlank() && maxWidth >= 640.dp) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Box(Modifier.weight(1f)) { work() }
+                Box(Modifier.weight(1f)) { figure() }
+            }
+        } else Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            work()
+            if (standardFigure.isNotBlank()) figure()
         }
     }
 }
@@ -449,10 +493,9 @@ private fun ResultItem(c: CoachController, it: JsonObject, number: Int) {
     val full = it["score"] != null && it.dbl("score") >= it.dbl("marks")
     Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(verticalArrangement = Arrangement.spacedBy(4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("第 $number 题" + it.str("label").takeIf { l -> l.isNotBlank() }?.let { l -> " ($l)" }.orEmpty(), style = MaterialTheme.typography.labelLarge)
                 StatusChip(statusLabels[status] ?: status, when (status) { "FAILED" -> MaterialTheme.colorScheme.error; "PENDING", "SKIPPED" -> MaterialTheme.colorScheme.onSurfaceVariant; else -> MaterialTheme.colorScheme.primary })
-                Spacer(Modifier.weight(1f))
                 Text(if (it["score"] != null) "${marks(it.dbl("score"))} / ${marks(it.dbl("marks"))}" else "— / ${marks(it.dbl("marks"))}",
                     style = MaterialTheme.typography.titleMedium, color = if (full) successColor() else if (it["score"] != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -473,6 +516,8 @@ private fun ResultItem(c: CoachController, it: JsonObject, number: Int) {
                     }
                 }
                 if (chosen == null) Text("你没有作答。", color = MaterialTheme.colorScheme.error)
+            } else if (it.str("type") == "part") {
+                AnalyticalComparison(answer, it.str("standardFigure"))
             } else {
                 Text("你的作答", style = MaterialTheme.typography.labelLarge)
                 Text(answer.str("text").ifBlank { "（空）" }, style = MaterialTheme.typography.bodyMedium)

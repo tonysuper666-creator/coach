@@ -377,6 +377,50 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
+    /** Private generated essay prompts; Main points this at the materials directory, tests at a fixture. */
+    var essays: EssayBank = EssayBank(null)
+    /** Later revisions (the DeepTutor migration's prerequisite ops) carry no `course`; the name is the latest one any revision gave. */
+    private fun courseName(course: String): String = events(course).asReversed().filter { it.type == "outline_revised" }
+        .firstNotNullOfOrNull { (it.payload["course"] as? JsonObject)?.str("name")?.takeIf(String::isNotBlank) }.orEmpty()
+    /** Bank prompts the learner can pick now; prompts whose week has no knowledge point yet stay hidden. */
+    fun essayPrompts(course: String): JsonObject {
+        val points = weekPoints(events(course))
+        val all = essays.prompts(courseName(course))
+        val usable = all.filter { essayKp(points, it.week, it.kp) != null }
+        return json("prompts" to JsonArray(usable.map { e ->
+            json("id" to e.id, "week" to e.week, "kp" to e.kp, "marks" to e.marks, "wordTarget" to e.wordTarget,
+                "stem" to e.stem, "pack" to e.packTitle, "fromMockPaper" to (e.kind == "paper"))
+        }), "unmatched" to all.size - usable.size, "weeks" to points.flatMap { it.weeks }.distinct().sorted())
+    }
+    private fun essayKp(points: List<WeekPoint>, week: Int, topic: String): String? {
+        val inWeek = points.filter { week in it.weeks }.ifEmpty { return null }
+        val words = Essay.words(topic).filter { it.length > 3 }
+        val named = inWeek.maxByOrNull { p -> words.count { it in p.title.lowercase() } }?.takeIf { p -> words.any { it in p.title.lowercase() } }
+        return (named ?: inWeek.firstOrNull { "【Essay】" in it.title } ?: inWeek.first()).id
+    }
+    /** Bank prompts are VERIFIED by the content gate; a pasted prompt has no reviewed key and never counts as evidence. */
+    private fun essayQuestion(course: String, essayId: String, pasted: String, week: Int): JsonObject? {
+        val bank = if (essayId.isBlank()) null else essays.prompts(courseName(course)).firstOrNull { it.id == essayId } ?: return null
+        val stem = bank?.stem ?: pasted.trim().takeIf { it.length in 15..4000 } ?: return null
+        val kp = essayKp(weekPoints(events(course)), bank?.week ?: week, bank?.kp.orEmpty()) ?: return null
+        val rubric = essayRubric(bank?.marks ?: 20.0)
+        val rubricFingerprint = sha256(rubric.toString().toByteArray(Charsets.UTF_8))
+        val keyState = if (bank == null) "UNREVIEWED" else "VERIFIED"
+        val reference = bank?.modelAnswer.orEmpty()
+        val fp = sha256(listOf("essay", kp, stem, reference, rubricFingerprint).joinToString("\u0000").toByteArray(Charsets.UTF_8))
+        val wordTarget = bank?.wordTarget ?: Essay.WORD_TARGET
+        val id = query("SELECT question_id FROM questions WHERE course_id=? AND fingerprint=?", course, fp) { it.getString(1) }.firstOrNull() ?: uid().also { id ->
+            val key = json("stem" to stem, "reference_answer" to reference, "rubric" to rubric, "essay" to json(
+                "essayId" to essayId.ifBlank { null }, "marks" to (bank?.marks ?: 20.0), "wordTarget" to wordTarget,
+                "markingNotes" to (bank?.rubric ?: JsonArray(emptyList())), "source" to bank?.source))
+            sql("INSERT INTO questions(question_id,course_id,format,stem_md,origin,fingerprint,key_state) VALUES(?,?,'ESSAY',?,'COACH',?,?)", id, course, stem, fp, keyState)
+            sql("INSERT INTO question_kp VALUES(?,?,1)", id, kp)
+            sql("INSERT INTO answer_keys(question_id,key_json,reviewed_by,reviewed_at) VALUES(?,?,?,?)", id, key.toString(), if (bank == null) "learner" else "bank", clock())
+            sql("INSERT INTO constructed_details VALUES(?,?,?,?,?,?,?)", id, essayId.ifBlank { "pasted" }, reference, rubric.toString(), rubricFingerprint, "bank", if (bank == null) "learner" else "bank")
+        }
+        return json("questionId" to id, "stem" to stem, "fingerprint" to fp, "format" to "ESSAY", "rubricFingerprint" to rubricFingerprint,
+            "kpIds" to listOf(kp), "keyState" to keyState, "wordTarget" to wordTarget, "essayId" to essayId.ifBlank { null })
+    }
     /** Offline CLI or server actor only: one transaction installs content and its two events. */
     fun seedContent(seed: ContentSeed): Boolean {
         val content = contentStore
@@ -502,7 +546,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (recent.isEmpty()) recent += events(course).filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" }.takeLast(2)
             .mapNotNull { letterMap(it.payload)[choiceId(it.payload.str("questionId"))] }
         val maps = keys.map { key ->
-            val correct = optionLetters(key.options.size).filter { it !in recent.takeLast(2) }.random(rng)
+            val letters = optionLetters(key.options.size)
+            // Two-option questions must alternate once both letters have been used.
+            val candidates = letters.filter { it !in recent.takeLast(2) }
+                .ifEmpty { letters.filter { it != recent.lastOrNull() } }
+            val correct = candidates.random(rng)
             val rest = optionLetters(key.options.size).filter { it != correct }.shuffled(rng).iterator()
             recent += correct
             sql("INSERT INTO choice_allocations(course_id,correct_letter) VALUES(?,?)",course,correct)
@@ -680,7 +728,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     val snapshot = JsonObject(posedSnapshot + mapOf("format" to JsonPrimitive(question.first),"keyState" to JsonPrimitive(question.third)))
                                     emit("question_posed",snapshot,"attempt:$attemptId")
                                 }
-                                emit("answer_submitted",json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer")),"attempt:$attemptId:answer")
+                                // A timed attempt handed in after its limit is kept and graded, but never counts as timed evidence.
+                                val limit = posed?.payload?.num("timeLimitSec") ?: 0
+                                val overtime = limit > 0 && clock() - posed!!.payload.num("posedAt") > (limit + Essay.GRACE_SEC) * 1000
+                                emit("answer_submitted",JsonObject(json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer")) +
+                                    if (overtime) json("overtime" to true) else json()),"attempt:$attemptId:answer")
                                 if (question.first == "SINGLE_CHOICE") {
                                     val correct = choiceId(qid)
                                     val frozenMap = letterMap(posed?.payload ?: posedSnapshot)
@@ -693,13 +745,34 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                         }
                     }
                 }
+                "pose_essay" -> {
+                    val attemptId = p.str("attemptId")
+                    val limit = p.num("timeLimitSec", Essay.TIME_LIMIT_SEC.toLong())
+                    val taken = query("SELECT 1 FROM events WHERE course_id=? AND idem_key=?",body.courseId,"attempt:$attemptId") { it.getInt(1) }.isNotEmpty()
+                    val question = if (attemptId.isBlank() || taken || limit !in 60L..3600L) null
+                        else essayQuestion(body.courseId, p.str("essayId"), p.str("stem"), p.num("week").toInt())
+                    if (question == null) { status="REJECTED"; error=if (attemptId.isBlank() || taken || limit !in 60L..3600L) "INVALID_ESSAY" else "ESSAY_UNAVAILABLE" }
+                    else {
+                        // Drill attempts never become the Today page's continue target.
+                        val posed = JsonObject(question + json("attemptId" to attemptId, "purpose" to "TIMED", "policyVersion" to 1,
+                            "posedAt" to clock(), "origin" to "COACH", "drill" to true, "timeLimitSec" to limit))
+                        emit("question_posed", posed, "attempt:$attemptId")
+                        result = json("posedSnapshot" to posed)
+                    }
+                }
                 "retry_week_mistake" -> {
                     val old = weekMistakes(events(body.courseId), p.num("week").toInt()).firstOrNull { it.payload.str("attemptId") == p.str("attemptId") }
                     if (old == null) { status="REJECTED"; error="MISTAKE_CHANGED" }
                     else {
                         val qid = old.payload.str("questionId")
-                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=? AND format='SINGLE_CHOICE'", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        val options = if (verified) choiceOptions(qid) else emptyList()
+                        val key = if (verified) choiceId(qid).orEmpty() else ""
+                        val usable = try { ChoiceKey(options, key); true } catch (_: IllegalArgumentException) { false }
                         if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
+                        else if (!usable) {
+                            status="REJECTED"; error="QUESTION_OPTIONS_UNAVAILABLE"
+                        }
                         else {
                             val thread = "week-review:${p.num("week")}:$qid"
                             val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload - setOf("mockId", "marks") + mapOf(
@@ -917,8 +990,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         inserted
     }
-    fun constructedAvailable(course: String, kp: String): Int = query("SELECT count(*) FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed' AND json_extract(e.payload,'$.questionId')=q.question_id)",course,kp) { it.getInt(1) }.single()
-    fun constructedQuestions(course: String, kp: String): List<JsonObject> = query("SELECT q.question_id,q.stem_md,d.reference_answer,d.rubric,d.rubric_fingerprint FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED'",course,kp) {
+    fun constructedAvailable(course: String, kp: String): Int = query("SELECT count(*) FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY' AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed' AND json_extract(e.payload,'$.questionId')=q.question_id)",course,kp) { it.getInt(1) }.single()
+    fun constructedQuestions(course: String, kp: String): List<JsonObject> = query("SELECT q.question_id,q.stem_md,d.reference_answer,d.rubric,d.rubric_fingerprint FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY'",course,kp) {
         json("questionId" to it.getString(1),"stem" to it.getString(2),"referenceAnswer" to it.getString(3),"rubric" to LedgerJson.parseToJsonElement(it.getString(4)),"rubricFingerprint" to it.getString(5))
     }
     fun enqueueConstructed(course: String, kp: String, objective: String, excerpt: String): String? = transaction {
@@ -958,7 +1031,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         val q=query("""SELECT q.question_id,q.stem_md,q.fingerprint,q.format,d.rubric_fingerprint
             FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
-            WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED'
+            WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY'
             AND NOT EXISTS(SELECT 1 FROM events e WHERE e.course_id=q.course_id AND e.type='question_posed'
                 AND json_extract(e.payload,'$.questionId')=q.question_id) ORDER BY q.question_id LIMIT 1""",course,kp) {
             json("questionId" to it.getString(1),"stem" to it.getString(2),"fingerprint" to it.getString(3),
@@ -1035,7 +1108,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val job=query("SELECT subject FROM jobs WHERE kind='grade_attempt' AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at DESC,job_id DESC LIMIT 1",course,attempt) {
             LedgerJson.parseToJsonElement(it.getString(1)).jsonObject
         }.firstOrNull() ?: return null
-        return json("posed" to posed.payload,"answer" to answer.payload,"question" to job.getValue("question"),
+        // An essay's reference answer and source stay on the Mac: the learner gets a rewrite of their own essay instead.
+        val frozen=job.getValue("question").jsonObject
+        val question=if(posed.payload.str("format")=="ESSAY") JsonObject(frozen - setOf("reference_answer","essay")) else frozen
+        return json("posed" to posed.payload,"answer" to answer.payload,"question" to question,
             "rubricFingerprint" to job.str("rubricFingerprint"),"deadline" to job.num("deadline"),
             "jobs" to JsonArray(query("SELECT kind,state,attempts,last_error,updated_at FROM jobs WHERE kind IN ('grade_attempt','review_grade') AND json_extract(subject,'$.course')=? AND json_extract(subject,'$.attempt')=? ORDER BY created_at,job_id",course,attempt) {
                 json("kind" to it.getString(1),"state" to it.getString(2),"attempts" to it.getInt(3),"lastError" to it.getString(4),"updatedAt" to it.getLong(5))
@@ -1193,7 +1269,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */
     fun constructedSupply(course: String): Map<String,Int> = query(
         """SELECT k.kp_id,count(*) FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
-           WHERE q.course_id=? AND q.key_state='VERIFIED' GROUP BY k.kp_id""",course) { it.getString(1) to it.getInt(2) }.toMap()
+           WHERE q.course_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY' GROUP BY k.kp_id""",course) { it.getString(1) to it.getInt(2) }.toMap()
 
     /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
     fun searchSourcePages(course: String, question: String): List<SourcePage> {

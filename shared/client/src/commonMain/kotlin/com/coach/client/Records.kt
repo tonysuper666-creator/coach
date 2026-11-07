@@ -3,6 +3,7 @@ package com.coach.client
 import com.coach.domain.Event
 import com.coach.domain.Mastery
 import com.coach.domain.Projection
+import com.coach.domain.flag
 import com.coach.domain.project
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -37,6 +38,8 @@ data class EvidenceSpan(val rubricItemId: String, val field: String, val start: 
 data class GradeView(
     val status: String, val score: Int, val max: Int, val feedback: String,
     val items: List<GradeItem>, val evidence: List<EvidenceSpan>, val graderModel: String,
+    /** 论述题的改写示范；[rewriteNotice] 说明它为什么没有显示。 */
+    val rewrite: String = "", val rewriteNotice: String = "",
 )
 
 data class ReviewView(val decision: String, val note: String, val reviewerModel: String, val graderModel: String, val revised: GradeView?)
@@ -47,6 +50,8 @@ data class AttemptDetail(
     val options: List<Pair<String, String>>, val answer: String, val finalAnswer: String,
     val submittedAt: Long?, val grade: GradeView?, val review: ReviewView?,
     val voided: Boolean, val hinted: Boolean,
+    /** 限时练习超过时限（含宽限）才交卷：照常批改，不计入掌握。 */
+    val overtime: Boolean = false,
 ) {
     val isChoice: Boolean get() = format == "SINGLE_CHOICE"
     /** 复核之后以复核后的批改为准；还没复核的构答草稿不计分。 */
@@ -83,6 +88,12 @@ class RecordsView(private val events: List<Event>) {
         out
     }
 
+    /** 交过卷的论述限时练习，最新的在前。每篇都能回看，不论它有没有改变掌握。 */
+    val timedEssays: List<AttemptDetail> by lazy {
+        sorted.filter { it.type == "question_posed" && it.payload.s("format") == "ESSAY" && it.payload.s("purpose") == "TIMED" }
+            .mapNotNull { attempt(it.payload.s("attemptId")) }.filter { it.submittedAt != null }.sortedByDescending { it.submittedAt }
+    }
+
     val orphans: List<OrphanedAnswer> by lazy {
         sorted.filter { it.type == "answer_orphaned" }.map { e ->
             val snapshot = e.payload["posedSnapshot"] as? JsonObject
@@ -103,11 +114,15 @@ class RecordsView(private val events: List<Event>) {
         val submitted = es.firstOrNull { it.type == "answer_submitted" }
         val graded = es.lastOrNull { it.type == "attempt_graded" }
         val reviewed = es.lastOrNull { it.type == "grade_reviewed" }
+        val draft = graded?.payload?.let(::gradeView)
+        // 复核不改改写示范的去留：初评时没显示的原因要带到复核后的批改上。
+        val review = reviewed?.payload?.let(::reviewView)?.let { r -> r.copy(revised = r.revised?.copy(rewriteNotice = draft?.rewriteNotice.orEmpty())) }
         return AttemptDetail(
             attemptId, p.strings("kpIds"), p.s("format"), p.s("purpose"), p.s("stem"), options,
             submitted?.payload?.s("answer").orEmpty(), submitted?.payload?.s("finalAnswer").orEmpty(), submitted?.occurredAt,
-            graded?.payload?.let(::gradeView), reviewed?.payload?.let(::reviewView),
+            draft, review,
             es.any { it.type == "attempt_voided" }, es.any { it.type == "hint_revealed" },
+            submitted?.payload?.flag("overtime") == true,
         )
     }
 
@@ -146,11 +161,11 @@ class RecordsView(private val events: List<Event>) {
 
     private fun gradeView(p: JsonObject) = GradeView(
         p.s("status"), p.i("score"), p.i("max").coerceAtLeast(1), p.s("feedback"),
-        items(p), evidence(p), p.s("graderModel"),
+        items(p), evidence(p), p.s("graderModel"), p.s("rewrite"), p.s("rewriteNotice"),
     )
 
     private fun reviewView(p: JsonObject) = ReviewView(p.s("decision"), p.s("note"), p.s("reviewerModel"), p.s("graderModel"), (p["revised"] as? JsonObject)?.let { r ->
-        GradeView("REVIEWED", r.i("score"), r.i("max").coerceAtLeast(1), r.s("feedback"), items(r), evidence(r), p.s("reviewerModel"))
+        GradeView("REVIEWED", r.i("score"), r.i("max").coerceAtLeast(1), r.s("feedback"), items(r), evidence(r), p.s("reviewerModel"), r.s("rewrite"))
     })
 
     private fun items(p: JsonObject): List<GradeItem> = (p["items"] as? JsonArray).orEmpty().mapNotNull { v ->

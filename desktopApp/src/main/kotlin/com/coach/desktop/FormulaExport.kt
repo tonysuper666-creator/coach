@@ -22,23 +22,33 @@ fun exportFormulas() {
     val folder = File(System.getProperty("coach.exportFormulas"))
     val rows = Json.parseToJsonElement(File(folder, "formulas.json").readText()).jsonArray
     val out = File(folder, "painter").apply { mkdirs() }
-    SwingUtilities.invokeAndWait {
-        for (raw in rows) {
-            val row = raw.jsonObject
-            val id = row.getValue("id").jsonPrimitive.int
-            val doc = MathSvgDocument.parse(row.getValue("sha").jsonPrimitive.content, row.getValue("svg").jsonPrimitive.content)
-            val w = ceil(doc.widthEm * 32).toInt().coerceAtLeast(1)
-            val h = ceil(doc.box[3] / 1000f * 32).toInt().coerceAtLeast(1)
-            val scene = ImageComposeScene(w, h, Density(1f)) {
-                val measurer = rememberTextMeasurer()
-                Canvas(Modifier.fillMaxSize().background(Color.White)) {
-                    with(MathSvgPainter(doc, Color.Black, measurer, 32f)) { draw(size) }
-                }
-            }
-            try {
-                scene.render().use { image -> image.encodeToData()!!.use { File(out, "$id.png").writeBytes(it.bytes) } }
-            } finally { scene.close() }
-        }
+    for (raw in rows) {
+        val row = raw.jsonObject
+        val id = row.getValue("id").jsonPrimitive.int
+        File(out, "$id.png").writeBytes(rasterizeFormula(row.getValue("sha").jsonPrimitive.content, row.getValue("svg").jsonPrimitive.content))
     }
     println("PAINTER exported=${rows.size} em=32")
+}
+
+/** One common Painter for screen verification and printed notes. May be called from a worker. */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+fun rasterizeFormula(sha: String, svg: String, em: Float = 32f): ByteArray {
+    val doc = MathSvgDocument.parse(sha, svg)
+    val w = ceil(doc.widthEm * em).toInt().coerceAtLeast(1)
+    val h = ceil(doc.box[3] / 1000f * em).toInt().coerceAtLeast(1)
+    require(w <= 16000 && h <= 16000 && w.toLong() * h <= 32_000_000) { "公式过大，请缩小导出范围" }
+    var result: ByteArray? = null
+    val render = {
+        val scene = ImageComposeScene(w, h, Density(1f)) {
+            val measurer = rememberTextMeasurer()
+            Canvas(Modifier.fillMaxSize().background(Color.White)) {
+                with(MathSvgPainter(doc, Color.Black, measurer, em)) { draw(size) }
+            }
+        }
+        try {
+            scene.render().use { image -> image.encodeToData()!!.use { result = it.bytes } }
+        } finally { scene.close() }
+    }
+    if (SwingUtilities.isEventDispatchThread()) render() else SwingUtilities.invokeAndWait(render)
+    return checkNotNull(result)
 }

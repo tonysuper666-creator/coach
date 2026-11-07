@@ -108,6 +108,9 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val found=if(page==null) null else actor.execute { browsablePage(call.parameters["course"]!!,call.parameters["doc"]!!,page) }
             if(found==null) call.respond(HttpStatusCode.NotFound) else call.respondText(found.toString(),ContentType.Application.Json)
         }
+        get("/v1/courses/{course}/essays") {
+            call.respondText(actor.execute { essayPrompts(call.parameters["course"]!!) }.toString(),ContentType.Application.Json)
+        }
         get("/v1/courses/{course}/pool") {
             val supply=actor.execute { constructedSupply(call.parameters["course"]!!) }
             call.respondText(json("constructed" to JsonObject(supply.mapValues { JsonPrimitive(it.value) })).toString(),ContentType.Application.Json)

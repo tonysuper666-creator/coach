@@ -47,6 +47,48 @@ private fun pack() = json("id" to "synthetic-pack", "kind" to "pack", "course" t
         "answer" to 0, "explanation" to "Synthetic explanation $i") })))))
 
 class MockExamTest {
+    @Test fun courseCodeAliasesListAndStartPapersAndDrillsWithoutCrossingCourses() {
+        val dir = Files.createTempDirectory("mock-course-alias")
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
+        try {
+            // Published batches can be nested below the library root.
+            library(dir.resolve("papers/round/batch"))
+            val library = MockLibrary(dir.resolve("papers"))
+            val engine = MockEngine(library)
+            val course = "course-synthetic-ledger"
+            store.append(course, "outline_revised", json("course" to json("id" to course, "name" to "c1 Synthetic orchard")))
+            // Later partial revisions must not erase the last available course name.
+            store.append(course, "outline_revised", json("course" to json("name" to " ")))
+            val home = engine.home(store, course)
+            assertEquals(listOf("synthetic-paper"), home.getValue("papers").jsonArray.map { it.jsonObject.str("id") })
+            assertEquals(8, home.getValue("drill").jsonObject.getValue("total").jsonPrimitive.int)
+            assertEquals(1, engine.home(store, "c1").getValue("papers").jsonArray.size, "original course ID remains case insensitive")
+            for (other in listOf("course-other", "", " ")) {
+                val isolated = engine.home(store, other)
+                assertTrue(isolated.getValue("papers").jsonArray.isEmpty())
+                assertEquals(0, isolated.getValue("drill").jsonObject.getValue("total").jsonPrimitive.int)
+                assertEquals(404, assertFailsWith<MockError> { engine.start(store, other, json("paperId" to "synthetic-paper")) }.status.value)
+                assertEquals(404, assertFailsWith<MockError> { engine.start(store, other, json("drill" to json())) }.status.value)
+            }
+            assertEquals("Synthetic mock", engine.start(store, course, json("paperId" to "synthetic-paper")).getValue("paper").jsonObject.str("title"))
+            val drillCourse = "course-synthetic-drill"
+            store.append(drillCourse, "outline_revised", json("course" to json("name" to "C1 Synthetic orchard")))
+            assertEquals(7, engine.start(store, drillCourse, json("drill" to json())).getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.size)
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun missingAndBlankCourseLabelsNeverMatchEvenAnEmptyCourseId() {
+        val dir = Files.createTempDirectory("mock-empty-course")
+        try {
+            for ((name, label) in listOf("missing" to null, "empty" to JsonPrimitive(""), "blank" to JsonPrimitive(" "), "null" to JsonNull)) {
+                val raw = LedgerJson.parseToJsonElement(PAPER).jsonObject - "course"
+                Files.writeString(dir.resolve("$name.json"), JsonObject(if (label == null) raw else raw + ("course" to label)).toString())
+            }
+            val library = MockLibrary(dir)
+            for (course in listOf("", " ", "C1", "null")) assertTrue(library.entries(course).isEmpty(), "unlabelled papers must fail closed")
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     private fun library(dir: Path): MockLibrary {
         Files.createDirectories(dir.resolve("figs"))
         Files.writeString(dir.resolve("paper.json"), PAPER)
@@ -93,12 +135,12 @@ class MockExamTest {
             val sent = started.toString()
             for (secret in listOf("SECRET-EXPLANATION-Q1", "SECRET-MODEL-E1", "SECRET-LOOKFOR", "SECRET-PART-B", "\"answer\":1", "1.25", "rubric", "tolerance"))
                 assertFalse(secret in sent, "the exam view must not leak $secret before submission")
-            assertTrue("<svg" in sent, "figures travel with the exam")
+            assertFalse("<svg" in sent, "standard analytical figures stay hidden until submission")
             assertEquals(409, request("/mocks", json("paperId" to "synthetic-paper")).first, "one exam at a time")
 
             // Leave mid-exam, then come back: the saved answers return with the remaining time.
             val answers = json("Q1" to json("choice" to 1), "Q2" to json("choice" to 0), "E2" to json("text" to "A bridge toll prices congestion; costs fall on commuters."),
-                "X#a" to json("text" to "average", "final" to "2.5"), "X#b" to json("text" to "Indifference holds where values meet.", "final" to "1.30"))
+                "X#a" to json("text" to "average", "final" to "2.50"), "X#b" to json("text" to "Indifference holds where values meet.", "final" to "1.30"))
             assertEquals(200, request("/mocks/$id/answers", json("answers" to answers)).first)
             now.addAndGet(30 * 60_000)
             val resumed = request("/mocks/$id").second
@@ -116,7 +158,8 @@ class MockExamTest {
             assertEquals(4.0, items.getValue("Q1").getValue("score").jsonPrimitive.double)
             assertEquals(0.0, items.getValue("Q2").getValue("score").jsonPrimitive.double)
             assertTrue("SECRET-EXPLANATION-Q2" in items.getValue("Q2").str("feedback"), "after submission the explanation is shown")
-            assertEquals(4.0, items.getValue("X#a").getValue("score").jsonPrimitive.double, "2.5 matches 2.50 within tolerance")
+            assertEquals(4.0, items.getValue("X#a").getValue("score").jsonPrimitive.double, "two-place input matches the frozen key")
+            assertTrue("<svg" in items.getValue("X#a").str("standardFigure"))
             assertEquals("SKIPPED", items.getValue("E1").str("status"), "the unanswered essay is not the chosen one")
             assertEquals("SKIPPED", items.getValue("Y#a").str("status"))
             assertEquals("PENDING", items.getValue("E2").str("status"))

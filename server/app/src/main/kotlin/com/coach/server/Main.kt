@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import java.util.Properties
 import java.io.File
 import com.coach.store.LedgerStore
+import com.coach.store.EssayBank
 import com.coach.core.LedgerActor
 import java.nio.file.Path
 import java.nio.file.Files
@@ -37,6 +38,8 @@ fun main(args: Array<String>): Unit = runBlocking {
         require(args.size == 2) { "usage: app restore BACKUP_DIRECTORY" }
         LedgerStore.restore(data,Path.of(args[1]))
     } else LedgerStore(data)
+    // Generated papers and packs are built from past papers: private directory, never the repo.
+    store.essays = EssayBank(Path.of(System.getenv("COACH_GENERATED_DIR") ?: File(System.getProperty("user.home"),"Coach/materials/generated").path))
     if(args.firstOrNull() == "restore") {
         println("COACH restored epoch=${store.hello().epoch} lastSeqBefore=${store.hello().lastSeqBefore}")
         store.close();lock.release();fileLock.close();return@runBlocking
@@ -109,8 +112,10 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val math = MathProcess.locate()
-    val mocks=MockEngine(MockLibrary.configured())
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks) }
+    val library=MockLibrary.configured()
+    val mocks=MockEngine(library)
+    val mainline=Mainline(library)
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")

@@ -29,6 +29,7 @@ from . import ton1193_isolated_seed as seed
 from . import ton1193_data_transaction as data_transaction
 from . import ton1193_isolated_acceptance as acceptance
 from . import ton1193_isolated_learning as learning
+from . import ton1193_synthetic_cli as synthetic
 
 
 def configure(config_path, config, roots, pid, owned):
@@ -251,9 +252,12 @@ def worker(config_path, report_path, inject):
                   unverified=['successful switch', 'injected failure rollback', 'device', 'production'])
     switch.atomic(marker, b'cleanup not yet proved\n')
     try:
+        cli_proof = synthetic.verify(config)
+        report.update(cli='SYNTHETIC', syntheticCliSha256=cli_proof['sha256'])
         switch.require(probe.command('/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', config['plist']).returncode == 0,
                        'isolated bootstrap failed')
         pid = wait_old(config, roots, label, kernel, owned)
+        report['syntheticPreflight'] = synthetic.smoke(config)
         diagnostic, java = configure(config_path, config, roots, pid, owned)
         if inject:
             config['acceptanceVerifier'] = [sys.executable, '-m',
@@ -322,14 +326,15 @@ def worker(config_path, report_path, inject):
                     baseline = str(root / 'stage/acceptance-baseline.json')
                     acceptance.run(config_path, 'snapshot', baseline)
                     started = time.time()
-                    learning.run(config_path, baseline, started, started + 300, recovery=True)
-                report['restoredLearning'] = dict(lecture=True, threeAnswers=True, ledgerVerified=True,
-                                                 elapsedSeconds=time.time()-started)
+                    report['restoredLearning'] = learning.run(config_path, baseline, started, started + 300, recovery=True)
                 report['injectedFailure'] = str(exc)
                 report['unverified'].remove('injected failure rollback')
         finally:
             done.set()
             thread.join()
+            candidate_learning = root / 'synthetic-learning-candidate.json'
+            if candidate_learning.exists():
+                report['candidateLearning'] = json.loads(candidate_learning.read_bytes())
             report['controllerDiagnostics'] = controller_diagnostics(root)
             report['journal'] = json.loads((root / 'stage/journal.json').read_text())
             if 'dataSnapshotHash' in report['journal']:

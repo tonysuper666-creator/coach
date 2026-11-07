@@ -17,7 +17,8 @@ import time
 from . import ton1193_isolated_acceptance as acceptance
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_live as live
-from .ton1175_switch import GateError, digest, require
+from . import ton1193_synthetic_cli as synthetic
+from .ton1175_switch import GateError, atomic, digest, require
 from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
 
@@ -123,6 +124,9 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
     require(digest(token) == before['tokenSha256'] and digest(credential.encode()) == before['credentialSha256']
             and credential and '\n' not in credential and '\r' not in credential, 'isolated token changed')
     check_phase()
+    synthetic.health(config)
+    log = Path(roots['home']) / 'Coach/bridge/logs/bridge.log'
+    offset = log.stat().st_size if log.exists() else 0
     ws = WebSocket(int(config['adapterEnvPins']['COACH_PORT']), credential,
                    time.monotonic() + deadline - time.time())
     try:
@@ -149,6 +153,12 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
     # Validate ledger evidence, original token, and deadline after the requests.
     acceptance.run(config_path, 'accept', baseline, started, deadline)
     check_phase()
+    evidence = dict(synthetic.evidence(config, offset), lecture=True, threeAnswers=True,
+                    ledgerVerified=True, elapsedSeconds=time.time() - started)
+    atomic(Path(config['stateDir']).parent / ('synthetic-learning-restored.json' if recovery else
+                                            'synthetic-learning-candidate.json'),
+           json.dumps(evidence).encode())
+    return evidence
 
 
 def main():

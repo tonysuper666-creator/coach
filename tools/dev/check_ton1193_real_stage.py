@@ -15,6 +15,7 @@ import sys
 
 from . import ton1175_switch as switch, ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
+from . import ton1193_synthetic_cli as synthetic
 from .rehearse_ton1175_launchd import port
 
 REPO = Path(__file__).resolve().parents[2]
@@ -166,6 +167,10 @@ def main(exercise=None, unstaged_exercise=None):
                                                    **plist_pins)))
         switch.atomic(installation, json.dumps(dict(root=str(old_release), sourceHead=old,
                                                      dataDir=str(home / 'Coach/data'))).encode())
+        cli_proof = synthetic.install(root)
+        proof = json.loads(manifest.read_bytes())
+        proof['isolatedSyntheticCli'] = cli_proof
+        switch.atomic(manifest, json.dumps(proof, sort_keys=True).encode())
         manifest_hash = switch.file_hash(manifest)
         config = {'stateDir': str(root / 'stage'), 'adapterSnapshotDir': str(root / 'stage/snapshot'),
                   'adapterManifest': str(manifest), 'adapterManifestSha256': manifest_hash,
@@ -185,7 +190,7 @@ def main(exercise=None, unstaged_exercise=None):
         switch.atomic(root / 'controller.json', json.dumps(config).encode())
         metadata = {'head': head, 'oldHead': old,
                           'candidateRealDependencies': True, 'oldRealDependencies': True,
-                          'switchAttempted': False,
+                          'switchAttempted': False, 'cli': 'SYNTHETIC', 'syntheticCliSha256': cli_proof['sha256'],
                           'nonce': ident, 'socketPathBytes': len(os.fsencode(isolated.activity_socket(home))),
                           'environmentKeys': sorted(env), 'environmentKeyCount': len(env)}
         if unstaged_exercise is not None:

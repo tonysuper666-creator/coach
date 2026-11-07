@@ -13,7 +13,14 @@ The private descriptor records the original and cloned directory identities,
 the preflight pin, manifest digest, schema version and ledger high-water mark.
 The journal publishes `snapshotted` before either pointer changes. The manifest
 includes every regular file and rejects symlinks, hardlinks and special files.
-A schema inventory also detects SQLite schema changes outside the data root.
+The external inventory is confined to `HOME/Coach`; it never opens external
+SQLite databases. Transaction-owned data, releases, installation metadata and
+the separately pinned plist are excluded. Logs may grow or rotate without being
+read, and runtime paths are opaque. Budget counters are validated and retained,
+with only integer deltas reported. The production key is checked by stat without
+reading it. All other files must keep the same relative paths and SHA-256 hashes.
+Symlinks and special files outside runtime paths are refused. Capture, restore
+before either rename, and commit each record a successful external-state check.
 
 On failed acceptance, candidate shutdown and lock release precede two durable
 same-parent renames: `data` to `data.candidate-<nonce>`, then
@@ -32,6 +39,20 @@ Candidate event delta and mock-session count remain in the quarantine journal.
 The digest of the database `pairing_code` rows yields `PAIRING_CHANGED` or
 `PAIRING_UNCHANGED`. Recovery always records `NOMERGE`: V7-only writes and
 pairing changes are retained for inspection, never applied to V6.
+Unmerged candidate WAL is quarantined byte for byte with its shm file and reports
+`candidateCounts=WAL_PENDING`; main-database counts are lower bounds. Regressed
+candidate sequences report `CANDIDATE_REGRESSED`. Neither candidate anomaly
+prevents restoring the verified snapshot. Snapshot, identity, layout, process,
+lock or external-state failures still stop recovery.
+
+Isolated stages install the deterministic synthetic Claude executable at the
+private `h/.local/bin/claude`, mode 0700, and bind its hash into the stage manifest.
+It responds only to auth status and the bridge's streaming protocol, without
+reading prompts or credentials, network access or paid calls. The existing 18
+environment keys and bridge code are unchanged. Rehearsal evidence must identify
+`cli=SYNTHETIC`, the synthetic served model, `fallback=false`, Codex logged out
+and agy disabled. Real CLI authentication and first-token latency remain
+unverified and belong to TON-1175's separately authorized production gate.
 
 After successful acceptance, `committed` prohibits rollback to V6. Subsequent
 faults require forward repair. The V6 snapshot is retained through the next
@@ -43,9 +64,9 @@ cleaned and checked. A new switch requires a new stage.
 Validation on macOS/APFS:
 
 ```sh
-COACH_HEAVY_PRIORITY=release tools/dev/heavy python3 -B -m unittest -v tools.dev.test_ton1193_data_transaction tools.dev.test_ton1193_data_snapshot tools.dev.test_ton1193_snapshots
-COACH_HEAVY_PRIORITY=release python3 -B -m tools.dev.check_ton1193_real_acceptance --apply --inject-failure --report ../ton1193-data-rollback.json
-COACH_HEAVY_PRIORITY=release python3 -B -m tools.dev.check_ton1193_real_acceptance --apply --report ../ton1193-data-success.json
+COACH_HEAVY_PRIORITY=release tools/dev/heavy python3 -B -m unittest -v tools.dev.test_ton1193_data_transaction tools.dev.test_ton1193_data_snapshot tools.dev.test_ton1193_snapshots tools.dev.test_ton1193_external_state tools.dev.test_ton1193_synthetic_cli
+COACH_HEAVY_PRIORITY=release python3 -B -m tools.dev.check_ton1193_real_acceptance --apply --inject-failure --report ../ton1193-synthetic-rollback.json
+COACH_HEAVY_PRIORITY=release python3 -B -m tools.dev.check_ton1193_real_acceptance --apply --report ../ton1193-synthetic-success.json
 ```
 
 Each real invocation requires a clean committed tree, builds both real releases

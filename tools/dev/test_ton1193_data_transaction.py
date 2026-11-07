@@ -198,11 +198,55 @@ class DataTransactionTest(unittest.TestCase):
     def test_new_schema_outside_data_stops_restore(self):
         value = self.capture()
         self.migrate()
-        with closing(sqlite3.connect(self.active.parent.parent / 'outside.sqlite')) as db, db:
+        with closing(sqlite3.connect(self.active.parent / 'outside.sqlite')) as db, db:
             db.execute('CREATE TABLE unauthorized(id INTEGER)')
-        with self.assertRaisesRegex(switch.GateError, 'schema outside data changed'):
+        with self.assertRaisesRegex(switch.GateError, 'EXTERNAL_STATE_CHANGED category=5'):
             data.restore(self.c)
         self.assertFalse(data._path(value, 'candidate').exists())
+
+    def test_capture_merges_existing_journal_fields(self):
+        switch.atomic(self.ops / 'journal.json', json.dumps({'phase': 'switching', 'proof': 'keep'}).encode())
+        self.capture()
+        self.assertEqual(data._journal(self.c)['proof'], 'keep')
+
+    def test_pending_candidate_wal_is_quarantined_without_blocking_restore(self):
+        value = self.capture()
+        self.migrate()
+        # Kill a real WAL writer: leave a committed, non-checkpointed WAL/shm.
+        script = '''import os,sqlite3,sys
+db=sqlite3.connect(sys.argv[1]); db.execute('PRAGMA journal_mode=WAL')
+db.execute('INSERT INTO events VALUES(44)'); db.commit(); os._exit(0)
+'''
+        subprocess.run([sys.executable, '-c', script, str(self.active / 'coach.sqlite')], check=True)
+        manifest = data.clone.fingerprint(self.active)
+        wal = (self.active / 'coach.sqlite-wal').read_bytes()
+        self.assertTrue(wal)
+        data.restore(self.c)
+        _, journal = data.load(self.c)
+        self.assertEqual(journal['candidateCounts'], 'WAL_PENDING')
+        self.assertEqual(data.counts(self.active), value['before'])
+        self.assertEqual(journal['candidateManifest'], manifest)
+        quarantine = data._path(value, 'candidate')
+        self.assertEqual((quarantine / 'coach.sqlite-wal').read_bytes(), wal)
+        self.assertTrue((quarantine / 'coach.sqlite-shm').exists())
+
+    def test_regressed_candidate_is_still_restored(self):
+        value = self.capture()
+        self.migrate()
+        with closing(sqlite3.connect(self.active / 'coach.sqlite')) as db, db:
+            db.execute('DELETE FROM events')
+        data.restore(self.c)
+        self.assertEqual(data._journal(self.c)['candidateCounts'], 'CANDIDATE_REGRESSED')
+        self.assertEqual(data.counts(self.active), value['before'])
+
+    def test_external_violation_prevents_commit(self):
+        self.capture()
+        self.migrate()
+        switch.set_journal(self.ops, 'validating')
+        (self.active.parent / 'outside.json').write_text('{}')
+        with self.assertRaisesRegex(switch.GateError, 'EXTERNAL_STATE_CHANGED category=5'):
+            data.commit(self.c)
+        self.assertEqual(data._journal(self.c)['dataState'], 'captured')
 
 
 if __name__ == '__main__':

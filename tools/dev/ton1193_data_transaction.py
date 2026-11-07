@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 from . import ton1193_data_snapshot as clone, ton1193_receipt as receipt
+from . import ton1193_external_state as external
 from .ton1175_switch import atomic, digest, require, GateError
 from .ton1193_live import _live_transaction
 from .ton1193_transaction import _read_file, load_bound_state
@@ -132,11 +133,11 @@ def _label_absent(c):
     require(result.returncode == 113, 'launchd label still present')
 
 
-def counts(path):
+def counts(path, *, lower_bound=False):
     """Stopped, immutable SQLite view; reject uncheckpointed WAL instead of losing it."""
     path = Path(path)
     wal = path / 'coach.sqlite-wal'
-    require(not wal.exists() or wal.stat().st_size == 0, 'database WAL not checkpointed')
+    require(lower_bound or not wal.exists() or wal.stat().st_size == 0, 'database WAL not checkpointed')
     fd = _open_path(str(path / 'coach.sqlite'))
     try:
         node = os.fstat(fd)
@@ -159,40 +160,19 @@ def counts(path):
         os.close(fd)
 
 
-def outside_schemas(data):
-    """Inventory schemas outside data, allowing non-schema runtime writes.
-
-    Runtime sockets and ordinary logs are not opened. Release payloads and
-    retained data siblings are separately pinned, so are excluded here.
-    """
-    result = {}
-    base = Path(data).parent.parent
-    directory_snapshot(base)
-    for directory, dirs, files in os.walk(base, followlinks=False):
-        here = Path(directory)
-        if here == Path(data).parent:
-            dirs[:] = [name for name in dirs if name != 'data' and not name.startswith(('data.pre-', 'data.candidate-'))]
-        if here == Path(data).parent / 'service':
-            dirs[:] = [name for name in dirs if name != 'releases']
-        for name in dirs + files:
-            path = Path(directory) / name
-            info = path.lstat()
-            require(not stat.S_ISLNK(info.st_mode), 'outside data contains symlink')
-            if not stat.S_ISREG(info.st_mode):
-                continue
-            fd = _open_path(str(path))
-            try:
-                magic = os.read(fd, 16)
-            finally:
-                os.close(fd)
-            if magic == b'SQLite format 3\0':
-                db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)
-                try:
-                    schema = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()
-                    result[str(path.relative_to(base))] = digest(_json(schema))
-                finally:
-                    db.close()
-    return result
+def candidate_observation(path, before):
+    wal = Path(path) / 'coach.sqlite-wal'
+    pending = wal.exists() and wal.stat().st_size > 0
+    try:
+        observed = counts(path, lower_bound=True)
+    except (GateError, OSError, sqlite3.Error):
+        return dict(candidateCounts='WAL_PENDING' if pending else 'CANDIDATE_UNREADABLE',
+                    candidateLowerBounds=None)
+    if pending:
+        return dict(candidateCounts='WAL_PENDING', candidateLowerBounds=observed)
+    if observed['lastSeq'] < before['lastSeq']:
+        return dict(candidateCounts='CANDIDATE_REGRESSED', candidateLowerBounds=observed)
+    return dict(candidateCounts=observed)
 
 
 def capture(c, seal):
@@ -211,14 +191,16 @@ def capture(c, seal):
     value = dict(version=1, pinHash=pin_hash, nonce=nonce, sealHash=digest(seal.encode()),
                  dataPath=str(data), dataId=directory_snapshot(data), parentId=directory_snapshot(data.parent),
                  snapshotId=directory_snapshot(saved), manifest=manifest, before=before,
-                 outsideSchemas=outside_schemas(data))
+                 outsideState=external.inventory(data))
     # Exclusive descriptor then journal publication. A crash before publication
     # never authorizes an unbound clone; it requires inspection and a new stage.
     from .ton1193_preflight import _exclusive_file
     raw = _json(value)
     _exclusive_file(str(private), NAME, raw)
-    atomic(Path(c['stateDir']) / 'journal.json', _json(dict(
-        phase='snapshotted', dataSnapshotHash=digest(raw), dataState='captured')))
+    journal = _journal(c)
+    journal.update(phase='snapshotted', dataSnapshotHash=digest(raw), dataState='captured',
+                   externalChecks={'capture': {'passed': True}})
+    atomic(Path(c['stateDir']) / 'journal.json', _json(journal))
 
 
 def stable_paths(c, stable):
@@ -291,11 +273,12 @@ def restore(c):
         require(directory_snapshot(data) == tuple(value['dataId']), 'candidate directory changed')
     paths = ([data] if active else []) + ([saved] if saved_exists else []) + ([candidate] if quarantined else [])
     _quiescent(c, paths)
-    require(outside_schemas(data) == value['outsideSchemas'], 'schema outside data changed')
+    delta = external.compare(value['outsideState'], external.inventory(data))
+    checks = dict(journal['externalChecks'], restore=dict(passed=True, budgetDelta=delta))
+    _checkpoint(c, journal['dataState'], externalChecks=checks)
     if not quarantined:
-        candidate_counts = counts(data)
-        require(candidate_counts['lastSeq'] >= value['before']['lastSeq'], 'candidate ledger regressed')
-        _checkpoint(c, 'quarantining', candidateManifest=clone.fingerprint(data), candidateCounts=candidate_counts)
+        observation = candidate_observation(data, value['before'])
+        _checkpoint(c, 'quarantining', candidateManifest=clone.fingerprint(data), **observation)
         _rename(value, data.name, candidate.name)
     value, journal = load(c)
     require(clone.fingerprint(candidate) == journal['candidateManifest'], 'quarantine manifest changed')
@@ -310,9 +293,12 @@ def restore(c):
             and clone.fingerprint(data) == value['manifest'] and counts(data) == value['before'],
             'restored snapshot differs')
     candidate_counts = journal['candidateCounts']
-    pairing = 'PAIRING_UNCHANGED' if candidate_counts['pairingHash'] == value['before']['pairingHash'] else 'PAIRING_CHANGED'
+    pairing = 'PAIRING_UNVERIFIED'
+    if isinstance(candidate_counts, dict):
+        pairing = 'PAIRING_UNCHANGED' if candidate_counts['pairingHash'] == value['before']['pairingHash'] else 'PAIRING_CHANGED'
+    observed = candidate_counts if isinstance(candidate_counts, dict) else journal.get('candidateLowerBounds')
     _checkpoint(c, 'restored', restoredCounts=counts(data), pairing=pairing, merge='NOMERGE',
-                candidateEventDelta=candidate_counts['lastSeq'] - value['before']['lastSeq'])
+                candidateEventDelta=observed['lastSeq'] - value['before']['lastSeq'] if observed else None)
 
 
 def commit(c):
@@ -321,5 +307,6 @@ def commit(c):
     require(directory_snapshot(value['dataPath']) == tuple(value['dataId'])
             and directory_snapshot(_path(value, 'pre')) == tuple(value['snapshotId'])
             and clone.fingerprint(_path(value, 'pre')) == value['manifest'], 'retained snapshot changed')
-    require(outside_schemas(value['dataPath']) == value['outsideSchemas'], 'schema outside data changed')
-    _checkpoint(c, 'committed')
+    delta = external.compare(value['outsideState'], external.inventory(value['dataPath']))
+    checks = dict(journal['externalChecks'], commit=dict(passed=True, budgetDelta=delta))
+    _checkpoint(c, 'committed', externalChecks=checks)

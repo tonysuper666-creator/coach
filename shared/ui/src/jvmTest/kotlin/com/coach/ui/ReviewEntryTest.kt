@@ -118,6 +118,13 @@ class ReviewEntryTest {
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
                 if (integrated) {
                     onNodeWithText("每日提醒 08:00").assertIsDisplayed()
+                    onNodeWithTag("open-mainline").assertIsDisplayed().performClick()
+                    onNodeWithText("选择题主线要连接 Mac。").assertIsDisplayed()
+                    onNodeWithText("← 复习").performClick()
+                    onNodeWithText("错题 0").assertIsDisplayed().performClick()
+                    onNodeWithText("还没有答错的题").assertIsDisplayed()
+                    onNodeWithText("到期 1").performClick()
+                    onNodeWithText("1 个知识点到期").assertIsDisplayed()
                     onNodeWithTag("essay-entry").assertIsDisplayed().performClick()
                     onNodeWithText("← 复习").performClick()
                     onNodeWithTag("essay-entry").assertIsDisplayed()

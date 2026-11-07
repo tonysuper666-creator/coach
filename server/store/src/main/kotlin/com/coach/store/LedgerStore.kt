@@ -546,7 +546,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (recent.isEmpty()) recent += events(course).filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" }.takeLast(2)
             .mapNotNull { letterMap(it.payload)[choiceId(it.payload.str("questionId"))] }
         val maps = keys.map { key ->
-            val correct = optionLetters(key.options.size).filter { it !in recent.takeLast(2) }.random(rng)
+            val letters = optionLetters(key.options.size)
+            // Two-option questions must alternate once both letters have been used.
+            val candidates = letters.filter { it !in recent.takeLast(2) }
+                .ifEmpty { letters.filter { it != recent.lastOrNull() } }
+            val correct = candidates.random(rng)
             val rest = optionLetters(key.options.size).filter { it != correct }.shuffled(rng).iterator()
             recent += correct
             sql("INSERT INTO choice_allocations(course_id,correct_letter) VALUES(?,?)",course,correct)
@@ -764,8 +768,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     if (old == null) { status="REJECTED"; error="MISTAKE_CHANGED" }
                     else {
                         val qid = old.payload.str("questionId")
-                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        val verified = query("SELECT key_state FROM questions WHERE course_id=? AND question_id=? AND format='SINGLE_CHOICE'", body.courseId, qid) { it.getString(1) }.singleOrNull() == "VERIFIED"
+                        val options = if (verified) choiceOptions(qid) else emptyList()
+                        val key = if (verified) choiceId(qid).orEmpty() else ""
+                        val usable = try { ChoiceKey(options, key); true } catch (_: IllegalArgumentException) { false }
                         if (!verified) { status="REJECTED"; error="QUESTION_UNAVAILABLE" }
+                        else if (!usable) {
+                            status="REJECTED"; error="QUESTION_OPTIONS_UNAVAILABLE"
+                        }
                         else {
                             val thread = "week-review:${p.num("week")}:$qid"
                             val posed = poseChoiceGroup(body.courseId, "week:${c.commandId}", listOf(JsonObject(old.payload - setOf("mockId", "marks") + mapOf(

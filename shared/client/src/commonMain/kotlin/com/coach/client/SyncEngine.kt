@@ -183,10 +183,27 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         }
         retainOrPrune(hello.epoch,hello.backedUpThroughSeq)
         val pending = q.allCommands().executeAsList().filter { it.ack_seq == null }
+        val blocked = mutableListOf<CommandBody?>()
+        // Only independent retries may overtake an uncertain command within a course.
+        // Include skipped commands as barriers too (e.g. a queued answer before another retry).
+        val questions = courses.associateWith { course -> localEvents(course).filter { it.type == "question_posed" }
+            .associate { it.payload.str("attemptId") to it.payload.str("questionId") } }
+        fun mayOvertake(earlier: CommandBody?, later: CommandBody?): Boolean {
+            if (earlier == null || later == null || earlier.courseId.isBlank() || later.courseId.isBlank()) return false
+            if (earlier.courseId != later.courseId) return true
+            if (earlier.type != "retry_week_mistake" || later.type != "retry_week_mistake") return false
+            val ids = questions[earlier.courseId].orEmpty()
+            val a = ids[earlier.payload.str("attemptId")].orEmpty()
+            val b = ids[later.payload.str("attemptId")].orEmpty()
+            return a.isNotBlank() && b.isNotBlank() && a != b
+        }
         for(row in pending) {
+            val body = try { LedgerJson.decodeFromString<CommandBody>(row.payload_bytes) } catch (_: Exception) { null }
+            if (blocked.any { !mayOvertake(it, body) }) { blocked += body; continue }
             // 永久拒收的命令（如换过配对留下的旧设备命令、超过 1 MiB 的笔记）记为 REJECTED，不能挡住后面的命令和拉取。
             val receipt = try { transport.command(WireCommand(row.device_id,row.command_id,row.payload_bytes,row.payload_sha256)) }
                 catch(e: CommandRefused) { Receipt(row.command_id,"REJECTED",error="HTTP_${e.status}",epoch=hello.epoch,backedUpThroughSeq=hello.backedUpThroughSeq) }
+                catch(e: CommandUploadDeferred) { blocked += body; continue }
             check(receipt.epoch == hello.epoch) { "Epoch changed during upload" }
             db.transaction {
                 q.ackCommand(receipt.eventSeqs.maxOrNull() ?: 0,receipt.status,row.command_id)

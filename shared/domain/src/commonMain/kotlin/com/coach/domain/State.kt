@@ -37,7 +37,9 @@ typealias JournalDay = Journal
     val quickAsks: Map<Long, QuickAskThread> = emptyMap(),
     val studyScope: StudyScope? = null,
     val position: Position = Position(), val mastery: Map<String, Mastery> = emptyMap(),
-    val review: Map<String, Review> = emptyMap(), val journal: Map<Long, Journal> = emptyMap(),
+    val review: Map<String, Review> = emptyMap(),
+    /** Points not yet passed that a missed or guessed answer put back into the due queue, by due day. */
+    val revisit: Map<String, Long> = emptyMap(), val journal: Map<Long, Journal> = emptyMap(),
     val coverage: Coverage = Coverage(), val orphanedAttempts: List<String> = emptyList(),
     val unsupportedTypes: List<String> = emptyList(), val requiresServerSnapshot: Boolean = false
 ) {

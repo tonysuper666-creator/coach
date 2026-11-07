@@ -7,8 +7,10 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.SecureRandom
 
+internal data class BridgeTraffic(val traffic: String, val bridgePort: Int)
+
 /** Only the managed production service may identify its calls as learner traffic. */
-internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
+internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean): BridgeTraffic {
     val traffic = env["COACH_TRAFFIC"] ?: if (managed) "user" else "test"
     val bridge = URI(env["COACH_BRIDGE_URL"] ?: "http://127.0.0.1:8791")
     require(traffic in setOf("user","test")) { "COACH_TRAFFIC must be user or test" }
@@ -16,7 +18,30 @@ internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
         require(traffic == "test" && bridge.port in 1..65535 && bridge.port !in setOf(8790,8791)) {
             "Standalone/test servers require COACH_BRIDGE_URL on their own bridge port; production 8790/8791 are forbidden"
         }
-        return
+        if (managed) {
+            val forbiddenPorts = setOf(3790, 8790, 8791, 18791)
+            val bridgePort = env["BRIDGE_PORT"]?.toIntOrNull()
+            val serverPort = env["COACH_PORT"]?.toIntOrNull()
+            require(env.containsKey("COACH_BRIDGE_URL") && bridge.scheme == "http" &&
+                bridge.host in setOf("127.0.0.1", "localhost", "::1", "[::1]") &&
+                bridge.port !in forbiddenPorts && bridgePort == bridge.port &&
+                serverPort != null && serverPort in 1..65535 && serverPort !in forbiddenPorts) {
+                "Managed test traffic requires explicit private loopback ports"
+            }
+            val home = Path.of(System.getProperty("user.home"))
+            val forbidden = listOf(home.resolve("Coach/data"), home.resolve("Coach/bridge"))
+                .map { it.toFile().canonicalFile.toPath() }
+            for (name in listOf("COACH_DATA_DIR", "COACH_BRIDGE_HOME", "COACH_RUN_DIR", "COACH_LOG_DIR")) {
+                val value = env[name]
+                require(!value.isNullOrBlank() && Path.of(value).isAbsolute) { "$name must be an explicit private path" }
+                val path = Path.of(value).toFile().canonicalFile.toPath()
+                require(forbidden.none { path.startsWith(it) }) { "$name must not use production data or bridge paths" }
+            }
+            require(!env.containsKey("COACH_BRIDGE_PRODUCTION_KEY_FILE")) {
+                "Managed test traffic must not use a production key override"
+            }
+        }
+        return BridgeTraffic(traffic, bridge.port)
     }
     val productionData = Path.of(System.getProperty("user.home"),"Coach/data").toAbsolutePath().normalize()
     val data = Path.of(env["COACH_DATA_DIR"] ?: productionData.toString()).toAbsolutePath().normalize()
@@ -25,6 +50,9 @@ internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
     }
     require(bridge.host in setOf("127.0.0.1","localhost","::1","[::1]") && bridge.port == 8791) {
         "Managed learner traffic must use the local production Coach bridge"
+    }
+    require((env["BRIDGE_PORT"] ?: "8791").toIntOrNull() == 8791) {
+        "The managed bridge must use the isolated Coach port 8791"
     }
     val home = Path.of(env["COACH_BRIDGE_HOME"] ?: Path.of(System.getProperty("user.home"),"Coach/bridge").toString())
     val key = Path.of(env["COACH_BRIDGE_PRODUCTION_KEY_FILE"] ?: home.resolve("state/production-key").toString())
@@ -42,4 +70,5 @@ internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
     }
     require(Files.readString(key).trim().matches(Regex("[a-f0-9]{64}"))) { "Invalid local production bridge credential" }
     Files.setPosixFilePermissions(key,PosixFilePermissions.fromString("rw-------"))
+    return BridgeTraffic(traffic, bridge.port)
 }

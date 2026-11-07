@@ -299,7 +299,7 @@ class Supervisor:
             # A worker can die without receiving TERM (SIGKILL/crash). Clean
             # every owned group first, then recover with a separate bounded worker.
             needs_recovery = apply and (code != 0 or expired) and phase in (
-                'switching', 'validating', 'recovering', 'recovery_required', 'switched')
+                'switching', 'snapshotted', 'validating', 'recovering', 'recovery_required', 'switched')
             recovered = True
             if needs_recovery:
                 self.event('recovery_started', phase=phase)

@@ -7,6 +7,19 @@ class ExamTextGuardTest {
     private val exam = "Amber badgers carry delicate emerald feathers gently home. Ivory jaguars keep lemons near old purple quails."
     private val index = ExamTextIndex(listOf(exam, "Rivers shine through unusual valleys while xenon yields zephyrs."))
 
+    @Test fun asciiFastPathMatchesOriginalNormalizationAndOffsets() {
+        val random = Random(1250)
+        val alphabet = (0..127).map { it.toChar() } + listOf('α', 'а', 'é', '\u0301', '\u200b', '\uD835', '\uDD04')
+        val inputs = listOf((0..127).map { it.toChar() }.joinToString(""), "a\u0301_*\\text{α}b") +
+            List(500) { List(random.nextInt(100)) { alphabet[random.nextInt(alphabet.size)] }.joinToString("") }
+        for (input in inputs) for (visible in listOf(false, true)) for (control in listOf(false, true))
+            for (separate in listOf(false, true)) for (soft in listOf(false, true)) {
+                val baseline = ExamTextIndex.scan(input, visible, control, separate, soft, asciiFastPath = false)
+                val fast = ExamTextIndex.scan(input, visible, control, separate, soft)
+                assertEquals(baseline, fast)
+            }
+    }
+
     @Test fun divergingPartialWordReleasesEarlierWithoutReleasingAnIndexedWindow() {
         val guard = ExamTextGuard(index)
         assertEquals("", guard.push("Amber "))

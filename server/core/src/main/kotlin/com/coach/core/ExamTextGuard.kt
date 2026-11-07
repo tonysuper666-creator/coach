@@ -149,7 +149,7 @@ class ExamTextIndex(documents: List<String>) {
 
         // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.
         // Only the matching view is folded; normal replies are published unchanged.
-        internal fun scan(text: String, visible: Boolean = true, controlWords: Boolean = visible, markupSeparates: Boolean = !visible, softMarkup: Boolean = false): Scan {
+        internal fun scan(text: String, visible: Boolean = true, controlWords: Boolean = visible, markupSeparates: Boolean = !visible, softMarkup: Boolean = false, asciiFastPath: Boolean = true): Scan {
             val normalized = StringBuilder()
             val starts = ArrayList<Int>()
             val ends = ArrayList<Int>()
@@ -172,6 +172,20 @@ class ExamTextIndex(documents: List<String>) {
                 var end = offset + Character.charCount(text.codePointAt(offset))
                 if (!visible) while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
                     end += Character.charCount(text.codePointAt(end))
+                // ASCII is already in NFKD; avoid a Normalizer allocation for
+                // each character on the common path. Keep combining sequences
+                // on the original path so their raw end offsets stay identical.
+                val ascii = text[offset]
+                if (asciiFastPath && ascii.code < 128 && end == offset + 1) {
+                    val c = if (ascii in 'A'..'Z') ascii + ('a' - 'A') else ascii
+                    if (softMarkup && ascii.code in MARKUP) {
+                        normalized.append('\u0001'); starts.add(offset); ends.add(end)
+                    } else if (markupSeparates || ascii.code !in MARKUP) {
+                        normalized.append(c); starts.add(offset); ends.add(end)
+                    }
+                    offset = end
+                    continue
+                }
                 // Invisible characters and accents cannot split readable words in
                 // any view, including words immediately following a backslash.
                 val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKD)

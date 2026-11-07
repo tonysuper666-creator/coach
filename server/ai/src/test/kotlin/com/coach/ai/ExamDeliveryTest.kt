@@ -9,6 +9,15 @@ class ExamDeliveryTest {
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
     private val index = ExamTextIndex(exams)
 
+    @Test fun otherCoursesWithoutExamContextPublishAnUnambiguousFirstChunk() {
+        val materials = ExamMaterials.fromTexts(exams)
+        assertEquals("", materials.context("another-course", "teach"))
+        val delivery = ExamDelivery { checkNotNull(materials.guard("another-course")) }
+        val published = delivery.push(VisibleStream.Segment.Text("先看一个新例子。"))
+        assertEquals("先看一个新例子。", published.joinToString("") { ExamDelivery.markdown(it) })
+        assertFalse(delivery.blocked)
+    }
+
     @Test fun textMathAndReplacementShareOneProtectedPublication() {
         val delivery = ExamDelivery { ExamTextGuard(index) }
         val published = StringBuilder()

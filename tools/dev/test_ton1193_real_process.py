@@ -32,8 +32,28 @@ class RealProcessRegressionTest(unittest.TestCase):
                  mock.patch.object(probe.acceptance, 'observe', side_effect=GateError('secret path and token')):
                 with self.assertRaisesRegex(GateError, 'did not become ready'):
                     probe.wait_ready(config, {}, 'label', Path('/isolated/old'), mock.Mock(), {}, diagnostic)
-            self.assertEqual(diagnostic, {'step': 'HELLO', 'reason': 'GATE_REJECTED'})
+            self.assertEqual(diagnostic, {'step': 'HELLO', 'reason': 'GATE_REJECTED',
+                                          'jobAbsent': 0, 'jobNoPid': 0, 'jobPid': 1,
+                                          'lastFailureStep': 'HELLO', 'lastFailureReason': 'GATE_REJECTED'})
             self.assertNotIn('secret', json.dumps(diagnostic))
+
+    def test_restored_readiness_counts_job_states_and_keeps_last_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'snapshot.json').write_text(json.dumps({'sides': {'old': {}}}))
+            diagnostic = {}
+            with mock.patch.object(probe.time, 'monotonic', side_effect=[0, 1, 2, 3, 61]), \
+                 mock.patch.object(probe.time, 'sleep'), \
+                 mock.patch.object(probe, 'job', side_effect=[0, 123, None]), \
+                 mock.patch.object(probe, 'collect'), \
+                 mock.patch.object(probe.process, '_identity', return_value=(1, '/isolated/old/app/lib/x')), \
+                 mock.patch.object(probe.acceptance, 'observe', side_effect=GateError('private detail')):
+                with self.assertRaisesRegex(GateError, 'did not become ready'):
+                    probe.wait_ready({'adapterSnapshotDir': root}, {}, 'label',
+                                     Path('/isolated/old'), mock.Mock(), {}, diagnostic)
+            self.assertEqual(diagnostic, {'step': 'JOB', 'reason': 'NOT_READY',
+                                          'jobAbsent': 1, 'jobNoPid': 1, 'jobPid': 1,
+                                          'lastFailureStep': 'HELLO', 'lastFailureReason': 'GATE_REJECTED'})
+            self.assertNotIn('private', json.dumps(diagnostic))
 
     def test_collection_finds_children_started_after_first_snapshot(self):
         kernel = mock.Mock()

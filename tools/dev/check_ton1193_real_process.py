@@ -129,9 +129,13 @@ def wait_ready(config, roots, label, release, kernel, owned, diagnostic=None):
     side = snapshot['sides'][release.name]
     deadline = time.monotonic() + 60
     diagnostic = diagnostic if diagnostic is not None else {}
+    diagnostic.update(jobAbsent=0, jobNoPid=0, jobPid=0,
+                      lastFailureStep='NONE', lastFailureReason='NONE')
     while time.monotonic() < deadline:
         diagnostic.update(step='JOB', reason='NOT_READY')
         pid = job(config, label)
+        counter = 'jobAbsent' if pid is None else 'jobPid' if pid else 'jobNoPid'
+        diagnostic[counter] += 1
         if pid:
             collect(kernel, pid, owned)
             identity = process._identity(pid)
@@ -179,6 +183,8 @@ def wait_ready(config, roots, label, release, kernel, owned, diagnostic=None):
                                             'MISSING_FIELD' if isinstance(exc, KeyError) else
                                             'GATE_REJECTED' if isinstance(exc, GateError) else
                                             'HTTP_ERROR')
+                    diagnostic.update(lastFailureStep=diagnostic['step'],
+                                      lastFailureReason=diagnostic['reason'])
         time.sleep(.2)
     raise GateError('real managed services/HTTP identity did not become ready')
 

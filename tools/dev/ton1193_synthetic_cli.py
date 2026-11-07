@@ -8,7 +8,7 @@ from .ton1175_switch import atomic, file_hash, require
 from .ton1193_trust import _open_path
 
 SOURCE = Path(__file__).with_name('ton1193_synthetic_claude.py')
-MODEL = 'ton1193-synthetic-claude'
+MODEL = 'claude-ton1193-synthetic'
 
 
 def target(root):

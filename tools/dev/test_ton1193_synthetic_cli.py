@@ -62,9 +62,9 @@ class SyntheticCliTest(unittest.TestCase):
         previous.write_text('旧行 rid=old served=real fallback=1 status=failed\n')
         offsets = synthetic.log_offsets(config)
         with previous.open('a') as stream:
-            stream.write('new rid=one served=ton1193-synthetic-claude fallback=0 status=complete\n')
+            stream.write('new rid=one served=claude-ton1193-synthetic fallback=0 status=complete\n')
         (logs / 'bridge-2026-11-07.log').write_text(
-            'new rid=two served=ton1193-synthetic-claude fallback=0 status=complete\n')
+            'new rid=two served=claude-ton1193-synthetic fallback=0 status=complete\n')
         with patch.object(synthetic, 'health', return_value={'cli': 'SYNTHETIC'}):
             result = synthetic.evidence(config, offsets)
             self.assertEqual(result['completedRequests'], 2)

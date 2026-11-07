@@ -3,7 +3,7 @@
 import json
 import sys
 
-MODEL = 'ton1193-synthetic-claude'
+MODEL = 'claude-ton1193-synthetic'
 TEXT = '这是合成讲课内容：机会成本是作出选择时放弃的最佳替代方案的价值。'
 
 

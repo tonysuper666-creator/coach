@@ -63,10 +63,13 @@ class WebSocket:
 
     def send(self, value):
         data = json.dumps(value, ensure_ascii=False).encode()
+        self.send_frame(1, data)
+
+    def send_frame(self, opcode, data):
         require(len(data) < 65536, 'oversized websocket request')
         mask = os.urandom(4)
         size = len(data)
-        header = bytes((0x81, 0x80 | size)) if size < 126 else bytes((0x81, 0xfe)) + struct.pack('!H', size)
+        header = bytes((0x80 | opcode, 0x80 | size)) if size < 126 else bytes((0x80 | opcode, 0xfe)) + struct.pack('!H', size)
         self.sock.sendall(header + mask + bytes(x ^ mask[i % 4] for i, x in enumerate(data)))
 
     def await_type(self, *types):
@@ -84,6 +87,10 @@ class WebSocket:
             require(size <= 1024 * 1024, 'oversized websocket frame')
             payload = self.read(size)
             require(opcode != 8, 'websocket closed before expected event')
+            if opcode == 9:
+                require(size <= 125, 'oversized websocket ping')
+                self.send_frame(10, payload)
+                continue
             if opcode != 1:
                 continue
             frame = json.loads(payload)
@@ -137,9 +144,12 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
         delta = ws.await_type('msg.delta')
         require(bool(delta.get('text') or delta.get('delta')), 'empty lecture')
         require(ws.await_type('msg.end').get('status') == 'complete', 'lecture incomplete')
-        while ws.await_type('tutor.state').get('state') != 'AWAIT':
-            pass
-        ws.send(dict(common, t='msg.ask', text='继续'))
+        while True:
+            state = ws.await_type('tutor.state').get('state')
+            require(state in ('PREPARE', 'TEACH', 'AWAIT'), 'lecture did not advance tutor state')
+            if state == 'AWAIT':
+                break
+        ws.send(dict(common, t='msg.ask', text='出题'))
         group = ws.await_type('tutor.cards')
         cards = group['cards']
         require(len(cards) == 3, 'expected three isolated questions')

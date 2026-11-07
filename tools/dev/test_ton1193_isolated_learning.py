@@ -1,4 +1,5 @@
 import json
+import socket
 import time
 import unittest
 from unittest import mock
@@ -39,6 +40,13 @@ class LearningDriverTest(unittest.TestCase):
         self.ws_class = self.websocket.start()
         self.addCleanup(self.websocket.stop)
         self.ws = self.ws_class.return_value
+        for name in ('health', 'log_offsets', 'evidence'):
+            patcher = mock.patch.object(learning.synthetic, name, return_value={})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(learning, 'atomic')
+        self.proof_write = patcher.start()
+        self.addCleanup(patcher.stop)
         self.ws.await_type.side_effect = [
             {'state': 'OPEN'}, {}, {'text': 'lesson'}, {'status': 'complete'}, {'state': 'AWAIT'},
             {'groupId': 'g', 'cards': [{'attemptId': str(i), 'questionId': f'q{i}',
@@ -72,6 +80,33 @@ class LearningDriverTest(unittest.TestCase):
             self.run_driver()
         self.ws.close.assert_called_once()
         self.accept_mock.assert_not_called()
+
+    def test_complete_stream_with_failed_tutor_state_never_accepts(self):
+        self.ws.await_type.side_effect = [
+            {'state': 'IDLE'}, {}, {'text': 'lesson'}, {'status': 'complete'},
+            {'state': 'PREPARE'}, {'state': 'TEACH'}, {'state': 'IDLE'}]
+        with self.assertRaisesRegex(GateError, 'did not advance tutor state'):
+            self.run_driver()
+        self.ws.close.assert_called_once()
+        self.accept_mock.assert_not_called()
+        self.proof_write.assert_not_called()
+
+
+class WebSocketControlTest(unittest.TestCase):
+    def test_ping_receives_masked_pong_while_waiting_for_tutor_event(self):
+        client, server = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+        # Exercise the real framing implementation without a managed JVM.
+        ws = learning.WebSocket.__new__(learning.WebSocket)
+        ws.sock, ws.deadline, ws.pending = client, time.monotonic() + 3, []
+        payload = json.dumps({'t': 'tutor.state', 'state': 'AWAIT'}).encode()
+        server.sendall(b'\x89\x03abc' + bytes((0x81, len(payload))) + payload)
+        self.assertEqual(ws.await_type('tutor.state')['state'], 'AWAIT')
+        server.settimeout(3)
+        reply = server.recv(9)
+        self.assertEqual(reply[:2], b'\x8a\x83')
+        self.assertEqual(bytes(x ^ reply[2 + i % 4] for i, x in enumerate(reply[6:])), b'abc')
 
 
 if __name__ == '__main__':

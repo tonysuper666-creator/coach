@@ -29,6 +29,30 @@ private class Script {
 }
 
 class ProjectionTest {
+    @Test fun lateKeyDowngradeSchedulesFromTheChangeWithoutInventingOverdueDays() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (existingDue in listOf<Long?>(40, 14, null)) {
+            val s = Script()
+            s.revise(json("kpId" to "kp"))
+            val d0 = logicalDay(s.at, "Europe/London")
+            if (existingDue != null) {
+                s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+                s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to d0 + existingDue, "interval" to 40))
+            }
+            s.answer("old-right", mainline = true)
+            val before = s.state()
+            s.at += 20 * DAY
+            s.e("question_key_changed", json("questionId" to "old-right", "keyState" to key, "reason" to "synthetic recheck"))
+            val after = s.state()
+            val expected = d0 + minOf(existingDue ?: Long.MAX_VALUE, 21)
+            val actual = if (existingDue == null) after.revisit.getValue("kp") else after.review.getValue("kp").dueDay
+            assertEquals(expected, actual, "$key existingDue=$existingDue: no retroactive d1 deadline at d20")
+            assertEquals(existingDue != null, after.mastery.getValue("kp").passed)
+            assertFalse(after.mastery.getValue("kp").needsRepair)
+            assertEquals(before.journal, after.journal, "key review is not a new student answer or spaced-review failure")
+            assertEquals(after, project(s.events.reversed()), "replay preserves the effective change date")
+        }
+    }
+
     @Test fun uncheckedMainlineOnlyBringsPassedPointsForwardRegardlessOfProvisionalGrade() {
         for (key in listOf("UNREVIEWED", "REJECTED")) for (score in listOf(0, 10))
             for (guessed in listOf(false, true)) for (review in listOf(false, true)) {

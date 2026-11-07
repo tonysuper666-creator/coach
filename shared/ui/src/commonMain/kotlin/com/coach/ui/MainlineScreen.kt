@@ -141,17 +141,19 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val explanation = done?.get("explanation") as? JsonObject
         val reasons = explanation?.get("options") as? JsonObject
         val answer = done?.num("answer")?.toInt()
+        // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
+        val displayedChoice = done?.num("choice")?.toInt() ?: chosen
         options.forEachIndexed { i, option ->
             val mark = when {
                 done == null -> null
                 i == answer -> "✓"
-                i == chosen -> "✗"
+                i == displayedChoice -> "✗"
                 else -> null
             }
             Surface(tonalElevation = if (done != null && i == answer) 3.dp else 0.dp, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().selectable(chosen == i, enabled = done == null && !busy, role = Role.RadioButton) { chosen = i }.padding(vertical = 4.dp).testTag("mainline-option-$i")) {
+                Column(Modifier.fillMaxWidth().selectable(displayedChoice == i, enabled = done == null && !busy, role = Role.RadioButton) { chosen = i }.padding(vertical = 4.dp).testTag("mainline-option-$i")) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        RadioButton(selected = chosen == i, onClick = null, enabled = done == null)
+                        RadioButton(selected = displayedChoice == i, onClick = null, enabled = done == null)
                         Text(letters[i], style = MaterialTheme.typography.titleSmall)
                         Box(Modifier.weight(1f)) { QuizText(option, "mainline:${item.str("id")}:$i", c.math) }
                         mark?.let { Text(it, style = MaterialTheme.typography.titleMedium, color = if (it == "✓") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }

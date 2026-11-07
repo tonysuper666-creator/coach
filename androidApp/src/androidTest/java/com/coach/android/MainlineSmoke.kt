@@ -20,8 +20,9 @@ class MainlineSmoke {
         val args = InstrumentationRegistry.getArguments()
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790, 8791, 18791, 3790))
-        require(context.packageName == "com.coach.android.ton1358")
+        require(context.packageName in setOf("com.coach.android.ton1358", "com.coach.android.ton1364"))
         require(BuildConfig.COACH_COURSE == "ton1358-synthetic-mainline")
+        val retryAfterCommit = args.getString("retryAfterCommit") == "true"
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         KeystoreCredentials(context, base).save(PairedCredentials("desktop", requireNotNull(args.getString("coachToken"))))
         context.deleteDatabase("coach-client.db")
@@ -97,7 +98,22 @@ class MainlineSmoke {
         fun answer(option: String, guessed: Boolean, outcome: String, shot: String) {
             click(waitFor(option, contains = true))
             clickWhenEnabled(if (guessed) "我是猜的" else "提交")
+            if (retryAfterCommit) {
+                show("Synthetic response lost after commit")
+                click(show("Synthetic plums ripen early", contains = true))
+                click(show(if (guessed) "提交" else "我是猜的"))
+            }
             show("为什么对：", contains = true)
+            if (retryAfterCommit) {
+                fun row(optionText: String): AccessibilityNodeInfo {
+                    var node = show(optionText, contains = true)
+                    while (!node.isCheckable) node = node.parent ?: throw AssertionError("Missing option radio state")
+                    return node
+                }
+                assertTrue("the committed option stays selected", row(option).isChecked)
+                assertFalse("the edited retry choice is not selected", row("Synthetic plums ripen early").isChecked)
+                show(option, contains = true)
+            }
             screenshot(shot)
             show(outcome)
         }

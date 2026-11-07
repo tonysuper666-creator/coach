@@ -39,6 +39,52 @@ Synthetic facts.
 """.trimIndent()
 
 class MainlineTest {
+    @Test fun submissionCannotBeReusedForAnotherItemAcrossHttpAndRestart() = runBlocking<Unit> {
+        for (shuffled in listOf(false, true)) {
+            val dir = Files.createTempDirectory("mainline-retry-binding")
+            val now = AtomicLong(1_800_000_000_000)
+            val db = Files.createDirectories(dir.resolve("db"))
+            var expected: JsonObject? = null
+            try {
+                repeat(2) { restart ->
+                    val store = LedgerStore(db) { now.get() }
+                    if (restart == 0) store.enroll("phone", "synthetic-private-token-32-characters")
+                    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+                    val actor = LedgerActor(scope, store)
+                    val pushes = MutableSharedFlow<String>(extraBufferCapacity = 64)
+                    val mainline = Mainline(library(dir.resolve("papers")), clock = { now.get() })
+                    val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) { mainlineRoutes(actor, pushes, mainline) }
+                    engine.start(false)
+                    try {
+                        val port = engine.engine.resolvedConnectors().single().port
+                        val http = HttpClient.newHttpClient()
+                        suspend fun send(item: String, choice: Int, guessed: Boolean): Pair<Int, JsonObject> = withContext(Dispatchers.IO) {
+                            val body = json("itemId" to item, "choice" to choice, "guessed" to guessed,
+                                "submissionId" to "one-submission", "layout" to if (shuffled) 3 else null)
+                            val request = HttpRequest.newBuilder(URI("http://127.0.0.1:$port/v1/courses/C1/mainline/1/answer"))
+                                .header("X-Coach-Device", "phone").header("Authorization", "Bearer synthetic-private-token-32-characters")
+                                .POST(HttpRequest.BodyPublishers.ofString(body.toString())).build()
+                            val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+                            response.statusCode() to LedgerJson.parseToJsonElement(response.body()).jsonObject
+                        }
+                        if (restart == 0) {
+                            val first = send("S1", 0, true)
+                            assertEquals(200, first.first)
+                            expected = first.second
+                        }
+                        val before = store.events("C1")
+                        val retry = send("S1", 2, false)
+                        assertEquals(200, retry.first)
+                        assertEquals(expected, retry.second, "same item replays original choice and guessed after restart=$restart")
+                        val mismatch = send("D1", 2, false)
+                        assertEquals(409, mismatch.first, "item mismatch must conflict, shuffled=$shuffled restart=$restart")
+                        assertEquals(before, store.events("C1"), "both retries append zero ledger events")
+                    } finally { engine.stopSuspend(0, 500); actor.close(); scope.cancel() }
+                }
+            } finally { dir.toFile().deleteRecursively() }
+        }
+    }
+
     private fun library(dir: Path): MockLibrary {
         val root = Files.createDirectories(dir.resolve("mcq-mainline"))
         Files.writeString(root.resolve("W01.json"), pack().toString())

@@ -18,7 +18,9 @@ private data class Attempt(val posed: Event, var submitted: Event? = null, var g
     val question get() = posed.payload.str("questionId")
     val seq get() = submitted?.seq ?: Long.MAX_VALUE
     val ratio get() = grade?.let { it.num("score").toDouble() / it.num("max", 1).coerceAtLeast(1) } ?: 0.0
-    val pass get() = ratio >= 0.8
+    /** A right answer the learner marked as a guess is not evidence that the point is known. */
+    val guessed get() = submitted?.payload?.flag("guessed") == true
+    val pass get() = ratio >= 0.8 && !guessed
 }
 
 /** Ordered ledger fold. Arrival order is irrelevant: seq is authoritative, including late reviews.
@@ -47,6 +49,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val solidSums = mutableMapOf<String, Double>()
     val solidConstructed = mutableMapOf<String, Int>()
     val review = mutableMapOf<String, Review>()
+    val revisit = mutableMapOf<String, Long>()
     val journal = mutableMapOf<Long, Journal>()
     val firstReview = mutableMapOf<Pair<String,Long>, String>()
     val outline = mutableListOf<Kp>()
@@ -82,6 +85,8 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         updateJournal(day) { j -> when(result) { "PASS" -> j.copy(reviewPass = j.reviewPass + 1); "NEEDS_WORK" -> j.copy(reviewNeedsWork = j.reviewNeedsWork + 1); else -> j.copy(reviewFail = j.reviewFail + 1) } }
         mastery[kp] = (mastery[kp] ?: Mastery()).copy(needsRepair = result != "PASS")
     }
+    /** A mainline choice whose key nobody has checked never counts as a mistake; it is still looked at again. */
+    fun unverifiedMainline(a: Attempt) = a.posed.payload.flag("mainline") && keys[a.question] != "VERIFIED"
     fun graded(a: Attempt): Boolean = a.grade != null && !a.uncertain &&
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
@@ -150,7 +155,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         mastery[kp] = Mastery(passed, passedBy,
             if (!old.passed && passed) event.seq else if (passed) old.passedAtSeq else null,
             solid, old.formerlySolid || (old.solid && !solid),
-            old.needsRepair || (changed != null && changed.submitted != null && graded(changed) && !changed.pass && old.passed),
+            old.needsRepair || (changed != null && changed.submitted != null && graded(changed) && !changed.pass && old.passed && !unverifiedMainline(changed)),
             tail.map { it.id }, support, progress, revokedSeq, reason, solidLatch)
         val day = logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)
         if (!old.passed && passed) {
@@ -173,8 +178,20 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             }
         }
     }
+    /** A missed or guessed mainline choice on a point not yet passed is looked at again the next day, alongside spaced review;
+     * the first graded answer on that point from the due day on settles it. Passed points use the review entry instead. */
+    fun revisitAfter(a: Attempt) {
+        if (a.submitted == null || a.voided || !graded(a)) return
+        for (kp in a.kps) {
+            if (mastery[kp]?.passed == true) { revisit.remove(kp); continue }
+            val dueDay = revisit[kp]
+            if (dueDay != null && a.day >= dueDay) { if (a.scheduled.add("revisit:$kp")) { if (a.pass) revisit.remove(kp) else revisit[kp] = a.day + 1 } }
+            else if (!a.pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, a.day + 1)
+        }
+    }
     fun refreshAttempt(a: Attempt, e: Event) {
         for (kp in a.kps) refresh(kp, e, a)
+        revisitAfter(a)
         val correct = graded(a) && !a.voided && a.pass
         if (a.submitted != null && correct != a.correctCounted) {
             updateJournal(a.day) { it.copy(correct = it.correct + if (correct) 1 else -1) }
@@ -315,10 +332,12 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             "review_completed" -> {
                 val kp = p.str("kpId")
                 if (mastery[kp]?.passed == true) schedule(kp, day, p.str("result"))
+                else if (revisit.containsKey(kp)) { if (p.str("result") == "PASS") revisit.remove(kp) else revisit[kp] = day + 1 }
             }
-            "review_snoozed" -> review[p.str("kpId")]?.let {
+            "review_snoozed" -> {
                 val until = maxOf(day + 1, p.num("untilDay"))
-                review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until)
+                review[p.str("kpId")]?.let { review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until) }
+                if (revisit.containsKey(p.str("kpId"))) revisit[p.str("kpId")] = until
             }
             // exam_set only changes the overlay; normal intervals must survive postponement/removal.
             "exam_weights_set" -> { weights.clear(); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
@@ -340,7 +359,8 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val exam = courseExamDay(events, effectiveZone)
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
     return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
-        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(), journal = journal.ordered(),
+        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
+        revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())

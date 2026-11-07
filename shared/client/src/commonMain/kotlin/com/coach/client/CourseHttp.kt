@@ -83,6 +83,14 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     suspend fun submitMock(mockId: String, answers: JsonObject, auto: Boolean): MockReply =
         mockCall("mocks/${mockId.encodeURLPathPart()}/submit", buildJsonObject { put("answers", answers); put("auto", auto) })
 
+    /** 选择题主线：各周的题数与覆盖面板。 */
+    suspend fun mainline(): MockReply = mockCall("mainline", null)
+    /** 一周的题，按铺垫 → 细节 → 桥接排好；不含答案和讲解。 */
+    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week", null)
+    /** 一道题答一次：返回对错、全部讲解、复习安排和新的覆盖数。同一个 [submissionId] 重发只算一次。 */
+    suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String): MockReply =
+        mockCall("mainline/$week/answer", buildJsonObject { put("itemId", itemId); put("choice", choice); put("guessed", guessed); put("submissionId", submissionId) })
+
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")
 

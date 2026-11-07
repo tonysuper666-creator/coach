@@ -2,6 +2,7 @@ package com.coach.client
 
 import com.coach.domain.courseExamDay
 import com.coach.domain.reviewsOn
+import com.coach.domain.REVISIT
 import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
@@ -43,7 +44,8 @@ data class QuizCard(
 )
 
 /** 到期复习的一项：[overdueDays] 为 0 表示今天到期。 */
-data class DueReview(val kp: KpRow, val dueDay: Long, val overdueDays: Int)
+/** [revisit]：答错或猜对的题把这个点排回来再看一次，不是间隔复习到期。 */
+data class DueReview(val kp: KpRow, val dueDay: Long, val overdueDays: Int, val revisit: Boolean = false)
 
 data class CardGrade(val correct: Boolean, val score: Int, val max: Int, val feedback: String, val note: String = "")
 data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
@@ -139,7 +141,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val today = logicalToday(nowMillis)
         return projection.reviewsOn(today).mapNotNull { (id, review) ->
             val kp = kp(id) ?: return@mapNotNull null
-            DueReview(kp, review.dueDay, (today - review.dueDay).toInt())
+            DueReview(kp, review.dueDay, (today - review.dueDay).toInt(), review.lastResult == REVISIT)
         }
     }
 

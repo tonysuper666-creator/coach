@@ -39,10 +39,13 @@ fun Review.onDay(day: Long, examDay: Long?): Review {
         intervalDays = interval, baseDueDay = normalDue, baseIntervalDays = normalInterval)
 }
 
-/** The actionable queue for a course day, shared by chat, UI and offline selection. */
-fun Projection.reviewsOn(day: Long): Map<String, Review> = review
+/** The actionable queue for a course day, shared by chat, UI and offline selection; a point to look at again joins it on its due day. */
+fun Projection.reviewsOn(day: Long): Map<String, Review> = (revisit.filterKeys { it !in review }.mapValues { Review(it.value, lastResult = REVISIT) } + review)
     .filterKeys { it in (activeKpIds ?: kpTitles.keys) }
     .mapValues { it.value.onDay(day, examDay) }
     .filterValues { it.dueDay <= day && it.lastReviewDay != day }
     .entries.sortedWith(compareBy({ it.value.dueDay }, { it.key }))
     .associate { it.key to it.value }
+
+/** [Review.lastResult] of a queue entry that comes from a missed or guessed answer rather than the spaced schedule. */
+const val REVISIT = "REVISIT"

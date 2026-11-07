@@ -162,13 +162,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     // 模拟考整屏打开："" 是模拟考首页，其余是某一场考试的 id。
     var mock by remember { mutableStateOf<String?>(null) }
     var essayOpen by remember { mutableStateOf(false) }
+    var mainline by remember { mutableStateOf(false) }
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; essayOpen = false; source = null; open = id to start }
-    val practiceReview: (String, Boolean) -> Unit = { id, start -> reviewMode = true; mock = null; essayOpen = false; source = null; reviewWeek = null; open = id to start }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; essayOpen = false; mainline = false; source = null; open = id to start }
+    val practiceReview: (String, Boolean) -> Unit = { id, start -> reviewMode = true; mock = null; essayOpen = false; mainline = false; source = null; reviewWeek = null; open = id to start }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
-    val openEssay: () -> Unit = { c.tutor.telemetry?.record("tap", "essay"); reviewWeek = null; mock = null; open = null; source = null; essayOpen = true }
-    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; essayOpen = false; tab = it; open = null; source = null }
+    val openEssay: () -> Unit = { c.tutor.telemetry?.record("tap", "essay"); reviewWeek = null; mock = null; mainline = false; open = null; source = null; essayOpen = true }
+    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; essayOpen = false; mainline = false; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
     // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
     val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
@@ -176,8 +177,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
     SideEffect {
-        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; mock = null; essayOpen = false; tab = AppTab.TODAY; open = id?.let { it to true } }
-        weekActions.onReview = { week -> reviewWeek = week; essayOpen = false; open = null; source = null }
+        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; mock = null; essayOpen = false; mainline = false; tab = AppTab.TODAY; open = id?.let { it to true } }
+        weekActions.onReview = { week -> reviewWeek = week; essayOpen = false; mainline = false; open = null; source = null }
     }
     LaunchedEffect(open, tab, source, essayOpen) {
         val screen = when {
@@ -229,7 +230,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, reminderSettings = settings) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, onOpenMainline = { c.tutor.telemetry?.record("tap", "mainline"); mainline = true }, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
@@ -243,6 +244,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
                         } else if (essayOpen && current != null) {
                             EssayScreen(c, current, onBack = { essayOpen = false })
+                        } else if (mainline && current != null) {
+                            MainlineScreen(c, current, onBack = { mainline = false }, onOpenSteps = { mainline = false; mock = "" }, onOpenEssay = openEssay,
+                                onReviewWeek = { week -> mainline = false; reviewWeek = week })
                         } else if (reviewWeek != null && current != null) {
                             WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
@@ -267,7 +271,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         )
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
-                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen))
+                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen || mainline))
                     if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)

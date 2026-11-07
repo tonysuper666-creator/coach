@@ -599,7 +599,11 @@ class ChatService(
             val first = withContext(Dispatchers.IO) {
                 session.trace?.bridge()
                 bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed,
-                    if (lessonPack == null) session.plan?.effort ?: "medium" else "low",
+                    // Short follow-ups already carry the bounded exam guidance;
+                    // use the fast tutor effort rather than deliberate over it
+                    // before the first word. Explicit lesson plans keep their effort.
+                    if (lessonPack == null) session.plan?.effort
+                        ?: if (session.examContext.isNotBlank()) "low" else "medium" else "low",
                     if (lessonPack == null) session.plan?.reviewedBasis == true else true), sink) { handle ->
                     session.attach(handle)
                     lessonStart.complete(Unit)

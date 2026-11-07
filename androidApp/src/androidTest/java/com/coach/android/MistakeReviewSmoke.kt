@@ -300,8 +300,14 @@ class MistakeReviewSmoke {
         java.io.File(context.cacheDir,"review-snap-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
         bitmap.recycle()
         java.io.File(context.cacheDir,"review-snap-$name.txt").writeText("elapsed=${SystemClock.elapsedRealtime()}\n"+layout()) } }
-    /** The option's letter sits right before its text in the tree: "✓ B" there means this very row is chosen. */
+    /** Verify this option's radio state even when its centred checkmark is clipped by the viewport. */
     private fun chosen(optionText: String): Boolean {
+        var row=find(optionText)
+        while(row!=null) {
+            if(row.isCheckable) return row.isChecked
+            row=row.parent
+        }
+        // Older accessibility implementations expose the marker as text instead of a checkable row.
         val nodes=visibleTexts();val want=norm(optionText).take(40)
         val at=nodes.indexOfFirst { norm(it.drop(2)).contains(want) }
         return at>=0 && (nodes[at].contains("✓") || (at>0 && nodes[at-1].contains("✓")))

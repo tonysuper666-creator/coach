@@ -118,6 +118,9 @@ class ReviewEntryTest {
                 onNodeWithText("1 个知识点到期").assertIsDisplayed()
                 if (integrated) {
                     onNodeWithText("每日提醒 08:00").assertIsDisplayed()
+                    onNodeWithTag("essay-entry").assertIsDisplayed().performClick()
+                    onNodeWithText("← 复习").performClick()
+                    onNodeWithTag("essay-entry").assertIsDisplayed()
                     onNodeWithTag("open-mock").assertIsDisplayed().performClick()
                     onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()

@@ -119,6 +119,8 @@ class CoachActivity : ComponentActivity() {
             formatClock = { clock.format(Date(it)) },
             math = com.coach.ui.MathAssets(mathHttp),
             course = com.coach.client.CourseHttp(serverUrl, credentials.deviceId, credentials.token, BuildConfig.COACH_COURSE),
+            // `--ei essayLimitSec 120`: a short timed essay, to watch the auto hand-in without waiting 25 minutes.
+            essayLimitSec = intent.getIntExtra("essayLimitSec", com.coach.domain.Essay.TIME_LIMIT_SEC).coerceIn(60, 3600),
         )
         return controller
     }

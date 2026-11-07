@@ -372,3 +372,79 @@ Keep the PR draft. Full-rubric mark allocation still depends on model grading
 and review against the original rubric; the server records the numeric verdict
 and discrepancy warning rather than inventing a deduction. Physical follow-up
 remains TON-1254.
+
+## 2026-11-07: device navigation and two complete isolated runs
+
+This section supersedes the earlier device gaps. Sage independently ran the
+`f4abc88` candidate: the device command exited 1 at `input-b`; new-seed hand
+calculations passed 3/3 and actual numeric-class probes passed 45/45. No grading,
+rubric, tolerance or ledger product code changed in this follow-up.
+
+The instrumentation now locates editors by semantic label/order, requests
+SHOW_ON_SCREEN, refreshes the resolved node, and requires exact entered text.
+Cache clearing and overlapping gestures retain 60% of the previous viewport;
+pausing before release avoids flinging past Compose's transient editor nodes.
+Search reverses once at the end. Failures report editor labels, visibility,
+bounds and recent scrolls. Original validation, score, figure, orientation and
+reopen assertions remain. Screenshot framing includes the full standard figure
+and the wrong-step explanation.
+
+The paired scripts create a fresh private database per command. Server restart
+within one command reuses that same copy and checks the result and ledger again.
+Port checks reject listeners and allow this run's closed connections in TIME_WAIT.
+Successful cleanup removes only its private copy/credentials, uninstalls both
+`.ton1292` packages and stops its own services/emulator. Scripts are supplied in
+the issue attachment, adjacent to `coach/`, not committed with local data.
+
+Actual commands, after building the final instrumentation:
+
+```sh
+cd coach
+tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest :server:app:installDist -PcoachApplicationId=com.coach.android.ton1292 -Pcoach.port=19292 --max-workers=2
+tools/dev/heavy --emulator python3 ../ton1292_device.py
+tools/dev/heavy --emulator python3 ../ton1292_device.py
+```
+
+Build exit **0**, `BUILD SUCCESSFUL in 23s` (135 tasks, 8 executed). Each complete
+device command exited **0**, including final cleanup. Both ran clean code head
+`b5ec2a44fe14c99d430ff76c458b3cb0fb77f685` with identical source, APK and script
+hashes. The subsequent commit changes this document only.
+
+| Run evidence ID | Fresh synthetic mock | Complete exit | UI journeys |
+| --- | --- | --- | --- |
+| 1794014041617933000 | mock-01m6ss4hv1x0jevmy0dqf7qhm5 | 0 | 3/3 |
+| 1794014264128016000 | mock-01m6ssb83rf2mvrmgkm9w11vae | 0 | 3/3 |
+
+Both runs entered answers through Android: a final `abc`, `4.0`, then `4.00`
+(correct decimal/precision hints, 4/4 on its existing full rubric); b working
+`20 - 2 * 4 = 12`, final `13.00` (method 3/3, final 0/3, explanation identifies
+copying the final value); c missing (0/2). Total **7/12**. Standard figures remain
+hidden before submission. Portrait 360x640 dp stacks figure/answer; landscape
+1280x800 dp shows them beside each other. Both directions reopen the stored
+result after restarting the isolated server. The five recorded events survive
+restart unchanged: c graded 744, a graded 746 then reviewed 748, b graded 747 then
+reviewed 749. Different mock/attempt IDs distinguish the fresh private sessions.
+
+The first run's raw portrait-reopened-score screenshot caught a loading frame
+despite its passing functional assertions; it is excluded from delivered passed
+screenshots. The second run's inspected portrait and landscape reopen images
+clearly show 7/12. Delivered screenshots are synthetic and individually inspected.
+Intermediate harness iterations failed at editor lookup, explanation framing and
+the old TIME_WAIT check; one preflight rejected a stale APK before starting any
+device. These are not counted among the two final successful commands.
+
+`candidate.json` in both runs records SHA256:
+
+| File | SHA256 |
+| --- | --- |
+| AnalyticalMockSmoke.kt | fbaca6022b751d05768c2c1d64abdece2ee33910702a3ca2d8f7512dbd6db8cf |
+| androidApp-debug.apk | 1848d6ed8aa08af925145ddee8d2841b95b8f4c86e2190c3feae05b55e46df4c |
+| androidApp-debug-androidTest.apk | 0c000567bd9575718098cfd8ae44817a715ac76cea6756c1f3245fad72728633 |
+| ton1292_device.py | 099049130ffe913f512aa7afceb549f4ecd57387d7b92a29020fc5634d4a1055 |
+| isolated_server.py | 78e8dd9c2f8f463407b43b61ac53590dc8120cbbe0b9ff086f6849554d36d8c6 |
+
+The full 466-test JVM run above remains historical, not rerun for this harness
+change. These device runs use a synthetic local HTTP grader/reviewer stub: they
+validate delivery of the same server numeric verdict, UI flow and persistence,
+not live-model explanation quality. Independent QA-C review/rerun is pending;
+keep PR100 draft, base main. Physical and production acceptance remain TON-1254.

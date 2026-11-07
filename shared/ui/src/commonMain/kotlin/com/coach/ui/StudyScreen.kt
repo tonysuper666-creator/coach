@@ -164,7 +164,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 AnchoredChatList(
                     items = rows, key = { it.key }, state = chat, windowKey = constraints.maxWidth,
-                    modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), spacing = 14.dp,
+                    modifier = Modifier.fillMaxSize().testTag("study-question-list"), contentPadding = PaddingValues(16.dp), spacing = 14.dp,
                 ) { row ->
                     when (row) {
                         is StudyRow.Message -> when (val item = row.item) {

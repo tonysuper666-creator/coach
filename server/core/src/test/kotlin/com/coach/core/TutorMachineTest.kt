@@ -46,6 +46,31 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun mistakeReviewOpensIndependentlyAfterLearningAndGradesThreeNewQuestions() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(); f.open(thread = "kp:kp-1"); f.teach(thread = "kp:kp-1")
+            val learned = f.machine.next("course", "kp:kp-1").cards
+            assertEquals(3, learned.size)
+            f.machine.submit("course", "kp:kp-1", learned.first().payload.str("groupId"),
+                f.answers(learned, setOf(0, 1, 2)), "desktop", "learned")
+
+            assertFailsWith<IllegalArgumentException> {
+                f.machine.open("course", "mistakes:kp-1", "kp-1", setOf("cost"), "Synthetic learning objective", review = false)
+            }
+            f.machine.open("course", "mistakes:kp-1", "kp-1", setOf("cost"), "Synthetic learning objective", review = true)
+            val retry = f.machine.retryMistakes("course", "mistakes:kp-1")
+            assertEquals(3, retry.cards.size)
+            assertNull(retry.plan)
+            assertTrue(retry.cards.none { card -> learned.any { it.payload.str("questionId") == card.payload.str("questionId") } })
+            val grades = f.machine.submit("course", "mistakes:kp-1", retry.cards.first().payload.str("groupId"),
+                f.answers(retry.cards), "desktop", "reviewed")
+            assertEquals(3, grades.grades.size)
+            assertTrue(grades.grades.all { it.payload.str("score") == "1" })
+            f.open(thread = "kp:kp-1") // The normal learning binding remains intact.
+            assertEquals(1, f.events().count { it.type == "kp_opened" && it.threadId == "mistakes:kp-1" })
+        }
+    }
+
     @Test fun gradedMistakesUseReviewedExplanationsAndNeverLeakPendingKeys() = runBlocking {
         TutorFixture().use { f ->
             f.actor.execute {
@@ -118,6 +143,25 @@ class TutorMachineTest {
             assertEquals(first.state, reopened.state)
             assertEquals(eventsAfterOpen, f.events())
             assertEquals(1, f.events().count { it.type == "kp_opened" })
+        }
+    }
+
+    @Test fun mistakeRetryAlwaysTakesThreeUnseenQuestionsAndNeverStartsPreparation() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(count=6); f.open()
+            f.machine.settings("course","thread",groupSize=1)
+            val first=f.machine.retryMistakes("course","thread")
+            assertEquals(3,first.cards.size)
+            assertNull(first.plan)
+            assertFalse(first.waitingForPool)
+            assertEquals(first.cards,f.machine.retryMistakes("course","thread").cards)
+            f.submit(first.cards,setOf(0,1))
+            val next=f.machine.retryMistakes("course","thread")
+            assertEquals(3,next.cards.size)
+            assertTrue(next.cards.none { n -> first.cards.any { it.payload.str("questionId")==n.payload.str("questionId") } })
+            f.submit(next.cards,id="retry")
+            assertFailsWith<IllegalArgumentException> { f.machine.retryMistakes("course","thread") }
+            assertTrue(f.actor.execute { supplyJobs("course","kp-1") }.isEmpty())
         }
     }
 

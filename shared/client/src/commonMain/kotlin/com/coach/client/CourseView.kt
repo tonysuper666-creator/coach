@@ -60,6 +60,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
     }?.threadId ?: "kp:$kpId"
 
+    val mistakes: MistakeReview by lazy { mistakeReview(events) }
+
     fun reviewThreadId(kpId: String): String = events.filter {
         it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
     }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"

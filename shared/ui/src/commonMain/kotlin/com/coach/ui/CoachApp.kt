@@ -208,6 +208,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
                     key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
                 } }
+                val reviewPane = remember(c, settings) { movableContentOf<CourseView> { reviewView ->
+                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, onOpenMainline = { c.tutor.telemetry?.record("tap", "mainline"); mainline = true }, reminderSettings = settings)
+                } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }
                 LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
@@ -223,14 +226,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     val contentWidth = maxWidth - layout.navWidthDp.dp
                     val wide = contentWidth >= WIDE_LAYOUT_MIN_WIDTH
                     LaunchedEffect(wide) { c.tutor.telemetry?.record("screen", if (wide) "wide" else "compact") }
-                    // Records and Resources use the whole width (Records has its own list | detail); the other tabs pair a list with the study thread.
-                    val paired = tab == AppTab.TODAY || tab == AppTab.ROUTE || tab == AppTab.REVIEW
+                    // Review, Records and Resources use the whole width; Today and Route pair a list with the study thread.
+                    val paired = tab == AppTab.TODAY || tab == AppTab.ROUTE
                     val body: @Composable () -> Unit = {
                         val tabContent: @Composable () -> Unit = {
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, onOpenMainline = { c.tutor.telemetry?.record("tap", "mainline"); mainline = true }, reminderSettings = settings) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) reviewPane(current) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }

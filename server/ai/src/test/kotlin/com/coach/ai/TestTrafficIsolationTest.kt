@@ -3,6 +3,22 @@ package com.coach.ai
 import kotlin.test.*
 
 class TestTrafficIsolationTest {
+    @Test fun testTrafficNeverReadsOrSendsProductionCredential() {
+        val root = java.nio.file.Files.createTempDirectory("coach-test-no-key-")
+        try {
+            StubBridge().use { stub ->
+                stub.enqueue(200, StubBridge.completion("synthetic"))
+                val missingKey = root.resolve("absent-production-key")
+                BridgeClient(BridgeConfig(baseUrl=stub.baseUrl,testTraffic=true,productionKeyFile=missingKey))
+                    .chat(ChatRequest("synthetic",BridgeClient.CLAUDE,"","synthetic",false))
+                val headers = stub.requestedHeaders.single().mapKeys { it.key.lowercase() }
+                assertEquals("test", headers.getValue("x-coach-traffic").single())
+                assertFalse(headers.containsKey("x-coach-production-key"))
+                assertFalse(java.nio.file.Files.exists(missingKey))
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun testRequestsCannotReachTheLearnerPort() {
         for (port in listOf(8790,8791)) {
             val bridge = BridgeClient(BridgeConfig(baseUrl="http://127.0.0.1:$port",testTraffic=true))

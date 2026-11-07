@@ -409,6 +409,39 @@ if action=='start': (r/'running').write_text('b'*40)
         self.assertEqual('switched', json.loads((f.ops / 'journal.json').read_text())['phase'])
         self.assertEqual(f.head, json.loads(f.installation.read_text())['sourceHead'])
 
+    def test_lost_seal_rejects_closed_nonce_and_rolls_back(self):
+        from . import ton1175_switch as release
+        s = self.service
+        s.proof()
+        f = self.transaction()
+        sealed = []
+        original_ask = Control.ask
+
+        def capture(client, command, **kwargs):
+            result = original_ask(client, command, **kwargs)
+            if command == 'seal':
+                sealed.append((client, result['seal']))
+            return result
+
+        actions = []
+        def controller(config, action):
+            actions.append(action)
+            if action == 'stop' and len(actions) == 1:
+                self.assertEqual(1, len(sealed))
+                sealed[0][0].close()
+                self.assertIsNone(s.snapshot().get('seal'), 'EOF must release the real JVM seal')
+                s.command('stop')
+
+        with mock.patch.object(Control, 'ask', capture), \
+             mock.patch.object(release, 'command', side_effect=controller):
+            with self.assertRaises((GateError, OSError, ValueError)):
+                release.operate(f.config, 'switch', True)
+        self.assertEqual(['stop', 'stop', 'start'], actions)
+        with self.assertRaisesRegex(GateError, 'shutdown barrier incomplete'):
+            verify(f.idle, s.logs(), stopped=True, seal=sealed[0][1])
+        f.assert_old()
+        self.assertEqual('rolled_back', json.loads((f.ops / 'journal.json').read_text())['phase'])
+
     def test_inflight_http_body_refuses(self):
         s = self.service
         pending = socket.create_connection(('127.0.0.1', s.port), timeout=5)

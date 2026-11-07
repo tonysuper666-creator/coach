@@ -26,6 +26,8 @@ try:
 except ImportError:
     from ton1175_switch import GateError, atomic, digest, file_hash, get_time, load, require, tree_hash
 
+HEALTH_LOOP_OLD_HEAD = '8d3608f5f32bb690f36284e71ca55ceec9e39bbf'
+
 
 def release_links(release):
     root = Path(release).resolve()
@@ -179,7 +181,53 @@ def darwin_lock_owner(path, pid):
         os.close(fd)
 
 
-def idle(evidence, installation, java, jcmd, lsof):
+@contextlib.contextmanager
+def staged_bridge_port(config_path, installation, expected_config_hash):
+    """Bind the pin to the same staged, current old plist and installation.
+
+    No value from idle evidence participates. The private stage and both
+    pointer files are rechecked after the JFR inspection.
+    """
+    if not __package__:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.dev.ton1193_transaction import _read_file, load_bound_state
+    from tools.dev.ton1193_trust import directory_snapshot
+    config_path = Path(config_path)
+    config_parent = directory_snapshot(config_path.parent)
+    config_bytes, config_inode = _read_file(config_path, config_parent, 0o600)
+    config = json.loads(config_bytes)
+    require(digest(json.dumps(config, sort_keys=True).encode()) == expected_config_hash,
+            'stage config differs from active transaction')
+    require(str(installation) == config['installation'], 'stage installation differs')
+    state_id = directory_snapshot(config['stateDir'])
+    state, state_hash = load_bound_state(config, state_id)
+    parents = {key: directory_snapshot(Path(config[key]).parent) for key in ('plist', 'installation')}
+    pointers = {}
+    for key, extension, mode in (('plist', 'plist', 'plistMode'),
+                                  ('installation', 'json', 'installationMode')):
+        pointers[key] = _read_file(config[key], parents[key], state[mode])
+        require(digest(pointers[key][0]) == state['files']['old.' + extension],
+                'stage pointer is not the bound old side')
+    require(json.loads(pointers['installation'][0]).get('sourceHead')
+            == config.get('expectedSourceHead') == HEALTH_LOOP_OLD_HEAD,
+            'unreviewed managed health loop source')
+    env = plistlib.loads(pointers['plist'][0])['EnvironmentVariables']
+    pin = config['adapterEnvPins']['BRIDGE_PORT']
+    require(isinstance(pin, str) and re.fullmatch(r'[1-9][0-9]{0,4}', pin)
+            and int(pin) <= 65535 and env['BRIDGE_PORT'] == pin
+            and env['COACH_MANAGE_SERVICES'] == config['adapterEnvPins']['COACH_MANAGE_SERVICES'] == '1',
+            'managed bridge pin differs')
+    yield int(pin)
+    require(_read_file(config_path, config_parent, 0o600) == (config_bytes, config_inode),
+            'stage config changed during inspection')
+    load_bound_state(config, state_id, state_hash)
+    for key, mode in (('plist', 'plistMode'), ('installation', 'installationMode')):
+        require(_read_file(config[key], parents[key], state[mode]) == pointers[key],
+                'stage pointer changed during inspection')
+
+
+def idle(evidence, installation, java, jcmd, lsof, stage_config=None, stage_config_sha256=None):
+    require(bool(stage_config) == bool(stage_config_sha256), 'stage config and transaction digest required together')
     p, info = load(evidence), load(installation)
     pid = str(int(p['pid']))
     require(int(pid) > 0 and info['sourceHead'] == p['sourceHead']
@@ -214,15 +262,20 @@ def idle(evidence, installation, java, jcmd, lsof):
 
     before = live_identity()
     inspector = Path(__file__).with_name('Ton1175Jfr.java')
-    measured = json.loads(captured([java, str(inspector), str(recording), p['windowStart'],
-                                    p['windowEnd'], pid]))
-    require(measured['pid'] == int(pid) and measured['socketReads'] == 0,
-            'JFR contains socket activity')
+    bridge = staged_bridge_port(stage_config, installation, stage_config_sha256) if stage_config else contextlib.nullcontext(None)
+    with bridge as port:
+        command = [java, str(inspector), str(recording), p['windowStart'], p['windowEnd'], pid]
+        if port is not None:
+            command.append(str(port))
+        measured = json.loads(captured(command))
+        require(measured['pid'] == int(pid) and measured['rejectReason'] == 'NONE' and measured['clientReads'] == 0
+                and measured['socketReads'] == measured['attributedHealthReads'],
+                'JFR contains client socket activity')
     # Uptime binds the live PID to the recorded JVM start, not just a PID which
     # might have been reused since the recording. No jcmd output is disclosed.
     uptime = captured([jcmd, pid, 'VM.uptime']).decode()
     match = re.search(r'(?m)^([0-9]+(?:\.[0-9]+)?) s\s*$', uptime)
-    require(match is not None and abs(time.time()-float(match[1])-get_time(measured['jvmStart'])) < 1,
+    require(match is not None and abs(time.time()-float(match[1])-measured['jvmStartEpochMillis']/1000) < 1,
             'recording belongs to a different JVM lifetime')
     require(live_identity() == before and file_hash(installation) == p['installationSha256']
             and file_hash(recording) == p['recordingSha256'], 'identity changed during verification')
@@ -380,6 +433,8 @@ def main():
     recording = sub.add_parser('idle')
     for name in ('java', 'jcmd', 'lsof'):
         recording.add_argument('--' + name, required=True)
+    recording.add_argument('--stage-config')
+    recording.add_argument('--stage-config-sha256')
     recording.add_argument('evidence')
     recording.add_argument('installation')
     for name in ('snapshot', 'accept'):
@@ -398,7 +453,8 @@ def main():
         elif args.action == 'logs':
             logs(args.evidence, args.paths, args.closed_seal)
         elif args.action == 'idle':
-            idle(args.evidence, args.installation, args.java, args.jcmd, args.lsof)
+            idle(args.evidence, args.installation, args.java, args.jcmd, args.lsof, args.stage_config,
+                 args.stage_config_sha256)
         elif args.action == 'snapshot':
             snapshot(args.config, args.baseline)
         else:

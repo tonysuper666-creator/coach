@@ -68,6 +68,19 @@ class ReviewEntryTest {
                 assertEquals("tutor.retryMistakes", retry.getValue("t").jsonPrimitive.content)
                 assertEquals("mistakes:K", retry.getValue("threadId").jsonPrimitive.content)
             }
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(270.dp, 500.dp)) {
+                    ReviewScreen(c, CourseView(events, project(events)), { _, _ -> }, {},
+                        onOpenMock = {}, onOpenEssay = {}, onOpenMainline = {})
+                } } } }
+                val list = onNodeWithTag("review-mistakes").fetchSemanticsNode().boundsInRoot
+                val entries = onNodeWithTag("review-entries").fetchSemanticsNode().boundsInRoot
+                assertTrue(list.height > entries.height, "mistakes need a usable viewport on compact screens")
+                onNodeWithTag("review-mistakes").performScrollToNode(hasText("Synthetic question"))
+                onNodeWithText("Synthetic question").assertIsDisplayed()
+                onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed()
+                onNodeWithTag("essay-entry").performScrollTo().assertIsDisplayed()
+            }
         } finally { tutor.close(); queue.cancel(); driver.close() }
     }
     private fun facts(examKnown: Boolean): List<Event> {

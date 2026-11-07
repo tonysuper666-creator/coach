@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import kotlinx.coroutines.launch
@@ -24,13 +26,18 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     val due = view.dueReviews(now)
     // Keep the existing due-review entry usable when there are no mistakes.
     var tab by remember { mutableStateOf(if (view.mistakes.items.isEmpty() && due.isNotEmpty()) 1 else 0) }
-    Column(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+      val compactHeight = maxHeight < 650.dp
+      val entriesMaxHeight = maxHeight * 0.28f
+      Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
             Text("复习", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             reminderSettings()
         }
         HorizontalDivider()
+        Column(if (compactHeight) Modifier.fillMaxWidth().heightIn(max = entriesMaxHeight)
+            .verticalScroll(rememberScrollState()).testTag("review-entries") else Modifier.fillMaxWidth()) {
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
         if (onOpenMainline != null) Surface(onClick = onOpenMainline, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).heightIn(min = 56.dp).testTag("open-mainline")) {
@@ -53,6 +60,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             }
         }
         if (onOpenEssay != null) EssayEntry(c, onOpenEssay)
+        }
         PrimaryTabRow(selectedTabIndex = tab) {
             listOf("错题 ${view.mistakes.items.size}", "到期 ${due.size}", "离线练习").forEachIndexed { index, label ->
                 Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label) })
@@ -80,6 +88,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 }
             }
         }
+    }
     }
 }
 
@@ -113,7 +122,7 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
             activeKp = null; notice = "连续答对 3 道，这个知识点的错题已移出。"
         }
     }
-    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+    LazyColumn(Modifier.fillMaxSize().testTag("review-mistakes"), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
         item {
             Column(Modifier.widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {

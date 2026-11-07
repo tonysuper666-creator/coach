@@ -18,6 +18,10 @@ import com.coach.client.anchorsOf
 import com.coach.client.cardNumberIn
 import com.coach.client.drainLedger
 import com.coach.client.movedBy
+import com.coach.client.mistakeReview
+import com.coach.domain.Event
+import com.coach.domain.LedgerJson
+import kotlinx.serialization.decodeFromString
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -101,6 +105,16 @@ class MistakeReviewSmoke {
             context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             if (!resume) {
+            samples.remove("baselineWrongCount")
+            val baseline = reviewFromLedger()
+            assertFalse("验收知识点已有历史错题，三连对会同时移除它们；请选择独立知识点", baseline.items.any { it.kpId == kp })
+            samples.put("baselineWrongCount", baseline.items.size)
+            samples.put("baselineAttemptIds", JSONArray(baseline.items.map { it.attemptId }.sorted()))
+            returnToToday()
+            click(waitText("到期复习"))
+            waitText("错题 ${baseline.items.size}", 15_000)
+            context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
             step("request initial questions")
             click(waitText("出题",15_000,enabled=true))
             waitQuestionPage(15_000)
@@ -112,14 +126,16 @@ class MistakeReviewSmoke {
             step("initial answers graded")
             returnToToday()
             } else returnToToday()
+            val baselineCount = samples.getInt("baselineWrongCount")
             val first = group("kp:$kp")
             val reviewButton = waitText("到期复习")
             step("open mistake list")
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
-            waitText("错题 $wrongCount")
-            waitText(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
+            waitText("错题 ${baselineCount + wrongCount}")
             settleAndCapture("wrong-list",reviewMark)
+            val newStems = (0 until wrongCount).map { first.getJSONObject(it).getJSONObject("payload").getString("stem") }
+            newStems.forEach { scrollTo(it) }
             step("mistake list captured")
             samples.put("wrongCount",wrongCount)
             if (phase == "prepare" || phase == "prepare3") {
@@ -130,7 +146,7 @@ class MistakeReviewSmoke {
             scrollTo("当时的答案：",substring=true)
             scrollTo("正确答案：",substring=true)
             scrollTo("判分依据：",substring=true)
-            val retryButton = scrollTo("再练一组")
+            val retryButton = retryFor(newStems.first(), reviewFromLedger().items.map { it.card.stem })
             step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
             click(retryButton)
@@ -150,9 +166,11 @@ class MistakeReviewSmoke {
             PoolTrace.begin("mistakes:$kp")
             val clearMark=SystemClock.elapsedRealtimeNanos()
             submitAnswers()
-            waitText("错题 0")
-            waitText("错题都已掌握，继续保持。")
+            waitText("错题 $baselineCount")
+            if (baselineCount == 0) waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
+            val expectedIds = samples.getJSONArray("baselineAttemptIds")
+            assertEquals((0 until expectedIds.length()).map { expectedIds.getString(it) }, reviewFromLedger().items.map { it.attemptId }.sorted())
             step("cleared list captured")
             samples.put("newQuestions",3).put("clearedCount",wrongCount)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
@@ -177,12 +195,13 @@ class MistakeReviewSmoke {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         click(waitText("到期复习",15_000))
         step("open offline mistake list")
-        waitText("错题 2")
+        val offlineCount = samples.getInt("baselineWrongCount") + samples.getInt("wrongCount")
+        waitText("错题 $offlineCount")
         waitText("离线可回看错题；连接 Mac 后可再练。")
         scrollTo("正确答案：",substring=true)
         settleAndCapture("offline",SystemClock.elapsedRealtimeNanos())
         step("offline mistake list captured")
-        samples.put("offlineWrongCount",2)
+        samples.put("offlineWrongCount",offlineCount)
         java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
     }
 
@@ -197,10 +216,11 @@ class MistakeReviewSmoke {
             .putExtra("coachUrl", "http://${BuildConfig.COACH_TAIL_HOST}:$port")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         click(waitText("到期复习", 15_000))
-        waitText("错题 0")
-        waitText("错题都已掌握，继续保持。")
+        val baselineCount = samples.getInt("baselineWrongCount")
+        waitText("错题 $baselineCount")
+        if (baselineCount == 0) waitText("错题都已掌握，继续保持。")
         settleAndCapture("restart-cleared", SystemClock.elapsedRealtimeNanos())
-        samples.put("restartClearedCount", 0)
+        samples.put("restartClearedCount", baselineCount)
         java.io.File(context.cacheDir, "review-metrics.json").writeText(samples.toString(2))
     }
 
@@ -220,6 +240,37 @@ class MistakeReviewSmoke {
             }
         }
         return all
+    }
+    private fun reviewFromLedger(): com.coach.client.MistakeReview {
+        val all = events()
+        return mistakeReview((0 until all.length()).map { LedgerJson.decodeFromString<Event>(all.getJSONObject(it).toString()) })
+    }
+    /** The first retry after this stem must precede every other mistake stem. */
+    private fun retryFor(stem: String, stems: List<String>): AccessibilityNodeInfo {
+        assertEquals("错题题干不唯一，无法安全关联重练入口", 1, stems.count { norm(it) == norm(stem) })
+        scrollTo(stem)
+        repeat(3) {
+            val nodes = mutableListOf<AccessibilityNodeInfo>()
+            fun collect(node: AccessibilityNodeInfo?) {
+                if (node == null || !node.refresh()) return
+                if (!node.text.isNullOrBlank() && node.isVisibleToUser) nodes.add(node)
+                for (i in 0 until node.childCount) collect(node.getChild(i))
+            }
+            collect(freshRoot())
+            val start = nodes.indexOfFirst { norm(it.text.toString()).contains(norm(stem).take(40)) }
+            if (start < 0) throw AssertionError("新错题离开视口，无法安全关联重练入口")
+            for (node in nodes.drop(start + 1)) {
+                val shown = norm(node.text.toString())
+                if (shown == "再练一组") return node
+                if (stems.any { norm(it) != norm(stem) && shown.contains(norm(it).take(40)) })
+                    throw AssertionError("新错题后先出现另一题，无法安全关联重练入口")
+            }
+            val list = page() ?: throw AssertionError("找不到错题列表")
+            val r = android.graphics.Rect().also(list::getBoundsInScreen)
+            drag(r.centerX(), r.top + r.height() * 7 / 10, r.top + r.height() * 5 / 10)
+            instrumentation.waitForIdleSync()
+        }
+        throw AssertionError("无法唯一定位新错题对应的再练入口")
     }
     private fun group(thread: String): JSONArray {
         val all=events();val cards=JSONArray()

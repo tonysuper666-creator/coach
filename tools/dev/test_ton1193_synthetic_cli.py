@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_synthetic_cli as synthetic
@@ -52,3 +53,20 @@ class SyntheticCliTest(unittest.TestCase):
         Path(proof['path']).write_text('tampered')
         with self.assertRaisesRegex(GateError, 'synthetic CLI changed'):
             synthetic.verify(config)
+
+    def test_managed_daily_logs_use_byte_offsets_and_include_rotation(self):
+        config = {'stateDir': str(self.root / 'stage')}
+        logs = self.root / 'h/Coach/logs'
+        logs.mkdir(parents=True)
+        previous = logs / 'bridge-2026-11-06.log'
+        previous.write_text('旧行 rid=old served=real fallback=1 status=failed\n')
+        offsets = synthetic.log_offsets(config)
+        with previous.open('a') as stream:
+            stream.write('new rid=one served=ton1193-synthetic-claude fallback=0 status=complete\n')
+        (logs / 'bridge-2026-11-07.log').write_text(
+            'new rid=two served=ton1193-synthetic-claude fallback=0 status=complete\n')
+        with patch.object(synthetic, 'health', return_value={'cli': 'SYNTHETIC'}):
+            result = synthetic.evidence(config, offsets)
+            self.assertEqual(result['completedRequests'], 2)
+            self.assertEqual(result['served_by'], synthetic.MODEL)
+            self.assertFalse(result['fallback'])

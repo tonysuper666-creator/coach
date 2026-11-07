@@ -125,8 +125,7 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
             and credential and '\n' not in credential and '\r' not in credential, 'isolated token changed')
     check_phase()
     synthetic.health(config)
-    log = Path(roots['home']) / 'Coach/bridge/logs/bridge.log'
-    offset = log.stat().st_size if log.exists() else 0
+    offsets = synthetic.log_offsets(config)
     ws = WebSocket(int(config['adapterEnvPins']['COACH_PORT']), credential,
                    time.monotonic() + deadline - time.time())
     try:
@@ -153,7 +152,7 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
     # Validate ledger evidence, original token, and deadline after the requests.
     acceptance.run(config_path, 'accept', baseline, started, deadline)
     check_phase()
-    evidence = dict(synthetic.evidence(config, offset), lecture=True, threeAnswers=True,
+    evidence = dict(synthetic.evidence(config, offsets), lecture=True, threeAnswers=True,
                     ledgerVerified=True, elapsedSeconds=time.time() - started)
     atomic(Path(config['stateDir']).parent / ('synthetic-learning-restored.json' if recovery else
                                             'synthetic-learning-candidate.json'),

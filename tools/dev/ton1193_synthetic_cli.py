@@ -64,11 +64,18 @@ def health(config):
     return {'cli': 'SYNTHETIC', 'codex': {'loggedIn': False}, 'agy': {'enabled': False}}
 
 
-def evidence(config, offset):
-    path = Path(config['stateDir']).parent / 'h/Coach/bridge/logs/bridge.log'
-    with path.open() as stream:
-        stream.seek(offset)
-        rows = [line.split() for line in stream if ' rid=' in line]
+def log_offsets(config):
+    # BRIDGE_LOG_STDOUT=1 is drained by ManagedServices to daily service logs.
+    logs = Path(config['stateDir']).parent / 'h/Coach/logs'
+    return {str(path): path.stat().st_size for path in logs.glob('bridge-*.log')}
+
+
+def evidence(config, offsets):
+    rows = []
+    for path in log_offsets(config):
+        with open(path, 'rb') as stream:
+            stream.seek(offsets.get(path, 0))
+            rows.extend(line.decode().split() for line in stream if b' rid=' in line)
     fields = [dict(item.split('=', 1) for item in row if '=' in item) for row in rows]
     require(fields and all(row.get('served') == MODEL and row.get('fallback') == '0'
                            and row.get('status') == 'complete' for row in fields),

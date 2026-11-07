@@ -35,7 +35,8 @@ class ExamMaterials private constructor(
                 if (rows.firstOrNull()?.trim()?.startsWith("|") == true)
                     rows.drop(2).map { rows.first() + "\n" + it }
                 else listOf(paragraph)
-            }.filter { it.isNotBlank() && it !in alreadyIncluded }
+            }.filter { it.isNotBlank() && it !in alreadyIncluded &&
+                (alreadyIncluded.isBlank() || !it.startsWith(alreadyIncluded)) }
             val scored = chunks.mapIndexed { i, chunk -> Triple(chunk, terms.count { it in chunk.lowercase() }, i) }
                 .sortedWith(compareByDescending<Triple<String, Int, Int>> { it.second }.thenBy { it.third })
             // Unrelated opening paragraphs add model latency without helping the
@@ -53,13 +54,13 @@ Private exam planning reference
 先用学生语言的一句实际解释开头，再引入英文术语、标题或公式。新例题核对代入、单位和加总，完成计算并解释结果。比率的口头定义须与分子/分母及单位一致，例如ICER是每多一单位QALY所需的额外成本。判断合同选择须给出并核验效用假设；偏好未给定时讲定性条件，不凭数字断言激励相容。
 <planning>
 $overview
-${select(guidance, 500, overview)}
+${select(guidance, 350, overview)}
 </planning>
 <adjudications>
 ${select(rulings, 300)}
 </adjudications>
 <past-paper-reference>
-${documents.joinToString("\n\n") { select(it, 300) }}
+${select(documents.joinToString("\n\n"), 300)}
 </past-paper-reference>
         """.trim()
     }

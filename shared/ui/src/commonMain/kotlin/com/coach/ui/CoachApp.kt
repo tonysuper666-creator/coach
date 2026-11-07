@@ -8,6 +8,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
@@ -210,7 +211,13 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 var sourceShown by remember { mutableStateOf(false) }
                 LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value))
+                    // The soft keyboard does not change the window's shape. Counting the height it covers flips a phone
+                    // (~750dp tall, ~400dp left with the keyboard up) into the short-height rail, which rebuilds the
+                    // open page: the focused field loses focus, the keyboard drops, and the next keystrokes go nowhere.
+                    val keyboard = with(LocalDensity.current) {
+                        (WindowInsets.safeDrawing.getBottom(this) - WindowInsets.systemBars.union(WindowInsets.displayCutout).getBottom(this)).coerceAtLeast(0).toDp()
+                    }
+                    val layout = LayoutRules.compute(WindowSpec(maxWidth.value, (maxHeight + keyboard).value))
                     val bottomBar = layout.nav == NavStyle.BottomBar
                     val contentWidth = maxWidth - layout.navWidthDp.dp
                     val wide = contentWidth >= WIDE_LAYOUT_MIN_WIDTH

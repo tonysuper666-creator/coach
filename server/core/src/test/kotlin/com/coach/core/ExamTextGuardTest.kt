@@ -141,15 +141,17 @@ class ExamTextGuardTest {
             assertFalse(checkedIndex.overlaps(seen.toString()), "split=$split")
         }
         // Each boundary may also be split in a separate delta (including commands).
-        val guard = ExamTextGuard(checkedIndex)
-        val seen = StringBuilder()
-        input.forEach { char ->
-            seen.append(guard.push(char.toString()))
+        for (size in listOf(1, 3)) {
+            val guard = ExamTextGuard(checkedIndex)
+            val seen = StringBuilder()
+            input.chunked(size).forEach { chunk ->
+                seen.append(guard.push(chunk))
+                assertFalse(checkedIndex.overlaps(seen.toString()))
+            }
+            seen.append(guard.finish())
+            assertTrue(guard.blocked)
             assertFalse(checkedIndex.overlaps(seen.toString()))
         }
-        seen.append(guard.finish())
-        assertTrue(guard.blocked)
-        assertFalse(checkedIndex.overlaps(seen.toString()))
     }
 
     @Test fun zeroWidthFormattingCannotSplitVisibleWords() =
@@ -172,6 +174,17 @@ class ExamTextGuardTest {
         val alternating = words.mapIndexed { i, word -> if (i % 2 == 0) "\\$word" else word }.joinToString(" ")
         for (input in listOf(everyWord, alternating, "`$everyWord`"))
             assertObfuscationBlocked(input)
+    }
+
+    @Test fun backslashWordsWithInvisibleCharactersOrAccentsRemainProtected() {
+        for (mark in listOf('\u200B', '\u200D', '\u2060', '\u00AD', '\u034F', '\u0301')) {
+            for (everyWord in listOf(true, false)) {
+                val input = quote.split(" ").mapIndexed { i, word ->
+                    if (everyWord || i % 2 == 0) "\\${word.first()}$mark${word.drop(1)}" else word
+                }.joinToString(" ")
+                assertObfuscationBlocked(input)
+            }
+        }
     }
 
     @Test fun referenceAndReplyCanRequireDifferentMatchingViews() {

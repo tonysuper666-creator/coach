@@ -72,9 +72,11 @@ class ExamTextIndex(documents: List<String>) {
                 var end = offset + Character.charCount(text.codePointAt(offset))
                 if (!visible) while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
                     end += Character.charCount(text.codePointAt(end))
-                val piece = Normalizer.normalize(text.substring(offset, end), if (visible) Normalizer.Form.NFKD else Normalizer.Form.NFKC)
+                // Invisible characters and accents cannot split readable words in
+                // either view, including words immediately following a backslash.
+                val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKD)
                 piece.codePoints().forEach { cp ->
-                    if (!visible || (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && cp !in MARKUP)) {
+                    if (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && (!visible || cp !in MARKUP)) {
                         val folded = ((if (visible) CONFUSABLES[cp] else null)?.toString() ?: String(Character.toChars(cp))).lowercase(Locale.ROOT)
                         folded.forEach { normalized.append(it); starts.add(offset); ends.add(end) }
                     }

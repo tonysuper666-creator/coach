@@ -39,7 +39,8 @@ internal class ExamOverlap(documents: List<String>) {
             .lowercase(java.util.Locale.ROOT)
         return english(folded)
     }
-    private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKC)
+    private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKD)
+        .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}]"), "")
         .lowercase(java.util.Locale.ROOT))
     private val windows = documents.flatMap { text -> listOf(words(text), literal(text))
         .flatMap { it.windowed(8).map { w -> w.joinToString(" ") } } }.toHashSet()
@@ -157,6 +158,20 @@ class ExamOutputTest {
         assertTrue(checker.hit("`$everyWord`"))
     }
 
+    @Test fun independentCheckerDetectsBackslashWordsWithInvisibleCharactersOrAccents() {
+        val checker = ExamOverlap(exams)
+        for (mark in listOf('\u200B', '\u200D', '\u2060', '\u00AD', '\u034F', '\u0301')) {
+            for (everyWord in listOf(true, false)) {
+                val input = exams.first().split(" ").mapIndexed { i, word ->
+                    if (everyWord || i % 2 == 0) "\\${word.first()}$mark${word.drop(1)}" else word
+                }.joinToString(" ")
+                assertTrue(checker.hit(input))
+                assertTrue(checker.hit("`$input`"))
+                assertTrue(ExamOverlap(listOf(input)).hit(exams.first()))
+            }
+        }
+    }
+
     @Test fun independentCheckerMatchesAcrossReferenceAndReplyFormatting() {
         val quote = exams.first()
         val reference = quote.replace("Amber", "Am**ber")
@@ -228,7 +243,14 @@ class ExamOutputTest {
 
     @Test fun obfuscatedQuotationsNeverReachTheWireOrStoredBody() = runBlocking {
         val variants = listOf(exams[0].map { "$it\u200B" }.joinToString(""),
-            exams[0].split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" })
+            exams[0].split(" ").joinToString(" ") { "\$\$\\text{$it}\$\$" }) +
+            listOf('\u200B', '\u200D', '\u2060', '\u00AD', '\u034F', '\u0301').flatMap { mark ->
+                listOf(true, false).map { everyWord ->
+                    exams[0].split(" ").mapIndexed { i, word ->
+                        if (everyWord || i % 2 == 0) "\\${word.first()}$mark${word.drop(1)}" else word
+                    }.joinToString(" ")
+                }
+            }
         StubTutor().use { stub ->
             ExamHarness(Files.createTempDirectory("exam-obfuscated"), ExamMaterials.fromTexts(exams), BridgeClient(BridgeConfig(stub.baseUrl))).use { h ->
                 for ((i, input) in variants.withIndex()) {

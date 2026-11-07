@@ -76,6 +76,20 @@ tasks.register<JavaExec>("sourceReplay") {
     mainClass.set("com.coach.server.SourceLookupReplayKt")
 }
 
+// Explicit private exam replay. No material or raw model output is printed or committed.
+tasks.register<JavaExec>("examReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.ExamReplayKt")
+}
+
+// Allows long CLI replays to run after releasing the machine's Gradle lock.
+tasks.register("examReplayClasspath") {
+    dependsOn(tasks.named("testClasses"))
+    doLast { layout.buildDirectory.file("exam-replay-classpath.txt").get().asFile.writeText(sourceSets["test"].runtimeClasspath.asPath) }
+}
+
 // Explicit SQLite backup replay over the real WebSocket routes; no AI or production writes.
 tasks.register<JavaExec>("tutorMigrationReplay") {
     group = "verification"

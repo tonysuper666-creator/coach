@@ -13,7 +13,8 @@ import java.nio.file.StandardCopyOption.*
 import java.time.Instant
 
 /** Local course assets only. A prepared lesson never marks a concept taught until displayed. */
-class LessonPreparation(private val actor: LedgerActor, private val bridge: BridgeClient, private val packs: Path) {
+class LessonPreparation(private val actor: LedgerActor, private val bridge: BridgeClient, private val packs: Path,
+    private val examMaterials: ExamMaterials = ExamMaterials.load()) {
     companion object {
         const val MAX_LESSON_INPUT_CHARS = 15_000
         /** A graded-mistake reteach already carries the reasoning in the reviewed explanation; a short source keeps the model from deliberating before its first character. */
@@ -119,11 +120,24 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         return (if(cache) packs.resolveSibling("prepared-lessons") else packs).resolve(course).resolve(kp + if(cache) ".json" else ".md")
     }
     fun pack(course: String, kp: String): String = path(course,kp).let { if(Files.isRegularFile(it)) Files.readString(it) else "" }
-    fun cached(course: String, kp: String, source: String): Prepared? = runCatching {
+    internal suspend fun examIdentity(course: String): String = actor.execute {
+        courseContent(course)?.course?.let { row -> listOf(row.code, row.title).firstOrNull { examMaterials.applies(it) } }
+            ?: events(course).asReversed().firstNotNullOfOrNull { event ->
+                if (event.type != "outline_revised") null else (event.payload["course"] as? JsonObject)?.let { row ->
+                    listOf(row.str("code"), row.str("name"), row.str("title")).firstOrNull { examMaterials.applies(it) }
+                }
+            } ?: course
+    }
+    private fun examReference(identity: String, source: String) = examMaterials.context(identity, source.take(1_000))
+    private fun examHash(reference: String) = if (reference.isBlank()) "" else sha256(reference.toByteArray())
+    suspend fun cached(course: String, kp: String, source: String, identity: String? = null): Prepared? {
+        val reference = examReference(identity ?: examIdentity(course), source)
+        return runCatching {
         val row=LedgerJson.parseToJsonElement(Files.readString(path(course,kp,true))).jsonObject
-        if(row.str("packHash") != cacheHash(source) || row.str("text").isBlank() || row.str("model").isBlank()) null
+        if(row.str("packHash") != cacheHash(source) || row.str("examHash") != examHash(reference) || row.str("text").isBlank() || row.str("model").isBlank()) null
         else Prepared(row.str("text"),row.str("model"))
-    }.getOrNull()
+        }.getOrNull()
+    }
 
     private suspend fun metadataOrNull(course: String, kp: String): JsonObject? = actor.execute {
         events(course).asReversed().filter { it.type == "outline_revised" }.firstNotNullOfOrNull { event ->
@@ -174,6 +188,8 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
         val fullSource=pack(course,kp)
         require(fullSource.isNotBlank()) { "教材备课包缺失" }
         val source=boundedInput(fullSource,meta)
+        val identity=examIdentity(course)
+        val reference=examReference(identity,fullSource)
         val worker=PoolWorker(actor,bridge)
         var steps=0
         while(actor.execute { poolAvailable(course,kp) } < 6 && steps < 8) {
@@ -182,10 +198,10 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
             steps++
             if(step.state=="stale") break
         }
-        if(cached(course,kp,fullSource)==null) {
+        if(cached(course,kp,fullSource,identity)==null) {
             val concepts=(meta["conceptIds"] as? JsonArray)?.map { it.jsonPrimitive.content }?.toSet() ?: setOf(kp)
             val plan=TutorReplyPlan(TutorThread(course,"kp:$kp",kp,concepts,meta.str("title").ifBlank { meta.str("name") }),"preparation",true,concepts,emptySet(),true,TeachingMode.CURRENT)
-            val context=TutorOutputGuard.modelInput(source) + "\n" + plan.instruction()
+            val context=TutorOutputGuard.modelInput(source) + "\n" + plan.instruction() + "\n" + reference
             val result=withContext(Dispatchers.IO) { bridge.chat(teachRequest("请讲解当前知识点。",context).copy(task="PREPARE_TEACH",stream=false)) }
             actor.execute { recordAiCall(result.call.toJson(),"foreground") }
             require(result is BridgeResult.Success && result.text.isNotBlank()) { "预生成讲解失败；保留实时讲解" }
@@ -193,7 +209,7 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
             Files.createDirectories(file.parent)
             val temp=Files.createTempFile(file.parent,".lesson-",".tmp")
             try {
-                Files.writeString(temp,json("packHash" to cacheHash(fullSource),"text" to result.text,
+                Files.writeString(temp,json("packHash" to cacheHash(fullSource),"examHash" to examHash(reference),"text" to result.text,
                     "model" to result.call.servedBy,"createdAt" to Instant.now().toString()).toString())
                 Files.move(temp,file,ATOMIC_MOVE,REPLACE_EXISTING)
             } finally { Files.deleteIfExists(temp) }

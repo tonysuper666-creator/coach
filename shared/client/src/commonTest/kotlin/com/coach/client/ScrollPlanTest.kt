@@ -32,8 +32,11 @@ class ScrollPlanTest {
         private val pageWorksAfter: Int = 0,
         private val dragWorks: Boolean = false,
         private val dragStep: Int = viewport * 4 / 10,
+        private val dragJitter: Int = 16,
         startOffset: Int = 0,
         private val footerTarget: Boolean = false,
+        /** ACTION_SHOW_ON_SCREEN may report an already partially visible row and leave it clipped. */
+        private val nudgeWorks: Boolean = true,
     ) {
         var offset = startOffset
             private set
@@ -82,7 +85,7 @@ class ScrollPlanTest {
             dragCalls++
             layoutChanges++
             if (!dragWorks) {
-                offset = (offset + if (jitterUp) -16 else 16).coerceIn(0, maxOffset)
+                offset = (offset + if (jitterUp) -dragJitter else dragJitter).coerceIn(0, maxOffset)
                 jitterUp = !jitterUp
                 return
             }
@@ -90,6 +93,7 @@ class ScrollPlanTest {
         }
 
         fun nudge(down: Boolean) {
+            if (!nudgeWorks) return
             offset = (offset + if (down) 120 else -120).coerceIn(0, maxOffset)
         }
 
@@ -233,6 +237,48 @@ class ScrollPlanTest {
     }
 
     /** 目标已经可见却压在输入条下：先请它让开，让不开就按贴近的边缘点，而不是继续翻页。 */
+    @Test fun partiallyVisibleThirdOptionEscapesStalledShowOnScreen() {
+        // QA-C: page 209..1768, third option y=1744; SHOW_ON_SCREEN never moves it.
+        val page = FakePage(card = 3, heights = listOf(625, 625, 625), viewport = 1559,
+            pageTop = 209, targetOffsetInCard = 285, nudgeWorks = false)
+        assertEquals(1744, page.view().targetCenterY)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertTrue(found, "Partially visible is not fully revealed; try the container: $moves")
+        assertTrue(moves.contains(ScrollMove.ScrollPage(forward = true)))
+        assertTrue(page.view().targetCenterY in 269..1708, "Tap only after the option clears the composer")
+    }
+
+    @Test fun clippedTargetUsesDragWhenShowAndContainerBothStall() {
+        val page = FakePage(card = 3, heights = listOf(625, 625, 625), viewport = 1559,
+            pageTop = 209, targetOffsetInCard = 285, nudgeWorks = false,
+            pageScrollWorks = false, dragWorks = true)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertTrue(found, "A stalled reveal must retain the drag fallback: $moves")
+        assertTrue(moves.any { it is ScrollMove.Drag && it.forward })
+        assertTrue(page.view().targetCenterY in 269..1708)
+    }
+
+    @Test fun clippedTargetFailsBoundedlyWhenAllScrollMethodsStall() {
+        val page = FakePage(card = 3, heights = listOf(625, 625, 625), viewport = 1559,
+            pageTop = 209, targetOffsetInCard = 285, nudgeWorks = false, pageScrollWorks = false, dragJitter = 0)
+        val (found, moves) = page.drive(ScrollDriver(card = 3))
+        assertFalse(found, "Never tap the clipped option when all movement fails")
+        assertTrue(moves.last() is ScrollMove.Unreachable)
+        assertTrue(moves.any { it is ScrollMove.ScrollPage }, "Try the container before declaring failure")
+        assertTrue(moves.any { it is ScrollMove.Drag }, "Try the drag fallback before declaring failure")
+        assertTrue(moves.size <= 12, "Failed reveals must terminate: $moves")
+    }
+
+    @Test fun targetClippedByHeaderScrollsBackwardAfterFailedReveal() {
+        val driver = ScrollDriver(card = 3)
+        val view = ScrollView(targetFound = true, targetCenterY = 219, pageTop = 209,
+            pageBottom = 1768, visibleCards = listOf(3))
+        assertEquals(ScrollMove.NudgeUp, driver.next(view))
+        repeat(2) { assertEquals(ScrollMove.NudgeUp, driver.next(view, moved = false)) }
+        assertEquals(ScrollMove.ScrollPage(forward = false), driver.next(view, moved = false))
+        assertEquals(ScrollMove.Tap, driver.next(view.copy(targetCenterY = 600), moved = true))
+    }
+
     @Test fun targetUnderTheComposerIsNudgedThenTapped() {
         val driver = ScrollDriver(card = 3)
         val low = ScrollView(targetFound = true, targetCenterY = 1_990, pageTop = 400, pageBottom = 2_000, visibleCards = listOf(3))

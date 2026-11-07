@@ -88,23 +88,23 @@ class ScrollDriver(
                 else -> {}
             }
         }
+        var revealForward: Boolean? = null
         if (view.targetFound) {
             val inside = view.targetCenterY >= view.pageTop + INSET && view.targetCenterY <= view.pageBottom - INSET
             if (inside) {
                 nudges = 0
                 return take(ScrollMove.Tap)
             }
-            // 目标被组合出来但压在页眉或输入条下：先请它自己滚进来，推不动再按贴近的边缘点。
+            // 先请目标自行滚入视口；部分可见的行可能一直不响应 SHOW_ON_SCREEN。
             val loose = view.targetCenterY >= view.pageTop + LOOSE_TOP && view.targetCenterY <= view.pageBottom - LOOSE_BOTTOM
             nudges++
-            if (nudges > NUDGE_LIMIT) {
-                if (loose) return take(ScrollMove.Tap)
-                return unreachable(view, "目标始终停在题页之外（y=${view.targetCenterY}，页 ${view.pageTop}-${view.pageBottom}）")
-            }
-            return take(if (view.targetCenterY > view.pageBottom - INSET) ScrollMove.NudgeDown else ScrollMove.NudgeUp)
-        }
-        nudges = 0
-        forward = direction(view)
+            val below = view.targetCenterY > view.pageBottom - INSET
+            if (nudges <= NUDGE_LIMIT) return take(if (below) ScrollMove.NudgeDown else ScrollMove.NudgeUp)
+            if (loose) return take(ScrollMove.Tap)
+            // 仍被遮挡时不放宽点击范围：沿目标方向使用容器翻页/手指拖及既有失败预算。
+            revealForward = below
+        } else nudges = 0
+        forward = revealForward ?: direction(view)
         if (pageBroken && dragStalls >= stallLimit)
             return unreachable(view, "翻页不动，手指拖连续 $stallLimit 次也没有进展")
         val probe = pageBroken && movesSinceProbe >= REPROBE_EVERY

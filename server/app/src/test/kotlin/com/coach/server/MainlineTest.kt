@@ -162,6 +162,53 @@ class MainlineTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
+    @Test fun theKeyLandsAnywhereOnScreenEvenWhenThePackAlwaysPutsItFirst() {
+        val shown = IntArray(4)
+        repeat(400) { n -> shown[optionOrder("synthetic-fingerprint-$n", 0, 4).indexOf(0)]++ }
+        assertTrue(shown.all { it in 60..140 }, "each position gets about a quarter of the keys: ${shown.toList()}")
+        assertEquals(optionOrder("synthetic-fingerprint-1", 3, 4), optionOrder("synthetic-fingerprint-1", 3, 4), "one showing always lays out the same way")
+        assertTrue((0 until 50).count { optionOrder("synthetic-fingerprint-$it", 0, 4) != optionOrder("synthetic-fingerprint-$it", 1, 4) } > 30,
+            "the next look at a question is usually in a new order")
+    }
+
+    @Test fun aShuffledQuestionIsGradedAndExplainedByWhatWasOnScreen() {
+        val dir = Files.createTempDirectory("mainline-shuffle")
+        val now = AtomicLong(1_800_000_000_000)
+        try {
+            val (store, mainline) = orchard(dir, now)
+            val items = mainline.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }
+            for (i in items) assertEquals(listOf("Apples", "Pears", "Plums", "Figs").map { "$it ${i.str("id")}" }.toSet(), i.strings("options").toSet())
+            // Pick a checked question whose key (Pears, second in the pack) is somewhere else on screen.
+            val q = assertNotNull(items.firstOrNull { it.str("keyState") == "VERIFIED" && it.strings("options").indexOf("Pears ${it.str("id")}") != 1 })
+            val id = q.str("id"); val options = q.strings("options")
+            val pears = options.indexOf("Pears $id"); val plums = options.indexOf("Plums $id")
+            val letters = optionLetters(4)
+
+            val wrong = mainline.answer(store, "C1", 1, json("itemId" to id, "choice" to plums, "layout" to q.num("layout"), "submissionId" to "shuffled-wrong"))
+            assertEquals("missed", wrong.str("status"), "he picked plums, whatever position plums has in the pack")
+            assertEquals(plums.toLong(), wrong.num("choice")); assertEquals(pears.toLong(), wrong.num("answer"), "the tick goes on the pears row he sees")
+            val reasons = wrong.getValue("explanation").jsonObject.getValue("options").jsonObject
+            assertEquals(listOf("Apples", "Plums", "Figs").map { options.indexOf("$it $id").toString() }.toSet(), reasons.keys)
+            assertEquals("Plums ripen later.", reasons.str("$plums"), "each reason sits under the option it explains")
+            assertEquals("Apples were sold out.", reasons.str("${options.indexOf("Apples $id")}"))
+            val events = store.events("C1")
+            assertEquals(letters[plums], events.last { it.type == "answer_submitted" }.payload.str("answer"))
+            val feedback = events.last { it.type == "attempt_graded" }.payload.str("feedback")
+            assertTrue("正确答案 ${letters[pears]}：Pears $id" in feedback && "错项 ${letters[plums]}：Plums ripen later." in feedback, "the record uses the letters on screen")
+
+            val resent = mainline.answer(store, "C1", 1, json("itemId" to id, "choice" to pears, "layout" to 99, "submissionId" to "shuffled-wrong"))
+            assertEquals("missed", resent.str("status"), "a resend is the first answer, not a second chance")
+            assertEquals(plums.toLong(), resent.num("choice"))
+
+            val again = mainline.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }.first { it.str("id") == id }
+            assertEquals(q.num("layout") + 1, again.num("layout"))
+            val right = mainline.answer(store, "C1", 1, json("itemId" to id, "choice" to again.strings("options").indexOf("Pears $id"),
+                "layout" to again.num("layout"), "submissionId" to "shuffled-right"))
+            assertEquals("mastered", right.str("status"))
+            assertEquals(again.strings("options").indexOf("Pears $id").toLong(), right.num("answer"))
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun packsLabelledWithTheCourseCodeShowUpForTheLedgerCourse() {
         val dir = Files.createTempDirectory("mainline-code")
         try {

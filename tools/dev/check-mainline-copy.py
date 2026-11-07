@@ -160,8 +160,12 @@ def main():
                 return request('/mainline')['weeks'][0]['coverage']
 
             def walk_by_protocol():
-                for item_id, choice, guessed in (('S1', 0, False), ('D1', 1, True), ('B1', 1, False)):
-                    body = json.dumps(dict(itemId=item_id, choice=choice, guessed=guessed, submissionId=f'protocol-{item_id}')).encode()
+                # Options come shuffled: answer by the text on screen and send back the layout it was read with.
+                shown = {i['id']: i for i in request('/mainline/1')['items']}
+                for item_id, text, guessed in (('S1', 'apples', False), ('D1', 'pears', True), ('B1', 'pears', False)):
+                    item = shown[item_id]
+                    choice = next(n for n, o in enumerate(item['options']) if f'Synthetic {text} are grown there' == o)
+                    body = json.dumps(dict(itemId=item_id, choice=choice, layout=item['layout'], guessed=guessed, submissionId=f'protocol-{item_id}')).encode()
                     req = urllib.request.Request(f'http://127.0.0.1:{port}/v1/courses/{COURSE}/mainline/1/answer', data=body, headers={
                         'Authorization': 'Bearer ' + token, 'X-Coach-Device': 'desktop', 'Content-Type': 'application/json'})
                     with urllib.request.urlopen(req, timeout=5) as response:

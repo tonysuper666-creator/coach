@@ -301,7 +301,10 @@ def worker(config_path, report_path, inject):
                 switch.require(all(injected[k] == old['identity'][k] for k in
                                    ('epoch', 'tokenSha256', 'credentialSha256')),
                                'candidate did not retain isolated token')
-                restored = probe.wait_ready(config, roots, label, Path(roots['releases']) / 'old', kernel, owned)
+                report['injectedAuthenticated'] = True
+                report['restoredReadiness'] = {}
+                restored = probe.wait_ready(config, roots, label, Path(roots['releases']) / 'old', kernel, owned,
+                                            diagnostic=report['restoredReadiness'])
                 switch.require(all(restored['identity'][k] == old['identity'][k] for k in
                                    ('epoch', 'tokenSha256', 'credentialSha256')),
                                'rollback changed isolated token')

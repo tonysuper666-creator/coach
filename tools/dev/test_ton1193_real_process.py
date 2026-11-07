@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
@@ -18,6 +19,22 @@ def process(pid, ppid, started=1):
 
 
 class RealProcessRegressionTest(unittest.TestCase):
+    def test_restored_readiness_reports_only_closed_step_and_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'snapshot.json').write_text(json.dumps({'sides': {'old': {}}}))
+            config = {'adapterSnapshotDir': root}
+            diagnostic = {}
+            with mock.patch.object(probe.time, 'monotonic', side_effect=[0, 1, 61]), \
+                 mock.patch.object(probe.time, 'sleep'), \
+                 mock.patch.object(probe, 'job', return_value=123), \
+                 mock.patch.object(probe, 'collect'), \
+                 mock.patch.object(probe.process, '_identity', return_value=(1, '/isolated/old/app/lib/x')), \
+                 mock.patch.object(probe.acceptance, 'observe', side_effect=GateError('secret path and token')):
+                with self.assertRaisesRegex(GateError, 'did not become ready'):
+                    probe.wait_ready(config, {}, 'label', Path('/isolated/old'), mock.Mock(), {}, diagnostic)
+            self.assertEqual(diagnostic, {'step': 'HELLO', 'reason': 'GATE_REJECTED'})
+            self.assertNotIn('secret', json.dumps(diagnostic))
+
     def test_collection_finds_children_started_after_first_snapshot(self):
         kernel = mock.Mock()
         kernel.snapshot.return_value = [process(10, 1), process(11, 10)]

@@ -8,7 +8,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
 import com.coach.domain.*
@@ -47,7 +50,7 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
     val card = group?.cards?.singleOrNull()
     Column(Modifier.fillMaxSize()) {
         TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(back) }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyColumn(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text("第 $week 周错题", style = MaterialTheme.typography.titleLarge) }
             if (card != null) {
                 item { QuizCardView(1, 1, card, group.submitted, choice, c.math) { choice = it } }
@@ -104,7 +107,8 @@ internal fun WeekMistakeItem(stem: String, attemptId: String, math: MathAssets, 
         shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-            .clickable(enabled = enabled, role = Role.Button) { onOpen(attemptId) },
+            .clickable(enabled = enabled, role = Role.Button) { onOpen(attemptId) }
+            .testTag("week-mistake-$attemptId"),
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             QuizText(preview, "mistake:$attemptId:$preview", math)

@@ -53,9 +53,11 @@ class WeekMistakePreviewTest {
         }
         waitUntil(timeoutMillis = 10_000) { renderedMath.contains("x^2") }
         onNodeWithText("合成图片 ［图片］", substring = true).assertExists()
+        onNodeWithTag("week-mistake-attempt-1").assertIsDisplayed()
         onNodeWithText("data:image", substring = true).assertDoesNotExist()
         onNodeWithText("点按查看完整题目").assertExists()
         onNodeWithTag("mistakes").performScrollToIndex(4)
+        onNodeWithTag("week-mistake-attempt-4").assertIsDisplayed()
         onNodeWithText("合成后续 S5").assertIsDisplayed().performClick()
         assertEquals("attempt-4", selected)
         onNodeWithTag("mistakes").performScrollToIndex(1)

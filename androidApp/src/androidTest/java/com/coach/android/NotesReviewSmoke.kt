@@ -30,7 +30,7 @@ class NotesReviewSmoke {
         val args = InstrumentationRegistry.getArguments()
         val port = args.getString("coachPort")!!.toInt()
         require(port !in setOf(18791, 8791, 8790))
-        require(context.packageName.endsWith(".ton1294"))
+        require(listOf(".ton1294", ".ton1341").any(context.packageName::endsWith))
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         val week = args.getString("week", "1").toInt()
         val client = PairingClient(base)
@@ -83,10 +83,10 @@ class NotesReviewSmoke {
                 if (target != null) command("advance_study_scope", json("scopeId" to scope.id, "kpId" to target))
             }
             context.startActivity(Intent(context, CoachActivity::class.java).putExtra("coachUrl", base).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            fun find(text: String, timeout: Long = 15000): AccessibilityNodeInfo {
+            fun find(text: String, timeout: Long = 15000, byResourceId: Boolean = false): AccessibilityNodeInfo {
                 fun walk(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
                     if (node == null) return null
-                    if (node.text?.toString() == text) return node
+                    if (if (byResourceId) node.viewIdResourceName == text else node.text?.toString() == text) return node
                     for (i in 0 until node.childCount) walk(node.getChild(i))?.let { return it }
                     return null
                 }
@@ -112,7 +112,7 @@ class NotesReviewSmoke {
                 var seen = false
                 repeat(12) {
                     if (!seen) {
-                        seen = runCatching { find(e.payload.str("stem"), 600) }.isSuccess
+                        seen = runCatching { find("week-mistake-${e.payload.str("attemptId")}", 600, byResourceId = true) }.isSuccess
                         if (!seen) {
                             fun scroll(node: AccessibilityNodeInfo?): Boolean {
                                 if (node == null) return false

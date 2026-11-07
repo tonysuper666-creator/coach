@@ -5,6 +5,7 @@ case deliberately fails acceptance only after the candidate has started.
 """
 import argparse
 import datetime as dt
+import fcntl
 import http.client
 import json
 import os
@@ -25,6 +26,9 @@ from . import ton1175_switch as switch
 from . import ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_isolated_seed as seed
+from . import ton1193_data_transaction as data_transaction
+from . import ton1193_isolated_acceptance as acceptance
+from . import ton1193_isolated_learning as learning
 
 
 def configure(config_path, config, roots, pid, owned):
@@ -309,6 +313,18 @@ def worker(config_path, report_path, inject):
                                    ('epoch', 'tokenSha256', 'credentialSha256')),
                                'rollback changed isolated token')
                 report['restored'] = restored
+                value, journal = data_transaction.load(config)
+                switch.require(restored['identity']['lastSeq'] == value['before']['lastSeq'],
+                               'restored startup high-water differs from sealed snapshot')
+                report['restoredStartupLastSeqMatchesSeal'] = True
+                with open(root / 'stage/lock', 'rb') as recovery_lock:
+                    fcntl.flock(recovery_lock, fcntl.LOCK_EX)
+                    baseline = str(root / 'stage/acceptance-baseline.json')
+                    acceptance.run(config_path, 'snapshot', baseline)
+                    started = time.time()
+                    learning.run(config_path, baseline, started, started + 300, recovery=True)
+                report['restoredLearning'] = dict(lecture=True, threeAnswers=True, ledgerVerified=True,
+                                                 elapsedSeconds=time.time()-started)
                 report['injectedFailure'] = str(exc)
                 report['unverified'].remove('injected failure rollback')
         finally:
@@ -316,6 +332,16 @@ def worker(config_path, report_path, inject):
             thread.join()
             report['controllerDiagnostics'] = controller_diagnostics(root)
             report['journal'] = json.loads((root / 'stage/journal.json').read_text())
+            if 'dataSnapshotHash' in report['journal']:
+                value, journal = data_transaction.load(config)
+                report['snapshot'] = dict(manifest=value['manifest'], before=value['before'],
+                                           state=journal['dataState'], retained=True)
+                if journal['dataState'] == 'committed':
+                    report['snapshot']['retainedDigestMatches'] = (
+                        data_transaction.clone.fingerprint(data_transaction._path(value, 'pre')) == value['manifest'])
+                if journal['dataState'] == 'restored':
+                    report['quarantineDigestMatches'] = (
+                        data_transaction.clone.fingerprint(data_transaction._path(value, 'candidate')) == journal['candidateManifest'])
             report['observedPhases'] = phases
             report['monitorErrors'] = monitor_errors
             rows = [json.loads(line) for line in Path(config['accessLogs'][0]).read_text().splitlines()]
@@ -335,13 +361,17 @@ def worker(config_path, report_path, inject):
             raise
         finally:
             report['ownedProcesses'] = [dict(pid=p.pid, ppid=p.ppid, started=p.started) for p in owned.values()]
+            if report.get('snapshot') and report.get('cleanup'):
+                report['stoppedData'] = data_transaction.counts(Path(roots['home']) / 'Coach/data')
+            report['dataEvidenceRetained'] = bool(list((Path(roots['home']) / 'Coach').glob('data.pre-*'))
+                                                  + list((Path(roots['home']) / 'Coach').glob('data.candidate-*')))
             switch.atomic(report_path, json.dumps(report, indent=2, sort_keys=True).encode())
         marker.unlink()
 
 
 def controller_diagnostics(root):
     """Copy only the isolated controller's closed diagnostic vocabulary."""
-    steps = {'CONTROLLER', 'TRANSACTION', 'REVALIDATE', 'STOPPED', 'RECEIPT', 'JOB',
+    steps = {'CONTROLLER', 'TRANSACTION', 'REVALIDATE', 'STOPPED', 'RECEIPT', 'JOB', 'LEARNING',
              'LAUNCHCTL', 'START_IDENTITY', 'STOP_IDENTITY'}
     reasons = set(isolated.REASONS.values()) | {'GATE_REJECTED', 'IO_ERROR', 'INVALID_DATA'}
     result = []
@@ -386,7 +416,7 @@ def main():
             stage.cmd(*argv, cwd=stage.REPO)
         stage.main(unstaged_exercise=exercise)
         data = json.loads(report.read_text())
-        data['fixtureRemoved'] = True
+        data['fixtureRemoved'] = not data['dataEvidenceRetained']
         switch.atomic(report, json.dumps(data, indent=2, sort_keys=True).encode())
 
 

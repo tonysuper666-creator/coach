@@ -96,9 +96,18 @@ class WebSocket:
         self.sock.close()
 
 
-def run(config_path, baseline, started, deadline):
+def run(config_path, baseline, started, deadline, *, recovery=False):
     config, roots, _ = isolated.fixture(config_path)
-    require(live.live_acceptance(config['stateDir']) == 'validating', 'isolated switch is not validating')
+    def check_phase():
+        if recovery:
+            from . import ton1193_data_transaction as data
+            _, journal = data.load(config)
+            require(journal['dataState'] == 'restored', 'isolated data not restored')
+            require(live._live_transaction(config['stateDir'], ('rolled_back',)) == 'rolled_back',
+                    'isolated recovery lock not held')
+        else:
+            require(live.live_acceptance(config['stateDir']) == 'validating', 'isolated switch is not validating')
+    check_phase()
     require(baseline == str(Path(config['stateDir']) / 'acceptance-baseline.json'), 'baseline outside isolated stage')
     raw, _ = _read_file(baseline, directory_snapshot(config['stateDir']), 0o600)
     before = json.loads(raw)
@@ -113,7 +122,7 @@ def run(config_path, baseline, started, deadline):
     credential = token.decode('ascii').strip()
     require(digest(token) == before['tokenSha256'] and digest(credential.encode()) == before['credentialSha256']
             and credential and '\n' not in credential and '\r' not in credential, 'isolated token changed')
-    require(live.live_acceptance(config['stateDir']) == 'validating', 'isolated switch changed')
+    check_phase()
     ws = WebSocket(int(config['adapterEnvPins']['COACH_PORT']), credential,
                    time.monotonic() + deadline - time.time())
     try:
@@ -139,6 +148,7 @@ def run(config_path, baseline, started, deadline):
         ws.close()
     # Validate ledger evidence, original token, and deadline after the requests.
     acceptance.run(config_path, 'accept', baseline, started, deadline)
+    check_phase()
 
 
 def main():

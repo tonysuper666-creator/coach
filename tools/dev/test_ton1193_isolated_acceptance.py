@@ -12,6 +12,7 @@ from unittest import mock
 from tools.dev import ton1193_isolated_acceptance as acceptance
 from tools.dev import ton1193_isolated_controller as isolated
 from tools.dev import ton1193_isolated_injected_failure as injected
+from tools.dev import ton1193_isolated_learning as learning
 from tools.dev.ton1175_switch import GateError, atomic, digest
 
 
@@ -125,11 +126,22 @@ class AcceptanceTest(unittest.TestCase):
 
     def test_injected_failure_records_authenticated_evidence(self):
         now = time.time()
-        with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'):
+        with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'), \
+             mock.patch.object(learning, 'run') as run_learning:
             self.assertTrue(injected.verify(str(self.path), self.baseline, now, now + 300))
+        run_learning.assert_called_once_with(str(self.path), self.baseline, now, now + 300)
         self.assertEqual(Hello.requests, 1)
         self.assertEqual(json.loads((self.root / 'injected-acceptance.json').read_text())['epoch'], 'isolated-epoch')
         self.assertFalse((self.root / 'injected-diagnostic.json').exists())
+
+    def test_learning_failure_never_claims_injected_acceptance(self):
+        now = time.time()
+        with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'), \
+             mock.patch.object(learning, 'run', side_effect=GateError('learning failed')):
+            self.assertFalse(injected.verify(str(self.path), self.baseline, now, now + 300))
+        self.assertFalse((self.root / 'injected-acceptance.json').exists())
+        self.assertEqual(json.loads((self.root / 'injected-diagnostic.json').read_text()),
+                         {'step': 'LEARNING', 'reason': 'GATE'})
 
     def test_startup_refusal_retries_under_live_transaction_then_authenticates(self):
         config, roots, _ = isolated.fixture(str(self.path))

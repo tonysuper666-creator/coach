@@ -108,13 +108,19 @@ def revalidate(config, private_dir, private_id, snapshot_hash, action):
         snap = json.loads(data)
         require(snap['version'] == 1, 'unknown snapshot version')
         state, _ = load_bound_state(config, snap['stateId'], snap['stateHash'])
-        require(_json(_stable(snap['stable'])) == _json(snap['stable']), 'stable directory changed')
+        stable = snap['stable']
+        if 'adapterSnapshotDir' in config:
+            from .ton1193_data_transaction import stable_paths
+            stable = stable_paths(config, stable)
+        require(_json(_stable(stable)) == _json(stable), 'stable directory changed')
         parents = {key: snap['stable'][str(Path(config[key]).parent)] for key in ('plist', 'installation')}
         expected, inodes = check_pointers(config, state, snap['stateId'], parents, action)
         for side in ('old', 'new') if action == 'stop' else (expected,):
             require(_json(_side(snap['specs'][side], snap['roots'])) == _json(snap['sides'][side]),
                     side + ' toolchain changed')
-        require(_json(_stable(snap['stable'])) == _json(snap['stable']), 'stable directory changed')
+        require(_json(_stable(stable)) == _json(stable), 'stable directory changed')
+        if 'adapterSnapshotDir' in config:
+            require(stable_paths(config, snap['stable']) == stable, 'data checkpoint changed')
         require(check_pointers(config, state, snap['stateId'], parents, action) == (expected, inodes),
                 'transaction changed during revalidation')
         return expected, inodes

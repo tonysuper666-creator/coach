@@ -210,9 +210,14 @@ def main(exercise=None, unstaged_exercise=None):
             result = subprocess.run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'],
                                     capture_output=True, timeout=10)
             switch.require(result.returncode == 113, 'test label remains; private fixture retained')
-        shutil.rmtree(root)
-        switch.require(not root.exists(), 'private root survived cleanup')
-        print(json.dumps({'stageRootRemoved': True, 'launchdUntouched': exercise is None and unstaged_exercise is None}), flush=True)
+        # Bound snapshots and quarantined candidate writes require deliberate
+        # operator retention. Never delete either as disposable test cleanup.
+        retained = list((root / 'h/Coach').glob('data.pre-*')) + list((root / 'h/Coach').glob('data.candidate-*'))
+        if not retained:
+            shutil.rmtree(root)
+            switch.require(not root.exists(), 'private root survived cleanup')
+        print(json.dumps({'stageRootRemoved': not bool(retained), 'dataEvidenceRetained': bool(retained),
+                          'launchdUntouched': exercise is None and unstaged_exercise is None}), flush=True)
 
 
 if __name__ == '__main__':

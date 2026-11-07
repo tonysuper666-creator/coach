@@ -24,6 +24,9 @@ def verify(config_path, baseline, started, deadline):
                 'isolated acceptance phase or deadline mismatch')
         step = 'HELLO'
         observed = acceptance.observe_when_ready(config, roots, deadline)
+        step = 'LEARNING'
+        from . import ton1193_isolated_learning as learning
+        learning.run(config_path, baseline, started, deadline)
         require(time.time() < deadline and live.live_acceptance(config['stateDir']) == 'validating',
                 'isolated acceptance transaction ended')
         step = 'EVIDENCE_WRITE'

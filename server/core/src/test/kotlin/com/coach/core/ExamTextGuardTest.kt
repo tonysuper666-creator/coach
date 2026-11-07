@@ -7,6 +7,33 @@ class ExamTextGuardTest {
     private val exam = "Amber badgers carry delicate emerald feathers gently home. Ivory jaguars keep lemons near old purple quails."
     private val index = ExamTextIndex(listOf(exam, "Rivers shine through unusual valleys while xenon yields zephyrs."))
 
+    @Test fun divergingPartialWordReleasesEarlierWithoutReleasingAnIndexedWindow() {
+        val guard = ExamTextGuard(index)
+        assertEquals("", guard.push("Amber "))
+        assertEquals("", guard.push("z")) // A single-letter variable can disappear from the matching view.
+        assertEquals("Amber ", guard.push("o")) // "zo" cannot become the indexed next word.
+        assertEquals("zoology ", guard.push("ology "))
+        assertFalse(guard.blocked)
+
+        // Every ignored one-letter variable may disappear from the matching
+        // view and must not let the already held prefix escape.
+        for (variable in "bcdefghjklmnopqrstuvwxyz") {
+            val ignoredVariable = ExamTextGuard(index)
+            assertEquals("", ignoredVariable.push("Amber $variable"))
+            val published = ignoredVariable.push(" badgers carry delicate emerald feathers gently home ")
+            assertTrue(ignoredVariable.blocked, "variable=$variable")
+            assertFalse(index.overlaps(published), "variable=$variable")
+        }
+
+        // A mismatch cannot weaken protection of a later fresh quotation.
+        val later = ExamTextGuard(index)
+        val seen = StringBuilder(later.push("Amber zo"))
+        seen.append(later.push("ology Amber badgers carry delicate emerald feathers gently home "))
+        seen.append(later.finish())
+        assertTrue(later.blocked)
+        assertFalse(index.overlaps(seen.toString()))
+    }
+
     @Test fun countOnlyProbeReportsPrefixHoldReleaseAndBlockWithoutChangingOutput() {
         var now = 0L
         val events = mutableListOf<ExamTextGuard.Hold>()

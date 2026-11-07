@@ -183,6 +183,16 @@ class ExamTextGuard @JvmOverloads constructor(
                         if (next == null) { prefix = false; break }
                         node = next
                     }
+                    // The unfinished word is already long enough to count as an
+                    // English word, and its stable prefix cannot become any next
+                    // indexed word. No continuation can complete this window.
+                    // A different single-letter variable may be ignored entirely,
+                    // so it must not disqualify the preceding prefix.
+                    if (prefix && incomplete && scan.stableEnd == pending.length) {
+                        val partial = scan.words.last().value
+                        val alwaysMatchable = partial.length > 1 || partial == "a" || partial == "i"
+                        if (alwaysMatchable && node.next.keys.none { it.startsWith(partial) }) prefix = false
+                    }
                     if (prefix) { reasons?.add("indexed_prefix"); cut = minOf(cut, words[start].start) }
                 }
             }

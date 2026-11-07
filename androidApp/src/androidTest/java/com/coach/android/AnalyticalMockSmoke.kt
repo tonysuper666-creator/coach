@@ -88,6 +88,11 @@ class AnalyticalMockSmoke {
             shot("$form-figure")
             stage = "wrong-step"
             seek { it.text?.toString()?.contains("错误发生在抄写结果这一步") == true }
+            // Accessibility may expose a paragraph before its glyphs reach the viewport.
+            // Frame the explanation itself, rather than capturing only the preceding SVG.
+            find { it.isScrollable }?.let { scrollOverlapping(it, true) }
+            Thread.sleep(350)
+            await { it.text?.toString()?.contains("错误发生在抄写结果这一步") == true }
             shot("$form-wrong-step")
             val config = context.resources.configuration
             assertEquals("Wrong device orientation", form == "landscape", config.screenWidthDp > config.screenHeightDp)

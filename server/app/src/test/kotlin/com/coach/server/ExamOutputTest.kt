@@ -31,10 +31,10 @@ internal class ExamOverlap(documents: List<String>) {
     // retains readable backslash-prefixed words, even inside code spans.
     private fun english(text: String) = Regex("[a-z]+").findAll(text).map { it.value }
         .filter { it.length > 1 || it == "a" || it == "i" }.toList()
-    private fun words(text: String): List<String> {
+    private fun words(text: String, controlWords: Boolean = true): List<String> {
         val decomposed = Normalizer.normalize(text, Normalizer.Form.NFKD)
-        val folded = decomposed.map { lookalikes[it] ?: it }.joinToString("")
-            .replace(Regex("\\\\[A-Za-z]+"), "")
+        val mapped = decomposed.map { lookalikes[it] ?: it }.joinToString("")
+        val folded = (if (controlWords) mapped.replace(Regex("\\\\[A-Za-z]+"), "") else mapped)
             .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}*_~`{}$]"), "")
             .lowercase(java.util.Locale.ROOT)
         return english(folded)
@@ -42,10 +42,13 @@ internal class ExamOverlap(documents: List<String>) {
     private fun literal(text: String) = english(Normalizer.normalize(text, Normalizer.Form.NFKD)
         .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}]"), "")
         .lowercase(java.util.Locale.ROOT))
-    private val windows = documents.flatMap { text -> listOf(words(text), literal(text))
+    // The third view retains backslash-prefixed letters while joining markup
+    // and folding lookalikes. It covers readable words split by both techniques.
+    private val windows = documents.flatMap { text -> listOf(words(text), literal(text), words(text, controlWords = false))
         .flatMap { it.windowed(8).map { w -> w.joinToString(" ") } } }.toHashSet()
     fun hit(text: String) = words(text).windowed(8).any { it.joinToString(" ") in windows } ||
-        literal(text).windowed(8).any { it.joinToString(" ") in windows }
+        literal(text).windowed(8).any { it.joinToString(" ") in windows } ||
+        words(text, controlWords = false).windowed(8).any { it.joinToString(" ") in windows }
 }
 
 internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false,
@@ -136,11 +139,36 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 
 class ExamOutputTest {
     private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
+    private fun backslashMarkupVariants(text: String): List<String> {
+        val lookalikes = mapOf('a' to 'а', 'c' to 'с', 'e' to 'е', 'h' to 'һ', 'm' to 'м', 'o' to 'о')
+        val wrappers = listOf("**" to "**", "`" to "`", "_" to "_", "~~" to "~~", "{" to "}")
+        return (0..6).flatMap { style -> listOf(true, false).map { everyWord ->
+            text.split(" ").mapIndexed { i, word ->
+                if (!everyWord && i % 2 != 0) word else {
+                    val rest = when (style) {
+                        5 -> word.drop(1).map { lookalikes[it] ?: it }.joinToString("")
+                        6 -> "${lookalikes.getValue(word[1])}${word.drop(2)}"
+                        else -> "${wrappers[style].first}${word.drop(1)}${wrappers[style].second}"
+                    }
+                    "\\${word.first()}$rest"
+                }
+            }.joinToString(" ")
+        } }
+    }
+
+    @Test fun independentCheckerDetectsBackslashWordsWithMarkupOrHomoglyphs() {
+        for (input in backslashMarkupVariants(exams[0])) {
+            assertTrue(ExamOverlap(exams).hit(input))
+            assertTrue(ExamOverlap(exams).hit("`$input`"))
+            assertTrue(ExamOverlap(listOf(input)).hit(exams[0]))
+        }
+    }
     @Test fun independentCheckerCountsEnglishWordsAndDetectsInsertedFormulaFillers() {
         val formula = "\$\$\\frac{Q_2-Q_1}{Q_2+Q_1} / \\frac{P_2-P_1}{P_2+P_1}\$\$"
         val sentence = "I saw a bright comet cross the horizon."
         val checker = ExamOverlap(exams + formula + sentence)
         assertFalse(checker.hit(formula))
+        assertFalse(checker.hit("\$\$\\text{MC} = \\alpha + \\beta Q\$\$"))
         assertTrue(checker.hit(sentence))
         assertTrue(checker.hit(exams.first()))
         for (filler in listOf("x", "\$Q_2\$", "\\frac{Q_2}{P_2}"))
@@ -250,7 +278,7 @@ class ExamOutputTest {
                         if (everyWord || i % 2 == 0) "\\${word.first()}$mark${word.drop(1)}" else word
                     }.joinToString(" ")
                 }
-            }
+            } + backslashMarkupVariants(exams[0])
         StubTutor().use { stub ->
             ExamHarness(Files.createTempDirectory("exam-obfuscated"), ExamMaterials.fromTexts(exams), BridgeClient(BridgeConfig(stub.baseUrl))).use { h ->
                 for ((i, input) in variants.withIndex()) {

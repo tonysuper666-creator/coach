@@ -39,9 +39,11 @@ class ExamTextIndex(documents: List<String>) {
         }
     }
 
-    // A reference and a reply may use different formatting. Both reply views
+    // A reference and a reply may use different formatting. All reply views
     // must match every reference view, including literal words in TeX wrappers.
-    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(root to scan(text), root to scan(text, visible = false))
+    internal fun scans(text: String): List<Pair<Node, Scan>> = listOf(
+        root to scan(text), root to scan(text, visible = false), root to scan(text, controlWords = false)
+    )
     internal data class Word(val value: String, val start: Int, val end: Int, val matchable: Boolean)
     internal data class Scan(val words: List<Word>, val openWord: Boolean, val stableEnd: Int)
     companion object {
@@ -49,7 +51,7 @@ class ExamTextIndex(documents: List<String>) {
 
         // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.
         // Only the matching view is folded; normal replies are published unchanged.
-        internal fun scan(text: String, visible: Boolean = true): Scan {
+        internal fun scan(text: String, visible: Boolean = true, controlWords: Boolean = visible): Scan {
             val normalized = StringBuilder()
             val starts = ArrayList<Int>()
             val ends = ArrayList<Int>()
@@ -58,7 +60,7 @@ class ExamTextIndex(documents: List<String>) {
             while (offset < text.length) {
                 // A partial control word must not be published: the next delta can
                 // turn "\\te" into "\\text", changing how subsequent letters tokenize.
-                if (visible && text[offset] == '\\' && (offset + 1 == text.length || asciiLetter(text[offset + 1]))) {
+                if (controlWords && text[offset] == '\\' && (offset + 1 == text.length || asciiLetter(text[offset + 1]))) {
                     var end = offset + 1
                     while (end < text.length && asciiLetter(text[end])) end++
                     if (end == text.length) stableEnd = minOf(stableEnd, offset)
@@ -73,7 +75,7 @@ class ExamTextIndex(documents: List<String>) {
                 if (!visible) while (end < text.length && Character.getType(text.codePointAt(end)) in MARK_TYPES)
                     end += Character.charCount(text.codePointAt(end))
                 // Invisible characters and accents cannot split readable words in
-                // either view, including words immediately following a backslash.
+                // any view, including words immediately following a backslash.
                 val piece = Normalizer.normalize(text.substring(offset, end), Normalizer.Form.NFKD)
                 piece.codePoints().forEach { cp ->
                     if (Character.getType(cp) !in IGNORED_TYPES && cp != 0xAD && (!visible || cp !in MARKUP)) {

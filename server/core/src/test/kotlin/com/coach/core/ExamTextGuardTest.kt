@@ -77,6 +77,8 @@ class ExamTextGuardTest {
             "\$\$E = (Q_2-Q_1)/((Q_2+Q_1)/2) / ((P_2-P_1)/((P_2+P_1)/2))\$\$",
             "\$\$\\frac{Q_2-Q_1}{Q_2+Q_1} / \\frac{P_2-P_1}{P_2+P_1}\$\$",
             "\$\$ICER = (C_B-C_A)/(Q_B-Q_A); Q = S_1 U_1 + S_2 U_2\$\$",
+            "\$\$\\frac{Q_2}{P_2}\$\$",
+            "\$\$\\text{MC} = \\alpha + \\beta Q\$\$",
         )
         val formulaIndex = ExamTextIndex(listOf(exam) + formulas)
         for (formula in formulas) {
@@ -184,6 +186,25 @@ class ExamTextGuardTest {
                 }.joinToString(" ")
                 assertObfuscationBlocked(input)
             }
+        }
+    }
+
+    @Test fun backslashWordsWithMarkupOrHomoglyphsRemainProtected() {
+        val lookalikes = mapOf('a' to 'а', 'c' to 'с', 'e' to 'е', 'h' to 'һ',
+            'm' to 'м', 'o' to 'о')
+        val wrappers = listOf("**" to "**", "`" to "`", "_" to "_", "~~" to "~~", "{" to "}")
+        for (style in 0..6) for (everyWord in listOf(true, false)) {
+            val input = quote.split(" ").mapIndexed { i, word ->
+                if (!everyWord && i % 2 != 0) word else {
+                    val rest = when (style) {
+                        5 -> word.drop(1).map { lookalikes[it] ?: it }.joinToString("")
+                        6 -> "${lookalikes.getValue(word[1])}${word.drop(2)}"
+                        else -> "${wrappers[style].first}${word.drop(1)}${wrappers[style].second}"
+                    }
+                    "\\${word.first()}$rest"
+                }
+            }.joinToString(" ")
+            assertObfuscationBlocked(input)
         }
     }
 

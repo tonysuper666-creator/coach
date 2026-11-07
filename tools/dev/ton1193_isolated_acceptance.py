@@ -1,6 +1,7 @@
 """Read-only acceptance evidence for the disposable TON-1193 fixture only."""
 import contextlib
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -11,6 +12,7 @@ import sys
 import time
 
 from . import ton1193_isolated_controller as isolated
+from . import ton1193_live as live
 from .ton1175_switch import GateError, atomic, digest, require
 from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
@@ -102,6 +104,23 @@ def observe(config, roots):
         connection.close()
 
 
+def observe_when_ready(config, roots, deadline):
+    """Allow the isolated JVM time to bind, without accepting a failed hello."""
+    stop = time.monotonic() + min(60, max(0, deadline - time.time()))
+    while True:
+        try:
+            result = observe(config, roots)
+            require(time.time() < deadline and time.monotonic() < stop,
+                    'isolated acceptance readiness timed out')
+            return result
+        except ConnectionRefusedError as exc:
+            if exc.errno != errno.ECONNREFUSED or time.monotonic() >= stop:
+                raise
+            require(live.live_acceptance(config['stateDir']) == 'validating',
+                    'isolated acceptance transaction ended')
+            time.sleep(min(0.25, max(0, stop - time.monotonic())))
+
+
 def run(config_path, action, baseline, started=None, deadline=None):
     config, roots, _ = isolated.fixture(config_path)
     require(baseline == str(Path(config['stateDir']) / 'acceptance-baseline.json'),
@@ -129,8 +148,10 @@ def run(config_path, action, baseline, started=None, deadline=None):
             and before['createdAt'] <= started <= now < deadline
             and started - before['createdAt'] <= 120, 'invalid acceptance deadline or baseline')
     monotonic_deadline = time.monotonic() + deadline - now
+    first = True
     while time.monotonic() < monotonic_deadline:
-        current = observe(config, roots)
+        current = observe_when_ready(config, roots, deadline) if first else observe(config, roots)
+        first = False
         require(current['epoch'] == before['epoch'] and current['tokenSha256'] == before['tokenSha256']
                 and current['credentialSha256'] == before['credentialSha256']
                 and current['lastSeq'] >= before['lastSeq'], 'isolated identity or ledger changed')

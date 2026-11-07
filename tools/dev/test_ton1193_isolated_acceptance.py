@@ -88,7 +88,10 @@ class AcceptanceTest(unittest.TestCase):
         clock = mock.Mock()
         clock.time.return_value = now
         clock.monotonic.side_effect = [0, 0, 301, 301]
-        with mock.patch.object(acceptance, 'time', clock):
+        config, roots, _ = isolated.fixture(str(self.path))
+        observed = acceptance.observe(config, roots)
+        with mock.patch.object(acceptance, 'time', clock), \
+             mock.patch.object(acceptance, 'observe_when_ready', return_value=observed):
             with self.assertRaisesRegex(GateError, 'lecture and exercise'):
                 acceptance.run(str(self.path), 'accept', self.baseline, now, now + 300)
 
@@ -113,7 +116,7 @@ class AcceptanceTest(unittest.TestCase):
     def test_injected_failure_records_only_closed_diagnostic(self):
         now = time.time()
         with mock.patch.object(injected.live, 'live_acceptance', return_value='validating'), \
-             mock.patch.object(acceptance, 'observe', side_effect=ConnectionRefusedError(errno.ECONNREFUSED, 'private detail')):
+             mock.patch.object(acceptance, 'observe_when_ready', side_effect=ConnectionRefusedError(errno.ECONNREFUSED, 'private detail')):
             self.assertFalse(injected.verify(str(self.path), self.baseline, now, now + 300))
         diagnostic = (self.root / 'injected-diagnostic.json').read_text()
         self.assertEqual(json.loads(diagnostic), {'step': 'HELLO', 'reason': 'CONNECTION_REFUSED'})
@@ -127,6 +130,30 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(Hello.requests, 1)
         self.assertEqual(json.loads((self.root / 'injected-acceptance.json').read_text())['epoch'], 'isolated-epoch')
         self.assertFalse((self.root / 'injected-diagnostic.json').exists())
+
+    def test_startup_refusal_retries_under_live_transaction_then_authenticates(self):
+        config, roots, _ = isolated.fixture(str(self.path))
+        real_observe = acceptance.observe
+        with mock.patch.object(acceptance, 'observe', side_effect=[
+                ConnectionRefusedError(errno.ECONNREFUSED, 'private'),
+                ConnectionRefusedError(errno.ECONNREFUSED, 'private'),
+                real_observe(config, roots)]) as observe, \
+             mock.patch.object(acceptance.live, 'live_acceptance', return_value='validating') as live, \
+             mock.patch.object(acceptance.time, 'sleep'):
+            result = acceptance.observe_when_ready(config, roots, time.time() + 10)
+        self.assertEqual(result['epoch'], 'isolated-epoch')
+        self.assertEqual(observe.call_count, 3)
+        self.assertEqual(live.call_count, 2)
+
+    def test_startup_wait_rejects_expired_or_ended_transaction(self):
+        config, roots, _ = isolated.fixture(str(self.path))
+        refusal = ConnectionRefusedError(errno.ECONNREFUSED, 'private')
+        with mock.patch.object(acceptance, 'observe', side_effect=refusal):
+            with self.assertRaises(ConnectionRefusedError):
+                acceptance.observe_when_ready(config, roots, time.time() - 1)
+            with mock.patch.object(acceptance.live, 'live_acceptance', return_value='recovering'):
+                with self.assertRaisesRegex(GateError, 'transaction ended'):
+                    acceptance.observe_when_ready(config, roots, time.time() + 10)
 
     def test_changed_token_and_outside_baseline_are_refused(self):
         acceptance.run(str(self.path), 'snapshot', self.baseline)

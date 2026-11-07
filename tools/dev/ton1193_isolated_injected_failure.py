@@ -23,7 +23,9 @@ def verify(config_path, baseline, started, deadline):
                 and live.live_acceptance(config['stateDir']) == 'validating',
                 'isolated acceptance phase or deadline mismatch')
         step = 'HELLO'
-        observed = acceptance.observe(config, roots)
+        observed = acceptance.observe_when_ready(config, roots, deadline)
+        require(time.time() < deadline and live.live_acceptance(config['stateDir']) == 'validating',
+                'isolated acceptance transaction ended')
         step = 'EVIDENCE_WRITE'
         atomic(Path(config['stateDir']).parent / 'injected-acceptance.json',
                json.dumps(observed).encode())

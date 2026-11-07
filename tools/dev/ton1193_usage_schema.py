@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 
 from .ton1175_switch import digest, require
 from .ton1193_transaction import _read_file
@@ -38,6 +40,32 @@ def attest(old_root, new_root, old_head, new_head):
                           statements=extract(raw) if raw is not None else None))
     return dict(version=1, source=SOURCE, old=sides[0], new=sides[1],
                 equal=sides[0]['statements'] is not None and sides[0]['statements'] == sides[1]['statements'])
+
+
+def attest_revisions(repo, old_head, new_head):
+    """Read both sources from named Git commits, never from an installed release."""
+    for head in (old_head, new_head):
+        require(isinstance(head, str) and re.fullmatch(r'[0-9a-f]{40}', head),
+                'full source commit required')
+        result = subprocess.run(['git', '-C', str(repo), 'cat-file', '-e', head + '^{commit}'],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=60)
+        require(result.returncode == 0, 'source commit missing')
+    with tempfile.TemporaryDirectory(prefix='ton1175-schema-') as temp:
+        roots = [Path(temp) / 'old', Path(temp) / 'new']
+        for root, head in zip(roots, (old_head, new_head)):
+            spec = head + ':' + SOURCE
+            exists = subprocess.run(['git', '-C', str(repo), 'cat-file', '-e', spec],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=60)
+            if exists.returncode == 0:
+                source = subprocess.run(['git', '-C', str(repo), 'show', spec],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, timeout=60, check=True).stdout
+                path = root / SOURCE
+                path.parent.mkdir(parents=True)
+                path.write_bytes(source)
+        return attest(*roots, old_head, new_head)
 
 
 def enabled(proof):

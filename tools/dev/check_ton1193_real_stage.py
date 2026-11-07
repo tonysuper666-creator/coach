@@ -16,7 +16,6 @@ import sys
 from . import ton1175_switch as switch, ton1175_verify as verify
 from . import ton1193_isolated_controller as isolated
 from . import ton1193_synthetic_cli as synthetic
-from . import ton1193_usage_schema as usage_schema
 from .rehearse_ton1175_launchd import port
 
 REPO = Path(__file__).resolve().parents[2]
@@ -136,7 +135,7 @@ def main(exercise=None, unstaged_exercise=None):
         previous = os.environ.get('JAVA_HOME')
         os.environ['JAVA_HOME'] = str(java_home)
         try:
-            verify.attest(REPO, new_release, str(node), str(java), manifest)
+            verify.attest(REPO, new_release, str(node), str(java), manifest, usage_old_head=old)
         finally:
             if previous is None:
                 os.environ.pop('JAVA_HOME', None)
@@ -171,7 +170,6 @@ def main(exercise=None, unstaged_exercise=None):
         cli_proof = synthetic.install(root)
         proof = json.loads(manifest.read_bytes())
         proof['isolatedSyntheticCli'] = cli_proof
-        proof['usageObservationSchema'] = usage_schema.attest(old_source, REPO, old, head)
         switch.atomic(manifest, json.dumps(proof, sort_keys=True).encode())
         manifest_hash = switch.file_hash(manifest)
         config = {'stateDir': str(root / 'stage'), 'adapterSnapshotDir': str(root / 'stage/snapshot'),

@@ -18,6 +18,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlsplit
 
@@ -91,13 +92,21 @@ for name, version in pins.items():
     return external
 
 
-def attest(checkout, release, node, java, output):
+def attest(checkout, release, node, java, output, usage_old_head=None, usage_allow_nontemporary=False):
     """Build before the outage, bind final relocated tree to a clean source head.
 
     The output and its SHA must be reviewed/pinned outside the candidate tree.
     Verification does not rebuild or install anything in the outage.
     """
     checkout, release = Path(checkout).resolve(), Path(release).resolve()
+    if usage_old_head is not None:
+        # Production evidence writes require an explicit, separately authorized opt-in.
+        roots = (Path(tempfile.gettempdir()).resolve(), Path('/tmp').resolve())
+        require(usage_allow_nontemporary or all(any(root in path.parents for root in roots)
+                for path in (release, Path(output).resolve())),
+                'schema evidence defaults to temporary release and manifest paths')
+    else:
+        require(not usage_allow_nontemporary, 'schema old head required for non-temporary opt-in')
     require(not captured(['git', '-C', str(checkout), 'status', '--porcelain']).strip(),
             'build checkout must be clean')
     head = captured(['git', '-C', str(checkout), 'rev-parse', 'HEAD']).decode().strip()
@@ -121,6 +130,11 @@ def attest(checkout, release, node, java, output):
     manifest = {'version': 1, 'sourceHead': head, 'root': str(release), 'node': str(Path(node).resolve()),
                 'java': str(Path(java).resolve()),
                 'treeSha256': tree_hash(release), 'externalExecutables': external}
+    if usage_old_head is not None:
+        if not __package__:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from tools.dev.ton1193_usage_schema import attest_revisions
+        manifest['usageObservationSchema'] = attest_revisions(checkout, usage_old_head, head)
     require(release not in Path(output).resolve().parents, 'manifest must be outside release')
     require(not Path(output).exists(), 'never overwrite provenance evidence')
     atomic(output, json.dumps(manifest, sort_keys=True).encode())
@@ -420,6 +434,9 @@ def main():
     build = sub.add_parser('attest')
     for name in ('checkout', 'release', 'node', 'java', 'output'):
         build.add_argument('--' + name, required=True)
+    build.add_argument('--usage-old-head', help='full old Git commit for usage schema proof')
+    build.add_argument('--usage-allow-nontemporary', action='store_true',
+                       help='explicitly allow schema evidence outside temporary roots')
     check = sub.add_parser('candidate')
     check.add_argument('--manifest', required=True)
     check.add_argument('--sha256', required=True)
@@ -447,7 +464,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.action == 'attest':
-            attest(args.checkout, args.release, args.node, args.java, args.output)
+            attest(args.checkout, args.release, args.node, args.java, args.output,
+                   args.usage_old_head, args.usage_allow_nontemporary)
         elif args.action == 'candidate':
             candidate(args.manifest, args.sha256, args.release, args.head, args.plist)
         elif args.action == 'logs':

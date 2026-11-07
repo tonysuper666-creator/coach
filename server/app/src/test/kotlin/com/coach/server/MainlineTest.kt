@@ -162,6 +162,27 @@ class MainlineTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
+    @Test fun qaUncheckedMatchingKeyOnAPassedPointStillQueuesTomorrow() {
+        val dir = Files.createTempDirectory("mainline-unchecked-passed")
+        val now = AtomicLong(1_800_000_000_000)
+        try {
+            val (store, mainline) = orchard(dir, now)
+            val today = logicalDay(now.get(), "Europe/London")
+            store.append("C1", "legacy_passed", json("kpId" to "kp-orchard", "sourceRef" to "synthetic"))
+            store.append("C1", "legacy_schedule", json("kpId" to "kp-orchard", "dueDay" to today + 14, "interval" to 14))
+            assertTrue(store.snapshot("C1").projection.mastery.getValue("kp-orchard").passed)
+            assertEquals(today + 14, store.snapshot("C1").projection.review.getValue("kp-orchard").dueDay)
+            val result = mainline.answer(store, "C1", 1, json("itemId" to "D2", "choice" to 1, "submissionId" to "unchecked-passed"))
+            val projection = store.snapshot("C1").projection
+            assertEquals("pending", result.str("status"))
+            assertFalse(projection.mastery.getValue("kp-orchard").needsRepair, "an unchecked key must not mark a known point wrong")
+            println("QA_PENDING_PASSED status=${result.str("status")} dueDay=${result["dueDay"]} expected=${today + 1} revisit=${projection.revisit} review=${projection.review}")
+            assertEquals(today + 1, (result["dueDay"] as? JsonPrimitive)?.longOrNull,
+                "an unchecked mainline key asks for another look tomorrow even when the point was already passed")
+            assertContains(projection.reviewsOn(today + 1), "kp-orchard")
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun packsLabelledWithTheCourseCodeShowUpForTheLedgerCourse() {
         val dir = Files.createTempDirectory("mainline-code")
         try {

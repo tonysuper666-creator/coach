@@ -87,6 +87,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     }
     /** A mainline choice whose key nobody has checked never counts as a mistake; it is still looked at again. */
     fun unverifiedMainline(a: Attempt) = a.posed.payload.flag("mainline") && keys[a.question] != "VERIFIED"
+    fun reviewPass(a: Attempt) = a.pass && !unverifiedMainline(a)
     fun graded(a: Attempt): Boolean = a.grade != null && !a.uncertain &&
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
@@ -171,10 +172,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         if (!passed) review.remove(kp)
         if (changed != null && graded(changed) && !changed.voided && passed) {
             val isReview = changed.posed.payload.flag("review")
-            if (isReview && firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
+            // An unchecked mainline key only asks for another look; it cannot pass or fail a spaced review.
+            if (!isReview || unverifiedMainline(changed)) {
+                if (!reviewPass(changed)) review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(changed.day,1))) }
+            } else if (firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
                 schedule(kp, changed.day, if (changed.pass) "PASS" else if (changed.ratio >= .5) "NEEDS_WORK" else "FAIL")
-            } else if (!isReview && !changed.pass) {
-                review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(changed.day,1))) }
             }
         }
     }
@@ -183,7 +185,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
      * An answer against an unchecked key is no evidence either way, so it always asks for another look and never settles one. */
     fun revisitAfter(a: Attempt) {
         if (a.submitted == null || a.voided || !graded(a)) return
-        val pass = a.pass && !unverifiedMainline(a)
+        val pass = reviewPass(a)
         for (kp in a.kps) {
             if (mastery[kp]?.passed == true) { revisit.remove(kp); continue }
             val dueDay = revisit[kp]

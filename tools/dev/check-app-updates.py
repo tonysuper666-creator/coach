@@ -27,6 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--prepare', action='store_true', help='build isolated N/N+1 and a synthetic wrong-signer APK first')
+    parser.add_argument('--database-copy', type=Path, help='read-only source SQLite copy (or synthetic fixture); never modified')
     args = parser.parse_args()
     out = args.artifacts.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -88,8 +89,8 @@ def main():
     data = out / 'data'
     shutil.rmtree(data, ignore_errors=True)
     data.mkdir(mode=0o700)
-    production = Path.home() / 'Coach/data'
-    with sqlite3.connect((production / 'coach.sqlite').resolve().as_uri() + '?mode=ro', uri=True) as source:
+    source_database = args.database_copy or Path.home() / 'Coach/data/coach.sqlite'
+    with sqlite3.connect(source_database.resolve().as_uri() + '?mode=ro', uri=True) as source:
         with sqlite3.connect(data / 'coach.sqlite') as target:
             source.backup(target)
     with sqlite3.connect(data / 'coach.sqlite') as db:
@@ -98,6 +99,7 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
     env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data / 'device-token'), COACH_RUN_DIR=str(out / 'run'),
                COACH_LOG_DIR=str(out / 'logs'), COACH_PACKS_DIR=str(out / 'packs'), COACH_STATE_DIR=str(out / 'state'),
+               COACH_GENERATED_DIR=str(out / 'generated'), COACH_MOCK_DIR=str(out / 'mock'),
                COACH_PORT=str(PORT), COACH_TAIL_HOST=tail_host(), COACH_TRAFFIC='test',
                COACH_BRIDGE_URL='http://127.0.0.1:1', COACH_SOURCE_LOOKUP='false', COACH_APP_UPDATE_DIR=str(updates))
     server = emulator = logcat = None

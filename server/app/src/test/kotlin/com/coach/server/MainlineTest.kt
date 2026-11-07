@@ -121,6 +121,18 @@ class MainlineTest {
             assertEquals("mastered", sure.str("status"))
             assertEquals(2, sure.cov("factsMastered"))
 
+            // Capability negotiation must work through the same HTTP boundary as the shared client.
+            assertTrue(items.all { it["layout"] is JsonNull })
+            val (_, shuffled) = request("/mainline/1?layout=shuffled-v1")
+            val shown = shuffled.getValue("items").jsonArray.map { it.jsonObject }
+            assertTrue(shown.all { it["layout"] is JsonPrimitive })
+            val q = assertNotNull(shown.firstOrNull { it.str("keyState") == "VERIFIED" && it.strings("options").indexOf("Pears ${it.str("id")}") != 1 })
+            val choice = q.strings("options").indexOf("Pears ${q.str("id")}")
+            val (_, shuffledRight) = request("/mainline/1/answer", json("itemId" to q.str("id"), "choice" to choice,
+                "layout" to q.num("layout"), "submissionId" to "http-layout-right"))
+            assertEquals("mastered", shuffledRight.str("status"))
+            assertEquals(choice.toLong(), shuffledRight.num("answer"))
+
             val (missing, _) = request("/mainline/9")
             assertEquals(404, missing)
         } finally { engine.stopSuspend(0, 500); actor.close(); scope.cancel(); dir.toFile().deleteRecursively() }
@@ -197,7 +209,7 @@ class MainlineTest {
                         store.append("C1", "legacy_passed", json("kpId" to "kp-orchard", "sourceRef" to "synthetic"))
                         store.append("C1", "legacy_schedule", json("kpId" to "kp-orchard", "dueDay" to today + 14, "interval" to 14))
                     }
-                    fun card(engine: Mainline) = engine.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }.single { it.str("id") == "D2" }
+                    fun card(engine: Mainline) = engine.week(store, "C1", 1, shuffled = true).getValue("items").jsonArray.map { it.jsonObject }.single { it.str("id") == "D2" }
                     val shown = card(mainline)
                     val restarted = Mainline(library = MockLibrary(dir.resolve("papers")), clock = { now.get() })
                     assertEquals(shown, card(restarted), "the displayed choice survives a reload and a server restart")
@@ -235,7 +247,7 @@ class MainlineTest {
         val now = AtomicLong(1_800_000_000_000)
         try {
             val (store, mainline) = orchard(dir, now)
-            val items = mainline.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }
+            val items = mainline.week(store, "C1", 1, shuffled = true).getValue("items").jsonArray.map { it.jsonObject }
             for (i in items) assertEquals(listOf("Apples", "Pears", "Plums", "Figs").map { "$it ${i.str("id")}" }.toSet(), i.strings("options").toSet())
             // Pick a checked question whose key (Pears, second in the pack) is somewhere else on screen.
             val q = assertNotNull(items.firstOrNull { it.str("keyState") == "VERIFIED" && it.strings("options").indexOf("Pears ${it.str("id")}") != 1 })
@@ -259,7 +271,7 @@ class MainlineTest {
             assertEquals("missed", resent.str("status"), "a resend is the first answer, not a second chance")
             assertEquals(plums.toLong(), resent.num("choice"))
 
-            val again = mainline.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }.first { it.str("id") == id }
+            val again = mainline.week(store, "C1", 1, shuffled = true).getValue("items").jsonArray.map { it.jsonObject }.first { it.str("id") == id }
             assertEquals(q.num("layout") + 1, again.num("layout"))
             val right = mainline.answer(store, "C1", 1, json("itemId" to id, "choice" to again.strings("options").indexOf("Pears $id"),
                 "layout" to again.num("layout"), "submissionId" to "shuffled-right"))
@@ -267,6 +279,30 @@ class MainlineTest {
             assertEquals(again.strings("options").indexOf("Pears $id").toLong(), right.num("answer"))
         } finally { dir.toFile().deleteRecursively() }
     }
+
+    @Test fun qaAClientWithoutLayoutIsGradedByTheOptionsItActuallyReceives() {
+        val dir = Files.createTempDirectory("mainline-legacy-client")
+        val now = AtomicLong(1_800_000_000_000)
+        try {
+            val (store, mainline) = orchard(dir, now)
+            // The existing unversioned GET used by the pre-layout CourseHttp client.
+            val items = mainline.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }
+            // Legacy GET retains pack order; it cannot describe a shuffle in its POST.
+            for (item in items) {
+                assertEquals(listOf("Apples", "Pears", "Plums", "Figs").map { "$it ${item.str("id")}" }, item.strings("options"))
+                assertTrue(item["layout"] is JsonNull)
+            }
+            val q = assertNotNull(items.firstOrNull { it.str("keyState") == "VERIFIED" })
+            val id = q.str("id")
+            val choice = q.strings("options").indexOf("Pears $id")
+            println("QA_LEGACY_LAYOUT item=$id options=${q.strings("options")} visibleCorrectIndex=$choice layout=${q.num("layout")}")
+            // An old client displays these options and sends the displayed index, without layout.
+            val result = mainline.answer(store, "C1", 1, json("itemId" to id, "choice" to choice, "submissionId" to "qa-legacy-client"))
+            println("QA_LEGACY_LAYOUT status=${result.str("status")} choice=${result.num("choice")} answer=${result.num("answer")} dueDay=${result.num("dueDay")}")
+            assertEquals("mastered", result.str("status"), "the visible correct option must remain correct when a pre-layout client submits it")
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
 
     @Test fun packsLabelledWithTheCourseCodeShowUpForTheLedgerCourse() {
         val dir = Files.createTempDirectory("mainline-code")

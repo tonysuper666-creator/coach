@@ -150,15 +150,16 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     }
 
     /** Questions in setup → detail → bridge order, without keys or explanations. */
-    fun week(store: LedgerStore, course: String, number: Int): JsonObject {
+    fun week(store: LedgerStore, course: String, number: Int, shuffled: Boolean = false): JsonObject {
         val events = store.events(course)
         val week = find(courseNames(events, course), number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
             "items" to JsonArray(week.items.map { item ->
                 val layout = round(events, item)
+                val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()
                 json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem,
-                    "options" to optionOrder(item.fingerprint, layout, item.unit.options.size).map { item.unit.options[it] }, "layout" to layout,
+                    "options" to order.map { item.unit.options[it] }, "layout" to if (shuffled) layout else null,
                     "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" })
             }))
     }
@@ -254,7 +255,12 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
     fun ApplicationCall.week() = parameters["week"]?.toIntOrNull() ?: throw MockError(HttpStatusCode.BadRequest, "周数不对")
     routing {
         get("/v1/courses/{course}/mainline") { val c = call.parameters["course"]!!; call.answer(c) { mainline.home(this, c) } }
-        get("/v1/courses/{course}/mainline/{week}") { val c = call.parameters["course"]!!; call.answer(c) { mainline.week(this, c, call.week()) } }
+        get("/v1/courses/{course}/mainline/{week}") {
+            val c = call.parameters["course"]!!
+            // Older clients submit only a displayed index, so only capable clients receive a shuffled layout.
+            val shuffled = call.request.queryParameters["layout"] == "shuffled-v1"
+            call.answer(c) { mainline.week(this, c, call.week(), shuffled) }
+        }
         post("/v1/courses/{course}/mainline/{week}/answer") { val c = call.parameters["course"]!!; call.answer(c) { mainline.answer(this, c, call.week(), it) } }
     }
 }

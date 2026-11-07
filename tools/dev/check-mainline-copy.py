@@ -161,7 +161,7 @@ def main():
 
             def walk_by_protocol():
                 # Options come shuffled: answer by the text on screen and send back the layout it was read with.
-                shown = {i['id']: i for i in request('/mainline/1')['items']}
+                shown = {i['id']: i for i in request('/mainline/1?layout=shuffled-v1')['items']}
                 for item_id, text, guessed in (('S1', 'apples', False), ('D1', 'pears', True), ('B1', 'pears', False)):
                     item = shown[item_id]
                     choice = next(n for n, o in enumerate(item['options']) if f'Synthetic {text} are grown there' == o)

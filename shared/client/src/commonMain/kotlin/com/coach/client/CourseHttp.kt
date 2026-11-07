@@ -86,7 +86,7 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     /** 选择题主线：各周的题数与覆盖面板。 */
     suspend fun mainline(): MockReply = mockCall("mainline", null)
     /** 一周的题，按铺垫 → 细节 → 桥接排好；不含答案和讲解。 */
-    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week", null)
+    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1", null)
     /**
      * 一道题答一次：返回对错、全部讲解、复习安排和新的覆盖数。同一个 [submissionId] 重发只算一次。
      * [choice] 是屏幕上的第几个选项，[layout] 原样带回这道题读下来时的 `layout`，Mac 据此认出是哪一种打乱顺序。

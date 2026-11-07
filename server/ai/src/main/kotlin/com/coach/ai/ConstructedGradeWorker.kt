@@ -52,7 +52,8 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 val payload=gradePayload(requireNotNull(draft.draft),answer,numeric,question,input.str("finalAnswer"),draft.evidenceSpans)
                 val stored=JsonObject(payload + json("status" to "AI_UNREVIEWED","graderModel" to grader,
                     "rubricFingerprint" to work.fingerprint,"processGrade" to storedDraft(draft.draft),
-                    "callIds" to draft.calls.map { it.callId },"notice" to fallbackNotice))
+                    "callIds" to draft.calls.map { it.callId },"notice" to fallbackNotice,
+                    "rewriteNotice" to if(draft.rewriteWithheld) "这次的改写示范和参考答案重合太多，没有显示；各项得分不受影响。" else null))
                 if(actor.execute { persistGradeDraft(work,stored,grader) }) onChanged(input.str("course"))
             } else {
                 val grader=input.str("grader")
@@ -80,9 +81,9 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
     }
 }
 
-internal fun storedDraft(draft: DraftGrade): JsonObject = json("items" to JsonArray(draft.items.map {
+internal fun storedDraft(draft: DraftGrade): JsonObject = JsonObject(json("items" to JsonArray(draft.items.map {
     json("id" to it.id,"points" to it.points,"reason" to it.reason,"evidence" to it.evidence)
-}),"total" to draft.total,"awarded" to draft.awarded)
+}),"total" to draft.total,"awarded" to draft.awarded) + if(draft.rewrite.isBlank()) emptyMap() else mapOf("rewrite" to JsonPrimitive(draft.rewrite)))
 
 /** Only the separate final-value field is compared; the model receives no authority over its points. */
 internal fun gradePayload(process: DraftGrade, answer: String, numeric: JsonObject?, question: ConstructedQuestion,
@@ -106,7 +107,8 @@ internal fun gradePayload(process: DraftGrade, answer: String, numeric: JsonObje
         json("rubricItemId" to e.rubricItemId,"field" to "answer","start" to e.span.start,"end" to e.span.end,"text" to e.span.text)
     } + if(numeric!=null && finalAnswer.isNotEmpty()) listOf(json("rubricItemId" to numeric.str("rubricItemId"),
         "field" to "finalAnswer","start" to 0,"end" to finalAnswer.length,"text" to finalAnswer,"method" to "SERVER_NUMERIC")) else emptyList()
-    return json("score" to kotlin.math.round(grade.awarded*100).toLong(),"max" to kotlin.math.round(grade.total*100).toLong(),
+    val payload=json("score" to kotlin.math.round(grade.awarded*100).toLong(),"max" to kotlin.math.round(grade.total*100).toLong(),
         "items" to storedDraft(grade).getValue("items"),"numericFinal" to numericFact,
         "evidence" to JsonArray(evidence))
+    return if(process.rewrite.isBlank()) payload else JsonObject(payload + ("rewrite" to JsonPrimitive(process.rewrite)))
 }

@@ -8,6 +8,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
@@ -19,7 +20,14 @@ import com.coach.client.KpRow
 import com.coach.client.SyncEngine
 import com.coach.client.TutorClient
 import com.coach.client.TutorUiState
+import com.coach.domain.json
+import com.coach.protocol.CommandBody
 import com.coach.ui.markdown.MathAsset
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -39,6 +47,11 @@ class CoachController(
     val nowMillis: () -> Long = { @OptIn(kotlin.time.ExperimentalTime::class) kotlin.time.Clock.System.now().toEpochMilliseconds() },
     /** 只读的课程查询（原题评分标准、教材原文、构答题库存）；没有（比如测试）就是 null，相关界面如实说「取不到」。 */
     val course: com.coach.client.CourseHttp? = null,
+    /** 论述限时练习的时限（秒）。默认 25 分钟；验收演示可以配短。 */
+    val essayLimitSec: Int = com.coach.domain.Essay.TIME_LIMIT_SEC,
+    /** 论述的截止计时和交卷送出，不随页面走。必须跑在界面线程上：交卷和打字改的是同一份草稿。测试可注入虚拟时钟。 */
+    private val essayClock: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main),
+    private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
     // Keep arrival anchors as long as the tutor model, including a trip back to Today.
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
@@ -53,6 +66,43 @@ class CoachController(
     /** 每场考试最后发出的保存序号，只增不减（锁内读写）。 */
     internal val mockSeq = HashMap<String, Long>()
     internal val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+    /** 正在写的那篇论述。放在这里：离开练习页再回来，倒计时照走，草稿还在。 */
+    internal var essay by mutableStateOf<EssaySession?>(null)
+        private set
+
+    /** 题目到手，开始计时。截止由这里盯着，不看练习页在不在屏幕上：回复习页、切到别的页，到点照样交卷。 */
+    internal fun startEssay(s: EssaySession) {
+        essay = s
+        essayClock.launch {
+            while (essay === s && !s.handedIn) {
+                val left = s.deadline - nowMillis()
+                if (left <= 0) { handInEssay(s); break }
+                // 每秒对一次墙钟：手机休眠时 delay 不走，醒来后一秒内补交。
+                delay(left.coerceAtMost(1000))
+            }
+        }
+    }
+
+    /** 交卷：只交一次。草稿就此定稿，命令先落进本机队列再送 Mac，断网也不丢。 */
+    internal fun handInEssay(s: EssaySession) {
+        if (s.handedIn || essay !== s) return
+        if (s.text.isBlank()) { essay = null; return }
+        tutor.telemetry?.record("tap", "essay_submit")
+        val cmd = sync.enqueue(CommandBody("submit_answer", courseId, nowMillis(),
+            json("attemptId" to s.attemptId, "answer" to s.text, "posedSnapshot" to s.posed, "threadId" to "essay:${s.attemptId}")))
+        s.handedIn = true
+        essayClock.launch {
+            try {
+                withContext(io) { sync.syncOnce() }
+                val receipt = sync.receipt(cmd.commandId)
+                if (receipt == null) s.note = "Mac 未连接：已交卷，连上后自动送去批改。"
+                else if (receipt.status !in setOf("OK", "DUPLICATE")) s.note = "Mac 没有收下这篇（${receipt.status}）。原文还在下面，可以复制保存。"
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { s.note = "Mac 未连接：已交卷，连上后自动送去批改。" }
+        }
+    }
+
+    internal fun closeEssay() { essay = null }
 }
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */
@@ -111,12 +161,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var reviewWeek by remember { mutableStateOf<Int?>(null) }
     // 模拟考整屏打开："" 是模拟考首页，其余是某一场考试的 id。
     var mock by remember { mutableStateOf<String?>(null) }
+    var essayOpen by remember { mutableStateOf(false) }
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; source = null; open = id to start }
-    val practiceReview: (String, Boolean) -> Unit = { id, start -> reviewMode = true; mock = null; source = null; reviewWeek = null; open = id to start }
+    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; essayOpen = false; source = null; open = id to start }
+    val practiceReview: (String, Boolean) -> Unit = { id, start -> reviewMode = true; mock = null; essayOpen = false; source = null; reviewWeek = null; open = id to start }
     val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
-    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; tab = it; open = null; source = null }
+    val openEssay: () -> Unit = { c.tutor.telemetry?.record("tap", "essay"); reviewWeek = null; mock = null; open = null; source = null; essayOpen = true }
+    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; essayOpen = false; tab = it; open = null; source = null }
     val focus = LocalFocusManager.current
     // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
     val anchorOfOpen = open?.let { (id, _) -> view?.kp(id) }?.takeIf { it.anchorDoc.isNotBlank() }
@@ -124,11 +176,12 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
     }
     SideEffect {
-        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; mock = null; tab = AppTab.TODAY; open = id?.let { it to true } }
-        weekActions.onReview = { week -> reviewWeek = week; open = null; source = null }
+        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; mock = null; essayOpen = false; tab = AppTab.TODAY; open = id?.let { it to true } }
+        weekActions.onReview = { week -> reviewWeek = week; essayOpen = false; open = null; source = null }
     }
-    LaunchedEffect(open, tab, source) {
+    LaunchedEffect(open, tab, source, essayOpen) {
         val screen = when {
+            essayOpen -> "essay"
             open != null -> "study"
             source != null -> null
             else -> when (tab) {
@@ -158,7 +211,13 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 var sourceShown by remember { mutableStateOf(false) }
                 LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val layout = LayoutRules.compute(WindowSpec(maxWidth.value, maxHeight.value))
+                    // The soft keyboard does not change the window's shape. Counting the height it covers flips a phone
+                    // (~750dp tall, ~400dp left with the keyboard up) into the short-height rail, which rebuilds the
+                    // open page: the focused field loses focus, the keyboard drops, and the next keystrokes go nowhere.
+                    val keyboard = with(LocalDensity.current) {
+                        (WindowInsets.safeDrawing.getBottom(this) - WindowInsets.systemBars.union(WindowInsets.displayCutout).getBottom(this)).coerceAtLeast(0).toDp()
+                    }
+                    val layout = LayoutRules.compute(WindowSpec(maxWidth.value, (maxHeight + keyboard).value))
                     val bottomBar = layout.nav == NavStyle.BottomBar
                     val contentWidth = maxWidth - layout.navWidthDp.dp
                     val wide = contentWidth >= WIDE_LAYOUT_MIN_WIDTH
@@ -170,7 +229,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, reminderSettings = settings) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
@@ -182,6 +241,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val mockId = mock
                         if (mockId != null && current != null) {
                             key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
+                        } else if (essayOpen && current != null) {
+                            EssayScreen(c, current, onBack = { essayOpen = false })
                         } else if (reviewWeek != null && current != null) {
                             WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
@@ -206,7 +267,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         )
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
-                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null))
+                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen))
                     if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)

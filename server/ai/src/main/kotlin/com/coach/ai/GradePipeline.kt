@@ -1,5 +1,6 @@
 package com.coach.ai
 
+import com.coach.domain.Essay
 import com.coach.domain.grade.NumericValue
 import com.coach.domain.grade.EvidenceCheck
 import com.coach.domain.grade.EvidenceSpan
@@ -194,6 +195,8 @@ class GradePipeline(private val client: BridgeClient) {
         /** 草稿逐条（含模型给的引文）——不为通过，只为失败时能看清是模型引错了还是校验器误拒。 */
         val draft: DraftGrade? = null,
         val evidenceSpans: List<GradedEvidence> = emptyList(),
+        /** The essay rewrite failed the copy guard twice and is not shown; the marks still stand. */
+        val rewriteWithheld: Boolean = false,
     )
 
     fun gradeConstructed(
@@ -211,15 +214,16 @@ class GradePipeline(private val client: BridgeClient) {
         if (fingerprint != expectedFingerprint) {
             return Outcome(false, null, listOf("rubric_changed"), calls, null, emptyList(), fingerprint)
         }
+        val essay = question.essay != null
         val graded = client.chat(
             ChatRequest(
-                task = "grade_constructed",
+                task = if (essay) "grade_essay" else "grade_constructed",
                 model = graderModel,
                 system = Prompts.GRADE_SYSTEM,
-                user = Prompts.gradeConstructed(question, answer),
+                user = if (essay) Prompts.gradeEssay(question, answer) else Prompts.gradeConstructed(question, answer),
                 stream = false,
                 background = background,
-                maxTokens = 2000,
+                maxTokens = if (essay) 3000 else 2000,
             ),
         )
         calls.add(graded.call)
@@ -232,7 +236,8 @@ class GradePipeline(private val client: BridgeClient) {
             return Outcome(false, null, listOf("grade_unparsable"), calls, null, emptyList(), fingerprint)
         }
         fun checks(candidate: DraftGrade): List<String> =
-            GradeGate.arithmetic(candidate, question.rubric) + GradeGate.evidence(answer, candidate).first
+            GradeGate.arithmetic(candidate, question.rubric) + GradeGate.evidence(answer, candidate).first +
+                essayDefects(question, answer, candidate) + rewriteDefects(question, answer, candidate)
 
         var current = draft
         var spans = GradeGate.evidence(answer, current).second
@@ -241,16 +246,17 @@ class GradePipeline(private val client: BridgeClient) {
             // ADR-0003 决定 6：失败带原因修复一次，仍失败才算批改不可用（这次修复也计入 ai_calls 与物理调用数）
             val repaired = client.chat(
                 ChatRequest(
-                    task = "repair_grade",
+                    task = if (essay) "repair_essay" else "repair_grade",
                     model = graderModel,
                     system = Prompts.GRADE_SYSTEM,
-                    user = Prompts.repairGrade(question, answer, current, defects),
+                    user = if (essay) Prompts.repairEssay(question, answer, current, defects) else Prompts.repairGrade(question, answer, current, defects),
                     stream = false,
                     background = background,
-                    maxTokens = 2000,
+                    maxTokens = if (essay) 3000 else 2000,
                 ),
             )
             calls.add(repaired.call)
+            val first = current to defects
             if (repaired is BridgeResult.Success) {
                 runCatching { TaskParsing.grade(repaired.text) }.getOrNull()?.let { fixed ->
                     current = fixed
@@ -258,12 +264,19 @@ class GradePipeline(private val client: BridgeClient) {
                     defects = checks(fixed)
                 }
             }
+            // Marks that were already sound are not lost because the attempt to fix only the rewrite broke them.
+            if (first.second.all { it in REWRITE_DEFECTS } && defects.any { it !in REWRITE_DEFECTS }) {
+                current = first.first; defects = first.second; spans = GradeGate.evidence(answer, current).second
+            }
         }
+        // A rewrite that still copies the reference is withheld; the marks themselves passed every check.
+        val withheld = defects.isNotEmpty() && defects.all { it in REWRITE_DEFECTS }
+        if (withheld) { current = current.copy(rewrite = ""); defects = emptyList() }
         if (defects.isNotEmpty()) {
             return Outcome(false, null, defects, calls, null, spans, fingerprint, current)
         }
         val located = locate(answer, current)
-        val prepared = Outcome(false, current.awarded, emptyList(), calls, null, spans, fingerprint, current, located)
+        val prepared = Outcome(false, current.awarded, emptyList(), calls, null, spans, fingerprint, current, located, withheld)
         if (draftOnly) return prepared
         return reviewDraft(question, answer, prepared, reviewerModel, background)
     }
@@ -274,24 +287,35 @@ class GradePipeline(private val client: BridgeClient) {
         val current = requireNotNull(prepared.draft)
         if (prepared.rubricFingerprint != GradeGate.rubricFingerprint(question.rubric))
             return prepared.copy(defects=listOf("rubric_changed"))
-        val defects = GradeGate.arithmetic(current, question.rubric) + GradeGate.evidence(answer,current).first
+        val essay = question.essay != null
+        val defects = GradeGate.arithmetic(current, question.rubric) + GradeGate.evidence(answer,current).first + essayDefects(question,answer,current)
         if (defects.isNotEmpty()) return prepared.copy(defects=defects)
-        val reviewed = client.chat(ChatRequest("cross_review_grade", reviewerModel, Prompts.CROSS_REVIEW_SYSTEM,
-            Prompts.crossReviewGrade(question, answer, current, prepared.evidence), false,
-            background=background, maxTokens=2500))
+        val reviewed = client.chat(ChatRequest(if (essay) "cross_review_essay" else "cross_review_grade", reviewerModel, Prompts.CROSS_REVIEW_SYSTEM,
+            if (essay) Prompts.crossReviewEssay(question, answer, current) else Prompts.crossReviewGrade(question, answer, current, prepared.evidence), false,
+            background=background, maxTokens=if (essay) 3000 else 2500))
         val calls=prepared.calls + reviewed.call
         if (reviewed is BridgeResult.Failure) return prepared.copy(calls=calls,defects=listOf("review_call_${reviewed.reason}"))
         val verdict=runCatching { TaskParsing.crossReview((reviewed as BridgeResult.Success).text) }.getOrNull()
             ?: return prepared.copy(calls=calls,defects=listOf("review_unparsable"))
         val final = when(verdict.verdict) {
             "CONFIRM" -> current
-            "REVISE" -> verdict.revisedGrade ?: return prepared.copy(calls=calls,crossReview=verdict,defects=listOf("review_revise"))
+            "REVISE" -> (verdict.revisedGrade ?: return prepared.copy(calls=calls,crossReview=verdict,defects=listOf("review_revise")))
+                .let { if (essay) carryEssayFeedback(it, current) else it }
             else -> return prepared.copy(calls=calls,defects=listOf("review_unknown_verdict"))
         }
-        val invalid=GradeGate.arithmetic(final,question.rubric) + GradeGate.evidence(answer,final).first
+        val invalid=GradeGate.arithmetic(final,question.rubric) + GradeGate.evidence(answer,final).first + essayDefects(question,answer,final)
         if(invalid.isNotEmpty()) return prepared.copy(calls=calls,crossReview=verdict,defects=invalid)
         return prepared.copy(written=true,awarded=final.awarded,calls=calls,crossReview=verdict,draft=final,
             evidence=GradeGate.evidence(answer,final).second,evidenceSpans=locate(answer,final),defects=emptyList())
+    }
+
+    /** The reviewer judges marks; where it leaves a criterion's sentence or reason blank, the first marker's stays. */
+    private fun carryEssayFeedback(revised: DraftGrade, draft: DraftGrade): DraftGrade {
+        val before = draft.items.associateBy { it.id }
+        return revised.copy(rewrite = draft.rewrite, items = revised.items.map { item ->
+            val old = before[item.id] ?: return@map item
+            item.copy(evidence = item.evidence.ifBlank { old.evidence }, reason = item.reason.ifBlank { old.reason })
+        })
     }
 
     private fun locate(answer: String, grade: DraftGrade) = grade.items.mapNotNull { item ->
@@ -299,6 +323,22 @@ class GradePipeline(private val client: BridgeClient) {
     }
 
     companion object {
+        private val REWRITE_DEFECTS = setOf("rewrite_missing", "rewrite_copies_reference")
+
+        /** Essay feedback must point at the learner's own sentences, every criterion included. */
+        fun essayDefects(question: ConstructedQuestion, answer: String, grade: DraftGrade): List<String> {
+            if (question.essay == null || answer.isBlank()) return emptyList()
+            return grade.items.filter { it.evidence.isBlank() }.map { "essay_quote_missing:${it.id}" } +
+                grade.items.filter { it.reason.isBlank() }.map { "essay_reason_missing:${it.id}" }
+        }
+
+        fun rewriteDefects(question: ConstructedQuestion, answer: String, grade: DraftGrade): List<String> = when {
+            question.essay == null || answer.isBlank() -> emptyList()
+            grade.rewrite.isBlank() -> listOf("rewrite_missing")
+            Essay.sharedRun(grade.rewrite, question.referenceAnswer) != null -> listOf("rewrite_copies_reference")
+            else -> emptyList()
+        }
+
         /** 选择题判分：无模型，立即 EXACT。 */
         fun gradeChoice(correctOptionId: String, chosenLetter: String, letterMap: Map<String, String>): Boolean =
             letterMap[correctOptionId] == chosenLetter.trim().uppercase()

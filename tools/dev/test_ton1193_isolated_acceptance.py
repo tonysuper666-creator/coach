@@ -167,6 +167,25 @@ class AcceptanceTest(unittest.TestCase):
                 with self.assertRaisesRegex(GateError, 'transaction ended'):
                     acceptance.observe_when_ready(config, roots, time.time() + 10)
 
+    def test_bridge_port_startup_refusal_waits_but_invalid_health_never_retries(self):
+        config, roots, _ = isolated.fixture(str(self.path))
+        observed = acceptance.observe(config, roots)
+        ready = mock.Mock(side_effect=[ConnectionRefusedError(errno.ECONNREFUSED, 'private'), None])
+        with mock.patch.object(acceptance, 'observe', return_value=observed) as observe, \
+             mock.patch.object(acceptance.live, 'live_acceptance', return_value='validating') as live, \
+             mock.patch.object(acceptance.time, 'sleep'):
+            self.assertEqual(acceptance.observe_when_ready(config, roots, time.time() + 10, ready=ready), observed)
+        self.assertEqual(observe.call_count, 2)
+        live.assert_called_once()
+        ready.side_effect = GateError('synthetic fallback isolation failed')
+        ready.reset_mock()
+        with mock.patch.object(acceptance, 'observe', return_value=observed), \
+             mock.patch.object(acceptance.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(GateError, 'fallback isolation failed'):
+                acceptance.observe_when_ready(config, roots, time.time() + 10, ready=ready)
+        ready.assert_called_once()
+        sleep.assert_not_called()
+
     def test_changed_token_and_outside_baseline_are_refused(self):
         acceptance.run(str(self.path), 'snapshot', self.baseline)
         atomic(self.token, b'changed')

@@ -104,12 +104,18 @@ def observe(config, roots):
         connection.close()
 
 
-def observe_when_ready(config, roots, deadline):
-    """Allow the isolated JVM time to bind, without accepting a failed hello."""
+def observe_when_ready(config, roots, deadline, ready=None):
+    """Wait for startup refusal only; authentication and health failures reject.
+
+    The optional health check shares the same deadline and live transaction:
+    the JVM can bind HTTP before its managed bridge has bound its own port.
+    """
     stop = time.monotonic() + min(60, max(0, deadline - time.time()))
     while True:
         try:
             result = observe(config, roots)
+            if ready is not None:
+                ready()
             require(time.time() < deadline and time.monotonic() < stop,
                     'isolated acceptance readiness timed out')
             return result

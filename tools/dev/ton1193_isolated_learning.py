@@ -122,7 +122,9 @@ def run(config_path, baseline, started, deadline, *, recovery=False):
     now = time.time()
     require(deadline - started == 300 and before['createdAt'] <= started <= now < deadline
             and started - before['createdAt'] <= 120, 'invalid acceptance deadline or baseline')
-    current = acceptance.observe(config, roots)
+    current = (acceptance.observe(config, roots) if recovery else
+               acceptance.observe_when_ready(config, roots, deadline,
+                                             ready=lambda: synthetic.health(config)))
     require(all(current[k] == before[k] for k in ('epoch', 'tokenSha256', 'credentialSha256'))
             and current['lastSeq'] >= before['lastSeq'], 'isolated identity or ledger changed')
     data = Path(roots['home']) / 'Coach/data'

@@ -30,8 +30,8 @@ class LearningDriverTest(unittest.TestCase):
         self.live = mock.patch.object(learning.live, 'live_acceptance', return_value='validating')
         self.live_mock = self.live.start()
         self.addCleanup(self.live.stop)
-        self.observe = mock.patch.object(learning.acceptance, 'observe', return_value=dict(self.before))
-        self.observe.start()
+        self.observe = mock.patch.object(learning.acceptance, 'observe_when_ready', return_value=dict(self.before))
+        self.observe_mock = self.observe.start()
         self.addCleanup(self.observe.stop)
         self.accept = mock.patch.object(learning.acceptance, 'run')
         self.accept_mock = self.accept.start()
@@ -57,11 +57,21 @@ class LearningDriverTest(unittest.TestCase):
 
     def test_drives_three_answers_then_checks_ledger(self):
         self.run_driver()
+        self.assertEqual(self.observe_mock.call_args.args, (self.config, self.roots, self.deadline))
+        self.assertTrue(callable(self.observe_mock.call_args.kwargs['ready']))
         self.assertEqual(self.ws_class.call_args.args[:2], (23456, 'isolated-token'))
         self.assertEqual(self.ws.send.call_args_list[-1].args[0]['answers'], {'0': 'A', '1': 'A', '2': 'A'})
         self.ws.close.assert_called_once()
         self.accept_mock.assert_called_once_with('/private/controller.json', 'accept', self.baseline,
                                                  self.started, self.deadline)
+
+    def test_startup_failure_never_connects_or_writes_learning_evidence(self):
+        self.observe_mock.side_effect = GateError('isolated acceptance readiness timed out')
+        with self.assertRaisesRegex(GateError, 'readiness timed out'):
+            self.run_driver()
+        self.ws_class.assert_not_called()
+        self.accept_mock.assert_not_called()
+        self.proof_write.assert_not_called()
 
     def test_changed_token_or_inactive_switch_refuses_before_connect(self):
         self.token = b'replaced'

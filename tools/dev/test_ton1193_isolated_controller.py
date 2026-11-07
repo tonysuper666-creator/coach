@@ -125,6 +125,20 @@ class IsolatedControllerTest(unittest.TestCase):
                                                 'step': 'REVALIDATE', 'reason': 'GATE_REJECTED'})
             self.assertNotIn('/secret', text)
 
+    def test_recovery_transaction_failure_keeps_closed_reason(self):
+        self.check()
+        def attempt(config, apply):
+            isolated.live.live_transaction(config['stateDir'])
+            isolated.live.live_transaction(config['stateDir'])
+        with mock.patch.object(isolated.controller, '_stop', side_effect=attempt), \
+             mock.patch.object(isolated.live, 'live_transaction',
+                               side_effect=['recovering', GateError('transaction lock not held')]):
+            with self.assertRaisesRegex(GateError, 'transaction lock not held'):
+                isolated.run(str(self.path), 'stop', True)
+        result = json.loads((self.root / 'controller-recovering-stop.json').read_text())
+        self.assertEqual(result, {'action': 'stop', 'phase': 'recovering',
+                                  'step': 'TRANSACTION', 'reason': 'TRANSACTION_LOCK_NOT_HELD'})
+
     def test_private_ancestors_and_byte_budget(self):
         target = self.root / 'h/Coach/state'
         isolated.private_directories(target, self.root)

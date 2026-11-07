@@ -42,6 +42,22 @@ REASONS = {
     'unexpected process image': 'PROCESS_IMAGE',
     'child process set changed': 'CHILD_SET_CHANGED',
     'transaction phase changed': 'PHASE_CHANGED',
+    'unsafe transaction directory': 'TRANSACTION_DIRECTORY_UNSAFE',
+    'transaction lock unavailable or symlink': 'TRANSACTION_LOCK_UNAVAILABLE',
+    'unsafe transaction lock': 'TRANSACTION_LOCK_UNSAFE',
+    'invalid journal': 'JOURNAL_INVALID',
+    'unsafe journal phase': 'JOURNAL_PHASE_UNSAFE',
+    'transaction lock check failed': 'TRANSACTION_LOCK_CHECK_FAILED',
+    'transaction lock not held': 'TRANSACTION_LOCK_NOT_HELD',
+    'transaction lock changed': 'TRANSACTION_LOCK_CHANGED',
+    'journal changed during lock check': 'JOURNAL_CHANGED',
+    'transaction directory changed': 'TRANSACTION_DIRECTORY_CHANGED',
+    'control parent changed or unsafe': 'CONTROL_PARENT_UNSAFE',
+    'control file unavailable or symlink': 'CONTROL_FILE_UNAVAILABLE',
+    'unsafe control file': 'CONTROL_FILE_UNSAFE',
+    'control file too large': 'CONTROL_FILE_TOO_LARGE',
+    'control file changed during read': 'CONTROL_FILE_CHANGED',
+    'control parent changed': 'CONTROL_PARENT_CHANGED',
 }
 
 

@@ -71,6 +71,7 @@ class CoachActivity : ComponentActivity() {
             CoachTheme(dark) {
                 Box(Modifier.semantics { testTagsAsResourceId = true }) {
                     PairingGate(store,serverUrl) { credentials ->
+                        AppUpdatePrompt(this@CoachActivity,serverUrl,credentials)
                         if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
                         else {
                             val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }

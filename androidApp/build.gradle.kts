@@ -1,4 +1,7 @@
 import java.util.Properties
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
+import java.nio.ByteBuffer
 
 plugins {
     alias(libs.plugins.android.application)
@@ -9,6 +12,25 @@ val localConfig = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 val coachTailHost = localConfig.getProperty("coach.tailHost", "")
+// Reserve once per Gradle invocation under a machine-wide lock, including parallel worktrees.
+// Explicit codes are for reproducible acceptance builds; normal builds always move forward.
+val coachVersionCode = providers.gradleProperty("coachVersionCode").orNull?.toInt() ?: run {
+    val counter = File(System.getProperty("user.home"), "Coach/builds/version-code")
+    counter.parentFile.mkdirs()
+    FileChannel.open(counter.toPath(), StandardOpenOption.CREATE,
+        StandardOpenOption.READ, StandardOpenOption.WRITE).use { channel ->
+        channel.lock().use {
+            val previous = counter.readText().trim().toIntOrNull() ?: 1
+            val next = maxOf(previous + 1, (System.currentTimeMillis() / 1000 - 1577836800).toInt())
+            require(next in 2..2100000000) { "Android version code exhausted" }
+            channel.truncate(0); channel.position(0)
+            channel.write(ByteBuffer.wrap(next.toString().toByteArray()))
+            channel.force(true)
+            next
+        }
+    }
+}
+require(coachVersionCode in 2..2100000000)
 require(coachTailHost.isEmpty() || coachTailHost.matches(Regex("[0-9]+(\\.[0-9]+){3}"))) {
     "coach.tailHost must be an IPv4 literal in ~/Coach/config/local.properties"
 }
@@ -57,12 +79,14 @@ android {
         buildConfigField("String", "COACH_COURSE", "\"$coachCourse\"")
         minSdk = 34
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = coachVersionCode
+        versionName = providers.gradleProperty("coachVersionName").orElse("0.1.$coachVersionCode").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     sourceSets.getByName("androidTest").kotlin.srcDir("../shared/domain/src/benchmark/kotlin")
     buildFeatures { compose = true; buildConfig = true }
+    // DESIGN §10: keep the existing private distribution signing identity on both variants.
+    buildTypes.getByName("release").signingConfig = signingConfigs.getByName("debug")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -72,6 +96,7 @@ dependencies {
     implementation(project(":shared:ui"))
     implementation(project(":shared:client"))
     implementation(libs.material3)
+    implementation(libs.lifecycle.compose)
     implementation("app.cash.sqldelight:android-driver:2.4.0")
     implementation("androidx.activity:activity-compose:1.12.0")
     implementation("androidx.window:window:1.5.1")

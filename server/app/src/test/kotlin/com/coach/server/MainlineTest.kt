@@ -183,6 +183,44 @@ class MainlineTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
+    @Test fun uncheckedShuffledChoicesQueueBothPassedAndUnpassedPointsWithoutJudgingThem() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (passed in listOf(false, true))
+            for (choice in 0..3) for (guessed in listOf(false, true)) {
+                val dir = Files.createTempDirectory("mainline-pending-layout")
+                val now = AtomicLong(1_800_000_000_000)
+                try {
+                    val (store, mainline) = orchard(dir, now)
+                    val file = dir.resolve("papers/mcq-mainline/W01.json")
+                    Files.writeString(file, Files.readString(file).replace("UNREVIEWED", key))
+                    val today = logicalDay(now.get(), "Europe/London")
+                    if (passed) {
+                        store.append("C1", "legacy_passed", json("kpId" to "kp-orchard", "sourceRef" to "synthetic"))
+                        store.append("C1", "legacy_schedule", json("kpId" to "kp-orchard", "dueDay" to today + 14, "interval" to 14))
+                    }
+                    fun card(engine: Mainline) = engine.week(store, "C1", 1).getValue("items").jsonArray.map { it.jsonObject }.single { it.str("id") == "D2" }
+                    val shown = card(mainline)
+                    val restarted = Mainline(library = MockLibrary(dir.resolve("papers")), clock = { now.get() })
+                    assertEquals(shown, card(restarted), "the displayed choice survives a reload and a server restart")
+                    val result = restarted.answer(store, "C1", 1, json("itemId" to "D2", "choice" to choice,
+                        "layout" to shown.num("layout"), "guessed" to guessed, "submissionId" to "pending-layout"))
+                    assertEquals("pending", result.str("status"), "$key, passed=$passed, choice=$choice, guessed=$guessed")
+                    assertEquals(today + 1, (result["dueDay"] as? JsonPrimitive)?.longOrNull)
+                    assertTrue(result["mistakeWeek"] is JsonNull)
+                    assertEquals(0L, result.getValue("coverage").jsonObject.num("factsMastered"))
+                    val projection = store.snapshot("C1").projection
+                    assertEquals(passed, projection.mastery.getValue("kp-orchard").passed)
+                    assertFalse(projection.mastery.getValue("kp-orchard").needsRepair)
+                    assertContains(projection.reviewsOn(today + 1), "kp-orchard")
+                    assertTrue(weekMistakes(store.events("C1"), 1).isEmpty())
+                    assertTrue(store.events("C1").last { it.type == "attempt_graded" }.payload.str("feedback").startsWith("答案键待核对，这次不记对错。"))
+                    val count = store.events("C1").size
+                    assertEquals(result, restarted.answer(store, "C1", 1, json("itemId" to "D2", "choice" to (choice + 1) % 4,
+                        "layout" to 99, "guessed" to !guessed, "submissionId" to "pending-layout")), "a retry replays the recorded choice and guess")
+                    assertEquals(count, store.events("C1").size)
+                } finally { dir.toFile().deleteRecursively() }
+            }
+    }
+
     @Test fun theKeyLandsAnywhereOnScreenEvenWhenThePackAlwaysPutsItFirst() {
         val shown = IntArray(4)
         repeat(400) { n -> shown[optionOrder("synthetic-fingerprint-$n", 0, 4).indexOf(0)]++ }

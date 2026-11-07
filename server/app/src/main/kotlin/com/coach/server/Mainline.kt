@@ -216,7 +216,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             val explanation = unit.explanation.replace(Regex("(?m)^(\\s*)错项\\s*(\\d+)")) { m ->
                 m.groupValues[2].toInt().takeIf { it in order.indices }?.let { "${m.groupValues[1]}错项 ${letters[order.indexOf(it)]}" } ?: m.value
             }
-            val feedback = (if (right) "正确。" else "你选 ${letters[choice]}，$key") + (if (guessed) "（标记为猜的）" else "") +
+            val feedback = (if (!item.verified) "答案键待核对，这次不记对错。" else if (right) "正确。" else "你选 ${letters[choice]}，$key") + (if (guessed) "（标记为猜的）" else "") +
                 explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
             val max = (unit.marks * 100).roundToLong()
             append(course, "attempt_graded", json("attemptId" to attempt, "score" to if (right) max else 0, "max" to max, "status" to "EXACT", "feedback" to feedback),

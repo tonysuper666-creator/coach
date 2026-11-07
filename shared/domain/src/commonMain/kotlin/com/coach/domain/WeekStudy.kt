@@ -58,6 +58,7 @@ fun pendingChoiceMistakes(events: List<Event>, ids: Set<String>): List<Event> {
     val guessed = events.filter { it.type == "answer_submitted" && it.payload.flag("guessed") }.map { it.payload.str("attemptId") }.toSet()
     return events.filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" &&
         it.payload.strings("kpIds").any { id -> id in ids } && it.payload.str("keyState") != "UNREVIEWED" &&
+        (!it.payload.flag("mainline") || it.payload.str("keyState") == "VERIFIED") &&
         it.payload.str("attemptId") in answered && it.payload.str("attemptId") !in voided }
         .groupBy { it.payload.str("questionId") }.values.mapNotNull { attempts ->
             val latest = attempts.last()

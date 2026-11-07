@@ -47,6 +47,48 @@ private fun pack() = json("id" to "synthetic-pack", "kind" to "pack", "course" t
         "answer" to 0, "explanation" to "Synthetic explanation $i") })))))
 
 class MockExamTest {
+    @Test fun courseCodeAliasesListAndStartPapersAndDrillsWithoutCrossingCourses() {
+        val dir = Files.createTempDirectory("mock-course-alias")
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
+        try {
+            // Published batches can be nested below the library root.
+            library(dir.resolve("papers/round/batch"))
+            val library = MockLibrary(dir.resolve("papers"))
+            val engine = MockEngine(library)
+            val course = "course-synthetic-ledger"
+            store.append(course, "outline_revised", json("course" to json("id" to course, "name" to "c1 Synthetic orchard")))
+            // Later partial revisions must not erase the last available course name.
+            store.append(course, "outline_revised", json("course" to json("name" to " ")))
+            val home = engine.home(store, course)
+            assertEquals(listOf("synthetic-paper"), home.getValue("papers").jsonArray.map { it.jsonObject.str("id") })
+            assertEquals(8, home.getValue("drill").jsonObject.getValue("total").jsonPrimitive.int)
+            assertEquals(1, engine.home(store, "c1").getValue("papers").jsonArray.size, "original course ID remains case insensitive")
+            for (other in listOf("course-other", "", " ")) {
+                val isolated = engine.home(store, other)
+                assertTrue(isolated.getValue("papers").jsonArray.isEmpty())
+                assertEquals(0, isolated.getValue("drill").jsonObject.getValue("total").jsonPrimitive.int)
+                assertEquals(404, assertFailsWith<MockError> { engine.start(store, other, json("paperId" to "synthetic-paper")) }.status.value)
+                assertEquals(404, assertFailsWith<MockError> { engine.start(store, other, json("drill" to json())) }.status.value)
+            }
+            assertEquals("Synthetic mock", engine.start(store, course, json("paperId" to "synthetic-paper")).getValue("paper").jsonObject.str("title"))
+            val drillCourse = "course-synthetic-drill"
+            store.append(drillCourse, "outline_revised", json("course" to json("name" to "C1 Synthetic orchard")))
+            assertEquals(7, engine.start(store, drillCourse, json("drill" to json())).getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.size)
+        } finally { store.close(); dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun missingAndBlankCourseLabelsNeverMatchEvenAnEmptyCourseId() {
+        val dir = Files.createTempDirectory("mock-empty-course")
+        try {
+            for ((name, label) in listOf("missing" to null, "empty" to JsonPrimitive(""), "blank" to JsonPrimitive(" "), "null" to JsonNull)) {
+                val raw = LedgerJson.parseToJsonElement(PAPER).jsonObject - "course"
+                Files.writeString(dir.resolve("$name.json"), JsonObject(if (label == null) raw else raw + ("course" to label)).toString())
+            }
+            val library = MockLibrary(dir)
+            for (course in listOf("", " ", "C1", "null")) assertTrue(library.entries(course).isEmpty(), "unlabelled papers must fail closed")
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     private fun library(dir: Path): MockLibrary {
         Files.createDirectories(dir.resolve("figs"))
         Files.writeString(dir.resolve("paper.json"), PAPER)

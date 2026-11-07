@@ -58,8 +58,8 @@ internal class ExamOverlap(documents: List<String>) {
             if (words.size == 8) result.add(words.joinToString(" "))
             return Reading(words.takeLast(7), "")
         }
-        for (control in listOf(true, false)) {
-            val source = softText(text, control)
+        for (control in listOf(true, false)) for (fold in listOf(true, false)) {
+            val source = softText(text, control, fold)
             if (source.none { it in "*_~`{}\$" }) continue
             var readings = setOf(Reading(emptyList(), ""))
             for (token in Regex("[a-z]+|[*_~`{}\\$]|[^a-z*_~`{}\\$]+").findAll(source)) {
@@ -89,8 +89,8 @@ internal class ExamOverlap(documents: List<String>) {
         }
         Regex("(?<![a-z])" + wordPatterns.joinToString("(?:[^a-z]+(?:[b-hj-z][^a-z]+)*)") + "(?![a-z])")
     }
-    private fun softText(text: String, controlWords: Boolean): String {
-        val mapped = Normalizer.normalize(text, Normalizer.Form.NFKD).map { lookalikes[it] ?: it }.joinToString("")
+    private fun softText(text: String, controlWords: Boolean, fold: Boolean = true): String {
+        val mapped = Normalizer.normalize(text, Normalizer.Form.NFKD).map { if (fold) lookalikes[it] ?: it else it }.joinToString("")
         return (if (controlWords) mapped.replace(Regex("\\\\[A-Za-z]+"), "") else mapped)
             .replace(Regex("[\\p{Cf}\\p{M}\\x{00AD}]"), "").lowercase(java.util.Locale.ROOT)
     }
@@ -99,7 +99,7 @@ internal class ExamOverlap(documents: List<String>) {
         words(text, controlWords = false).windowed(8).any { it.joinToString(" ") in windows } ||
         words(text, markupSeparates = true).windowed(8).any { it.joinToString(" ") in windows } ||
         words(text, false, true).windowed(8).any { it.joinToString(" ") in windows } ||
-        listOf(true, false).any { control -> val source = softText(text, control); softPatterns.any { it.containsMatchIn(source) } }
+        listOf(true, false).any { control -> listOf(true, false).any { fold -> val source = softText(text, control, fold); softPatterns.any { it.containsMatchIn(source) } } }
 }
 
 internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeClient, live: Boolean = false,
@@ -189,6 +189,10 @@ internal class ExamHarness(data: Path, materials: ExamMaterials, bridge: BridgeC
 }
 
 class ExamOutputTest {
+    @Test fun independentCheckerFindsUnfoldedLetterWithInnerMarkup() {
+        val reference = "Ivory jag_uars keep \u03b1 lemons near old purple quails"
+        assertTrue(ExamOverlap(listOf(reference)).hit("Ivory jaguars keep lemons near old purple quails"))
+    }
     @Test fun independentCheckerDetectsMixedSoftBoundaries() {
         val checker = ExamOverlap(listOf("Ivory jaguars keep lemons near old purple quails"))
         assertTrue(checker.hit("Ivory j_aguars keep lemons near old purple quаils*next"))

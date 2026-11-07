@@ -67,7 +67,7 @@ class ExamTextIndex(documents: List<String>) {
     private fun indexSoftReference(text: String, add: (List<String>) -> Unit): Boolean {
         if (Normalizer.normalize(text, Normalizer.Form.NFKD).none { it.code in MARKUP }) return true
         data class RefState(val history: List<String>, val partial: String)
-        for (controlWords in listOf(true, false)) {
+        for ((controlWords, visible) in SOFT_VIEWS) {
             var states = setOf(RefState(emptyList(), ""))
             fun finish(state: RefState): RefState {
                 val word = state.partial
@@ -77,7 +77,7 @@ class ExamTextIndex(documents: List<String>) {
                 if (words.size == 8) add(words)
                 return RefState(words.takeLast(7), "")
             }
-            for (symbol in scan(text, controlWords = controlWords, softMarkup = true).symbols) {
+            for (symbol in scan(text, visible, controlWords, softMarkup = true).symbols) {
                 states = when (val c = symbol.char) {
                     in 'a'..'z' -> states.mapTo(mutableSetOf()) { it.copy(partial = it.partial + c) }
                     '\u0001' -> states.flatMapTo(mutableSetOf()) { listOf(it, finish(it)) }
@@ -97,8 +97,8 @@ class ExamTextIndex(documents: List<String>) {
         data class State(val node: Node, val partial: String, val start: Int)
         var hit: Int? = null
         var hold: Int? = null
-        for (controlWords in listOf(true, false)) {
-            val scan = scan(text, controlWords = controlWords, softMarkup = true)
+        for ((controlWords, visible) in SOFT_VIEWS) {
+            val scan = scan(text, visible, controlWords, softMarkup = true)
             var states = emptySet<State>()
             var boundary = true
             fun advance(state: State): State? {
@@ -144,6 +144,7 @@ class ExamTextIndex(documents: List<String>) {
         return SoftResult(hit, hold)
     }
     companion object {
+        private val SOFT_VIEWS = listOf(true to true, false to true, true to false, false to false)
         internal fun words(text: String): List<Word> = scan(text).words
 
         // Match the reader's words, retaining raw UTF-16 offsets for the stream cut.

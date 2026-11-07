@@ -34,6 +34,17 @@ class ExamSoftBoundaryTest {
         assertTrue(guard.blocked)
     }
 
+    @Test fun unfoldedFormulaLetterWithInnerMarkupStillProtectsTheWindow() {
+        // α folds to the article "a"; the readable words need the unfolded view and joined markup together.
+        val index = ExamTextIndex(listOf("Ivory jag_uars keep \u03b1 lemons near old purple quails"))
+        val reply = "Ivory jaguars keep lemons near old purple quails"
+        assertTrue(index.overlaps(reply))
+        val guard = ExamTextGuard(index)
+        val published = reply.chunked(3).joinToString("") { guard.push(it) } + guard.finish()
+        assertTrue(guard.blocked)
+        assertFalse(published.contains("purple quails"))
+    }
+
     @Test fun oversizedAmbiguousReferenceFailsClosed() {
         val index = ExamTextIndex(listOf("a".repeat(1025) + "*"))
         assertTrue(index.incompleteIndex)

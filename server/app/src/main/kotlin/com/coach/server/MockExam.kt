@@ -194,12 +194,14 @@ private fun numericFeedback(fact: JsonObject): String = (when (fact.str("status"
 /** Papers are read from a private directory outside the repository; nothing here is ever committed. */
 class MockLibrary(val directory: Path?, val minutesOverride: Int? = null) {
     data class Entry(val file: String, val paper: JsonObject?, val error: String?)
-    fun entries(course: String): List<Entry> {
+    fun entries(course: String): List<Entry> = entries(setOf(course))
+    fun entries(courses: Set<String>): List<Entry> {
         val dir = directory?.takeIf { Files.isDirectory(it) } ?: return emptyList()
-        return Files.walk(dir, 2).use { s -> s.filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }.sorted().toList() }.mapNotNull { file ->
+        return Files.walk(dir).use { s -> s.filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }.sorted().toList() }.mapNotNull { file ->
             val name = dir.relativize(file).toString()
             val raw = runCatching { LedgerJson.parseToJsonElement(Files.readString(file)).jsonObject }.getOrElse { return@mapNotNull Entry(name, null, "不是有效 JSON") }
-            if (!raw.str("course").equals(course, ignoreCase = true)) return@mapNotNull null
+            val label = raw.str("course")
+            if (label.isBlank() || courses.none { it.isNotBlank() && label.equals(it, ignoreCase = true) }) return@mapNotNull null
             runCatching { Entry(name, withFigures(raw, file.parent), null).also { MockPaper(it.paper!!) } }
                 .getOrElse { Entry(name, null, it.message ?: it.javaClass.simpleName) }
         }
@@ -215,8 +217,10 @@ class MockLibrary(val directory: Path?, val minutesOverride: Int? = null) {
             if (svg == null) item else JsonObject(item + ((if (item.str("type") == "analytical") "standardFigure" else "figure") to JsonPrimitive(svg)))
         })))
     })))
-    fun papers(course: String) = entries(course).mapNotNull { it.paper }.filter { it.str("kind") == "paper" }
-    fun packs(course: String) = entries(course).mapNotNull { it.paper }.filter { it.str("kind") == "pack" }
+    fun papers(course: String) = papers(setOf(course))
+    fun packs(course: String) = packs(setOf(course))
+    fun papers(courses: Set<String>) = entries(courses).mapNotNull { it.paper }.filter { it.str("kind") == "paper" }
+    fun packs(courses: Set<String>) = entries(courses).mapNotNull { it.paper }.filter { it.str("kind") == "pack" }
 
     companion object {
         fun configured(env: Map<String, String> = System.getenv()): MockLibrary {
@@ -241,11 +245,11 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
 
     fun home(store: LedgerStore, course: String): JsonObject {
         sweep(store, course)
-        val entries = library.entries(course)
+        val events = store.events(course)
+        val entries = library.entries(courseNames(events, course))
         val papers = entries.mapNotNull { it.paper }
         val packItems = papers.filter { it.str("kind") == "pack" }.flatMap { MockPaper(it).units.filter { u -> u.type == "mcq" } }
         val sessions = store.mocks(course, 20)
-        val events = store.events(course)
         return json("papers" to JsonArray(papers.filter { it.str("kind") == "paper" }.map { p ->
             val paper = MockPaper(p)
             json("id" to paper.id, "title" to paper.title, "minutes" to (library.minutesOverride ?: p.int("minutes") ?: 120),
@@ -267,7 +271,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
         val paper: JsonObject; val kind: String
         val drill = input["drill"] as? JsonObject
         if (drill == null) {
-            paper = library.papers(course).firstOrNull { it.str("id") == input.str("paperId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这套卷子")
+            paper = library.papers(courseNames(store.events(course), course)).firstOrNull { it.str("id") == input.str("paperId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这套卷子")
             kind = "paper"
         } else { paper = drillPaper(store, course, drill); kind = "drill" }
         val minutes = library.minutesOverride ?: if (kind == "drill") 14 else paper.int("minutes") ?: 120
@@ -285,7 +289,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
     /** Seven distinct choices from the packs: one week, or weighted by exam weight; recently drilled questions go last. */
     private fun drillPaper(store: LedgerStore, course: String, drill: JsonObject): JsonObject {
         val week = drill.int("week")
-        val pool = library.packs(course).flatMap { pack ->
+        val pool = library.packs(courseNames(store.events(course), course)).flatMap { pack ->
             val items = (pack["sections"] as JsonArray).flatMap { (it.jsonObject["items"] as? JsonArray).orEmpty() }.map { it.jsonObject }
             items.filter { it.str("type") == "mcq" && (week == null || it.int("kp_week") == week) }
                 .map { JsonObject(it + ("id" to JsonPrimitive(pack.str("id") + "." + it.str("id"))) + ("key_state" to JsonPrimitive(it.str("key_state").ifBlank { pack.str("key_state") }))) }

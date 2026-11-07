@@ -184,6 +184,10 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val qid = "mock-" + fingerprint.take(24)
         val letters = optionLetters(options.size)
         val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == attempt }
+        if (posed != null && (!posed.payload.flag("mainline") || posed.payload.num("mainlineWeek") != week.week.toLong() ||
+                posed.payload.str("mainlineItem") != unit.itemId || posed.payload.str("questionId") != qid)) {
+            throw MockError(HttpStatusCode.Conflict, "这次提交已用于另一道题，请重新打开这一题")
+        }
         val order = if (posed != null) {
             // A resend answers with what was recorded the first time, whatever layout it carries now.
             val shown = (posed.payload["letterMap"] as? JsonObject).orEmpty().mapValues { (it.value as? JsonPrimitive)?.contentOrNull.orEmpty() }

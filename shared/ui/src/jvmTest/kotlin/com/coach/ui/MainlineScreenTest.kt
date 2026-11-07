@@ -26,8 +26,9 @@ class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
 
-    private class FakeMac(today: Long) : AutoCloseable {
+    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false) : AutoCloseable {
         val answers = CopyOnWriteArrayList<JsonObject>()
+        private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
         private val explanation = """{"correct":"Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
             "options":{"0":"Synthetic apples were sold out before the season started, so they cannot be the answer.",
@@ -36,15 +37,20 @@ class MainlineScreenTest {
             "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"Synthetic lecture 1, slide 4"}"""
         private val items = listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-            fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String) {
-                val bytes = body.toByteArray(); ex.sendResponseHeaders(200, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
+            fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String, status: Int = 200) {
+                val bytes = body.toByteArray(); ex.sendResponseHeaders(status, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
             }
             createContext("/v1/courses/C/mainline") { ex ->
                 val path = ex.requestURI.path
                 when {
                     path.endsWith("/answer") -> {
-                        val a = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
-                        answers += a
+                        val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                        answers += wire
+                        val a = recorded.getOrPut(wire.getValue("submissionId").jsonPrimitive.content) { wire }
+                        if (loseFirstReply && answers.size == 1) {
+                            reply(ex, """{"error":"Synthetic response lost after commit"}""", 503)
+                            return@createContext
+                        }
                         val id = a["itemId"]!!.jsonPrimitive.content
                         val guessed = a["guessed"]!!.jsonPrimitive.boolean
                         val right = a["choice"]!!.jsonPrimitive.int == 1
@@ -68,7 +74,7 @@ class MainlineScreenTest {
         override fun close() { http.close(); server.stop(0) }
     }
 
-    private fun walk(width: Int, height: Int) = FakeMac(today).use { mac ->
+    private fun walk(width: Int, height: Int, retryChoice: Int? = null, firstGuessed: Boolean = false) = FakeMac(today, retryChoice != null).use { mac ->
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val transport = object : LedgerTransport {
@@ -93,6 +99,30 @@ class MainlineScreenTest {
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("铺垫题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+
+                if (retryChoice != null) {
+                    onNodeWithTag("mainline-option-$retryChoice").performClick()
+                    onNodeWithTag(if (firstGuessed) "mainline-guess" else "mainline-submit").performClick()
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic response lost after commit").fetchSemanticsNodes().isNotEmpty() }
+                    onNodeWithTag("mainline-option-2").performClick()
+                    onNodeWithTag(if (firstGuessed) "mainline-submit" else "mainline-guess").performClick()
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+                    assertEquals(2, mac.answers.size)
+                    assertEquals(mac.answers[0]["submissionId"], mac.answers[1]["submissionId"])
+                    assertEquals(retryChoice, mac.answers[0].getValue("choice").jsonPrimitive.int)
+                    assertEquals(2, mac.answers[1].getValue("choice").jsonPrimitive.int)
+                    assertEquals(firstGuessed, mac.answers[0].getValue("guessed").jsonPrimitive.boolean)
+                    assertEquals(!firstGuessed, mac.answers[1].getValue("guessed").jsonPrimitive.boolean)
+                    onNodeWithTag("mainline-option-$retryChoice").assertIsSelected()
+                    onNodeWithTag("mainline-option-2").assertIsNotSelected()
+                    val wrongMark = hasText("✗") and hasAnyAncestor(hasTestTag("mainline-option-$retryChoice"))
+                    if (retryChoice == 0) onNode(wrongMark, useUnmergedTree = true).assertExists()
+                    else onNodeWithText("✗", useUnmergedTree = true).assertDoesNotExist()
+                    val outcome = if (retryChoice == 0) "答错了。" else if (firstGuessed) "答对了，但标了猜的：不算掌握。" else "答对了，算掌握。"
+                    onNodeWithText(outcome).performScrollTo().assertIsDisplayed()
+                    capture("mainline-retry-$retryChoice-$firstGuessed-$width")
+                    return@runComposeUiTest
+                }
 
                 // Wrong on the setup question: every option carries its reason right away, no extra tap.
                 onNodeWithTag("mainline-option-0").performClick()
@@ -142,4 +172,7 @@ class MainlineScreenTest {
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
     @Test fun desktopWalksOneWeekWithExplanationsOnTheSamePage() = walk(1000, 800)
+    @Test fun lostWrongReplyMarksTheRecordedChoiceAfterChangingBothChoiceAndGuess() = walk(412, 915, 0, false)
+    @Test fun lostGuessedReplyKeepsTheRecordedGuessAfterAnUnguessedRetry() = walk(1000, 800, 1, true)
+    @Test fun lostCorrectReplyKeepsTheRecordedPassAfterAGuessedRetry() = walk(412, 915, 1, false)
 }

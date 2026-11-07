@@ -88,6 +88,10 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     /** A mainline choice whose key nobody has checked never counts as a mistake; it is still looked at again. */
     fun unverifiedMainline(a: Attempt) = a.posed.payload.flag("mainline") && keys[a.question] != "VERIFIED"
     fun reviewPass(a: Attempt) = a.pass && !unverifiedMainline(a)
+    // Key validity becomes known at the change event (DESIGN §2.2), never backdated to the answer.
+    // Existing earlier deadlines still win; only a newly requested look-again uses this effective day.
+    fun lookAgainDay(a: Attempt, event: Event) = if (event.type == "question_key_changed")
+        maxOf(a.day, logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)) else a.day
     fun graded(a: Attempt): Boolean = a.grade != null && !a.uncertain &&
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
@@ -174,7 +178,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             val isReview = changed.posed.payload.flag("review")
             // An unchecked mainline key only asks for another look; it cannot pass or fail a spaced review.
             if (!isReview || unverifiedMainline(changed)) {
-                if (!reviewPass(changed)) review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(changed.day,1))) }
+                if (!reviewPass(changed)) review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(lookAgainDay(changed, event),1))) }
             } else if (firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
                 schedule(kp, changed.day, if (changed.pass) "PASS" else if (changed.ratio >= .5) "NEEDS_WORK" else "FAIL")
             }
@@ -183,19 +187,19 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     /** A missed or guessed mainline choice on a point not yet passed is looked at again the next day, alongside spaced review;
      * the first graded answer on that point from the due day on settles it. Passed points use the review entry instead.
      * An answer against an unchecked key is no evidence either way, so it always asks for another look and never settles one. */
-    fun revisitAfter(a: Attempt) {
+    fun revisitAfter(a: Attempt, event: Event) {
         if (a.submitted == null || a.voided || !graded(a)) return
         val pass = reviewPass(a)
         for (kp in a.kps) {
             if (mastery[kp]?.passed == true) { revisit.remove(kp); continue }
             val dueDay = revisit[kp]
             if (dueDay != null && a.day >= dueDay) { if (a.scheduled.add("revisit:$kp")) { if (pass) revisit.remove(kp) else revisit[kp] = a.day + 1 } }
-            else if (!pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, a.day + 1)
+            else if (!pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, lookAgainDay(a, event) + 1)
         }
     }
     fun refreshAttempt(a: Attempt, e: Event) {
         for (kp in a.kps) refresh(kp, e, a)
-        revisitAfter(a)
+        revisitAfter(a, e)
         val correct = graded(a) && !a.voided && a.pass
         if (a.submitted != null && correct != a.correctCounted) {
             updateJournal(a.day) { it.copy(correct = it.correct + if (correct) 1 else -1) }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Weekly choice mainline against a disposable, readonly-backed production copy. No real AI calls.
 
-Build :server:app:installDist and the ton1358 APKs through tools/dev/heavy first. The week pack is
+Build :server:app:installDist and the isolated APKs through tools/dev/heavy first (coachApplicationId
+must match --package; coach.course=ton1358-synthetic-mainline). The week pack is
 synthetic and written to a temporary COACH_MOCK_DIR; the copied database, credentials and logs are
 deleted. With --android the walk is driven on coach_1128_c70_r: pick a week, miss the setup question,
 mark a right detail answer as a guess, answer the bridge question, and read the coverage panel.
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.error
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +64,11 @@ def main():
     parser.add_argument('--android', metavar='SERIAL', help='Run only on coach_1128_c70_r; invoke under tools/dev/heavy --emulator')
     parser.add_argument('--screenshots', type=Path, help='Export synthetic emulator screenshots here')
     parser.add_argument('--private', action='store_true', help='Also count what the configured private packs parse to')
+    parser.add_argument('--package', default=PACKAGE, choices=[PACKAGE, 'com.coach.android.ton1364'], help='Isolated APK application ID')
+    parser.add_argument('--retry-after-commit', action='store_true', help='Lose each first answer response, then verify the edited retry replays the committed choice')
     args = parser.parse_args()
+    assert not args.retry_after_commit or args.android, '--retry-after-commit requires --android'
+    package = args.package
     os.umask(0o077)
     assert smoke.BINARY.is_file(), 'Build installDist through tools/dev/heavy first'
     android_host = ''
@@ -87,6 +93,8 @@ def main():
     bridge_thread = threading.Thread(target=bridge.serve_forever)
     bridge_thread.start()
     process = None
+    proxy = proxy_thread = None
+    retries = {}
     try:
         with tempfile.TemporaryDirectory(prefix='coach-mainline-copy-') as temporary:
             base = Path(temporary)
@@ -172,19 +180,62 @@ def main():
                         json.load(response)
 
             def android():
+                nonlocal proxy, proxy_thread
+                android_port = port
+                if args.retry_after_commit:
+                    class LostReply(smoke.http.server.BaseHTTPRequestHandler):
+                        def log_message(self, *ignored):
+                            pass
+
+                        def forward(self):
+                            body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                            headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'content-length', 'connection')}
+                            req = urllib.request.Request(f'http://127.0.0.1:{port}{self.path}', data=body if self.command == 'POST' else None,
+                                                         headers=headers, method=self.command)
+                            try:
+                                with urllib.request.urlopen(req, timeout=15) as response:
+                                    status, result = response.status, response.read()
+                            except urllib.error.HTTPError as error:
+                                status, result = error.code, error.read()
+                            if self.path.endswith('/mainline/1/answer') and status == 200:
+                                sent = json.loads(body)
+                                attempts = retries.setdefault(sent['submissionId'], [])
+                                attempts.append((sent, json.loads(result)))
+                                if len(attempts) == 1:
+                                    status, result = 503, b'{"error":"Synthetic response lost after commit"}'
+                            self.send_response(status)
+                            self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', str(len(result)))
+                            self.end_headers()
+                            self.wfile.write(result)
+                        do_GET = do_POST = forward
+                    proxy = smoke.http.server.ThreadingHTTPServer((android_host, 0), LostReply)
+                    assert proxy.server_address[1] not in smoke.FORBIDDEN | {3790}
+                    proxy_thread = threading.Thread(target=proxy.serve_forever)
+                    proxy_thread.start()
+                    android_port = proxy.server_address[1]
                 # Never echo the command or instrument output: arguments carry a copy-only credential.
                 result = subprocess.run([adb, '-s', args.android, 'shell', 'am', 'instrument', '-w',
-                    '-e', 'class', 'com.coach.android.MainlineSmoke', '-e', 'coachPort', str(port), '-e', 'coachToken', token,
-                    f'{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner'], capture_output=True, timeout=240)
+                    '-e', 'class', 'com.coach.android.MainlineSmoke', '-e', 'coachPort', str(android_port), '-e', 'coachToken', token,
+                    '-e', 'retryAfterCommit', str(args.retry_after_commit).lower(),
+                    f'{package}.test/androidx.test.runner.AndroidJUnitRunner'], capture_output=True, timeout=240)
                 passed = result.returncode == 0 and b'OK (1 test)' in result.stdout
                 args.screenshots.mkdir(parents=True, exist_ok=True)
                 (args.screenshots / 'instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 for screen in SCREENS:
                     name = f'mainline-{screen}.png'
-                    shot = subprocess.run([adb, '-s', args.android, 'exec-out', 'run-as', PACKAGE, 'cat', f'cache/{name}'], capture_output=True)
+                    shot = subprocess.run([adb, '-s', args.android, 'exec-out', 'run-as', package, 'cat', f'cache/{name}'], capture_output=True)
                     if shot.returncode == 0 and shot.stdout.startswith(b'\x89PNG'):
                         (args.screenshots / name).write_bytes(shot.stdout)
                 assert passed, 'Synthetic emulator mainline walk failed; see instrument.txt (credential redacted)'
+                if args.retry_after_commit:
+                    assert len(retries) == 3, 'all three answers retried'
+                    for attempts in retries.values():
+                        assert len(attempts) == 2
+                        (first, committed), (edited, replayed) = attempts
+                        assert first['choice'] != edited['choice'] and first['guessed'] != edited['guessed']
+                        assert committed == replayed
+                        assert replayed['choice'] == first['choice'] and replayed['guessed'] == first['guessed']
 
             try:
                 start()
@@ -207,6 +258,12 @@ def main():
                     submitted = [json.loads(r[0]) for r in db.execute("select payload from events where course_id=? and type='answer_submitted'", (COURSE,))]
                     assert len(posed) == 3 and all(p['mainline'] and p['purpose'] == 'RECALL' for p in posed)
                     assert sorted(bool(s.get('guessed')) for s in submitted) == [False, False, True]
+                    for attempts in retries.values():
+                        first, replayed = attempts[0]
+                        posed_item = next(p for p in posed if p['mainlineItem'] == first['itemId'])
+                        sent = next(s for s in submitted if s['attemptId'] == posed_item['attemptId'])
+                        assert sent['answer'] == 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[replayed['choice']]
+                        assert bool(sent.get('guessed')) == replayed['guessed']
                     assert db.execute('pragma integrity_check').fetchone()[0] == 'ok'
                 private = None
                 if args.private:
@@ -230,12 +287,17 @@ def main():
                     coverageBefore=dict(facts=before['facts'], withQuestions=before['factsWithQuestions'], mastered=before['factsMastered']),
                     coverageAfter=dict(facts=after['facts'], withQuestions=after['factsWithQuestions'], mastered=after['factsMastered'], answered=after['answered']),
                     revisitTomorrow=sorted(k for k, v in revisit.items() if v == day + 1), guessedAnswers=1,
+                    editedRetriesVerified=len(retries),
                     emulator='coach_1128_c70_r' if args.android else 'protocol only', privatePacks=private), indent=2))
             finally:
                 stop()
     finally:
         if args.android:
-            subprocess.run([adb, '-s', args.android, 'shell', 'am', 'force-stop', PACKAGE], capture_output=True)
+            subprocess.run([adb, '-s', args.android, 'shell', 'am', 'force-stop', package], capture_output=True)
+        if proxy:
+            proxy.shutdown()
+            proxy_thread.join()
+            proxy.server_close()
         bridge.shutdown()
         bridge_thread.join()
         bridge.server_close()

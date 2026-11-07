@@ -61,6 +61,48 @@ class LaunchdBindingTest(unittest.TestCase):
             with self.assertRaisesRegex(GateError, 'identity changed'):
                 started._binding(345, self.side, self.roots, self.plist)
 
+    def test_launcher_exec_must_reach_same_verified_jvm(self):
+        shell = (1, '1 Sat Nov 7 01:49:14 2026 /bin/sh /fixed/release/app/bin/app')
+        java = (1, '1 Sat Nov 7 01:49:14 2026 java /fixed/release/app/lib/a.jar com.coach.server.MainKt')
+        with mock.patch.object(started, '_job', return_value=345), \
+             mock.patch.object(started, '_daemon_pid', return_value=777), \
+             mock.patch.object(started.process, '_identity', side_effect=[shell, java, java]), \
+             mock.patch.object(started.process, '_image', return_value='/bin/sh'), \
+             mock.patch.object(started.process, 'bind', return_value={'identity': java}) as bind, \
+             mock.patch.object(started.time, 'sleep'):
+            started._binding(345, self.side, self.roots, self.plist)
+            bind.assert_called_once_with(345, self.side, self.roots)
+
+        reused = (1, '1 Sat Nov 7 01:49:15 2026 java /fixed/release/app/lib/a.jar com.coach.server.MainKt')
+        with mock.patch.object(started, '_job', return_value=345), \
+             mock.patch.object(started, '_daemon_pid', return_value=777), \
+             mock.patch.object(started.process, '_identity', side_effect=[shell, reused]), \
+             mock.patch.object(started.process, '_image', return_value='/bin/sh'), \
+             mock.patch.object(started.time, 'sleep'), \
+             mock.patch.object(started.process, 'bind') as bind:
+            with self.assertRaisesRegex(GateError, 'identity changed'):
+                started._binding(345, self.side, self.roots, self.plist)
+            bind.assert_not_called()
+
+    def test_launcher_timeout_and_unknown_shell_fail_closed(self):
+        shell = (1, '1 Sat Nov 7 01:49:14 2026 /bin/sh /fixed/release/app/bin/app')
+        with mock.patch.object(started, '_job', return_value=345), \
+             mock.patch.object(started, '_daemon_pid', return_value=777), \
+             mock.patch.object(started.process, '_identity', return_value=shell), \
+             mock.patch.object(started.time, 'monotonic', side_effect=[0, 21]), \
+             mock.patch.object(started.process, 'bind') as bind:
+            with self.assertRaisesRegex(GateError, 'launcher did not exec'):
+                started._binding(345, self.side, self.roots, self.plist)
+            bind.assert_not_called()
+        other = (1, '1 Sat Nov 7 01:49:14 2026 /bin/sh /other/app')
+        with mock.patch.object(started, '_job', return_value=345), \
+             mock.patch.object(started, '_daemon_pid', return_value=777), \
+             mock.patch.object(started.process, '_identity', return_value=other), \
+             mock.patch.object(started.process, 'bind') as bind:
+            with self.assertRaisesRegex(GateError, 'unexpected launchd process'):
+                started._binding(345, self.side, self.roots, self.plist)
+            bind.assert_not_called()
+
     def test_stop_selects_live_release_and_rejects_wrong_or_ambiguous_side(self):
         sides = {'old': self.side, 'new': {'release': '/fixed/candidate'}}
         with mock.patch.object(started.process, '_identity', return_value=self.identity), \

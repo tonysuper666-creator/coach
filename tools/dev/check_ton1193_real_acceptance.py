@@ -295,6 +295,8 @@ def worker(config_path, report_path, inject):
                 if diagnostic.exists():
                     report['injectedDiagnostic'] = json.loads(diagnostic.read_text())
                     raise switch.GateError('injected verifier refused before authenticated failure')
+                switch.require((root / 'injected-acceptance.json').is_file(),
+                               'injected verifier did not run')
                 injected = json.loads((root / 'injected-acceptance.json').read_text())
                 switch.require(all(injected[k] == old['identity'][k] for k in
                                    ('epoch', 'tokenSha256', 'credentialSha256')),

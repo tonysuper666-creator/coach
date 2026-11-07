@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 
 from . import ton1193_preflight as preflight
 from . import ton1193_process as process
@@ -51,6 +52,29 @@ def _daemon_pid():
 def _binding(pid, side, roots, plist):
     require(_job(plist) == pid and _daemon_pid() != pid, 'launchd or daemon PID changed')
     identity = process._identity(pid)
+    # launchd exposes the PID before the release's shell launcher execs Java.
+    # Waiting never authorizes the launcher: the normal JVM/image binding below
+    # remains mandatory, and a different job, process birth, or command fails.
+    launcher = '/bin/sh ' + str(Path(side['release']) / 'app/bin/app')
+    fields = identity[1].split(None, 6)
+    if identity[0] == 1 and len(fields) == 7 and fields[6] == launcher:
+        birth = fields[:6]
+        deadline = time.monotonic() + 20
+        while True:
+            require(time.monotonic() < deadline, 'launcher did not exec JVM')
+            require(_job(plist) == pid and _daemon_pid() != pid,
+                    'launchd or daemon PID changed')
+            fields = identity[1].split(None, 6)
+            require(identity[0] == 1 and len(fields) == 7 and fields[:6] == birth,
+                    'launchd process identity changed')
+            if fields[6] != launcher:
+                break
+            if process._image(pid) != '/bin/sh':
+                time.sleep(0.05)
+                identity = process._identity(pid)
+                continue
+            time.sleep(0.05)
+            identity = process._identity(pid)
     require(identity[0] == 1 and str(Path(side['release']) / 'app/lib') + '/' in identity[1]
             and 'com.coach.server.MainKt' in identity[1], 'unexpected launchd process identity')
     evidence = process.bind(pid, side, roots)

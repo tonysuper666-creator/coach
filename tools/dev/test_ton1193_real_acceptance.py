@@ -11,6 +11,18 @@ from .ton1175_switch import GateError
 
 
 class LiveConfigurationTest(unittest.TestCase):
+    def test_controller_diagnostics_rejects_unclosed_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'controller-recovering-start.json'
+            value = {'phase': 'recovering', 'action': 'start', 'step': 'RECEIPT', 'reason': 'IO_ERROR'}
+            path.write_text(json.dumps(value))
+            self.assertEqual(driver.controller_diagnostics(root), [value])
+            value['path'] = '/private/secret'
+            path.write_text(json.dumps(value))
+            with self.assertRaisesRegex(GateError, 'invalid controller diagnostic'):
+                driver.controller_diagnostics(root)
+
     def test_binds_exact_lifetime_log_and_real_verifiers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

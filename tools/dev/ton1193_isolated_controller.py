@@ -21,12 +21,36 @@ from unittest.mock import patch
 from . import ton1193_controller as controller, ton1193_preflight as preflight
 from . import ton1193_started as started, ton1193_live as live
 from .ton1175_launchd import FORBIDDEN_PORTS
-from .ton1175_switch import GateError, require
+from .ton1175_switch import GateError, require, atomic
 from .ton1193_transaction import _read_file
 from .ton1193_trust import directory_snapshot
 
 ISOLATED_ENV_KEYS = preflight.ENV_KEYS | frozenset(('COACH_TRAFFIC', 'COACH_BRIDGE_URL'))
 SOCKET_BUDGET = 101
+
+# Only fixed values may leave an isolated controller process. Never persist
+# exception text: it can contain paths or credentials.
+REASONS = {
+    'production label occupied': 'LABEL_OCCUPIED',
+    'recorded PID still exists or was reused': 'STOPPED_PID_EXISTS',
+    'stopped job or PID appeared': 'STOPPED_IDENTITY_CHANGED',
+    'started job PID unavailable': 'START_PID_UNAVAILABLE',
+    'isolated job has no PID': 'ISOLATED_PID_UNAVAILABLE',
+    'launchd label or plist identity changed': 'LAUNCHD_IDENTITY',
+    'launchctl command failed': 'LAUNCHCTL_FAILED',
+    'unexpected launchd process identity': 'JVM_IDENTITY',
+    'unexpected process image': 'PROCESS_IMAGE',
+    'child process set changed': 'CHILD_SET_CHANGED',
+    'transaction phase changed': 'PHASE_CHANGED',
+}
+
+
+def safe_reason(exc):
+    if isinstance(exc, GateError):
+        return REASONS.get(str(exc), 'GATE_REJECTED')
+    if isinstance(exc, OSError):
+        return 'IO_ERROR'
+    return 'INVALID_DATA'
 
 
 def fixture_nonce(root):
@@ -121,6 +145,21 @@ def run(path, action, apply=False):
     target = f'gui/{os.getuid()}/{label}'
     original_whitelist = preflight._whitelist
     original_launchctl = controller._launchctl
+    trace = {'step': 'CONTROLLER', 'phase': 'unknown', 'failedStep': None}
+
+    def traced(step, function):
+        def invoke(*args, **kwargs):
+            trace['step'] = step
+            try:
+                result = function(*args, **kwargs)
+                if step == 'TRANSACTION' and result in ('switching', 'recovering'):
+                    trace['phase'] = result
+                return result
+            except (GateError, OSError, ValueError, KeyError, TypeError):
+                if trace['failedStep'] is None:
+                    trace['failedStep'] = step
+                raise
+        return invoke
 
     def whitelist(plist, c, r):
         require(plist.get('Label') == label, 'fixture label mismatch')
@@ -160,16 +199,32 @@ def run(path, action, apply=False):
     with ExitStack() as stack:
         stack.enter_context(patch.object(preflight, '_whitelist', whitelist))
         stack.enter_context(patch.object(controller, '_target', lambda: target))
-        stack.enter_context(patch.object(controller, '_launchctl', checked_launchctl))
+        stack.enter_context(patch.object(controller, '_job', traced('JOB', controller._job)))
+        stack.enter_context(patch.object(controller, '_launchctl', traced('LAUNCHCTL', checked_launchctl)))
         stack.enter_context(patch.object(preflight, 'revalidate',
-                                         lambda c, a: preflight._revalidate(c, a, roots)))
+                                         traced('REVALIDATE', lambda c, a: preflight._revalidate(c, a, roots))))
+        stack.enter_context(patch.object(controller, '_stopped', traced('STOPPED', controller._stopped)))
+        stack.enter_context(patch.object(controller.receipt, 'consume', traced('RECEIPT', controller.receipt.consume)))
+        stack.enter_context(patch.object(live, 'live_transaction', traced('TRANSACTION', live.live_transaction)))
         stack.enter_context(patch.object(started, '_job', job))
-        stack.enter_context(patch.object(started, 'check_started', check_started))
-        stack.enter_context(patch.object(started, 'check_stopping', check_stopping))
+        stack.enter_context(patch.object(started, 'check_started', traced('START_IDENTITY', check_started)))
+        stack.enter_context(patch.object(started, 'check_stopping', traced('STOP_IDENTITY', check_stopping)))
         if action == 'preflight':
             require(apply, 'preflight writes isolated snapshot; --apply required')
             return preflight._preflight(config, roots)
-        return (controller._stop if action == 'stop' else controller._start)(config, apply)
+        try:
+            return (controller._stop if action == 'stop' else controller._start)(config, apply)
+        except (GateError, OSError, ValueError, KeyError, TypeError) as exc:
+            # The fixture was validated above; write only in its private root.
+            # The original exception and fail-closed controller behavior remain intact.
+            diagnostic = {'action': action, 'phase': trace['phase'],
+                          'step': trace['failedStep'] or trace['step'], 'reason': safe_reason(exc)}
+            try:
+                atomic(Path(path).parent / ('controller-' + trace['phase'] + '-' + action + '.json'),
+                       json.dumps(diagnostic, sort_keys=True).encode())
+            except OSError:
+                pass
+            raise
 
 
 def main():

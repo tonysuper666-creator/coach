@@ -20,11 +20,13 @@ class StagedBridgePinTest(unittest.TestCase):
         self.config_file = self.root / 'controller.json'
         self.config = {'stateDir': str(self.state_dir), 'plist': str(self.plist),
                        'installation': str(self.installation), 'adapterEnvPins': {
-                           'BRIDGE_PORT': '41500', 'COACH_MANAGE_SERVICES': '1'}}
+                           'BRIDGE_PORT': '41500', 'COACH_MANAGE_SERVICES': '1'},
+                       'expectedSourceHead': verify.HEALTH_LOOP_OLD_HEAD}
         self.config_hash = switch.digest(json.dumps(self.config, sort_keys=True).encode())
         old_plist = plistlib.dumps({'EnvironmentVariables': self.config['adapterEnvPins']})
         files = {'old.plist': old_plist, 'new.plist': b'new plist',
-                 'old.json': b'old installation', 'new.json': b'new installation'}
+                 'old.json': json.dumps({'sourceHead': verify.HEALTH_LOOP_OLD_HEAD}).encode(),
+                 'new.json': b'new installation'}
         state = {'configHash': self.config_hash, 'plistMode': 0o600, 'installationMode': 0o600,
                  'files': {name: switch.digest(data) for name, data in files.items()}}
         for name, data in files.items():
@@ -64,6 +66,17 @@ class StagedBridgePinTest(unittest.TestCase):
         self.plist.unlink()
         os.link(self.state_dir / 'old.plist', self.plist)
         with self.assertRaises(switch.GateError):
+            with self.pin():
+                pass
+
+    def test_rejects_unreviewed_source_even_when_stage_and_pointer_match(self):
+        data = json.dumps({'sourceHead': '0' * 40}).encode()
+        state = json.loads((self.state_dir / 'state.json').read_bytes())
+        state['files']['old.json'] = switch.digest(data)
+        switch.atomic(self.state_dir / 'old.json', data)
+        switch.atomic(self.state_dir / 'state.json', json.dumps(state).encode())
+        switch.atomic(self.installation, data)
+        with self.assertRaisesRegex(switch.GateError, 'unreviewed managed health loop source'):
             with self.pin():
                 pass
 

@@ -309,6 +309,7 @@ def worker(config_path, report_path, inject):
         finally:
             done.set()
             thread.join()
+            report['controllerDiagnostics'] = controller_diagnostics(root)
             report['journal'] = json.loads((root / 'stage/journal.json').read_text())
             report['observedPhases'] = phases
             report['monitorErrors'] = monitor_errors
@@ -331,6 +332,26 @@ def worker(config_path, report_path, inject):
             report['ownedProcesses'] = [dict(pid=p.pid, ppid=p.ppid, started=p.started) for p in owned.values()]
             switch.atomic(report_path, json.dumps(report, indent=2, sort_keys=True).encode())
         marker.unlink()
+
+
+def controller_diagnostics(root):
+    """Copy only the isolated controller's closed diagnostic vocabulary."""
+    steps = {'CONTROLLER', 'TRANSACTION', 'REVALIDATE', 'STOPPED', 'RECEIPT', 'JOB',
+             'LAUNCHCTL', 'START_IDENTITY', 'STOP_IDENTITY'}
+    reasons = set(isolated.REASONS.values()) | {'GATE_REJECTED', 'IO_ERROR', 'INVALID_DATA'}
+    result = []
+    for phase in ('switching', 'recovering', 'unknown'):
+        for action in ('stop', 'start'):
+            path = root / ('controller-' + phase + '-' + action + '.json')
+            if not path.exists():
+                continue
+            value = json.loads(path.read_text())
+            switch.require(isinstance(value, dict) and set(value) == {'phase', 'action', 'step', 'reason'}
+                           and value['phase'] == phase and value['action'] == action
+                           and value['step'] in steps and value['reason'] in reasons,
+                           'invalid controller diagnostic')
+            result.append(value)
+    return result
 
 
 def main():

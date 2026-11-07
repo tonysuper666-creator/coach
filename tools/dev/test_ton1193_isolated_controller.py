@@ -108,6 +108,23 @@ class IsolatedControllerTest(unittest.TestCase):
                     isolated.run(bad, 'start', True)
             launch.assert_not_called()
 
+    def test_start_failure_records_closed_diagnostics_for_each_phase(self):
+        self.check()
+        def attempt(config, apply):
+            isolated.live.live_transaction(config['stateDir'])
+            isolated.preflight.revalidate(config, 'start')
+        for phase in ('switching', 'recovering'):
+            with self.subTest(phase=phase), \
+                 mock.patch.object(isolated.controller, '_start', side_effect=attempt), \
+                 mock.patch.object(isolated.live, 'live_transaction', return_value=phase), \
+                 mock.patch.object(isolated.preflight, '_revalidate', side_effect=GateError('private /secret')):
+                with self.assertRaisesRegex(GateError, 'private /secret'):
+                    isolated.run(str(self.path), 'start', True)
+            text = (self.root / ('controller-' + phase + '-start.json')).read_text()
+            self.assertEqual(json.loads(text), {'action': 'start', 'phase': phase,
+                                                'step': 'REVALIDATE', 'reason': 'GATE_REJECTED'})
+            self.assertNotIn('/secret', text)
+
     def test_private_ancestors_and_byte_budget(self):
         target = self.root / 'h/Coach/state'
         isolated.private_directories(target, self.root)

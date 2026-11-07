@@ -12,7 +12,7 @@ import kotlin.math.abs
  * 于是一次都不认输；每轮又要整树两遍比对（实测约 2.7 秒），三次重试就超过 420 秒。
  *
  * 这里把方向、手段与终止条件从设备代码里抽出来：一次观察 = 一次决策，
- * 进展只认题页内锚点的位移，页面推不动就有界退出，可以让假页面确定性地复现该缺陷。
+ * 比较题页内未裁剪的锚点；缺少可靠锚点时不臆断停滞，仍受动作与时间预算限制。
  */
 data class ScrollView(
     /** 目标是否真的可见（`isVisibleToUser`）；只是被组合出来不算。 */
@@ -165,10 +165,14 @@ class ScrollDriver(
 }
 
 /** 一次树里的可见文本行：屏幕坐标 + 是否可见。 */
-data class RowText(val text: String, val top: Int, val centerY: Int, val visible: Boolean = true)
+data class RowText(val text: String, val top: Int, val centerY: Int, val visible: Boolean = true,
+    val bottom: Int = 2 * centerY - top)
 
-/** 一次观察里能用来判断位移的锚点：题号行或容器内文本行的屏幕 top。 */
-data class Anchors(val cards: List<Int> = emptyList(), val tops: List<Int> = emptyList())
+/** 文本身份只用于比较，不写进 trace。 */
+data class Anchors(val cards: List<Int> = emptyList(), val tops: List<Int> = emptyList(),
+    val texts: List<String> = emptyList()) {
+    override fun toString() = "Anchors(cards=$cards, tops=$tops)"
+}
 
 val CardHeader = Regex("第 (\\d+) / \\d+ 题")
 
@@ -180,22 +184,24 @@ fun cardNumberIn(text: String): Int? = CardHeader.find(text)?.groupValues?.get(1
  * 固定页眉、返回栏、计数条不随内容移动，把它们当锚点会把真实前进误判成停滞
  * （2600px 长卡滚到中段时题号行已经滚出视口，旧实现退回「整棵树前 6 个文本」，
  * 那 6 个恰好全是页眉）。容器里有题号行时用题号行，题号行全部出视口时改用
- * 容器内文本行——它们随内容一起走，位移才是真位移。
+ * 容器内完整文本行。裁剪在容器边缘的长文本框坐标固定，不能用来证明停滞。
  */
 fun anchorsOf(rows: List<RowText>, pageTop: Int, pageBottom: Int, limit: Int = 8): Anchors {
-    val inside = rows.filter { it.visible && it.centerY in pageTop..pageBottom }
+    val inside = rows.filter { it.visible && it.top > pageTop && it.bottom < pageBottom }
     val cardTops = ArrayList<Int>()
     val cards = ArrayList<Int>()
     val textTops = ArrayList<Int>()
+    val texts = ArrayList<String>()
     for (row in inside) {
         cardNumberIn(row.text)?.let { cards.add(it); cardTops.add(row.top) }
-        if (textTops.size < limit) textTops.add(row.top)
+        if (textTops.size < limit) { textTops.add(row.top); texts.add(row.text) }
     }
-    return if (cardTops.isNotEmpty()) Anchors(cards, cardTops) else Anchors(emptyList(), textTops)
+    return if (cardTops.isNotEmpty()) Anchors(cards, cardTops, texts)
+        else Anchors(tops = textTops, texts = texts)
 }
 
 /**
- * 两次探测之间题页真的前进了吗。只认两个锚点集合里 ≥[tolerance] 像素的位移。
+ * 两次探测之间题页真的前进了吗。比较完整行的身份与 ≥[tolerance] 像素位移。
  *
  * 集合本身不可比时按「动了」处理，绝不因此判停滞：换页/换题会换掉整组锚点，
  * 题号行滚出视口时锚点为空，这些都不该被算成「推不动」。
@@ -203,6 +209,7 @@ fun anchorsOf(rows: List<RowText>, pageTop: Int, pageBottom: Int, limit: Int = 8
 fun movedBy(before: Anchors, after: Anchors, tolerance: Int = 50): Boolean {
     if (before.tops.isEmpty() || after.tops.isEmpty()) return true
     if (before.cards != after.cards) return true
+    if (before.texts != after.texts) return true
     return movedBy(before.tops, after.tops, tolerance)
 }
 
@@ -214,4 +221,31 @@ fun movedBy(before: List<Int>, after: List<Int>, tolerance: Int = 50): Boolean {
     if (before.isEmpty() || after.isEmpty()) return true
     if (before.size != after.size) return true
     return before.indices.any { abs(after[it] - before[it]) >= tolerance }
+}
+
+/** Associate the first retry after a unique stem across overlapping, forward-only viewports.
+ * Inputs are normalized visible text in accessibility traversal order. Never cross another stem.
+ */
+class RetryLocator(private val stem: String, stems: List<String>) {
+    private val prefix = stem.take(40)
+    private val otherPrefixes = stems.filter { it != stem }.map { it.take(40) }
+    private var seen = false
+
+    init {
+        require(prefix.isNotBlank() && stems.count { it.contains(prefix) } == 1) {
+            "错题题干前缀不唯一，无法安全关联重练入口"
+        }
+    }
+
+    fun find(texts: List<String>): Int? {
+        val start = texts.indexOfFirst { it.contains(prefix) }
+        if (start >= 0) seen = true
+        check(seen) { "新错题尚未进入视口，无法安全关联重练入口" }
+        for (index in start + 1 until texts.size) {
+            val shown = texts[index]
+            check(otherPrefixes.none { shown.contains(it) }) { "新错题后先出现另一题，无法安全关联重练入口" }
+            if (shown == "再练一组") return index
+        }
+        return null
+    }
 }

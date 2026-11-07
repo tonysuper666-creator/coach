@@ -11,6 +11,7 @@ import com.coach.client.LedgerPage
 import com.coach.client.PairedCredentials
 import com.coach.client.PoolTrace
 import com.coach.client.RowText
+import com.coach.client.RetryLocator
 import com.coach.client.ScrollDriver
 import com.coach.client.ScrollMove
 import com.coach.client.ScrollView
@@ -249,28 +250,34 @@ class MistakeReviewSmoke {
     private fun retryFor(stem: String, stems: List<String>): AccessibilityNodeInfo {
         assertEquals("错题题干不唯一，无法安全关联重练入口", 1, stems.count { norm(it) == norm(stem) })
         scrollTo(stem)
-        repeat(3) {
+        val locator = RetryLocator(norm(stem), stems.map(::norm))
+        val driver = ScrollDriver(towardEnd = true)
+        var moved: Boolean? = null
+        while(true) {
+            checkTime("retryFor ${stem.take(30)}")
             val nodes = mutableListOf<AccessibilityNodeInfo>()
             fun collect(node: AccessibilityNodeInfo?) {
                 if (node == null || !node.refresh()) return
                 if (!node.text.isNullOrBlank() && node.isVisibleToUser) nodes.add(node)
                 for (i in 0 until node.childCount) collect(node.getChild(i))
             }
-            collect(freshRoot())
-            val start = nodes.indexOfFirst { norm(it.text.toString()).contains(norm(stem).take(40)) }
-            if (start < 0) throw AssertionError("新错题离开视口，无法安全关联重练入口")
-            for (node in nodes.drop(start + 1)) {
-                val shown = norm(node.text.toString())
-                if (shown == "再练一组") return node
-                if (stems.any { norm(it) != norm(stem) && shown.contains(norm(it).take(40)) })
-                    throw AssertionError("新错题后先出现另一题，无法安全关联重练入口")
+            collect(page())
+            locator.find(nodes.map { norm(it.text.toString()) })?.let { return nodes[it] }
+            // Keep the same page/drag/stall budgets as all other searches. The established
+            // stem association survives leaving the viewport, only while moving forward.
+            val before = look("再练一组", false)
+            val move = driver.next(before.view.copy(targetFound = false), moved)
+            when(move) {
+                is ScrollMove.ScrollPage -> before.pageNode?.let { scrollPage(it,move.forward) }
+                is ScrollMove.Drag -> before.pageNode?.let { dragIn(it,move.forward) }
+                is ScrollMove.Unreachable -> throw AssertionError("无法唯一定位新错题对应的再练入口：${move.reason}")
+                else -> error("Unexpected retry search move: $move")
             }
-            val list = page() ?: throw AssertionError("找不到错题列表")
-            val r = android.graphics.Rect().also(list::getBoundsInScreen)
-            drag(r.centerX(), r.top + r.height() * 7 / 10, r.top + r.height() * 5 / 10)
-            instrumentation.waitForIdleSync()
+            instrumentation.waitForIdleSync();Thread.sleep(250)
+            val after = look("再练一组", false).anchors
+            moved = movedBy(before.anchors,after)
+            trace("retry search move=$move moved=$moved before=${before.anchors} after=$after")
         }
-        throw AssertionError("无法唯一定位新错题对应的再练入口")
     }
     private fun group(thread: String): JSONArray {
         val all=events();val cards=JSONArray()
@@ -447,25 +454,27 @@ class MistakeReviewSmoke {
     /**
      * 只走一遍树。13:36 的旧实现每轮读两次整树（实测约 2.7 秒/次），三次重试就吃掉 420 秒，
      * 而判据还是“任意文字位置变了”——吸附回弹的十几像素也算前进，于是题号停在 2 也不认输。
-     * 锚点交给 [anchorsOf]：只用落在题页矩形内的行，题号行优先，出视口的题号与固定页眉都不参与。
+     * 只把所选容器后代交给 [anchorsOf]。裁剪后的长文本框可能一直贴着视口边缘，
+     * 只比较完整行；没有可靠锚点时保留未知状态，仍受既有翻页/拖动和时间预算限制。
      */
     private fun look(text: String,substring: Boolean): Look {
         val list=page();val pageRect=list?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
         val rows=ArrayList<RowText>()
         var target: AccessibilityNodeInfo?=null;var atFooter=false
         val want=norm(text)
-        fun walk(n: AccessibilityNodeInfo?) {
+        fun walk(n: AccessibilityNodeInfo?, inPage: Boolean = false) {
             if(n==null) return
             if(!n.refresh()) return
+            val content = inPage || n == list
             val shown=norm(n.text?.toString().orEmpty())
             if(shown.isNotEmpty() && n.isVisibleToUser) {
                 val r=android.graphics.Rect();n.getBoundsInScreen(r)
-                rows.add(RowText(shown,r.top,r.centerY()))
+                if(content) rows.add(RowText(shown,r.top,r.centerY(),bottom=r.bottom))
                 if(shown.contains("选完") || shown.contains("提交本组答案")) atFooter=true
                 val hit=if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
                 if(hit && target==null) target=n
             }
-            for(i in 0 until n.childCount) walk(n.getChild(i))
+            for(i in 0 until n.childCount) walk(n.getChild(i),content)
         }
         walk(freshRoot())
         val focus=target?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }

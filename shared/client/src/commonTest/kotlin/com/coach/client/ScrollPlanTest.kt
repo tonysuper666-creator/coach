@@ -3,6 +3,7 @@ package com.coach.client
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -343,5 +344,86 @@ class ScrollPlanTest {
         assertTrue(movedBy(Anchors(), Anchors()), "没有锚点就无从判断，不能因此判停滞")
         assertTrue(movedBy(Anchors(tops = listOf(500)), Anchors()), "一侧没有锚点同样不算停滞")
         assertTrue(movedBy(emptyList(), listOf(500)), "位置列表为空也不算停滞")
+    }
+
+    @Test fun aLongRowClippedToTheViewportCannotProveAStall() {
+        // 13:33 replay: a different slice of the same long answer fills 1017..1960.
+        // Accessibility reports the clipped rectangle, so its top stays at 1017.
+        val rows = listOf(RowText("a very long original answer", 1017, 1488))
+        val before = anchorsOf(rows, 1017, 1960)
+        val after = anchorsOf(rows, 1017, 1960)
+        assertTrue(movedBy(before, after), "A viewport boundary is not a content position")
+    }
+
+    @Test fun repeatedHeadersDoNotHideDifferentContentAtTheSameCoordinates() {
+        fun rows(body: String) = listOf(
+            RowText("Repeated section header", 1080, 1110),
+            RowText(body, 1200, 1250),
+        )
+        assertTrue(movedBy(anchorsOf(rows("answer one"), 1017, 1960),
+            anchorsOf(rows("answer two"), 1017, 1960)),
+            "Equal row coordinates do not mean equal content, even with a repeated header")
+    }
+
+    @Test fun aFullyVisibleUnchangedRowStillProvesAStall() {
+        val anchors = anchorsOf(listOf(RowText("unchanged answer", 1200, 1250)), 1017, 1960)
+        assertFalse(movedBy(anchors, anchors), "A real stationary page must still stop")
+    }
+
+    @Test fun leavingTheQuestionHeaderForAClippedAnswerKeepsSearchingForward() {
+        val snapshots = listOf(
+            listOf(RowText("第 1 / 3 题", 1081, 1110)),
+            listOf(RowText("long original answer", 1017, 1488)),
+            listOf(RowText("long original answer", 1017, 1488)),
+            listOf(RowText("long original answer", 1017, 1488)),
+            listOf(RowText("Synthetic question 2", 1200, 1250)),
+        ).map { anchorsOf(it, 1017, 1960) }
+        val driver = ScrollDriver()
+        snapshots.indices.forEach { index ->
+            val moved = if (index == 0) null else movedBy(snapshots[index - 1], snapshots[index])
+            val move = driver.next(ScrollView(targetFound = index == snapshots.lastIndex,
+                targetCenterY = 1250, pageTop = 1017, pageBottom = 1960), moved)
+            assertEquals(if (index == snapshots.lastIndex) ScrollMove.Tap else ScrollMove.ScrollPage(true), move,
+                "Clipped content must not reverse the search at snapshot $index")
+        }
+    }
+
+    @Test fun repeatedQuestionHeaderDoesNotHideChangedBodyText() {
+        fun rows(body: String) = listOf(RowText("第 1 / 3 题", 1080, 1110), RowText(body, 1200, 1250))
+        assertTrue(movedBy(anchorsOf(rows("answer one"), 1017, 1960),
+            anchorsOf(rows("answer two"), 1017, 1960)))
+    }
+
+    @Test fun missingReliableAnchorsStillExhaustTheExistingActionBudget() {
+        val anchors = anchorsOf(listOf(RowText("clipped original answer", 1017, 1488)), 1017, 1960)
+        assertTrue(anchors.tops.isEmpty(), "A clipped rectangle does not prove movement or a stall")
+        val driver = ScrollDriver(card = 2)
+        var move = driver.next(ScrollView())
+        var count = 1
+        while (move !is ScrollMove.Unreachable && count < 50) {
+            move = driver.next(ScrollView(), movedBy(anchors, anchors))
+            count++
+        }
+        assertTrue(move is ScrollMove.Unreachable, "Unknown movement cannot allow an infinite search")
+        assertEquals(ScrollDriver.PAGE_LIMIT + ScrollDriver.DRAG_LIMIT + 1, count)
+    }
+
+    @Test fun retryRemainsAssociatedAfterItsStemLeavesTheViewport() {
+        val locator = RetryLocator("Synthetic question 1", listOf("Synthetic question 1", "Synthetic question 2"))
+        assertEquals(null, locator.find(listOf("再练一组", "Synthetic question 1", "long answer starts")),
+            "A previous card's retry above the target is not its retry")
+        repeat(6) { assertEquals(null, locator.find(listOf("a clipped slice of the long answer"))) }
+        assertEquals(1, locator.find(listOf("判分依据：synthetic", "再练一组", "Synthetic question 2")))
+    }
+
+    @Test fun retrySearchRejectsCrossingAnotherStemOrStartingWithoutTheTarget() {
+        fun locator() = RetryLocator("Synthetic question 1", listOf("Synthetic question 1", "Synthetic question 2"))
+        assertFailsWith<IllegalStateException> { locator().find(listOf("再练一组")) }
+        val crossed = locator()
+        crossed.find(listOf("Synthetic question 1"))
+        assertFailsWith<IllegalStateException> { crossed.find(listOf("Synthetic question 2", "再练一组")) }
+        val commonPrefix = "a".repeat(40)
+        assertFailsWith<IllegalArgumentException> { RetryLocator(commonPrefix + "one",
+            listOf(commonPrefix + "one", commonPrefix + "two")) }
     }
 }

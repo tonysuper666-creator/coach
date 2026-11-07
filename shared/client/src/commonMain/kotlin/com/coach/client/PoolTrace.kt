@@ -15,5 +15,11 @@ object PoolTrace {
         val start=starts[thread] ?: return@synchronized
         if(stage !in stages.getValue(thread)) stages.getValue(thread)[stage]=start.elapsedNow().inWholeNanoseconds/1_000_000.0
     } }
+    fun markActive(stage: String) { if(enabled) synchronized(lock) {
+        starts.forEach { (thread,start) ->
+            val entries=stages.getValue(thread)
+            if(stage !in entries) entries[stage]=start.elapsedNow().inWholeNanoseconds/1_000_000.0
+        }
+    } }
     fun snapshot(thread: String): Map<String,Double> = synchronized(lock) { stages[thread]?.toMap().orEmpty() }
 }

@@ -326,7 +326,7 @@ class TutorClient(
 
     fun retryMistakes(threadId: String, courseId: String) = send(buildJsonObject {
         put("t", "tutor.retryMistakes"); put("threadId", threadId); put("courseId", courseId)
-    })
+    }).also { if (it) PoolTrace.mark(threadId, "retry_queued") }
 
     /** 一次提交整组；answers: attemptId → 字母。 */
     fun answer(threadId: String, courseId: String, groupId: String, answers: Map<String, String>, submissionId: String) = send(buildJsonObject {

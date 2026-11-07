@@ -9,6 +9,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.Anchors
 import com.coach.client.LedgerPage
 import com.coach.client.PairedCredentials
+import com.coach.client.PoolTrace
 import com.coach.client.RowText
 import com.coach.client.ScrollDriver
 import com.coach.client.ScrollMove
@@ -89,6 +90,7 @@ class MistakeReviewSmoke {
         course = BuildConfig.COACH_COURSE
         keys = JSONObject(java.io.File(context.cacheDir,"review-keys.json").readText())
         val kp = requireNotNull(args.getString("coachKp"))
+        PoolTrace.enabled = true
         KeystoreCredentials(context,base).save(PairedCredentials(device,token))
         val phase = args.getString("coachPhase")
         val wrongCount = if (phase == "prepare3" || phase == "resume3") 3 else 2
@@ -132,7 +134,9 @@ class MistakeReviewSmoke {
             step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
             click(retryButton)
+            samples.put("retryClickReturnedMs", (SystemClock.elapsedRealtimeNanos()-retryMark)/1_000_000.0)
             waitQuestionPage()
+            samples.put("retryHeadingObservedMs", (SystemClock.elapsedRealtimeNanos()-retryMark)/1_000_000.0)
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
             val retry = group("mistakes:$kp")
@@ -152,6 +156,8 @@ class MistakeReviewSmoke {
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
         } finally {
+            samples.put("retryStagesMs", JSONObject(PoolTrace.snapshot("mistakes:$kp")))
+            PoolTrace.enabled = false
             java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
         }
     }

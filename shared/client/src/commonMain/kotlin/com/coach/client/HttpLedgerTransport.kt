@@ -57,6 +57,7 @@ class HttpLedgerTransport(baseUrl: String, private val deviceId: String,
             onOpen()
             for(frame in incoming) if(frame is Frame.Text) {
                 val obj=runCatching { LedgerJson.parseToJsonElement(frame.readText()).jsonObject }.getOrNull() ?: continue
+                if(obj.str("t") == "tutor.cards") PoolTrace.mark(obj.str("threadId"),"watch_cards_received")
                 // Text/math deltas update the message stream, not the learning ledger.
                 // Catch up on durable facts rather than issuing HTTP reads for every token.
                 if(obj.str("t") in setOf("ledger","tutor.state","tutor.cards","tutor.feedback","msg.end") ||

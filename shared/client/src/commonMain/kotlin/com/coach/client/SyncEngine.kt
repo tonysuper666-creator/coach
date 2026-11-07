@@ -202,7 +202,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     /** Event pages carry their epoch. A push with no outbox work needs one read, not
      * hello + events. Full polling still refreshes backup watermarks and uploads commands. */
     private suspend fun syncHint() {
+        PoolTrace.markActive("hint_waiting")
         val caughtUp=mutex.withLock {
+            PoolTrace.markActive("hint_lock_acquired")
             val epoch=meta("epoch") ?: return@withLock false
             if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
             try { pullCourses(epoch) }
@@ -221,7 +223,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
+                PoolTrace.markActive("events_request_started")
                 val page = transport.events(course,cursor)
+                PoolTrace.markActive("events_request_completed")
                 if(page.epoch != epoch) throw EpochChanged()
                 val quizThreads=if(PoolTrace.enabled) page.events.filter { it.type=="question_posed" }.mapNotNull { it.threadId }.distinct() else emptyList()
                 quizThreads.forEach { PoolTrace.mark(it,"events_read") }

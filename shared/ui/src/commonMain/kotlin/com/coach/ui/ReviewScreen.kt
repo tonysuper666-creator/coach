@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.client.PoolTrace
 
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
@@ -80,6 +81,7 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
     val thread = activeKp?.let { "mistakes:$it" }.orEmpty()
     val tv = ui.threads[thread]
     val group = if (activeKp == null) null else view.quizGroups(thread).lastOrNull { it.groupId !in priorGroups }
+    SideEffect { if (group != null) PoolTrace.mark(thread, "composed") }
     fun retry(kpId: String) {
         val kp = view.kp(kpId)
         val target = "mistakes:$kpId"
@@ -119,7 +121,7 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
                 items(group.cards, key = { it.attemptId }) { card ->
                     Box(Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
                         QuizCardView(group.cards.indexOf(card) + 1, group.cards.size, card, group.submitted,
-                            chosen[card.attemptId], c.math) { chosen[card.attemptId] = it }
+                            chosen[card.attemptId], c.math, onFirstDraw = { PoolTrace.mark(thread, "first_draw") }) { chosen[card.attemptId] = it }
                     }
                 }
                 item {

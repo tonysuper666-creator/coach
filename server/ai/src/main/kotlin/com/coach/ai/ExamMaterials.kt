@@ -15,7 +15,8 @@ class ExamMaterials private constructor(
     val available: Boolean get() = index != null
     fun applies(course: String): Boolean = course.contains("ECNM10119", ignoreCase = true)
     // Protect other courses too when the index is present: a prompt can ask across courses.
-    fun guard(course: String): ExamTextGuard? = if (available || applies(course)) ExamTextGuard(index) else null
+    fun guard(course: String, onHold: ((ExamTextGuard.Hold) -> Unit)? = null): ExamTextGuard? =
+        if (available || applies(course)) ExamTextGuard(index, onHold) else null
 
     fun context(course: String, query: String): String {
         if (!applies(course) || !available) return ""

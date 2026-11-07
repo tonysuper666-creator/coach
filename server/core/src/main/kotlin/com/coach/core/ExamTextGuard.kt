@@ -117,8 +117,25 @@ class ExamTextIndex(documents: List<String>) {
  * prefix can therefore never need retracting. One match switches the rest of this
  * message to reasoning, without an extra model call or a copy of the leaked span.
  */
-class ExamTextGuard(private val index: ExamTextIndex?) {
+class ExamTextGuard @JvmOverloads constructor(
+    private val index: ExamTextIndex?,
+    private val onHold: ((Hold) -> Unit)? = null,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    /** Count-only observations. Reasons may overlap; elapsed time is not additive. */
+    data class Hold(val reasons: Set<String>, val chars: Int, val elapsedMs: Long, val released: Boolean)
     private val pending = StringBuilder()
+    private var holdStarted: Long? = null
+    private fun observe(cut: Int, reasons: Set<String>, final: Boolean = false) {
+        val observer = onHold ?: return
+        val now = nanoTime()
+        val left = pending.length - cut
+        if (left > 0 && !final && holdStarted == null) holdStarted = now
+        val start = holdStarted ?: return
+        val released = final || left == 0
+        observer(Hold(reasons.toSet(), left, ((now - start) / 1_000_000).coerceAtLeast(0), released))
+        if (released) holdStarted = null
+    }
     var blocked = false
         private set
     var hits = 0
@@ -135,6 +152,7 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
     private fun drain(end: Boolean): String {
         if (index == null) return block(0)
         var cut = pending.length
+        val reasons = if (onHold == null) null else mutableSetOf<String>()
         var hitStart: Int? = null
         // Preserve literal eight-word protection as well: joining inline markup
         // must not create a new bypass for a quotation separated by underscores.
@@ -153,6 +171,8 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
                 if (count == 8) hitStart = minOf(hitStart ?: pending.length, words[start].start)
             }
             if (!end) {
+                if (incomplete) reasons?.add("open_word")
+                if (scan.stableEnd < pending.length) reasons?.add("unstable_encoding")
                 cut = minOf(cut, if (incomplete) scan.words.last().start else pending.length, scan.stableEnd)
                 // An unfinished eighth word must leave the preceding seven unpublished.
                 for (start in maxOf(0, complete - 7) until complete) {
@@ -163,21 +183,23 @@ class ExamTextGuard(private val index: ExamTextIndex?) {
                         if (next == null) { prefix = false; break }
                         node = next
                     }
-                    if (prefix) cut = minOf(cut, words[start].start)
+                    if (prefix) { reasons?.add("indexed_prefix"); cut = minOf(cut, words[start].start) }
                 }
             }
         }
         hitStart?.let { hits++; return block(it) }
-        if (end) return take(pending.length)
+        if (end) { observe(pending.length, setOf("end"), true); return take(pending.length) }
         // A literal word can start inside a control word; never publish its backslash alone.
         if (cut > 0 && pending[cut - 1] == '\\') cut--
         // Bound stalled ambiguous output without ever publishing it.
         if (pending.length - cut > 65_536) return block(cut)
+        observe(cut, reasons ?: emptySet())
         return take(cut)
     }
 
     private fun take(length: Int): String = pending.substring(0, length).also { pending.delete(0, length) }
     private fun block(start: Int): String {
+        observe(pending.length, setOf("blocked"), true)
         blocked = true
         return take(start) + REASONING.also { pending.setLength(0) }
     }

@@ -7,6 +7,32 @@ class ExamTextGuardTest {
     private val exam = "Amber badgers carry delicate emerald feathers gently home. Ivory jaguars keep lemons near old purple quails."
     private val index = ExamTextIndex(listOf(exam, "Rivers shine through unusual valleys while xenon yields zephyrs."))
 
+    @Test fun countOnlyProbeReportsPrefixHoldReleaseAndBlockWithoutChangingOutput() {
+        var now = 0L
+        val events = mutableListOf<ExamTextGuard.Hold>()
+        val guard = ExamTextGuard(index, events::add) { now }
+        assertEquals("", guard.push("Amber "))
+        now += 200_000_000
+        assertEquals("", guard.push("badgers "))
+        now += 50_000_000
+        assertEquals("Amber badgers novel ", guard.push("novel "))
+        assertTrue(events.any { "indexed_prefix" in it.reasons && it.chars > 0 })
+        assertEquals(250L, events.last().elapsedMs)
+        assertTrue(events.last().released)
+        assertEquals(0, events.last().chars)
+
+        events.clear()
+        val overlap = ExamTextGuard(index, events::add) { now }
+        assertEquals("", overlap.push("Amber badgers carry delicate emerald feathers gently "))
+        now += 90_000_000
+        val result = overlap.push("home ")
+        assertTrue(overlap.blocked)
+        assertFalse(index.overlaps(result))
+        assertTrue(events.last().released)
+        assertEquals(setOf("blocked"), events.last().reasons)
+        assertEquals(90L, events.last().elapsedMs)
+    }
+
     @Test fun everyByteBoundaryIsProtectedBeforePublication() {
         for (split in 0..exam.length) {
             val guard = ExamTextGuard(index)

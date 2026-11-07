@@ -468,6 +468,10 @@ class ChatService(
         val visibleText = StringBuilder()
         val rawAnswer = StringBuilder()
         val started = System.nanoTime()
+        val probe = System.getProperty("coach.firstTextProbe") == "1"
+        var probeRaw = -1L
+        var probeTutor = -1L
+        var probeVisible = -1L
         var lastPersist = started
         var visible = VisibleStream { drop ->
             log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
@@ -481,9 +485,13 @@ class ChatService(
         // Text of finished parts of a staged reply; a guard revision only ever replaces what comes after it.
         var completedPrefix = ""
         fun acceptFiltered(text: String) {
+            if (probe && probeTutor < 0 && text.isNotBlank()) probeTutor = elapsedMs()
             val revision = guard.takeRevision()
             if (revision == null) {
-                for (segment in visible.push(text)) emitSegment(session,segment,visibleText)
+                for (segment in visible.push(text)) {
+                    if (probe && probeVisible < 0 && com.coach.ai.ExamDelivery.markdown(segment).isNotBlank()) probeVisible = elapsedMs()
+                    emitSegment(session,segment,visibleText)
+                }
             } else {
                 // A sentence can acquire a forbidden reference after its safe prefix was streamed.
                 // Replace that prefix via the existing snapshot protocol; the letter itself never streams.
@@ -503,6 +511,7 @@ class ChatService(
         var lessonFirstDeltaMs = -1L
         val lastExamInputAtMs = java.util.concurrent.atomic.AtomicLong(-1)
         fun handleDelta(text: String) {
+            if (probe && probeRaw < 0 && text.isNotBlank()) probeRaw = elapsedMs()
             session.trace?.raw(text)
             if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
             val previous = session.cursor
@@ -515,7 +524,10 @@ class ChatService(
             }
             if (session.cursor != previous && session.cursor.text.removePrefix(previous.text).isNotBlank()) {
                 session.lastDeltaAtMs = elapsedMs()
-                if (firstVisibleMs < 0) firstVisibleMs = session.lastDeltaAtMs
+                if (firstVisibleMs < 0) {
+                    firstVisibleMs = session.lastDeltaAtMs
+                    if (probe) log("COACH first_text_probe raw_ms=$probeRaw tutor_ms=$probeTutor visible_filter_ms=$probeVisible published_ms=$firstVisibleMs")
+                }
             }
             val now = System.nanoTime()
             if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
@@ -875,7 +887,11 @@ class ChatService(
      */
     private fun protectExams(session: Session) {
         if (examMaterials.guard(session.examIdentity) != null) {
-            session.examDelivery = com.coach.ai.ExamDelivery { checkNotNull(examMaterials.guard(session.examIdentity)) }
+            val observer: ((com.coach.core.ExamTextGuard.Hold) -> Unit)? =
+                if (System.getProperty("coach.firstTextProbe") == "1") { hold ->
+                    log("COACH exam_hold reasons=${hold.reasons.sorted().joinToString(",")} chars=${hold.chars} elapsed_ms=${hold.elapsedMs} released=${hold.released}")
+                } else null
+            session.examDelivery = com.coach.ai.ExamDelivery { checkNotNull(examMaterials.guard(session.examIdentity, observer)) }
         }
         if (examMaterials.applies(session.examIdentity) && !examMaterials.available) {
             log("COACH exam-protection unavailable; protected output uses reasoning only")

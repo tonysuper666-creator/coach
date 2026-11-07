@@ -126,6 +126,42 @@ class MainlineTest {
         } finally { engine.stopSuspend(0, 500); actor.close(); scope.cancel(); dir.toFile().deleteRecursively() }
     }
 
+    /** D2's key is unchecked and its provisional answer is option 1: a "right" pick there proves nothing. */
+    private fun orchard(dir: Path, now: AtomicLong): Pair<LedgerStore, Mainline> {
+        val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { now.get() }
+        store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "kp-orchard", "title" to "Orchard", "week" to 1)))))
+        return store to Mainline(library(dir.resolve("papers")), clock = { now.get() })
+    }
+
+    @Test fun anUncheckedKeyStillBringsTheQuestionBackTomorrowWhenHisPickMatchesIt() {
+        val dir = Files.createTempDirectory("mainline-unchecked-first")
+        val now = AtomicLong(1_800_000_000_000)
+        try {
+            val (store, mainline) = orchard(dir, now)
+            val result = mainline.answer(store, "C1", 1, json("itemId" to "D2", "choice" to 1, "submissionId" to "unchecked-first"))
+            val tomorrow = logicalDay(now.get(), "Europe/London") + 1
+            assertEquals("pending", result.str("status"))
+            assertEquals(tomorrow, (result["dueDay"] as? JsonPrimitive)?.longOrNull, "an unchecked key is never a pass, so he sees it again tomorrow")
+            assertEquals(REVISIT, store.snapshot("C1").projection.reviewsOn(tomorrow)["kp-orchard"]?.lastResult)
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun anUncheckedKeyCannotSettleARevisitThatIsDue() {
+        val dir = Files.createTempDirectory("mainline-unchecked-due")
+        val now = AtomicLong(1_800_000_000_000)
+        try {
+            val (store, mainline) = orchard(dir, now)
+            mainline.answer(store, "C1", 1, json("itemId" to "S1", "choice" to 0, "submissionId" to "missed-first"))
+            val due = logicalDay(now.get(), "Europe/London") + 1
+            assertEquals(due, store.snapshot("C1").projection.revisit["kp-orchard"])
+            now.addAndGet(86_400_000)
+            val result = mainline.answer(store, "C1", 1, json("itemId" to "D2", "choice" to 1, "submissionId" to "unchecked-on-due-day"))
+            assertEquals("pending", result.str("status"))
+            assertEquals(due + 1, store.snapshot("C1").projection.revisit["kp-orchard"], "the due look-again moves on a day instead of clearing")
+            assertEquals(due + 1, (result["dueDay"] as? JsonPrimitive)?.longOrNull)
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun packsLabelledWithTheCourseCodeShowUpForTheLedgerCourse() {
         val dir = Files.createTempDirectory("mainline-code")
         try {

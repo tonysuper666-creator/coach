@@ -179,14 +179,16 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         }
     }
     /** A missed or guessed mainline choice on a point not yet passed is looked at again the next day, alongside spaced review;
-     * the first graded answer on that point from the due day on settles it. Passed points use the review entry instead. */
+     * the first graded answer on that point from the due day on settles it. Passed points use the review entry instead.
+     * An answer against an unchecked key is no evidence either way, so it always asks for another look and never settles one. */
     fun revisitAfter(a: Attempt) {
         if (a.submitted == null || a.voided || !graded(a)) return
+        val pass = a.pass && !unverifiedMainline(a)
         for (kp in a.kps) {
             if (mastery[kp]?.passed == true) { revisit.remove(kp); continue }
             val dueDay = revisit[kp]
-            if (dueDay != null && a.day >= dueDay) { if (a.scheduled.add("revisit:$kp")) { if (a.pass) revisit.remove(kp) else revisit[kp] = a.day + 1 } }
-            else if (!a.pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, a.day + 1)
+            if (dueDay != null && a.day >= dueDay) { if (a.scheduled.add("revisit:$kp")) { if (pass) revisit.remove(kp) else revisit[kp] = a.day + 1 } }
+            else if (!pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, a.day + 1)
         }
     }
     fun refreshAttempt(a: Attempt, e: Event) {

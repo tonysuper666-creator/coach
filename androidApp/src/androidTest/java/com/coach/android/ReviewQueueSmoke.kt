@@ -38,12 +38,14 @@ class ReviewQueueSmoke {
                 for (i in 0 until node.childCount) walk(node.getChild(i))?.let { return it }
                 return null
             }
+            // The live tree: a cached list node can stay empty after its rows were drawn (seen on a 1920×1200 window).
+            ui.clearCache()
             return walk(ui.rootInActiveWindow)
         }
-        fun waitFor(text: String, contains: Boolean = false): AccessibilityNodeInfo {
+        fun waitFor(text: String, contains: Boolean = false, visible: Boolean = false): AccessibilityNodeInfo {
             val end = SystemClock.elapsedRealtime() + 30_000
             while (SystemClock.elapsedRealtime() < end) {
-                find { if (contains) text in it.text?.toString().orEmpty() else it.text?.toString() == text }?.let { return it }
+                find { (!visible || it.isVisibleToUser) && if (contains) text in it.text?.toString().orEmpty() else it.text?.toString() == text }?.let { return it }
                 Thread.sleep(50)
             }
             // Synthetic fixture text only: name what the screen showed instead of the missing row.
@@ -78,6 +80,8 @@ class ReviewQueueSmoke {
             click(waitFor("开始"))
             waitFor("到期复习")
             waitFor("Synthetic review question", contains = true)
+            // The group opens at question 1, also when a tall window has nothing above it.
+            waitFor("第 1 / 3 题", visible = true)
             assertNull(find { it.text?.toString() == "开始讲解" })
             screenshot("practice")
         }

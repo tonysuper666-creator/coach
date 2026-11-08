@@ -109,6 +109,11 @@ class ChatRevealTest {
         assertTrue(kotlin.math.abs(listTop() - top("i2")) <= 1f, "tall item starts at the top edge: ${top("i2")} vs ${listTop()}")
     }
 
+    // A tall window with nothing older than the group: the list cannot put question 1 at the bottom edge, so it already sits at the top.
+    @Test fun firstGroupInTallViewportKeepsQuestionOneOnScreen() = run(listOf(350, 350, 350, 70), viewport = 965, reveal = 0) {
+        assertTrue(kotlin.math.abs(listTop() - top("i0")) <= 1f, "question 1 starts at the top edge: ${top("i0")} vs ${listTop()}")
+    }
+
     @Test fun nearTailClampsWithoutJumpingPastIt() = run(List(10) { 200 }, viewport = 500, reveal = 9) {
         assertTrue(top("i9") >= listTop(), "last item stays inside the viewport")
         assertTrue(it.anchor.pinned, "reader is at the tail")

@@ -1,5 +1,6 @@
 package com.coach.android
 
+import kotlin.math.roundToInt
 import android.content.Intent
 import android.os.Bundle
 import android.os.SystemClock
@@ -69,8 +70,8 @@ class MistakeReviewSmoke {
             scrollTo("本组 1 / 3 题正确",substring=true)
             step("initial answers graded")
             focus("kp:$kp","graded")
-            click(waitText("← 今天"))
-            } else click(waitText("← 今天",15_000))
+            backToToday()
+            } else backToToday(15_000)
             val first = group("kp:$kp")
             val reviewButton = waitText("到期复习")
             step("open mistake list")
@@ -223,6 +224,16 @@ class MistakeReviewSmoke {
         for(i in 0 until node.childCount) visibleTexts(node.getChild(i),out)
         return out
     }
+    /** Back to 今天. A wide window keeps it beside the study pane, which then has no back button. */
+    private fun backToToday(timeout: Long=10_000) {
+        val end=SystemClock.elapsedRealtime()+timeout
+        while(SystemClock.elapsedRealtime()<end) {
+            find("← 今天")?.let { click(it);return }
+            if(find("到期复习")!=null && find("学习范围",substring=true)!=null) return
+            Thread.sleep(10)
+        }
+        throw AssertionError("Visible text missing: ← 今天")
+    }
     private fun waitText(text: String,timeout: Long=10_000,enabled: Boolean=false): AccessibilityNodeInfo {
         val end=SystemClock.elapsedRealtime()+timeout
         while(SystemClock.elapsedRealtime()<end) {
@@ -281,6 +292,9 @@ class MistakeReviewSmoke {
     private val cardNumber=Regex("第 (\\d+) / \\d+ 题")
     /** Card numbers whose header is on screen; the page is a column of cards, so these say which way to drag. */
     private fun shownCards()=visibleTexts().mapNotNull { cardNumber.find(it)?.groupValues?.get(1)?.toInt() }
+    /** Page-edge margins in dp: they were tuned as 60/30/20 px on a 420dpi phone, where these give the same or more pixels;
+     * in raw px a 160dpi window demanded 2.6× the distance and refused a fully visible last row. */
+    private fun dp(v: Int)=(v*context.resources.displayMetrics.density).roundToInt()
     /** Looks for [text] by dragging toward it. [card] (1-based) names the card the text belongs to when known;
      * otherwise the drag reverses whenever the content stops moving. A fling can carry past a long option, so
      * direction is re-decided after every drag from what is on screen, never assumed. */
@@ -292,7 +306,7 @@ class MistakeReviewSmoke {
             val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             val r=android.graphics.Rect();node.getBoundsInScreen(r)
             trace("reveal #$it ${text.take(30)} at ${r.centerY()} page=${page?.top}-${page?.bottom}")
-            if(page!=null && r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) return node
+            if(page!=null && r.centerY()>=page.top+dp(23) && r.centerY()<=page.bottom-dp(23)) return node
             node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
             instrumentation.waitForIdleSync();Thread.sleep(700)
         }
@@ -303,9 +317,9 @@ class MistakeReviewSmoke {
             val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
             if(hit!=null) {
                 val r=android.graphics.Rect();hit.getBoundsInScreen(r)
-                if(page==null || (r.centerY()>=page.top+60 && r.centerY()<=page.bottom-60) || (stuck>=2 && r.centerY()>=page.top+20 && r.centerY()<=page.bottom-30)) { trace("found after $it drags: ${text.take(40)}");return hit }
+                if(page==null || (r.centerY()>=page.top+dp(23) && r.centerY()<=page.bottom-dp(23)) || (stuck>=2 && r.centerY()>=page.top+dp(8) && r.centerY()<=page.bottom-dp(12))) { trace("found after $it drags: ${text.take(40)}");return hit }
                 trace("found at ${r.centerY()} outside page ${page.top}-${page.bottom}; nudging")
-                val down=r.centerY()>page.bottom-60
+                val down=r.centerY()>page.bottom-dp(23)
                 // At the very end of the page the row cannot rise further; after two fruitless nudges tap it where it is.
                 if(!scroll(down)) stuck++ else stuck=0
                 return@repeat

@@ -78,10 +78,12 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
         if (requestedKey != key || list.layoutInfo.visibleItemsInfo.none { it.key == key }) {
             list.scrollToItem(index, 0)
         }
-        val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
+        val item = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key } }.filterNotNull().first()
         val info = list.layoutInfo
-        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
-        if (room <= 0) list.scrollToItem(index, -room) else list.scrollBy(-room.toFloat())
+        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - item.size
+        // With too little older content the list clamps: the item never reaches the bottom edge and already sits higher (tall window, first group).
+        // Scroll by what is left from where it actually is, not from the bottom edge.
+        if (room <= 0) list.scrollToItem(index, -room) else list.scrollBy((item.offset - room).toFloat())
         // A clamped no-op emits no scroll update; settle the tail flag explicitly (04e9695).
         anchor.pinned = list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0
         true

@@ -11,7 +11,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.double
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -43,11 +45,13 @@ data class ConstructedQuestion(
     val referenceAnswer: String,
     val rubric: List<RubricItem>,
     val numericFinal: JsonObject? = null,
+    /** Timed essay context (word target, marking notes); null for ordinary constructed questions. */
+    val essay: JsonObject? = null,
 )
 
 data class GradeItem(val id: String, val points: Double, val reason: String, val evidence: String)
 
-data class DraftGrade(val items: List<GradeItem>, val total: Double, val awarded: Double)
+data class DraftGrade(val items: List<GradeItem>, val total: Double, val awarded: Double, val rewrite: String = "")
 
 data class CrossReview(val verdict: String, val note: String, val revisedTotal: Double?, val revisedGrade: DraftGrade? = null)
 
@@ -334,6 +338,137 @@ A revised total alone is insufficient. Do not alter the rubric or copy evidence 
 
     val CROSS_REVIEW_SYSTEM = "You are an independent second grader. Output JSON only."
 
+    private fun criteria(question: ConstructedQuestion) = buildJsonArray {
+        question.rubric.forEach { item -> add(buildJsonObject { put("id", item.id); put("text", item.text); put("points", item.points) }) }
+    }
+
+    /** The item's own marking points and model answer tell the marker what a good answer contains; they never add criteria. */
+    private fun essayContext(question: ConstructedQuestion): String {
+        val notes = (question.essay?.get("markingNotes") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.joinToString("\n") {
+            "- ${it["criterion"]?.jsonPrimitive?.contentOrNull.orEmpty()}: ${it["look_for"]?.jsonPrimitive?.contentOrNull.orEmpty()}"
+        }
+        val reference = question.referenceAnswer.ifBlank { "(none: the student pasted this question)" }
+        return """
+Marking notes for this question (context only, not extra criteria):
+${notes.ifBlank { "(none)" }}
+
+Reference answer (context only; never quote it and never copy its wording):
+<<<
+$reference
+>>>
+        """.trim()
+    }
+
+    private const val ESSAY_ITEM_RULES = """For EVERY criterion:
+- "points": what the essay earns on that criterion, from 0 to the criterion's points, in steps of 0.5.
+- "evidence": ONE whole sentence copied verbatim from the student essay, the sentence that most decides this criterion,
+  whether it earns or loses points. Copy it exactly, including its final punctuation; keep typos; do not shorten, join or fix it.
+  Every criterion needs a sentence, including criteria that earn 0.
+- "reason": 用简体中文写两三句：先说这句做到了什么、缺了什么，再说下一篇具体怎样改能拿到这一项的分。"""
+
+    private const val ESSAY_REWRITE_RULE = """"rewrite": one improved English paragraph (at most 120 words) that shows how THIS student's own argument could
+be written better under exam conditions. Keep the student's main claim and examples, fix the order, add the missing mechanism
+or evidence. Write it in your own words: no phrase of eight or more words may come from the reference answer."""
+
+    fun gradeEssay(question: ConstructedQuestion, answer: String): String {
+        val target = question.essay?.get("wordTarget")?.jsonPrimitive?.intOrNull ?: 300
+        return """
+You are marking a timed exam essay (about $target words, written in 25 minutes) for a university health economics course.
+Mark ONLY against the four frozen criteria below. Do not invent criteria and do not change their points.
+
+Question: ${question.stem}
+
+Frozen criteria (items and points are fixed):
+${criteria(question)}
+
+${essayContext(question)}
+
+Student essay (verbatim, written under time pressure):
+<<<
+$answer
+>>>
+
+$ESSAY_ITEM_RULES
+
+Then $ESSAY_REWRITE_RULE
+
+Return JSON only:
+{"items":[{"id":"structure","points":2.5,"reason":"...","evidence":"..."}],"total":20,"awarded":11.5,"rewrite":"..."}
+        """.trim()
+    }
+
+    fun repairEssay(question: ConstructedQuestion, answer: String, rejected: DraftGrade, defects: List<String>): String {
+        val previous = buildJsonArray {
+            rejected.items.forEach { item ->
+                add(buildJsonObject { put("id", item.id); put("points", item.points); put("reason", item.reason); put("evidence", item.evidence) })
+            }
+        }
+        return """
+Your previous essay marking failed the deterministic checks below. The criteria and their points are FROZEN.
+
+Question: ${question.stem}
+
+Frozen criteria:
+${criteria(question)}
+
+${essayContext(question)}
+
+Student essay (verbatim):
+<<<
+$answer
+>>>
+
+Your previous items:
+$previous
+
+Your previous rewrite:
+<<<
+${rejected.rewrite}
+>>>
+
+Failures to fix:
+${defects.joinToString("\n") { "- $it" }}
+
+$ESSAY_ITEM_RULES
+
+Also return $ESSAY_REWRITE_RULE
+
+Return the corrected JSON only:
+{"items":[{"id":"structure","points":2.5,"reason":"...","evidence":"..."}],"total":20,"awarded":11.5,"rewrite":"..."}
+        """.trim()
+    }
+
+    fun crossReviewEssay(question: ConstructedQuestion, answer: String, draft: DraftGrade): String {
+        val assigned = buildJsonArray {
+            draft.items.forEach { item -> add(buildJsonObject { put("id", item.id); put("points", item.points); put("evidence", item.evidence); put("reason", item.reason) }) }
+        }
+        return """
+You are a second, independent marker from a different model family. You see the FULL timed essay, the frozen criteria and
+the marks another marker gave, each with the essay sentence it rests on.
+
+Question: ${question.stem}
+
+Frozen criteria:
+${criteria(question)}
+
+${essayContext(question)}
+
+Full student essay (verbatim):
+<<<
+$answer
+>>>
+
+Proposed marking:
+$assigned
+
+Decide: does each criterion's mark follow from the student's own essay?
+Return JSON only: {"verdict":"CONFIRM"|"REVISE","note":"...","revised_total":<number or null>}
+Use CONFIRM only if every criterion's points are right; use REVISE if any criterion is over- or under-credited.
+For REVISE also include "revised_grade": {"items":[{"id":"structure","points":2,"reason":"...","evidence":"..."}],"total":20,"awarded":9}
+with EVERY frozen criterion. Evidence is one whole sentence copied verbatim from the essay; reason is 简体中文.
+        """.trim()
+    }
+
     fun reviewConstructedKey(question: ConstructedQuestion, excerpt: String): String = """
 You are an independent reviewer from a different model family. Check the reference answer and the rubric
 of a constructed-response question against the textbook excerpt.
@@ -449,6 +584,7 @@ object TaskParsing {
                 )
             } ?: emptyList(),
             numericFinal = obj["numeric_final"] as? JsonObject,
+            essay = obj["essay"] as? JsonObject,
         )
     }
 
@@ -467,6 +603,7 @@ object TaskParsing {
             items = items,
             total = obj["total"]?.jsonPrimitive?.double ?: items.sumOf { it.points },
             awarded = obj["awarded"]?.jsonPrimitive?.double ?: items.sumOf { it.points },
+            rewrite = (obj["rewrite"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty(),
         )
     }
 

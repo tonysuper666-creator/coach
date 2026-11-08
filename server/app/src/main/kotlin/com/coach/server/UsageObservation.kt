@@ -128,7 +128,7 @@ internal fun usageRoute(path: String): String {
     val parts = path.split('/')
     if (parts.size >= 5 && parts[1] == "v1" && parts[2] == "courses") {
         val tail = parts.drop(4)
-        if (tail.size == 1 && tail[0] in setOf("events", "snapshot", "today", "constructed")) return "/v1/courses/{course}/${tail[0]}"
+        if (tail.size == 1 && tail[0] in setOf("events", "snapshot", "today", "constructed", "essays")) return "/v1/courses/{course}/${tail[0]}"
         if (tail.size == 2 && tail[0] in setOf("attempts", "quick", "journal")) return "/v1/courses/{course}/${tail[0]}/{id}"
         if (tail.size == 3 && tail[0] == "journal" && tail[2] == "summary") return "/v1/courses/{course}/journal/{day}/summary"
     }

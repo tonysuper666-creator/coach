@@ -47,7 +47,8 @@ fun weekPoints(events: List<Event>): List<WeekPoint> {
         kpIds.drop(cursor).firstOrNull { it in available && mastery[it]?.let { m -> m.passed && !m.needsRepair } != true }
 }
 
-/** Latest answered version of each choice; a successful retry removes it from the week's mistakes. A choice whose key nobody checked cannot be re-posed, so it is not listed. */
+/** Latest answered version of each choice; a successful retry removes it from the week's mistakes, a right answer marked as a guess keeps it there.
+ * A choice whose key nobody checked cannot be re-posed, so it is not listed. */
 fun weekMistakes(events: List<Event>, week: Int): List<Event> {
     val ids = weekPoints(events).filter { week in it.weeks }.map { it.id }.toSet()
     return pendingChoiceMistakes(events, ids)
@@ -58,12 +59,14 @@ fun pendingChoiceMistakes(events: List<Event>, ids: Set<String>): List<Event> {
     val answered = events.filter { it.type == "answer_submitted" }.map { it.payload.str("attemptId") }.toSet()
     val voided = events.filter { it.type == "attempt_voided" }.map { it.payload.str("attemptId") }.toSet()
     val grades = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.associateBy { it.payload.str("attemptId") }
+    val guessed = events.filter { it.type == "answer_submitted" && it.payload.flag("guessed") }.map { it.payload.str("attemptId") }.toSet()
     return events.filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" &&
         it.payload.strings("kpIds").any { id -> id in ids } && it.payload.str("keyState") != "UNREVIEWED" &&
+        (!it.payload.flag("mainline") || it.payload.str("keyState") == "VERIFIED") &&
         it.payload.str("attemptId") in answered && it.payload.str("attemptId") !in voided }
         .groupBy { it.payload.str("questionId") }.values.mapNotNull { attempts ->
             val latest = attempts.last()
             val grade = grades[latest.payload.str("attemptId")]?.payload ?: return@mapNotNull null
-            latest.takeIf { grade.num("max") > 0 && grade.num("score") < grade.num("max") }
+            latest.takeIf { grade.num("max") > 0 && (grade.num("score") < grade.num("max") || latest.payload.str("attemptId") in guessed) }
         }
 }

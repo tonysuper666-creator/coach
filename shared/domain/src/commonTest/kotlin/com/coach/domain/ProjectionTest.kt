@@ -16,11 +16,11 @@ private class Script {
     fun answer(id: String, score: Int = 10, purpose: String = "PRACTICE", format: String = "SINGLE_CHOICE",
         hints: Boolean = false, assisted: Boolean = false, status: String = "EXACT", question: String = id,
         fingerprint: String = question, origin: String = "COACH", keyState: String = "VERIFIED",
-        review: Boolean = false, offline: Boolean = false, kp: String = "kp") {
-        e("question_posed",json("attemptId" to id,"questionId" to question,"kpIds" to listOf(kp),"fingerprint" to fingerprint,"keyState" to keyState,"origin" to origin,"purpose" to purpose,"format" to format,"policyVersion" to 1,"review" to review))
+        review: Boolean = false, offline: Boolean = false, kp: String = "kp", mainline: Boolean = false, guessed: Boolean = false) {
+        e("question_posed",json("attemptId" to id,"questionId" to question,"kpIds" to listOf(kp),"fingerprint" to fingerprint,"keyState" to keyState,"origin" to origin,"purpose" to purpose,"format" to format,"policyVersion" to 1,"review" to review,"mainline" to mainline))
         if(hints) e("hint_revealed",json("attemptId" to id,"cause" to "LEAK"))
         if(assisted) e("followup_asked",json("pendingAttemptId" to id),"LEARNER","mac")
-        e("answer_submitted",json("attemptId" to id,"answer" to "synthetic answer","offline" to offline),"LEARNER")
+        e("answer_submitted",json("attemptId" to id,"answer" to "synthetic answer","offline" to offline,"guessed" to guessed),"LEARNER")
         e("attempt_graded",json("attemptId" to id,"score" to score,"max" to 10,"status" to status))
     }
     fun state() = project(events)
@@ -29,6 +29,63 @@ private class Script {
 }
 
 class ProjectionTest {
+    @Test fun lateKeyDowngradeSchedulesFromTheChangeWithoutInventingOverdueDays() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (existingDue in listOf<Long?>(40, 14, null)) {
+            val s = Script()
+            s.revise(json("kpId" to "kp"))
+            val d0 = logicalDay(s.at, "Europe/London")
+            if (existingDue != null) {
+                s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+                s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to d0 + existingDue, "interval" to 40))
+            }
+            s.answer("old-right", mainline = true)
+            val before = s.state()
+            s.at += 20 * DAY
+            s.e("question_key_changed", json("questionId" to "old-right", "keyState" to key, "reason" to "synthetic recheck"))
+            val after = s.state()
+            val expected = d0 + minOf(existingDue ?: Long.MAX_VALUE, 21)
+            val actual = if (existingDue == null) after.revisit.getValue("kp") else after.review.getValue("kp").dueDay
+            assertEquals(expected, actual, "$key existingDue=$existingDue: no retroactive d1 deadline at d20")
+            assertEquals(existingDue != null, after.mastery.getValue("kp").passed)
+            assertFalse(after.mastery.getValue("kp").needsRepair)
+            assertEquals(before.journal, after.journal, "key review is not a new student answer or spaced-review failure")
+            assertEquals(after, project(s.events.reversed()), "replay preserves the effective change date")
+        }
+    }
+
+    @Test fun uncheckedMainlineOnlyBringsPassedPointsForwardRegardlessOfProvisionalGrade() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (score in listOf(0, 10))
+            for (guessed in listOf(false, true)) for (review in listOf(false, true)) {
+                val s = Script()
+                s.revise(json("kpId" to "kp"))
+                s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+                val today = logicalDay(s.at, "Europe/London")
+                s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to today + 14, "intervalDays" to 14))
+                val before = s.state()
+                s.answer("unchecked", score = score, keyState = key, mainline = true, guessed = guessed, review = review)
+                val after = s.state()
+                val scenario = "$key score=$score guessed=$guessed review=$review"
+                assertEquals(before.mastery.getValue("kp"), after.mastery.getValue("kp"), scenario)
+                assertEquals(before.review.getValue("kp").copy(dueDay = today + 1), after.review.getValue("kp"), scenario)
+                assertContains(after.reviewsOn(today + 1), "kp", scenario)
+                assertTrue(after.revisit.isEmpty(), scenario)
+                assertEquals(0, after.journal.getValue(today).reviewFail, scenario)
+                assertEquals(0, after.journal.getValue(today).reviewPass, scenario)
+            }
+    }
+
+    @Test fun uncheckedMainlineCannotPostponeAnAlreadyDuePassedPoint() {
+        val s = Script()
+        s.revise(json("kpId" to "kp"))
+        s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+        val today = logicalDay(s.at, "Europe/London")
+        s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to today, "intervalDays" to 14))
+        val before = s.state().review.getValue("kp")
+        s.answer("unchecked", keyState = "UNREVIEWED", mainline = true)
+        assertEquals(before, s.state().review.getValue("kp"))
+        assertContains(s.state().reviewsOn(today), "kp")
+    }
+
     @Test fun threeCorrectLatchAndSubsequentFailureRepairs() {
         val s=Script();s.answer("1");s.answer("2");assertFalse(s.mastery().passed)
         s.answer("3");assertTrue(s.mastery().passed);val seq=s.mastery().passedAtSeq

@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 private sealed interface RecordSelection {
     data class Change(val change: MasteryChange) : RecordSelection
     data class Orphan(val orphan: OrphanedAnswer) : RecordSelection
+    data class Essay(val attemptId: String) : RecordSelection
 }
 
 /** 记录行的标题：历史记录里退休点仍显示知识点名，不回退到原始 id。 */
@@ -43,7 +44,7 @@ internal fun changeTitle(view: CourseView, kpId: String): String =
 fun RecordsScreen(c: CoachController, view: CourseView?, wide: Boolean, onOpenMock: ((mockId: String) -> Unit)? = null, onOpenKp: (kpId: String) -> Unit) {
     if (view == null) return CenterMessage("正在加载课程…")
     val records by produceState<RecordsView?>(null, view) {
-        value = withContext(Dispatchers.Default) { RecordsView(view.events).also { it.changes; it.orphans } }
+        value = withContext(Dispatchers.Default) { RecordsView(view.events).also { it.changes; it.orphans; it.timedEssays } }
     }
     val data = records ?: return CenterMessage("正在整理记录…")
     var picked by remember { mutableStateOf<RecordSelection?>(null) }
@@ -70,7 +71,9 @@ private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView,
     val changes = data.changes.sortedByDescending { it.seq }
     val orphans = data.orphans.sortedByDescending { it.seq }
     val mocks = remember(data) { mockRecords(view, data) }
-    if (changes.isEmpty() && orphans.isEmpty() && mocks.isEmpty()) {
+    val essays = data.timedEssays
+    var allEssays by remember { mutableStateOf(false) }
+    if (changes.isEmpty() && orphans.isEmpty() && mocks.isEmpty() && essays.isEmpty()) {
         Box(modifier) { CenterMessage("还没有掌握变化。连续答对 3 道不同的题，知识点就会「已通过」，这里会记下为什么。") }
         return
     }
@@ -94,6 +97,13 @@ private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView,
                 }
             }
         }
+        if (essays.isNotEmpty()) {
+            item { Text("限时论述", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary) }
+            items(if (allEssays) essays else essays.take(3), key = { "e:${it.attemptId}" }) { d ->
+                EssayRow(c, d, (selected as? RecordSelection.Essay)?.attemptId == d.attemptId) { onSelect(RecordSelection.Essay(d.attemptId)) }
+            }
+            if (essays.size > 3 && !allEssays) item { TextButton(onClick = { allEssays = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("显示全部 ${essays.size} 篇") } }
+        }
         var lastDay = Long.MIN_VALUE
         for (change in changes) {
             val day = logicalDay(change.at, view.zone)
@@ -112,6 +122,30 @@ private fun RecordsList(c: CoachController, view: CourseView, data: RecordsView,
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun EssayRow(c: CoachController, d: AttemptDetail, selected: Boolean, onClick: () -> Unit) {
+    val grade = d.effectiveGrade
+    Surface(
+        onClick = onClick, tonalElevation = if (selected) 6.dp else 1.dp, shape = MaterialTheme.shapes.medium,
+        border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("essay-record"),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(c.formatClock(d.submittedAt ?: 0L), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    grade == null -> StatusChip("批改中", MaterialTheme.colorScheme.tertiary)
+                    d.review == null -> StatusChip("初评 ${percent(grade)} · 复核中", MaterialTheme.colorScheme.tertiary)
+                    else -> StatusChip("得分 ${percent(grade)}", if (grade.score * 10 >= grade.max * 8) successColor() else MaterialTheme.colorScheme.error)
+                }
+                if (d.overtime) StatusChip("超时", MaterialTheme.colorScheme.error)
+            }
+            Text(d.stem, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text("${com.coach.domain.Essay.wordCount(d.answer)} 词 · 看逐项批改和改写示范 ›", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -147,6 +181,14 @@ private fun RecordDetail(c: CoachController, view: CourseView, data: RecordsView
             null -> CenterMessage("选一条记录，看原题和判分依据。")
             is RecordSelection.Orphan -> OrphanDetail(c, selected.orphan)
             is RecordSelection.Change -> ChangeDetail(c, view, data, selected.change, onOpenKp)
+            is RecordSelection.Essay -> {
+                val detail = remember(selected.attemptId, data) { data.attempt(selected.attemptId) }
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text("限时论述", style = MaterialTheme.typography.titleLarge)
+                    if (detail == null) Text("本机账本里找不到这篇，请联网同步后再看。", color = MaterialTheme.colorScheme.error)
+                    else AttemptCard(c.math, c.course != null, { id -> c.course?.attemptRecord(id)?.let(::rubricFrom) }, 1, 1, detail)
+                }
+            }
         }
     }
 }
@@ -204,6 +246,7 @@ internal fun AttemptCard(math: MathAssets, canAskMac: Boolean, loadRubric: suspe
             if (!d.counted && d.grade != null) Text("这次批改还在复核，复核通过前不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
             if (d.voided) Text("这次作答已作废。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (d.hinted) Text("答题前看过提示，这次不进已通过窗口。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
+            if (d.overtime) Text("超过时限才交卷：照常批改，不算限时成绩。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
 
             Text("原题", style = MaterialTheme.typography.labelLarge)
             Markdown(d.stem, true, "rec-stem:${d.attemptId}", math)
@@ -267,7 +310,7 @@ private fun ConstructedBlock(d: AttemptDetail, rubric: RubricView?, canAskMac: B
             val spec = rubric?.rubric?.firstOrNull { it.id == id }
             Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .5f), RoundedCornerShape(10.dp)).padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(buildString {
-                    append(id); if (spec != null && spec.text.isNotBlank()) append("  ").append(spec.text)
+                    append(if (d.format == "ESSAY") com.coach.domain.Essay.LABELS[id] ?: id else id); if (spec != null && spec.text.isNotBlank()) append("  ").append(spec.text)
                     if (item != null) append("  ·  得 ${trimZero(item.points)}") ; if (spec != null) append(" / ${trimZero(spec.points)} 分")
                 }, style = MaterialTheme.typography.bodyMedium)
                 if (item == null) Text("批改记录里没有这一项的得分。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
@@ -276,6 +319,21 @@ private fun ConstructedBlock(d: AttemptDetail, rubric: RubricView?, canAskMac: B
                 if (spec != null && spec.basis.isNotBlank()) Text("教材依据：${spec.basis}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        if (grade != null) RewriteBlock(grade)
+    }
+}
+
+/** 论述题的改写示范：在你自己的论证上改，不是参考答案。 */
+@Composable
+internal fun RewriteBlock(grade: GradeView) {
+    if (grade.rewrite.isBlank() && grade.rewriteNotice.isBlank()) return
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .5f), RoundedCornerShape(10.dp)).padding(10.dp).testTag("essay-rewrite"),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("改写示范", style = MaterialTheme.typography.labelLarge)
+        if (grade.rewrite.isNotBlank()) {
+            Text("在你的论证上改写，示范结构和证据怎么写；不是参考答案。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(grade.rewrite, style = MaterialTheme.typography.bodyMedium)
+        } else Text(grade.rewriteNotice, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

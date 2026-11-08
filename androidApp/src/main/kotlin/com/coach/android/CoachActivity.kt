@@ -9,6 +9,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.core.view.WindowCompat
 import com.coach.client.PairedCredentials
 import androidx.activity.enableEdgeToEdge
@@ -66,11 +70,13 @@ class CoachActivity : ComponentActivity() {
                 }
             }
             CoachTheme(dark) {
-                PairingGate(store,serverUrl) { credentials ->
-                    if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
-                    else {
-                        val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), backHandler = { enabled, onBack -> BackHandler(enabled, onBack) }, settings = { ReminderSettings(reminder) })
+                Box(Modifier.semantics { testTagsAsResourceId = true }) {
+                    PairingGate(store,serverUrl) { credentials ->
+                        if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
+                        else {
+                            val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
+                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), backHandler = { enabled, onBack -> BackHandler(enabled, onBack) }, settings = { ReminderSettings(reminder) })
+                        }
                     }
                 }
             }
@@ -120,6 +126,8 @@ class CoachActivity : ComponentActivity() {
             formatClock = { clock.format(Date(it)) },
             math = com.coach.ui.MathAssets(mathHttp),
             course = com.coach.client.CourseHttp(serverUrl, credentials.deviceId, credentials.token, BuildConfig.COACH_COURSE),
+            // `--ei essayLimitSec 120`: a short timed essay, to watch the auto hand-in without waiting 25 minutes.
+            essayLimitSec = intent.getIntExtra("essayLimitSec", com.coach.domain.Essay.TIME_LIMIT_SEC).coerceIn(60, 3600),
         )
         return controller
     }

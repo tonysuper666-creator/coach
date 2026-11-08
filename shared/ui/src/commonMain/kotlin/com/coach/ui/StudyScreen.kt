@@ -158,8 +158,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         LaunchedEffect(groups.size) {
             if (groups.size > seenGroups && (pending != null || seenGroups > 0)) {
                 PoolTrace.mark(thread,"focus_requested")
-                groups.last().cards.firstOrNull()?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
-                PoolTrace.mark(thread,"focus_settled")
+                val settled = groups.last().cards.firstOrNull()?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
+                PoolTrace.mark(thread, if (settled == false) "focus_timeout" else "focus_settled")
             }
             seenGroups = groups.size
         }

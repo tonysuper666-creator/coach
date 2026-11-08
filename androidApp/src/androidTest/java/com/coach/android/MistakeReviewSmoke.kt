@@ -109,7 +109,7 @@ class MistakeReviewSmoke {
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
         } catch(t: Throwable) {
-            runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")) }
+            runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")+"\nlayout: "+layout()) }
             throw t
         } finally {
             java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
@@ -193,7 +193,10 @@ class MistakeReviewSmoke {
         bitmap.recycle()
         samples.put(name+"Ms",(end-mark)/1_000_000.0).put(name+"FrameStartedMs",(start-mark)/1_000_000.0)
     }
-    private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=ui.rootInActiveWindow,anyVisibility: Boolean=false): AccessibilityNodeInfo? {
+    /** The live tree: on a loaded emulator the accessibility cache can still hold pre-drag bounds, so a moved page read as
+     * unmoved and the search dragged straight back, and a tap landed on a row that had already scrolled away. */
+    private fun root(): AccessibilityNodeInfo? { ui.clearCache();return ui.rootInActiveWindow }
+    private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=root(),anyVisibility: Boolean=false): AccessibilityNodeInfo? {
         if(node==null) return null
         val shown=norm(node.text?.toString().orEmpty());val want=norm(text)
         // Option rows may merge the letter with a long Markdown body: match the body's opening too.
@@ -203,7 +206,7 @@ class MistakeReviewSmoke {
         return null
     }
     private fun norm(s: String)=s.replace('\u2019','\'').replace(Regex("\\s+")," ").trim()
-    private fun visibleTexts(node: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: MutableList<String> = mutableListOf()): List<String> {
+    private fun visibleTexts(node: AccessibilityNodeInfo?=root(),out: MutableList<String> = mutableListOf()): List<String> {
         if(node==null) return out
         node.text?.toString()?.takeIf { it.isNotBlank() }?.let { out.add((if(node.isVisibleToUser) "V " else "H ")+it.take(400)) }
         for(i in 0 until node.childCount) visibleTexts(node.getChild(i),out)
@@ -234,13 +237,13 @@ class MistakeReviewSmoke {
         for(i in 1..steps) { Thread.sleep(16);send(android.view.MotionEvent.ACTION_MOVE,SystemClock.uptimeMillis(),fromY+(toY-fromY)*i/steps.toFloat()) }
         send(android.view.MotionEvent.ACTION_UP,SystemClock.uptimeMillis(),toY.toFloat())
     }
-    private fun layout(node: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: StringBuilder=StringBuilder()): String {
+    private fun layout(node: AccessibilityNodeInfo?=root(),out: StringBuilder=StringBuilder()): String {
         if(node==null) return out.toString()
         if(!node.text.isNullOrBlank()) { val r=android.graphics.Rect();node.getBoundsInScreen(r);out.append(node.text).append('@').append(r.top).append(';') }
         for(i in 0 until node.childCount) layout(node.getChild(i),out)
         return out.toString()
     }
-    private fun scrollables(n: AccessibilityNodeInfo?=ui.rootInActiveWindow,out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
+    private fun scrollables(n: AccessibilityNodeInfo?=root(),out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
         if(n==null) return out
         if(n.isScrollable) out.add(n)
         for(i in 0 until n.childCount) scrollables(n.getChild(i),out)
@@ -306,9 +309,17 @@ class MistakeReviewSmoke {
         }
         throw AssertionError("Cannot scroll to: $text; "+scrollNote+"; every node seen while scrolling: "+seen.joinToString(" | "))
     }
-    /** A real touch at the option's centre: the same path a finger takes, so it also proves the row is on screen. */
+    /** A real touch at the option's centre: the same path a finger takes, so it also proves the row is on screen.
+     * A touch while the page still settles after a drag only stops the fling, so wait until the row holds still. */
     private fun tap(node: AccessibilityNodeInfo) {
         val r=android.graphics.Rect();node.getBoundsInScreen(r)
+        val end=SystemClock.uptimeMillis()+3_000
+        while(SystemClock.uptimeMillis()<end) {
+            Thread.sleep(150)
+            val now=android.graphics.Rect();if(!node.refresh()) break;node.getBoundsInScreen(now)
+            if(now==r) break
+            r.set(now)
+        }
         trace("tap ${r.centerX()},${r.centerY()}")
         ui.executeShellCommand("input tap ${r.centerX()} ${r.centerY()}").use { d -> java.io.FileInputStream(d.fileDescriptor).use { it.readBytes() } }
         instrumentation.waitForIdleSync()

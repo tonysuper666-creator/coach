@@ -20,7 +20,8 @@ class ReviewQueueSmoke {
         val args = InstrumentationRegistry.getArguments()
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790, 8791, 18791, 3790))
-        require(context.packageName == "com.coach.android.ton1291")
+        // Any per-card isolated package (the runner passes --application-id); never the production one.
+        require(Regex("com\\.coach\\.android\\.ton[0-9]+").matches(context.packageName))
         require(BuildConfig.COACH_COURSE == "ton1291-synthetic-review")
         val after = args.getString("coachPhase") == "after"
         val phase = if (after) "after" else "before"
@@ -45,7 +46,15 @@ class ReviewQueueSmoke {
                 find { if (contains) text in it.text?.toString().orEmpty() else it.text?.toString() == text }?.let { return it }
                 Thread.sleep(50)
             }
-            throw AssertionError("Missing synthetic review UI: $text")
+            // Synthetic fixture text only: name what the screen showed instead of the missing row.
+            val shown = mutableListOf<String>()
+            fun collect(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                node.text?.toString()?.takeIf { it.isNotBlank() }?.let { shown += it }
+                for (i in 0 until node.childCount) collect(node.getChild(i))
+            }
+            collect(ui.rootInActiveWindow)
+            throw AssertionError("Missing synthetic review UI: $text; visible: ${shown.joinToString(" | ")}")
         }
         fun click(node: AccessibilityNodeInfo) {
             var target = node

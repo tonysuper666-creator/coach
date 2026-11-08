@@ -60,11 +60,24 @@ and current v7. It is a private rehearsal helper, not a production restore tool.
 ## Installed rollback target and downgrade contract
 
 Architect's decision retires `8e644b5` and rejects `37f89ed` as rollback targets:
-neither was installed production. The current installed server is
-`c0c5bb82510694a481351d60733b8c98d6162bb8` (TON-1298). Its source SHA must be
-provided through an explicit private installation descriptor copy. The harness
-checks `sourceHead` against the requested full SHA and the reviewed contract;
-unknown or mismatched versions fail closed. It never discovers production paths.
+neither was installed production. Each installed server gets its own reviewed
+entry in `ROLLBACK_CONTRACTS`; the source SHA must be provided through an explicit
+private installation descriptor copy. The harness checks `sourceHead` against the
+requested full SHA and selects that entry; unknown or mismatched versions fail
+closed. It never discovers production paths.
+
+| Installed head | Copy | Old release | First migration | Review on rollback | Mocks on rollback | v6 refusal |
+| --- | --- | --- | --- | --- | --- | --- |
+| `c0c5bb82…` (TON-1298, historical) | v6 | pre-v7 `5ef9989` | v6→v7 window, restore rehearsed | rejected, no durable write | 404 client error | old binary |
+| `cf1f1598…` (TON-1341 #112, current) | v7 | the installed build itself | none; no `backups/pre-*` may appear, schema stays 7 | supported | answers | `--historical-distribution` |
+
+For `cf1f1598` the copy and the candidate share schema 7 and the same table
+migrations, so the train is a same-database server swap: old (installed) →
+candidate → rollback to installed → exit-71 recovery → candidate forward roll.
+Its client already keeps Continue learning off review threads, so both clients
+must report zero misroutes. The pre-v7 `5ef9989` binary must still exit 1 with
+"Database schema is newer than this server" on the copy; the run refuses to start
+without it. The `c0c5bb82` rows below remain the reviewed historical contract.
 
 **Rollback only the server. Keep the candidate #89 client; do not reinstall an
 old APK.** The c0c5bb8 client chooses the latest `kp_opened` without filtering
@@ -111,14 +124,26 @@ python3 -W error::ResourceWarning -m unittest \
   tools.dev.test_release_train tools.dev.test_release_train_review \
   tools.dev.test_release_train_contract
 
+# Current installation (v7 copy): old and rollback are the clean installed checkout's build.
 tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
   --private-data-dir /PRIVATE/COPY/data \
+  --old-distribution /PRIVATE/CLEAN-INSTALLED/server/app/build/install/app \
+  --old-head cf1f159833a4fd5fadad0b8450b147b4e413f7b2 \
+  --rollback-checkout /PRIVATE/CLEAN-INSTALLED \
+  --rollback-head cf1f159833a4fd5fadad0b8450b147b4e413f7b2 \
+  --rollback-installation /PRIVATE/installation.json \
+  --historical-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
+  --out /PRIVATE/OUTPUT/sanitized-summary.json
+
+# Historical contract (v6 copy).
+tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
+  --private-data-dir /PRIVATE/V6-COPY/data \
   --old-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
   --old-head 5ef99895d9fad277bfbdbb97b64eda6a551242e9 \
-  --rollback-checkout /PRIVATE/CLEAN-INSTALLED \
+  --rollback-checkout /PRIVATE/CLEAN-C0C5BB82 \
   --rollback-head c0c5bb82510694a481351d60733b8c98d6162bb8 \
-  --rollback-installation /PRIVATE/installation.json \
-  --out /PRIVATE/OUTPUT/sanitized-summary.json
+  --rollback-installation /PRIVATE/c0c5bb82-installation.json \
+  --out /PRIVATE/OUTPUT/historical-summary.json
 ```
 
 For an independently generated synthetic input, prepare a new output directory
@@ -128,6 +153,10 @@ from the built historical v6 server (do not reuse another author's private copy)
 tools/dev/heavy --priority release python3 tools/dev/prepare-train-fixture.py \
   --old-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
   --out /PRIVATE/INDEPENDENT-SYNTHETIC-V6
+# A v7 input made by the installed build itself, for the cf1f1598 contract:
+tools/dev/heavy --priority release python3 tools/dev/prepare-train-fixture.py \
+  --old-distribution /PRIVATE/CLEAN-INSTALLED/server/app/build/install/app --schema 7 \
+  --out /PRIVATE/INDEPENDENT-SYNTHETIC-V7
 ```
 
 Pass `/PRIVATE/INDEPENDENT-SYNTHETIC-V6/data` as `--private-data-dir` to both

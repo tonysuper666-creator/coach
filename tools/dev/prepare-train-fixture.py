@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a synthetic private v6 input using the actual old server binary.
+"""Prepare a synthetic private v6 (or, with --schema 7, v7) input using the actual old server binary.
 
 No installed data, existing credentials, production ports or real tutors are used.
 The resulting data/token directory is private and must never be uploaded.
@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--old-distribution', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--schema', type=int, choices=(6, 7), default=6, help='schema the given binary must leave')
     args = parser.parse_args()
     os.umask(0o077)
     base = args.out.resolve()
@@ -67,7 +68,7 @@ def main():
                 try: process.wait(timeout=20)
                 except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
     with sqlite3.connect(data / 'coach.sqlite') as db:
-        assert db.execute('pragma user_version').fetchone()[0] == 6
+        assert db.execute('pragma user_version').fetchone()[0] == args.schema
         payload = {'course': {'tz': 'Europe/London'}, 'ops': [{'op': 'add', 'kpId': 'original-kp', 'title': 'Synthetic original objective', 'conceptIds': ['synthetic']}]}
         event = dict(seq=1, id='original-event', courseId='synthetic-original', type='outline_revised', schema=1,
                      recordedAt=1, occurredAt=1, deviceId='desktop', actor='LEARNER', effectIndex=0, idemKey='original-event', payload=payload)
@@ -75,7 +76,7 @@ def main():
                    (1, event['id'], event['courseId'], event['type'], 1, 1, 1, 'desktop', 'LEARNER', 0, event['idemKey'], json.dumps(payload), json.dumps(event)))
         db.execute('insert or replace into devices(device_id,token_sha256,created_at) values(?,?,?)', ('paired-synthetic', hashlib.sha256(b'synthetic-paired-token').hexdigest(), 1))
         assert db.execute('pragma integrity_check').fetchone()[0] == 'ok'
-    print(json.dumps(dict(fixture='synthetic private v6', schema=6, originalEvents=1, pairedCredential=True, oldTokenAuthenticated=True, childReaped=True, productionConnections=0)))
+    print(json.dumps(dict(fixture=f'synthetic private v{args.schema}', schema=args.schema, originalEvents=1, pairedCredential=True, oldTokenAuthenticated=True, childReaped=True, productionConnections=0)))
 
 
 if __name__ == '__main__':

@@ -28,7 +28,21 @@ spec = importlib.util.spec_from_file_location('candidate_smoke', ROOT / 'tools/d
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 PROTECTED = {8790, 8791, 18791, 3790}
-INSTALLED_ROLLBACK = 'c0c5bb82510694a481351d60733b8c98d6162bb8'
+# Reviewed downgrade contracts, keyed by the installed production head that a rollback returns to.
+# A new installed head needs its own reviewed entry: what the copy looks like and what that build serves.
+ROLLBACK_CONTRACTS = {
+    # First v7 release over a v6 copy: the rollback build performs the v6 -> v7 migration (restore window rehearsed),
+    # the pre-v7 old binary must then refuse the copy, and that build has neither review threads nor the mocks route.
+    'c0c5bb82510694a481351d60733b8c98d6162bb8': dict(
+        inputSchema=6, oldIsInstalled=False, firstMigration=True, reviewOnRollback=False,
+        mocksOnRollback=dict(status=404, clientError=True, completed=True)),
+    # TON-1341 (#112): the copy is already v7 and the installed build is both the old and the rollback release.
+    # Same schema and table migrations as the candidate, so no backup may appear; it serves review threads and mocks.
+    # The historical v6 check stays: a separately supplied pre-v7 binary must still refuse this copy.
+    'cf1f159833a4fd5fadad0b8450b147b4e413f7b2': dict(
+        inputSchema=7, oldIsInstalled=True, firstMigration=False, reviewOnRollback=True,
+        mocksOnRollback=dict(status=200, clientError=False, completed=True)),
+}
 
 
 @contextmanager
@@ -264,11 +278,12 @@ def installed_rollback(descriptor, expected_head):
     require(descriptor.is_file() and not descriptor.is_symlink(), 'installation descriptor must be a regular private input')
     installed = json.loads(descriptor.read_text())
     require(installed.get('sourceHead') == expected_head, 'rollback head differs from the installed production version')
-    require(expected_head == INSTALLED_ROLLBACK, 'no reviewed downgrade contract for this installed version')
-    return expected_head
+    require(expected_head in ROLLBACK_CONTRACTS, 'no reviewed downgrade contract for this installed version')
+    return ROLLBACK_CONTRACTS[expected_head]
 
 
-def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=None, expected_rollback_head=None, installation=None):
+def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=None, expected_rollback_head=None, installation=None,
+        historical_distribution=None):
     os.umask(0o077)
     source_data = private_input(private_data_dir)
     candidate = ROOT / 'server/app/build/install/app'
@@ -276,8 +291,18 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
     require((candidate / 'bin/app').is_file() and (old / 'bin/app').is_file(), 'missing built or installed distribution')
     rollback = old
     rollback_head = old_head
+    # Without a pinned rollback the old release is also the rollback target (the original v6 rehearsal).
+    contract = dict(inputSchema=None, oldIsInstalled=True, firstMigration=False, reviewOnRollback=False,
+                    mocksOnRollback=ROLLBACK_CONTRACTS['c0c5bb82510694a481351d60733b8c98d6162bb8']['mocksOnRollback'])
+    historical = None
     if rollback_checkout is not None:
-        installed_rollback(installation, expected_rollback_head)
+        contract = installed_rollback(installation, expected_rollback_head)
+        if contract['oldIsInstalled']:
+            require(old_head == expected_rollback_head, 'old distribution must be the installed version for this contract')
+        if not contract['firstMigration']:
+            require(historical_distribution is not None, 'this contract keeps the historical v6 refusal: pass the pre-v7 distribution')
+            historical = historical_distribution.resolve()
+            require((historical / 'bin/app').is_file(), 'missing historical pre-v7 distribution')
         rollback_checkout = rollback_checkout.resolve()
         rollback_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=rollback_checkout, text=True).strip()
         require(rollback_head == expected_rollback_head, 'rollback checkout differs from pinned head')
@@ -309,6 +334,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
             (data / 'device-token').chmod(0o600)
             with database(data / 'coach.sqlite') as db:
                 require(db.execute('pragma integrity_check').fetchone()[0] == 'ok', 'invalid private snapshot')
+                require(contract['inputSchema'] in (None, db.execute('pragma user_version').fetchone()[0]),
+                        'private copy schema differs from the installed downgrade contract')
                 maximum = db.execute('select coalesce(max(seq),0) from events').fetchone()[0]
                 original = digest_events(db, maximum)
                 devices = dict(db.execute('select device_id,token_sha256 from devices'))
@@ -318,9 +345,10 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                 db.execute("update jobs set state='cancelled', last_error='isolated_release_train' where state in ('queued','running')")
                 for phase in ('old', 'candidate', 'rollback', 'fault-recovery'):
                     seed(db, phase)
-            for name, source in [('old', old), ('candidate', candidate), ('rollback', rollback)]:
-                shutil.copytree(source, base / name)
-            hashes = {name: distribution_digest(base / name) for name in ('old', 'candidate', 'rollback')}
+            for name, source in [('old', old), ('candidate', candidate), ('rollback', rollback), ('historical-v6', historical)]:
+                if source is not None:
+                    shutil.copytree(source, base / name)
+            hashes = {name: distribution_digest(base / name) for name in ('old', 'candidate', 'rollback', 'historical-v6') if (base / name).exists()}
             pointer = base / 'current'
 
             def select(name):
@@ -468,16 +496,20 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     unchanged()
                     with database(data / 'coach.sqlite') as db:
                         schema_versions[phase] = db.execute('pragma user_version').fetchone()[0]
-                    if phase == 'old' and rollback_checkout is not None:
+                    if contract['inputSchema'] == 7:
+                        require(schema_versions[phase] == 7 and not list((data / 'backups').glob('pre-*')),
+                                'same-schema release migrated or backed up the copy')
+                    if phase == 'old' and contract['firstMigration']:
                         migration = migration_window()
                 began = time.monotonic()
-                if rollback_checkout is not None:
+                refuser = 'old' if contract['firstMigration'] else 'historical-v6' if historical is not None else None
+                if refuser is not None:
                     # Keep the historical v6 binary incompatibility diagnostic as an additional check.
-                    select('old')
+                    select(refuser)
                     try:
                         start()
                     except RuntimeError:
-                        require(startup_failures and startup_failures[-1]['release'] == 'old'
+                        require(startup_failures and startup_failures[-1]['release'] == refuser
                                 and startup_failures[-1]['exitCode'] == 1
                                 and 'Database schema is newer than this server' in startup_failures[-1]['hints'],
                                 'unexpected original rollback failure')
@@ -488,11 +520,13 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     unchanged()
                 select('rollback')
                 port = start()
-                readbacks['rollback'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state),
-                                             original=readback(port, token, real_courses, base / 'rollback', data))
+                review = contract['reviewOnRollback']
+                readbacks['rollback'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state, review_supported=review),
+                                             original=readback(port, token, real_courses, base / 'rollback', data, review_supported=review))
                 mocks = client_probe('ReleaseTrainMockReadback', base / 'candidate',
-                                     dict(baseUrl=f'http://127.0.0.1:{port}', token=token, course='ton1254-candidate'))
-                require(mocks == dict(status=404, clientError=True, completed=True), 'missing old-server mocks error')
+                                     dict(baseUrl=f'http://127.0.0.1:{port}', token=token, course='ton1254-candidate',
+                                          expectSupported=contract['mocksOnRollback']['status'] == 200))
+                require(mocks == contract['mocksOnRollback'], 'rollback mocks route differs from the installed contract')
                 exercise(port, token, 'rollback')
                 timings['rollback'] = round(time.monotonic() - began, 3)
                 require(timings['rollback'] < 300, 'isolated rollback exceeded 300 seconds')
@@ -517,8 +551,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     stop()
                 select('rollback')
                 port = start()
-                readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state),
-                                                   original=readback(port, token, real_courses, base / 'rollback', data))
+                readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state, review_supported=review),
+                                                   original=readback(port, token, real_courses, base / 'rollback', data, review_supported=review))
                 exercise(port, token, 'fault-recovery')
                 timings['fault-recovery'] = round(time.monotonic() - began, 3)
                 require(timings['fault-recovery'] < 300, 'isolated fault recovery exceeded 300 seconds')
@@ -562,12 +596,12 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                                candidateSourceTrees={area: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + area], cwd=ROOT, text=True).strip() for area in ('server', 'shared')},
                                rehearsalSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                                rollbackHead=rollback_head, rollbackTargetFromInstallation=True, rollbackScope='server only; keep candidate client',
-                               oldApkReinstallAllowed=False, historicalV6BinaryRejected=rollback_checkout is not None,
-                               originalRollbackRejected=rollback_checkout is not None, mocksOnRollback=mocks,
+                               rollbackContract=dict(contract), oldApkReinstallAllowed=False, historicalV6BinaryRejected=refuser is not None,
+                               originalRollbackRejected=refuser == 'old', rollbackReviewOpens=review, mocksOnRollback=mocks,
                                forwardReviewRecallCards=len(review_cards), forwardRollSameDatabase=True,
                                firstMigration=migration, courseReadbacks=readbacks, candidateWrongAnswers=1, candidateRetryNewCards=3,
                                startupFailures=startup_failures, schemaVersions=schema_versions,
-                               distributionSha256=hashes, phases=['old', 'candidate'] + (['historical-v6-rollback-refused'] if rollback_checkout is not None else []) + ['rollback', 'failed-start', 'fault-recovery', 'forward-roll'],
+                               distributionSha256=hashes, phases=['old', 'candidate'] + (['historical-v6-rollback-refused'] if refuser is not None else []) + ['rollback', 'failed-start', 'fault-recovery', 'forward-roll'],
                                originalTokenAcceptedStarts=authenticated_starts, syntheticLectureQuizPasses=4, candidateEventsRetained=kept,
                                originalEventsUnchanged=True, pairedTokenHashesUnchanged=True, copyIntegrity='ok',
                                startupAndLectureQuizSeconds=timings, databaseRestoredOnRollback=False,
@@ -592,12 +626,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path, help='sanitized metadata report; no private data')
     parser.add_argument('--private-data-dir', required=True, type=Path, help='previously prepared private database/token copies; never the live dataDir')
-    parser.add_argument('--old-distribution', required=True, type=Path, help='built pre-v7 app distribution')
+    parser.add_argument('--old-distribution', required=True, type=Path, help='built app distribution of the release before the switch (the installed one for a v7 contract)')
     parser.add_argument('--old-head', required=True, help='source commit of the old distribution')
+    parser.add_argument('--historical-distribution', type=Path, help='built pre-v7 distribution that must refuse a v7 copy (contracts without a first migration)')
     parser.add_argument('--rollback-checkout', type=Path, help='clean checkout with a built compatible rollback distribution')
     parser.add_argument('--rollback-head', help='exact full commit of the compatible rollback checkout')
     parser.add_argument('--rollback-installation', required=True, type=Path, help='explicit private copy of the pre-switch installation descriptor')
     args = parser.parse_args()
     if not args.rollback_checkout or not args.rollback_head:
         parser.error('--rollback-checkout and --rollback-head are required for the installed downgrade contract')
-    run(args.out, args.private_data_dir, args.old_distribution, args.old_head, args.rollback_checkout, args.rollback_head, args.rollback_installation)
+    run(args.out, args.private_data_dir, args.old_distribution, args.old_head, args.rollback_checkout, args.rollback_head, args.rollback_installation,
+        args.historical_distribution)

@@ -7,6 +7,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.PairedCredentials
+import com.coach.client.PoolTrace
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -51,6 +52,7 @@ class MistakeReviewSmoke {
         KeystoreCredentials(context,base).save(PairedCredentials(device,token))
         val resume = args.getString("coachPhase") == "resume"
         if (!resume) context.deleteDatabase("coach-client.db")
+        PoolTrace.enabled = true
         try {
             step("launch activity")
             context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
@@ -59,12 +61,14 @@ class MistakeReviewSmoke {
             step("request initial questions")
             click(waitText("出题",15_000,enabled=true))
             waitText("第 1 / 3 题",15_000)
+            focus("kp:$kp","initial")
             val first = group("kp:$kp")
             step("answer initial questions")
             answer(first, wrong = 2)
             scrollTo("提交本组答案").let(::click)
             scrollTo("本组 1 / 3 题正确",substring=true)
             step("initial answers graded")
+            focus("kp:$kp","graded")
             click(waitText("← 今天"))
             } else click(waitText("← 今天",15_000))
             val first = group("kp:$kp")
@@ -88,8 +92,10 @@ class MistakeReviewSmoke {
             val retryButton = scrollTo("再练一组")
             step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
+            PoolTrace.begin("review:$course:$kp") // a retry is not a "test" send, so the app does not start this thread's trace
             click(retryButton)
             waitText("第 1 / 3 题")
+            focus("review:$course:$kp","retry")
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
             val retry = group("review:$course:$kp")
@@ -104,15 +110,18 @@ class MistakeReviewSmoke {
             waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
+            focus("review:$course:$kp","cleared")
             samples.put("newQuestions",3).put("clearedCount",2)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
         } catch(t: Throwable) {
+            focus("kp:$kp","fail");focus("review:$course:$kp","fail")
             runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")+"\nlayout: "+layout()) }
             throw t
         } finally {
             java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
+            PoolTrace.enabled = false
         }
     }
 
@@ -162,6 +171,8 @@ class MistakeReviewSmoke {
             pick(opt.getString("text"),i+1)
         }
     }
+    /** The newest question group's focus stages in ms (focus_requested, then focus_settled or focus_timeout); no question text. */
+    private fun focus(thread: String,at: String)=step("focus $at $thread ${JSONObject(PoolTrace.snapshot(thread))}")
     private fun trace(line: String)=java.io.File(context.cacheDir,"review-trace.txt").appendText("${SystemClock.elapsedRealtime()} $line\n")
     private fun snap(name: String) { runCatching {
         val bitmap=ui.takeScreenshot()

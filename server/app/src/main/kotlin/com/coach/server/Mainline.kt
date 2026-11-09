@@ -325,7 +325,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val reasons = (parts["options"] as JsonObject).mapNotNull { (i, why) -> i.toIntOrNull()?.takeIf { it in order.indices }?.let { "${order.indexOf(it)}" to why } }.toMap()
         json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed,
             "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
-            "source" to item.source, "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
+            "source" to item.source, "anchor" to item.anchor.take(300), "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
             "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history))
     }
 }

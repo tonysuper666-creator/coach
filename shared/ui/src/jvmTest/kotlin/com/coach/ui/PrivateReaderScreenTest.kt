@@ -493,4 +493,45 @@ class PrivateReaderScreenTest {
         assertNull(pageBoxes(Json.parseToJsonElement("""{"version":"v","pdfPage":3,"width":300,"height":400,"words":[${w(1, 1, 500, 5, "a")}]}""").jsonObject, "v", 3), "out of the page frame")
         assertNull(pageBoxes(Json.parseToJsonElement("""{"version":"v","pdfPage":3,"width":0,"height":400,"words":[]}""").jsonObject, "v", 3))
     }
+
+    @Test fun citationOpensTheDocumentPageWithItsAnchorAlreadyMarkedForTwoCourses() {
+        for ((course, offset) in listOf("C" to 1, "OTHER" to 2)) FakeReader(course = course, offset = offset).use { fake ->
+            fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "," + w(85, 40, 120, 55, "beta") + "]"
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha beta") } } } }
+                onNodeWithTag("private-citation").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-page-label").assertTextContains("第 ${offset + 1} 页", substring = true)
+                onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+                onAllNodesWithTag("private-citation-noanchor").assertCountEquals(0)
+                // Marking is on the cited page only; turning the page drops it rather than carrying it to another page.
+                onNodeWithTag("private-next").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-${offset + 2}").fetchSemanticsNodes().isNotEmpty() }
+                onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            }
+        }
+    }
+
+    @Test fun citationWithoutAnchorOrWithUnusableAnchorFallsBackToPageOnlyAndNeverGuesses() = FakeReader().use { fake ->
+        fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "," + w(30, 90, 80, 105, "Alpha") + "]"
+        for ((anchor, expect) in listOf("" to "private-citation-noanchor", "Alpha" to "private-highlight-status", "Missing" to "private-highlight-status")) runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateSourceReference(fake.http.reader, "教材 p.1", anchor) } } } }
+            onNodeWithTag("private-citation").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag(expect).fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            if (anchor == "Alpha") onNodeWithTag("private-highlight-status").assertTextContains("出现多处", substring = true)
+            if (anchor == "Missing") onNodeWithTag("private-highlight-status").assertTextContains("找不到这句话", substring = true)
+        }
+    }
+
+    @Test fun citationOnAChangedDocumentVersionIsNotMarked() = FakeReader().use { fake ->
+        fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "]"
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha") } } } }
+            fake.version = "v2" // the catalog moves on before the citation resolves: resolve says v1, so it must not open or mark anything
+            onNodeWithTag("private-citation").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithText("无法定位出处", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+        }
+    }
 }

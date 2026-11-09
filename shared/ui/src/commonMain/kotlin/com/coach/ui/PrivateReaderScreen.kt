@@ -88,7 +88,7 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
 
 @OptIn(ExperimentalUuidApi::class)
 @Composable
-private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null,
+private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
                                practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null, onBack: () -> Unit) {
     var retry by remember(doc) { mutableIntStateOf(0) }
     val state by produceState<ReaderLoad<JsonObject>>(ReaderLoad.Loading, reader, doc, retry) {
@@ -116,7 +116,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             var busy by remember(doc, loaded.value) { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
             var showNotes by remember(doc) { mutableStateOf(false) }
-            var focus by remember(doc) { mutableStateOf<HighlightFocus?>(null) }
+            var focus by remember(doc, loaded.value) { mutableStateOf(initialPage?.takeIf { initialAnchor.isNotBlank() }?.let { HighlightFocus(it, initialAnchor) }) }
             var focusRetry by remember(doc) { mutableIntStateOf(0) }
             val highlight by rememberHighlight(reader, doc, focus, focusRetry)
             if (showNotes) PrivateReaderAnnotations(reader, doc, page, onShow = { quote -> focus = HighlightFocus(page, quote); showNotes = false }) { showNotes = false }
@@ -144,6 +144,8 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             if (showMap) ChapterMapDialog(reader, doc.id, doc.pages, onJump = { target -> showMap = false; if (target != page) move(target) }, onClose = { showMap = false }, practice = practice)
             LaunchedEffect(doc, loaded.value, initialPage) {
                 if (initialPage != null && initialPage != restored) move(initialPage)
+                // move() clears any mark from the previous page; a citation's own anchor belongs to the page it opened on.
+                if (initialPage != null && initialAnchor.isNotBlank()) focus = HighlightFocus(initialPage, initialAnchor)
             }
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val wide = maxWidth >= 840.dp
@@ -157,6 +159,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     HorizontalDivider()
                     if (stale) Text("旧版本的阅读位置未自动套用，请重新定位。", Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error)
                     if (initialPage != null) Text("已按出处定位到页；页面内容仍需核对。", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
+                    if (initialPage != null && initialAnchor.isBlank() && page == initialPage) Text("这条出处只登记到页，没有登记原文位置。", Modifier.padding(horizontal = 16.dp).testTag("private-citation-noanchor"), style = MaterialTheme.typography.labelMedium)
                     Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
                     if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
                     PageStudyPanel(reader, doc.id, page, practice, onShowAnchor = { quote -> focus = HighlightFocus(page, quote) })
@@ -222,7 +225,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
 
 /** A source click resolves through the course catalog; an unregistered or ambiguous source never guesses. */
 @Composable
-internal fun PrivateSourceReference(reader: ReaderHttp, source: String) {
+internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: String = "") {
     var opened by remember(source) { mutableStateOf(false) }
     TextButton(onClick = { opened = true }, modifier = Modifier.testTag("private-citation")) { Text("出处：$source") }
     if (opened) Dialog(onDismissRequest = {}, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)) {
@@ -246,7 +249,7 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String) {
                     TextButton(onClick = { retry++ }) { Text("重试") }
                     TextButton(onClick = { opened = false }) { Text("返回题目") }
                 }
-                is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second) { opened = false }
+                is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second, anchor) { opened = false }
             }
         }
     }

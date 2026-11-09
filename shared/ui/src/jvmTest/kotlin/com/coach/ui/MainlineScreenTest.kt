@@ -1,11 +1,17 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.*
@@ -26,7 +32,7 @@ class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "") : AutoCloseable {
+    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         /** Every reader request the cited-source component makes through the real CourseHttp. */
@@ -72,7 +78,7 @@ class MainlineScreenTest {
                     path.endsWith("/mainline/1") && initialFailures-- > 0 -> reply(ex, """{"error":"Synthetic Mac temporarily unavailable"}""", 503)
                     path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
                         items.joinToString(",") { (id, tier) -> """{"id":"$id","tier":"$tier","stem":"Synthetic orchard question $id: which statement about the orchard holds?",
-                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}],"emphasis":[{"fact_id":"F-B1","week":1,"recording_id":"T1","recording_kind":"tutorial","timestamp":"02:01:03","summary":"Synthetic pears were emphasized."}]""" else "") + "}")
+                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}],"emphasis":[{"fact_id":"${if (setupEmphasis) "F-S1" else "F-B1"}","week":1,"recording_id":"T1","recording_kind":"tutorial","timestamp":"02:01:03","summary":"Synthetic pears were emphasized."}]""" else "") + "}")
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
             }
@@ -337,6 +343,56 @@ class MainlineScreenTest {
     // 1972×1248 pixels at Android density 320 is 986×624 dp, before system insets.
     // No performScrollTo before the explanation assertion: submitting must expose it automatically.
     @Test fun outerLandscapeShowsExplanationAutomaticallyAtDensity320() = walk(986, 624)
+    @Test fun outerLandscapeSubmissionRevealsExplanationAndCitationAtDensity320() = FakeMac(today, includeNotes = true, setupEmphasis = true).use { mac ->
+        val c = controller(mac)
+        c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
+        val events = listOf(Event(1, "synthetic-outline", "C", "outline_revised", recordedAt = now, occurredAt = now,
+            deviceId = "synthetic", actor = "SYSTEM", payload = json("knowledgePoints" to JsonArray(listOf(
+                json("id" to "K", "title" to "Synthetic orchard point a", "week" to 1))))))
+        val view = CourseView(events, project(events))
+        // Match QA's 1972x1248 capture at density 320: the system bars plus connection banner
+        // leave the desk at y=146..1200px. The full 986x624dp walk above omits those insets.
+        runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f)) {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 24.dp)) {
+                CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.REVIEW, vertical) {} }) {
+                    MainlineScreen(c, view, {}, {}, {}, {})
+                }
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-option-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-emphasis").assertIsDisplayed()
+            onNodeWithTag("mainline-option-0").assertIsDisplayed().performClick()
+            onNodeWithTag("mainline-submit").assertIsDisplayed().performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            val explanation = onNodeWithText("为什么对", substring = true)
+            val citation = onNodeWithTag("private-citation")
+            val scroll = onNode(hasScrollAction() and hasAnyDescendant(hasTestTag("mainline-heading")))
+            try {
+                waitUntil(timeoutMillis = 15_000) {
+                    val viewport = scroll.fetchSemanticsNode().boundsInRoot
+                    val source = citation.fetchSemanticsNode().boundsInRoot
+                    // The last 40dp of the scroller is covered by the fixed action bar's fade.
+                    explanation.isDisplayed() && citation.isDisplayed() && source.top >= viewport.top && source.bottom <= viewport.bottom - 80f
+                }
+                explanation.assertIsDisplayed()
+                citation.assertIsDisplayed()
+                capture("outer-feedback-1972x1248")
+            } catch (failure: Throwable) {
+                capture("outer-feedback-1972x1248-failure")
+                throw failure
+            }
+            // Once the reader scrolls further down, returning from notes must retain that position.
+            onNodeWithText("答错了。").performScrollTo().assertIsDisplayed()
+            val beforeNotes = scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            onNodeWithText("回到要点").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            assertEquals(beforeNotes, scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(),
+                "returning to a completed answer must preserve the reader's scroll")
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+        }
+    }
     @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)
     @Test fun lostGuessedReplyAutomaticallyResendsRecordedGuess() = walk(1000, 800, 1, true)
     @Test fun lostCorrectReplyAutomaticallyResendsRecordedPass() = walk(412, 915, 1, false)

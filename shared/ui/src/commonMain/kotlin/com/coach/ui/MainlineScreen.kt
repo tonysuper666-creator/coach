@@ -16,13 +16,17 @@ import androidx.compose.animation.core.tween
 import coach.design.tokens.CoachV7
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.MockReply
@@ -163,6 +167,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var itemId by remember { mutableStateOf(saved.str("item")) }
     var chosen by remember { mutableStateOf((saved["choice"] as? JsonPrimitive)?.intOrNull) }
     var result by remember { mutableStateOf(saved["result"] as? JsonObject) }
+    // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
+    var revealFeedback by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
     val busy = pending != null
     val now = rememberCourseNow(c)
@@ -213,6 +219,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
                     b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
                 save("result" to b, "pending" to JsonNull, "body" to body!!)
+                revealFeedback = true
                 SubmissionTrace.mark(traceId, "ui.persisted")
                 break
             }
@@ -344,6 +351,18 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }) {
         val m = LocalDeskMetrics.current
         val density = LocalDensity.current
+        val feedbackRequester = remember { BringIntoViewRequester() }
+        var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
+        LaunchedEffect(revealFeedback, feedbackSize, m.inner) {
+            if (revealFeedback && feedbackSize != IntSize.Zero) {
+                if (!m.inner) {
+                    // Keep the complete card, including its citation, above the fixed bottom fade.
+                    val fade = with(density) { 40.dp.toPx() }
+                    feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
+                }
+                revealFeedback = false
+            }
+        }
         var actionHeight by remember { mutableStateOf(0.dp) }
         val bottomInset = if (m.inner) 0.dp else actionHeight
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -373,7 +392,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 }
                 if (done != null && explanation != null) {
                     Spacer(Modifier.height(24.dp))
-                    PaperCard(Modifier.railAnchor("why"), contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
+                    PaperCard(Modifier.railAnchor("why").bringIntoViewRequester(feedbackRequester)
+                        .onGloballyPositioned { feedbackSize = it.size }, contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
                         Text("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
                         Spacer(Modifier.height(8.dp))
                         Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)

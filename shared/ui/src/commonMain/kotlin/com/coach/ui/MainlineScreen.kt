@@ -1,15 +1,16 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import coach.design.tokens.CoachV7
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
@@ -28,12 +29,15 @@ import kotlin.random.Random
 fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
     val http = c.course
     var week by remember { mutableStateOf<Int?>(null) }
-    Column(Modifier.fillMaxSize()) {
-        when {
-            http == null -> { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
-            week == null -> MainlineHome(c, http, onBack) { week = it }
-            else -> key(week) { MainlineWeek(c, http, view, week!!, onBack = { week = null }, onOpenSteps, onOpenEssay, onReviewWeek) }
+    when {
+        http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
+            Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
         }
+        week == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习",
+            directory = { com.coach.ui.v7.WeekDirectory(view, null, null) }) {
+            Column(Modifier.fillMaxSize()) { MainlineHome(c, http, onBack) { week = it } }
+        }
+        else -> key(week) { MainlineWeek(c, http, view, week!!, onBack = { week = null }, onOpenSteps, onOpenEssay, onReviewWeek) }
     }
 }
 
@@ -109,7 +113,6 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val now = rememberCourseNow(c)
     val scroll = rememberScrollState()
     LaunchedEffect(index) { scroll.scrollTo(0) }
-    Header("第 $number 周 · 选择题", "← 选周", onBack)
     when {
         reply == null -> { CenterMessage("正在读取…"); return }
         body == null -> { CenterMessage(reply!!.error ?: "连不上 Mac，读不到这一周的题。"); return }
@@ -132,63 +135,72 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             } finally { busy = false }
         }
     }
-    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        coverage?.let { CoverageLines(it) }
-        HorizontalDivider()
+    val done = result
+    val explanation = done?.get("explanation") as? JsonObject
+    com.coach.ui.v7.Desk(crumb = "第 $number 周 · 选择题", onBack = onBack, backLabel = "← 选周",
+        directory = { com.coach.ui.v7.WeekDirectory(view, number, null) },
+        margin = {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                coverage?.let { com.coach.ui.v7.PaperCard { CoverageLines(it) } }
+                explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { com.coach.ui.v7.PaperCard { Labeled("背景", it) } }
+                (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done?.str("source")?.takeIf { it.isNotBlank() })?.let {
+                    com.coach.ui.v7.PaperCard { Labeled("出处", it) }
+                }
+            }
+        }) {
+    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding).padding(top = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!com.coach.ui.v7.LocalDeskMetrics.current.inner) coverage?.let { CoverageLines(it) }
         Text("${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${items.size} 题", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-        QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math)
-        val done = result
-        val explanation = done?.get("explanation") as? JsonObject
+        QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium)
         val reasons = explanation?.get("options") as? JsonObject
         val answer = done?.num("answer")?.toInt()
         // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
         val displayedChoice = done?.num("choice")?.toInt() ?: chosen
         options.forEachIndexed { i, option ->
-            val mark = when {
-                done == null -> null
-                i == answer -> "✓"
-                i == displayedChoice -> "✗"
-                else -> null
+            val verdict = if (done == null) null else if (i == answer) true else if (i == displayedChoice) false else null
+            Column(Modifier.animateContentSize(tween(if (com.coach.ui.v7.LocalV7ReducedMotion.current) 0 else CoachV7.Motion.expandMs, easing = CoachV7.Motion.easing)), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                com.coach.ui.v7.AnswerOption(letters[i], displayedChoice == i, verdict, done == null && !busy,
+                    modifier = Modifier.testTag("mainline-option-$i"), onClick = { chosen = i }) {
+                    QuizText(option, "mainline:${item.str("id")}:$i", c.math)
+                }
             }
-            Surface(tonalElevation = if (done != null && i == answer) 3.dp else 0.dp, shape = MaterialTheme.shapes.small, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().selectable(displayedChoice == i, enabled = done == null && !busy, role = Role.RadioButton) { chosen = i }.padding(vertical = 4.dp).testTag("mainline-option-$i")) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        RadioButton(selected = displayedChoice == i, onClick = null, enabled = done == null)
-                        Text(letters[i], style = MaterialTheme.typography.titleSmall)
-                        Box(Modifier.weight(1f)) { QuizText(option, "mainline:${item.str("id")}:$i", c.math) }
-                        mark?.let { Text(it, style = MaterialTheme.typography.titleMedium, color = if (it == "✓") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
-                    }
-                    val why = if (done == null) null else if (i == answer) explanation?.str("correct") else (reasons?.get("$i") as? JsonPrimitive)?.contentOrNull
-                    if (!why.isNullOrBlank()) Text((if (i == answer) "为什么对：" else "为什么不选：") + why, Modifier.padding(start = 48.dp, end = 8.dp, bottom = 6.dp),
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (done != null && explanation != null) com.coach.ui.v7.PaperCard(Modifier.fillMaxWidth(), contentSpacing = 12.dp) {
+            options.forEachIndexed { i, _ ->
+                val why = if (i == answer) explanation.str("correct") else (reasons?.get("$i") as? JsonPrimitive)?.contentOrNull
+                if (!why.isNullOrBlank()) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(if (i == answer) "为什么对：" else "为什么不选：", style = MaterialTheme.typography.titleSmall)
+                    Text(why, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         if (done == null) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { submit(false) }, enabled = chosen != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-submit")) { Text("提交") }
-                OutlinedButton(onClick = { submit(true) }, enabled = chosen != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-guess")) { Text("我是猜的") }
+                com.coach.ui.v7.PrimaryButton(onClick = { submit(false) }, enabled = chosen != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-submit")) { Text("提交") }
+                com.coach.ui.v7.PaperButton(onClick = { submit(true) }, enabled = chosen != null && !busy, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-guess")) { Text("我是猜的") }
             }
             Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             Outcome(done, view.logicalToday(now), onReviewWeek)
-            explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
-            (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { Labeled("出处", it) }
+            if (!com.coach.ui.v7.LocalDeskMetrics.current.inner) explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
+            if (!com.coach.ui.v7.LocalDeskMetrics.current.inner) (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { Labeled("出处", it) }
             val next = done.str("next").takeIf { it.isNotBlank() }
             if (done.str("tier") == "bridge") {
                 Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onOpenSteps, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-steps")) { Text("步骤批改") }
-                    OutlinedButton(onClick = onOpenEssay, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-essay")) { Text("限时论述") }
+                    com.coach.ui.v7.PaperButton(onClick = onOpenSteps, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-steps")) { Text("步骤批改") }
+                    com.coach.ui.v7.PaperButton(onClick = onOpenEssay, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-essay")) { Text("限时论述") }
                 }
             }
-            Button(onClick = {
+            com.coach.ui.v7.PrimaryButton(onClick = {
                 val at = next?.let { id -> items.indexOfFirst { it.str("id") == id } } ?: -1
                 if (at >= 0) index = at else onBack()
             }, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("mainline-next")) { Text(if (next != null) "下一题" else "这一周做完了") }
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
+}
+
 }
 
 @Composable

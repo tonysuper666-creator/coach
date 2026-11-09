@@ -238,7 +238,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val reading = source
                         // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
                         val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
-                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference, reviewMode) } }
+                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, ({ open = null }), openReference, reviewMode) } }
                         val mockId = mock
                         if (mockId != null && current != null) {
                             key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
@@ -256,13 +256,6 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             covered = reading != null,
                             base = {
                                 when {
-                                    wide && paired -> Row(Modifier.fillMaxSize()) {
-                                        Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
-                                        VerticalDivider()
-                                        Box(Modifier.weight(1f).fillMaxHeight()) {
-                                            if (paneArgs != null) studyPane(paneArgs) else CenterMessage("选一个知识点，或点「继续」。")
-                                        }
-                                    }
                                     paneArgs != null -> studyPane(paneArgs)
                                     else -> tabContent()
                                 }
@@ -272,7 +265,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
                     val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen || mainline))
-                    if (bottomBar) Column(Modifier.fillMaxSize()) {
+                    val deskWindow = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
+                    val deskScreen = (target != null || (tab == AppTab.TODAY && current?.projection?.studyScope != null) || mainline) && source == null && !essayOpen && mock == null && reviewWeek == null
+                    if (deskScreen) CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical ->
+                        if (vertical) Column(Modifier.fillMaxWidth()) { AppTab.entries.forEach { t ->
+                            TextButton(onClick = { select(t) }) { Text(t.label, color = if (tab == t) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant) }
+                        } } else AppNavBar(tab, select)
+                    }, com.coach.ui.v7.LocalDeskWindow provides deskWindow) { body() }
+                    else if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)
                     } else Row(Modifier.fillMaxSize()) {
@@ -368,8 +368,8 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     }
 }
 
-/** 标签底色 = 字色的这么多分之几：太深会把字色压成低对比，由 StudyChromeTest 守住 ≥4.5。 */
-internal const val CHIP_TINT = .12f
+/** V7 status labels use plain ink on the current paper/desk; StudyChromeTest checks both actual surfaces. */
+internal const val CHIP_TINT = 0f
 
 @Composable
 internal fun StatusChip(text: String, color: Color) {

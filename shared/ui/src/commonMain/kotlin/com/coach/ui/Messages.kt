@@ -26,7 +26,7 @@ internal fun LearnerBubble(text: String) {
 @Composable
 internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!message.done || message.fallback) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             // The model name matters only when someone other than the usual tutor answered (rate-limit fallback); otherwise it is internal detail.
             Text("导师" + if (message.fallback && message.model.isNotBlank()) " · ${message.model}" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             if (message.fallback) StatusChip("兜底", MaterialTheme.colorScheme.tertiary)
@@ -63,18 +63,30 @@ private fun reasonText(reason: String?) = when (reason) {
 /** 增量 Markdown：同一条消息只追加新增的字符；snapshot 整体替换（key 变化）时重建。 */
 @Composable
 internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets, modifier: Modifier = Modifier) {
-    val engine = remember(key) { IncrementalMarkdown() }
-    val blocks = remember(key, text, done) { engine.update(text, done) }
+    val hasFootnotes = done && com.coach.ui.v7.footnotes(text).isNotEmpty()
+    val engine = remember(key, hasFootnotes) { IncrementalMarkdown() }
+    val blocks = remember(key, text, done, hasFootnotes) { engine.update(if (done) com.coach.ui.v7.withoutFootnoteDefinitions(text) else text, done) }
     LaunchedEffectMath(blocks, math)
     // The renderer reports every formula it has to draw as source because no SVG is cached yet: fetch exactly those (same key it looked up).
     val scope = rememberCoroutineScope()
+    val notes = remember(text) { com.coach.ui.v7.footnotes(text) }
+    val inlineNotes = !com.coach.ui.v7.LocalDeskMetrics.current.inner && !com.coach.ui.v7.LocalReadingFocus.current
+    CompositionLocalProvider(com.coach.ui.v7.LocalFootnotePrefix provides "$key:") {
     ProvideMarkdownMeasurer {
-        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((coach.design.tokens.CoachV7.Size.body.value * coach.design.tokens.V7Reading.paragraphEm).dp)) {
             blocks.forEach { block ->
                 key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), failed = math.failed.keys, onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
+                if (inlineNotes) notes.filter { block.source.contains("[^${it.id}]") }.forEach { note ->
+                    com.coach.ui.v7.PaperCard(Modifier.fillMaxWidth()) {
+                        Text("${note.number}  ${note.label}", style = MaterialTheme.typography.labelMedium)
+                        Text(note.text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
     }
+}
+
 }
 
 @Composable

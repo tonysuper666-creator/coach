@@ -17,6 +17,10 @@ class LayoutCacheTest {
           {"id":"p1b1","kind":"table","bbox":[60,200,270,300],"reading_order":1,"column":0,"status":"unknown","in_reading_flow":false,"fallback":"original_page_region"}]}""")
         Files.writeString(v.resolve("pages/00002.json"), """{"schema_version":1,"status":"ok","columns":2,
           "reading_order_status":"conflict","fallback":"original_page","rotation":0,"size":null,"blocks":[]}""")
+        Files.writeString(v.resolve("pages/00004.json"), """{"schema_version":1,"status":"ok","columns":1,
+          "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
+          {"id":"a","kind":"text","bbox":[72,300,500,350],"reading_order":0,"column":0,"status":"ok","text":"x"},
+          {"id":"b","kind":"text","bbox":[72,100,500,150],"reading_order":1,"column":0,"status":"ok","text":"y"}]}""")
         Files.writeString(v.resolve("pages/00003.json"), """{"schema_version":2,"status":"ok","blocks":[]}""")
         return root
     }
@@ -27,6 +31,11 @@ class LayoutCacheTest {
         assertEquals(2, p.columns); assertTrue(p.orderTrusted)
         assertFalse(p.blocks[1].inReadingFlow); assertEquals("original_page_region", p.blocks[1].fallback)
         assertFalse(assertNotNull(c.page("doc", 2)).orderTrusted)
+    }
+
+    @Test fun upsideDownOrderIsNotTrustedEvenIfProducerSaysSingleColumn() {
+        val p = assertNotNull(LayoutCache(fixture()).page("doc", 4))
+        assertEquals("single_column", p.readingOrderStatus); assertFalse(p.orderTrusted)
     }
 
     @Test fun missingPageUnknownDocAndFutureSchemaAreNull() {

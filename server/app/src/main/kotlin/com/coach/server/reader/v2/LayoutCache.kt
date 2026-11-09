@@ -21,7 +21,17 @@ data class LayoutPage(
 ) {
     /** True only when text order may be used for sentence anchoring; otherwise use the original page. */
     val orderTrusted: Boolean
-        get() = status == "ok" && fallback == null && readingOrderStatus in setOf("ok", "single_column")
+        get() = status == "ok" && fallback == null && readingOrderStatus in setOf("ok", "single_column") &&
+            blocksRunTopDown()
+
+    /** Independent sanity check (does not rely on the producer's verdict): within each column,
+     *  text-flow blocks must follow reading order from top to bottom (2pt tolerance). */
+    private fun blocksRunTopDown(): Boolean {
+        val flow = setOf("text", "heading", "list", "caption", "footnote")
+        return blocks.filter { it.kind in flow && it.inReadingFlow && it.bbox.size >= 4 }
+            .groupBy { it.column }
+            .all { (_, bs) -> bs.sortedBy { it.readingOrder }.zipWithNext().all { (a, b) -> b.bbox[1] >= a.bbox[1] - 2.0 } }
+    }
 }
 
 class LayoutCache(private val root: Path) {

@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "2"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -53,7 +53,7 @@ def atomic_write_json(path: Path, obj) -> None:
 
 # ---------------------------------------------------------------- columns ----
 
-def assign_columns(blocks: list[dict]) -> int:
+def assign_columns(blocks: list[dict], page_h: float | None = None) -> int:
     """Set block['column'] (0 = full-width/unassigned, 1..n = column); return n.
 
     Only text-flow blocks narrower than 60% of the occupied width take part; the
@@ -77,13 +77,46 @@ def assign_columns(blocks: list[dict]) -> int:
             intervals[-1][2].append(b)
         else:
             intervals.append([l, r, [b]])
-    cols = [iv for iv in intervals if len(iv[2]) >= 2]
+    def tall_enough(iv):   # a column must carry a real share of the page, not a few captions
+        if not page_h:
+            return True
+        return sum(b["bbox"][3] - b["bbox"][1] for b in iv[2]) >= 0.25 * page_h
+    cols = [iv for iv in intervals if len(iv[2]) >= 2 and tall_enough(iv)]
     if len(cols) < 2:
         return 1
     for i, (_, _, members) in enumerate(cols, 1):
         for b in members:
             b["column"] = i
     return len(cols)
+
+
+def layout_ambiguous(blocks: list[dict]) -> bool:
+    """Single-column verdict is not trustworthy when narrow text blocks sit side by
+    side (a missed or partial multi-column layout)."""
+    flow = [b for b in blocks if b["kind"] in TEXT_FLOW and b["bbox"]]
+    if len(flow) < 2:
+        return False
+    x0 = min(b["bbox"][0] for b in flow)
+    x1 = max(b["bbox"][2] for b in flow)
+    span = max(x1 - x0, 1.0)
+    mid = (x0 + x1) / 2
+    narrow = [b for b in flow if (b["bbox"][2] - b["bbox"][0]) < 0.6 * span]
+    left = [b for b in narrow if (b["bbox"][0] + b["bbox"][2]) / 2 < mid]
+    right = [b for b in narrow if (b["bbox"][0] + b["bbox"][2]) / 2 >= mid]
+    return any(a["bbox"][1] < c["bbox"][3] and c["bbox"][1] < a["bbox"][3]
+               for a in left for c in right)
+
+
+def _single_column_order(blocks: list[dict]) -> bool:
+    """Text-flow blocks must run top to bottom (2pt tolerance)."""
+    last = None
+    for b in sorted(blocks, key=lambda b: b["reading_order"]):
+        if b["kind"] not in TEXT_FLOW or not b["bbox"]:
+            continue
+        if last is not None and b["bbox"][1] < last - 2.0:
+            return False
+        last = b["bbox"][1]
+    return True
 
 
 def check_reading_order(blocks: list[dict], ncols: int):
@@ -94,6 +127,11 @@ def check_reading_order(blocks: list[dict], ncols: int):
     block; the consumer must then fall back to the original page.
     """
     if ncols < 2:
+        if layout_ambiguous(blocks):
+            return "unknown", None
+        if not _single_column_order(blocks):
+            keyed = sorted((x for x in blocks if x["bbox"]), key=lambda x: x["bbox"][1])
+            return "conflict", [x["id"] for x in keyed]
         return "single_column", None
     seen_max = 0
     last_top: dict = {}
@@ -228,7 +266,9 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
         if kind == "table":
             t = b.get("table")
             blk["table"] = t
-            blk["status"] = "ok" if t and t["cells"] else "unknown"
+            full = bool(t and t["cells"] and t["rows"] and t["cols"] and
+                        sum(c["rs"] * c["cs"] for c in t["cells"]) >= t["rows"] * t["cols"])
+            blk["status"] = "ok" if full else "unknown"   # partial grids are not trusted
             if blk["status"] == "unknown":
                 blk["fallback"] = "original_page_region"
             blk["in_reading_flow"] = False   # a grid is never a run of sentences
@@ -247,7 +287,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
             if not b["text"]:
                 blk["status"] = "missing"
         blocks.append(blk)
-    ncols = assign_columns(blocks)
+    ncols = assign_columns(blocks, mb[3] - mb[1])
     ro_status, suggested = check_reading_order(blocks, ncols)
     if rotated:
         ro_status, suggested = "unknown", None
@@ -256,6 +296,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
               reading_order_status=ro_status, blocks=blocks)
     if suggested:
         pj["suggested_order_columnwise"] = suggested
+    if suggested or ro_status in ("conflict", "unknown"):
         pj["fallback"] = "original_page"
     if rotated:
         pj["fallback"] = "original_page"

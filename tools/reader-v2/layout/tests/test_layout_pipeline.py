@@ -113,6 +113,17 @@ class CacheLogic(Base):
         self.assertTrue((self.cache / "d" / "latest.json").exists())
         self.assertEqual((self.cache / "d" / "latest.json").read_bytes()[:1], b"{")   # no BOM
 
+    def test_pipeline_version_change_invalidates_cache(self):
+        from unittest import mock
+        pdf = self.syn / "mixed.pdf"
+        with mock.patch.object(lp, "PIPELINE_VERSION", "1"):
+            lp.ingest(pdf, self.cache, "d", FakeEngine())
+        eng = FakeEngine()
+        s = lp.ingest(pdf, self.cache, "d", eng)
+        self.assertFalse(s["cache_hit"])
+        self.assertEqual(len(eng.calls), 1)
+        self.assertIn("-p2-", s["version"])
+
     def test_resume_skips_done_pages(self):
         pdf = self.syn / "mixed.pdf"
         bad = FakeEngine(fail_pages={3})
@@ -161,6 +172,34 @@ class Heuristics(unittest.TestCase):
         meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
         b = lp.build_page_json(1, raw, meta, "s")["blocks"][0]
         self.assertEqual((b["status"], b["fallback"]), ("unknown", "original_page_region"))
+
+    def test_single_column_bottom_to_top_is_conflict(self):
+        bl = [{"kind": "text", "bbox": [72, 700 - 80 * i, 520, 740 - 80 * i], "reading_order": i, "id": f"a{i}"} for i in range(5)]
+        self.assertEqual(lp.assign_columns(bl, 842), 1)
+        self.assertEqual(lp.check_reading_order(bl, 1)[0], "conflict")
+
+    def test_side_by_side_narrow_blocks_without_columns_are_unknown(self):
+        bl = [{"kind": "text", "bbox": [72, 100, 520, 150], "reading_order": 0, "id": "w"},
+              {"kind": "caption", "bbox": [72, 200, 250, 240], "reading_order": 1, "id": "l"},
+              {"kind": "caption", "bbox": [330, 205, 520, 245], "reading_order": 2, "id": "r"}]
+        self.assertEqual(lp.assign_columns(bl, 842), 1)
+        self.assertEqual(lp.check_reading_order(bl, 1)[0], "unknown")
+
+    def test_short_narrow_captions_are_not_columns(self):
+        bl = [{"kind": "caption", "bbox": [60, 100 + 30 * i, 250, 120 + 30 * i], "reading_order": i, "id": f"l{i}"} for i in range(2)]
+        bl += [{"kind": "caption", "bbox": [330, 100 + 30 * i, 520, 120 + 30 * i], "reading_order": 2 + i, "id": f"r{i}"} for i in range(2)]
+        self.assertEqual(lp.assign_columns(bl, 842), 1)
+
+    def test_partial_table_grid_is_unknown(self):
+        raw = {"size": (595, 842), "layout_score": None, "blocks": [
+            {"label": "table", "bbox": [1, 1, 5, 5], "text": None, "order": 0,
+             "table": {"rows": 2, "cols": 2, "cells": [{"r": 0, "c": 0, "rs": 1, "cs": 1, "text": "x"}]}},
+            {"label": "table", "bbox": [1, 9, 5, 15], "text": None, "order": 1,
+             "table": {"rows": 1, "cols": 2, "cells": [{"r": 0, "c": 0, "rs": 1, "cs": 2, "text": "m"}]}}]}
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        b = lp.build_page_json(1, raw, meta, "s")["blocks"]
+        self.assertEqual([(x["status"], x.get("fallback")) for x in b],
+                         [("unknown", "original_page_region"), ("ok", None)])
 
     def test_full_width_blocks_stay_single_column(self):
         bl = [{"kind": "text", "bbox": [72, 100 + 80 * i, 520, 150 + 80 * i], "reading_order": i, "id": f"a{i}"} for i in range(5)]

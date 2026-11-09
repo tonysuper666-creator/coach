@@ -95,6 +95,13 @@ the same. Convert a native selection to an unambiguous index range first, then
 call the shared capture entrypoint. Never fabricate an index range from native
 string indices.
 
+Before TON-1426/1427/1431 connect native selection, `shared/domain` must provide a
+shared conversion from resource + native selected text + native prefix/suffix to
+one unique range in index text. No match or multiple matches must reject capture.
+Native adapters must use that conversion and must not pass their own extraction
+offsets directly to `capture`. This selection-conversion helper is a downstream
+integration prerequisite; this PR's low-level range capture does not implement it.
+
 EPUB `ReaderResource.href`/`ReaderLocator.href` names a publication resource and
 contains no `#fragment`. Fragments go in `locations.fragments`; the locator also
 round-trips Readium progression/position fields and before/highlight/after text.
@@ -152,9 +159,13 @@ version throws `ReaderVersionConflict`. Re-extraction requires a deliberate
 future index-revision migration, not silent replacement of existing evidence.
 
 `save(entry)` creates revision 1 only after the captured version's index has been
-registered and its quote/context resolve to exactly its original resource/range
-with `SAME_VERSION_RANGE`. No-range, native-offset-mismatched, scanned or otherwise
-unverified new entries are rejected before insertion. Existing legacy entries
+registered and the entire submitted anchor equals
+`ReaderAnchorResolver.capture(index, resource, originalRange, id)`. This includes
+the exact quote, generated context, geometry, locator and schema fields, not just
+the resource/range proof. Client-provided boxes are rejected when the index has
+no span or has different geometry. No-range, altered-context, native-offset-
+mismatched, scanned or otherwise unverified new entries are rejected before
+insertion. Existing legacy entries
 may retain their original selectors when editing notes/progress.
 An edit supplies `expectedRevision` equal to the
 entry revision; SQLite compare-and-swap rejects stale device updates with
@@ -203,7 +214,8 @@ python3 tools/reader-anchor/verify_contract.py
 
 The Kotlin tests cover the Architect P1-P4 ligature-mismatch, scanned-cover,
 repeated-sentence and cross-page-context regressions as assertions, capture
-self-check/rejection and new-entry validation, plus unique migration, ambiguous/deleted/changed/scanned/
+self-check/rejection, Q3 non-index geometry/altered-context rejection on insertion,
+and new-entry validation, plus unique migration, ambiguous/deleted/changed/scanned/
 partial negatives, overlapping occurrences, original UTF-16 offsets, EPUB
 relocation, map gaps/ranges, all four rotations, trim, JSON vectors, restart,
 two-connection stale-write conflicts and note/progress preservation. The Python

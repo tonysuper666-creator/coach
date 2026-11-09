@@ -55,11 +55,9 @@ class ReaderAnchorStore(directory: Path) : AutoCloseable {
         if (expectedRevision == null) {
             require(entry.revision == 0L)
             val capturedIndex = requireNotNull(document(entry.anchor.version)) { "Capture index must be registered first" }
-            val check = ReaderAnchorResolver.resolve(entry.anchor, capturedIndex)
-            require(entry.anchor.originalRange != null && check.reason == AnchorReason.SAME_VERSION_RANGE &&
-                check.target?.resource == entry.anchor.resource && check.target?.range == entry.anchor.originalRange) {
-                "Anchor must resolve to its captured index resource and range"
-            }
+            val range = requireNotNull(entry.anchor.originalRange) { "Capture requires an index text range" }
+            val captured = ReaderAnchorResolver.capture(capturedIndex, entry.anchor.resource, range, entry.anchor.id)
+            require(entry.anchor == captured) { "Anchor must equal the registered index capture" }
             val saved = entry.copy(revision = 1)
             val changed = db.prepareStatement("INSERT OR IGNORE INTO reader_anchors(id,revision,body) VALUES(?,1,?)").use { s ->
                 s.setString(1, entry.anchor.id); s.setString(2, ReaderAnchorJson.encodeToString(saved)); s.executeUpdate()

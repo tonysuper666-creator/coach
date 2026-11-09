@@ -72,4 +72,35 @@ class ReaderAnchorStoreTest {
             assertEquals("synthetic note", store.get(anchor.id)?.note)
         }
     }
+
+    @Test fun q3NewEntriesRejectNonIndexGeometryAndAlteredContext() {
+        val version = DocumentVersion("synthetic-q3", "a".repeat(64), ReaderFormat.PDF)
+        val page = ReaderResource(pdfPageIndex0 = 0)
+        val range = ReaderTextRange(7, 19)
+        val frame = PdfPageFrame(PdfPointRect(0.0, 0.0, 600.0, 800.0))
+        val correct = ReaderGeometry(frame, listOf(ReaderRect(0.1, 0.2, 0.3, 0.1)))
+        val wrong = ReaderGeometry(frame, listOf(ReaderRect(0.8, 0.9, 0.1, 0.05)))
+        for (indexedGeometry in listOf(null, correct)) {
+            val dir = Files.createTempDirectory("synthetic-reader-q3-")
+            val spans = indexedGeometry?.let { listOf(ReaderTextGeometry(range, it)) }.orEmpty()
+            val index = ReaderDocumentIndex(version, listOf(ReaderTextUnit(page, "Start. Water boils. End.", spans)), true, 1)
+            val captured = ReaderAnchorResolver.capture(index, page, range, "q3")
+            // Text/range are valid in both submissions; neither client geometry nor weakened context is index-owned.
+            val bad = listOf(captured.copy(geometry = wrong), captured.copy(quote = requireNotNull(captured.quote).copy(prefix = "")))
+            ReaderAnchorStore(dir).use { store ->
+                store.register(index)
+                for (submitted in bad) {
+                    assertEquals(AnchorReason.SAME_VERSION_RANGE, ReaderAnchorResolver.resolve(submitted, index).reason)
+                    assertFailsWith<IllegalArgumentException> { store.save(ReaderAnchorEntry(submitted, "synthetic note", 0.3)) }
+                    assertNull(store.get(captured.id))
+                }
+                assertEquals(captured, store.save(ReaderAnchorEntry(captured, "synthetic note", 0.3)).anchor)
+            }
+            ReaderAnchorStore(dir).use { store ->
+                assertEquals(captured, store.get(captured.id)?.anchor)
+                assertEquals(indexedGeometry, store.resolve(captured.id, version).target?.geometry)
+                assertEquals("synthetic note", store.get(captured.id)?.note)
+            }
+        }
+    }
 }

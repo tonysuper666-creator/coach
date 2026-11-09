@@ -328,6 +328,8 @@ class MainlineScreenTest {
     private fun ComposeUiTest.capture(name: String) {
         val dir = File("build/screens").also { it.mkdirs() }
         ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
+        // Keep successful geometry too: a visible heading can coexist with the body below the viewport.
+        File(dir, "$name.txt").writeText(onRoot(useUnmergedTree = true).printToString(maxDepth = 50))
     }
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)

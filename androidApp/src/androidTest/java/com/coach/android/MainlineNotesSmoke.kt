@@ -142,9 +142,17 @@ class MainlineNotesSmoke {
                 val fetched = SystemClock.elapsedRealtimeNanos()
                 val displayed = nodes.indices.any { explanations[it].isDisplayed() }
                 SubmissionTrace.mark("test", "test.queryEnd")
+                val displayMs = (SystemClock.elapsedRealtimeNanos() - fetched) / 1_000_000.0
+                val bounds = JSONArray()
+                nodes.forEach { node ->
+                    val rect = node.boundsInRoot
+                    bounds.put(JSONObject().put("left", rect.left).put("top", rect.top)
+                        .put("right", rect.right).put("bottom", rect.bottom))
+                }
                 polls.put(JSONObject().put("nodes", nodes.size).put("displayed", displayed)
                     .put("fetchMs", (fetched - began) / 1_000_000.0)
-                    .put("displayMs", (SystemClock.elapsedRealtimeNanos() - fetched) / 1_000_000.0))
+                    .put("displayMs", displayMs)
+                    .put("boundsInRoot", bounds))
                 return displayed
             }
             try {

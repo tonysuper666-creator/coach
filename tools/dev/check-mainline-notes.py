@@ -61,7 +61,10 @@ def stop(process):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--package', choices=[PACKAGE, 'com.coach.android.ton1419'], default=PACKAGE)
+    parser.add_argument('--joint-reader', action='store_true')
+    parser.add_argument('--probe-url', help='One authenticated HTTP probe; any HTTP failure exits nonzero')
     parser.add_argument('--emulator', type=Path, default=Path('/opt/homebrew/share/android-commandlinetools/emulator/emulator'))
     parser.add_argument('--fault-only', action='store_true')
     # A full pass outlives one foreground shell on this machine, so the same script can be run in two
@@ -69,6 +72,13 @@ def main():
     parser.add_argument('--sizes', default='2448x1848,1972x1248')
     parser.add_argument('--modes', default='normal,resumeQuiz,resumeNotes,fault,offline')
     args = parser.parse_args()
+    if args.probe_url:
+        req = urllib.request.Request(args.probe_url, headers={'Authorization': 'Bearer ' + os.environ['COACH_SYNTHETIC_PROBE_TOKEN'], 'X-Coach-Device': 'desktop'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            assert response.status == 200
+        return
+    assert args.output, '--output is required for emulator acceptance'
+    package = args.package
     sizes = [] if args.fault_only else [s for s in args.sizes.split(',') if s]
     modes = {m for m in args.modes.split(',') if m}
     partial = modes != {'normal', 'resumeQuiz', 'resumeNotes', 'fault', 'offline'} or len(sizes) < 2
@@ -121,6 +131,15 @@ def main():
             base = Path(temporary)
             data = base / 'data'
             fixture.write_pack(base / 'mock/mcq-mainline')
+            if args.joint_reader:
+                module('joint_reader_fixture', ROOT / 'tools/dev/mainline-reader-fixture.py').write_library(base / 'library', fixture.COURSE)
+                pack_file = base / 'mock/mcq-mainline/W01.json'
+                pack = json.loads(pack_file.read_text())
+                for item in pack['sections'][0]['items']:
+                    item['source'] = '教材 p.1'
+                    item['anchor'] = 'Synthetic pears grow in the orchard.'
+                    item['explanation'] = item['explanation'].replace('Synthetic lecture 1, slide 4', '教材 p.1')
+                pack_file.write_text(json.dumps(pack))
             notes = dict(schema_version=1, week=1, sections=[
                 dict(section_id='W01-basics', title='Synthetic basics', body='Synthetic apples are sold out. Synthetic pears grow in the orchard.',
                      fact_ids=['F1', 'F2'], sources=['Synthetic lecture 1']),
@@ -137,6 +156,8 @@ def main():
                 COACH_STATE_DIR=str(base / 'state'), COACH_RUN_DIR=str(base / 'run'), COACH_PACKS_DIR=str(base / 'packs'),
                 COACH_MOCK_DIR=str(base / 'mock'), COACH_GENERATED_DIR=str(base / 'generated'), COACH_TAIL_HOST='', COACH_PORT=str(port),
                 COACH_TRAFFIC='test', COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge.server_address[1]}')
+            if args.joint_reader:
+                env['COACH_READER_LIBRARY'] = str(base / 'library')
             token = ''
 
             def request(path):
@@ -180,6 +201,7 @@ def main():
             offline = False
             unavailable_until = 0
             failures = {'load': 0}
+            negative_http = False
             attempts = {}
             diagnostics = []
 
@@ -197,7 +219,9 @@ def main():
                         self.connection.shutdown(socket.SHUT_RDWR)
                         return
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'content-length', 'connection')}
-                    if fault and '/mainline/1?' in self.path and failures['load'] == 0:
+                    if negative_http and self.path == '/v1/hello':
+                        status, body = 503, b'{"error":"Synthetic post-start HTTP failure"}'
+                    elif fault and '/mainline/1?' in self.path and failures['load'] == 0:
                         failures['load'] += 1
                         status, body = 503, b'{"error":"Synthetic temporary outage"}'
                     else:
@@ -256,12 +280,13 @@ def main():
                 record_clock(mode, 'before')
                 result = android('shell', 'am', 'instrument', '-w', '-e', 'class', 'com.coach.android.MainlineNotesSmoke',
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
-                    f'{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner', timeout=300, check=False)
+                    '-e', 'jointReader', '1' if args.joint_reader else '0',
+                    f'{package}.test/androidx.test.runner.AndroidJUnitRunner', timeout=300, check=False)
                 record_clock(mode, 'after')
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 # App-side diagnostics for a UI failure: connection state transitions and mainline fetches.
                 if result.returncode != 0 or b'OK (1 test)' not in result.stdout:
-                    pid = android('shell', 'pidof', PACKAGE, check=False).stdout.decode().strip().split()
+                    pid = android('shell', 'pidof', package, check=False).stdout.decode().strip().split()
                     log = android('logcat', '-d', '-v', 'time', *(['--pid', pid[0]] if pid else []), check=False)
                     (folder / f'{mode}-logcat.txt').write_text(log.stdout.decode(errors='replace').replace(token, '<redacted>'))
                     shot = android('exec-out', 'screencap', '-p', check=False)
@@ -273,14 +298,15 @@ def main():
                     android('shell', 'rm', '-f', '/sdcard/ton1394-fail.xml', check=False)
                 (out / 'http-diagnostics.json').write_text(json.dumps(diagnostics, indent=2))
                 for name in ('entry', 'wait-fail', 'click-fail', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'weekly-map-open', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
-                             'fault-waiting', 'resumed-quiz', 'reading-before-restart', 'resumed-notes'):
-                    image = android('exec-out', 'run-as', PACKAGE, 'cat', f'cache/mainline-{name}.png', check=False)
+                             'fault-waiting', 'resumed-quiz', 'reading-before-restart', 'resumed-notes',
+                             'joint-highlight', 'joint-note', 'joint-page-two', 'joint-answer-return', 'joint-note-after-restart'):
+                    image = android('exec-out', 'run-as', package, 'cat', f'cache/mainline-{name}.png', check=False)
                     if image.stdout.startswith(b'\x89PNG'):
                         (folder / f'{name}.png').write_bytes(image.stdout)
                 assert result.returncode == 0 and b'OK (1 test)' in result.stdout, f'{mode} UI failed; see redacted instrumentation report'
                 entry = {}
                 if mode in ('normal', 'fault', 'offline'):
-                    timing = json.loads(android('exec-out', 'run-as', PACKAGE, 'cat', 'cache/mainline-timings.json').stdout)
+                    timing = json.loads(android('exec-out', 'run-as', package, 'cat', 'cache/mainline-timings.json').stdout)
                     (folder / 'timings.json').write_text(json.dumps(timing, indent=2))
                     samples.extend(timing['samples'])
                     entry = {key: timing[key] for key in ('initialColdClicks', 'warmClicks', 'notesRouteClicks')}
@@ -289,7 +315,7 @@ def main():
 
             for index, size in enumerate(sizes):
                 if index:
-                    android('shell', 'am', 'force-stop', PACKAGE)
+                    android('shell', 'am', 'force-stop', package)
                     stop(process)
                     process = None
                     shutil.rmtree(data)
@@ -298,19 +324,19 @@ def main():
                 android('shell', 'wm', 'size', size)
                 android('shell', 'wm', 'density', '240')
                 if 'normal' in modes:
-                    android('shell', 'am', 'force-stop', PACKAGE)
+                    android('shell', 'am', 'force-stop', package)
                     instrument('normal', out / size)
                 if 'resumeQuiz' in modes:
-                    android('shell', 'am', 'force-stop', PACKAGE)
+                    android('shell', 'am', 'force-stop', package)
                     instrument('resumeQuiz', out / size)
                 if 'resumeNotes' in modes:
-                    android('shell', 'am', 'force-stop', PACKAGE)
+                    android('shell', 'am', 'force-stop', package)
                     instrument('resumeNotes', out / size)
             fault = True
             android('shell', 'wm', 'size', '1972x1248')
             android('shell', 'wm', 'density', '240')
             if 'fault' in modes:
-                android('shell', 'am', 'force-stop', PACKAGE)
+                android('shell', 'am', 'force-stop', package)
                 record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
                                            '/sdcard/ton1394-recovery.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 instrument('fault', out / 'recovery')
@@ -320,7 +346,7 @@ def main():
                 android('shell', 'rm', '/sdcard/ton1394-recovery.mp4')
             offline = True
             if 'offline' in modes:
-                android('shell', 'am', 'force-stop', PACKAGE)
+                android('shell', 'am', 'force-stop', package)
                 record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
                                            '/sdcard/ton1394-offline.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 instrument('offline', out / 'offline')
@@ -350,12 +376,27 @@ def main():
                 if values:
                     partition_summary[key] = dict(meanMs=sum(values) / len(values),
                                                   p95ms=values[math.ceil(.95 * len(values)) - 1])
-            report = dict(syntheticOnly=True, productionRead=False, package=PACKAGE, runs=runs, samples=samples,
+            report = dict(syntheticOnly=True, productionRead=False, package=package, runs=runs, samples=samples,
                           transport='Android emulator -> configured Tailscale IPv4 -> isolated HTTP proxy -> candidate',
                           disconnection='Isolated proxy drops all HTTP connections for 3.5s after commit; emulator network settings unchanged',
                           p95ms=p95, p95Budget=p95_observation(p95), timingPartitions=partition_summary,
                           normalSamples=len(normal), faults=failures, immutableReplays=len(retried), coverage=coverage,
                           utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+            if args.joint_reader:
+                # A fresh process running this very script sees a real post-start HTTP 503 and must fail.
+                import sys
+                request('/v1/hello')
+                negative_http = True
+                negative = subprocess.run([sys.executable, __file__, '--probe-url', f'http://{host}:{proxy.server_address[1]}/v1/hello'],
+                    env=dict(os.environ, COACH_SYNTHETIC_PROBE_TOKEN=token), capture_output=True, text=True)
+                (out / 'negative-http.txt').write_text((negative.stdout + negative.stderr).replace(token, '<redacted>'))
+                assert negative.returncode != 0 and '503' in negative.stderr
+                report['negativeHttp'] = dict(startedHealthy=True, status=503, scriptExit=negative.returncode)
+                negative_http = False
+                report['readerState'] = request(f'/v1/courses/{fixture.COURSE}/reader/joint-book/state')
+                assert report['readerState']['notes'], 'PDF note must survive the app restarts'
+                assert report['readerState']['progress'], 'PDF reading progress must be persisted'
+                report['jointReader'] = True
             (out / 'report.json').write_text(json.dumps(report, indent=2))
             print(json.dumps({k: report[k] for k in ('normalSamples', 'p95ms', 'p95Budget', 'immutableReplays', 'coverage')}), flush=True)
             if report['p95Budget']['withinBudget'] is False:
@@ -373,8 +414,8 @@ def main():
             bridge_thread.join()
         if emulator:
             if emulator.poll() is None:
-                android('uninstall', PACKAGE + '.test', check=False)
-                android('uninstall', PACKAGE, check=False)
+                android('uninstall', package + '.test', check=False)
+                android('uninstall', package, check=False)
                 android('shell', 'wm', 'size', 'reset', check=False)
                 android('shell', 'wm', 'density', 'reset', check=False)
                 android('emu', 'kill', check=False)

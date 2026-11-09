@@ -7,6 +7,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.sp
 import com.coach.ui.v7.*
 import androidx.compose.animation.animateContentSize
@@ -333,10 +335,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             Text(if (nextId != null) "第 ${index + 2} 题  ›" else "", Modifier.clickable(enabled = done != null && nextId != null, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
+        val density = LocalDensity.current
+        var actionHeight by remember { mutableStateOf(0.dp) }
+        val bottomInset = if (m.inner) 0.dp else actionHeight
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val pageHeight = maxHeight - m.topPadding - 24.dp - (if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp)
+            val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .padding(bottom = if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp).verticalScroll(scroll)
+                .padding(bottom = bottomInset).verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("本周要点") }
@@ -410,9 +415,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                 }
             }
-            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = if (m.window == DeskWindow.Outer) 85.dp else 69.dp).fillMaxWidth().height(40.dp)
+            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomInset).fillMaxWidth().height(40.dp)
                 .background(Brush.verticalGradient(listOf(Color.Transparent, com.coach.ui.theme.CoachTheme.colors.surface1))))
-            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
+            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { actionHeight = with(density) { it.height.toDp() } }.verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
         }

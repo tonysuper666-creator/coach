@@ -3,6 +3,7 @@ package com.coach.android
 import android.content.Intent
 import android.os.SystemClock
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -28,9 +29,11 @@ class MainlineNotesSmoke {
         val args = InstrumentationRegistry.getArguments()
         val port = requireNotNull(args.getString("coachPort")).toInt()
         require(port !in setOf(8790, 8791, 18791, 3790))
-        require(context.packageName == "com.coach.android.ton1394")
+        require(context.packageName in setOf("com.coach.android.ton1394", "com.coach.android.ton1419"))
         require(BuildConfig.COACH_COURSE == "ton1358-synthetic-mainline")
         val mode = args.getString("mode") ?: "normal"
+        val jointReader = args.getString("jointReader") == "1"
+        val citation = if (jointReader) "出处：教材 p.1" else "Synthetic lecture 1, slide 4"
         // Opt-in diagnosis only (instrumentation arg ton1394Trace=1); off leaves the run unchanged.
         SubmissionTrace.enabled = args.getString("ton1394Trace") == "1"
         SubmissionTrace.clear()
@@ -166,7 +169,16 @@ class MainlineNotesSmoke {
         if (mode == "resumeQuiz") {
             waitFor("桥接题 · 第 3/3 题")
             show("答对了，算掌握。")
-            show("Synthetic lecture 1, slide 4", contains = true)
+            show(citation, contains = true)
+            if (jointReader) {
+                click(show(citation, contains = true))
+                waitFor("PDF 第 1 页", contains = true)
+                click(show("本页原文与批注"))
+                show("我的批注：Synthetic PDF note")
+                screenshot("joint-note-after-restart")
+                compose.onNodeWithTag("private-notes-close").performClick()
+                compose.onNodeWithTag("private-document-back").performClick()
+            }
             screenshot("resumed-quiz")
             click(show("本周要点"))
             click(show("○ Synthetic basics"))
@@ -261,6 +273,41 @@ class MainlineNotesSmoke {
         screenshot("question-emphasis")
         click(waitFor("关闭"))
         answer("Synthetic apples are grown there", false, "答错了。", "setup")
+        if (jointReader && !fault) {
+            val original = compose.onNodeWithTag("mainline-option-0").fetchSemanticsNode().config
+            click(show(citation))
+            compose.waitUntil(timeoutMillis = 15_000) { compose.onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+            screenshot("joint-highlight")
+            click(show("本页原文与批注"))
+            val passage = compose.onNodeWithTag("private-note-text")
+            compose.waitUntil(timeoutMillis = 15_000) { runCatching { passage.fetchSemanticsNode() }.isSuccess }
+            passage.performTextInputSelection(androidx.compose.ui.text.TextRange(0, 9))
+            compose.onNodeWithTag("private-note-add").performClick()
+            compose.onNodeWithTag("private-note-editor").performTextInput("Synthetic PDF note")
+            compose.waitUntil(timeoutMillis = 15_000) { runCatching { compose.onNodeWithTag("private-note-editor-close").assertIsEnabled() }.isSuccess }
+            compose.onNodeWithTag("private-note-editor-close").performClick()
+            show("我的批注：Synthetic PDF note")
+            screenshot("joint-note")
+            compose.onNodeWithTag("private-notes-close").performClick()
+            clickWhenEnabled("下一页")
+            waitFor("PDF 第 2 页", contains = true)
+            compose.onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            screenshot("joint-page-two")
+            compose.waitUntil(timeoutMillis = 15_000) { runCatching { compose.onNodeWithTag("private-document-back").assertIsEnabled() }.isSuccess }
+            compose.onNodeWithTag("private-document-back").performClick()
+            show("答错了。")
+            // The immutable displayed choice survives the full-screen PDF dialog.
+            val returned = compose.onNodeWithTag("mainline-option-0").fetchSemanticsNode().config
+            assertEquals(original[SemanticsProperties.Selected], returned[SemanticsProperties.Selected])
+            assertTrue(returned[SemanticsProperties.Selected])
+            show(citation)
+            screenshot("joint-answer-return")
+            click(show("回看要点：Synthetic basics"))
+            show("我的一句话：Synthetic personal note")
+            click(show("跳过要点，直接做题"))
+            show("答错了。")
+        }
         if (!fault) show("我的一句话：Synthetic personal note")
         show("为什么不选：Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")

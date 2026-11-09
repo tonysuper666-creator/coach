@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import coach.design.tokens.CoachV7
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
@@ -97,12 +98,12 @@ internal fun HighlightStatus(state: HighlightState?, onRetry: () -> Unit, onClea
     when (state) {
         null -> {}
         HighlightState.Loading -> Text("正在定位原文位置…", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
-        is HighlightState.Shown -> Row(Modifier.padding(horizontal = 16.dp)) {
-            Text("已在页上标出原文位置。", Modifier.testTag("private-highlight-status"), style = MaterialTheme.typography.labelMedium)
+        is HighlightState.Shown -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("已在页上标出原文位置。", Modifier.weight(1f).testTag("private-highlight-status"), style = MaterialTheme.typography.labelMedium)
             TextButton(onClick = onClear, modifier = Modifier.testTag("private-highlight-clear")) { Text("取消标注") }
         }
-        is HighlightState.Unplaced -> Row(Modifier.padding(horizontal = 16.dp)) {
-            Text(state.message, Modifier.testTag("private-highlight-status"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+        is HighlightState.Unplaced -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(state.message, Modifier.weight(1f).testTag("private-highlight-status"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (state.retry) TextButton(onClick = onRetry, modifier = Modifier.testTag("private-highlight-retry")) { Text("重试") }
             TextButton(onClick = onClear, modifier = Modifier.testTag("private-highlight-clear")) { Text("关闭") }
         }

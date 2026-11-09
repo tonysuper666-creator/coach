@@ -346,6 +346,8 @@ class MainlineScreenTest {
 
     @Test fun pagePracticeShowsOnlyThePagesQuestionsAndReturns() = FakeMac(today, false).use { mac ->
         val c = controller(mac)
+        val original = buildJsonObject { put("mode", "quiz"); put("item", "S1"); put("choice", 0); put("quizScroll", 451) }
+        c.sync.saveMainlineState("C", original, "week:1")
         val view = CourseView(emptyList(), project(emptyList()))
         var closed = 0
         runComposeUiTest {
@@ -353,8 +355,10 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("question D1", substring = true).fetchSemanticsNodes().isNotEmpty() }
             onAllNodesWithText("question S1", substring = true).assertCountEquals(0)
             onAllNodesWithText("question B1", substring = true).assertCountEquals(0)
+            onNodeWithTag("mainline-option-2").performClick()
             onNodeWithText("← 回到阅读").performClick()
             assertEquals(1, closed)
+            assertEquals(original, c.sync.mainlineState("C", "week:1"), "page practice must preserve the underlying question, choice and scroll")
         }
     }
 
@@ -384,6 +388,8 @@ class MainlineScreenTest {
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-week-1").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("铺垫题", substring = true).fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").performClick()

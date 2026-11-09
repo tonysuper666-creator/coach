@@ -230,7 +230,7 @@ class ExamSourceIndexTest {
     }
 
     @Test fun manyPastPaperDocumentsNeverMakeTheSharedBudgetNegative() {
-        val many = List(100) { "Pelican $it drifts over quiet harbours while anchors rest below the pier." }
+        val many = List(162) { "Pelican $it drifts over quiet harbours while anchors rest below the pier." }
         val m = ExamMaterials.fromTexts(many, guidance, rulings(null), null)
         val parts = body(m.context(course, "Please teach discounting"))
         assertTrue(parts.papers.length <= 160 && parts.sum <= 700, "papers ${parts.papers.length}")

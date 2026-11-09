@@ -31,7 +31,7 @@ data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
-class MockReply(val body: JsonObject?, val error: String?)
+class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
 /** [weeks] 是课程大纲里已有知识点的周，自己贴题时从这里选；[unmatched] 是因为那一周还没有知识点而暂时练不了的题数。 */
@@ -63,11 +63,11 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
         val url = "$base/v1/courses/${course.encodeURLPathPart()}/$path"
         val response: HttpResponse = if (body == null) http.get(url) else http.post(url) { setBody(TextContent(body.toString(), ContentType.Application.Json)) }
         val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
-        if (response.status.isSuccess()) MockReply(parsed, null) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）")
+        if (response.status.isSuccess()) MockReply(parsed, null, parsed == null) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）", response.status.value in setOf(408, 429) || response.status.value >= 500)
     } catch (error: kotlinx.coroutines.CancellationException) {
         throw error
     } catch (error: Exception) {
-        MockReply(null, null)
+        MockReply(null, null, true)
     }
 
     /** 模拟考首页：可考的卷子、速刷题量、未交卷的考试、历次成绩。 */

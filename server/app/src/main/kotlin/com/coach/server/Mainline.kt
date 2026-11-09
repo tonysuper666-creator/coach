@@ -30,7 +30,8 @@ internal fun optionOrder(fingerprint: String, round: Int, size: Int): List<Int> 
     return (0 until size).shuffled(java.util.Random(seed))
 }
 
-internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>)
+internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>,
+    val notes: List<JsonObject>, val notesError: String?)
 
 private val tiers = listOf("setup", "detail", "bridge")
 
@@ -125,8 +126,17 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
                 MainlineFact(f.str("fact_id"), f.str("fact"), f.str("type"), f.str("source"), f.str("kp"))
             }
         }
-        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts)
+        val (notes, notesError) = loadMainlineNotes(factsFile.resolveSibling("W%02d-notes.json".format(week)), week, facts)
+        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts, notes, notesError)
     }
+
+    private fun notes(week: MainlineWeek, history: ChoiceHistory) = JsonArray(week.notes.map { section ->
+        val mastered = section.strings("fact_ids").all { fact ->
+            val linked = week.items.filter { fact in it.factIds }
+            linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }
+        }
+        JsonObject(section + ("mastered" to JsonPrimitive(mastered)))
+    })
 
     private fun round(events: List<Event>, item: MainlineItem) = events.count { it.type == "question_posed" && it.payload.str("fingerprint") == item.fingerprint }
 
@@ -155,10 +165,11 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val week = find(courseNames(events, course), number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
+            "notes" to notes(week, history), "notesError" to week.notesError,
             "items" to JsonArray(week.items.map { item ->
                 val layout = round(events, item)
                 val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()
-                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem,
+                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem, "factIds" to item.factIds,
                     "options" to order.map { item.unit.options[it] }, "layout" to if (shuffled) layout else null,
                     "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" })
             }))
@@ -240,7 +251,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed,
             "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
             "source" to item.source, "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
-            "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history))
+            "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history), "notes" to notes(week, history))
     }
 }
 

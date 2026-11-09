@@ -4,6 +4,9 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.coach.domain.flag
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -162,7 +165,9 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     // 模拟考整屏打开："" 是模拟考首页，其余是某一场考试的 id。
     var mock by remember { mutableStateOf<String?>(null) }
     var essayOpen by remember { mutableStateOf(false) }
-    var mainline by remember { mutableStateOf(false) }
+    var mainline by remember { mutableStateOf(c.sync.mainlineState(c.courseId).flag("open")) }
+    SideEffect { c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + ("open" to JsonPrimitive(mainline)))) }
+    var mainlineBridge by remember { mutableStateOf(false) }
     val actionScope = rememberCoroutineScope()
     val weekActions = remember(c) { WeekActions(c, actionScope) }
     val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; essayOpen = false; mainline = false; source = null; open = id to start }
@@ -230,7 +235,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             when (tab) {
                                 AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
                                 AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, onOpenMainline = { c.tutor.telemetry?.record("tap", "mainline"); mainline = true }, reminderSettings = settings) else CenterMessage("正在加载课程…")
+                                AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay, onOpenMainline = { week, direct ->
+                                    c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to (week?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull), "entry" to JsonPrimitive(if (direct) "quiz" else "notes"))))
+                                    c.tutor.telemetry?.record("tap", "mainline"); mainline = true
+                                }, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                 AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
                                 AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                             }
@@ -241,11 +249,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference, reviewMode) } }
                         val mockId = mock
                         if (mockId != null && current != null) {
-                            key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
+                            key(mockId) { MockScreen(c, current, onBack = { mock = null; if (mainlineBridge) { mainline = true; mainlineBridge = false } }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
                         } else if (essayOpen && current != null) {
-                            EssayScreen(c, current, onBack = { essayOpen = false })
+                            EssayScreen(c, current, onBack = { essayOpen = false; if (mainlineBridge) { mainline = true; mainlineBridge = false } })
                         } else if (mainline && current != null) {
-                            MainlineScreen(c, current, onBack = { mainline = false }, onOpenSteps = { mainline = false; mock = "" }, onOpenEssay = openEssay,
+                            MainlineScreen(c, current, onBack = { mainline = false; tab = AppTab.REVIEW }, onOpenSteps = { mainlineBridge = true; mainline = false; mock = "" }, onOpenEssay = { mainlineBridge = true; openEssay() },
                                 onReviewWeek = { week -> mainline = false; reviewWeek = week })
                         } else if (reviewWeek != null && current != null) {
                             WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })

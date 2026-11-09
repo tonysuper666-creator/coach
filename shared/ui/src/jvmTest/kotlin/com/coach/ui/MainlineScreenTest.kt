@@ -26,7 +26,7 @@ class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false) : AutoCloseable {
+    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0) : AutoCloseable {
         val answers = CopyOnWriteArrayList<JsonObject>()
         private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
@@ -62,9 +62,10 @@ class MainlineScreenTest {
                             "explanation":$explanation,"source":"Synthetic lecture 1","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
                             "mistakeWeek":${if (queued) 1 else "null"},"next":$next,"coverage":${cov(if (status == "mastered") 1 else 0, i + 1)}}""")
                     }
+                    path.endsWith("/mainline/1") && initialFailures-- > 0 -> reply(ex, """{"error":"Synthetic Mac temporarily unavailable"}""", 503)
                     path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
                         items.joinToString(",") { (id, tier) -> """{"id":"$id","tier":"$tier","stem":"Synthetic orchard question $id: which statement about the orchard holds?",
-                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED"}""" } + "]}")
+                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}]""" else "") + "}")
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
             }
@@ -98,21 +99,23 @@ class MainlineScreenTest {
                 onNodeWithText("知识点 3 · 有题 3 · 已掌握 0").assertIsDisplayed()
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("mainline-skip").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("铺垫题", substring = true).fetchSemanticsNodes().isNotEmpty() }
 
                 if (retryChoice != null) {
                     onNodeWithTag("mainline-option-$retryChoice").performClick()
                     onNodeWithTag(if (firstGuessed) "mainline-guess" else "mainline-submit").performClick()
-                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic response lost after commit").fetchSemanticsNodes().isNotEmpty() }
-                    onNodeWithTag("mainline-option-2").performClick()
-                    onNodeWithTag(if (firstGuessed) "mainline-submit" else "mainline-guess").performClick()
+                    waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic response lost after commit", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                    onNodeWithTag("mainline-submit").assertIsNotEnabled()
+                    onNodeWithTag("mainline-guess").assertIsNotEnabled()
                     waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
                     assertEquals(2, mac.answers.size)
                     assertEquals(mac.answers[0]["submissionId"], mac.answers[1]["submissionId"])
                     assertEquals(retryChoice, mac.answers[0].getValue("choice").jsonPrimitive.int)
-                    assertEquals(2, mac.answers[1].getValue("choice").jsonPrimitive.int)
+                    assertEquals(retryChoice, mac.answers[1].getValue("choice").jsonPrimitive.int)
                     assertEquals(firstGuessed, mac.answers[0].getValue("guessed").jsonPrimitive.boolean)
-                    assertEquals(!firstGuessed, mac.answers[1].getValue("guessed").jsonPrimitive.boolean)
+                    assertEquals(firstGuessed, mac.answers[1].getValue("guessed").jsonPrimitive.boolean)
                     onNodeWithTag("mainline-option-$retryChoice").assertIsSelected()
                     onNodeWithTag("mainline-option-2").assertIsNotSelected()
                     val wrongMark = hasText("✗") and hasAnyAncestor(hasTestTag("mainline-option-$retryChoice"))
@@ -165,6 +168,69 @@ class MainlineScreenTest {
         } finally { tutor.close(); driver.close() }
     }
 
+    @Test fun notesFilterAndExactAnsweredQuestionSurviveAnActualDatabaseReopen() = FakeMac(today, includeNotes = true, initialFailures = 1).use { mac ->
+        val file = File.createTempFile("mainline-resume-", ".sqlite")
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("No ledger network")
+            override suspend fun snapshot(course: String): Snapshot = error("No ledger network")
+            override suspend fun events(course: String, after: Long): EventsPage = error("No ledger network")
+            override suspend fun command(command: WireCommand): Receipt = error("No ledger network")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("No ledger network")
+        }
+        val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
+        fun controller(driver: JdbcSqliteDriver) = CoachController("C", SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
+            tutor, formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
+        val view = CourseView(emptyList(), project(emptyList()))
+        var driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
+        try {
+            ClientDatabase.Schema.create(driver)
+            var c = controller(driver)
+            var saved: JsonObject? = null
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("mainline-week-1").performClick()
+                // The first GET fails; retry must recover without another tap.
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic Mac temporarily unavailable").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("○ Synthetic bridge notes").performScrollTo().performClick()
+                onNodeWithTag("mainline-section-quiz").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("桥接题 · 第 1/1 题").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("mainline-option-1").performScrollTo().performClick()
+                onNodeWithTag("mainline-guess").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("答对了，但标了猜的：不算掌握。").performScrollTo().assertIsDisplayed()
+                saved = c.sync.mainlineState("C", "week:1")
+                assertEquals("B1", saved!!.str("item"))
+                assertEquals("W01-bridge", saved!!.str("filter"))
+                assertNotNull(saved!!["result"])
+            }
+            driver.close()
+            driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
+            c = controller(driver)
+            assertEquals(saved, c.sync.mainlineState("C", "week:1"))
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("桥接题 · 第 1/1 题").performScrollTo().assertIsDisplayed()
+                onNodeWithTag("mainline-option-1").assertIsSelected()
+                onNodeWithTag("mainline-return-section").performScrollTo().performClick()
+                onNodeWithText("Synthetic pears connect", substring = true).performScrollTo().assertIsDisplayed()
+                waitForIdle()
+                assertEquals("notes", c.sync.mainlineState("C", "week:1").str("mode"))
+                assertEquals("W01-bridge", c.sync.mainlineState("C", "week:1").str("section"))
+            }
+            driver.close()
+            driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
+            c = controller(driver)
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
+                onNodeWithTag("mainline-notes").performScrollTo().assertIsDisplayed()
+                onNodeWithText("Synthetic pears connect", substring = true).performScrollTo().assertIsDisplayed()
+            }
+        } finally { driver.close(); tutor.close(); file.delete() }
+    }
+
     private fun ComposeUiTest.capture(name: String) {
         val dir = File("build/screens").also { it.mkdirs() }
         ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
@@ -172,7 +238,7 @@ class MainlineScreenTest {
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
     @Test fun desktopWalksOneWeekWithExplanationsOnTheSamePage() = walk(1000, 800)
-    @Test fun lostWrongReplyMarksTheRecordedChoiceAfterChangingBothChoiceAndGuess() = walk(412, 915, 0, false)
-    @Test fun lostGuessedReplyKeepsTheRecordedGuessAfterAnUnguessedRetry() = walk(1000, 800, 1, true)
-    @Test fun lostCorrectReplyKeepsTheRecordedPassAfterAGuessedRetry() = walk(412, 915, 1, false)
+    @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)
+    @Test fun lostGuessedReplyAutomaticallyResendsRecordedGuess() = walk(1000, 800, 1, true)
+    @Test fun lostCorrectReplyAutomaticallyResendsRecordedPass() = walk(412, 915, 1, false)
 }

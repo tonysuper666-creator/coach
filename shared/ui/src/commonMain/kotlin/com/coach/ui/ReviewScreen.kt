@@ -14,10 +14,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.domain.*
+import kotlinx.serialization.json.*
 
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: (() -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     Column(Modifier.fillMaxSize()) {
@@ -29,16 +31,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
         OfflinePractice(c)
-        if (onOpenMainline != null) Surface(onClick = onOpenMainline, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).heightIn(min = 56.dp).testTag("open-mainline")) {
-            Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("选择题主线", style = MaterialTheme.typography.bodyLarge)
-                    Text("按周从铺垫题做到桥接题，答完立刻看讲解", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Text("›", style = MaterialTheme.typography.titleLarge)
-            }
-        }
+        if (onOpenMainline != null) MainlineEntry(c, onOpenMainline)
         if (onOpenMock != null) Surface(onClick = onOpenMock, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 56.dp).testTag("open-mock")) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -69,6 +62,47 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                     }
                 }
             }
+        }
+    }
+}
+
+/** Existing Review entry: one click to the current week's question, a separate reading route. */
+@Composable
+private fun MainlineEntry(c: CoachController, onOpen: (Int?, Boolean) -> Unit) {
+    var overview by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(c) {
+        val http = c.course ?: return@LaunchedEffect
+        do {
+            val reply = http.mainline()
+            error = reply.error
+            if (reply.body != null) {
+                overview = reply.body
+                c.sync.saveMainlineState(c.courseId, json("body" to reply.body), "home")
+                break
+            }
+            if (!reply.retryable) break
+            delay(1500)
+        } while (true)
+    }
+    val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().map { it.jsonObject }
+    val previous = (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull
+    val target = weeks.firstOrNull { it.num("week").toInt() == previous }
+        ?: weeks.firstOrNull { val cov = it["coverage"] as? JsonObject; cov != null && cov.num("factsMastered") < cov.num("facts") }
+        ?: weeks.firstOrNull()
+    val number = target?.num("week")?.toInt()
+    Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).testTag("open-mainline")) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text("选择题主线", style = MaterialTheme.typography.bodyLarge)
+            Text("按周从铺垫题做到桥接题，答完立刻看讲解", style = MaterialTheme.typography.labelMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { onOpen(number, true) }, enabled = number != null, modifier = Modifier.testTag("mainline-continue")) { Text(number?.let { "继续第 $it 周" } ?: "正在连接…") }
+                TextButton(onClick = { onOpen(number, false) }, enabled = number != null) { Text("看本周要点") }
+                TextButton(onClick = { onOpen(null, false) }) { Text("选其他周") }
+            }
+            if (number == null && error != null) Text("Mac 暂时不可用，正在自动重连…", color = MaterialTheme.colorScheme.error)
+            else if (overview != null && weeks.isEmpty()) Text("还没有生成选择题主线。")
         }
     }
 }

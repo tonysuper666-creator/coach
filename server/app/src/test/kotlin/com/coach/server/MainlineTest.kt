@@ -39,6 +39,42 @@ Synthetic facts.
 """.trimIndent()
 
 class MainlineTest {
+    @Test fun notesCoverFactsFilterQuestionsAndNeverMasterGuessesOrUnverifiedKeys() {
+        val dir = Files.createTempDirectory("mainline-notes")
+        try {
+            val library = library(dir.resolve("papers"))
+            val notesFile = dir.resolve("papers/mcq-mainline/W01-notes.json")
+            fun section(id: String, facts: List<String>) = json("section_id" to id, "title" to "Synthetic $id", "body" to "Pears grow here.",
+                "fact_ids" to facts, "sources" to listOf("Synthetic lecture 1"))
+            val sections = listOf(section("orchard", listOf("F1")), section("late-plums", listOf("F2")), section("imports", listOf("F3")))
+            fun write(ss: List<JsonObject>) = Files.writeString(notesFile, json("schema_version" to 1, "week" to 1, "sections" to JsonArray(ss)).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                assertTrue(mainline.week(store, "C1", 1).str("notesError").isNotBlank())
+                write(sections)
+                fun notes() = mainline.week(store, "C1", 1)["notes"]!!.jsonArray.map { it.jsonObject }
+                assertEquals(3, notes().size)
+                assertEquals(listOf("F1"), mainline.week(store,"C1",1)["items"]!!.jsonArray.first().jsonObject.strings("factIds"))
+                fun answer(id: String, guessed: Boolean, submission: String) = mainline.answer(store,"C1",1,
+                    json("itemId" to id,"choice" to 1,"guessed" to guessed,"submissionId" to submission))
+                answer("S1", true, "guess")
+                assertFalse(notes()[0].flag("mastered"))
+                answer("S1", false, "known")
+                assertTrue(notes()[0].flag("mastered"))
+                answer("D1", false, "detail")
+                answer("D2", false, "unverified")
+                assertFalse(notes()[1].flag("mastered"), "Every question linked to each fact must be verified and mastered")
+                write(sections.dropLast(1))
+                assertTrue(notes().isEmpty())
+                assertEquals(4, mainline.week(store,"C1",1)["items"]!!.jsonArray.size, "Bad notes leave all legacy questions available")
+                write(listOf(section("unknown", listOf("NOT-A-FACT"))))
+                assertTrue(notes().isEmpty())
+                write(sections.map { JsonObject(it + ("sources" to JsonArray(listOf(JsonPrimitive("Wrong source"))))) })
+                assertTrue(notes().isEmpty())
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun submissionCannotBeReusedForAnotherItemAcrossHttpAndRestart() = runBlocking<Unit> {
         for (shuffled in listOf(false, true)) {
             val dir = Files.createTempDirectory("mainline-retry-binding")

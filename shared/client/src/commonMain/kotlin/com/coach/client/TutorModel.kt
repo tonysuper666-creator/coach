@@ -159,7 +159,7 @@ class TutorModel(
 
     /** 学习者自己发出的一句话，立刻进线程；同时开始计首字。 */
     fun onSent(threadId: String, kind: String, learnerText: String?, clientMsgId: String? = null) = synchronized(lock) {
-        if(kind=="test") PoolTrace.begin(threadId)
+        if(kind=="test" || kind=="retry") PoolTrace.begin(threadId)
         pendingSend[threadId] = kind to TimeSource.Monotonic.markNow()
         mutateThread(threadId) {
             val key = clientMsgId?.let { "l:$it" } ?: "l:${items.size}:${wallClock()}"

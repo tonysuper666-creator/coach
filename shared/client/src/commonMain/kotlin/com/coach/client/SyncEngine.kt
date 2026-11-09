@@ -165,6 +165,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     }
 
     suspend fun syncOnce() = mutex.withLock {
+        PoolTrace.markActive("poll_lock_acquired")
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
         if(previousEpoch != hello.epoch) {
@@ -214,18 +215,22 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         pullCourses(hello.epoch)
         _connection.value = "online"
         _revision.value += 1
+        PoolTrace.markActive("poll_published")
     }
 
     /** Event pages carry their epoch. A push with no outbox work needs one read, not
      * hello + events. Full polling still refreshes backup watermarks and uploads commands. */
     private suspend fun syncHint() {
+        PoolTrace.markActive("hint_waiting")
         val caughtUp=mutex.withLock {
+            PoolTrace.markActive("hint_lock_acquired")
             val epoch=meta("epoch") ?: return@withLock false
             if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
             try { pullCourses(epoch) }
             catch(e: EpochChanged) { return@withLock false }
             _connection.value="online"
             _revision.value+=1
+            PoolTrace.markActive("hint_published")
             true
         }
         if(!caughtUp) syncOnce()
@@ -238,8 +243,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
+                PoolTrace.markActive("events_request_started")
                 val page = transport.events(course,cursor)
+                PoolTrace.markActive("events_request_completed")
                 if(page.epoch != epoch) throw EpochChanged()
+                PoolTrace.markActive("events_count_${page.events.size}")
                 val quizThreads=if(PoolTrace.enabled) page.events.filter { it.type=="question_posed" }.mapNotNull { it.threadId }.distinct() else emptyList()
                 quizThreads.forEach { PoolTrace.mark(it,"events_read") }
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
@@ -249,7 +257,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             // 不认识的事实类型要靠服务端投影；整份快照只在本地副本前进后重下，不是每次轮询都下。
             val replicaSeq=q.replicaSeq(course).executeAsOne()
             if(projection(course).requiresServerSnapshot && meta("serverProjectionSeq:$course") != "$epoch:$replicaSeq") {
+                PoolTrace.markActive("snapshot_request_started")
                 val snapshot=transport.snapshot(course)
+                PoolTrace.markActive("snapshot_request_completed")
                 if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
                     q.putMeta("serverProjection:$course",LedgerJson.encodeToString(snapshot.projection))
@@ -269,7 +279,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             for(hint in hints) {
                 try { syncHint() }
                 catch(e: CancellationException) { throw e }
-                catch(e: Exception) { _connection.value="offline" }
+                catch(e: Exception) { PoolTrace.markActive("hint_error_${e::class.simpleName}");_connection.value="offline" }
             }
         }
         // Polling is a recovery path for missed WS frames; both paths use the same serialized sync transaction.
@@ -280,9 +290,9 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             val backoff=ReconnectBackoff()
             while(isActive) {
                 var opened: TimeMark?=null
-                try { transport.watch(onOpen={ opened=TimeSource.Monotonic.markNow() }) { hints.trySend(Unit) } }
+                try { transport.watch(onOpen={ opened=TimeSource.Monotonic.markNow();PoolTrace.markActive("watch_open") }) { hints.trySend(Unit) };PoolTrace.markActive("watch_closed") }
                 catch(e: CancellationException) { throw e }
-                catch(e: Exception) { _connection.value="offline" }
+                catch(e: Exception) { PoolTrace.markActive("watch_error_${e::class.simpleName}");_connection.value="offline" }
                 delay(backoff.next(opened?.elapsedNow()?.inWholeMilliseconds ?: 0))
             }
         } finally { hints.close();pushed.cancelAndJoin();polling.cancelAndJoin() }

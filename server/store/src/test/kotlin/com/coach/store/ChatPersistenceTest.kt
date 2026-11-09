@@ -9,6 +9,25 @@ import java.sql.DriverManager
 import kotlin.test.*
 
 class ChatPersistenceTest {
+    @Test fun reviewThreadCoexistsWithTheUniqueLearningBindingAcrossRestart() {
+        val directory = Files.createTempDirectory("chat-review-binding-")
+        try {
+            LedgerStore(directory).use { store ->
+                store.bindTutorThread("course", "kp:kp-1", "kp-1")
+                store.bindReviewThread("course", "mistakes:kp-1", "kp-1")
+                store.bindReviewThread("course", "mistakes:kp-1", "kp-1")
+                assertFailsWith<IllegalArgumentException> { store.bindTutorThread("course", "other", "kp-1") }
+                assertFailsWith<IllegalArgumentException> { store.bindReviewThread("course", "mistakes:kp-1", "other") }
+                assertFailsWith<IllegalArgumentException> { store.bindReviewThread("other", "mistakes:kp-1", "kp-1") }
+            }
+            LedgerStore(directory).use { store ->
+                store.bindTutorThread("course", "kp:kp-1", "kp-1")
+                store.bindReviewThread("course", "mistakes:kp-1", "kp-1")
+                assertFailsWith<IllegalArgumentException> { store.bindTutorThread("course", "other", "kp-1") }
+            }
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
     @Test fun kpCannotBeReboundToAnotherThreadId() {
         val directory = Files.createTempDirectory("chat-kp-binding-")
         try {

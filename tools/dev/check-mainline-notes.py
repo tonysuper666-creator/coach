@@ -217,12 +217,25 @@ def main():
 
             def instrument(mode, folder):
                 folder.mkdir(parents=True, exist_ok=True)
+                android('logcat', '-c', check=False)
                 result = android('shell', 'am', 'instrument', '-w', '-e', 'class', 'com.coach.android.MainlineNotesSmoke',
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
                     f'{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner', timeout=300, check=False)
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
+                # App-side diagnostics for a UI failure: connection state transitions and mainline fetches.
+                if result.returncode != 0 or b'OK (1 test)' not in result.stdout:
+                    pid = android('shell', 'pidof', PACKAGE, check=False).stdout.decode().strip().split()
+                    log = android('logcat', '-d', '-v', 'time', *(['--pid', pid[0]] if pid else []), check=False)
+                    (folder / f'{mode}-logcat.txt').write_text(log.stdout.decode(errors='replace').replace(token, '<redacted>'))
+                    shot = android('exec-out', 'screencap', '-p', check=False)
+                    if shot.stdout.startswith(b'\x89PNG'):
+                        (folder / f'{mode}-failure.png').write_bytes(shot.stdout)
+                    android('shell', 'uiautomator', 'dump', '/sdcard/ton1394-fail.xml', check=False)
+                    dump = android('shell', 'cat', '/sdcard/ton1394-fail.xml', check=False)
+                    (folder / f'{mode}-failure-tree.xml').write_bytes(dump.stdout)
+                    android('shell', 'rm', '-f', '/sdcard/ton1394-fail.xml', check=False)
                 (out / 'http-diagnostics.json').write_text(json.dumps(diagnostics, indent=2))
-                for name in ('entry', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
+                for name in ('entry', 'wait-fail', 'click-fail', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
                              'fault-waiting', 'resumed-quiz', 'reading-before-restart', 'resumed-notes'):
                     image = android('exec-out', 'run-as', PACKAGE, 'cat', f'cache/mainline-{name}.png', check=False)
                     if image.stdout.startswith(b'\x89PNG'):

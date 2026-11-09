@@ -74,11 +74,14 @@ private fun MainlineEntry(c: CoachController, onOpen: (Int?, Boolean) -> Unit) {
     LaunchedEffect(c) {
         val http = c.course ?: return@LaunchedEffect
         do {
-            val reply = http.mainline()
+            // The course endpoint is a blocking call: keep it off the composition dispatcher, or the frame that
+            // has to show the answer waits for the socket and the entry stays on 正在连接… while it does.
+            val reply = withContext(Dispatchers.IO) { http.mainline() }
             error = reply.error
-            if (reply.body != null) {
-                overview = reply.body
-                c.sync.saveMainlineState(c.courseId, json("body" to reply.body), "home")
+            val body = reply.body
+            if (body != null) {
+                overview = body
+                c.sync.saveMainlineState(c.courseId, json("body" to body), "home")
                 break
             }
             if (!reply.retryable) break
@@ -97,8 +100,14 @@ private fun MainlineEntry(c: CoachController, onOpen: (Int?, Boolean) -> Unit) {
             Text("选择题主线", style = MaterialTheme.typography.bodyLarge)
             Text("按周从铺垫题做到桥接题，答完立刻看讲解", style = MaterialTheme.typography.labelMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onOpen(number, true) }, enabled = number != null, modifier = Modifier.testTag("mainline-continue")) { Text(number?.let { "继续第 $it 周" } ?: "正在连接…") }
-                TextButton(onClick = { onOpen(number, false) }, enabled = number != null) { Text("看本周要点") }
+                // Swap the placeholder for the real entry instead of renaming one button in place: the label of the
+                // week is then carried by a button that already exists, so the screen reader hears the current week.
+                if (number != null) {
+                    Button(onClick = { onOpen(number, true) }, modifier = Modifier.testTag("mainline-continue")) { Text("继续第 $number 周") }
+                    TextButton(onClick = { onOpen(number, false) }) { Text("看本周要点") }
+                } else {
+                    Text("正在连接…", Modifier.padding(vertical = 14.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 TextButton(onClick = { onOpen(null, false) }) { Text("选其他周") }
             }
             if (number == null && error != null) Text("Mac 暂时不可用，正在自动重连…", color = MaterialTheme.colorScheme.error)

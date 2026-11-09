@@ -16,9 +16,11 @@ import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.MockReply
 import com.coach.domain.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlin.random.Random
 
@@ -57,7 +59,8 @@ private fun Header(title: String, back: String, onBack: () -> Unit) {
 private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Unit, onOpen: (Int, Boolean) -> Unit) {
     val revision by c.sync.revision.collectAsState()
     val reply by produceState<MockReply?>(null, revision) {
-        do { val r = http.mainline(); value = r; if (!r.retryable) break; delay(1500) } while (true)
+        // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
+        do { val r = withContext(Dispatchers.IO) { http.mainline() }; value = r; if (!r.retryable) break; delay(1500) } while (true)
     }
     Header("选择题主线", "← 复习", onBack)
     val body = reply?.body
@@ -119,7 +122,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var retry by remember { mutableStateOf(0) }
     LaunchedEffect(retry) {
         if (body == null) do {
-            val r = http.mainlineWeek(number)
+            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
             error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
             retryable = r.retryable
             if (r.body != null) { body = r.body; save("body" to r.body!!); break }
@@ -167,8 +170,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     LaunchedEffect(pending, retry) {
         val wire = pending ?: return@LaunchedEffect
         do {
-            val r = http.answerMainline(number, wire.str("itemId"), wire.num("choice").toInt(), wire.flag("guessed"), wire.str("submissionId"),
-                (wire["layout"] as? JsonPrimitive)?.intOrNull)
+            val r = withContext(Dispatchers.IO) {
+                http.answerMainline(number, wire.str("itemId"), wire.num("choice").toInt(), wire.flag("guessed"), wire.str("submissionId"),
+                    (wire["layout"] as? JsonPrimitive)?.intOrNull)
+            }
             val b = r.body
             if (b != null) {
                 result = b; pending = null; error = null

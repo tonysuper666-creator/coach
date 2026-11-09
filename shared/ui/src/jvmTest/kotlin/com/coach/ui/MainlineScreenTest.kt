@@ -173,6 +173,42 @@ class MainlineScreenTest {
         } finally { tutor.close(); driver.close() }
     }
 
+    /**
+     * 复习页的主线入口：课程回答一到，入口就要显示当前周并能点进去。设备烟测在像素已经画出「继续第 1 周」时
+     * 读到的仍是「正在连接…」，所以这个标签必须来自回答到达后才出现的节点，而不是把一个禁用按钮原地改名。
+     */
+    @Test fun reviewEntryShowsTheCurrentWeekOnceTheCourseAnswers() = FakeMac(today).use { mac ->
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("No ledger network in this test")
+            override suspend fun snapshot(course: String): Snapshot = error("No network")
+            override suspend fun events(course: String, after: Long): EventsPage = error("No network")
+            override suspend fun command(command: WireCommand): Receipt = error("No network")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("No network")
+        }
+        val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
+        val c = CoachController("C", SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
+            tutor, formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
+        val view = CourseView(emptyList(), project(emptyList()))
+        var opened: Pair<Int?, Boolean>? = null
+        try {
+            runComposeUiTest {
+                setContent {
+                    CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 900.dp)) {
+                        ReviewScreen(c, view, { _, _ -> }, {}, onOpenMainline = { number, start -> opened = number to start })
+                    } } }
+                }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("继续第 1 周").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("正在连接…").assertDoesNotExist()
+                onNodeWithTag("mainline-continue").assertIsEnabled().performClick()
+                assertEquals(1 to true, opened)
+                onNodeWithText("看本周要点").assertExists()
+                capture("review-mainline-entry")
+            }
+        } finally { tutor.close(); driver.close() }
+    }
+
     @Test fun notesFilterAndExactAnsweredQuestionSurviveAnActualDatabaseReopen() = FakeMac(today, includeNotes = true, initialFailures = 1).use { mac ->
         val file = File.createTempFile("mainline-resume-", ".sqlite")
         val transport = object : LedgerTransport {

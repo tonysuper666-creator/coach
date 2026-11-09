@@ -50,20 +50,92 @@ class MainlineNotesSmoke {
             }
             return walk(ui.rootInActiveWindow)
         }
+        // What the accessibility tree exposes right now, with the enabled flag that decides whether a tap can land.
+        fun snapshot(): String {
+            val seen = mutableListOf<String>()
+            find { node -> node.text?.toString()?.let { seen += if (node.isEnabled) it else "$it(disabled)" }; false }
+            return seen.joinToString(" | ")
+        }
+        // When the tree disagrees with the pixels, the text list alone cannot say whether the row is absent or just
+        // unnamed. Keep class, bounds, clickable and visibility for every node so the report settles it.
+        fun outline(): String {
+            val rows = mutableListOf<String>()
+            find { node ->
+                val text = node.text?.toString()
+                val description = node.contentDescription?.toString()
+                if (text != null || description != null || node.isClickable) {
+                    val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+                    rows += buildString {
+                        append(node.className?.toString()?.substringAfterLast('.') ?: "node")
+                        if (text != null) append(" text=").append(text)
+                        if (description != null) append(" desc=").append(description)
+                        if (node.isClickable) append(" clickable")
+                        if (!node.isVisibleToUser) append(" hidden")
+                        append(' ').append(bounds)
+                    }
+                }
+                false
+            }
+            return rows.joinToString("\n")
+        }
+        fun fail(text: String): Nothing {
+            // Keep the pixels of the frame the tree disagreed with; the activity is torn down right after this throws.
+            runCatching {
+                ui.takeScreenshot()?.let { bitmap ->
+                    java.io.File(context.cacheDir, "mainline-wait-fail.png").outputStream().use {
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    bitmap.recycle()
+                }
+            }
+            throw AssertionError("Missing synthetic mainline UI: $text; on screen: ${snapshot()}\n${outline()}")
+        }
         fun waitFor(text: String, contains: Boolean = false): AccessibilityNodeInfo {
             val end = SystemClock.elapsedRealtime() + 30_000
             while (SystemClock.elapsedRealtime() < end) {
                 find { if (contains) text in it.text?.toString().orEmpty() || text in it.contentDescription?.toString().orEmpty() else it.text?.toString() == text || it.contentDescription?.toString() == text }?.let { return it }
-                Thread.sleep(50)
+                Thread.sleep(150)
             }
-            val seen = mutableListOf<String>()
-            find { node -> node.text?.toString()?.let { seen += it }; false }
-            throw AssertionError("Missing synthetic mainline UI: $text; on screen: ${seen.joinToString(" | ")}")
+            fail(text)
+        }
+        // Every read crosses Binder into the app's main thread, where it also walks the whole tree. Reading 20 times a
+        // second starves the snapshot observer that publishes the next semantics, so a freshly inserted row is painted
+        // while the accessibility mirror keeps listing the frame from before it existed. Give the main thread room.
+        fun settleFor(text: String): AccessibilityNodeInfo? {
+            repeat(24) {
+                Thread.sleep(250)
+                find { it.text?.toString() == text || it.contentDescription?.toString() == text }?.let { return it }
+            }
+            return null
         }
         fun clickable(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
-            var target = node
-            while (!target.isClickable) target = target.parent ?: throw AssertionError("No clickable ancestor")
-            return target
+            // A tab or a row can be remade between finding a node and walking up to its clickable ancestor, which
+            // leaves the remembered parent chain pointing at removed semantics ids: refresh() on that dead node never
+            // repairs it. Re-read the same text from the current tree on every attempt instead.
+            val text = node.text?.toString()
+            val description = node.contentDescription?.toString()
+            fun candidate(): AccessibilityNodeInfo? {
+                val current = find { n ->
+                    if (text != null) n.text?.toString() == text
+                    else description != null && n.contentDescription?.toString() == description
+                } ?: node
+                var target: AccessibilityNodeInfo? = current
+                while (target != null && !target.isClickable) target = target.parent
+                return target
+            }
+            repeat(20) {
+                candidate()?.let { return it }
+                Thread.sleep(50)
+            }
+            runCatching {
+                ui.takeScreenshot()?.let { bitmap ->
+                    java.io.File(context.cacheDir, "mainline-click-fail.png").outputStream().use {
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    bitmap.recycle()
+                }
+            }
+            throw AssertionError("No clickable ancestor: ${text ?: description}; on screen: ${snapshot()}")
         }
         fun click(node: AccessibilityNodeInfo) {
             val target = clickable(node)
@@ -109,11 +181,15 @@ class MainlineNotesSmoke {
         }
         fun selectPassage() {
             val text = show("本节正文，可选择文字")
+            // The reader carries ACTION_SET_SELECTION on the very node that owns the passage's contentDescription, so
+            // the platform can select the passage without first opening a text-input session on the read-only field.
             assertTrue("Real text selection must be accessible", text.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
                 putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
                 putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 9)
             }))
             instrumentation.waitForIdleSync()
+            // Fail where the selection is lost, with the frame, instead of thirty seconds later at the annotation button.
+            settleFor("选中文本") ?: fail("选中文本")
         }
         val samples = JSONArray()
         fun answer(option: String, guessed: Boolean, outcome: String, shot: String) {

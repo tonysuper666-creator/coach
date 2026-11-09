@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setSelection
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -142,14 +143,33 @@ internal fun WeeklyReader(
                             if (formatted && !selectOriginal) {
                                 // Keep existing Markdown/math rendering; selections use the exact original offsets.
                                 Markdown(text, true, "reader:${section.str("section_id")}:${section.str("content_version")}", c.math)
-                            } else BasicTextField(value = TextFieldValue(annotated, selected), onValueChange = {
-                                // Focus loss can collapse the field before a selection action receives its click.
-                                // Keep the chosen range until the user acts or explicitly dismisses it.
-                                if (!it.selection.collapsed) selected = it.selection
-                            },
-                                readOnly = true, modifier = Modifier.fillMaxWidth().testTag("reader-text").semantics { contentDescription = "本节正文，可选择文字" },
-                                textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Serif, fontSize = 20.sp,
-                                    lineHeight = 32.sp, color = MaterialTheme.colorScheme.onSurface))
+                            } else {
+                                // Android resolves ACTION_SET_SELECTION against the node it reaches by
+                                // contentDescription and reads that node's own (unmerged) semantics. The field's
+                                // SetSelection action sits on the inner text node, so the node a screen reader lands
+                                // on reported the selection as changed while nothing got selected. Carry the action
+                                // on that outer node and map the requested range onto this reader's own selection.
+                                val bodyLength = text.length
+                                Box(Modifier.fillMaxWidth().testTag("reader-text").semantics {
+                                    contentDescription = "本节正文，可选择文字"
+                                    setSelection { start, end, _ ->
+                                        if (start < 0 || end < 0 || start > bodyLength || end > bodyLength) false
+                                        else {
+                                            selected = TextRange(minOf(start, end), maxOf(start, end))
+                                            true
+                                        }
+                                    }
+                                }) {
+                                    BasicTextField(value = TextFieldValue(annotated, selected), onValueChange = {
+                                        // Focus loss can collapse the field before a selection action receives its click.
+                                        // Keep the chosen range until the user acts or explicitly dismisses it.
+                                        if (!it.selection.collapsed) selected = it.selection
+                                    },
+                                        readOnly = true, modifier = Modifier.fillMaxWidth(),
+                                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Serif, fontSize = 20.sp,
+                                            lineHeight = 32.sp, color = MaterialTheme.colorScheme.onSurface))
+                                }
+                            }
                             if (!selected.collapsed) {
                                 Text("选中文本", style = MaterialTheme.typography.labelMedium)
                                 Row(Modifier.horizontalScroll(rememberScrollState())) {

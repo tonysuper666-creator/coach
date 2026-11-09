@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var connection: ConnectionModel
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var address = ""
     @State private var code = ""
 
@@ -21,7 +22,7 @@ struct ContentView: View {
                         realtimeStatus
                         LearningView(connection: connection)
                     case .unavailable, .revoked:
-                        Text("无法连接").font(Appearance.heading)
+                        Text("无法连接").font(Appearance.serif(.title2, size: 22, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
                         if connection.state == .unavailable {
                             Button("重试") { Task { await connection.reconnect() } }
                                 .disabled(connection.busy)
@@ -38,7 +39,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Appearance.paper.ignoresSafeArea())
             .foregroundStyle(Appearance.ink)
-            .font(Appearance.font)
+            .font(Appearance.serif(.body, size: 17, dynamicTypeSize: dynamicTypeSize))
             .tint(Appearance.ink)
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -67,13 +68,13 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: CoachV7.Space.s6) {
             VStack(alignment: .leading, spacing: CoachV7.Space.s3) {
                 Text("开始学习").font(.subheadline).foregroundStyle(Appearance.secondary)
-                Text("连接你的 Mac").font(Appearance.title)
+                Text("连接你的 Mac").font(Appearance.serif(.title1, size: 28, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
                 Text("在 Mac 上获取配对码，并填写 Tailscale 地址与端口。")
                     .foregroundStyle(Appearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
-                Text("配对设备").font(Appearance.heading)
+                Text("配对设备").font(Appearance.serif(.title2, size: 22, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
                 TextField("http://地址:端口", text: $address)
                     .textContentType(.URL).keyboardType(.URL)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()

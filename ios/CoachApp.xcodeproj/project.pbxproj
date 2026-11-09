@@ -7,8 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A14110000000000000000001 /* CoachV7.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000003 /* CoachV7.swift */; };
-		A14110000000000000000002 /* CoachColor+Hex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000004 /* CoachColor+Hex.swift */; };
+		0826476EED8F045EB641377D /* literata_OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 93A1AEFBDA211A6C6FA7D0E8 /* literata_OFL.txt */; };
+		1C899A92E084DCBC44AC2443 /* NotoSerifSCwght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D6F8C92800B95455150ECE3F /* NotoSerifSCwght.ttf */; };
 		35D5C13A16A83B987893CF97 /* Learning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E2890D923AC0A46AB3BCEB /* Learning.swift */; };
 		3AAA8A2AD397A1695FEBB577 /* CoachApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3E42771824AAAB60DEAE54 /* CoachApp.swift */; };
 		3D88815FD6ACCC8CBBF021FB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9CBE383152773C7ECBF87E11 /* Foundation.framework */; };
@@ -16,9 +16,13 @@
 		7B981169BCAF9B990109C7A3 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A524CF59AB2B8F8627D30FF /* CredentialStore.swift */; };
 		9200EAD73892D68AB77CA019 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCF88DC003C6B83110C563D5 /* Pairing.swift */; };
 		9BD99C308C66F49618DBA8F6 /* Appearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67438094CBC276A427AEA822 /* Appearance.swift */; };
+		A14110000000000000000001 /* CoachV7.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000003 /* CoachV7.swift */; };
+		A14110000000000000000002 /* CoachColor+Hex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000004 /* CoachColor+Hex.swift */; };
+		A9CBDFE6AD9F0809FA65BA44 /* Literataopsz-wght.ttf in Resources */ = {isa = PBXBuildFile; fileRef = E92284BD95252E0AF2182B53 /* Literataopsz-wght.ttf */; };
 		B829034815E958976FBF66BD /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48B84D7EF27575125B5870DC /* ContentView.swift */; };
 		C7E5E28B4AC19113771B661B /* RealConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 964F92EB522EBE423ED3BA17 /* RealConnectionTests.swift */; };
 		D3B57B7EFF782EB15A4ACA4F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9CBE383152773C7ECBF87E11 /* Foundation.framework */; };
+		D96B23600580BB87044F6AB7 /* notoserifsc_OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 63CAB49CEE3C96243F33610D /* notoserifsc_OFL.txt */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -32,20 +36,24 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		A14110000000000000000003 /* CoachV7.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachV7.swift; sourceTree = "<group>"; };
-		A14110000000000000000004 /* CoachColor+Hex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CoachColor+Hex.swift"; sourceTree = "<group>"; };
 		0848696FC830180EBB2049C7 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		15DD6E57E9AFA2D7ADCB482C /* CoachAppIntegrationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CoachAppIntegrationTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		48B84D7EF27575125B5870DC /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5A524CF59AB2B8F8627D30FF /* CredentialStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		63CAB49CEE3C96243F33610D /* notoserifsc_OFL.txt */ = {isa = PBXFileReference; includeInIndex = 1; name = notoserifsc_OFL.txt; path = "../docs/ios/font-licenses/notoserifsc_OFL.txt"; sourceTree = "<group>"; };
 		67438094CBC276A427AEA822 /* Appearance.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Appearance.swift; sourceTree = "<group>"; };
+		93A1AEFBDA211A6C6FA7D0E8 /* literata_OFL.txt */ = {isa = PBXFileReference; includeInIndex = 1; name = literata_OFL.txt; path = "../docs/ios/font-licenses/literata_OFL.txt"; sourceTree = "<group>"; };
 		95E2890D923AC0A46AB3BCEB /* Learning.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Learning.swift; sourceTree = "<group>"; };
 		964F92EB522EBE423ED3BA17 /* RealConnectionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RealConnectionTests.swift; sourceTree = "<group>"; };
 		9CBE383152773C7ECBF87E11 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		A14110000000000000000003 /* CoachV7.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachV7.swift; sourceTree = "<group>"; };
+		A14110000000000000000004 /* CoachColor+Hex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CoachColor+Hex.swift"; sourceTree = "<group>"; };
 		A5C8D52DA135553A641A41ED /* CoachApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CoachApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF3E42771824AAAB60DEAE54 /* CoachApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CoachApp.swift; sourceTree = "<group>"; };
 		BCF88DC003C6B83110C563D5 /* Pairing.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Pairing.swift; sourceTree = "<group>"; };
+		D6F8C92800B95455150ECE3F /* NotoSerifSCwght.ttf */ = {isa = PBXFileReference; includeInIndex = 1; name = NotoSerifSCwght.ttf; path = CoachApp/Fonts/NotoSerifSCwght.ttf; sourceTree = "<group>"; };
 		D95A84F53881855178F20203 /* ConnectionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ConnectionModel.swift; sourceTree = "<group>"; };
+		E92284BD95252E0AF2182B53 /* Literataopsz-wght.ttf */ = {isa = PBXFileReference; includeInIndex = 1; name = "Literataopsz-wght.ttf"; path = "CoachApp/Fonts/Literataopsz-wght.ttf"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -126,6 +134,10 @@
 				0B84754F43FAD337A72DAB65 /* CoachApp */,
 				F881168B5CF21A749F24EA0B /* CoachConnection */,
 				BC5E1C51ECA4FE07F7F97A5C /* CoachAppIntegrationTests */,
+				E92284BD95252E0AF2182B53 /* Literataopsz-wght.ttf */,
+				D6F8C92800B95455150ECE3F /* NotoSerifSCwght.ttf */,
+				93A1AEFBDA211A6C6FA7D0E8 /* literata_OFL.txt */,
+				63CAB49CEE3C96243F33610D /* notoserifsc_OFL.txt */,
 			);
 			sourceTree = "<group>";
 		};
@@ -212,6 +224,10 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A9CBDFE6AD9F0809FA65BA44 /* Literataopsz-wght.ttf in Resources */,
+				1C899A92E084DCBC44AC2443 /* NotoSerifSCwght.ttf in Resources */,
+				0826476EED8F045EB641377D /* literata_OFL.txt in Resources */,
+				D96B23600580BB87044F6AB7 /* notoserifsc_OFL.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

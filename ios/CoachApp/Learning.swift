@@ -227,6 +227,7 @@ final class LearningModel: ObservableObject {
 }
 
 struct LearningView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ObservedObject var connection: ConnectionModel
     @StateObject private var model: LearningModel
     @State private var selections: [String: Int] = [:]
@@ -237,7 +238,7 @@ struct LearningView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
-            Text("接着学习").font(Appearance.title)
+            Text("接着学习").font(Appearance.serif(.title1, size: 28, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
             Text("输入课程标识，打开已有练习。").foregroundStyle(Appearance.secondary)
             TextField("课程标识", text: $model.course).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(model.pending != nil)
                 .accessibilityIdentifier("courseID")
@@ -251,7 +252,7 @@ struct LearningView: View {
                 Button(week.title) { Task { await model.openWeek(week.week) } }.disabled(model.busy).accessibilityIdentifier("week-\(week.week)")
             }
             if let week = model.week {
-                Text(week.title).font(Appearance.heading)
+                Text(week.title).font(Appearance.serif(.title2, size: 22, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
                 ForEach(week.items) { item in
                     VStack(alignment: .leading, spacing: CoachV7.Space.s3) {
                         Text(item.stem).font(.system(.headline, design: .serif))

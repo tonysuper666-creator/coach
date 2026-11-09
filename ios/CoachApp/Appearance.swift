@@ -21,9 +21,35 @@ enum Appearance {
     static let line = adaptive(CoachV7.Light.line, CoachV7.Dark.line)
     static let accent = adaptive(CoachV7.Light.zhu, CoachV7.Dark.zhu)
     static let pine = adaptive(CoachV7.Light.pine, CoachV7.Dark.pine)
-    static let font = Font.system(.body, design: .serif)
-    static let title = Font.system(.title, design: .serif).weight(.semibold)
-    static let heading = Font.system(.title2, design: .serif).weight(.semibold)
+    // Font files report these PostScript names; they differ from their filenames.
+    // Supplying a cascade keeps Chinese in Noto Serif while Latin uses Literata.
+    static func serif(_ style: UIFont.TextStyle, size: CGFloat, weight: UIFont.Weight = .regular,
+                      dynamicTypeSize: DynamicTypeSize) -> Font {
+        let fallback = UIFontDescriptor(name: "NotoSerifSC-ExtraLight", size: size)
+        let descriptor = UIFontDescriptor(name: "Literata-Regular", size: size).addingAttributes([
+            .cascadeList: [fallback],
+            .traits: [UIFontDescriptor.TraitKey.weight: weight.rawValue]
+        ])
+        let base = UIFont(descriptor: descriptor, size: size)
+        let category: UIContentSizeCategory
+        switch dynamicTypeSize {
+        case .xSmall: category = .extraSmall
+        case .small: category = .small
+        case .medium: category = .medium
+        case .large: category = .large
+        case .xLarge: category = .extraLarge
+        case .xxLarge: category = .extraExtraLarge
+        case .xxxLarge: category = .extraExtraExtraLarge
+        case .accessibility1: category = .accessibilityMedium
+        case .accessibility2: category = .accessibilityLarge
+        case .accessibility3: category = .accessibilityExtraLarge
+        case .accessibility4: category = .accessibilityExtraExtraLarge
+        case .accessibility5: category = .accessibilityExtraExtraExtraLarge
+        @unknown default: category = .large
+        }
+        let traits = UITraitCollection(preferredContentSizeCategory: category)
+        return Font(UIFontMetrics(forTextStyle: style).scaledFont(for: base, compatibleWith: traits))
+    }
 }
 
 struct V7Card: ViewModifier {

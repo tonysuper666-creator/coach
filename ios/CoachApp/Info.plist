@@ -8,6 +8,10 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1</string>
     <key>CFBundleVersion</key><string>1</string>
+    <key>UIAppFonts</key><array>
+        <string>Literataopsz-wght.ttf</string>
+        <string>NotoSerifSCwght.ttf</string>
+    </array>
     <key>UILaunchScreen</key><dict/>
     <key>NSAppTransportSecurity</key><dict>
         <key>NSExceptionDomains</key><dict>

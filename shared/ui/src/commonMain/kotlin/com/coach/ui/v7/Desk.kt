@@ -155,7 +155,7 @@ fun Desk(
                                 }
                             }
                         }
-                        if (!focused) Text(if (inner && !marginCollapsed) "收页边" else "页边",
+                        if (!focused) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
                             Modifier.clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         Text(if (focused) "退出专心读" else "专心读",
                             Modifier.clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)

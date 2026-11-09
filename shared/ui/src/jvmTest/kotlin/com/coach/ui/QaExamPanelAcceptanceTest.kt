@@ -113,7 +113,7 @@ class QaExamPanelAcceptanceTest {
                 setContent { CoachTheme(false) {
                     ExamPanelCard(c, v, ExamFocus(listOf(WeekFocus(1, 0.0))), { _, _ -> }, {})
                 } }
-                onNodeWithText("各周都已稳固，没有要补的。").assertDoesNotExist()
+                onNodeWithText("各周都稳了，没有要补的。").assertDoesNotExist()
             }
         } finally { tutor.close(); queue.cancel() }
     }

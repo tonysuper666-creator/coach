@@ -60,6 +60,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val orphans = mutableListOf<String>()
     val unsupported = mutableSetOf<String>()
     val weights = mutableMapOf<String, Int>()
+    var weightsScope = ""
     var current: String? = null
     var studyScope: StudyScope? = null
     var previousTime: Long? = null
@@ -348,7 +349,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                 if (revisit.containsKey(p.str("kpId"))) revisit[p.str("kpId")] = until
             }
             // exam_set only changes the overlay; normal intervals must survive postponement/removal.
-            "exam_weights_set" -> { weights.clear(); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
+            "exam_weights_set" -> { weights.clear(); weightsScope = p.str("scope"); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
             "note_saved" -> updateJournal(day) { it.copy(notes = it.notes + 1) }
             "journal_edited" -> updateJournal(p.num("day",day)) { it.copy(rev = p.num("rev"), manual = p.str("content", it.manual)) }
             "journal_summarized" -> updateJournal(p.num("day",day)) { it.copy(summaryFromSeq = p.num("fromSeq"), summary = p.str("summary"), summaryModel = p.str("model").ifBlank { null }, summaryNotice = p.str("notice").ifBlank { null }) }
@@ -370,7 +371,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
         revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
-        coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),
+        coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum(), weightsScope),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())
 }
 

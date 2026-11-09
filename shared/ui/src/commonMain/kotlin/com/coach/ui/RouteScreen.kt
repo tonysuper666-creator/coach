@@ -55,16 +55,16 @@ fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, on
         item {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("路线", style = MaterialTheme.typography.headlineMedium)
-                ProportionBar("已通过", passed, kps.size, MaterialTheme.colorScheme.secondary)
-                ProportionBar("稳固", solid, kps.size, successColor())
-                Text("按知识点个数计；按期中分值的覆盖在「今天」页顶部。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                ProportionBar(KpStatus.PASSED.label, passed, kps.size, MaterialTheme.colorScheme.secondary)
+                ProportionBar(KpStatus.SOLID.label, solid, kps.size, successColor())
+                Text("按节数计。期末分值的覆盖在「今天」页顶部。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         for (module in routeModules(kps)) {
             item(key = "m:${module.module}:${module.kps.first().id}") {
                 Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.Bottom) {
-                    Text(module.module.ifBlank { "知识点" }, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                    Text("${module.passed}/${module.kps.size} 已通过" + if (module.solid > 0) " · ${module.solid} 稳固" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(module.module.ifBlank { "未分章" }, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                    Text("${KpStatus.PASSED.label} ${module.passed}/${module.kps.size}" + if (module.solid > 0) " · ${KpStatus.SOLID.label} ${module.solid}" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             items(module.kps, key = { it.id }) { kp ->
@@ -98,16 +98,16 @@ private fun RouteRow(kp: KpRow, selected: Boolean, unmet: List<KpRow>, noConstru
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Column(Modifier.weight(1f)) {
-                    if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (tag.isNotBlank()) Text(sourceLine(tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(main, style = MaterialTheme.typography.bodyLarge)
                 }
                 // 状态用文字（和图标位），不只靠颜色。
-                StatusChip((if (kp.status == KpStatus.SOLID) "✓✓ " else if (kp.status == KpStatus.PASSED) "✓ " else "") + kp.status.label, statusColor(kp.status))
+                StatusChip(kp.status.symbol + " " + kp.status.label, statusColor(kp.status))
             }
-            if (kp.formerlySolid) Text("曾稳固：最近一次合格情境没通过，需要新的合格通过。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+            if (kp.formerlySolid) Text("之前稳了，最近一次简答/论述/限时题没答对，需要重新答对。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (kp.solidProgress.isNotBlank()) Text(kp.solidProgress, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (unmet.isNotEmpty()) Text("建议先学：" + unmet.joinToString("、") { splitTitle(it.title).second.take(24) }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
-            if (noConstructed) Text("此 KP 暂无构答题：稳固层到不了，如实显示。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (noConstructed) Text("这一节还没有简答题，暂时到不了「稳了」。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

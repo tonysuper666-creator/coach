@@ -69,6 +69,9 @@ fun canonicalJson(value: JsonElement): String = when (value) {
 /** Uses local calendar date before applying the 04:00 boundary, including DST transitions. */
 expect fun logicalDay(epochMillis: Long, zone: String): Long
 
+/** The plain local calendar date in [zone] (no 04:00 shift): countdowns to a dated exam change at local midnight. */
+expect fun calendarDay(epochMillis: Long, zone: String): Long
+
 /** ULID encoding with caller-supplied clock/randomness keeps the domain free of IO. */
 fun ulid(timestampMillis: Long, entropy: ByteArray): String {
     require(timestampMillis >= 0 && timestampMillis < (1L shl 48) && entropy.size == 10)

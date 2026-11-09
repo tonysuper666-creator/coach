@@ -67,7 +67,7 @@ data class ExamPanel(
  */
 fun CourseView.examPanel(nowMillis: Long, focus: ExamFocus?): ExamPanel {
     val countdown = examDay?.let { day ->
-        val left = (day - logicalToday(nowMillis)).toInt()
+        val left = (day - com.coach.domain.calendarDay(nowMillis, zone)).toInt()
         if (left >= 0) ExamCountdown.Days(left, day) else ExamCountdown.Past(day)
     } ?: ExamCountdown.Unset
     // 押题表里有、大纲还没排到的周也列出来（total = 0），如实显示「还没有知识点」，不冒充掌握。

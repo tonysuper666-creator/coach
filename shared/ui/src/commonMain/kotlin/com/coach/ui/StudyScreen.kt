@@ -23,7 +23,7 @@ import kotlinx.coroutines.launch
 private val READING_WIDTH = coach.design.tokens.CoachV7.Layout.colw
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null, reviewMode: Boolean = false, initialFocus: Boolean = false) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null, reviewMode: Boolean = false, initialFocus: Boolean = false, backLabel: String? = null) {
     val thread = if (reviewMode) view.reviewThreadId(kp.id) else view.tutorThreadId(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
@@ -102,11 +102,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
     }
     CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
-    com.coach.ui.v7.Desk(crumb = kp.module.ifBlank { c.courseId }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
+    com.coach.ui.v7.Desk(crumb = kp.module.ifBlank { c.courseId }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
         directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.takeIf { ui.connected && !it.busy }?.let { it::select }) },
         margin = { com.coach.ui.v7.MarginNotes(notes) {
             if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {
-                Text("本次参考", style = MaterialTheme.typography.labelMedium)
+                Text("出处", style = MaterialTheme.typography.labelMedium)
                 Text(kp.reference, style = MaterialTheme.typography.bodyMedium)
                 if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }) { Text("看原文") }
             }
@@ -121,14 +121,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     if (pending != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(main, Modifier.weight(1f).testTag("study-quiz-heading"),
                             style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (!readingFocus) TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("study-ask")) { Text("追问") }
+                        if (!readingFocus) TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("study-ask")) { Text("问一句") }
                     }
-                    else com.coach.ui.v7.PageHeader(if (reviewMode) "到期复习" else view.weekProgress(kp.id).orEmpty(), main)
+                    else com.coach.ui.v7.PageHeader(if (reviewMode) "复习" else view.weekProgress(kp.id).orEmpty(), main)
                     // 范围、看原文（点开就是本知识点锚点所在的教材页）、状态放在同一组里，放不下就换行，不压标题。
                     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
                     if (!readingFocus && pending == null) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
-                            Text(if (showScope) "收起学习范围" else tag.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · 共 ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾", style = MaterialTheme.typography.labelMedium)
+                            Text(if (showScope) "收起出处" else sourceLine(tag).ifBlank { "出处" } + if (additionalScope.isNotEmpty()) " · 另 ${additionalScope.size} 处 ▾" else " ▾", style = MaterialTheme.typography.labelMedium)
                         }
                         if (onOpenReference != null && kp.anchorDoc.isNotBlank()) com.coach.ui.v7.PaperButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
                             Text("看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
@@ -138,7 +138,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)
-                        additionalScope.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
+                        additionalScope.forEach { Text("• " + com.coach.client.displayTitle(it).ifBlank { com.coach.client.titleSource(it) } + com.coach.client.titleSource(it).takeIf { s -> s.isNotBlank() }?.let { s -> "（$s）" }.orEmpty(), style = MaterialTheme.typography.bodyMedium) }
                         if (weekActions != null) WeekPicker(view, weekActions, ui.connected)
                     }
                 }
@@ -188,7 +188,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         Box(Modifier.weight(1f).widthIn(max = READING_WIDTH).fillMaxWidth().testTag("study-scroll-viewport")) {
             if (rows.isEmpty()) Text(
-                if (reviewMode) "正在准备复习题；也可以点「开始复习」。" else if (kp.explained) "这个知识点讲过了。点「下一步」继续出题，或直接提问。" else "还没开始。点下面的「开始讲解」。",
+                if (reviewMode) "正在准备复习题；也可以点「开始复习」。" else if (kp.explained) "这一节讲过了。点「下一步」继续出题，或直接问一句。" else "还没开始。点下面的「开始讲解」。",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -235,21 +235,22 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             }
             if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
                 com.coach.ui.v7.PaperButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一个知识点 →") }
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一节 →") }
                 weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
             // 输入框始终可用（讲解进行中也能打字，键盘不会被收起）；只有「发送」会按状态禁用。
             // 组字回车只上屏、不发送；硬件键盘/桌面回车发送，Shift+回车换行；手机回车换行，点击按钮发送（§7.6）。
             ComposerField(
                 value = draft, onValueChange = { draft = it }, onSend = { send(it) }, gate = enterGate,
-                placeholder = "追问…", maxLines = 4, canSend = ui.connected && !tv.busy,
+                placeholder = "问一句…", maxLines = 4, canSend = ui.connected && !tv.busy,
             )
         }
     }
     if (askOpen && pending != null && !readingFocus) AlertDialog(onDismissRequest = { askOpen = false },
-        title = { Text("追问") }, text = {
+        title = { Text("问一句") }, text = {
+            Column { Text("现在问，这题不算进「稳了」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ComposerField(value = draft, onValueChange = { draft = it }, onSend = { text -> send(text).also { if (it) askOpen = false } },
-                gate = enterGate, placeholder = "想问什么？", maxLines = 4, canSend = ui.connected && !tv.busy)
+                gate = enterGate, placeholder = "问一句…", maxLines = 4, canSend = ui.connected && !tv.busy) }
         }, confirmButton = { TextButton(onClick = { askOpen = false }) { Text("继续答题") } })
 }
 

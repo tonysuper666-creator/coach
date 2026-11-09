@@ -211,7 +211,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
                 // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
                 val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
-                    key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
+                    key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode, backLabel = args.backLabel) }
                 } }
                 val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
                 var sourceShown by remember { mutableStateOf(false) }
@@ -243,7 +243,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val reading = source
                         // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
                         val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
-                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, ({ open = null }), openReference, reviewMode) } }
+                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, ({ open = null }), openReference, reviewMode, if (reviewMode) "← 复习" else "← ${tab.label}") } }
                         val mockId = mock
                         if (mockId != null && current != null) {
                             key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
@@ -253,7 +253,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             MainlineScreen(c, current, onBack = { mainline = false }, onOpenSteps = { mainline = false; mock = "" }, onOpenEssay = openEssay,
                                 onReviewWeek = { week -> mainline = false; reviewWeek = week })
                         } else if (reviewWeek != null && current != null) {
-                            WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })
+                            WeekMistakesScreen(c, current, reviewWeek!!, back = "← ${tab.label}", onBack = { reviewWeek = null })
                         } else if (split) SourceSplit(
                             study = { studyPane(paneArgs!!) },
                             source = { ResourcesScreen(c, reading, onBack = { source = null }, backLabel = "✕ 关闭原文") },
@@ -265,7 +265,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                     else -> tabContent()
                                 }
                             },
-                            overlay = { ResourcesScreen(c, reading, onBack = { source = null }) },
+                            overlay = { ResourcesScreen(c, reading, onBack = { source = null }, backLabel = if (target != null) "← 回到这一节" else "← 返回") },
                         )
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
@@ -354,7 +354,7 @@ private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) ->
     }
 }
 
-private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?, val reviewMode: Boolean)
+private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?, val reviewMode: Boolean, val backLabel: String)
 
 /**
  * 横幅跟的是「站稳了」的连接状态：断线持续 [DISCONNECT_GRACE_MS] 才出现，恢复后稳定 [RECONNECT_SETTLE_MS] 才收起，

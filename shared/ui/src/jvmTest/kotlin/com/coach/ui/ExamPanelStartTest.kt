@@ -106,7 +106,7 @@ class ExamPanelStartTest {
                 val v = view(mapOf("a" to Mastery(passed = true, solid = true)), "a" to "【W1·Ch1】Synthetic point", "b" to "【W2·Ch2】Other point")
                 var focus by mutableStateOf(ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(2, 0.0))))
                 setContent { CoachTheme(false) { ExamPanelCard(c, v, focus, { _, _ -> }, {}) } }
-                onNodeWithText("各周都已稳固，没有要补的。").assertDoesNotExist()
+                onNodeWithText("各周都稳了，没有要补的。").assertDoesNotExist()
                 onNodeWithText("W2 还没掌握", substring = true).assertExists()
 
                 focus = ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(2, 0.0), WeekFocus(7, 2.0), WeekFocus(8, 1.0)))

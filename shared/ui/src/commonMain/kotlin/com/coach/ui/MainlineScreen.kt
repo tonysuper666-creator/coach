@@ -70,7 +70,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Uni
         else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val weeks = (body["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }
             if (weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.bodyMedium)
-            else Text("选一周，从铺垫题开始。答对且不是猜的才算掌握。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else Text("选一周，从基础题开始。答对且不是猜的才算会了。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             for (w in weeks) {
                 val n = w.num("week").toInt()
                 Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
@@ -87,20 +87,20 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Uni
     }
 }
 
-/** 覆盖面板：这周有多少知识点、多少有题、多少已掌握（答对且没标猜的）。 */
+/** 覆盖面板：这周有多少考点、多少有题、多少会了（答对且没标猜的）。 */
 @Composable
 private fun CoverageLines(cov: JsonObject, modifier: Modifier = Modifier) {
     val facts = cov.num("facts"); val mastered = cov.num("factsMastered")
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("知识点 $facts · 有题 ${cov.num("factsWithQuestions")} · 已掌握 $mastered", style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag("mainline-coverage"))
+        Text("考点 $facts · 有题 ${cov.num("factsWithQuestions")} · 会了 $mastered", style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag("mainline-coverage"))
         LinearProgressIndicator(progress = { if (facts == 0L) 0f else mastered.toFloat() / facts }, modifier = Modifier.fillMaxWidth())
-        Text("题 ${cov.num("answered")}/${cov.num("questions")} 已做 · ${cov.num("mastered")} 题掌握" +
-            (cov.num("keysPending").takeIf { it > 0 }?.let { " · $it 题答案键待核对" } ?: ""),
+        Text("题 ${cov.num("answered")}/${cov.num("questions")} 已做 · ${cov.num("mastered")} 题答对" +
+            (cov.num("keysPending").takeIf { it > 0 }?.let { " · $it 题答案未核对，不计分" } ?: ""),
             style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
-private val tierNames = mapOf("setup" to "铺垫题", "detail" to "细节题", "bridge" to "桥接题")
+private val tierNames = mapOf("setup" to "基础题", "detail" to "细节题", "bridge" to "综合题")
 
 @Composable
 private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, onBack: () -> Unit,
@@ -172,18 +172,18 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 PrimaryButton(onClick = { submit(false) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-submit")) { Text("提交") }
                 PaperButton(onClick = { submit(true) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-guess")) { Text("我是猜的") }
             } else {
-                PaperButton(onClick = onBack, modifier = buttonModifier) { Text("回到原页") }
+                PaperButton(onClick = onBack, modifier = buttonModifier) { Text("回到选周") }
                 PrimaryButton(onClick = ::nextQuestion, modifier = buttonModifier.testTag("mainline-next")) { Text(if (done.str("next").isNotBlank()) "下一题  ›" else "这一周做完了") }
             }
         }
     }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${items.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "本周 ${items.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = "← 选周",
         directory = { WeekDirectory(view, number, null) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
                 if (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank()) SourceThumbnail(d, openSource)
-                if (d.lecture.isNotBlank()) NoteCard("★ ${d.lectureLabel}", d.lecture)
+                if (d.lecture.isNotBlank()) NoteCard(d.lectureLabel, d.lecture)
                 if (d.related.isNotEmpty()) PaperCard(contentSpacing = 8.dp) {
                     Text("相关", style = MaterialTheme.typography.labelMedium)
                     d.related.forEach { related -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -196,9 +196,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 }
             }
         }, footer = {
-            Text("‹  回到要点", Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
+            Text("‹  回到选周", Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
             Text("${index + 1} / ${items.size}", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
-            Text("第 ${index + 2} 题  ›", Modifier.clickable(enabled = done != null, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
+            Text(if (index + 1 < items.size) "第 ${index + 2} 题  ›" else "", Modifier.clickable(enabled = done != null && index + 1 < items.size, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -259,9 +259,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
                     coverage?.let { CoverageLines(it, Modifier.padding(top = 16.dp)) }
                     if (done.str("tier") == "bridge") {
-                        Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
+                        Text("这是连着大题的综合题：可以接着做模拟考，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PaperButton(onClick = onOpenSteps, modifier = Modifier.testTag("mainline-steps")) { Text("步骤批改") }
+                            PaperButton(onClick = onOpenSteps, modifier = Modifier.testTag("mainline-steps")) { Text("模拟考") }
                             PaperButton(onClick = onOpenEssay, modifier = Modifier.testTag("mainline-essay")) { Text("限时论述") }
                         }
                     }
@@ -291,10 +291,10 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
     val due = (r["dueDay"] as? JsonPrimitive)?.longOrNull
     val when_ = due?.let { when (val d = it - today) { 0L -> "今天"; 1L -> "明天"; else -> if (d < 0) "今天" else "$d 天后" } }
     val head = when (r.str("status")) {
-        "mastered" -> "答对了，算掌握。"
-        "guessed" -> "答对了，但标了猜的：不算掌握。"
-        "pending" -> "这题答案键还没核对，这次不记对错。"
-        else -> "答错了。"
+        "mastered" -> "答对。"
+        "guessed" -> "猜对：不算会。"
+        "pending" -> "这题答案还没核对，这次不计分。"
+        else -> "答错。"
     }
     val queued = when {
         r.str("kpId").isBlank() -> if (r.str("status") == "mastered") null else "这道题没对上大纲里的知识点，没能排进复习。"

@@ -25,7 +25,9 @@ import kotlinx.serialization.Serializable
 @Serializable data class LegacyJournalEntry(val sourceId: String, val text: String)
 
 /** Exam points, never a ratio of knowledge-point counts. */
-@Serializable data class ExamCoverage(val passed: Int = 0, val solid: Int = 0, val total: Int = 0)
+@Serializable data class ExamCoverage(val passed: Int = 0, val solid: Int = 0, val total: Int = 0,
+    /** "FINAL" when the weights are the final exam's; blank = weights imported from the midterm scope. */
+    val scope: String = "")
 typealias Coverage = ExamCoverage
 typealias JournalDay = Journal
 

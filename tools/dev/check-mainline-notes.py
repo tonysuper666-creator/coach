@@ -163,6 +163,10 @@ def main():
                 assert db.execute('select count(*) from events').fetchone()[0] == 0
                 db.execute('insert into events(seq,id,course_id,type,schema,recorded_at,occurred_at,device_id,actor,effect_index,idem_key,payload,event_json) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                     (1, event['id'], fixture.COURSE, 'outline_revised', 1, now, now, 'desktop', 'SYSTEM', 0, event['idemKey'], json.dumps(payload), json.dumps(event)))
+            # Each size must begin with unanswered synthetic questions, while its restart modes
+            # share the resulting ledger. The first size's answers otherwise leak into the next.
+            baseline = base / 'baseline-data'
+            shutil.copytree(data, baseline)
             start()
             fault = False
             offline = False
@@ -248,14 +252,23 @@ def main():
                     if image.stdout.startswith(b'\x89PNG'):
                         (folder / f'{name}.png').write_bytes(image.stdout)
                 assert result.returncode == 0 and b'OK (1 test)' in result.stdout, f'{mode} UI failed; see redacted instrumentation report'
+                entry = {}
                 if mode in ('normal', 'fault', 'offline'):
                     timing = json.loads(android('exec-out', 'run-as', PACKAGE, 'cat', 'cache/mainline-timings.json').stdout)
                     (folder / 'timings.json').write_text(json.dumps(timing, indent=2))
                     samples.extend(timing['samples'])
-                runs.append(dict(mode=mode, passed=True))
+                    entry = {key: timing[key] for key in ('initialColdClicks', 'warmClicks', 'notesRouteClicks')}
+                runs.append(dict(mode=mode, passed=True, evidence=str(folder.relative_to(out)), **entry))
                 print('UI ' + mode + ': PASS', flush=True)
 
-            for size in sizes:
+            for index, size in enumerate(sizes):
+                if index:
+                    android('shell', 'am', 'force-stop', PACKAGE)
+                    stop(process)
+                    process = None
+                    shutil.rmtree(data)
+                    shutil.copytree(baseline, data)
+                    start()
                 android('shell', 'wm', 'size', size)
                 android('shell', 'wm', 'density', '240')
                 if 'normal' in modes:

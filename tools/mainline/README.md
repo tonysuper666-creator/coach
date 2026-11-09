@@ -259,34 +259,70 @@ section filtering, mastery, process restart, 40 raw UI timing samples and inject
 load/committed-response loss recovery and a 3.5-second proxy disconnection after
 commit. This deliberately drops HTTP connections on the isolated path; it does
 not toggle the emulator's network settings. Fault samples are reported separately.
-Timing starts immediately before the submit action and ends when an explanation
-appears in the real accessibility tree; it is a conservative UI observation,
-not localhost HTTP timing. Its nearest-rank p95 must be at most 800 ms.
+Each pixel size starts from its own empty ledger; restart scenarios within that
+size retain its state. Interactions and assertions query live Compose semantics,
+because UiAutomation's accessibility cache stopped updating after focus/selection
+transitions even while screenshots showed the new frame. Selection uses the real
+text-selection action and notes use actual text input. Screenshots still use
+UiAutomation. Click counts are measured actions, not preset values.
+
+Timing starts before locating and dispatching Submit and ends when the explanation
+is displayed in Compose. It includes test synchronization and click overhead, so
+it is a conservative UI observation, not localhost HTTP timing. Its nearest-rank
+p95 must be at most 800 ms. The proxy deliberately does not tunnel WebSockets:
+HTTP recovery does not validate the global connected banner, which remains
+`Mac 未连接` in this fixture.
 
 ## Current verification status (TON-1394 draft)
 
-JVM suites pass (390 tests: server 214, client 74, UI 102; zero failures,
+JVM suites pass (391 tests: server 214, client 74, UI 103; zero failures,
 errors or skips), as do the six content-tool checks, server distribution and
-isolated Android application/test APK builds. The reading interactions above
-are implemented and covered in part by JVM tests; device acceptance has
-**not passed**. The smoke test now selects the real accessible navigation label,
-which reaches Review. Two current attempts both stopped waiting for
-`继续第 1 周`: the accessibility tree still showed `正在连接…` and `Mac 未连接`.
-The diagnostic attempt's in-app health probe passed; the proxy recorded HTTP
-200 for health, snapshot, events and the mainline index. Its WebSocket upgrade
-requests returned 400 (the isolated HTTP proxy does not tunnel WebSockets).
-These observations do not establish why the Continue button failed to update.
-Keep the failure report and sanitized method/path/status diagnostics; do not
-remove assertions or claim network reachability proves a completed UI load.
+isolated Android application/test APK builds. The UI regression includes exiting
+focus and then changing theme without restoring an obsolete focus snapshot.
 
-Both attempts exited 1 and were stopped under the two-failure escalation rule.
-They produced only early entry screenshots at 2448×1848. There is no validated
-full-week flow, 1972×1248 layout, cold/warm click count, restart/fault recording,
-live subscription explanation timing or submission p95 result. C reading
-interactions and actual private W5 integration still need device acceptance.
-The protocol above describes what the harness is intended to collect, not
-completed acceptance evidence. All isolated processes and card APKs were
-cleaned after each attempt; production and physical devices were untouched.
+`build/ton1394-evidence-compose-final` records eight passing instrumentation
+scenarios: normal, resumeQuiz and resumeNotes at both 2448×1848 and 1972×1248,
+plus injected failure and offline recovery. Cold/warm first-question paths take
+two clicks each at both sizes; the notes route also takes two. Reading themes,
+focus, actual selection/note entry, map navigation, filtering, guessed/mastery
+rules and restart persistence have device evidence. Six immutable submission
+replays preserve the original stored outcome.
+
+The complete smoke command nevertheless exits **1**: 40 normal samples collected
+on 2026-11-09 from 04:43:09Z to 04:45:13Z have nearest-rank p95 **1183.056292 ms**,
+above the unchanged 800 ms limit (range 333.316375–1216.455 ms). Six fault samples
+are separate. Test synchronization is included; these samples alone cannot assign
+the delay to network or rendering. Keep the raw report and the failure.
+
+Real subscription CLI evidence is a separate opt-in command. It starts disposable
+server and bridge instances, seeds only synthetic source pages, exercises the real
+reader route, records generated synthetic text and the AI call ledger, and reaps
+its processes. It uses the existing subscription login and never reads course
+materials or production credentials:
+
+```sh
+python3 -m venv build/ton1394-live-venv
+build/ton1394-live-venv/bin/python -m pip install -r tools/bridge/requirements.txt
+tools/dev/heavy ./gradlew :server:app:installDist --console=plain
+tools/dev/heavy python3 tools/dev/check-reader-selection-live.py \
+  --bridge-python build/ton1394-live-venv/bin/python \
+  --output build/ton1394-evidence-cli-final
+```
+
+The recorded final run exits **1**: two physical `READER_SELECTION` calls served by
+`claude-sonnet-5-5` complete, but only the example passes the source gate. Explain
+takes 3435.411 ms and example 4366.163 ms round trip. The rejected explain answer
+quotes a paraphrase and adds an uncited self-correction; the strict gate correctly
+returns an inability to confirm. Prompt guidance now requests plain paragraphs
+and exact quotations, but does not resolve this case. Earlier failed samples are
+retained; stop repeated prompt retries under the two-failure escalation rule.
+This is source-gate evidence, not independent factual grading or Android AI timing.
+
+Full acceptance remains pending: submission p95, reliable live citation output,
+the global WebSocket connection state, Android AI timing/cancel/recovery, and the
+approved private W5 mapping and actual course path. Synthetic screenshots cannot
+establish private-course acceptance. Production and physical devices are untouched;
+the draft PR is neither merged nor deployed.
 
 ## Research adoption
 

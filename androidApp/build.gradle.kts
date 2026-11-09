@@ -83,5 +83,6 @@ dependencies {
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.12.1")
     androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

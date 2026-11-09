@@ -2,12 +2,14 @@ package com.coach.android
 
 import android.content.Intent
 import android.os.SystemClock
-import android.os.Bundle
-import android.view.accessibility.AccessibilityNodeInfo
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.PairedCredentials
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONArray
@@ -16,6 +18,8 @@ import org.json.JSONObject
 /** Synthetic-only real UI timing and recovery; disposable tailnet candidate, never production. */
 @RunWith(AndroidJUnit4::class)
 class MainlineNotesSmoke {
+    @get:Rule val compose = createEmptyComposeRule()
+
     @Test fun readFilterAnswerAndResume() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -41,45 +45,11 @@ class MainlineNotesSmoke {
         if (mode in setOf("normal", "fault", "offline")) context.deleteDatabase("coach-client.db")
         context.startActivity(Intent(context, CoachActivity::class.java).putExtra("coachUrl", base)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-        fun find(match: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-            fun walk(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-                if (node == null) return null
-                if (match(node)) return node
-                for (i in 0 until node.childCount) walk(node.getChild(i))?.let { return it }
-                return null
-            }
-            return walk(ui.rootInActiveWindow)
-        }
-        // What the accessibility tree exposes right now, with the enabled flag that decides whether a tap can land.
-        fun snapshot(): String {
-            val seen = mutableListOf<String>()
-            find { node -> node.text?.toString()?.let { seen += if (node.isEnabled) it else "$it(disabled)" }; false }
-            return seen.joinToString(" | ")
-        }
-        // When the tree disagrees with the pixels, the text list alone cannot say whether the row is absent or just
-        // unnamed. Keep class, bounds, clickable and visibility for every node so the report settles it.
-        fun outline(): String {
-            val rows = mutableListOf<String>()
-            find { node ->
-                val text = node.text?.toString()
-                val description = node.contentDescription?.toString()
-                if (text != null || description != null || node.isClickable) {
-                    val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
-                    rows += buildString {
-                        append(node.className?.toString()?.substringAfterLast('.') ?: "node")
-                        if (text != null) append(" text=").append(text)
-                        if (description != null) append(" desc=").append(description)
-                        if (node.isClickable) append(" clickable")
-                        if (!node.isVisibleToUser) append(" hidden")
-                        append(' ').append(bounds)
-                    }
-                }
-                false
-            }
-            return rows.joinToString("\n")
-        }
+        // Query Compose's current semantics directly. UiAutomation's cached accessibility tree can stop
+        // updating after a selection/dialog/focus transition even while Compose keeps rendering new frames.
+        fun target(text: String, contains: Boolean = false): SemanticsNodeInteraction = compose.onAllNodes(
+            hasText(text, substring = contains) or hasContentDescription(text, substring = contains)).onFirst()
         fun fail(text: String): Nothing {
-            // Keep the pixels of the frame the tree disagreed with; the activity is torn down right after this throws.
             runCatching {
                 ui.takeScreenshot()?.let { bitmap ->
                     java.io.File(context.cacheDir, "mainline-wait-fail.png").outputStream().use {
@@ -88,90 +58,35 @@ class MainlineNotesSmoke {
                     bitmap.recycle()
                 }
             }
-            throw AssertionError("Missing synthetic mainline UI: $text; on screen: ${snapshot()}\n${outline()}")
+            throw AssertionError("Missing synthetic mainline UI: $text\n${compose.onAllNodes(isRoot()).printToString(maxDepth = 50)}")
         }
-        fun waitFor(text: String, contains: Boolean = false): AccessibilityNodeInfo {
-            val end = SystemClock.elapsedRealtime() + 30_000
-            while (SystemClock.elapsedRealtime() < end) {
-                find { if (contains) text in it.text?.toString().orEmpty() || text in it.contentDescription?.toString().orEmpty() else it.text?.toString() == text || it.contentDescription?.toString() == text }?.let { return it }
-                Thread.sleep(150)
-            }
-            fail(text)
+        fun waitFor(text: String, contains: Boolean = false): SemanticsNodeInteraction {
+            val node = target(text, contains)
+            try {
+                compose.waitUntil(timeoutMillis = 30_000) { runCatching { node.fetchSemanticsNode() }.isSuccess }
+            } catch (_: ComposeTimeoutException) { fail(text) }
+            return node
         }
-        fun clickable(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
-            // A tab or a row can be remade between finding a node and walking up to its clickable ancestor, which
-            // leaves the remembered parent chain pointing at removed semantics ids: refresh() on that dead node never
-            // repairs it. Re-read the same text from the current tree on every attempt instead.
-            val text = node.text?.toString()
-            val description = node.contentDescription?.toString()
-            fun candidate(): AccessibilityNodeInfo? {
-                // A labelled target is only ever acted on through a node read back from the live tree: a label that
-                // already flipped to its next value must not be clicked through the remembered (now different) node.
-                // An unlabelled container cannot be re-found that way, and its caller just read it from the tree.
-                val current: AccessibilityNodeInfo = if (text == null && description == null) {
-                    node
-                } else {
-                    find { n ->
-                        if (text != null) n.text?.toString() == text
-                        else n.contentDescription?.toString() == description
-                    } ?: return null
-                }
-                var target: AccessibilityNodeInfo? = current
-                while (target != null && !target.isClickable) target = target.parent
-                return target
-            }
-            repeat(20) {
-                candidate()?.let { return it }
-                Thread.sleep(50)
-            }
-            runCatching {
-                ui.takeScreenshot()?.let { bitmap ->
-                    java.io.File(context.cacheDir, "mainline-click-fail.png").outputStream().use {
-                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
-                    }
-                    bitmap.recycle()
-                }
-            }
-            throw AssertionError("No clickable ancestor: ${text ?: description}; on screen: ${snapshot()}")
+        var clicks = 0
+        var coldClicks: Int? = null
+        var warmClicks: Int? = null
+        var notesClicks: Int? = null
+        fun click(node: SemanticsNodeInteraction) {
+            node.assertIsEnabled().performClick()
+            clicks++
         }
-        fun tap(target: AccessibilityNodeInfo, label: Any?) {
-            val actions = target.actionList.joinToString(",") { it.id.toString() }
-            println("TON1394 tap $label enabled=${target.isEnabled} actions=[$actions]")
-            assertTrue(target.isEnabled && target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            instrumentation.waitForIdleSync()
-        }
-        fun click(node: AccessibilityNodeInfo) {
-            tap(clickable(node), node.text ?: node.contentDescription)
-        }
-        // The answer buttons turn on once an option is picked; wait for that frame instead of tapping a disabled button.
         fun clickWhenEnabled(text: String) {
-            val end = SystemClock.elapsedRealtime() + 10_000
-            while (SystemClock.elapsedRealtime() < end) {
-                // The resolved clickable ancestor usually carries no text of its own: tap it directly instead of
-                // handing it back to click(), which would look the label up again and lose it.
-                val target = clickable(waitFor(text))
-                if (target.isEnabled) return tap(target, text)
-                Thread.sleep(50)
-            }
-            throw AssertionError("Still disabled: $text")
+            val node = waitFor(text)
+            compose.waitUntil(timeoutMillis = 10_000) { runCatching { node.assertIsEnabled() }.isSuccess }
+            click(node)
         }
-        // Compose leaves rows scrolled out of view out of the accessibility tree: scroll the page until the text shows up.
-        fun show(text: String, contains: Boolean = false): AccessibilityNodeInfo {
-            fun match(node: AccessibilityNodeInfo) = if (contains) text in node.text?.toString().orEmpty() || text in node.contentDescription?.toString().orEmpty() else node.text?.toString() == text || node.contentDescription?.toString() == text
-            for (direction in listOf(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
-                repeat(12) {
-                    find(::match)?.let { node ->
-                        node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
-                        instrumentation.waitForIdleSync()
-                        return node
-                    }
-                    val page = find { it.isScrollable } ?: return waitFor(text, contains)
-                    if (!page.performAction(direction)) return@repeat
-                    instrumentation.waitForIdleSync()
-                    Thread.sleep(150)
-                }
-            }
-            return waitFor(text, contains)
+        fun show(text: String, contains: Boolean = false): SemanticsNodeInteraction {
+            val node = waitFor(text, contains)
+            // Static controls and dialog rows have no scroll parent. A clipped row must be scrolled into view;
+            // assertIsDisplayed below still fails if scrolling was unsuccessful.
+            if (!node.isDisplayed()) node.performScrollTo()
+            node.assertIsDisplayed()
+            return node
         }
         fun screenshot(name: String) {
             instrumentation.waitForIdleSync()
@@ -182,42 +97,12 @@ class MainlineNotesSmoke {
             }
             bitmap.recycle()
         }
-        fun passage(): AccessibilityNodeInfo? = find { it.contentDescription?.toString() == "本节正文，可选择文字" }
-        // A node remembered across a scroll and a recomposition can point at a virtual id the app has since remade:
-        // the platform still answers the action, nothing reaches the reader, and the failure lands far away. Always
-        // act on a node read back from the live tree in the same frame as the action.
         fun selectPassage() {
-            val text = passage() ?: show("本节正文，可选择文字")
-            val actions = text.actionList.joinToString(",") { it.id.toString() }
-            // The original acceptance: the passage exposes a working text-selection action to accessibility services.
-            val accepted = text.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
-                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 9)
-            })
-            println("TON1394 selection action accepted=$accepted actions=[$actions]")
-            assertTrue("Real text selection must be accessible", accepted)
-            instrumentation.waitForIdleSync()
-            // The selection row is laid out directly under the passage, so a page scrolled past it leaves it out of
-            // the accessibility tree: scroll to it the way a reader would instead of calling it missing.
-            if (runCatching { show("选中文本") }.getOrNull() != null) { println("TON1394 selection path=action"); return }
-            // A read-only passage is still selectable by hand, so long-press and drag over it: this is what the
-            // acceptance is about, and it stays available even when an accessibility action is answered elsewhere.
-            val rect = android.graphics.Rect().also { (passage() ?: text).getBoundsInScreen(it) }
-            val down = SystemClock.uptimeMillis()
-            fun touch(action: Int, x: Int, at: Long) {
-                val event = android.view.MotionEvent.obtain(down, down + at, action, x.toFloat(), rect.centerY().toFloat(), 0)
-                event.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
-                ui.injectInputEvent(event, true)
-                event.recycle()
-            }
-            touch(android.view.MotionEvent.ACTION_DOWN, rect.left + 40, 0)
-            SystemClock.sleep(900)
-            touch(android.view.MotionEvent.ACTION_MOVE, rect.left + 140, 1000)
-            touch(android.view.MotionEvent.ACTION_MOVE, rect.right - 80, 1300)
-            touch(android.view.MotionEvent.ACTION_UP, rect.right - 80, 1600)
-            instrumentation.waitForIdleSync()
-            if (runCatching { show("选中文本") }.getOrNull() != null) { println("TON1394 selection path=long-press"); return }
-            fail("选中文本")
+            val passage = compose.onNodeWithTag("reader-text").performScrollTo()
+            var accepted = false
+            passage.performSemanticsAction(SemanticsActions.SetSelection) { accepted = it(0, 9, false) }
+            assertTrue("Reader semantics must accept real text selection", accepted)
+            show("选中文本")
         }
         val samples = JSONArray()
         fun answer(option: String, guessed: Boolean, outcome: String, shot: String) {
@@ -225,17 +110,18 @@ class MainlineNotesSmoke {
             val submit = if (guessed) "我是猜的" else "提交"
             show(submit)
             val ready = SystemClock.elapsedRealtime() + 5000
-            while (!clickable(waitFor(submit)).isEnabled && SystemClock.elapsedRealtime() < ready) Thread.sleep(10)
+            while (!runCatching { waitFor(submit).assertIsEnabled() }.isSuccess && SystemClock.elapsedRealtime() < ready) Thread.sleep(10)
             val started = SystemClock.elapsedRealtimeNanos()
-            click(clickable(waitFor(submit)))
+            click(waitFor(submit))
             if (fault) {
                 waitFor("答案已保存在本机，正在自动重连", contains = true)
-                assertFalse(clickable(waitFor(submit)).isEnabled)
+                waitFor(submit).assertIsNotEnabled()
                 screenshot("fault-waiting")
             }
-            val deadline = SystemClock.elapsedRealtime() + 15_000
-            while (find { it.isVisibleToUser && "为什么" in it.text?.toString().orEmpty() } == null && SystemClock.elapsedRealtime() < deadline) Thread.sleep(10)
-            assertNotNull("Explanation must appear automatically", find { it.isVisibleToUser && "为什么" in it.text?.toString().orEmpty() })
+            val explanations = compose.onAllNodes(hasText("为什么", substring = true))
+            fun explanationVisible() = explanations.fetchSemanticsNodes().indices.any { explanations[it].isDisplayed() }
+            compose.waitUntil(timeoutMillis = 15_000) { explanationVisible() }
+            assertTrue("Explanation must appear automatically", explanationVisible())
             val elapsed = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
             samples.put(JSONObject().put("item", shot).put("ms", elapsed).put("fault", fault).put("utc", java.time.Instant.now().toString()))
             screenshot(shot)
@@ -260,22 +146,30 @@ class MainlineNotesSmoke {
             return
         }
         waitFor("今天")
+        val coldStart = clicks
         click(waitFor("导航：复习"))
         screenshot("entry")
         clickWhenEnabled("继续第 1 周")
         waitFor("铺垫题 · 第 1/3 题")
+        coldClicks = clicks - coldStart
+        assertTrue("Cold entry must reach the first question within two clicks", coldClicks <= 2)
         screenshot("two-click-first")
         if (!fault) {
             fun returnToToday() {
                 click(show("← 选周")); click(show("← 复习")); click(waitFor("导航：今天"))
             }
             returnToToday()
+            val warmStart = clicks
             click(waitFor("导航：复习")); clickWhenEnabled("继续第 1 周")
             waitFor("铺垫题 · 第 1/3 题")
+            warmClicks = clicks - warmStart
+            assertTrue("Warm entry must reach the first question within two clicks", warmClicks <= 2)
             screenshot("warm-two-click-first")
             returnToToday()
+            val notesStart = clicks
             click(waitFor("导航：复习")); clickWhenEnabled("看本周要点")
             waitFor("跳过要点，直接做题")
+            notesClicks = clicks - notesStart
             screenshot("reading-route")
             click(show("★ 课上强调"))
             waitFor("01:38:00", contains = true)
@@ -284,20 +178,8 @@ class MainlineNotesSmoke {
             click(waitFor("关闭"))
             selectPassage()
             click(show("一句批注"))
-            // The label sits on the field's decoration box, which is not the node that accepts text: address the
-            // editable node itself, and retry while the dialog is still animating in.
-            var typed = false
-            for (attempt in 0 until 30) {
-                val field = find { it.className == "android.widget.EditText" && it.isEnabled }
-                    ?: throw AssertionError("Missing note field; on screen: ${snapshot()}\n${outline()}")
-                field.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                if (field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
-                        putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Synthetic personal note")
-                    })) { typed = true; break }
-                Thread.sleep(100)
-            }
-            assertTrue("Note field must accept text:\n${outline()}", typed)
-            instrumentation.waitForIdleSync()
+            compose.onNodeWithTag("reader-note").performTextInput("Synthetic personal note")
+            compose.onNodeWithTag("reader-note").assertTextContains("Synthetic personal note")
             click(waitFor("返回阅读"))
             show("我的一句话：Synthetic personal note")
             screenshot("personal-note")
@@ -305,7 +187,7 @@ class MainlineNotesSmoke {
             screenshot("dark-reading")
             click(show("专心读"))
             waitFor("退出专注")
-            assertNull("Focus mode must hide app navigation", find { it.contentDescription?.toString() == "导航：复习" })
+            target("导航：复习").assertDoesNotExist()
             screenshot("focus-reading")
             click(waitFor("退出专注"))
             // The exit is proven by the app navigation returning; tapping the label a second time would only flip
@@ -319,9 +201,7 @@ class MainlineNotesSmoke {
             screenshot("weekly-map-open")
             show("○ 待练 F1")
             screenshot("weekly-map")
-            // Asking the tutor is the last reader step on purpose: after this panel closes the app stops publishing
-            // accessibility updates for the reader (the pixels keep drawing, the tree does not), so every assertion
-            // that needs the reader's tree has to run while it still answers.
+            // Keep the selection-only tutor evidence check and subsequent map navigation in the same run.
             selectPassage()
             click(show("再讲一遍"))
             waitFor("缺少可定位的课件或教材页依据", contains = true)
@@ -375,6 +255,7 @@ class MainlineNotesSmoke {
         click(show("跳过要点，直接做题"))
         show("答对了，算掌握。")
         java.io.File(context.cacheDir, "mainline-timings.json").writeText(JSONObject()
-            .put("mode", mode).put("samples", samples).put("initialColdClicks", 2).put("warmClicks", 2).put("notesRouteClicks", 2).toString(2))
+            .put("mode", mode).put("samples", samples).put("initialColdClicks", coldClicks)
+            .put("warmClicks", warmClicks ?: JSONObject.NULL).put("notesRouteClicks", notesClicks ?: JSONObject.NULL).toString(2))
     }
 }

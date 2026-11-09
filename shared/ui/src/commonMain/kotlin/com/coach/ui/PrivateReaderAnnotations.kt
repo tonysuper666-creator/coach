@@ -167,10 +167,10 @@ private fun PrivateNoteEditor(reader: ReaderHttp, doc: PrivateDocument, initial:
                         } else error = "无法载入同一版本的批注；请保留本地内容并检查资料。"
                         busy = false
                     }
-                }, modifier = Modifier.testTag("private-note-conflict-load")) { Text("查看服务端批注") }
+                }, modifier = Modifier.testTag("private-note-conflict-load")) { Text("查看已保存的批注") }
                 conflict?.let { current ->
-                    Text("服务端：${current.s("note")}")
-                    TextButton(onClick = { text = current.s("note"); savedText = text; revision = current.l("revision"); pending = null; conflict = null; onSaved(current) }, modifier = Modifier.testTag("private-note-use-remote")) { Text("使用服务端内容") }
+                    Text("已保存的批注：${current.s("note")}")
+                    TextButton(onClick = { text = current.s("note"); savedText = text; revision = current.l("revision"); pending = null; conflict = null; onSaved(current) }, modifier = Modifier.testTag("private-note-use-remote")) { Text("使用已保存的内容") }
                     TextButton(onClick = { conflict = null; send(body(text, current.l("revision"))) }, modifier = Modifier.testTag("private-note-keep-local")) { Text("用我的内容覆盖") }
                 }
                 TextButton(onClick = onClose, modifier = Modifier.testTag("private-note-discard")) { Text("放弃未保存内容") }

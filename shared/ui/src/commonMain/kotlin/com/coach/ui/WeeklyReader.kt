@@ -119,7 +119,7 @@ internal fun WeeklyReader(
             Column {
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = { set("dark", JsonPrimitive(!dark)) }) { Text(if (dark) "浅色阅读" else "深色阅读") }
-                    TextButton(onClick = { onFocus(!focus) }) { Text(if (focus) "退出专注" else "专心读") }
+                    TextButton(onClick = { onFocus(!focus) }) { Text(if (focus) "退出专心读" else "专心读") }
                     TextButton(onClick = { onQuiz("", null) }, modifier = Modifier.testTag("mainline-skip")) { Text("跳过要点，直接做题") }
                     if (section != null) TextButton(onClick = { onQuiz(section.str("section_id"), null) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
                 }
@@ -248,7 +248,7 @@ internal fun WeeklyReader(
                 Text(action!!.str("quote"))
                 when {
                     answer != null -> {
-                        Text(answer!!.str("text").ifBlank { "缺少可定位的课程依据，暂时无法确认。" })
+                        Text(answer!!.str("text").ifBlank { "这一段对不上课件或教材，暂时没法确认。" })
                         for (p in (answer!!["sources"] as? JsonArray).orEmpty().map { it.jsonObject }) {
                             TextButton(onClick = { page = p.str("docId") to p.num("pdfPage").toInt() }) {
                                 Text("【${p.str("anchor")}】${p.str("docId")} · PDF 第 ${p.num("pdfPage")} 页")

@@ -75,14 +75,14 @@ class WeeklyReaderTest {
                 onNodeWithText("收起本周脉络").performClick()
                 onNodeWithText("要点：Synthetic section").assertDoesNotExist()
                 onNodeWithText("专心读").performClick()
-                onNodeWithText("退出专注").assertIsDisplayed()
+                onNodeWithText("退出专心读").assertIsDisplayed()
                 onNodeWithText("跳过要点，直接做题").assertIsDisplayed()
                 // Leaving focus and then touching another control must not bring focus back: the write that follows
                 // has to extend the current state, not re-save the snapshot taken while focus mode was still on.
-                onNodeWithText("退出专注").performClick()
+                onNodeWithText("退出专心读").performClick()
                 onNodeWithText("浅色阅读").performScrollTo().performClick()
                 onNodeWithText("本周脉络：节 → 考点 → 题").performScrollTo().assertIsDisplayed()
-                onNodeWithText("退出专注").assertDoesNotExist()
+                onNodeWithText("退出专心读").assertDoesNotExist()
             }
             driver.close()
             driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")

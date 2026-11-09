@@ -129,7 +129,7 @@ private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighligh
         }
         HorizontalDivider(color = c.borderSubtle)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("让 AI 再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
             Text("举个例子", Modifier.clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
@@ -241,7 +241,7 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 saveError = when {
                     receipt?.status in setOf("OK", "DUPLICATE") -> null
                     receipt == null -> "批注已留在本机，连接后重试同步。"
-                    else -> "服务端没有收下批注，请重试。"
+                    else -> "批注没保存上，请再试一次。"
                 }
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { saveError = if (queued) "批注已留在本机，连接后重试同步。" else "批注未保存，请重试。" }

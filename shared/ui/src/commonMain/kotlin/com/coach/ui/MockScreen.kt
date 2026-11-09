@@ -456,7 +456,7 @@ private fun MockResult(c: CoachController, result: JsonObject, view: CourseView,
                 Text((if (result.flag("auto")) "到点自动交卷" else "手动交卷") + " · 用时 ${clock(spent)}" + if (result.str("purpose") == "FULL_MOCK") " · 计入整卷模拟证据" else " · 计入限时证据",
                     style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (result.num("pending") > 0) Text("还有 ${result.num("pending")} 题在批改：Mac 上按评分细则逐条打分，批完这里自动更新，总分会变。", style = MaterialTheme.typography.bodyMedium)
-                if (result.num("drafts") > 0) Text("${result.num("drafts")} 题是 AI 初评，复核后可能调整。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (result.num("drafts") > 0) Text("${result.num("drafts")} 题待复核，分数可能调整。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (lost.isNotEmpty()) item {
@@ -483,7 +483,7 @@ private fun MockResult(c: CoachController, result: JsonObject, view: CourseView,
     }
 }
 
-private val statusLabels = mapOf("GRADED" to "已判分", "REVIEWED" to "已复核", "DRAFT" to "AI 初评", "PENDING" to "批改中", "FAILED" to "批改失败", "SKIPPED" to "未计分")
+private val statusLabels = mapOf("GRADED" to "已判分", "REVIEWED" to "已复核", "DRAFT" to "待复核", "PENDING" to "批改中", "FAILED" to "批改失败", "SKIPPED" to "未计分")
 
 @Composable
 private fun ResultItem(c: CoachController, it: JsonObject, number: Int) {

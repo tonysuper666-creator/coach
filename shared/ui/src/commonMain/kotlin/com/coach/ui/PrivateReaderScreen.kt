@@ -188,11 +188,11 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                                         val remotePage = remote?.int("pdfPage")?.takeIf { remote.string("version") == doc.version && it in 1..doc.pages }
                                         page = remotePage ?: 1
                                         pending = null
-                                        status = "已载入服务端位置"
+                                        status = "已载入保存的位置"
                                     } else status = "无法载入，或资料版本已变化；请返回目录重新打开。"
                                     busy = false
                                 }
-                            }, modifier = Modifier.testTag("private-load-remote")) { Text("载入服务端位置") }
+                            }, modifier = Modifier.testTag("private-load-remote")) { Text("载入已保存的位置") }
                         }
                         TextButton(onClick = {
                             busy = true
@@ -209,7 +209,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                                     busy = false
                                 }
                             }
-                        }, modifier = Modifier.testTag("private-keep-page")) { Text("保留本页并覆盖服务端位置") }
+                        }, modifier = Modifier.testTag("private-keep-page")) { Text("保留本页并覆盖已保存的位置") }
                         TextButton(onClick = onBack, modifier = Modifier.testTag("private-discard")) { Text("放弃未保存位置并返回") }
                     }
                     if (!readingFocus) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

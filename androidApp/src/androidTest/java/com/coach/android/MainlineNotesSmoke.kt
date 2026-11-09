@@ -269,16 +269,16 @@ class MainlineNotesSmoke {
             click(show("深色阅读"))
             screenshot("dark-reading")
             click(show("专心读"))
-            waitFor("退出专注")
+            waitFor("退出专心读")
             target("导航：复习").assertDoesNotExist()
             compose.onNodeWithTag("mainline-notes").assertDoesNotExist()
             screenshot("focus-reading")
-            click(waitFor("退出专注"))
+            click(waitFor("退出专心读"))
             // The V7 shell contains the existing weekly reader. Its heading and back control return
             // when focus ends; the desk's app navigation belongs to the question screen.
             waitFor("第 1 周 · 本周要点")
             compose.onNodeWithTag("mainline-notes").assertIsDisplayed()
-            target("退出专注").assertDoesNotExist()
+            target("退出专心读").assertDoesNotExist()
             click(show("浅色阅读"))
             // The map starts collapsed and one tap on the heading opens it; the heading flips to 收起本周脉络. The
             // heading sits above the passage the previous steps scrolled to, so reach it the way a reader would.

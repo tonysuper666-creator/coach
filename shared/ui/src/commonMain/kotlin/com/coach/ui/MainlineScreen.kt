@@ -364,22 +364,23 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             }
         }
         var actionHeight by remember { mutableStateOf(0.dp) }
-        val bottomInset = if (m.inner) 0.dp else actionHeight
+        val bottomInset = if (m.inner) 0.dp else maxOf(actionHeight, if (m.window == DeskWindow.Outer) 85.dp else 69.dp)
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .padding(bottom = bottomInset).verticalScroll(scroll)
+                .padding(bottom = bottomInset).testTag("mainline-scroll-viewport").verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("本周要点") }
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(if (d.sectionLabel.isBlank()) "${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${filtered.size} 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 ${index + 1} 题 / ${filtered.size}",
-                        style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("不计时", style = MaterialTheme.typography.labelMedium)
                 }
                 ClassEmphasis(emphasis, item.strings("factIds"))
                 Spacer(Modifier.height(12.dp))
-                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium.copy(lineHeight = 30.4.sp))
+                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(20.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     options.forEachIndexed { i, option ->

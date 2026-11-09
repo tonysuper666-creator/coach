@@ -137,7 +137,7 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                         Text("$week.${index + 1}", Modifier.width(if (m.window == DeskWindow.Outer) 46.8.dp else 57.6.dp), style = MaterialTheme.typography.labelLarge,
                             color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
                         Column(Modifier.weight(1f)) {
-                            Text(splitTitle(kp.title).second, style = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = if (m.inner) 31.45.sp else 24.65.sp,
+                            Text(splitTitle(kp.title).second, style = MaterialTheme.typography.bodyLarge.copy(
                                 fontWeight = if (kp.status == KpStatus.IN_PROGRESS) FontWeight.SemiBold else FontWeight.Normal))
                             if (m.window == DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Spacer(Modifier.height(2.dp)); Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
                         }

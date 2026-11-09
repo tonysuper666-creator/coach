@@ -14,8 +14,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.coach.client.ReaderHttp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
@@ -50,14 +55,16 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, onBack: () -> Unit) {
     }
     var document by remember { mutableStateOf<PrivateDocument?>(null) }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { if (document != null) document = null else onBack() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 返回") }
-            Text(document?.title ?: "教材阅读", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        if (document == null) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 返回") }
+                Text("教材阅读", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            }
+            HorizontalDivider()
         }
-        HorizontalDivider()
         val selected = document
         when {
-            selected != null -> PrivatePdfDocument(reader, selected)
+            selected != null -> PrivatePdfDocument(reader, selected) { document = null }
             catalog is ReaderLoad.Loading -> CenterMessage("正在读取教材目录…")
             catalog is ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("教材目录暂时不可用，请检查 Mac 连接。")
@@ -78,8 +85,9 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, onBack: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalUuidApi::class)
 @Composable
-private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument) {
+private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, onBack: () -> Unit) {
     var retry by remember(doc) { mutableIntStateOf(0) }
     val state by produceState<ReaderLoad<JsonObject>>(ReaderLoad.Loading, reader, doc, retry) {
         value = ReaderLoad.Loading
@@ -99,14 +107,89 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument) {
             val stale = (progress?.get("stale") as? JsonPrimitive)?.booleanOrNull == true ||
                 (progress != null && progress.string("version") != doc.version)
             val restored = if (stale) null else progress?.int("pdfPage")?.takeIf { it in 1..doc.pages }
-            var page by remember(doc, loaded.value) { mutableIntStateOf(restored ?: 1) }
+            var page by remember(doc, loaded.value) { mutableIntStateOf(initialPage ?: restored ?: 1) }
+            var revision by remember(doc, loaded.value) { mutableLongStateOf((progress?.get("revision") as? JsonPrimitive)?.longOrNull ?: 0L) }
+            var pending by remember(doc, loaded.value) { mutableStateOf<ProgressWrite?>(null) }
+            var status by remember(doc, loaded.value) { mutableStateOf("") }
+            var busy by remember(doc, loaded.value) { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
+            fun send(write: ProgressWrite) {
+                pending = write
+                busy = true
+                status = "正在保存…"
+                scope.launch {
+                    val result = reader.saveProgress(doc.id, doc.version, write.page, write.baseRevision, write.id)
+                    val nextRevision = (result.body?.get("revision") as? JsonPrimitive)?.longOrNull
+                    if (result.ok && nextRevision != null) {
+                        revision = nextRevision
+                        pending = null
+                        status = "已保存"
+                    } else status = if (result.status == 409) "阅读位置或资料版本已变化，请核对后选择。" else "位置尚未保存，请重试。"
+                    busy = false
+                }
+            }
+            fun move(target: Int) {
+                page = target
+                send(ProgressWrite(target, revision, Uuid.random().toString()))
+            }
+            LaunchedEffect(doc, loaded.value, initialPage) {
+                if (initialPage != null && initialPage != restored) move(initialPage)
+            }
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val wide = maxWidth >= 840.dp
                 var spread by remember { mutableStateOf(false) }
                 val two = wide && spread && page < doc.pages
                 Column(Modifier.fillMaxSize()) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onBack, enabled = !busy && pending == null, modifier = Modifier.heightIn(min = 48.dp).testTag("private-document-back")) { Text("← 返回") }
+                        Text(doc.title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    }
+                    HorizontalDivider()
                     if (stale) Text("旧版本的阅读位置未自动套用，请重新定位。", Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error)
-                    Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages} · 当前翻页暂不保存", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
+                    if (initialPage != null) Text("已按出处定位到页；页面内容仍需核对。", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
+                    Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
+                    if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
+                    val draft = pending
+                    if (draft != null && !busy) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { send(draft) }, modifier = Modifier.testTag("private-save-retry")) { Text("重试保存") }
+                            TextButton(onClick = {
+                                busy = true
+                                scope.launch {
+                                    val fresh = reader.state(doc.id)
+                                    val body = fresh.body
+                                    val currentVersion = (body?.get("document") as? JsonObject)?.string("version")
+                                    val remote = body?.get("progress") as? JsonObject
+                                    val freshRevision = (remote?.get("revision") as? JsonPrimitive)?.longOrNull ?: 0L
+                                    if (fresh.ok && currentVersion == doc.version) {
+                                        revision = freshRevision
+                                        val remotePage = remote?.int("pdfPage")?.takeIf { remote.string("version") == doc.version && it in 1..doc.pages }
+                                        page = remotePage ?: 1
+                                        pending = null
+                                        status = "已载入服务端位置"
+                                    } else status = "无法载入，或资料版本已变化；请返回目录重新打开。"
+                                    busy = false
+                                }
+                            }, modifier = Modifier.testTag("private-load-remote")) { Text("载入服务端位置") }
+                        }
+                        TextButton(onClick = {
+                            busy = true
+                            scope.launch {
+                                val fresh = reader.state(doc.id)
+                                val body = fresh.body
+                                val currentVersion = (body?.get("document") as? JsonObject)?.string("version")
+                                val remote = body?.get("progress") as? JsonObject
+                                val freshRevision = (remote?.get("revision") as? JsonPrimitive)?.longOrNull ?: 0L
+                                if (fresh.ok && currentVersion == doc.version) {
+                                    send(ProgressWrite(draft.page, freshRevision, Uuid.random().toString()))
+                                } else {
+                                    status = "无法载入，或资料版本已变化；请返回目录重新打开。"
+                                    busy = false
+                                }
+                            }
+                        }, modifier = Modifier.testTag("private-keep-page")) { Text("保留本页并覆盖服务端位置") }
+                        TextButton(onClick = onBack, modifier = Modifier.testTag("private-discard")) { Text("放弃未保存位置并返回") }
+                    }
                     if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
                     Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight())
@@ -114,14 +197,48 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument) {
                     }
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { page = (page - if (wide && spread) 2 else 1).coerceAtLeast(1) }, enabled = page > 1, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-prev")) { Text("上一页") }
-                        OutlinedButton(onClick = { page = (page + if (two) 2 else 1).coerceAtMost(doc.pages) }, enabled = page + (if (two) 1 else 0) < doc.pages, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-next")) { Text("下一页") }
+                        OutlinedButton(onClick = { move((page - if (wide && spread) 2 else 1).coerceAtLeast(1)) }, enabled = !busy && pending == null && page > 1, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-prev")) { Text("上一页") }
+                        OutlinedButton(onClick = { move((page + if (two) 2 else 1).coerceAtMost(doc.pages)) }, enabled = !busy && pending == null && page + (if (two) 1 else 0) < doc.pages, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-next")) { Text("下一页") }
                     }
                 }
             }
         }
     }
 }
+
+/** A source click resolves through the course catalog; an unregistered or ambiguous source never guesses. */
+@Composable
+internal fun PrivateSourceReference(reader: ReaderHttp, source: String) {
+    var opened by remember(source) { mutableStateOf(false) }
+    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("private-citation")) { Text("出处：$source") }
+    if (opened) Dialog(onDismissRequest = {}, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)) {
+        Surface(Modifier.fillMaxSize()) {
+            var retry by remember { mutableIntStateOf(0) }
+            val target by produceState<ReaderLoad<Pair<PrivateDocument, Int>>>(ReaderLoad.Loading, reader, source, retry) {
+                value = ReaderLoad.Loading
+                val resolved = reader.resolve(source)
+                val body = resolved.body
+                val id = body?.string("documentId").orEmpty()
+                val version = body?.string("version").orEmpty()
+                val page = body?.int("pdfPage")
+                val catalog = if (resolved.ok) reader.catalog() else null
+                val document = if (catalog?.ok == true) privateDocuments(catalog.body)?.singleOrNull { it.id == id && it.version == version } else null
+                value = if (document != null && page != null && page in 1..document.pages) ReaderLoad.Ready(document to page) else ReaderLoad.Failed
+            }
+            when (val result = target) {
+                ReaderLoad.Loading -> CenterMessage("正在定位出处…")
+                ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("无法定位出处：资料未登记、出处不唯一或 Mac 暂不可用。")
+                    TextButton(onClick = { retry++ }) { Text("重试") }
+                    TextButton(onClick = { opened = false }) { Text("返回题目") }
+                }
+                is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second) { opened = false }
+            }
+        }
+    }
+}
+
+private data class ProgressWrite(val page: Int, val baseRevision: Long, val id: String)
 
 @Composable
 private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, modifier: Modifier) {

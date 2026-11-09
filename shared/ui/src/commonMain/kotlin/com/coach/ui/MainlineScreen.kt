@@ -173,7 +173,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         } else {
             Outcome(done, view.logicalToday(now), onReviewWeek)
             explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
-            (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { Labeled("出处", it) }
+            (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { PrivateSourceReference(http.reader, it) }
             val next = done.str("next").takeIf { it.isNotBlank() }
             if (done.str("tier") == "bridge") {
                 Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)

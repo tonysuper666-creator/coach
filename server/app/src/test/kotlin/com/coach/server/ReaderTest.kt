@@ -244,6 +244,29 @@ class ReaderTest {
         } finally { dir.toFile().deleteRecursively() }
     }
 
+    @Test fun differentCoursesResolveTheirOwnConfiguredOffsets() = runBlocking<Unit> {
+        val dir = Files.createTempDirectory("reader-two-courses")
+        try {
+            val root = dir.resolve("library")
+            catalog(root)
+            val second = inventedPdf(label = "Synthetic oranges")
+            Files.write(root.resolve("other.pdf"), second)
+            val catalogFile = root.resolve("catalog.json")
+            val original = LedgerJson.parseToJsonElement(Files.readString(catalogFile)).jsonObject
+            val other = json("id" to "other", "course" to "C2", "title" to "Different synthetic textbook", "file" to "other.pdf",
+                "sha256" to ReaderLibrary.digest(second), "pages" to 34, "printedPageOffset" to 5, "kind" to "textbook")
+            Files.writeString(catalogFile, JsonObject(original + ("documents" to JsonArray(original.getValue("documents").jsonArray + other))).toString())
+            withReader(dir.resolve("db"), ReaderLibrary(root)) { s ->
+                assertEquals(32, s.reader.resolve("教材 p.1").body!!.num("pdfPage"))
+                val result = s.request("C2/reader/resolve?source=" + java.net.URLEncoder.encode("教材 p.1", "UTF-8"))
+                assertEquals(200, result.first)
+                val body = LedgerJson.parseToJsonElement(result.second).jsonObject
+                assertEquals("other", body.str("documentId"))
+                assertEquals(6, body.num("pdfPage"))
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun standaloneRoutesStillAuthenticateAndMutationScopeIncludesCourseAndOperation() = runBlocking<Unit> {
         val dir = Files.createTempDirectory("reader-scope")
         try {

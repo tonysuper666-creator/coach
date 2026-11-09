@@ -173,10 +173,13 @@ class MainlineNotesSmoke {
             if (jointReader) {
                 click(show(citation, contains = true))
                 waitFor("PDF 第 1 页", contains = true)
-                click(show("本页原文与批注"))
+                // The page heading is present while its image/state is still loading. Wait for
+                // the real notes control to become enabled before opening persisted annotations.
+                clickWhenEnabled("本页原文与批注")
                 show("我的批注：Synthetic PDF note")
                 screenshot("joint-note-after-restart")
                 compose.onNodeWithTag("private-notes-close").performClick()
+                compose.waitUntil(timeoutMillis = 15_000) { runCatching { compose.onNodeWithTag("private-document-back").assertIsEnabled() }.isSuccess }
                 compose.onNodeWithTag("private-document-back").performClick()
             }
             screenshot("resumed-quiz")

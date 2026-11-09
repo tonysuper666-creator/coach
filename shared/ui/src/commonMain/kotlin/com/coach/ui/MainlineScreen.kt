@@ -118,7 +118,7 @@ private val tierNames = mapOf("setup" to "铺垫题", "detail" to "细节题", "
 
 @Composable
 private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, entry: String?, onBack: () -> Unit,
-    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
+    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, only: Set<String>? = null) {
     val scope = rememberCoroutineScope()
     var readerState by remember { mutableStateOf(http.readerState(c.sync, number)) }
     // Every reader write goes through a transform of the value held here instead of a whole object captured in an
@@ -127,13 +127,16 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // which hides the weekly map).
     fun saveReader(transform: (JsonObject) -> JsonObject) {
         val next = transform(readerState); readerState = next; http.saveReaderState(c.sync, number, next)
+
     }
     val marks = (readerState["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
     DisposableEffect(Unit) { onDispose { c.readerFocus = false } }
-    var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "week:$number")) }
+    // Page practice must not overwrite the answer behind the citation overlay.
+    val stateKey = if (only == null) "week:$number" else "pagePractice:$number:${only.sorted().joinToString(",")}"
+    var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, stateKey)) }
     fun save(vararg fields: Pair<String, JsonElement>) {
         saved = JsonObject(saved + fields)
-        c.sync.saveMainlineState(c.courseId, saved, "week:$number")
+        c.sync.saveMainlineState(c.courseId, saved, stateKey)
     }
     var body by remember { mutableStateOf(saved["body"] as? JsonObject) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -149,10 +152,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             delay(1500)
         } while (true)
     }
-    val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }
+    val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
     val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
-    var reading by remember { mutableStateOf(entry?.let { it == "notes" } ?: (saved.str("mode") != "quiz")) }
+    var reading by remember { mutableStateOf(only == null && (entry?.let { it == "notes" } ?: (saved.str("mode") != "quiz"))) }
     var sectionId by remember { mutableStateOf(saved.str("section")) }
     var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
     var itemId by remember { mutableStateOf(saved.str("item")) }
@@ -177,13 +180,14 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
     fun position(mode: Boolean, id: String = itemId, section: String = sectionId, selectedFilter: String = filter) {
+        if (mode && only != null) { onBack(); return }
         reading = mode; itemId = id; sectionId = section; filter = selectedFilter
         save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
     LaunchedEffect(Unit) {
         save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "filter" to JsonPrimitive(filter))
-        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
+        if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
     LaunchedEffect(item?.str("id")) { if (item != null && itemId != item.str("id")) position(reading, item.str("id")) }
     LaunchedEffect(pending, retry) {
@@ -263,6 +267,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         return
     }
     if (item == null) {
+        if (only != null) { CenterMessage("本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
         Text("这一节暂无对应题目。")
         TextButton(onClick = { position(true) }) { Text("返回本周要点") }
         TextButton(onClick = { startQuiz() }) { Text("做本周全部题") }
@@ -304,7 +309,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors) {
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (only != null) "← 回到阅读" else if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
+
         directory = { WeekDirectory(view, number, null) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
@@ -366,7 +372,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                             Spacer(Modifier.height(16.dp))
                         }
-                        Text(annotatedMarks(explanation.str("source").ifBlank { done.str("source") }), style = MaterialTheme.typography.labelLarge.copy(lineHeight = 24.975.sp), color = com.coach.ui.theme.CoachTheme.colors.successFg)
+                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
+                            PrivateSourceReference(http.reader, source, done.str("anchor"))
+                        }
                     }
                     if (!m.inner && d.sourceSvg.isNotBlank()) { Spacer(Modifier.height(20.dp)); FigureSvg(d.sourceSvg) }
                 }
@@ -380,6 +388,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
+                    if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
+                        PrivateSourceReference(http.reader, source, done.str("anchor"))
+                    }
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.
                     options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->
@@ -390,7 +401,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                         TextButton(onClick = { position(true, section = s.str("section_id")) }, modifier = Modifier.testTag("mainline-return-section")) { Text("回看要点：${s.str("title")}") }
                     }
                     coverage?.let { CoverageLines(it, Modifier.padding(top = 16.dp)) }
-                    if (done.str("tier") == "bridge") {
+                    if (done.str("tier") == "bridge" && only == null) {
                         Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             PaperButton(onClick = onOpenSteps, modifier = Modifier.testTag("mainline-steps")) { Text("步骤批改") }
@@ -459,6 +470,32 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
                 color = if (r.str("status") == "missed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
             queued?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             if (week != null) TextButton(onClick = { onReviewWeek(week) }, contentPadding = PaddingValues(0.dp)) { Text("已进第 $week 周错题本 ›") }
+        }
+    }
+}
+
+/** The reader's "去做这几题": the existing weekly walk restricted to the questions registered on one page; closing returns to the reader untouched. */
+@Composable
+internal fun PagePractice(c: CoachController, week: Int, ids: Set<String>, onClose: () -> Unit) {
+    val revision by c.sync.revision.collectAsState()
+    val view by produceState<CourseView?>(null, revision) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val events = c.sync.localEvents(c.courseId)
+            if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
+        }
+    }
+    PagePracticeBody(c, view, week, ids, onClose)
+}
+
+@Composable
+internal fun PagePracticeBody(c: CoachController, view: CourseView?, week: Int, ids: Set<String>, onClose: () -> Unit) {
+    val http = c.course
+    Column(Modifier.fillMaxSize()) {
+        when {
+            http == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("要连接 Mac 才能做题。") }
+            ids.isEmpty() -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本页没有登记的题。") }
+            view == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本机还没有这门课的学习记录，暂时不能开始练习。") }
+            else -> MainlineWeek(c, http, view, week, "quiz", onBack = onClose, onOpenSteps = onClose, onOpenEssay = onClose, onReviewWeek = { onClose() }, only = ids)
         }
     }
 }

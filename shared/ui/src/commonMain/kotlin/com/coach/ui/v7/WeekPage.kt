@@ -60,7 +60,7 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
         TextButton(onClick = { next?.let(actions::select) }, enabled = next != null && ui.connected && !actions.busy) { Text(next?.let { "第 $it 周 ›" }.orEmpty()) }
     }) {
         val metrics = LocalDeskMetrics.current
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = metrics.horizontalPadding).padding(top = metrics.topPadding, bottom = 32.dp),
+        Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + metrics.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = metrics.horizontalPadding).padding(top = metrics.topPadding, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp)) {
             PageHeader("第 $week 周 · 本周", title, meta = "已通过 $passed / ${points.size} 个知识点", week = week)
             PaperCard(Modifier.fillMaxWidth(), contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {

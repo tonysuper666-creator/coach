@@ -267,11 +267,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen || mainline))
                     val deskWindow = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
                     val deskScreen = (target != null || (tab == AppTab.TODAY && current?.projection?.studyScope != null) || mainline) && source == null && !essayOpen && mock == null && reviewWeek == null
-                    if (deskScreen) CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical ->
-                        if (vertical) Column(Modifier.fillMaxWidth()) { AppTab.entries.forEach { t ->
-                            TextButton(onClick = { select(t) }) { Text(t.label, color = if (tab == t) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant) }
-                        } } else AppNavBar(tab, select)
-                    }, com.coach.ui.v7.LocalDeskWindow provides deskWindow) { body() }
+                    if (deskScreen) CompositionLocalProvider(
+                        com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(tab, vertical, select) },
+                        com.coach.ui.v7.LocalDeskWindow provides deskWindow,
+                    ) { body() }
                     else if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)
@@ -308,9 +307,23 @@ internal fun SourceOverlay(covered: Boolean, base: @Composable () -> Unit, overl
     }
 }
 
+/** Shared by the actual app and JVM captures, including the narrow-screen bottom navigation. */
 @Composable
-private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+fun DeskNavigation(selected: AppTab, vertical: Boolean, onSelect: (AppTab) -> Unit) {
+    if (vertical) Column(Modifier.fillMaxWidth()) {
+        AppTab.entries.forEach { tab ->
+            TextButton(onClick = { onSelect(tab) }) {
+                Text(tab.label, color = if (selected == tab) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    } else AppNavBar(selected, onSelect, v7 = true)
+}
+
+@Composable
+private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit, v7: Boolean = false) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = if (v7) 0.dp else 3.dp,
+        modifier = if (v7) Modifier.height(coach.design.tokens.V7Windows.Outer.footH) else Modifier,
+        windowInsets = if (v7) WindowInsets(0.dp) else NavigationBarDefaults.windowInsets) {
         AppTab.entries.forEach { t ->
             NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = { Text(t.label) })
         }

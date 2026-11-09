@@ -148,7 +148,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 }
             }
         }) {
-    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding).padding(top = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(Modifier.widthIn(max = CoachV7.Layout.colw + com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding * 2).fillMaxSize().verticalScroll(scroll).padding(horizontal = com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding).padding(top = com.coach.ui.v7.LocalDeskMetrics.current.topPadding, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (!com.coach.ui.v7.LocalDeskMetrics.current.inner) coverage?.let { CoverageLines(it) }
         Text("${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${items.size} 题", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium)

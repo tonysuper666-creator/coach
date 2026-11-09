@@ -124,13 +124,13 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
         val kp = view.kp("K2")!!
         val message = TutorMessage("synthetic-reading", "", false, prose, status = "complete")
         val ui = TutorUiState(connected = true, threads = mapOf(view.tutorThreadId(kp.id) to ThreadView(items = listOf(ChatItem.Tutor(message)), historyLoaded = true)))
-        compose.setContent { CoachTheme(dark) { Surface { Box(Modifier.requiredSize(width.dp, height.dp)) {
+        compose.setContent { CoachTheme(dark) { CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(if (scene == "quiz") AppTab.REVIEW else AppTab.TODAY, vertical) {} }) { Surface { Box(Modifier.requiredSize(width.dp, height.dp)) {
             when (scene) {
                 "week" -> TodayScreen(controller, view, ui, null, {}, { _, _ -> }, WeekActions(controller, scope))
                 "read", "focus" -> StudyScreen(controller, kp, view, ui, false, {}, onOpenReference = {}, initialFocus = scene == "focus")
                 "quiz" -> MainlineScreen(controller, view, {}, {}, {}, {})
             }
-        } } } }
+        } } } } }
         if (scene == "quiz") {
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("mainline-week-8").performClick()

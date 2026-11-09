@@ -12,6 +12,9 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
 import com.coach.ui.CoachTheme
+import com.coach.ui.AppTab
+import com.coach.ui.DeskNavigation
+import com.coach.ui.v7.LocalDeskNavigation
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7ReducedMotion
 import org.junit.Rule
@@ -53,6 +56,19 @@ class V7InteractionTest {
         compose.onNodeWithTag("draft").assertTextContains("draft survives")
         compose.onNodeWithTag("choice").assertIsOn()
         compose.onNodeWithTag("v7-directory").assertDoesNotExist()
+    }
+
+    @Test fun phoneWeekFooterKeepsTheReviewNavigationReachable() {
+        var selected = AppTab.TODAY
+        compose.setContent { CoachTheme(false) {
+            CompositionLocalProvider(LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.TODAY, vertical) { selected = it } }) {
+                Box(Modifier.requiredSize(624.dp, 986.dp)) {
+                    Desk("合成周页", footer = { Text("合成周页的相邻周") }) { Text("合成正文") }
+                }
+            }
+        } }
+        compose.onNodeWithText("复习").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(AppTab.REVIEW, selected) }
     }
 
     @Test fun reducedMotionRevealsPaperWithoutAdvancingTheAnimationClock() {

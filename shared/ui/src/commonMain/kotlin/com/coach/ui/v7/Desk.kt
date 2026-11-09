@@ -108,14 +108,14 @@ fun Desk(
                         .clip(if (focus) RoundedCornerShape(0.dp) else RoundedCornerShape(CoachV7.Radius.sheet))
                         .background(colors.surface1)
                         .graphicsLayer { alpha = progress.value; translationY = if (focus || reduced) 0f else 8.dp.toPx() * (1 - progress.value) }
-                        .testTag("v7-paper")) { page() }
+                        .testTag("v7-paper"), contentAlignment = Alignment.TopCenter) { page() }
                     Box(Modifier.width(marginWidth).fillMaxHeight()) {
                         if (marginWidth > 0.dp) Box(Modifier.fillMaxSize().padding(start = 24.dp, end = 28.dp, top = 20.dp).testTag("v7-margin")) { margin() }
                     }
                 }
-                if (footer != null) Row(Modifier.fillMaxWidth().height(if (inner) CoachV7.Layout.footH else 52.dp).padding(horizontal = 28.dp),
+                if (footer != null && inner) Row(Modifier.fillMaxWidth().height(if (inner) CoachV7.Layout.footH else 52.dp).padding(horizontal = 28.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = footer)
-                else if (!inner && !landscape && !focus) LocalDeskNavigation.current?.invoke(false)
+                if (!inner && !landscape && !focus) LocalDeskNavigation.current?.invoke(false)
             }
         }
     }

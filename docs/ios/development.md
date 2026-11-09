@@ -6,7 +6,7 @@
 
 ATS 例外在构建时以 `COACH_ATS_HOST` 设置单个主机，默认是仅用于占位的 `127.0.0.1`，实际目标须用本机私有构建配置注入；例外不包含子域，不设置全局允许。输入的服务地址仍由连接库限制为 Tailscale 地址。隔离模拟器已用单个 Tailscale 数值地址验证 HTTP 和 WebSocket。不要将私有地址、配对码或令牌提交到仓库。
 
-下一步以模拟器实际操作覆盖配对至答题回执的完整界面流程，并验证事件同步和服务已提交但回执丢失的真实网络故障。阅读和批注需要对应接口进入 main 后联测；缺失接口不应模拟成功。模拟器 bundle ID 是开发占位，正式标识和签名由后续打包任务办理。
+下一步以模拟器实际操作覆盖配对至答题回执的完整界面流程，并验证事件同步。阅读和批注需要对应接口进入 main 后联测；缺失接口不应模拟成功。模拟器 bundle ID 是开发占位，正式标识和签名由后续打包任务办理。
 
 ### Isolated real-server simulator check
 
@@ -73,7 +73,22 @@ second test-host process restores the Keychain credential, then checks revocatio
 the open WS closes with 1008 and subsequent HTTP and WS handshakes return 401.
 All test-only configuration, credentials and server data are temporary.
 
-This test cuts connectivity before the answer is sent; it does not prove behavior
-when a committed response is lost. The separate learning check above exercises
-same-ID replay by restoring a pending record. Neither check covers manual UI flows,
-WS ledger event delivery/catch-up, rotation or Dynamic Type.
+The separate lost-reply mode verifies a committed response disappearing on the
+wire, without resetting the pending record:
+
+```sh
+tools/dev/heavy --emulator python3 ios/Tools/run-realtime-tests.py --lost-reply
+```
+
+After pairing and loading the synthetic question, the test relay forwards the
+answer POST to Ktor and withholds the server's HTTP 200 response, then closes the
+socket. The first test process verifies that the client retains its actual pending
+ID and reads the ledger over HTTP. The second restores credentials and that ID from
+Keychain, retries, checks the original receipt and refreshed mastered state, and
+asserts that `question_posed`, `answer_submitted`, and `attempt_graded` for the
+attempt each occur once both before and after retry. The relay's private control
+is restricted by a per-run random secret. This fault is response loss after a
+successful server response, not a general network partition test.
+
+The checks do not cover manual UI flows, WS ledger event delivery/catch-up,
+rotation or Dynamic Type.

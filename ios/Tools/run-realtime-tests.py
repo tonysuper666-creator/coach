@@ -10,7 +10,7 @@ def report(text):
     for secret in sorted(secrets, key=len, reverse=True):
         if secret: text = text.replace(secret, '[redacted]')
     for line in text.splitlines():
-        if any(x in line for x in ['error:', 'Test Case', 'Test Suite', 'Executed ', 'elapsed:', 'Revoked HTTP:', 'Revoked WS handshake:', '** TEST', '** BUILD', 'Testing failed', 'failed to', 'error=']): print(line, flush=True)
+        if any(x in line for x in ['error:', 'Test Case', 'Test Suite', 'Executed ', 'elapsed:', 'Revoked HTTP:', 'Revoked WS handshake:', 'Lost reply', 'Ledger counts', '** TEST', '** BUILD', 'Testing failed', 'failed to', 'error=']): print(line, flush=True)
 def run(args):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     report(result.stdout)
@@ -31,6 +31,8 @@ class Relay(socketserver.ThreadingTCPServer):
         self.lock = threading.Lock()
         self.active = set()
         self.enabled = True
+        self.drop_answers = False
+        self.dropped = 0
         super().__init__(address, Forward)
     def set_enabled(self, enabled):
         with self.lock:
@@ -47,12 +49,39 @@ class Forward(socketserver.BaseRequestHandler):
             try: upstream = socket.create_connection(self.server.target, timeout=3)
             except OSError: return
             self.server.active.update((self.request, upstream))
+        first_request = b''
+        answer_request = False
+        classified = False
+        response_header = b''
         try:
             while True:
                 ready, _, _ = select.select([self.request, upstream], [], [], 1)
                 for source in ready:
                     data = source.recv(65536)
                     if not data: return
+                    if source is self.request and not classified:
+                        first_request += data
+                        if b'\r\n\r\n' in first_request:
+                            line = first_request.split(b'\r\n', 1)[0]
+                            answer_request = bool(re.fullmatch(rb'POST /v1/courses/[^/]+/mainline/\d+/answer HTTP/1\.[01]', line))
+                            classified = True
+                            first_request = b''
+                        elif len(first_request) > 65536:
+                            return
+                    if source is upstream and answer_request:
+                        with self.server.lock:
+                            dropping = self.server.drop_answers
+                        if dropping:
+                            response_header += data
+                            if b'\r\n\r\n' not in response_header:
+                                if len(response_header) > 65536: return
+                                continue
+                            if re.match(rb'HTTP/1\.[01] 200(?: |\r)', response_header):
+                                with self.server.lock: self.server.dropped += 1
+                                return
+                            data = response_header
+                            response_header = b''
+                            answer_request = False
                     (upstream if source is self.request else self.request).sendall(data)
         except (OSError, ValueError): pass
         finally:
@@ -61,10 +90,22 @@ class Forward(socketserver.BaseRequestHandler):
             upstream.close()
 class Control(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.headers.get('X-Test-Control') != self.server.secret or self.path not in ('/down', '/up'):
+        if self.headers.get('X-Test-Control') != self.server.secret or self.path not in ('/down', '/up', '/arm-loss', '/disarm-loss'):
             self.send_response(403); self.end_headers(); return
-        self.server.relay.set_enabled(self.path == '/up')
+        if self.path in ('/arm-loss', '/disarm-loss'):
+            # Close any keep-alive HTTP connections before arming so the next
+            # answer POST is the first request on its own inspected connection.
+            if self.path == '/arm-loss': self.server.relay.set_enabled(False)
+            with self.server.relay.lock: self.server.relay.drop_answers = self.path == '/arm-loss'
+            if self.path == '/arm-loss': self.server.relay.set_enabled(True)
+        else:
+            self.server.relay.set_enabled(self.path == '/up')
         self.send_response(204); self.end_headers()
+    def do_GET(self):
+        if self.headers.get('X-Test-Control') != self.server.secret or self.path != '/status':
+            self.send_response(403); self.end_headers(); return
+        with self.server.relay.lock: body = json.dumps({'dropped': self.server.relay.dropped}).encode()
+        self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def log_message(self, *args): pass
 
 proc = None
@@ -128,7 +169,8 @@ with tempfile.TemporaryDirectory(prefix='coach-ios-isolated-') as tmp:
         with (bundles[0]/'IsolatedFixture.plist').open('wb') as f: plistlib.dump({'base':f'http://{host}:{relay.server_address[1]}', 'code':code,'adminToken':token, 'control':f'http://{host}:{control.server_address[1]}', 'controlSecret':control.secret},f)
         run(['codesign', '-f', '-s', '-', str(bundles[0])])
 
-        for test in ['testRealtimeOfflineAndRetry', 'testRealtimeRestoreAndRevoke']:
+        tests = ['testLostReplyCommit', 'testLostReplyRestore'] if '--lost-reply' in sys.argv else ['testRealtimeOfflineAndRetry', 'testRealtimeRestoreAndRevoke']
+        for test in tests:
             run(['xcodebuild']+common+['-destination', 'id='+sim, '-only-testing:CoachAppIntegrationTests/RealConnectionTests/'+test, 'test-without-building'])
         screenshot = os.environ.get('COACH_IOS_SCREENSHOT')
         if screenshot:

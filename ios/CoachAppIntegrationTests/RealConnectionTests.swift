@@ -98,6 +98,81 @@ final class RealConnectionTests: XCTestCase {
         print("\(label) elapsed: \(start.duration(to: .now))")
     }
 
+    private func answerEventCounts(_ connection: ConnectionModel, submission: String) async throws -> [String: Int] {
+        let (address, credential) = try XCTUnwrap(connection.learningCredentials)
+        var parts = URLComponents(url: address.url.appendingPathComponent("v1/courses/contract-course/events"), resolvingAgainstBaseURL: false)!
+        parts.queryItems = [URLQueryItem(name: "after", value: "0"), URLQueryItem(name: "limit", value: "500")]
+        var request = URLRequest(url: try XCTUnwrap(parts.url))
+        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let page = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(page["hasMore"] as? Bool, false, "Fixture must fit in one ledger page")
+        let events = try XCTUnwrap(page["events"] as? [[String: Any]])
+        var counts = [String: Int]()
+        for event in events {
+            guard let payload = event["payload"] as? [String: Any],
+                  payload["attemptId"] as? String == "mainline-" + submission,
+                  let type = event["type"] as? String else { continue }
+            counts[type, default: 0] += 1
+        }
+        return counts
+    }
+
+    private func droppedReplies(_ values: [String: String]) async throws -> Int {
+        var request = URLRequest(url: try XCTUnwrap(URL(string: try XCTUnwrap(values["control"]) + "/status")))
+        request.setValue(try XCTUnwrap(values["controlSecret"]), forHTTPHeaderField: "X-Test-Control")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        return try XCTUnwrap((JSONSerialization.jsonObject(with: data) as? [String: Int])?["dropped"])
+    }
+
+    func testLostReplyCommit() async throws {
+        let values = try fixture()
+        let connection = ConnectionModel()
+        await connection.pair(address: try XCTUnwrap(values["base"]), code: try XCTUnwrap(values["code"]))
+        guard case .connected = connection.state else { XCTFail("Pair failed"); return }
+        let learning = LearningModel(connection: connection)
+        learning.course = "contract-course"
+        await learning.loadCourse()
+        await learning.openWeek(1)
+        let item = try XCTUnwrap(learning.week?.items.first)
+        let choice = try XCTUnwrap(item.options.firstIndex(of: "Pears"))
+        try await control("arm-loss", fixture: values)
+        await learning.submit(item: item, choice: choice)
+        let pending = try XCTUnwrap(learning.pending, "A lost reply must remain pending")
+        XCTAssertNil(learning.receipt)
+        XCTAssertNotNil(learning.message)
+        let dropped = try await droppedReplies(values)
+        XCTAssertGreaterThan(dropped, 0, "No successful server reply was actually dropped")
+        let counts = try await answerEventCounts(connection, submission: pending.submissionId)
+        for type in ["question_posed", "answer_submitted", "attempt_graded"] { XCTAssertEqual(counts[type], 1, type) }
+        print("Lost reply: \(dropped) successful response(s) withheld; Ledger counts before retry: \(counts)")
+    }
+
+    func testLostReplyRestore() async throws {
+        let values = try fixture()
+        let connection = ConnectionModel()
+        await connection.restore()
+        guard case .connected = connection.state else { XCTFail("Restore failed"); return }
+        let learning = LearningModel(connection: connection)
+        let pending = try XCTUnwrap(learning.pending)
+        let before = try await answerEventCounts(connection, submission: pending.submissionId)
+        try await control("disarm-loss", fixture: values)
+        await learning.retryPending()
+        XCTAssertNil(learning.pending)
+        XCTAssertEqual(learning.receipt?.attemptId, "mainline-" + pending.submissionId)
+        XCTAssertEqual(learning.receipt?.status, "mastered")
+        let after = try await answerEventCounts(connection, submission: pending.submissionId)
+        XCTAssertEqual(before, after)
+        for type in ["question_posed", "answer_submitted", "attempt_graded"] { XCTAssertEqual(after[type], 1, type) }
+        await learning.loadCourse()
+        await learning.openWeek(1)
+        XCTAssertEqual(learning.week?.items.first?.status, "mastered")
+        print("Ledger counts after retry: \(after)")
+    }
+
     func testRealtimeOfflineAndRetry() async throws {
         let values = try fixture()
         let connection = ConnectionModel()

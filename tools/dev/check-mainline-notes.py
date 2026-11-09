@@ -322,7 +322,8 @@ def main():
                     shutil.copytree(baseline, data)
                     start()
                 android('shell', 'wm', 'size', size)
-                android('shell', 'wm', 'density', '240')
+                # Match the V7 1224dp inner / 986dp cover landscape geometry at these pixel sizes.
+                android('shell', 'wm', 'density', '320')
                 if 'normal' in modes:
                     android('shell', 'am', 'force-stop', package)
                     instrument('normal', out / size)
@@ -334,7 +335,7 @@ def main():
                     instrument('resumeNotes', out / size)
             fault = True
             android('shell', 'wm', 'size', '1972x1248')
-            android('shell', 'wm', 'density', '240')
+            android('shell', 'wm', 'density', '320')
             if 'fault' in modes:
                 android('shell', 'am', 'force-stop', package)
                 record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',

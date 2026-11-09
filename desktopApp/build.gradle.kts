@@ -31,10 +31,20 @@ compose.desktop {
         mainClass = "com.coach.desktop.MainKt"
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg)
+            targetFormats(TargetFormat.Dmg, TargetFormat.Msi)
             packageName = "Coach"
             packageVersion = "1.0.0"
+            vendor = "Coach"
             modules("java.sql")
+            windows {
+                // Per-user so the installer needs no administrator prompt on the target PC.
+                // upgradeUuid stays fixed: a newer MSI replaces program files in place and
+                // leaves the user's ~/Coach data (ledger copy, token, state) untouched.
+                perUserInstall = true
+                shortcut = true
+                menuGroup = "Coach"
+                upgradeUuid = "6f1b0a52-6c4d-4d3f-9a1e-2b7c5d84e910"
+            }
         }
     }
 }

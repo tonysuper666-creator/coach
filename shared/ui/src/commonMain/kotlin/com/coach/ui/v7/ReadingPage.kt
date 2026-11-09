@@ -95,7 +95,7 @@ internal fun NoteCard(label: String, text: String, personal: Boolean = false) {
             append(label)
             label.indexOf('★').takeIf { it >= 0 }?.let { addStyle(SpanStyle(color = c.dangerFg), it, it + 1) }
         }, style = MaterialTheme.typography.labelMedium.copy(lineHeight = 19.8.sp, fontWeight = FontWeight.Medium), color = c.fgSecondary)
-        Text(text, style = if (personal) MaterialTheme.typography.bodyMedium.copy(fontFamily = LocalV7Fonts.current.note, fontSize = 16.sp, lineHeight = 25.6.sp) else MaterialTheme.typography.bodyMedium,
+        Text(text, style = if (personal) MaterialTheme.typography.bodyMedium.copy(fontFamily = LocalV7Fonts.current.note) else MaterialTheme.typography.bodyMedium,
             color = if (personal) c.fgSecondary else c.fgPrimary)
     }
 }
@@ -293,8 +293,8 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                     }
                 } else Markdown(text, true, "reading:${kp.id}", c.math)
                 Spacer(Modifier.height(8.7.dp))
-                Row(Modifier.widthIn(max = CoachV7.Layout.colw * (CoachV7.Size.ui.value / CoachV7.Size.body.value)).fillMaxWidth().railAnchor("end"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(if (d.question != null && m.inner && !focus) "读完这一节了。第 1 题就在右边页边，想做再做。" else "读完这一节了。追问…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
+                Row(Modifier.fillMaxWidth().railAnchor("end"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("追问…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
                     Text(d.question?.let { "整节 ${it.count} 题 →" } ?: "开始练习 →", Modifier.clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
                 }
             }

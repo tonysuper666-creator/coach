@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
@@ -27,9 +28,11 @@ import coach.design.tokens.CoachV7
 import coach.design.tokens.V7Windows
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.AppTab
+import com.coach.ui.LocalV7TextScale
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import kotlinx.coroutines.launch
 
 val LocalReadingFocus = staticCompositionLocalOf { false }
 val LocalFootnotePrefix = staticCompositionLocalOf { "" }
@@ -38,21 +41,23 @@ val LocalDeskWindow = staticCompositionLocalOf<com.coach.ui.adaptive.WindowSpec?
 val LocalDeskSelect = staticCompositionLocalOf<(AppTab) -> Unit> { {} }
 val LocalDeskNavigation = staticCompositionLocalOf<(@Composable (Boolean) -> Unit)?> { null }
 
-enum class DeskWindow { Inner, OuterLandscape, Outer }
-/** Window geometry, not device names: the cover landscape must never become three columns. */
+enum class DeskWindow { Inner, Medium, OuterLandscape, Outer }
+/** Columns depend only on the available width, including split-screen windows. */
 fun deskWindow(width: Float, height: Float): DeskWindow = when {
-    (width >= 1100f && height >= 700f) || (width >= 840f && height >= 600f && width / height <= 1.52f) -> DeskWindow.Inner
+    width >= 1100f -> DeskWindow.Inner
+    width >= 700f -> DeskWindow.Medium
     width > height -> DeskWindow.OuterLandscape
     else -> DeskWindow.Outer
 }
 
 @Immutable
 data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val topPadding: Dp, val optionHeight: Dp) {
-    val inner get() = window == DeskWindow.Inner
+    val inner get() = window == DeskWindow.Inner || window == DeskWindow.Medium
 }
 val LocalDeskMetrics = staticCompositionLocalOf { DeskMetrics(DeskWindow.Inner, CoachV7.Layout.mainPx, CoachV7.Layout.mainPt, CoachV7.Layout.optH) }
 
 /** The page stays in the same composition when the directory/margin collapse or focus mode changes. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Desk(
     crumb: String,
@@ -65,6 +70,7 @@ fun Desk(
     compactStatus: String = "",
     compactTypeControl: Boolean = true,
     compactFooter: Boolean = false,
+    showNavigation: Boolean = true,
     onCrumbClick: (() -> Unit)? = null,
     directory: @Composable () -> Unit = {},
     margin: @Composable () -> Unit = {},
@@ -86,20 +92,33 @@ fun Desk(
     }
     val contentNow by rememberUpdatedState(content)
     val page = remember { movableContentOf { contentNow() } }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var marginCollapsed by rememberSaveable { mutableStateOf(false) }
+    var marginSheet by remember { mutableStateOf(false) }
+    ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen,
+        drawerContent = {
+            ModalDrawerSheet(Modifier.width(300.dp)) {
+                TextButton(onClick = { scope.launch { drawerState.close() } }) { Text("收起目录") }
+                if (drawerState.isOpen) Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).testTag("v7-directory-drawer")) { directory() }
+            }
+        }) {
     BoxWithConstraints(modifier.fillMaxSize().background(if (focused) colors.surface1 else colors.bgCanvas).testTag("v7-desk")) {
         val logicalWindow = LocalDeskWindow.current
-        val window = deskWindow(logicalWindow?.widthDp ?: maxWidth.value, logicalWindow?.heightDp ?: maxHeight.value)
+        val window = deskWindow(maxWidth.value, logicalWindow?.heightDp ?: maxHeight.value)
         val windowWidth = maxWidth
-        val inner = window == DeskWindow.Inner
+        val sheetHeight = maxHeight * .7f
+        val inner = window == DeskWindow.Inner || window == DeskWindow.Medium
+        val threeColumns = window == DeskWindow.Inner
         val landscape = window == DeskWindow.OuterLandscape
         val metrics = DeskMetrics(window,
-            when { focused -> 24.dp; inner -> (CoachV7.Layout.mainPx * (windowWidth.value / 1224f)).coerceAtLeast(24.dp); landscape -> V7Windows.OuterL.mainPx; else -> V7Windows.Outer.mainPx },
-            when { focused -> 72.dp; inner -> CoachV7.Layout.mainPt; landscape -> V7Windows.OuterL.mainPt; else -> V7Windows.Outer.mainPt },
-            if (inner) CoachV7.Layout.optH else if (landscape) V7Windows.OuterL.optH else V7Windows.Outer.optH)
+            if (inner) 24.dp else 16.dp,
+            if (landscape) 12.dp else 20.dp,
+            48.dp)
         CompositionLocalProvider(LocalDeskMetrics provides metrics, LocalReadingFocus provides focused) {
             Column(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxWidth().height(if (landscape) V7Windows.OuterL.barH else CoachV7.Layout.barH).padding(horizontal = if (inner) CoachV7.Layout.pad else 20.dp)) {
-                    Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.fillMaxWidth().height(if (inner) 48.dp else 72.dp).padding(horizontal = 16.dp)) {
+                    Row(Modifier.align(if (inner) Alignment.CenterStart else Alignment.TopStart).height(48.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box {
                             var menu by remember { mutableStateOf(false) }
                             val select = LocalDeskSelect.current
@@ -108,42 +127,49 @@ fun Desk(
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
                         }
-                        if (onBack != null && (!inner || backLabel == "← 复习")) {
-                            Spacer(Modifier.width(12.dp))
-                            Text(backLabel, Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
+                        if (!threeColumns) {
+                            TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
+                        }
+                        if (onBack != null) {
+                            TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }
                     }
                     Text(buildAnnotatedString {
                         append(crumb)
                         val start = crumb.lastIndexOf('·').takeIf { it >= 0 }?.plus(1) ?: 0
                         addStyle(SpanStyle(fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary), start, crumb.length)
-                    }, Modifier.align(Alignment.Center).widthIn(max = windowWidth * .44f)
+                    }, Modifier.align(if (inner) Alignment.Center else Alignment.BottomStart).padding(bottom = if (inner) 0.dp else 4.dp).widthIn(max = if (inner) windowWidth * .30f else windowWidth - 32.dp)
                         .then(if (onCrumbClick != null) Modifier.clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
-                        if (barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                        if (threeColumns && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         var typeMenu by remember { mutableStateOf(false) }
-                        if (inner || compactTypeControl) Box {
+                        Box {
+                            val textScale = LocalV7TextScale.current
                             Text("Aa", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                             DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
-                                Text("字号跟随系统设置", Modifier.padding(16.dp), style = MaterialTheme.typography.labelLarge)
+                                listOf("小" to .9f, "中" to 1f, "大" to 1.15f).forEach { (label, scale) ->
+                                    DropdownMenuItem(text = { Text(label + if (textScale.value == scale) " ✓" else "") },
+                                        modifier = Modifier.testTag("v7-type-$label"), onClick = { textScale.value = scale; typeMenu = false })
+                                }
                             }
                         }
-                        if (inner) Text(if (focused) "退出专心读" else "专心读",
+                        if (!focused) Text(if (inner && !marginCollapsed) "收页边" else "页边",
+                            Modifier.clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                        Text(if (focused) "退出专心读" else "专心读",
                             Modifier.clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)) {
                     // Keep all three containers in place so a fold never recreates the reading composition.
-                    val tocWidth = if (inner && !focused) CoachV7.Layout.wToc * (windowWidth.value / 1224f).coerceAtMost(1f) else 0.dp
-                    val marginWidth = if (inner && !focused) CoachV7.Layout.wRail * (windowWidth.value / 1224f).coerceAtMost(1f) else 0.dp
+                    val tocWidth = if (threeColumns && !focused) 160.dp else 0.dp
+                    val marginWidth = if (inner && !focused && !marginCollapsed) (windowWidth * .30f).coerceIn(260.dp, 280.dp) else 0.dp
                     Box(Modifier.width(tocWidth).fillMaxHeight()) {
                         if (tocWidth > 0.dp) Column(Modifier.padding(start = 8.dp, end = 0.dp, top = 24.dp).verticalScroll(rememberScrollState()).testTag("v7-directory")) {
                             directory()
                         }
                     }
-                    if (landscape && !focused) Box(Modifier.width(V7Windows.OuterL.navW).fillMaxHeight().padding(top = 20.dp)) { LocalDeskNavigation.current?.invoke(true) }
                     Box(Modifier.weight(1f).fillMaxHeight().padding(top = if (inner && !focused) 4.dp else 0.dp)
                         .then(if (inner && !focused) Modifier.paperShadow("sheet", colors.dark) else Modifier)
                         .clip(if (focused) RoundedCornerShape(0.dp) else if (!inner) RoundedCornerShape(bottomStart = CoachV7.Radius.sheet, bottomEnd = CoachV7.Radius.sheet) else RoundedCornerShape(CoachV7.Radius.sheet))
@@ -151,14 +177,18 @@ fun Desk(
                         .graphicsLayer { alpha = progress.value; translationY = if (focused || reduced) 0f else 8.dp.toPx() * (1 - progress.value) }
                         .testTag("v7-paper"), contentAlignment = Alignment.TopCenter) { page() }
                     Box(Modifier.width(marginWidth).fillMaxHeight()) {
-                        if (marginWidth > 0.dp) Box(Modifier.fillMaxSize().padding(start = 24.dp, end = 28.dp, top = 20.dp, bottom = 20.dp).testTag("v7-margin")) { margin() }
+                        if (marginWidth > 0.dp) Box(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 16.dp).testTag("v7-margin")) { margin() }
                     }
                 }
-                if (footer != null && (inner || compactFooter)) Row(Modifier.fillMaxWidth().background(colors.bgCanvas).height(if (inner) CoachV7.Layout.footH else 52.dp).padding(horizontal = 28.dp),
+                if (footer != null && (inner || compactFooter)) Row(Modifier.fillMaxWidth().background(colors.bgCanvas).height(40.dp).padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = footer)
-                if (!inner && !landscape && !focused) LocalDeskNavigation.current?.invoke(false)
+                if (!inner && !focused && showNavigation) LocalDeskNavigation.current?.invoke(false)
             }
         }
+        if (marginSheet && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {
+            Box(Modifier.fillMaxWidth().height(sheetHeight).padding(16.dp).testTag("v7-margin-sheet")) { margin() }
+        }
+    }
     }
 }
 
@@ -179,13 +209,13 @@ fun PageHeader(kicker: String, title: String, deck: String = "", meta: String = 
     Column {
         Text(kicker, style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = colors.fgSecondary)
         Spacer(Modifier.height(if (week == null) 12.dp else 8.dp))
-        val titleStyle = if (m.inner) MaterialTheme.typography.headlineMedium else MaterialTheme.typography.headlineSmall
+        val titleStyle = if (week != null) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.headlineMedium
         if (week != null) Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            val size = if (m.inner) coach.design.tokens.V7Reading.weekDisplay else coach.design.tokens.V7Reading.coverDisplay
+            val size = 48.sp * LocalV7TextScale.current.value
             Text(week.toString().padStart(2, '0'), fontFamily = LocalV7Fonts.current.display,
                 fontWeight = FontWeight.Light, fontSize = size, lineHeight = size * .8f, letterSpacing = (-.03).em,
                 style = TextStyle(lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both, LineHeightStyle.Mode.Tight)),
-                modifier = Modifier.height((size.value * .8f).dp).wrapContentHeight(Alignment.CenterVertically, unbounded = true).testTag("v7-week-number"))
+                modifier = Modifier.wrapContentHeight().testTag("v7-week-number"))
             Column {
                 Text(title, style = titleStyle)
                 if (deck.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(deck, style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 27.sp), color = colors.fgSecondary) }
@@ -220,10 +250,10 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
     val verdictColor = if (correct == true) colors.successFg else colors.dangerFg
     Surface(onClick = onClick, enabled = enabled, color = bg, contentColor = colors.fgPrimary, shape = RoundedCornerShape(10.dp),
         modifier = modifier.fillMaxWidth().paperShadow("option", colors.dark).heightIn(min = LocalDeskMetrics.current.optionHeight), selected = selected) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.padding(horizontal = if (LocalDeskMetrics.current.inner) 16.dp else 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(letter, Modifier.width(16.2.dp), fontFamily = LocalV7Fonts.current.numbers, style = MaterialTheme.typography.labelLarge, color = if (correct != null) verdictColor else colors.fgSecondary)
             Box(Modifier.weight(1f)) {
-                MaterialTheme(typography = MaterialTheme.typography.copy(bodyLarge = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 24.65.sp))) { content() }
+                MaterialTheme(typography = MaterialTheme.typography.copy(bodyLarge = MaterialTheme.typography.bodyLarge.copy(lineHeight = 23.sp * LocalV7TextScale.current.value))) { content() }
             }
             if (correct != null) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 VerdictIcon(correct, Modifier.size(14.dp), verdictColor)

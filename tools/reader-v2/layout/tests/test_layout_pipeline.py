@@ -128,6 +128,21 @@ class CacheLogic(Base):
         pj = lp.build_page_json(1, raw, meta, "s")
         self.assertEqual(pj["fallback"], "original_page")
 
+    def test_code_beside_text_is_not_trusted(self):
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        for kinds in (("code", "text"), ("text", "code"), ("code", "code")):
+            raw = {"size": (595, 842), "layout_score": None, "blocks": [
+                blk("code" if kinds[0] == "code" else "text", [60, 100, 280, 300], 0),
+                blk("code" if kinds[1] == "code" else "text", [320, 110, 540, 300], 1)]}
+            pj = lp.build_page_json(1, raw, meta, "s")
+            self.assertEqual((pj["reading_order_status"], pj["fallback"]), ("unknown", "original_page"), kinds)
+
+    def test_unknown_kind_beside_text_is_not_trusted(self):
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        raw = {"size": (595, 842), "layout_score": None, "blocks": [
+            blk("text", [60, 100, 280, 300], 0), blk("form", [320, 110, 540, 300], 1)]}
+        self.assertEqual(lp.build_page_json(1, raw, meta, "s")["fallback"], "original_page")
+
     def test_normal_text_with_one_table_stays_trusted(self):
         meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
         raw = {"size": (595, 842), "layout_score": None, "blocks": [
@@ -157,7 +172,7 @@ class CacheLogic(Base):
         s = lp.ingest(pdf, self.cache, "d", eng)
         self.assertFalse(s["cache_hit"])
         self.assertEqual(len(eng.calls), 1)
-        self.assertIn("-p3-", s["version"])
+        self.assertIn("-p4-", s["version"])
 
     def test_resume_skips_done_pages(self):
         pdf = self.syn / "mixed.pdf"

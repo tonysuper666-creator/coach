@@ -55,7 +55,7 @@ formulas/unknown/rotated pages anchor to the original-page region.
 - `/Rotate` ≠ 0: Docling reports unrotated-space geometry and (with a CropBox) a wrong page size, and 180° pages come out in reverse order → flagged `unknown` + fallback; no shift applied.
 - Display formulas are not enriched by default; a standalone formula line may be labelled `figure`/`text`. Do not infer formula correctness from OCR.
 - Scanned pages go through Docling's built-in RapidOCR (local); a blank/undetected scan gives `empty`.
-- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "3").
+- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "4").
 - Single-column verdict is checked (text must run top-to-bottom) and downgraded to `unknown`+fallback when narrow blocks sit side by side without forming columns; a column must hold >=25% of page height in text. Tables whose cells do not cover rows*cols are `unknown`. Thresholds are tuned on synthetic pages only; real-page tuning needs the Mac run.
 - Column detection is geometric (≥2 disjoint x-intervals with ≥2 narrow blocks each); full-width headings on a two-column page may land in column 1.
 - Server consumer: `server/app/.../reader/v2/LayoutCache.kt` (read-only; `LayoutPage.orderTrusted` is the single gate for sentence anchoring). Its test passed on Windows via `./gradlew :server:app:test --tests 'com.coach.server.reader.v2.*'`; the Python test `test_page_json_has_every_field_the_kotlin_consumer_reads` pins the contract.

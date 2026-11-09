@@ -32,7 +32,7 @@ data class LayoutPage(
         val body = blocks.filter { it.kind != "header_footer" && it.bbox.size >= 4 }
         if (body.isEmpty()) return false
         val tab = body.filter { it.kind == "table" }
-        val text = body.count { it.kind in setOf("text", "heading", "list", "caption", "footnote") }
+        val text = body.count { it.kind in setOf("text", "heading", "list", "caption", "footnote", "code") }
         val pageArea = size?.let { it[0] * it[1] } ?: 0.0
         return tab.any { it.rawLabel == "document_index" } ||
             (pageArea > 0 && tab.sumOf { area(it) } >= 0.35 * pageArea) || (tab.size > text && tab.size >= 2)
@@ -41,7 +41,7 @@ data class LayoutPage(
     /** Narrow text/table blocks side by side that the producer did not turn into columns. */
     private fun sideBySide(): Boolean {
         if (columns != null && columns >= 2) return false
-        val kinds = setOf("text", "heading", "list", "caption", "footnote", "table")
+        val kinds = setOf("text", "heading", "list", "caption", "footnote", "code", "table", "unknown")
         val flow = blocks.filter { it.kind in kinds && it.bbox.size >= 4 }
         if (flow.size < 2) return false
         val x0 = flow.minOf { it.bbox[0] }
@@ -57,7 +57,7 @@ data class LayoutPage(
     /** Independent sanity check (does not rely on the producer's verdict): within each column,
      *  text-flow blocks must follow reading order from top to bottom (2pt tolerance). */
     private fun blocksRunTopDown(): Boolean {
-        val flow = setOf("text", "heading", "list", "caption", "footnote")
+        val flow = setOf("text", "heading", "list", "caption", "footnote", "code")
         return blocks.filter { it.kind in flow && it.inReadingFlow && it.bbox.size >= 4 }
             .groupBy { it.column }
             .all { (_, bs) -> bs.sortedBy { it.readingOrder }.zipWithNext().all { (a, b) -> b.bbox[1] >= a.bbox[1] - 2.0 } }

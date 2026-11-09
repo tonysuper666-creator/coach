@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = "3"   # bump on any behaviour change: it is part of the cache version key
+PIPELINE_VERSION = "4"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -33,7 +33,9 @@ KIND_MAP = {
     "checkbox_unselected": "text", "document_index": "table", "key_value_region": "unknown",
     "form": "unknown", "reference": "text",
 }
-TEXT_FLOW = {"text", "heading", "list", "caption", "footnote"}
+TEXT_FLOW = {"text", "heading", "list", "caption", "footnote", "code"}
+# kinds whose geometry counts for side-by-side detection (unknown structure must not hide a column)
+SIDE_GEOM = TEXT_FLOW | {"table", "unknown"}
 
 
 def sha256_file(path: Path) -> str:
@@ -93,7 +95,7 @@ def assign_columns(blocks: list[dict], page_h: float | None = None) -> int:
 def layout_ambiguous(blocks: list[dict]) -> bool:
     """Single-column verdict is not trustworthy when narrow text blocks sit side by
     side (a missed or partial multi-column layout)."""
-    flow = [b for b in blocks if (b["kind"] in TEXT_FLOW or b["kind"] == "table") and b["bbox"]]
+    flow = [b for b in blocks if b["kind"] in SIDE_GEOM and b["bbox"]]
     if len(flow) < 2:
         return False
     x0 = min(b["bbox"][0] for b in flow)

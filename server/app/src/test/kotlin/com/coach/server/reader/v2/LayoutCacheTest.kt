@@ -29,6 +29,10 @@ class LayoutCacheTest {
           "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
           {"id":"a","kind":"text","bbox":[60,100,280,300],"reading_order":0,"column":0,"status":"ok","text":"x"},
           {"id":"b","kind":"text","bbox":[320,110,540,300],"reading_order":1,"column":0,"status":"ok","text":"y"}]}""")
+        Files.writeString(v.resolve("pages/00007.json"), """{"schema_version":1,"status":"ok","columns":1,
+          "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
+          {"id":"a","kind":"code","bbox":[60,100,280,300],"reading_order":0,"column":0,"status":"ok","text":"x"},
+          {"id":"b","kind":"text","bbox":[320,110,540,300],"reading_order":1,"column":0,"status":"ok","text":"y"}]}""")
         Files.writeString(v.resolve("pages/00003.json"), """{"schema_version":2,"status":"ok","blocks":[]}""")
         return root
     }
@@ -48,7 +52,7 @@ class LayoutCacheTest {
 
     @Test fun indexTablesAndSideBySideBlocksAreNotTrustedEvenIfProducerSaysOk() {
         val c = LayoutCache(fixture())
-        for (n in listOf(5, 6)) {
+        for (n in listOf(5, 6, 7)) {
             val p = assertNotNull(c.page("doc", n))
             assertEquals("single_column", p.readingOrderStatus)
             assertFalse(p.orderTrusted, "page $n")

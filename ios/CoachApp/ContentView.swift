@@ -9,6 +9,9 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: CoachV7.Space.s6) {
+                    Text(Appearance.name)
+                        .font(.largeTitle.bold())
+                        .accessibilityAddTraits(.isHeader)
                     switch connection.state {
                     case .loading:
                         ProgressView("正在恢复连接…")
@@ -32,12 +35,14 @@ struct ContentView: View {
                 .frame(maxWidth: 600, alignment: .leading)
                 .padding(CoachV7.Space.s6)
             }
-            .background(Appearance.paper)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Appearance.paper.ignoresSafeArea())
             .foregroundStyle(Appearance.ink)
             .font(Appearance.font)
             .tint(Appearance.ink)
-            .navigationTitle(Appearance.name)
+            .toolbar(.hidden, for: .navigationBar)
         }
+        .background(Appearance.paper.ignoresSafeArea())
         .task { await connection.restore() }
     }
 

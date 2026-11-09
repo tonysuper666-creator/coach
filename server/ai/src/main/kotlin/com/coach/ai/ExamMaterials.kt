@@ -28,7 +28,7 @@ class ExamMaterials private constructor(
                 for (size in 2..minOf(4, run.value.length)) addAll(run.value.windowed(size))
             }
         }.filter { it !in setOf("what", "explain", "please", "question", "answer", "knowledge", "point", "解释", "例子", "给我", "用新") }.take(128)
-        fun select(text: String, budget: Int, alreadyIncluded: String = ""): String {
+        fun select(text: String, budget: Int, alreadyIncluded: String = "", definitions: Boolean = false): String {
             val chunks = text.split(Regex("\\n\\s*\\n")).flatMap { paragraph ->
                 // Score table entries individually: a matching late row must not
                 // pull in (and get truncated behind) the entire preceding table.
@@ -40,11 +40,24 @@ class ExamMaterials private constructor(
                 (alreadyIncluded.isBlank() || !it.startsWith(alreadyIncluded)) }
             val scored = chunks.mapIndexed { i, chunk -> Triple(chunk, terms.count { it in chunk.lowercase() }, i) }
                 .sortedWith(compareByDescending<Triple<String, Int, Int>> { it.second }.thenBy { it.third })
+            val definitionChunks = if (definitions) scored.filter {
+                Regex("定义|框架|\\bdefinition\\b|\\bframework\\b", RegexOption.IGNORE_CASE).containsMatchIn(it.first)
+            } else emptyList()
+            // Without a shared term, multiple definitions are ambiguous. Only use
+            // the fallback when there is a single candidate, and never insert a
+            // partial definition when it cannot fit in the existing section budget.
+            val preferred = definitionChunks.firstOrNull { it.second > 0 }
+                ?: definitionChunks.singleOrNull()
+            val definition = preferred?.first?.takeIf { it.length <= budget }
+            val remaining = if (definition == null) budget else (budget - definition.length - 2).coerceAtLeast(0)
+            val other = scored.filter { it !in definitionChunks }
             // Unrelated opening paragraphs add model latency without helping the
             // question. Keep one fallback when no topic matches, and never repeat
             // planning material already carried by the format/weight overview.
-            val selected = scored.filter { it.second > 0 }.take(3).ifEmpty { scored.take(1) }
-            return selected.joinToString("\n\n") { it.first.take(budget / selected.size) }.take(budget)
+            val selected = other.filter { it.second > 0 }.take(3).ifEmpty { other.take(1) }
+            val excerpts = if (remaining == 0) "" else
+                selected.joinToString("\n\n") { it.first.take(remaining / selected.size) }.take(remaining)
+            return listOfNotNull(definition, excerpts.takeIf { it.isNotEmpty() }).joinToString("\n\n").take(budget)
         }
         val overview = guidance.split(Regex("\\n\\s*\\n")).firstOrNull {
             it.contains("考试格式") || it.contains("exam format", ignoreCase = true)
@@ -58,10 +71,10 @@ Private exam planning reference
 先用一句学生语言解释，再给术语或公式。新例题完成代入并核对单位、加总；ICER口头定义与成本/QALY一致。判断合同选择须核验效用假设；偏好未给定时只讲定性条件。
 <planning>
 $overview
-${select(guidance, 200, overview)}
+${select(guidance, 200, overview, definitions = true)}
 </planning>
 <adjudications>
-${select(rulings, 160)}
+${select(rulings, 160, definitions = true)}
 </adjudications>
 <past-paper-reference>
 $papers

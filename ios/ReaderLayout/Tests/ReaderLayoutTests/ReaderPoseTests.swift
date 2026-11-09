@@ -23,7 +23,7 @@ final class ReaderPoseTests: XCTestCase {
     func testUncertainAndNarrowInputsDoNotPretendToBeHardwareFacts() {
         XCTAssertEqual(ReaderPoseResolver.resolve(geometry(.partiallyOpen)), .compact)
         XCTAssertEqual(ReaderPoseResolver.resolve(geometry(.unavailable, compact: true)), .compact)
-        XCTAssertEqual(ReaderPoseResolver.resolve(geometry(.unavailable)), .openLandscape)
+        XCTAssertEqual(ReaderPoseResolver.resolve(geometry(.unavailable)), .compact)
         XCTAssertEqual(ReaderPoseResolver.resolve(geometry(width: .nan)), .compact)
         XCTAssertEqual(ReaderPoseResolver.resolve(geometry(width: 0)), .compact)
     }

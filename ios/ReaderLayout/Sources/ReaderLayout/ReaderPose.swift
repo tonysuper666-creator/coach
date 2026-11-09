@@ -64,7 +64,10 @@ public enum ReaderPoseResolver {
             return .compact
         case .open:
             if geometry.surface == .faceUp { return .tabletop }
-        case .unavailable: break
+        case .unavailable:
+            // A non-folding screen uses the same branch as a closed foldable,
+            // regardless of orientation or the window's size class.
+            return .compact
         }
 
         if geometry.compactWidth { return .compact }

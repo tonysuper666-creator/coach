@@ -13,12 +13,33 @@ then subtracts its own toolbar height. A closed fold has no hinge feature and
 uses the current window width. No model names, hinge angle guesses or hardware
 resolution constants select a layout.
 
+Available content width uses the current Android 700/1100dp boundaries: below
+700 a single pane with a drawer, 700 through 1099 page/question panes, and 1100+
+adds a page-directory pane. Fold-reserved book/tabletop regions take precedence.
+The actual page viewport (after banners, bars, controls and hinge reservation)
+decides readability independently of this pane count. Below 480dp page height,
+an explicitly selected column, or a height-fit body below 16sp, reading uses
+column width and vertical scroll. Large figures can pan horizontally instead
+of being cut or silently shrinking the text. Only explicit overview can be a
+thumbnail. System fontScale participates in the 16sp floor.
+
+The native renderer must provide its measured smallest body font in full-page
+units as `ReaderPageLayout.bodyFontSize`. A missing metric conservatively uses
+width-fit and does not claim a measured font-size pass. Schema-v1 Docling output
+does not provide this metric; do not fabricate it from OCR. The synthetic host
+reports the actual Android Paint size to its tests, independently of the plan.
+
 `ReaderSession` is hoisted outside layout branches. Local snapshots retain the
 answer/note drafts, original column, selected anchor, pending confirmation and
 return location. Snapshot storage belongs to the owner, in private account-scoped
 storage; the fixture uses a separate synthetic-only preferences file. Source
 geometry isn't persisted: a restored source drawer asks for native verification
 again. This does not implement cross-device sync or durable study events.
+On RECHECK, the owner must use `selectedQuestionId` to obtain a **fresh** shared
+and native resolution, construct that question with the new result, and call
+`showSource` again. The screen does not start a resolver or reuse pre-restart
+geometry. A failed recheck must remain an explicit unconfirmed result. Expanded
+layouts clear a former compact QUESTIONS drawer and do not consume Back for it.
 
 `ReaderLayoutV1` reads PR127's schema-1 page JSON and checks the exact file digest,
 page base and coordinate convention. Unreliable order/rotation/geometry uses the

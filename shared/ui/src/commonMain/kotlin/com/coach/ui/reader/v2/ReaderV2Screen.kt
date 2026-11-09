@@ -53,8 +53,13 @@ fun ReaderV2Screen(
             val bodyFold = window.fold?.let { f -> f.copy(bounds = f.bounds.copy(top = f.bounds.top - chromeHeight, bottom = f.bounds.bottom - chromeHeight)) }
             val bodyWindow = ReaderWindow(maxWidth.value, maxHeight.value, bodyFold)
             val bodyPanes = readerPanes(bodyWindow, session.railVisible)
+            LaunchedEffect(bodyPanes.arrangement, session.drawer) {
+                if (bodyPanes.arrangement != ReaderArrangement.COMPACT && session.drawer == ReaderDrawer.QUESTIONS)
+                    onSession(session.copy(drawer = ReaderDrawer.NONE))
+            }
             val inlineSource = bodyPanes.arrangement != ReaderArrangement.COMPACT && session.drawer == ReaderDrawer.SOURCE
             val displayPage = if (inlineSource) source?.let { target -> pages.firstOrNull { it.pageIndex0 == target.pageIndex0 } } else page
+            var displayedColumn by remember(displayPage?.pageIndex0) { mutableStateOf<Int?>(null) }
             ReaderPaneLayout(bodyPanes, Modifier.fillMaxSize(), page = {
                 if (bodyPanes.arrangement == ReaderArrangement.COMPACT && session.focus == ReaderFocus.QUESTIONS) {
                     ReaderQuestionPanel(questions, session, onSession)
@@ -62,7 +67,7 @@ fun ReaderV2Screen(
                     Row(Modifier.fillMaxWidth().horizontalScrollForReader()) {
                         if (inlineSource) TextButton(onClick = close, modifier = Modifier.testTag("reader-return")) { Text("返回原页") }
                         else if (page != null && page.columns.isNotEmpty()) {
-                            val current = session.position.columnId ?: if (bodyPanes.arrangement == ReaderArrangement.COMPACT && !session.overview) page.columns.firstOrNull()?.id else null
+                            val current = session.position.columnId ?: displayedColumn
                             val next = page.nextColumn(current)
                             TextButton(onClick = { column(next) }, enabled = next != current, modifier = Modifier.testTag("reader-next-column")) { Text("下一栏") }
                             TextButton(onClick = { onSession(session.copy(position = session.position.copy(columnId = null), overview = true)) }) { Text("整页") }
@@ -77,9 +82,17 @@ fun ReaderV2Screen(
                     }
                     if (displayPage == null) Text(if (inlineSource) (session.sourceFailure ?: ReaderSourceFailure.MISSING).message else "这一页暂时打不开", Modifier.padding(16.dp).testTag("reader-source-error"))
                     else ReaderV2Page(displayPage, session.position.columnId, bodyPanes.arrangement == ReaderArrangement.COMPACT,
-                        if (inlineSource) source else null, session.flash, ::column, Modifier.weight(1f), session.overview, pageContent)
+                        if (inlineSource) source else null, session.flash, ::column, Modifier.weight(1f), session.overview,
+                        onPlan = { if (!inlineSource) displayedColumn = it.columnId }, pageContent = pageContent)
                 }
-            }, questions = { ReaderQuestionPanel(questions, session, onSession) })
+            }, questions = { ReaderQuestionPanel(questions, session, onSession) }, navigation = {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp)) {
+                    Text("页目录", style = MaterialTheme.typography.titleSmall)
+                    for (p in pages.sortedBy { it.pageIndex0 }) TextButton(onClick = {
+                        onSession(session.copy(position = ReaderPosition(p.pageIndex0), overview = false))
+                    }) { Text("PDF 第${p.pageIndex0 + 1}页") }
+                }
+            })
             if (bodyPanes.arrangement == ReaderArrangement.COMPACT && session.drawer != ReaderDrawer.NONE) Surface(Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(.5f).testTag("reader-half-sheet"),
                 tonalElevation = 4.dp, shadowElevation = 8.dp) {
                 Column(Modifier.fillMaxSize()) {
@@ -123,18 +136,22 @@ private fun ReaderQuestionPanel(questions: List<ReaderQuestion>, session: Reader
 private fun Modifier.horizontalScrollForReader(): Modifier = horizontalScroll(rememberScrollState())
 
 @Composable
-private fun ReaderPaneLayout(panes: ReaderPanes, modifier: Modifier, page: @Composable () -> Unit, questions: @Composable () -> Unit) {
+private fun ReaderPaneLayout(panes: ReaderPanes, modifier: Modifier, page: @Composable () -> Unit,
+    questions: @Composable () -> Unit, navigation: @Composable () -> Unit) {
     Layout(content = {
         Box(Modifier.clipToBounds().testTag("reader-page-pane")) { page() }
         if (panes.questions != null) Box(Modifier.clipToBounds().background(MaterialTheme.colorScheme.surfaceVariant).testTag("reader-question-pane")) { questions() }
+        if (panes.navigation != null) Box(Modifier.clipToBounds().testTag("reader-navigation-pane")) { navigation() }
     }, modifier = modifier) { children, limits ->
         fun measure(p: ReaderPane, index: Int) = children[index].measure(Constraints.fixed(
             (p.width * density).roundToInt().coerceAtLeast(1), (p.height * density).roundToInt().coerceAtLeast(1)))
         val body = measure(panes.page, 0)
         val rail = panes.questions?.let { measure(it, 1) }
+        val nav = panes.navigation?.let { measure(it, if (panes.questions != null) 2 else 1) }
         layout(limits.maxWidth, limits.maxHeight) {
             body.place((panes.page.left * density).roundToInt(), (panes.page.top * density).roundToInt())
             panes.questions?.let { rail?.place((it.left * density).roundToInt(), (it.top * density).roundToInt()) }
+            panes.navigation?.let { nav?.place((it.left * density).roundToInt(), (it.top * density).roundToInt()) }
         }
     }
 }

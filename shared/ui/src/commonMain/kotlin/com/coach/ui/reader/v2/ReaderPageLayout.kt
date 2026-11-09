@@ -4,8 +4,14 @@ import kotlinx.serialization.json.*
 
 data class ReaderColumn(val id: Int, val region: ReaderRegion)
 data class ReaderPageLayout(val pageIndex0: Int, val width: Float, val height: Float,
-    val trim: ReaderRegion = ReaderRegion.Full, val columns: List<ReaderColumn> = emptyList()) {
-    init { require(pageIndex0 >= 0 && width.isFinite() && height.isFinite() && width > 0 && height > 0) }
+    val trim: ReaderRegion = ReaderRegion.Full, val columns: List<ReaderColumn> = emptyList(),
+    /** Smallest body font in the full-page renderer's units, measured by its owner.
+     * Null means height-fit readability cannot be proved; never infer this from OCR. */
+    val bodyFontSize: Float? = null) {
+    init {
+        require(pageIndex0 >= 0 && width.isFinite() && height.isFinite() && width > 0 && height > 0)
+        require(bodyFontSize == null || bodyFontSize.isFinite() && bodyFontSize > 0)
+    }
     fun column(id: Int?) = columns.firstOrNull { it.id == id }
     fun nextColumn(id: Int?): Int? {
         if (columns.isEmpty()) return null

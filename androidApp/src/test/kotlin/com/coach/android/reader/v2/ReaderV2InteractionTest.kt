@@ -33,10 +33,11 @@ class ReaderV2InteractionTest {
     @get:Rule val compose = createComposeRule()
     private var session by mutableStateOf(ReaderV2Fixture.session())
     private var window by mutableStateOf(ReaderWindow(390f, 844f))
+    private val bodyPixels = mutableMapOf<Int, Float>()
 
     private fun host() { compose.setContent { MaterialTheme {
         Box(Modifier.requiredSize(window.width.dp, window.height.dp).testTag("reader-fixture-frame")) {
-            ReaderV2FixtureHost(window, session, { session = it })
+            ReaderV2FixtureHost(window, session, { session = it }, onBodySize = { page, px -> bodyPixels[page] = px })
         }
     } } }
 
@@ -149,7 +150,10 @@ class ReaderV2InteractionTest {
 
     @Test fun letterboxedColumnCannotLeakAdjacentColumnIntoItsMargins() {
         compose.setContent { Box(Modifier.requiredSize(400.dp, 800.dp).background(Color.White).testTag("crop-probe")) {
-            ReaderV2Page(ReaderV2Fixture.pages.first(), 2, false, null, 0, {}, pageContent = {
+            // A genuinely readable height-fit crop still has letterbox margins.
+            val readableCrop = ReaderV2Fixture.pages.first().copy(trim = ReaderV2Fixture.columns[1].region,
+                columns = emptyList(), bodyFontSize = 48f)
+            ReaderV2Page(readableCrop, null, false, null, 0, {}, pageContent = {
                 Canvas(Modifier.fillMaxSize()) {
                     drawRect(Color.Red)
                     drawRect(Color.Blue, Offset(size.width * .54f, 0f), Size(size.width * .38f, size.height))
@@ -160,5 +164,62 @@ class ReaderV2InteractionTest {
         assertEquals(Color.White, pixels[5, 400])
         assertEquals(Color.Blue, pixels[200, 400])
         assertEquals(Color.White, pixels[395, 400])
+    }
+
+    private fun assertReadableColumn() {
+        val pixels = compose.onNodeWithTag("reader-page-0").captureToImage().toPixelMap()
+        val ruler = Color(0xFF2F6A4B)
+        val widest = (0 until pixels.height).maxOf { y -> (0 until pixels.width).count { x -> pixels[x, y] == ruler } }
+        assertTrue("Reading column must fill the actual page viewport", widest >= pixels.width * .9f)
+        compose.runOnIdle { assertTrue("Android Paint body must remain at least 16sp at mdpi/fontScale=1", bodyPixels.getValue(0) >= 15.95f) }
+    }
+
+    @Test fun wideLandscapePhoneReadsAtColumnWidthBeforeAndAfterNextColumn() {
+        window = ReaderWindow(914f, 380f)
+        host()
+        assertReadableColumn()
+        capture("phone-landscape-914x380-reading")
+        compose.onNodeWithTag("reader-next-column").performClick()
+        compose.runOnIdle { assertEquals(2, session.position.columnId) }
+        assertReadableColumn()
+    }
+
+    @Test fun tabletopOrdinaryReadingUsesWidthAndVerticalScroll() {
+        window = ReaderWindow(900f, 844f, ReaderFold(ReaderPane(0f, 400f, 900f, 420f), false, true))
+        host()
+        compose.onNodeWithTag("reader-half-sheet").assertDoesNotExist()
+        compose.onNodeWithTag("reader-source-highlight").assertDoesNotExist()
+        assertReadableColumn()
+        capture("flex-reading")
+        compose.onNodeWithTag("reader-next-column").performClick()
+        compose.runOnIdle { assertEquals(2, session.position.columnId) }
+        assertReadableColumn()
+    }
+
+    @Test fun expandingAQuestionDrawerDoesNotConsumeAnInvisibleBackPress() {
+        host()
+        compose.onNodeWithTag("reader-margin").performClick()
+        compose.onNodeWithTag("reader-half-sheet").assertIsDisplayed()
+        compose.runOnIdle { window = ReaderWindow(900f, 844f) }
+        compose.onNodeWithTag("reader-half-sheet").assertDoesNotExist()
+        compose.runOnIdle {
+            assertEquals(ReaderDrawer.NONE, session.drawer)
+            assertFalse(session.handlesReaderBack(ReaderArrangement.EXPANDED))
+        }
+    }
+
+    @Test fun aFullWidthFigureCanPanWithoutShrinkingBodyText() {
+        compose.setContent { Box(Modifier.requiredSize(390.dp, 360.dp).testTag("figure-probe")) {
+            val fullWidth = ReaderV2Fixture.pages.first().copy(trim = ReaderRegion.Full, columns = emptyList())
+            ReaderV2Page(fullWidth, null, true, null, 0, {}, pageContent = {
+                Canvas(Modifier.fillMaxSize()) {
+                    drawRect(Color.Red)
+                    drawRect(Color.Blue, Offset(size.width / 2, 0f), Size(size.width / 2, size.height))
+                }
+            })
+        } }
+        assertEquals(Color.Red, compose.onNodeWithTag("figure-probe").captureToImage().toPixelMap()[100, 100])
+        compose.onNodeWithTag("reader-page-0").performTouchInput { swipeLeft() }
+        assertEquals(Color.Blue, compose.onNodeWithTag("figure-probe").captureToImage().toPixelMap()[100, 100])
     }
 }

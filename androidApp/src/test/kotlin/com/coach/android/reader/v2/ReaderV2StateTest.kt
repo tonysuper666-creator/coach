@@ -6,6 +6,46 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReaderV2StateTest {
+    @Test fun currentAndroidWindowBreakpointsKeepPageAndQuestionPanesContiguous() {
+        assertEquals(ReaderArrangement.COMPACT, readerPanes(ReaderWindow(699f, 900f), true).arrangement)
+        for (width in listOf(700f, 704f, 933f, 1099f)) {
+            val panes = readerPanes(ReaderWindow(width, 900f), true)
+            assertEquals(ReaderArrangement.EXPANDED, panes.arrangement)
+            assertNull(panes.navigation)
+            assertEquals(panes.page.right, panes.questions!!.left)
+        }
+        val three = readerPanes(ReaderWindow(1100f, 900f), true)
+        assertEquals(three.navigation!!.right, three.page.left)
+        assertEquals(three.page.right, three.questions!!.left)
+        assertTrue(readerPanes(ReaderWindow(933f, 704f), true).page.width >= 520f)
+    }
+
+    @Test fun readingUsesActualPaneHeightAndAFontFloorWhileOverviewStaysExplicit() {
+        val page = ReaderV2Fixture.pages.first()
+        for ((width, height) in listOf(714f to 250f, 900f to 270f, 500f to 700f)) {
+            val plan = readerPagePlan(page, null, false, null, false, width, height, 1f, 16f)
+            assertEquals(1, plan.columnId)
+            assertEquals(width, plan.region.width * plan.viewport.pageWidth, .05f)
+            assertTrue(plan.bodySizePx!! >= 16f)
+            assertTrue(plan.viewport.contentHeight > height)
+        }
+        val explicit = readerPagePlan(page, 2, false, null, false, 900f, 270f, 1f, 16f)
+        assertEquals(2, explicit.columnId)
+        assertEquals(900f, explicit.region.width * explicit.viewport.pageWidth, .05f)
+        val readablePage = page.copy(bodyFontSize = 48f)
+        assertNull(readerPagePlan(readablePage, null, false, null, false, 700f, 700f, 1f, 16f).columnId)
+        val unknownFont = page.copy(bodyFontSize = null)
+        assertNull(readerPagePlan(unknownFont, null, false, null, false, 700f, 700f, 1f, 16f).bodySizePx)
+        val overview = readerPagePlan(page, null, false, null, true, 714f, 250f, 1f, 16f)
+        assertNull(overview.columnId)
+        assertEquals(ReaderRegion.Full, overview.region)
+        assertTrue(overview.bodySizePx!! < 16f)
+        val figure = readerPagePlan(page.copy(columns = emptyList(), trim = ReaderRegion.Full), null, true,
+            null, false, 300f, 250f, 1f, 16f)
+        assertTrue(figure.bodySizePx!! >= 16f)
+        assertTrue(figure.viewport.contentWidth > 300f)
+    }
+
     @Test fun compactExpandedAndRuntimeHingesKeepContentOutsideReservedRegions() {
         assertEquals(ReaderArrangement.COMPACT, readerPanes(ReaderWindow(390f, 844f), true).arrangement)
         val expanded = readerPanes(ReaderWindow(820f, 720f), true)

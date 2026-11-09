@@ -49,9 +49,10 @@ class ReaderV2FixtureActivity : ComponentActivity() {
         setContent { MaterialTheme {
             val density = LocalDensity.current.density
             var origin by remember { mutableStateOf(Offset.Zero) }
-            BackHandler(session.drawer != ReaderDrawer.NONE) { session = session.closeDrawer() }
             BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInWindow() }) {
-                ReaderV2FixtureHost(ReaderWindow(maxWidth.value, maxHeight.value, features.firstOrNull()?.let { readerFold(it, density, origin) }), session, { session = it })
+                val readerWindow = ReaderWindow(maxWidth.value, maxHeight.value, features.firstOrNull()?.let { readerFold(it, density, origin) })
+                BackHandler(session.handlesReaderBack(readerPanes(readerWindow, session.railVisible).arrangement)) { session = session.closeDrawer() }
+                ReaderV2FixtureHost(readerWindow, session, { session = it })
             }
         } }
     }

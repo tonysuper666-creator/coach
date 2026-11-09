@@ -13,7 +13,7 @@ data class ReaderFold(val bounds: ReaderPane, val vertical: Boolean, val separat
 data class ReaderWindow(val width: Float, val height: Float, val fold: ReaderFold? = null) {
     init { require(width.isFinite() && height.isFinite() && width > 0 && height > 0) }
 }
-data class ReaderPanes(val arrangement: ReaderArrangement, val page: ReaderPane, val questions: ReaderPane?)
+data class ReaderPanes(val arrangement: ReaderArrangement, val page: ReaderPane, val questions: ReaderPane?, val navigation: ReaderPane? = null)
 
 fun readerPanes(window: ReaderWindow, railVisible: Boolean): ReaderPanes {
     val w = window.width
@@ -32,8 +32,13 @@ fun readerPanes(window: ReaderWindow, railVisible: Boolean): ReaderPanes {
                 ReaderPane(0f, b.bottom, w, h))
         }
     }
-    if (w < 600f) return ReaderPanes(ReaderArrangement.COMPACT, ReaderPane(0f, 0f, w, h), null)
+    if (w < 700f) return ReaderPanes(ReaderArrangement.COMPACT, ReaderPane(0f, 0f, w, h), null)
     val rail = if (railVisible) min(200f, w * .28f) else 0f
-    return ReaderPanes(ReaderArrangement.EXPANDED, ReaderPane(0f, 0f, w - rail, h),
-        if (rail > 0) ReaderPane(w - rail, 0f, w, h) else null)
+    val navigation = if (w >= 1100f) min(180f, w * .16f) else 0f
+    return ReaderPanes(ReaderArrangement.EXPANDED, ReaderPane(navigation, 0f, w - rail, h),
+        if (rail > 0) ReaderPane(w - rail, 0f, w, h) else null,
+        if (navigation > 0) ReaderPane(0f, 0f, navigation, h) else null)
 }
+
+fun ReaderSession.handlesReaderBack(arrangement: ReaderArrangement): Boolean =
+    drawer == ReaderDrawer.SOURCE || drawer == ReaderDrawer.QUESTIONS && arrangement == ReaderArrangement.COMPACT

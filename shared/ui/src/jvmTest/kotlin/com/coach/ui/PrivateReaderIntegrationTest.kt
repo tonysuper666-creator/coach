@@ -92,7 +92,7 @@ class PrivateReaderIntegrationTest {
                         waitUntil(timeoutMillis = 15000) { onAllNodesWithTag("private-note-conflict-load").fetchSemanticsNodes().isNotEmpty() }
                         onNodeWithTag("private-note-conflict-load").performClick()
                         waitUntil(timeoutMillis = 15000) { onAllNodesWithTag("private-note-keep-local").fetchSemanticsNodes().isNotEmpty() }
-                        onNodeWithText("服务端：desktop edit").assertExists()
+                        onNodeWithText("已保存的批注：desktop edit").assertExists()
                         onNodeWithTag("private-note-keep-local").performClick()
                         waitUntil(timeoutMillis = 15000) { runBlocking { desktop.reader.state("book").body!!.getValue("notes").jsonArray.single().jsonObject.getValue("note").jsonPrimitive.content == "phone edit" } }
                     }

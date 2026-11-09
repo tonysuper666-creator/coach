@@ -13,7 +13,15 @@ private struct LedgerNotice: Decodable { let t: String; let course: String; let 
 // separately could permanently lose a page if the app is killed between writes.
 struct LedgerReplica: Codable {
     struct Event: Codable { let seq: Int64; let id: String; let json: Data }
-    struct Course: Codable { var cursor: Int64 = 0; var events: [Event] = [] }
+    struct Course: Codable {
+        var cursor: Int64 = 0
+        var events: [Event] = []
+        // Older payloads are intentionally discarded; their sequence has already
+        // been consumed. Optional keeps previously persisted replicas readable.
+        var prunedThrough: Int64?
+    }
+    static let maxCachedEvents = 256
+    static let maxCachedBytes = 512 * 1024
     var epoch: String
     var courses: [String: Course] = [:]
 
@@ -51,7 +59,9 @@ struct LedgerReplica: Codable {
                 guard updated.events.contains(where: { $0.id == id && $0.seq == seq && $0.json == json }) else { throw ConnectionError.invalidResponse }
                 continue
             }
-            // Unknown old events indicate a hole, not a safe duplicate.
+            // Old payloads outside the retained window cannot be compared byte
+            // for byte, but have already been covered by the committed cursor.
+            if seq <= (updated.prunedThrough ?? 0) { continue }
             guard seq > updated.cursor else { throw ConnectionError.invalidResponse }
             let event = Event(seq: seq, id: id, json: json)
             updated.events.append(event); ids.insert(id); sequences.insert(seq); added = true
@@ -59,6 +69,20 @@ struct LedgerReplica: Codable {
         updated.cursor = through
         var next = self
         next.courses[course] = updated
+        // Bound retained payloads globally, not merely per course. Evict the
+        // oldest event in a course first so its watermark remains meaningful.
+        var count = next.courses.values.reduce(0) { $0 + $1.events.count }
+        var bytes = next.courses.values.reduce(0) { $0 + $1.events.reduce(0) { $0 + $1.json.count } }
+        while count > Self.maxCachedEvents || bytes > Self.maxCachedBytes {
+            guard let victim = next.courses.keys.filter({ !(next.courses[$0]?.events.isEmpty ?? true) })
+                .min(by: { (next.courses[$0]?.events.map(\.seq).min() ?? .max) < (next.courses[$1]?.events.map(\.seq).min() ?? .max) }),
+                var entry = next.courses[victim],
+                let index = entry.events.indices.min(by: { entry.events[$0].seq < entry.events[$1].seq }) else { break }
+            let removed = entry.events.remove(at: index)
+            entry.prunedThrough = max(entry.prunedThrough ?? 0, removed.seq)
+            next.courses[victim] = entry
+            count -= 1; bytes -= removed.json.count
+        }
         try next.save(file: file)
         self = next
         return (more, added)

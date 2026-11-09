@@ -1,4 +1,4 @@
-import http.server, ipaddress, json, os, pathlib, plistlib, re, secrets as random_secrets, select, socket, socketserver, subprocess, sys, tempfile, threading, time, urllib.request
+import http.server, ipaddress, json, os, pathlib, plistlib, re, secrets as random_secrets, select, shutil, socket, socketserver, subprocess, sys, tempfile, threading, time, urllib.request
 
 root = pathlib.Path.cwd()
 server = root / 'server/app/build/install/app/bin/app'
@@ -182,6 +182,9 @@ with tempfile.TemporaryDirectory(prefix='coach-ios-isolated-') as tmp:
         tests = ['testLostReplyCommit', 'testLostReplyRestore'] if '--lost-reply' in sys.argv else (['testLedgerOfflineCatchUp', 'testLedgerRestore'] if '--ledger' in sys.argv else ['testRealtimeOfflineAndRetry', 'testRealtimeRestoreAndRevoke'])
         for test in tests:
             run(['xcodebuild']+common+['-destination', 'id='+sim, '-only-testing:CoachAppIntegrationTests/RealConnectionTests/'+test, 'test-without-building'])
+            if test == 'testLedgerOfflineCatchUp' and os.environ.get('COACH_LEDGER_UI_SCREENSHOT'):
+                container = run(['xcrun', 'simctl', 'get_app_container', sim, 'dev.coach.ton1411.simulator', 'data']).splitlines()[-1]
+                shutil.copyfile(pathlib.Path(container)/'Documents'/'ledger-ui.png', os.environ['COACH_LEDGER_UI_SCREENSHOT'])
         screenshot = os.environ.get('COACH_IOS_SCREENSHOT')
         if screenshot:
             run(['xcrun', 'simctl', 'launch', sim, 'dev.coach.ton1411.simulator'])

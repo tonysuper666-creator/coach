@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Security
 import SwiftUI
 
@@ -11,7 +12,11 @@ private final class LearningNoRedirects: NSObject, URLSessionTaskDelegate {
 struct WeekList: Decodable { let weeks: [WeekSummary] }
 struct WeekSummary: Decodable, Identifiable { let week: Int; let title: String; var id: Int { week } }
 struct PracticeWeek: Decodable { let title: String; let items: [PracticeItem] }
-struct PracticeItem: Decodable, Identifiable { let id: String; let stem: String; let options: [String]; let layout: Int?; let status: String }
+struct PracticeItem: Decodable, Identifiable {
+    let id: String; let stem: String; let options: [String]; let layout: Int?; let status: String
+    var selectionSignature: SelectionSignature { SelectionSignature(id: id, stem: stem, options: options, layout: layout) }
+}
+struct SelectionSignature: Equatable { let id: String; let stem: String; let options: [String]; let layout: Int? }
 struct AnswerReceipt: Decodable { let itemId: String; let attemptId: String; let choice: Int; let status: String; let keyState: String }
 struct PendingAnswer: Codable {
     let course: String; let week: Int; let itemId: String; let choice: Int; let layout: Int?; let submissionId: String; let server: String; let deviceId: String
@@ -55,6 +60,12 @@ final class LearningModel: ObservableObject {
     @Published var pending: PendingAnswer?
     @Published var message: String?
     @Published var busy = false
+    @Published private(set) var refreshNeeded = false
+    @Published private(set) var selectionRevision = 0
+    private var loadedCourse: String?
+    private var lastVersions: [String: Int] = [:]
+    private var subscription: AnyCancellable?
+    private var refreshTask: Task<Void, Never>?
     private let connection: ConnectionModel
     private let pendingStore = PendingAnswerStore()
     private var storageAvailable = true
@@ -73,6 +84,53 @@ final class LearningModel: ObservableObject {
         } catch {
             storageAvailable = false
             message = "无法读取待确认答案，请检查设备解锁状态。"
+        }
+        lastVersions = connection.ledgerVersions
+        subscription = connection.$ledgerVersions.dropFirst().sink { [weak self] versions in
+            guard let self else { return }
+            let active = self.loadedCourse
+            let changed = active.map { versions[$0, default: 0] != self.lastVersions[$0, default: 0] } ?? false
+            self.lastVersions = versions
+            if changed, self.selectedWeek != nil, self.course == active {
+                self.refreshNeeded = true
+                self.scheduleRefresh()
+            }
+        }
+    }
+
+    private func scheduleRefresh() {
+        guard refreshNeeded, !busy, refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            await self?.refreshWeek()
+        }
+    }
+
+    private func finishOperation() {
+        busy = false
+        scheduleRefresh()
+    }
+
+    func refreshWeek() async {
+        guard !busy, let active = loadedCourse, active == course, let number = selectedWeek else {
+            refreshTask = nil; return
+        }
+        refreshTask = nil
+        refreshNeeded = false
+        busy = true
+        do {
+            let updated = try await request(PracticeWeek.self, path: ["v1", "courses", active, "mainline", String(number)], query: [URLQueryItem(name: "layout", value: "shuffled-v1")])
+            if loadedCourse == active, course == active, selectedWeek == number {
+                // Never silently apply a previously selected index to different options.
+                if let old = week, old.items.map(\.selectionSignature) != updated.items.map(\.selectionSignature) {
+                    selectionRevision += 1
+                }
+                week = updated
+            }
+            finishOperation()
+        } catch {
+            // Avoid an immediate retry loop. A later ledger event or the visible
+            // retry control retries without losing the pending answer.
+            busy = false; refreshNeeded = true; fail(error)
         }
     }
 
@@ -112,11 +170,12 @@ final class LearningModel: ObservableObject {
               name != ".", name != ".." else { message = "请输入有效的课程标识。"; return }
         guard pending == nil || pending?.course == name else { message = "请先确认上一次答题。"; return }
         course = name; UserDefaults.standard.set(name, forKey: "coach.learning.course")
-        busy = true; defer { busy = false }; message = nil
+        busy = true; defer { finishOperation() }; message = nil
+        loadedCourse = nil; refreshNeeded = false
         weeks = []; week = nil; receipt = nil; selectedWeek = nil
         do {
             let list = try await request(WeekList.self, path: ["v1", "courses", name, "mainline"])
-            weeks = list.weeks; week = nil; receipt = nil; selectedWeek = nil
+            weeks = list.weeks; week = nil; receipt = nil; selectedWeek = nil; loadedCourse = name
             if weeks.isEmpty { message = "这门课程还没有可用练习。" }
         } catch { fail(error) }
     }
@@ -124,10 +183,12 @@ final class LearningModel: ObservableObject {
     func openWeek(_ number: Int) async {
         guard !busy else { return }
         guard pending == nil || pending?.week == number else { message = "请先确认上一次答题。"; return }
-        busy = true; defer { busy = false }; message = nil
+        let version = connection.ledgerVersions[course, default: 0]
+        busy = true; defer { finishOperation() }; message = nil
         do {
             week = try await request(PracticeWeek.self, path: ["v1", "courses", course, "mainline", String(number)], query: [URLQueryItem(name: "layout", value: "shuffled-v1")])
-            selectedWeek = number; receipt = nil
+            selectedWeek = number; receipt = nil; selectionRevision += 1
+            if connection.ledgerVersions[course, default: 0] != version { refreshNeeded = true }
         } catch { fail(error) }
     }
 
@@ -154,7 +215,7 @@ final class LearningModel: ObservableObject {
         guard let (server, credential) = connection.learningCredentials, value.server == server.url.absoluteString, value.deviceId == credential.deviceId else {
             message = "待确认答案属于另一台 Mac 或设备，请恢复原连接后重试。"; return
         }
-        busy = true; defer { busy = false }; message = nil
+        busy = true; defer { finishOperation() }; message = nil
         do {
             let body = try JSONEncoder().encode(AnswerBody(itemId: value.itemId, choice: value.choice, layout: value.layout, submissionId: value.submissionId))
             let result = try await request(AnswerReceipt.self, path: ["v1", "courses", value.course, "mainline", String(value.week), "answer"], body: body)
@@ -170,7 +231,10 @@ struct LearningView: View {
     @StateObject private var model: LearningModel
     @State private var selections: [String: Int] = [:]
     @State private var showDiscard = false
-    init(connection: ConnectionModel) { self.connection = connection; _model = StateObject(wrappedValue: LearningModel(connection: connection)) }
+    init(connection: ConnectionModel, model: LearningModel? = nil) {
+        self.connection = connection
+        _model = StateObject(wrappedValue: model ?? LearningModel(connection: connection))
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("接着学习").font(.title2.bold())
@@ -203,12 +267,16 @@ struct LearningView: View {
                     }.padding(.vertical, 8)
                 }
             }
+            if model.refreshNeeded {
+                Button("刷新练习状态") { Task { await model.refreshWeek() } }.disabled(model.busy)
+            }
             if let receipt = model.receipt {
                 Text("已收到答案 · \(receipt.status) · \(receipt.keyState)").accessibilityIdentifier("answerReceipt")
             }
             if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("learningMessage") }
             Button("移除此设备的连接", role: .destructive) { connection.forget() }
         }
+        .onChange(of: model.selectionRevision) { _ in selections = [:] }
         .alert("清除待确认记录？", isPresented: $showDiscard) {
             Button("清除记录", role: .destructive) { model.discardPending() }
             Button("取消", role: .cancel) { }

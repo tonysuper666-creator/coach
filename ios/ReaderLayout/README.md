@@ -26,8 +26,14 @@ and non-Duo simulator results are not iPhone Duo evidence.
 
 The host's pose menu uses synthetic choices only. Changing a choice recreates
 the sample canvas while keeping its page, selection and note in the parent;
-this is a state-continuity fixture, not a fold-aware layout. From the repository
-root, run its UI tests on an available iOS simulator with:
+the sample drawer also keeps its question/source state across those changes.
+This is a state-continuity fixture, not a fold-aware layout or a real source
+lookup. Its UI tests exercise a 280-point container and accessibility text size
+using launch arguments; those values are test fixtures, not device dimensions.
+Another test-only launch mode changes the container width and text size while
+the drawer is open; these controls are absent in the normal host.
+The reader and drawer scroll separately when their content does not fit.
+From the repository root, run its UI tests on an available iOS simulator with:
 
 ```sh
 tools/dev/heavy --emulator bash ios/ReaderLayout/Host/run-ui-tests.sh <simulator-udid>

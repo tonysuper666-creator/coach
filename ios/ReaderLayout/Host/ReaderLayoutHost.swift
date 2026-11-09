@@ -2,10 +2,37 @@ import SwiftUI
 
 @main
 struct ReaderLayoutHostApp: App {
-    var body: some Scene { WindowGroup { HostView() } }
+    @State private var fixtureNarrow = false
+    @State private var fixtureLarge = false
+
+    var body: some Scene {
+        WindowGroup {
+            if ProcessInfo.processInfo.arguments.contains("-adaptiveFixture") {
+                VStack {
+                    HStack {
+                        Button("切换测试宽度") { fixtureNarrow.toggle() }
+                        Button("切换测试字号") { fixtureLarge.toggle() }
+                    }
+                    HostView()
+                        .dynamicTypeSize(fixtureLarge ? .accessibility3 : .large)
+                        .frame(maxWidth: fixtureNarrow ? 280 : .infinity)
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("-largeTypeFixture") {
+                fixture.dynamicTypeSize(.accessibility3)
+            } else {
+                fixture
+            }
+        }
+    }
+
+    private var fixture: some View {
+        // UI-test-only container width, not a device fact.
+        HostView().frame(maxWidth: ProcessInfo.processInfo.arguments.contains("-narrowFixture") ? 280 : .infinity)
+    }
 }
 
 private struct HostView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var content: FlatReaderLayout.Content = .pdf
     @State private var closed = false
     @State private var manual: ReaderPose?
@@ -13,6 +40,7 @@ private struct HostView: View {
     @State private var selection = false
     @State private var draft = ""
     @State private var drawer = false
+    @State private var showingSource = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -23,10 +51,14 @@ private struct HostView: View {
             let pose = ReaderPoseResolver.resolve(geometry, manual: manual)
             let layout = FlatReaderLayout.resolve(content: content, width: proxy.size.width,
                                                   height: proxy.size.height)
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 0) {
+              ScrollView {
+               VStack(alignment: .leading, spacing: 12) {
                 Text("阅读布局示例").font(.title2.bold())
                 Text("组件宿主 · 自造内容").font(.caption).foregroundStyle(.secondary)
-                HStack {
+                let controls = proxy.size.width < 340 || dynamicTypeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout())
+                controls {
                     Button(content == .pdf ? "PDF" : "EPUB") { content = content == .pdf ? .epub : .pdf }
                     Button(closed ? "合上" : "直板") { closed.toggle() }
                     Menu("选择形态") {
@@ -44,17 +76,28 @@ private struct HostView: View {
                              draft: $draft, drawer: $drawer)
                     // Exercise an actual child view teardown on pose changes.
                     .id(poseLabel(pose))
+               }.padding()
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+              }.frame(maxHeight: .infinity).clipped().accessibilityIdentifier("readerScroll")
                 if drawer {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack { Text("内容抽屉").font(.headline); Spacer(); Button("收起") { drawer = false } }
-                        Text("这里是抽屉容器示例。")
+                    ScrollView {
+                      VStack(alignment: .leading, spacing: 8) {
+                        HStack { Text("内容抽屉示例").font(.headline); Spacer(); Button("收起") { drawer = false } }
+                        if showingSource {
+                            Text("出处示例：这是一句自造的示例文字。")
+                            Button("返回题目") { showingSource = false }
+                        } else {
+                            Text("题目示例：这段话讲了什么？")
+                            Button("查看出处") { showingSource = true }
+                        }
+                      }.padding().frame(maxWidth: .infinity, alignment: .topLeading)
                     }
-                    .padding().frame(maxWidth: .infinity, minHeight: proxy.size.height * 0.4, alignment: .topLeading)
+                    .frame(height: proxy.size.height * 0.4)
+                    .clipped()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                    .frame(maxHeight: proxy.size.height * 0.45)
+                    .accessibilityIdentifier("sampleDrawer")
                 }
             }
-            .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
@@ -94,7 +137,6 @@ private struct ReaderCanvas: View {
     @State private var instance = UUID().uuidString
 
     var body: some View {
-        ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("布局示例").font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("canvasInstance-\(instance)")
@@ -111,16 +153,17 @@ private struct ReaderCanvas: View {
                 }
                 Toggle("标记这一段", isOn: $selection)
                 TextField("写下笔记", text: $draft).textFieldStyle(.roundedBorder)
+                    .submitLabel(.done)
                 HStack {
                     Button("下一页") { page += 1 }
                     Button("打开抽屉") { drawer.toggle() }
                 }.buttonStyle(.bordered)
             }.frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     private var sampleText: some View {
         Text("这是用于检查布局的示例内容。阅读时可以保留当前页和笔记。")
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("sampleBody")
     }
 }

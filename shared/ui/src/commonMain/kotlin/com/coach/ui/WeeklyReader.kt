@@ -249,7 +249,6 @@ internal fun WeeklyReader(
                 when {
                     answer != null -> {
                         Text(answer!!.str("text").ifBlank { "缺少可定位的课程依据，暂时无法确认。" })
-                        Text("AI耗时：${answer!!.num("elapsedMs")} ms")
                         for (p in (answer!!["sources"] as? JsonArray).orEmpty().map { it.jsonObject }) {
                             TextButton(onClick = { page = p.str("docId") to p.num("pdfPage").toInt() }) {
                                 Text("【${p.str("anchor")}】${p.str("docId")} · PDF 第 ${p.num("pdfPage")} 页")

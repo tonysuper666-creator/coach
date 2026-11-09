@@ -150,8 +150,8 @@ val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 val SOURCE_SPLIT_MIN_WIDTH = 840.dp
 
 /** 底栏/侧轨的五个入口。「学习」不是入口：它是从「继续」或某个知识点打开的线程。 */
-enum class AppTab(val label: String, val glyph: String) {
-    TODAY("今天", "◉"), ROUTE("路线", "☰"), REVIEW("复习", "↻"), RECORDS("记录", "✓"), RESOURCES("资料", "❖"),
+enum class AppTab(val label: String, val glyph: String? = null) {
+    TODAY("今天", "◉"), ROUTE("路线", "☰"), REVIEW("复习", "↻"), RECORDS("记录", "✓"), RESOURCES("资料"),
 }
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
@@ -351,7 +351,7 @@ private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit, v7: Boolean 
         modifier = if (v7) Modifier.height(coach.design.tokens.V7Windows.Outer.footH) else Modifier,
         windowInsets = if (v7) WindowInsets(0.dp) else NavigationBarDefaults.windowInsets) {
         AppTab.entries.forEach { t ->
-            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, colors = if (v7) NavigationBarItemDefaults.colors(selectedIconColor = ink.accent, selectedTextColor = ink.fgPrimary, indicatorColor = ink.surface2, unselectedIconColor = ink.fgSecondary, unselectedTextColor = ink.fgSecondary) else NavigationBarItemDefaults.colors(), icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = { Text(t.label) })
+            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, colors = if (v7) NavigationBarItemDefaults.colors(selectedIconColor = ink.accent, selectedTextColor = ink.fgPrimary, indicatorColor = ink.surface2, unselectedIconColor = ink.fgSecondary, unselectedTextColor = ink.fgSecondary) else NavigationBarItemDefaults.colors(), icon = { AppNavIcon(t) }, label = { Text(t.label) })
         }
     }
 }
@@ -361,9 +361,19 @@ private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) ->
     NavigationRail(containerColor = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxHeight()) {
         Spacer(Modifier.weight(1f))
         AppTab.entries.forEach { t ->
-            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
+            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, icon = { AppNavIcon(t) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
         }
         Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun AppNavIcon(tab: AppTab) {
+    val glyph = tab.glyph
+    if (glyph == null) {
+        com.coach.ui.v7.DeskNavIcon(tab, Modifier.size(22.dp), LocalContentColor.current)
+    } else {
+        Text(glyph, style = MaterialTheme.typography.titleMedium)
     }
 }
 

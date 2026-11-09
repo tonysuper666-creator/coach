@@ -313,7 +313,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val actions: @Composable () -> Unit = {
         val metrics = LocalDeskMetrics.current
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            val buttonModifier = if (metrics.inner) Modifier else Modifier.weight(1f).height(if (metrics.window == DeskWindow.Outer) 52.dp else 44.dp)
+            val buttonModifier = if (metrics.window == DeskWindow.Inner) Modifier else Modifier.weight(1f).height(if (metrics.window == DeskWindow.Outer) 52.dp else 44.dp)
             if (done == null) {
                 PrimaryButton(onClick = { submit(false) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-submit")) { Text("提交") }
                 PaperButton(onClick = { submit(true) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-guess")) { Text("我是猜的") }
@@ -351,11 +351,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }) {
         val m = LocalDeskMetrics.current
         val density = LocalDensity.current
+        // Medium describes columns, not spare height: keep submission reachable in these windows too.
+        val dockActions = m.window != DeskWindow.Inner
         val feedbackRequester = remember { BringIntoViewRequester() }
         var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
-        LaunchedEffect(revealFeedback, feedbackSize, m.inner) {
+        LaunchedEffect(revealFeedback, feedbackSize, dockActions) {
             if (revealFeedback && feedbackSize != IntSize.Zero) {
-                if (!m.inner) {
+                if (dockActions) {
                     // Keep the complete card, including its citation, above the fixed bottom fade.
                     val fade = with(density) { 40.dp.toPx() }
                     feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
@@ -364,22 +366,23 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             }
         }
         var actionHeight by remember { mutableStateOf(0.dp) }
-        val bottomInset = if (m.inner) 0.dp else actionHeight
+        val bottomInset = if (dockActions) maxOf(actionHeight, if (m.window == DeskWindow.Outer) 85.dp else 69.dp) else 0.dp
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .padding(bottom = bottomInset).verticalScroll(scroll)
+                .padding(bottom = bottomInset).testTag("mainline-scroll-viewport").verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("本周要点") }
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(if (d.sectionLabel.isBlank()) "${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${filtered.size} 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 ${index + 1} 题 / ${filtered.size}",
-                        style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("不计时", style = MaterialTheme.typography.labelMedium)
                 }
                 ClassEmphasis(emphasis, item.strings("factIds"))
                 Spacer(Modifier.height(12.dp))
-                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium.copy(lineHeight = 30.4.sp))
+                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(20.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     options.forEachIndexed { i, option ->
@@ -412,7 +415,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }
                 Spacer(Modifier.height(24.dp))
-                if (m.inner) actions()
+                if (!dockActions) actions()
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (pending != null && !retryable) TextButton(onClick = { retry++ }) { Text("重试原答案") }
                 if (done == null) Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelMedium)
@@ -443,9 +446,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                 }
             }
-            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomInset).fillMaxWidth().height(40.dp)
+            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomInset).fillMaxWidth().height(40.dp)
                 .background(Brush.verticalGradient(listOf(Color.Transparent, com.coach.ui.theme.CoachTheme.colors.surface1))))
-            if (!m.inner) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { actionHeight = with(density) { it.height.toDp() } }.verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
+            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { actionHeight = with(density) { it.height.toDp() } }.verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
         }

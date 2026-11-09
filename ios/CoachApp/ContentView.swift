@@ -50,6 +50,7 @@ struct ContentView: View {
                 Text("实时连接已断开，正在重试。待确认的答案会保留。")
                 Button("重试实时连接") { connection.startRealtime() }
             }
+            if let message = connection.ledgerMessage { Text(message) }
         }.accessibilityIdentifier("realtimeStatus")
     }
 

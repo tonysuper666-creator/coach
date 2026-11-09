@@ -10,7 +10,7 @@ def report(text):
     for secret in sorted(secrets, key=len, reverse=True):
         if secret: text = text.replace(secret, '[redacted]')
     for line in text.splitlines():
-        if any(x in line for x in ['error:', 'Test Case', 'Test Suite', 'Executed ', 'elapsed:', 'Revoked HTTP:', 'Revoked WS handshake:', 'Lost reply', 'Ledger counts', '** TEST', '** BUILD', 'Testing failed', 'failed to', 'error=']): print(line, flush=True)
+        if any(x in line for x in ['error:', 'Test Case', 'Test Suite', 'Executed ', 'elapsed:', 'Revoked HTTP:', 'Revoked WS handshake:', 'Lost reply', 'Ledger counts', 'Ledger catchup:', 'Ledger restore:', '** TEST', '** BUILD', 'Testing failed', 'failed to', 'error=']): print(line, flush=True)
 def run(args):
     result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     report(result.stdout)
@@ -90,8 +90,17 @@ class Forward(socketserver.BaseRequestHandler):
             upstream.close()
 class Control(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.headers.get('X-Test-Control') != self.server.secret or self.path not in ('/down', '/up', '/arm-loss', '/disarm-loss'):
+        if self.headers.get('X-Test-Control') != self.server.secret or self.path not in ('/down', '/up', '/arm-loss', '/disarm-loss', '/submit'):
             self.send_response(403); self.end_headers(); return
+        if self.path == '/submit':
+            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            request = urllib.request.Request(f'http://127.0.0.1:{self.server.port}/v1/courses/contract-course/mainline/1/answer', data=body, headers={'Authorization':'Bearer '+self.server.token, 'X-Coach-Device':'desktop', 'Content-Type':'application/json'})
+            try:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+                    status = response.status; response.read()
+                self.send_response(204 if status == 200 else 502)
+            except Exception: self.send_response(502)
+            self.end_headers(); return
         if self.path in ('/arm-loss', '/disarm-loss'):
             # Close any keep-alive HTTP connections before arming so the next
             # answer POST is the first request on its own inspected connection.
@@ -156,6 +165,7 @@ with tempfile.TemporaryDirectory(prefix='coach-ios-isolated-') as tmp:
         control = http.server.ThreadingHTTPServer((host, 0), Control)
         if relay.server_address[1] in (18791,8791,8790,3790) or control.server_address[1] in (18791,8791,8790,3790): raise RuntimeError('unsafe relay port')
         control.secret = random_secrets.token_urlsafe(32); control.relay = relay
+        control.token = token; control.port = port
         secrets.append(control.secret)
         threading.Thread(target=relay.serve_forever, daemon=True).start()
         relay_started = True
@@ -169,7 +179,7 @@ with tempfile.TemporaryDirectory(prefix='coach-ios-isolated-') as tmp:
         with (bundles[0]/'IsolatedFixture.plist').open('wb') as f: plistlib.dump({'base':f'http://{host}:{relay.server_address[1]}', 'code':code,'adminToken':token, 'control':f'http://{host}:{control.server_address[1]}', 'controlSecret':control.secret},f)
         run(['codesign', '-f', '-s', '-', str(bundles[0])])
 
-        tests = ['testLostReplyCommit', 'testLostReplyRestore'] if '--lost-reply' in sys.argv else ['testRealtimeOfflineAndRetry', 'testRealtimeRestoreAndRevoke']
+        tests = ['testLostReplyCommit', 'testLostReplyRestore'] if '--lost-reply' in sys.argv else (['testLedgerOfflineCatchUp', 'testLedgerRestore'] if '--ledger' in sys.argv else ['testRealtimeOfflineAndRetry', 'testRealtimeRestoreAndRevoke'])
         for test in tests:
             run(['xcodebuild']+common+['-destination', 'id='+sim, '-only-testing:CoachAppIntegrationTests/RealConnectionTests/'+test, 'test-without-building'])
         screenshot = os.environ.get('COACH_IOS_SCREENSHOT')

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 private final class RealtimeNoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -6,6 +7,63 @@ private final class RealtimeNoRedirects: NSObject, URLSessionTaskDelegate {
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }
 }
 private struct RealtimeHello: Decodable { let epoch: String; let lastSeq: Int64 }
+private struct LedgerNotice: Decodable { let t: String; let course: String; let epoch: String }
+
+// One atomic file contains both the events and their cursor: advancing the cursor
+// separately could permanently lose a page if the app is killed between writes.
+struct LedgerReplica: Codable {
+    struct Event: Codable { let seq: Int64; let id: String; let json: Data }
+    struct Course: Codable { var cursor: Int64 = 0; var events: [Event] = [] }
+    var epoch: String
+    var courses: [String: Course] = [:]
+
+    static func file(address: ServerAddress, credential: DeviceCredential) throws -> URL {
+        let identity = address.url.absoluteString + "\n" + credential.deviceId
+        let hash = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        return directory.appendingPathComponent("ledger-\(hash).json")
+    }
+    static func load(file: URL, epoch: String) throws -> LedgerReplica {
+        guard FileManager.default.fileExists(atPath: file.path) else { return LedgerReplica(epoch: epoch) }
+        let previous = try JSONDecoder().decode(LedgerReplica.self, from: Data(contentsOf: file))
+        return previous.epoch == epoch ? previous : LedgerReplica(epoch: epoch)
+    }
+    func save(file: URL) throws {
+        try JSONEncoder().encode(self).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+    mutating func apply(data: Data, course: String, file: URL) throws -> (Bool, Bool) {
+        guard let page = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pageEpoch = page["epoch"] as? String, pageEpoch == epoch,
+              let through = (page["throughSeq"] as? NSNumber)?.int64Value,
+              let more = page["hasMore"] as? Bool,
+              let rows = page["events"] as? [[String: Any]] else { throw ConnectionError.invalidResponse }
+        var updated = courses[course] ?? Course()
+        guard through >= updated.cursor, !more || through > updated.cursor else { throw ConnectionError.invalidResponse }
+        var ids = Set(updated.events.map(\.id))
+        var sequences = Set(updated.events.map(\.seq))
+        var added = false
+        for row in rows {
+            guard let seq = (row["seq"] as? NSNumber)?.int64Value, seq > 0, seq <= through,
+                  let id = row["id"] as? String, !id.isEmpty,
+                  row["courseId"] as? String == course else { throw ConnectionError.invalidResponse }
+            let json = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+            if ids.contains(id) || sequences.contains(seq) {
+                guard updated.events.contains(where: { $0.id == id && $0.seq == seq && $0.json == json }) else { throw ConnectionError.invalidResponse }
+                continue
+            }
+            // Unknown old events indicate a hole, not a safe duplicate.
+            guard seq > updated.cursor else { throw ConnectionError.invalidResponse }
+            let event = Event(seq: seq, id: id, json: json)
+            updated.events.append(event); ids.insert(id); sequences.insert(seq); added = true
+        }
+        updated.cursor = through
+        var next = self
+        next.courses[course] = updated
+        try next.save(file: file)
+        self = next
+        return (more, added)
+    }
+}
 
 @MainActor
 final class ConnectionModel: ObservableObject {
@@ -15,6 +73,11 @@ final class ConnectionModel: ObservableObject {
     @Published var busy = false
     enum RealtimeState { case connecting, online, offline }
     @Published private(set) var realtime: RealtimeState = .connecting
+    @Published private(set) var ledgerVersions: [String: Int] = [:]
+    @Published private(set) var ledgerMessage: String?
+    private(set) var ledgerReplica: LedgerReplica?
+    private let ledgerPageSize: Int
+    init(ledgerPageSize: Int = 100) { self.ledgerPageSize = ledgerPageSize }
     private var realtimeTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var generation = UUID()
@@ -86,8 +149,15 @@ final class ConnectionModel: ObservableObject {
     func forget() {
         do {
             stopRealtime()
+            if let (address, credential) = saved {
+                let file = try LedgerReplica.file(address: address, credential: credential)
+                if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+            }
             try store.delete()
             saved = nil
+            ledgerReplica = nil
+            ledgerVersions = [:]
+            ledgerMessage = nil
             message = nil
             state = .unpaired
         } catch { message = "无法删除设备凭据，请稍后重试。" }
@@ -149,8 +219,10 @@ final class ConnectionModel: ObservableObject {
                 }
             }
             do {
+                var epoch: String?
                 while !Task.isCancelled && generation == current {
                     let frame = try await task.receive()
+                    guard generation == current, !Task.isCancelled else { throw CancellationError() }
                     let data: Data
                     switch frame {
                     case .string(let value): data = Data(value.utf8)
@@ -158,11 +230,24 @@ final class ConnectionModel: ObservableObject {
                     @unknown default: continue
                     }
                     if let hello = try? JSONDecoder().decode(RealtimeHello.self, from: data), !hello.epoch.isEmpty {
+                        let file = try LedgerReplica.file(address: address, credential: credential)
+                        ledgerReplica = try LedgerReplica.load(file: file, epoch: hello.epoch)
+                        epoch = hello.epoch
                         realtime = .online
                         delay = 1
+                        for course in ledgerReplica?.courses.keys.sorted() ?? [] {
+                            try await catchUp(course: course, epoch: hello.epoch, file: file, address: address, credential: credential, session: session, generation: current)
+                        }
+                    } else if let notice = try? JSONDecoder().decode(LedgerNotice.self, from: data), notice.t == "ledger" {
+                        guard notice.epoch == epoch, let epoch else { throw ConnectionError.invalidResponse }
+                        let file = try LedgerReplica.file(address: address, credential: credential)
+                        try await catchUp(course: notice.course, epoch: epoch, file: file, address: address, credential: credential, session: session, generation: current)
                     }
                 }
-            } catch { /* Verify authorization separately below; a transport error is not a revocation. */ }
+            } catch {
+                if generation == current && !Task.isCancelled { ledgerMessage = "学习记录尚未同步，正在重试。" }
+                /* Verify authorization separately below; a transport error is not a revocation. */
+            }
             heartbeat.cancel()
             let closeCode = task.closeCode
             task.cancel(with: .goingAway, reason: nil)
@@ -180,6 +265,32 @@ final class ConnectionModel: ObservableObject {
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
             delay = min(delay * 2, 16)
         }
+    }
+
+    private func catchUp(course: String, epoch: String, file: URL, address: ServerAddress, credential: DeviceCredential, session: URLSession, generation current: UUID) async throws {
+        guard !course.isEmpty, course.utf8.count <= 128, course != ".", course != "..",
+              course.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.")).contains($0) }) else { throw ConnectionError.invalidResponse }
+        var more = false
+        repeat {
+            guard generation == current, !Task.isCancelled, let cursor = ledgerReplica?.courses[course]?.cursor ?? (ledgerReplica == nil ? nil : 0) else { throw CancellationError() }
+            var url = address.url
+            for part in ["v1", "courses", course, "events"] { url.appendPathComponent(part) }
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(name: "after", value: String(cursor)), URLQueryItem(name: "limit", value: String(ledgerPageSize))]
+            guard let url = components.url else { throw ConnectionError.invalidAddress }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+            request.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+            let (data, response) = try await session.data(for: request)
+            guard generation == current, !Task.isCancelled else { throw CancellationError() }
+            guard let response = response as? HTTPURLResponse else { throw ConnectionError.invalidResponse }
+            if response.statusCode == 401 { throw ConnectionError.unauthorized }
+            guard response.statusCode == 200, ledgerReplica?.epoch == epoch else { throw ConnectionError.invalidResponse }
+            let result = try ledgerReplica!.apply(data: data, course: course, file: file)
+            more = result.0
+            if result.1 { ledgerVersions[course, default: 0] += 1 }
+        } while more
+        ledgerMessage = nil
     }
 
     private func errorMessage(_ error: Error) -> String {

@@ -1,12 +1,12 @@
 # iOS 开发状态
 
-`ios/CoachApp.xcodeproj` 是尚未完成的模拟器应用，提供配对、Keychain 凭据恢复及 WebSocket 在线状态。已接入主线练习的课程入口、题目、提交和回执；阅读批注及 WebSocket 事件同步尚未接入。不要将连接界面当作完整客户端验收。
+`ios/CoachApp.xcodeproj` 是尚未完成的模拟器应用，提供配对、Keychain 凭据恢复及 WebSocket 在线状态。已接入主线练习的课程入口、题目、提交和回执；WS 通知触发的事件补拉和游标持久化已接入，但练习界面尚未消费事件以自动刷新。阅读批注尚未接入。不要将连接界面当作完整客户端验收。
 
 模拟器构建：`tools/dev/heavy xcodebuild -project ios/CoachApp.xcodeproj -scheme CoachApp -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build`。未签名的模拟器构建在本机无法读取 Keychain，不可用于验证凭据恢复。
 
 ATS 例外在构建时以 `COACH_ATS_HOST` 设置单个主机，默认是仅用于占位的 `127.0.0.1`，实际目标须用本机私有构建配置注入；例外不包含子域，不设置全局允许。输入的服务地址仍由连接库限制为 Tailscale 地址。隔离模拟器已用单个 Tailscale 数值地址验证 HTTP 和 WebSocket。不要将私有地址、配对码或令牌提交到仓库。
 
-下一步以模拟器实际操作覆盖配对至答题回执的完整界面流程，并验证事件同步。阅读和批注需要对应接口进入 main 后联测；缺失接口不应模拟成功。模拟器 bundle ID 是开发占位，正式标识和签名由后续打包任务办理。
+下一步接通事件到练习界面的刷新，并以模拟器实际操作覆盖配对至答题回执、关闭重开以及不同尺寸和字号。阅读和批注需要对应接口进入 main 后联测；缺失接口不应模拟成功。模拟器 bundle ID 是开发占位，正式标识和签名由后续打包任务办理。
 
 ### Isolated real-server simulator check
 
@@ -90,5 +90,21 @@ attempt each occur once both before and after retry. The relay's private control
 is restricted by a per-run random secret. This fault is response loss after a
 successful server response, not a general network partition test.
 
-The checks do not cover manual UI flows, WS ledger event delivery/catch-up,
-rotation or Dynamic Type.
+### Isolated ledger catch-up check
+
+```sh
+tools/dev/heavy --emulator python3 ios/Tools/run-realtime-tests.py --ledger
+```
+
+The relay cuts a real WS connection while a second isolated client submits a
+synthetic answer to Ktor. On reconnect the app follows its ledger notice and
+pulls pages of one event over authenticated HTTP. The check verifies three
+distinct events, replay of the overlapping actual response, reloading the cursor
+between pages, and a new test-host process reconnecting with the same cursor.
+The event data and cursor are persisted together in one protected, atomic file
+per server and device. They do not yet drive the displayed practice state; the
+user must reopen the course to obtain current server state. Forgetting the device
+removes its cache. Unbounded storage growth needs follow-up.
+
+The checks do not cover manual UI flows, the app itself being closed and
+reopened, rotation, Dynamic Type, or physical devices.

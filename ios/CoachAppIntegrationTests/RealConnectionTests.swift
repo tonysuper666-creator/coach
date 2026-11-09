@@ -244,4 +244,89 @@ final class RealConnectionTests: XCTestCase {
         rejected.cancel(with: .goingAway, reason: nil)
     }
 
+    func testLedgerOfflineCatchUp() async throws {
+        let values = try fixture()
+        let connection = ConnectionModel(ledgerPageSize: 1)
+        await connection.pair(address: try XCTUnwrap(values["base"]), code: try XCTUnwrap(values["code"]))
+        guard case .connected = connection.state else { XCTFail("Pair failed"); return }
+        try await waitUntil("WS initial hello") { connection.realtime == .online }
+        let learning = LearningModel(connection: connection)
+        learning.course = "contract-course"
+        await learning.loadCourse(); await learning.openWeek(1)
+        let item = try XCTUnwrap(learning.week?.items.first)
+        let choice = try XCTUnwrap(item.options.firstIndex(of: "Pears"))
+        try await control("down", fixture: values)
+        try await waitUntil("WS disconnected") { connection.realtime == .offline }
+        var request = URLRequest(url: try XCTUnwrap(URL(string: try XCTUnwrap(values["control"]) + "/submit")))
+        request.httpMethod = "POST"
+        request.setValue(try XCTUnwrap(values["controlSecret"]), forHTTPHeaderField: "X-Test-Control")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["itemId": item.id, "choice": choice, "layout": try XCTUnwrap(item.layout), "submissionId": "ledger-catchup-test"])
+        let (_, submitted) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((submitted as? HTTPURLResponse)?.statusCode, 204)
+        try await control("up", fixture: values)
+        try await waitUntil("ledger pages caught up") { (connection.ledgerReplica?.courses["contract-course"]?.events.count ?? 0) >= 3 }
+        let original = try XCTUnwrap(connection.ledgerReplica?.courses["contract-course"])
+        XCTAssertEqual(original.events.count, 3)
+        XCTAssertEqual(Set(original.events.map(\.id)).count, 3)
+        XCTAssertEqual(connection.ledgerVersions["contract-course"], 3, "Each real HTTP page has one event")
+        let (address, credential) = try XCTUnwrap(connection.learningCredentials)
+        var components = URLComponents(url: address.url.appendingPathComponent("v1/courses/contract-course/events"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "after", value: "0"), URLQueryItem(name: "limit", value: "500")]
+        var replay = URLRequest(url: try XCTUnwrap(components.url))
+        replay.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        replay.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        let (page, response) = try await URLSession.shared.data(for: replay)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        var replica = try XCTUnwrap(connection.ledgerReplica)
+        let file = try LedgerReplica.file(address: address, credential: credential)
+        let result = try replica.apply(data: page, course: "contract-course", file: file)
+        XCTAssertFalse(result.1, "Overlapping replay must not add events")
+        XCTAssertEqual(replica.courses["contract-course"]?.events.count, 3)
+        XCTAssertEqual(replica.courses["contract-course"]?.cursor, original.cursor)
+        // Stop after page one and reload the same atomic file before requesting page two.
+        let boundaryFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: boundaryFile) }
+        var boundary = LedgerReplica(epoch: replica.epoch)
+        var after: Int64 = 0
+        var pageCount = 0
+        repeat {
+            components.queryItems = [URLQueryItem(name: "after", value: String(after)), URLQueryItem(name: "limit", value: "1")]
+            replay.url = try XCTUnwrap(components.url)
+            let (data, pageResponse) = try await URLSession.shared.data(for: replay)
+            XCTAssertEqual((pageResponse as? HTTPURLResponse)?.statusCode, 200)
+            let pageResult = try boundary.apply(data: data, course: "contract-course", file: boundaryFile)
+            pageCount += 1
+            if pageCount == 1 { boundary = try LedgerReplica.load(file: boundaryFile, epoch: replica.epoch) }
+            after = try XCTUnwrap(boundary.courses["contract-course"]?.cursor)
+            if !pageResult.0 { break }
+        } while pageCount < 10
+        XCTAssertEqual(pageCount, 3)
+        XCTAssertEqual(boundary.courses["contract-course"]?.events.map(\.id), original.events.map(\.id))
+        XCTAssertEqual(after, original.cursor)
+        print("Ledger catchup: 3 actual HTTP pages, 3 unique events; overlapping replay adds 0; page-boundary restore cursor \(original.cursor)")
+    }
+
+    func testLedgerRestore() async throws {
+        let connection = ConnectionModel(ledgerPageSize: 1)
+        await connection.restore()
+        guard case .connected = connection.state else { XCTFail("Restore failed"); return }
+        try await waitUntil("restored ledger cursor") { (connection.ledgerReplica?.courses["contract-course"]?.events.count ?? 0) == 3 }
+        let course = try XCTUnwrap(connection.ledgerReplica?.courses["contract-course"])
+        XCTAssertEqual(Set(course.events.map(\.id)).count, 3)
+        XCTAssertGreaterThan(course.cursor, 0)
+        // A fresh socket receives the server's overlapping initial notification.
+        connection.startRealtime()
+        try await waitUntil("overlapping reconnect") { connection.realtime == .online }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(connection.ledgerReplica?.courses["contract-course"]?.events.count, 3)
+        XCTAssertEqual(connection.ledgerReplica?.courses["contract-course"]?.cursor, course.cursor)
+        print("Ledger restore: cursor \(course.cursor), 3 unique events after reconnect")
+        let (address, credential) = try XCTUnwrap(connection.learningCredentials)
+        let file = try LedgerReplica.file(address: address, credential: credential)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        connection.forget()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertNil(try CredentialStore(service: "coach.ton1411.device").load())
+    }
+
 }

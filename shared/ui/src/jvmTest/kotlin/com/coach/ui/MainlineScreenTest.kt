@@ -26,8 +26,10 @@ class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false) : AutoCloseable {
+    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val anchor: String = "") : AutoCloseable {
         val answers = CopyOnWriteArrayList<JsonObject>()
+        /** Every reader request the cited-source component makes through the real CourseHttp. */
+        val readerRequests = CopyOnWriteArrayList<String>()
         private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
         private val explanation = """{"correct":"Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
@@ -59,7 +61,7 @@ class MainlineScreenTest {
                         val next = items.getOrNull(i + 1)?.first?.let { "\"$it\"" } ?: "null"
                         val queued = status != "mastered"
                         reply(ex, """{"itemId":"$id","answer":1,"choice":${a["choice"]},"guessed":$guessed,"keyState":"VERIFIED","status":"$status","tier":"${items[i].second}",
-                            "explanation":$explanation,"source":"Synthetic lecture 1","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
+                            "explanation":$explanation,"source":"Synthetic lecture 1","anchor":"$anchor","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
                             "mistakeWeek":${if (queued) 1 else "null"},"next":$next,"coverage":${cov(if (status == "mastered") 1 else 0, i + 1)}}""")
                     }
                     path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
@@ -67,6 +69,25 @@ class MainlineScreenTest {
                             "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED"}""" } + "]}")
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
+            }
+            createContext("/v1/courses/C/reader") { ex ->
+                val path = ex.requestURI.path
+                readerRequests += ex.requestURI.toString()
+                if (path.endsWith("/image")) {
+                    val png = java.io.ByteArrayOutputStream().also { ImageIO.write(java.awt.image.BufferedImage(30, 40, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
+                    ex.sendResponseHeaders(200, png.size.toLong()); ex.responseBody.use { it.write(png) }
+                    return@createContext
+                }
+                ex.requestBody.readBytes()
+                reply(ex, when {
+                    path.endsWith("/resolve") -> """{"documentId":"doc","version":"v1","pdfPage":2,"anchorStatus":"page_only"}"""
+                    path.endsWith("/boxes") -> """{"version":"v1","pdfPage":2,"width":300,"height":400,"words":[
+                        {"x0":30,"y0":40,"x1":80,"y1":55,"text":"Alpha"},{"x0":85,"y0":40,"x1":120,"y1":55,"text":"beta"}]}"""
+                    path.endsWith("/progress") -> """{"revision":1}"""
+                    path.endsWith("/study") -> """{"facts":[],"questions":[],"unlocated":0}"""
+                    path.endsWith("/state") -> """{"document":{"version":"v1"},"progress":null,"notes":[]}"""
+                    else -> """{"documents":[{"id":"doc","title":"Synthetic reading","version":"v1","pages":4}]}"""
+                })
             }
             start()
         }
@@ -220,5 +241,27 @@ class MainlineScreenTest {
             setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PagePracticeBody(c, view, 1, emptySet(), onClose = {}) } } } }
             onNodeWithText("本页没有登记的题", substring = true).assertExists()
         }
+    }
+
+    @Test fun answerAnchorTravelsThroughMainlineScreenToTheCitedPageHighlight() = FakeMac(today, false, "Alpha beta").use { mac ->
+        val c = controller(mac)
+        val view = CourseView(emptyList(), project(emptyList()))
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 915.dp)) {
+                MainlineScreen(c, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-week-1").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("铺垫题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-option-0").performClick()
+            onNodeWithTag("mainline-submit").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-citation").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
+            onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+        }
+        assertTrue(mac.readerRequests.any { it.contains("/resolve?source=") }, "the cited source went through the reader resolve route")
+        assertTrue(mac.readerRequests.any { it.contains("/doc/pages/2/boxes") && it.contains("version=v1") }, "coordinates were requested for the resolved document, page and version: ${mac.readerRequests}")
     }
 }

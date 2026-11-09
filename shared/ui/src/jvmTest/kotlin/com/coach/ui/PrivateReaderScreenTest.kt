@@ -36,6 +36,9 @@ class PrivateReaderScreenTest {
         @Volatile var map: String? = null
         /** Word boxes (PDF points) for any page; null → the boxes route fails with 503. */
         @Volatile var boxWords: String? = null
+        /** Simulates the document being republished between the citation resolving and the coordinates being asked for. */
+        @Volatile var republishOnBoxes = false
+        val boxes409 = CopyOnWriteArrayList<String>()
         @Volatile var boxWidth = 300.0
         @Volatile var boxHeight = 400.0
         val auth = CopyOnWriteArrayList<String>()
@@ -86,7 +89,8 @@ class PrivateReaderScreenTest {
                     }
                     path.endsWith("/boxes") -> {
                         val asked = ex.requestURI.rawQuery.orEmpty().substringAfter("version=", "")
-                        if (asked != version) { status = 409; "{}".toByteArray() }
+                        if (republishOnBoxes) version = "v2"
+                        if (asked != version) { boxes409 += asked; status = 409; "{}".toByteArray() }
                         else boxWords?.let { """{"version":"$version","pdfPage":${path.substringBeforeLast('/').substringAfterLast('/')},"width":$boxWidth,"height":$boxHeight,"words":$it}""".toByteArray() }
                             ?: run { status = 503; "{}".toByteArray() }
                     }
@@ -533,5 +537,20 @@ class PrivateReaderScreenTest {
             waitUntil(timeoutMillis = 10000) { onAllNodesWithText("无法定位出处", substring = true).fetchSemanticsNodes().isNotEmpty() }
             onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
         }
+    }
+
+    @Test fun documentRepublishedAfterTheCitationOpensGetsA409AndNoMark() = FakeReader().use { fake ->
+        fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "]"
+        fake.republishOnBoxes = true
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha") } } } }
+            onNodeWithTag("private-citation").performClick()
+            // Catalog and resolve succeed on v1 (the page opens); only the coordinate request meets the new version.
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-status").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-highlight-status").assertTextContains("资料版本已变化", substring = true)
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            onNodeWithTag("private-page-label").assertExists()
+        }
+        assertEquals(listOf("v1"), fake.boxes409.toList(), "the boxes route really answered 409 for the v1 request")
     }
 }

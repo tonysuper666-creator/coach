@@ -197,7 +197,7 @@ class MainlineNotesSmoke {
         }
         if (mode == "resumeQuiz") {
             waitForQuestion(3, point = 'c')
-            show("答对了，算掌握。")
+            show("答对。")
             show(citation, contains = true)
             if (jointReader) {
                 click(show(citation, contains = true))
@@ -315,7 +315,7 @@ class MainlineNotesSmoke {
             compose.onNodeWithTag("mainline-option-$index").fetchSemanticsNode().config[SemanticsProperties.Text]
                 .any { it.text == "Synthetic plums ripen early" }
         }
-        answer("Synthetic apples are grown there", false, "答错了。", "setup")
+        answer("Synthetic apples are grown there", false, "答错。", "setup")
         waitForQuestion(1)
         if (jointReader && !fault) {
             val selectedAnswer = target("Synthetic apples are grown there", contains = true)
@@ -341,7 +341,7 @@ class MainlineNotesSmoke {
             screenshot("joint-page-two")
             compose.waitUntil(timeoutMillis = 15_000) { runCatching { compose.onNodeWithTag("private-document-back").assertIsEnabled() }.isSuccess }
             compose.onNodeWithTag("private-document-back").performClick()
-            show("答错了。")
+            show("答错。")
             // The immutable displayed choice survives the full-screen PDF dialog.
             val returned = selectedAnswer.fetchSemanticsNode().config
             assertEquals(original[SemanticsProperties.Selected], returned[SemanticsProperties.Selected])
@@ -351,7 +351,7 @@ class MainlineNotesSmoke {
             click(show("回看要点：Synthetic basics"))
             show("我的一句话：Synthetic personal note")
             click(show("跳过要点，直接做题"))
-            show("答错了。")
+            show("答错。")
         }
         if (!fault) show("我的一句话：Synthetic personal note")
         show("${'A' + plumsIndex} 为什么不选")
@@ -361,13 +361,13 @@ class MainlineNotesSmoke {
         screenshot("setup-bottom")
         click(compose.onNodeWithTag("mainline-next").performScrollTo())
         waitForQuestion(2)
-        answer("Synthetic pears are grown there", true, "答对了，但标了猜的：不算掌握。", "detail")
+        answer("Synthetic pears are grown there", true, "猜对：不算会。", "detail")
         waitForQuestion(2, point = 'b')
         click(compose.onNodeWithTag("mainline-next").performScrollTo())
         waitForQuestion(3)
-        answer("Synthetic pears are grown there", false, "答对了，算掌握。", "bridge")
+        answer("Synthetic pears are grown there", false, "答对。", "bridge")
         waitForQuestion(3, point = 'c')
-        show("步骤批改")
+        show("模拟考")
         show("限时论述")
         screenshot("bridge-bottom")
         if (!fault) repeat(17) { n ->
@@ -376,7 +376,7 @@ class MainlineNotesSmoke {
             waitFor("跳过要点，直接做题")
             clickWhenEnabled("跳过要点，直接做题")
             waitForQuestion(3)
-            answer("Synthetic pears are grown there", false, "答对了，算掌握。", "timed-$n")
+            answer("Synthetic pears are grown there", false, "答对。", "timed-$n")
         }
         // A section is mastered only when all its facts/questions are mastered; guessed detail stays open.
         click(show("本周要点"))
@@ -384,7 +384,7 @@ class MainlineNotesSmoke {
         show("✓ Synthetic bridge notes")
         screenshot("mastery")
         click(show("跳过要点，直接做题"))
-        show("答对了，算掌握。")
+        show("答对。")
         java.io.File(context.cacheDir, "mainline-timings.json").writeText(JSONObject()
             .put("mode", mode).put("samples", samples).put("initialColdClicks", coldClicks)
             .put("warmClicks", warmClicks ?: JSONObject.NULL).put("notesRouteClicks", notesClicks ?: JSONObject.NULL).toString(2))

@@ -1,6 +1,7 @@
 package com.coach.client
 
 import com.coach.domain.courseExamDay
+import com.coach.domain.calendarDay
 import com.coach.domain.reviewsOn
 import com.coach.domain.REVISIT
 import com.coach.domain.weekPoints
@@ -15,7 +16,14 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 
-enum class KpStatus(val label: String) { NEW("未开始"), IN_PROGRESS("学习中"), PASSED("已通过"), SOLID("稳固"), NEEDS_REPAIR("需修复") }
+/**
+ * 全 App 唯一的学习状态词（TON-1444）：未学 / 在学 / 会了 / 稳了 / 要补。所有页面只通过 [label]、[symbol] 输出。
+ * 定义：未学 = 没打开过；在学 = 打开过或做过题、还没会；会了 = 最近 3 道不同题答对且不含猜对；
+ * 稳了 = 会了之后在不同两天用简答/论述/限时题答对；要补 = 会了之后又答错，已排进复习。
+ */
+enum class KpStatus(val label: String, val symbol: String) {
+    NEW("未学", "○"), IN_PROGRESS("在学", "◐"), PASSED("会了", "✓"), SOLID("稳了", "✓✓"), NEEDS_REPAIR("要补", "!")
+}
 
 data class KpRow(
     val id: String, val title: String, val status: KpStatus, val explained: Boolean, val conceptIds: List<String>,
@@ -25,7 +33,7 @@ data class KpRow(
     val reference: String = "",
     /** 曾稳固后又没过合格情境（路线上写「曾稳固」，不是「稳固」）。 */
     val formerlySolid: Boolean = false,
-    /** 稳固进度，如「2/2 条 · 构答 1 · 2 天 · 均 0.88」；还没有任何合格证据就空。 */
+    /** 稳了进度，如「2/2 次 · 简答 1 · 2 天 · 均分 0.88」；还没有任何合格证据就空。 */
     val solidProgress: String = "",
     /** 前置知识点（软锁：只提示「建议先学 X」，不阻止打开）。 */
     val prereqs: List<String> = emptyList(),
@@ -67,7 +75,6 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()
-        val explained = HashSet<String>()
         val modules = HashMap<String, String>()
         val moduleOf = HashMap<String, String>()
         val references = HashMap<String, String>()
@@ -105,25 +112,23 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
-            "explanation_delivered" -> explained += e.payload.s("kpId")
         }
         projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
-        val attempted = events.filter { it.type == "question_posed" }.flatMap { posed -> (posed.payload["kpIds"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.toSet()
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
             val m = projection.mastery[id]
-            val status = when {
-                m == null -> KpStatus.NEW
-                m.needsRepair -> KpStatus.NEEDS_REPAIR
-                m.solid -> KpStatus.SOLID
-                m.passed -> KpStatus.PASSED
-                id in explained || id in attempted || projection.position.current == id -> KpStatus.IN_PROGRESS
-                else -> KpStatus.NEW
+            // The list and chat read the same projected facts, including historical opens and quick-ask exclusion.
+            val status = when (com.coach.domain.kpState(m, id in projection.startedKpIds)) {
+                com.coach.domain.KpState.NEEDS_REPAIR -> KpStatus.NEEDS_REPAIR
+                com.coach.domain.KpState.SOLID -> KpStatus.SOLID
+                com.coach.domain.KpState.PASSED -> KpStatus.PASSED
+                com.coach.domain.KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS
+                com.coach.domain.KpState.NEW -> KpStatus.NEW
             }
-            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳固进度 ${it.count}/2 条 · 构答 ${it.constructed} · ${it.days} 天 · 均 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
+            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]
-            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
+            KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
                 anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
         }
@@ -145,11 +150,11 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         }
     }
 
-    /** 考试日（最近一次 `exam_set`）；没设就是 null。 */
+    /** 期末考试日：课程配置（课程内容 `course.examDate`）与手动 `exam_set` 里账本中最后写入的一个；都没有就是 null。 */
     val examDay: Long? by lazy { courseExamDay(events, zone) }
 
-    /** 离考试还有几天；没设考试日、或已经考过返回 null。 */
-    fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - logicalToday(nowMillis)).toInt() }?.takeIf { it >= 0 }
+    /** 离期末还有几天（按课程时区的当前日历日，不是 04:00 逻辑日，也不是 UTC 小时差）；没设日期、或已经考过返回 null。 */
+    fun daysToExam(nowMillis: Long): Int? = examDay?.let { (it - calendarDay(nowMillis, zone)).toInt() }?.takeIf { it >= 0 }
 
     val weekPoints by lazy { weekPoints(events) }
     /** The imported ECNM10119 outline explicitly records Week 7 as a zero-point midterm exemption. */
@@ -162,7 +167,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         }.toSet()
     }
     val weeks: List<Int> by lazy { (weekPoints.flatMap { it.weeks } + midtermExemptionWeeks).distinct().sorted() }
-    fun weekLabel(week: Int): String = if (week in midtermExemptionWeeks) "第 $week 周 · 期中周（无新课，豁免）" else "第 $week 周"
+    fun weekLabel(week: Int): String = if (week in midtermExemptionWeeks) "第 $week 周 · 期中周，无新课" else "第 $week 周"
     fun weekKps(week: Int): List<KpRow> = weekPoints.filter { week in it.weeks }.mapNotNull { kp(it.id) }
     val weekTarget: KpRow? get() = projection.studyScope?.target(projection.mastery, kps.map { it.id }.toSet())?.let(::kp)
     fun weekProgress(kpId: String): String? = projection.studyScope?.let { s ->

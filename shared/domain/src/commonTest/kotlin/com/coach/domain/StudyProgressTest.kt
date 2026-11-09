@@ -17,29 +17,29 @@ class StudyProgressTest {
     }
 
     @Test fun coverageUsesExamPointsAtThreeLedgerCheckpointsAndHonorsRevocation() {
-        fact("exam_weights_set",json("weights" to json("valuable" to 30,"other" to 70,"prereq" to 0)))
+        fact("exam_weights_set",json("weights" to json("valuable" to 30,"other" to 70,"prereq" to 0),"scope" to "FINAL"))
         fact("kp_overridden",json("kpId" to "prereq","kind" to "MARK_PASSED"))
-        assertEquals(ExamCoverage(0,0,100),project(events).examCoverage)
+        assertEquals(ExamCoverage(0,0,100,"FINAL"),project(events).examCoverage)
         answer("a","valuable"); at += 86400000; answer("b","valuable")
         val solid = project(events)
-        assertEquals(ExamCoverage(30,30,100),solid.examCoverage)
-        assertEquals("按期中分值：已通过覆盖 30 / 100 分，稳固 30 分",solid.today(at).coverageText)
+        assertEquals(ExamCoverage(30,30,100,"FINAL"),solid.examCoverage)
+        assertEquals("期末分值：会了覆盖 30 / 100 分，稳了 30 分",solid.today(at).coverageText)
         fact("attempt_voided",json("attemptId" to "b"))
-        assertEquals(ExamCoverage(0,0,100),project(events).examCoverage)
+        assertEquals(ExamCoverage(0,0,100,"FINAL"),project(events).examCoverage)
     }
 
     @Test fun deterministicAnswersShareTodayNumbersAndDoNotGuess() {
-        val state = Projection(kpTitles=mapOf("kp" to "Synthetic objective","overdue" to "Earlier objective"),lastSeq=42,coverage=ExamCoverage(43,30,100),position=Position(current="kp"),
+        val state = Projection(kpTitles=mapOf("kp" to "Synthetic objective","overdue" to "Earlier objective"),lastSeq=42,coverage=ExamCoverage(43,30,100,"FINAL"),position=Position(current="kp"),
             mastery=mapOf("kp" to Mastery(passed=true)),review=mapOf("overdue" to Review(1),"later" to Review(999999)))
         val today = state.today(at)
         assertEquals(today.coverageText,today.answer(assertNotNull(progressIntent("请问，我学了多少？"))))
         assertTrue(today.answer(assertNotNull(progressIntent("还差多少"))).contains("57 分覆盖"))
         assertEquals(listOf("overdue"),today.dueKpIds)
         assertEquals("今天到期复习：Earlier objective。",today.answer(ProgressIntent.REVIEW_TODAY))
-        assertEquals("Synthetic objective：已通过，尚未稳固。",today.answer(ProgressIntent.CURRENT_KP))
+        assertEquals("Synthetic objective：会了，还没稳。",today.answer(ProgressIntent.CURRENT_KP))
         for (s in listOf("学了多少就忘了多少怎么办", "今天复习什么是逆向选择", "这个点过了没关系吗", "还差多少样本才能估计", "继续", "什么是覆盖率")) assertNull(progressIntent(s),s)
         for (s in listOf("学了多少","还差多少？","今天复习什么","这个点过了没")) assertNotNull(progressIntent(s),s)
-        assertTrue(Projection().today(at).coverageText.contains("尚未设置"))
+        assertTrue(Projection().today(at).coverageText.contains("还没有期末的分值数据"))
     }
 
     @Test fun quickAnswersAndFollowupsCannotEnterEitherMasteryWindow() {

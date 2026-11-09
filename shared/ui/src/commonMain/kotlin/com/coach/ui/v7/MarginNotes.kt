@@ -41,12 +41,12 @@ fun MarginNotes(notes: List<MarginNote>, modifier: Modifier = Modifier, extra: @
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 12.dp.roundToPx() }
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).onGloballyPositioned { origin = it.positionInRoot().y }) {
-        Text("页边", style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.fgSecondary)
+        Text("出处与批注", style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.fgSecondary)
         Spacer(Modifier.height(8.dp))
         Layout(content = {
             notes.forEach { note ->
                 PaperCard {
-                    Text((if (note.lecture) "★ " else "") + note.number + "  " + note.label,
+                    Text((if (note.lecture) "课上强调 · " else "") + note.number + "  " + note.label,
                         style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.fgSecondary)
                     Text(note.text, style = MaterialTheme.typography.bodyMedium,
                         fontFamily = if (note.personal) LocalV7Fonts.current.note else LocalV7Fonts.current.reading)

@@ -42,11 +42,11 @@ fun TodayScreen(
                     Text("今天", style = MaterialTheme.typography.headlineMedium)
                     // 分值口径的「学了多少」：和聊天里问「我学了多少」得到的是同一个数（TON-1092）。
                     Text(view.projection.today(now).coverageText, style = MaterialTheme.typography.titleMedium)
-                    Text("已通过 $passed / ${kps.size} 个知识点", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${KpStatus.PASSED.label} $passed / ${kps.size} 节", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (target != null) {
                         ContinueCard(target, view.isResume(target)) { onOpen(target.id, true) }
                     } else {
-                        if (view.projection.studyScope == null) Text("所有知识点都已通过。", style = MaterialTheme.typography.titleMedium)
+                        if (view.projection.studyScope == null) Text("每一节都会了。", style = MaterialTheme.typography.titleMedium)
                     }
                     if (weekActions != null) {
                         WeekPicker(view, weekActions, ui.connected)
@@ -56,12 +56,12 @@ fun TodayScreen(
                     ReviewCard(view.dueReviews(now).size, onOpenReview)
                     Text(examReviewNotice(view, now), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
                     Spacer(Modifier.height(4.dp))
-                    Text("全部知识点", style = MaterialTheme.typography.titleSmall)
+                    Text("全部节", style = MaterialTheme.typography.titleSmall)
                 }
             }
             kps.forEachIndexed { index, kp ->
                 if (kp.module.isNotBlank() && kp.module != kps.getOrNull(index - 1)?.module) item(key = "m:${kp.module}") {
-                    Text(kp.module, Modifier.padding(top = 10.dp, bottom = 2.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text(com.coach.client.moduleDisplayName(kp.module).ifBlank { "未分章" }, Modifier.padding(top = 10.dp, bottom = 2.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
                 item(key = kp.id) { KpRowView(kp, kp.id == selectedKpId) { onOpen(kp.id, false) } }
             }
@@ -69,13 +69,17 @@ fun TodayScreen(
     }
 }
 
-/** 知识点名常带「【W1·Ch1–2】」这样的课次标签：标签放小字，正文放主行。 */
+/** 知识点名常带「【W1·Ch1–2】」这样的课次标签：显示时标签变成一行说明（[sourceLine]），正文放主行，界面上不出现【】。 */
 private val SCOPE_SEPARATOR = Regex("\\s+[｜|]\\s+(?=【)")
 internal fun additionalTitleScope(title: String): List<String> = title.split(SCOPE_SEPARATOR).drop(1).map { it.trim() }.filter { it.isNotBlank() }
+/** [splitTitle] 的标签部分 → 一行人话说明（「W3·slides」→「第 3 周 · 课件」）。 */
+internal fun sourceLine(tag: String): String = if (tag.isBlank()) "" else com.coach.client.titleSource("【$tag】")
 internal fun splitTitle(title: String): Pair<String, String> {
     val first = title.split(SCOPE_SEPARATOR, limit = 2).first().trim()
-    val match = Regex("^【([^】]{1,24})】\\s*(.+)$", RegexOption.DOT_MATCHES_ALL).find(first) ?: return "" to first
-    return match.groupValues[1] to match.groupValues[2]
+    val match = Regex("^【([^】]{1,24})】\\s*(.+)$", RegexOption.DOT_MATCHES_ALL).find(first)
+    val tag = match?.groupValues?.get(1).orEmpty()
+    // The tag part is a source note, never the title; every 【…】 left in the title is removed before display.
+    return tag to com.coach.client.displayTitle(match?.groupValues?.get(2) ?: first)
 }
 
 @Composable
@@ -87,8 +91,8 @@ private fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
         modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
     ) {
         Column(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (resume) "回到（没学完）" else "开始下一个", style = MaterialTheme.typography.labelLarge)
-            Text(if (resume) "回到 $main（没学完）" else "开始下一个：$main", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+            Text("接着学", style = MaterialTheme.typography.labelLarge)
+            Text(if (resume) "继续 · $main" else "开始 · $main", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
         }
     }
 }
@@ -103,7 +107,7 @@ private fun ReviewCard(due: Int, onClick: () -> Unit) {
         Row(Modifier.padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f)) {
                 Text("到期复习", style = MaterialTheme.typography.titleMedium)
-                Text(if (due == 0) "今天没有到期的复习" else "$due 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (due == 0) "今天没有到期的复习" else "$due 节到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (due > 0) StatusChip("$due", MaterialTheme.colorScheme.secondary)
         }
@@ -122,8 +126,8 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val (tag, main) = splitTitle(kp.title)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(tag, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                StatusChip(kp.status.label, statusColor(kp.status))
+                Text(sourceLine(tag), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                StatusChip(kp.status.symbol + " " + kp.status.label, statusColor(kp.status))
             }
             Text(main, style = MaterialTheme.typography.bodyMedium)
         }
@@ -133,7 +137,7 @@ private fun KpRowView(kp: KpRow, selected: Boolean, onClick: () -> Unit) {
 @Composable
 internal fun statusColor(status: KpStatus): Color = kpStatusColor(status, MaterialTheme.colorScheme, successColor())
 
-/** 状态标签的字色。「未开始」用 onSurfaceVariant（outline 在深色下压在同色底上读不清）；「学习中」用 secondary（primary 在淡底上只有 4.1:1）。 */
+/** 状态标签的字色。「未学」用 onSurfaceVariant（outline 在深色下压在同色底上读不清）；「在学」用 onSurface。 */
 internal fun kpStatusColor(status: KpStatus, scheme: ColorScheme, success: Color): Color = when (status) {
     KpStatus.NEW -> scheme.onSurfaceVariant
     KpStatus.IN_PROGRESS -> scheme.onSurface

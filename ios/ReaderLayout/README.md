@@ -23,3 +23,12 @@ real reading material or production integration. The PDF column and drawer are
 containers, not real PDF parsing or navigation. The EPUB two-page threshold is
 an application column minimum, not a device specification. Synthetic inputs
 and non-Duo simulator results are not iPhone Duo evidence.
+
+The host's pose menu uses synthetic choices only. Changing a choice recreates
+the sample canvas while keeping its page, selection and note in the parent;
+this is a state-continuity fixture, not a fold-aware layout. From the repository
+root, run its UI tests on an available iOS simulator with:
+
+```sh
+tools/dev/heavy --emulator bash ios/ReaderLayout/Host/run-ui-tests.sh <simulator-udid>
+```

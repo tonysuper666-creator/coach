@@ -30,7 +30,8 @@ internal fun optionOrder(fingerprint: String, round: Int, size: Int): List<Int> 
     return (0 until size).shuffled(java.util.Random(seed))
 }
 
-internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>)
+internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>,
+    val notes: List<JsonObject>, val notesError: String?, val emphasis: List<JsonObject>)
 
 private val tiers = listOf("setup", "detail", "bridge")
 
@@ -125,8 +126,18 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
                 MainlineFact(f.str("fact_id"), f.str("fact"), f.str("type"), f.str("source"), f.str("kp"))
             }
         }
-        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts)
+        val (notes, notesError) = loadMainlineNotes(factsFile.resolveSibling("W%02d-notes.json".format(week)), week, facts)
+        val emphasis = loadMainlineEmphasis(factsFile.resolveSibling("W%02d-emphasis.json".format(week)), week, facts)
+        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts, notes, notesError, emphasis)
     }
+
+    private fun notes(week: MainlineWeek, history: ChoiceHistory) = JsonArray(week.notes.map { section ->
+        val mastered = section.strings("fact_ids").all { fact ->
+            val linked = week.items.filter { fact in it.factIds }
+            linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }
+        }
+        JsonObject(section + ("mastered" to JsonPrimitive(mastered)))
+    })
 
     private fun round(events: List<Event>, item: MainlineItem) = events.count { it.type == "question_posed" && it.payload.str("fingerprint") == item.fingerprint }
 
@@ -140,6 +151,19 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     }
 
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
+
+    /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
+    internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
+        val week = find(courseNames(store.events(course), course), number)
+        val section = week.notes.firstOrNull { it.str("section_id") == input.str("sectionId") }
+            ?: throw MockError(HttpStatusCode.Conflict, "要点已更新，请重新读取后再选中。")
+        val text = section.str("body")
+        val start = input.num("start"); val end = input.num("end")
+        if (input.str("version") != section.str("content_version") || start < 0 || end <= start ||
+            end > text.length || end - start > 2000 || text.substring(start.toInt(), end.toInt()) != input.str("quote"))
+            throw MockError(HttpStatusCode.Conflict, "选中文本与当前要点不一致，请重新读取后再选中。")
+        return input.str("quote")
+    }
 
     fun home(store: LedgerStore, course: String): JsonObject {
         val events = store.events(course)
@@ -155,10 +179,11 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val week = find(courseNames(events, course), number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
+            "notes" to notes(week, history), "notesError" to week.notesError, "emphasis" to JsonArray(week.emphasis),
             "items" to JsonArray(week.items.map { item ->
                 val layout = round(events, item)
                 val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()
-                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem,
+                json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem, "factIds" to item.factIds,
                     "options" to order.map { item.unit.options[it] }, "layout" to if (shuffled) layout else null,
                     "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" })
             }))
@@ -240,11 +265,11 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed,
             "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
             "source" to item.source, "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
-            "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history))
+            "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history), "notes" to notes(week, history))
     }
 }
 
-fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline) {
+fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline, reader: ReaderExplanation? = null) {
     suspend fun ApplicationCall.answer(course: String, block: LedgerStore.(JsonObject) -> JsonObject) {
         try {
             val text = if (request.httpMethod == HttpMethod.Post) receiveText() else ""
@@ -266,5 +291,27 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             call.answer(c) { mainline.week(this, c, call.week(), shuffled) }
         }
         post("/v1/courses/{course}/mainline/{week}/answer") { val c = call.parameters["course"]!!; call.answer(c) { mainline.answer(this, c, call.week(), it) } }
+        post("/v1/courses/{course}/mainline/{week}/explain") {
+            try {
+                val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
+                val course = call.parameters["course"]!!
+                val (quote, pages) = actor.execute {
+                    val quote = mainline.selection(this, course, call.week(), input)
+                    quote to searchSourcePages(course, quote).filter { it.learnerVisible }
+                }
+                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages)
+                    ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
+                call.respondText(body.toString(), ContentType.Application.Json)
+            } catch (e: MockError) {
+                call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
+            } catch (e: IllegalArgumentException) {
+                call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
+            }
+        }
+        post("/v1/courses/{course}/mainline/{week}/explain/cancel") {
+            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            reader?.cancel(call.attributes[observedDevice], call.parameters["course"]!!, input?.str("requestId").orEmpty())
+            call.respondText("{}", ContentType.Application.Json)
+        }
     }
 }

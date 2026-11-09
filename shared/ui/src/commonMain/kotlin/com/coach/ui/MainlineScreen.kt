@@ -24,8 +24,13 @@ import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.MockReply
+import com.coach.client.SubmissionTrace
 import com.coach.domain.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlin.random.Random
 
@@ -36,16 +41,21 @@ import kotlin.random.Random
 @Composable
 fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
     val http = c.course
-    var week by remember { mutableStateOf<Int?>(null) }
+    var week by remember { mutableStateOf((c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull) }
+    var entry by remember { mutableStateOf(c.sync.mainlineState(c.courseId).str("entry").ifBlank { null }) }
+    fun openWeek(n: Int, quiz: Boolean) {
+        entry = if (quiz) "quiz" else "notes"; week = n
+        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(n), "entry" to JsonPrimitive(entry))))
+    }
     when {
         http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
             Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
         }
         week == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习",
             directory = { com.coach.ui.v7.WeekDirectory(view, null, null) }) {
-            Column(Modifier.fillMaxSize()) { MainlineHome(c, http, onBack) { week = it } }
+            Column(Modifier.fillMaxSize()) { MainlineHome(c, http, onBack, ::openWeek) }
         }
-        else -> key(week) { MainlineWeek(c, http, view, week!!, onBack = { week = null }, onOpenSteps, onOpenEssay, onReviewWeek) }
+        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }, onOpenSteps, onOpenEssay, onReviewWeek) }
     }
 }
 
@@ -59,25 +69,29 @@ private fun Header(title: String, back: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Unit, onOpen: (Int) -> Unit) {
+private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Unit, onOpen: (Int, Boolean) -> Unit) {
     val revision by c.sync.revision.collectAsState()
-    val reply by produceState<MockReply?>(null, revision) { value = http.mainline() }
+    val reply by produceState<MockReply?>(null, revision) {
+        // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
+        do { val r = withContext(Dispatchers.IO) { http.mainline() }; value = r; if (!r.retryable) break; delay(1500) } while (true)
+    }
     Header("选择题主线", "← 复习", onBack)
     val body = reply?.body
     when {
         reply == null -> CenterMessage("正在读取…")
-        body == null -> CenterMessage(reply!!.error ?: "连不上 Mac，读不到选择题主线。")
+        body == null -> CenterMessage(reply!!.error ?: "连不上 Mac，正在自动重连…")
         else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val weeks = (body["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }
             if (weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.bodyMedium)
             else Text("选一周，从铺垫题开始。答对且不是猜的才算掌握。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             for (w in weeks) {
                 val n = w.num("week").toInt()
-                Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+                Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n, false) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("mainline-week-$n")) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("第 $n 周 · ${w.str("title")}", style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                         CoverageLines(w["coverage"] as? JsonObject ?: JsonObject(emptyMap()))
+                        TextButton(onClick = { onOpen(n, true) }, modifier = Modifier.testTag("mainline-direct-$n")) { Text("直接做题") }
                     }
                 }
             }
@@ -103,58 +117,176 @@ private fun CoverageLines(cov: JsonObject, modifier: Modifier = Modifier) {
 private val tierNames = mapOf("setup" to "铺垫题", "detail" to "细节题", "bridge" to "桥接题")
 
 @Composable
-private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, onBack: () -> Unit,
+private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, entry: String?, onBack: () -> Unit,
     onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
     val scope = rememberCoroutineScope()
-    var reload by remember { mutableStateOf(0) }
-    val reply by produceState<MockReply?>(null, reload) { value = http.mainlineWeek(number) }
-    val body = reply?.body
-    val items = remember(body) { (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject } }
-    var index by remember(body) { mutableStateOf(items.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0)) }
-    var coverage by remember(body) { mutableStateOf(body?.get("coverage") as? JsonObject) }
-    var chosen by remember(index, body) { mutableStateOf<Int?>(null) }
-    var result by remember(index, body) { mutableStateOf<JsonObject?>(null) }
-    // One id per answer on screen: a resend after a dropped connection is the same answer, not a second one.
-    var submission by remember(index, body) { mutableStateOf(Random.nextLong().toULong().toString(16)) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val now = rememberCourseNow(c)
-    val scroll = rememberScrollState()
-    LaunchedEffect(index) { scroll.scrollTo(0) }
-    when {
-        reply == null -> { CenterMessage("正在读取…"); return }
-        body == null -> { CenterMessage(reply!!.error ?: "连不上 Mac，读不到这一周的题。"); return }
-        items.isEmpty() -> { CenterMessage("这一周还没有题。"); return }
+    var readerState by remember { mutableStateOf(http.readerState(c.sync, number)) }
+    // Every reader write goes through a transform of the value held here instead of a whole object captured in an
+    // older composition: a control tapped one frame after another would otherwise re-save its stale snapshot and
+    // resurrect a flag the first tap just cleared (exiting focus mode and then touching the theme brought focus back,
+    // which hides the weekly map).
+    fun saveReader(transform: (JsonObject) -> JsonObject) {
+        val next = transform(readerState); readerState = next; http.saveReaderState(c.sync, number, next)
     }
-    val item = items[index]
-    val options = item.strings("options")
-    val letters = optionLetters(options.size)
-    fun submit(guessed: Boolean) {
-        val choice = chosen ?: return
-        if (busy) return
-        busy = true; error = null
-        c.tutor.telemetry?.record("tap", if (guessed) "mainline_guess" else "mainline_answer")
-        scope.launch {
-            try {
-                val r = http.answerMainline(number, item.str("id"), choice, guessed, submission, (item["layout"] as? JsonPrimitive)?.intOrNull)
-                val b = r.body
-                if (b != null) { result = b; (b["coverage"] as? JsonObject)?.let { coverage = it } }
-                else error = r.error ?: "连不上 Mac，这次没交上；再点一次会接着交，不会算两次。"
-            } finally { busy = false }
+    val marks = (readerState["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
+    DisposableEffect(Unit) { onDispose { c.readerFocus = false } }
+    var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "week:$number")) }
+    fun save(vararg fields: Pair<String, JsonElement>) {
+        saved = JsonObject(saved + fields)
+        c.sync.saveMainlineState(c.courseId, saved, "week:$number")
+    }
+    var body by remember { mutableStateOf(saved["body"] as? JsonObject) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var retryable by remember { mutableStateOf(true) }
+    var retry by remember { mutableStateOf(0) }
+    LaunchedEffect(retry) {
+        if (body == null) do {
+            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
+            error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
+            retryable = r.retryable
+            if (r.body != null) { body = r.body; save("body" to r.body!!); break }
+            if (!r.retryable) break
+            delay(1500)
+        } while (true)
+    }
+    val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }
+    val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
+    val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
+    var reading by remember { mutableStateOf(entry?.let { it == "notes" } ?: (saved.str("mode") != "quiz")) }
+    var sectionId by remember { mutableStateOf(saved.str("section")) }
+    var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
+    var itemId by remember { mutableStateOf(saved.str("item")) }
+    var chosen by remember { mutableStateOf((saved["choice"] as? JsonPrimitive)?.intOrNull) }
+    var result by remember { mutableStateOf(saved["result"] as? JsonObject) }
+    var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
+    val busy = pending != null
+    val now = rememberCourseNow(c)
+    val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
+    val filtered = if (filter.isBlank()) items else {
+        val facts = sections.firstOrNull { it.str("section_id") == filter }?.strings("fact_ids").orEmpty()
+        items.filter { q -> q.strings("factIds").any { it in facts } }
+    }
+    val index = filtered.indexOfFirst { it.str("id") == itemId }.takeIf { it >= 0 }
+        ?: filtered.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0)
+    val item = filtered.getOrNull(index)
+    val scroll = rememberScrollState(saved.num("quizScroll").toInt())
+    val readingScroll = rememberScrollState(saved.num("readScroll").toInt())
+    LaunchedEffect(reading) {
+        snapshotFlow { if (reading) readingScroll.value else scroll.value }.collect { offset ->
+            save((if (reading) "readScroll" else "quizScroll") to JsonPrimitive(offset))
         }
     }
+    fun position(mode: Boolean, id: String = itemId, section: String = sectionId, selectedFilter: String = filter) {
+        reading = mode; itemId = id; sectionId = section; filter = selectedFilter
+        save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "item" to JsonPrimitive(id),
+            "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
+    }
+    LaunchedEffect(Unit) {
+        save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "filter" to JsonPrimitive(filter))
+        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
+    }
+    LaunchedEffect(item?.str("id")) { if (item != null && itemId != item.str("id")) position(reading, item.str("id")) }
+    LaunchedEffect(pending, retry) {
+        val wire = pending ?: return@LaunchedEffect
+        val traceId = wire.str("submissionId")
+        SubmissionTrace.mark(traceId, "ui.effectStart")
+        do {
+            val r = withContext(Dispatchers.IO) {
+                SubmissionTrace.mark(traceId, "ui.ioStart")
+                http.answerMainline(number, wire.str("itemId"), wire.num("choice").toInt(), wire.flag("guessed"), wire.str("submissionId"),
+                    (wire["layout"] as? JsonPrimitive)?.intOrNull).also { SubmissionTrace.mark(traceId, "ui.answerReturned") }
+            }
+            SubmissionTrace.mark(traceId, "ui.mainResumed")
+            val b = r.body
+            if (b != null) {
+                result = b; pending = null; error = null
+                SubmissionTrace.mark(traceId, "ui.resultAssigned")
+                val updatedItems = JsonArray(items.map { q ->
+                    if (q.str("id") == b.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(b.str("status")))) else q
+                })
+                body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
+                    b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
+                save("result" to b, "pending" to JsonNull, "body" to body!!)
+                SubmissionTrace.mark(traceId, "ui.persisted")
+                break
+            }
+            retryable = r.retryable
+            error = if (r.retryable) (r.error?.let { "$it · " } ?: "") + "答案已保存在本机，正在自动重连；不会重复计分。" else r.error
+            if (!r.retryable) break
+            delay(1500)
+        } while (true)
+    }
+    fun submit(guessed: Boolean) {
+        val choice = chosen ?: return
+        if (busy || item == null) return
+        val wire = json("itemId" to item.str("id"), "choice" to choice, "guessed" to guessed,
+            "submissionId" to Random.nextLong().toULong().toString(16), "layout" to item["layout"])
+        // Commit the immutable payload and original displayed options BEFORE any network I/O.
+        save("pending" to wire, "item" to JsonPrimitive(item.str("id")), "body" to body!!)
+        SubmissionTrace.mark(wire.str("submissionId"), "ui.pendingSaved")
+        pending = wire; error = null
+    }
+    fun startQuiz(selectedFilter: String = "") {
+        if (pending != null) { position(false); return }
+        if (selectedFilter != filter) {
+            chosen = null; result = null
+            save("choice" to JsonNull, "result" to JsonNull)
+        }
+        position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
+    }
+    LaunchedEffect(reading, readerState.flag("focus")) { c.readerFocus = reading && readerState.flag("focus") }
+    if ((reading && !readerState.flag("focus")) || (!reading && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", "← 选周", onBack)
+    if (body == null) {
+        CenterMessage(error ?: "正在读取…")
+        if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
+        return
+    }
+    if (reading) {
+        val currentItems = items.map { q -> if (q.str("id") == result?.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(result!!.str("status")))) else q }
+        WeeklyReader(c, number, sections, section, currentItems, marks, readerState, readingScroll, body!!.str("notesError"),
+            ::saveReader, onSection = { id -> position(true, section = id); scope.launch { readingScroll.scrollTo(0) } },
+            onQuiz = { sectionFilter, id ->
+                startQuiz(sectionFilter)
+                if (id != null && pending == null) {
+                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
+                    position(false, id, selectedFilter = sectionFilter)
+                    scope.launch { scroll.scrollTo(0) }
+                }
+            }, onRefresh = {
+                if (pending == null) {
+                body = null; result = null; chosen = null
+                save("body" to JsonNull, "result" to JsonNull, "choice" to JsonNull)
+                retry++
+                }
+            }, onFocus = { focused -> saveReader { JsonObject(it + ("focus" to JsonPrimitive(focused))) } },
+            emphasis = { facts -> ClassEmphasis(emphasis, facts) })
+        return
+    }
+    if (item == null) {
+        Text("这一节暂无对应题目。")
+        TextButton(onClick = { position(true) }) { Text("返回本周要点") }
+        TextButton(onClick = { startQuiz() }) { Text("做本周全部题") }
+        return
+    }
+    val coverage = body?.get("coverage") as? JsonObject
+    val options = item.strings("options")
+    val letters = optionLetters(options.size)
     val done = result
     val explanation = done?.get("explanation") as? JsonObject
-
     val d = LocalV7PageDetails.current
     val railAnchors = remember { MarginAnchors() }
     val answer = done?.num("answer")?.toInt()
+    // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
     val displayedChoice = done?.num("choice")?.toInt() ?: chosen
     val reasons = explanation?.get("options") as? JsonObject
+    val nextId = filtered.getOrNull(index + 1)?.str("id")
     fun nextQuestion() {
-        val next = done?.str("next")?.takeIf { it.isNotBlank() }
-        val at = next?.let { id -> items.indexOfFirst { it.str("id") == id } } ?: -1
-        if (at >= 0) index = at else onBack()
+        if (nextId != null) {
+            chosen = null; result = null
+            save("choice" to JsonNull, "result" to JsonNull, "quizScroll" to JsonPrimitive(0))
+            position(false, nextId)
+            scope.launch { scroll.scrollTo(0) }
+        } else position(true)
     }
     val actions: @Composable () -> Unit = {
         val metrics = LocalDeskMetrics.current
@@ -164,13 +296,15 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 PrimaryButton(onClick = { submit(false) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-submit")) { Text("提交") }
                 PaperButton(onClick = { submit(true) }, enabled = chosen != null && !busy, modifier = buttonModifier.testTag("mainline-guess")) { Text("我是猜的") }
             } else {
-                PaperButton(onClick = onBack, modifier = buttonModifier) { Text("回到原页") }
-                PrimaryButton(onClick = ::nextQuestion, modifier = buttonModifier.testTag("mainline-next")) { Text(if (done.str("next").isNotBlank()) "下一题  ›" else "这一周做完了") }
+                PaperButton(onClick = { position(true) }, modifier = buttonModifier) { Text("回到要点") }
+                PrimaryButton(onClick = ::nextQuestion, modifier = buttonModifier.testTag("mainline-next")) {
+                    Text(if (nextId != null) "下一题  ›" else if (filter.isBlank()) "这一周做完了" else "这一节做完了，回看要点")
+                }
             }
         }
     }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors) {
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${items.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
         directory = { WeekDirectory(view, number, null) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
@@ -188,9 +322,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 }
             }
         }, footer = {
-            Text("‹  回到要点", Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
-            Text("${index + 1} / ${items.size}", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
-            Text("第 ${index + 2} 题  ›", Modifier.clickable(enabled = done != null, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
+            Text("‹  回到要点", Modifier.clickable { position(true) }, style = MaterialTheme.typography.labelLarge)
+            Text("${index + 1} / ${filtered.size}", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
+            Text(if (nextId != null) "第 ${index + 2} 题  ›" else "", Modifier.clickable(enabled = done != null && nextId != null, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -199,11 +333,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 .padding(bottom = if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp).verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
+                TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("本周要点") }
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(if (d.sectionLabel.isBlank()) "${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1} / ${items.size} 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 ${index + 1} 题 / ${items.size}",
+                    Text(if (d.sectionLabel.isBlank()) "${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${filtered.size} 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 ${index + 1} 题 / ${filtered.size}",
                         style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("不计时", style = MaterialTheme.typography.labelMedium)
                 }
+                ClassEmphasis(emphasis, item.strings("factIds"))
                 Spacer(Modifier.height(12.dp))
                 QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium.copy(lineHeight = 30.4.sp))
                 Spacer(Modifier.height(20.dp))
@@ -211,7 +347,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     options.forEachIndexed { i, option ->
                         val verdict = if (done == null) null else if (i == answer) true else if (i == displayedChoice) false else null
                         AnswerOption(letters[i], displayedChoice == i, verdict, done == null && !busy,
-                            modifier = Modifier.testTag("mainline-option-$i"), onClick = { chosen = i }) {
+                            modifier = Modifier.testTag("mainline-option-$i"), onClick = { chosen = i; save("choice" to JsonPrimitive(i)) }) {
                             QuizText(option, "mainline:${item.str("id")}:$i", c.math)
                         }
                     }
@@ -237,17 +373,22 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 Spacer(Modifier.height(24.dp))
                 if (m.inner) actions()
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (pending != null && !retryable) TextButton(onClick = { retry++ }) { Text("重试原答案") }
                 if (done == null) Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelMedium)
                 }
                 if (done != null) {
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
+                    if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.
                     options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->
                         (reasons?.get("$i") as? JsonPrimitive)?.contentOrNull?.let { Labeled("${letters[i]} 为什么不选", it) }
                     }
                     explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
+                    for (s in sections.filter { s -> s.strings("fact_ids").any { it in item.strings("factIds") } }) {
+                        TextButton(onClick = { position(true, section = s.str("section_id")) }, modifier = Modifier.testTag("mainline-return-section")) { Text("回看要点：${s.str("title")}") }
+                    }
                     coverage?.let { CoverageLines(it, Modifier.padding(top = 16.dp)) }
                     if (done.str("tier") == "bridge") {
                         Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
@@ -266,6 +407,24 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
 }
+}
+
+/** A modal overlay preserves the underlying question, choices and scroll position. */
+@Composable
+private fun ClassEmphasis(all: List<JsonObject>, factIds: List<String>) {
+    val linked = all.filter { it.str("fact_id") in factIds }
+    if (linked.isEmpty()) return
+    var opened by remember { mutableStateOf(false) }
+    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("mainline-emphasis")) { Text("★ 课上强调") }
+    if (opened) AlertDialog(onDismissRequest = { opened = false },
+        title = { Text("课上强调") },
+        text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            for (m in linked) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("${m.str("fact_id")} · 第 ${m.num("week")} 周 · ${if (m.str("recording_kind") == "tutorial") "习题课" else "讲课"} ${m.str("recording_id")} · ${m.str("timestamp")}", style = MaterialTheme.typography.labelLarge)
+                Text(m.str("summary"), style = MaterialTheme.typography.bodyMedium)
+            }
+        } },
+        confirmButton = { TextButton(onClick = { opened = false }, modifier = Modifier.testTag("mainline-emphasis-close")) { Text("关闭") } })
 }
 
 @Composable

@@ -45,6 +45,17 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     val epoch: String? get() = meta("epoch")
     private val q get() = db.ledgerQueries
     private val cache=ProjectionCache(db)
+    /** Device-local reading/answer state, retained independently of disposable ledger snapshots. */
+    fun mainlineState(course: String, page: String = "active"): JsonObject =
+        meta("mainline:v1:$course:$page")?.let { runCatching { LedgerJson.parseToJsonElement(it).jsonObject }.getOrNull() } ?: json()
+    fun saveMainlineState(course: String, state: JsonObject, page: String = "active") {
+        q.putMeta("mainline:v1:$course:$page", state.toString())
+    }
+    /** Pairing identity scopes personal marks; they are never uploaded as course evidence. */
+    internal fun readerState(course: String, week: Int, identity: String): JsonObject =
+        mainlineState(course, "reader:${hash(identity.encodeToByteArray())}:$week")
+    internal fun saveReaderState(course: String, week: Int, identity: String, state: JsonObject) =
+        saveMainlineState(course, state, "reader:${hash(identity.encodeToByteArray())}:$week")
     fun enqueue(body: CommandBody): WireCommand {
         val bytes = canonicalJson(LedgerJson.encodeToJsonElement(body))
         val c = WireCommand(deviceId,newId(),bytes,hash(bytes.encodeToByteArray()))

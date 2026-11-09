@@ -119,7 +119,10 @@ fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
             get("/resolve") { call.answer { course, _ -> call.json(library.resolve(course, call.request.queryParameters["source"].orEmpty())) } }
             get("/{document}/pages/{page}") { call.answer { course, _ -> call.json(library.page(library.document(course, call.parameters["document"]!!), call.page())) } }
             get("/{document}/pages/{page}/image") { call.answer { course, _ ->
-                call.respondBytes(library.image(library.document(course, call.parameters["document"]!!), call.page()), ContentType.Image.PNG)
+                val d = library.document(course, call.parameters["document"]!!)
+                val version = call.request.queryParameters["version"]
+                if (version != null && version != d.version) conflictReader("资料版本已改变，请重新定位")
+                call.respondBytes(library.image(d, call.page()), ContentType.Image.PNG)
             } }
             get("/{document}/state") { call.answer { course, _ ->
                 val d = library.document(course, call.parameters["document"]!!)

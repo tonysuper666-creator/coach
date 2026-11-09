@@ -20,7 +20,9 @@ class ReaderHttp internal constructor(
     suspend fun catalog(): ReaderReply = request("", null)
     suspend fun resolve(source: String): ReaderReply = request("resolve?source=${source.encodeURLParameter()}", null)
     suspend fun page(document: String, pdfPage: Int): ReaderReply = request("${document.encodeURLPathPart()}/pages/$pdfPage", null)
-    suspend fun image(document: String, pdfPage: Int): ByteArray? = bytes("${document.encodeURLPathPart()}/pages/$pdfPage/image")
+    suspend fun image(document: String, pdfPage: Int, version: String? = null): ByteArray? = bytes(
+        "${document.encodeURLPathPart()}/pages/$pdfPage/image" + (version?.let { "?version=${it.encodeURLParameter()}" } ?: "")
+    )
     suspend fun state(document: String): ReaderReply = request("${document.encodeURLPathPart()}/state", null)
     suspend fun exportMarkdown(document: String): String? = text("${document.encodeURLPathPart()}/notes.md")
     suspend fun saveProgress(document: String, version: String, pdfPage: Int, baseRevision: Long, mutationId: String): ReaderReply =

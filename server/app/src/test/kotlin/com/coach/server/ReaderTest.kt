@@ -208,15 +208,20 @@ class ReaderTest {
         val dir = Files.createTempDirectory("reader-version")
         try {
             val root = dir.resolve("library"); val first = catalog(root)
+            var oldVersion = ""
             withReader(dir.resolve("db"), first) { s ->
                 val page = s.reader.page("orchard", 32).body!!
+                oldVersion = page.str("version")
                 assertTrue(s.reader.saveNote("orchard", noteBody(page)).ok)
                 Files.write(root.resolve("synthetic.pdf"), inventedPdf(label = "Synthetic apples are new"))
                 assertEquals(409, s.reader.page("orchard", 32).status)
             }
             val replacement = catalog(root, inventedPdf(label = "Synthetic apples are new"))
             withReader(dir.resolve("db"), replacement) { s ->
+                assertEquals(409, s.request("C1/reader/orchard/pages/32/image?version=$oldVersion").first)
+                assertNull(s.reader.image("orchard", 32, oldVersion))
                 val state = s.reader.state("orchard").body!!
+                assertNotNull(s.reader.image("orchard", 32, state.getValue("document").jsonObject.str("version")))
                 assertTrue(state.getValue("notes").jsonArray.single().jsonObject.flag("stale"))
                 assertContains(s.reader.exportMarkdown("orchard")!!, "旧资料版本")
                 assertContains(s.reader.page("orchard", 32).body!!.str("text"), "Synthetic apples are new")

@@ -1,7 +1,7 @@
 Private PDF reader (TON-1400, phase-one foundation)
 ================================================
 
-The reader has a separate private allowlist and authenticated course-scoped transport. This PR supplies PDF page images/text, exact citation resolution, server-ledger progress/annotations and one-document Markdown export. It does **not** complete phase one: the shared reader UI, course/fact/question integration, selection UI, chapter map and external device/performance gates remain to be implemented. EPUB is outside this phase.
+The reader has a separate private allowlist and authenticated course-scoped transport. This PR supplies PDF page images/text, exact citation resolution, server-ledger progress/annotations and one-document Markdown export. The existing Resources screen now opens a private PDF viewer with single-page and wide two-page display. It restores previously recorded, same-version progress, but page turns in this viewer are **not yet saved** and the UI says so. It does **not** complete phase one: source-click integration, progress writes/conflict handling, shared reading appearance and stars, annotations, course/fact/question integration, selection UI, chapter map and external device/performance gates remain to be implemented. EPUB is outside this phase.
 
 Local setup
 -----------
@@ -24,7 +24,7 @@ Catalog schema 1 contains `documents`: each entry has `id`, actual ledger `cours
 Transport contract for TON-1394 integration
 -----------------------------------------
 
-Reuse `CourseHttp.reader` in the existing paired course client. It shares auth, local-network validation, cancellation, timeout and no-redirect behavior. No MainlineScreen/CoachApp/ResourcesScreen changes are included, so PR #117 can continue independently. Reuse its common reading appearance, selection menu and emphasis stars when wiring these methods; do not introduce a second set of those components.
+Reuse `CourseHttp.reader` in the existing paired course client. It shares auth, local-network validation, cancellation, timeout and no-redirect behavior. MainlineScreen and CoachApp remain untouched, so PR #117 can continue independently; ResourcesScreen adds an entry without replacing existing source navigation. Reuse its common reading appearance, selection menu and emphasis stars when available; do not introduce a second set of those components.
 
 All paths below are relative to `/v1/courses/{course}/reader`, use existing `Authorization: Bearer …` and `X-Coach-Device` headers and return `Cache-Control: no-store`. Credentials in query parameters are rejected. There is no raw-file route, client-supplied filesystem path or AI route.
 
@@ -33,7 +33,7 @@ All paths below are relative to `/v1/courses/{course}/reader`, use existing `Aut
 | GET root | `documents` metadata, `privateAi=disabled_no_local_inference` |
 | GET `/resolve?source=…` | Exact `教材 p.N` or `Wn 课件 p.N` → `documentId,version,pdfPage,printedPage,anchorStatus=page_only`; 422 for unknown/ambiguous/out of range |
 | GET `/{id}/pages/{page}` | `documentId,version,pdfPage,printedPage,text,textSha256,privateAi` |
-| GET `/{id}/pages/{page}/image` | Actual local PDF rendered to PNG, longest edge 1600 px, disk cache by content hash/page/render size |
+| GET `/{id}/pages/{page}/image?version=…` | Actual local PDF rendered to PNG, longest edge 1600 px, disk cache by content hash/page/render size; optional expected version returns 409 on mismatch |
 | GET `/{id}/state` | `document`, `progress` or null, latest nondeleted `notes`, each with ledger `revision` and `stale` |
 | POST `/{id}/progress` | Versioned page progress, returns `revision,savedAt,replayed` |
 | POST `/{id}/notes` | Highlight and Markdown note, returns `revision,savedAt,replayed` |

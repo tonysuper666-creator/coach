@@ -40,6 +40,11 @@ internal suspend fun prefetchSourcePage(c: CoachController, docId: String, pdfPa
 @Composable
 fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?, backLabel: String = "← 学习") {
     val http = c.course
+    var privateReader by remember(jump) { mutableStateOf(false) }
+    if (privateReader && http != null) {
+        PrivateReaderScreen(http.reader) { privateReader = false }
+        return
+    }
     var attempt by remember { mutableStateOf(0) }
     val docs by produceState<Load<List<SourceDoc>>>(Load.Pending, http, attempt) {
         value = http?.sources()?.let { Load.Ready(it) } ?: Load.Failed
@@ -50,6 +55,7 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp).testTag("source-back")) { Text(backLabel) }
             else if (open != null) TextButton(onClick = { open = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 全部章节") }
             Text("资料", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleLarge)
+            if (jump == null && http != null) TextButton(onClick = { privateReader = true }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-private-reader")) { Text("教材阅读") }
         }
         HorizontalDivider()
         val list = (docs as? Load.Ready)?.value

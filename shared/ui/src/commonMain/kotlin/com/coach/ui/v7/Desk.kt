@@ -131,7 +131,7 @@ fun Desk(
                             TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
                         }
                         if (onBack != null) {
-                            TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("返回", style = MaterialTheme.typography.labelLarge) }
+                            TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }
                     }
                     Text(buildAnnotatedString {

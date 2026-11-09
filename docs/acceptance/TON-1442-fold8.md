@@ -6,7 +6,7 @@
 
 字号通过 `ReadingSizes` 在运行时校准，保留原始 V7 导入包作为历史设计输入：正文/选项 16 sp、题干 17 sp、节标题 22 sp、周标题 26 sp、界面 13 sp、小标签 11.5 sp。Aa 提供小、中、大三档，默认中；应用内比例与系统字体缩放叠加。专心读使用同一套字号。
 
-未作答时，学习页把节标题压成一行，追问收成旁边的按钮。外屏答题收起底部导航，保留顶栏返回入口，并去掉题卡重复的内边距。追问展开后继续使用原来的草稿、输入法与发送逻辑。题组仍可滚动；进入新题组时先建立倒序列表的定位基准，再根据实际偏移对齐第一题顶部，避免列表已经到达边界时再次移动整段距离，把题干推出屏幕。主线答题页保留提交、猜测、幂等重试和讲解。
+未作答时，学习页把节标题压成一行，追问收成旁边的按钮。外屏答题收起底部导航，保留顶栏返回入口，并去掉题卡重复的内边距。返回按钮显示调用方传入的上一级名称（例如「← 复习」），不受底部导航或专心读开关影响。追问展开后继续使用原来的草稿、输入法与发送逻辑。题组仍可滚动；进入新题组时先建立倒序列表的定位基准，再根据实际偏移对齐第一题顶部，避免列表已经到达边界时再次移动整段距离，把题干推出屏幕。主线答题页保留提交、猜测、幂等重试和讲解。
 
 ## 自动证据
 
@@ -24,6 +24,6 @@ Windows 本轮通过 `tools/dev/heavy --local` 调用临时 PowerShell 启动器
 tools/dev/heavy --local powershell.exe -NoProfile -File ../run-build.ps1 :androidApp:testDebugUnitTest :androidApp:assembleDebug :shared:domain:jvmTest :shared:protocol:jvmTest :shared:client:jvmTest -Proborazzi.test.record=true
 ```
 
-2026-11-09 本机结果：命令退出 0，`BUILD SUCCESSFUL in 2m 8s`。Android 91 项、domain 63 项、client 74 项，合计 228 项，失败、错误、跳过均为 0；protocol 为 `NO-SOURCE`。输出 84 张真实窗口截图及原端到端 fixture 的 3 张补充图，证据清单记录每张图的原始像素尺寸、SHA-256 和源提交。
+2026-11-09 本机复跑结果：命令退出 0，`BUILD SUCCESSFUL in 2m 10s`。Android 92 项、domain 63 项、client 74 项，合计 229 项，失败、错误、跳过均为 0；protocol 为 `NO-SOURCE`。新增 Android 回归覆盖 411/704/933/1224 dp 四种窗口及专心读开关，共 8 种组合，底部导航收起时「← 复习」仍可见且点击后回到复习队列。原 `ReviewEntryTest` 未改。输出 84 张真实窗口截图及原端到端 fixture 的 3 张补充图，证据清单记录每张图的原始像素尺寸、SHA-256 和源提交。
 
-`apksigner verify --print-certs` 退出 0，证书 SHA-256 与上面的完整值一致；`aapt2 dump badging` 确认包名 `com.coach.android`、versionCode 1、versionName 0.1.0。候选 APK SHA-256：`ccc2106b6c6a66f053527b9530e1794698d21b542f3ce9bf38a39bc4c2ae3bce`。Mac 门禁、独立视觉验收及合并后出包仍待执行，未宣称整卡验收通过。
+`apksigner verify --print-certs` 退出 0，证书 SHA-256 与上面的完整值一致；`aapt2 dump badging` 确认包名 `com.coach.android`、versionCode 1、versionName 0.1.0。候选 APK SHA-256：`5eb6d246c63fc3559392cd52e4152a9f700bfe9a5725af61209fe5c92395da5f`。新 head 的 Mac 门禁待独立复跑，视觉验收及合并后出包仍待执行，未宣称整卡验收通过。

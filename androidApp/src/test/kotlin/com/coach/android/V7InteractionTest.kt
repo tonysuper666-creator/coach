@@ -31,6 +31,29 @@ import org.robolectric.annotation.GraphicsMode
 class V7InteractionTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun reviewBackKeepsItsDestinationAndWorksWithoutBottomNavigation() {
+        var dimensions by mutableStateOf(411 to 900)
+        var focused by mutableStateOf(false)
+        var returned by mutableStateOf(false)
+        compose.setContent { CoachTheme(false) {
+            CompositionLocalProvider(LocalDeskNavigation provides { Text("底部导航") }) {
+                Box(Modifier.requiredSize(dimensions.first.dp, dimensions.second.dp)) {
+                    if (returned) Text("回到复习队列")
+                    else Desk("合成复习", onBack = { returned = true }, backLabel = "← 复习",
+                        focus = focused, showNavigation = false) { Text("待答题") }
+                }
+            }
+        } }
+        for (window in listOf(411 to 900, 933 to 704, 704 to 933, 1224 to 924)) {
+            for (focus in listOf(false, true)) {
+                compose.runOnIdle { dimensions = window; focused = focus; returned = false }
+                compose.onNodeWithText("底部导航").assertDoesNotExist()
+                compose.onNodeWithText("← 复习").assertIsDisplayed().performClick()
+                compose.onNodeWithText("回到复习队列").assertIsDisplayed()
+            }
+        }
+    }
+
     @Test fun mediumWindowCanHideNotesAndChangeTypeWithoutLosingTheDraft() {
         compose.setContent { CoachTheme(false) {
             Box(Modifier.requiredSize(933.dp, 704.dp)) {

@@ -72,6 +72,12 @@ is no configuration-cache reuse across jobs. Caller options such as `--tests`,
 are preserved; daemon/configuration-cache mode, priority and worker limits are
 owned by the runner. Local environment variables are not implicitly forwarded.
 
+The [2026-11-09 measurements](winbox-build-validation.md) explain this default:
+remote isolated builds had a 72.206-second median versus 78.247 seconds with
+daemon/configuration cache requested. Mac had a 25.230-second median, so this
+offloads Mac CPU and intermediate build writes but does not accelerate this
+task set. Mac SSD writes were not measured directly.
+
 Regression checks:
 
 ```sh

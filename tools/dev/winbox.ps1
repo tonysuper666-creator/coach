@@ -9,8 +9,10 @@ $trash = "D:/agent/_trash/$Job"
 $admin = New-Object Threading.Mutex($false, 'Global\CoachHeavyGit')
 $slots = @(0,1 | ForEach-Object { New-Object Threading.Mutex($false, "Global\CoachHeavySlot$_") })
 $slot = -1
-$created = $false
 $exitCode = 70
+$phase = 'prepare'
+$reported = $false
+$env:JAVA_HOME = 'C:/Program Files/Eclipse Adoptium/jdk-21.0.12.101-hotspot'
 
 function Take-Mutex($mutex, [int]$milliseconds) {
     try { return $mutex.WaitOne($milliseconds) }
@@ -42,15 +44,25 @@ try {
             $exitCode = 75
         } else {
             "Coach heavy: winbox slot=$slot pid=$PID freeGiB=$([math]::Round($free,2)) priority=Idle"
+            if ($null -ne $config.androidConfig) {
+                $fingerprint = & "$env:JAVA_HOME/bin/java.exe" "$inbox/WinboxConfig.java"
+                if ($LASTEXITCODE -ne 0) { throw 'cannot fingerprint Windows Android configuration' }
+                $actual = $fingerprint | ConvertFrom-Json
+                foreach ($key in @('coach.tailHost', 'coach.course', 'coach.port')) {
+                    $expectedHash = $config.androidConfig.$key
+                    if (!$expectedHash -or $expectedHash -cne $actual.$key) {
+                        throw "Android configuration differs: $key (values withheld)"
+                    }
+                }
+                'Coach heavy: Android configuration hashes match (3 keys)'
+            }
             if (!(Take-Mutex $admin 60000)) { throw 'QUEUE75: git administration lock timeout' }
             try {
                 if (!(Test-Path $repo)) { Git-Checked @('-c', 'init.defaultBranch=main', 'init', '--bare', $repo) }
                 Git-Checked @('--git-dir', $repo, 'fetch', '--quiet', "$inbox/source.bundle", $config.sha)
                 Git-Checked @('--git-dir', $repo, '-c', 'core.autocrlf=false', 'worktree', 'add', '--quiet', '--detach', $work, $config.sha)
-                $created = $true
             } finally { $admin.ReleaseMutex() }
             $env:GRADLE_USER_HOME = 'D:/agent/gradle-home'
-            $env:JAVA_HOME = 'C:/Program Files/Eclipse Adoptium/jdk-21.0.12.101-hotspot'
             $env:ANDROID_HOME = 'D:/agent/android-sdk'
             $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
             Set-Content -Encoding Ascii "$work/local.properties" 'sdk.dir=D:/agent/android-sdk'
@@ -66,6 +78,7 @@ try {
             }
             $gradleArgs += @('--priority=low', '--max-workers=2', '--console=plain')
             $timer = [Diagnostics.Stopwatch]::StartNew()
+            $phase = 'gradle'
             # Invoke Java directly: no cmd.exe interpolation of task/property values.
             $ErrorActionPreference = 'Continue'
             & "$env:JAVA_HOME/bin/java.exe" '-Xmx64m' '-Xms64m' '-Dorg.gradle.appname=gradlew' '-jar' "$work/gradle/wrapper/gradle-wrapper.jar" @gradleArgs 2>&1 |
@@ -73,11 +86,12 @@ try {
             $exitCode = $LASTEXITCODE
             $ErrorActionPreference = 'Stop'
             $seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+            $phase = 'artifacts'
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $zip = [IO.Compression.ZipFile]::Open("$inbox/artifacts.zip", 'Create')
             try {
                 Get-ChildItem $work -Recurse -File | Where-Object {
-                    $_.FullName -match '\\build\\(outputs|reports|test-results)\\'
+                    $_.FullName -match '\\build\\(outputs|reports|test-results|screens)\\'
                 } | ForEach-Object {
                     $relative = $_.FullName.Substring($work.Length + 1).Replace('\','/')
                     [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $_.FullName, $relative) | Out-Null
@@ -85,25 +99,32 @@ try {
             } finally { $zip.Dispose() }
             @{exit=$exitCode; seconds=$seconds; sha=$config.sha; slot=$slot; artifacts=$true; mode=$config.mode} |
                 ConvertTo-Json | Set-Content -Encoding UTF8 "$inbox/result.json"
+            $reported = $true
             "Coach heavy: winbox GRADLE_EXIT=$exitCode SECONDS=$seconds"
         }
     }
 } catch {
     Write-Output "Coach heavy: winbox runner failed: $_"
-    if ("$_" -like 'QUEUE75:*') { $exitCode = 75 } else { $exitCode = 70 }
+    if ($phase -eq 'prepare') { $exitCode = 75 } else { $exitCode = 70 }
 } finally {
     Set-Location D:/agent
     # Keep files in quarantine; prune only the missing worktree's Git metadata.
-    if ($created -and (Test-Path $work)) {
+    if (Test-Path $work) {
         if (Take-Mutex $admin 60000) {
             try {
                 New-Item -ItemType Directory -Force $trash | Out-Null
                 Move-Item $work "$trash/worktree"
                 Git-Checked @('--git-dir', $repo, 'worktree', 'prune', '--expire', 'now')
                 Move-Item "$inbox/source.bundle" "$trash/source.bundle"
-            } catch { Write-Output "Coach heavy: quarantine failed: $_"; $exitCode = 70 }
+            } catch {
+                Write-Output "Coach heavy: quarantine deferred (inspect $work): $_"
+                if (!$reported -and $phase -ne 'prepare') { $exitCode = 70 }
+            }
             finally { $admin.ReleaseMutex() }
-        } else { $exitCode = 70 }
+        } else {
+            Write-Output "Coach heavy: quarantine deferred (administration lock; inspect $work)"
+            if (!$reported -and $phase -ne 'prepare') { $exitCode = 70 }
+        }
     }
     if ($slot -ge 0) { $slots[$slot].ReleaseMutex() }
     foreach ($mutex in $slots) { $mutex.Dispose() }

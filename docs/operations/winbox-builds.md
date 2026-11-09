@@ -6,6 +6,8 @@ tasks explicitly name `androidApp` or `shared:{domain,protocol,client,ui}`.
 Nothing needs to be installed on each Mac worktree. Python 3.9+, Git, SSH and
 SCP use the existing `winbox` SSH alias. Windows needs the provisioned JDK 21,
 JDK 17 toolchain in the Gradle cache, SDK 37 and shared debug keystore.
+Android tasks also need Java 17+ on Mac (`JAVA_HOME` or `java` on PATH) to read
+configuration fingerprints; if unavailable the command falls back to Mac.
 
 ```sh
 tools/dev/heavy ./gradlew :androidApp:assembleDebug :shared:domain:jvmTest :shared:protocol:jvmTest --offline
@@ -14,11 +16,14 @@ tools/dev/heavy --emulator python3 tools/dev/check-android.py
 ```
 
 The wrapper prints `host=winbox` or `host=Mac local lock`. Remote work never
-holds a Mac heavy lane. Remote code 75 (free memory below 4 GiB or slot timeout)
+holds a Mac heavy lane. Remote code 75 (free memory below 4 GiB, slot timeout,
+configuration mismatch or failure preparing the Windows worktree)
 and SSH/transport connection failure (255) fall back to Mac under its regular
 lock. Compilation/test failures propagate without a local retry. Missing
-artifacts, bad snapshots or runner errors fail visibly (70), avoiding a
+artifacts or errors after Gradle starts fail visibly (70), avoiding a
 misleading successful local retry.
+Missing Gradle dependencies, including an uncached `--offline` dependency,
+remain Gradle failures and do not trigger fallback.
 
 Keep these commands on Mac:
 
@@ -28,8 +33,10 @@ Keep these commands on Mac:
 | `--emulator`, connected/device/managed tests, install/uninstall | Devices and emulator live on Mac |
 | `desktopApp:*`, native/iOS/macOS/Xcode, desktop packaging | Host tooling and runtime |
 | Unqualified `test`/`build`/`check`, shared `allTests`/`check`/`build` | Can select server or native tasks |
+| `shared:ui:*` test/check tasks, including `jvmTest`, `test*` and test compilation | Read Mac `~/Coach/corpus/render`; Windows would silently skip corpus tests |
 | Arbitrary scripts, shell commands, `env ... ./gradlew`, non-root invocations | Cannot infer their environment or subprocesses |
 | Init scripts, project-directory overrides, unknown options, machine paths | Not portable; use explicit task paths and supported options |
+| Nonempty `JAVA_OPTS`, `GRADLE_OPTS`, `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` | May change the local JVM home/configuration; not forwarded |
 
 `--local` or `COACH_HEAVY_HOST=local` forces the Mac lock. `--priority release`
 retains local priority behavior on Mac; Windows slots are independently queued
@@ -50,19 +57,36 @@ An exited process releases its mutex even if it is killed. Queue waits time
 out; active jobs are never killed to make room. Interrupted jobs can leave
 files for inspection, but cannot retain a slot after the runner process exits.
 
+Before an Android build, both hosts read `~/Coach/config/local.properties`
+using Java `Properties.load`, exactly as `androidApp/build.gradle.kts` does.
+Only SHA-256 hashes of `coach.tailHost`, `coach.course` and `coach.port`
+(including build defaults for missing keys) are sent in `request.json`.
+Different hashes return 75 before worktree creation or Gradle, so the build
+uses the current Mac configuration. No configuration file is copied or edited.
+Matching certificates alone do not establish matching APK connection settings.
+
 After completion, active job worktrees and bundles move to
 `D:\agent\_trash\<job>`; only missing worktree metadata is pruned. No automatic
 trash deletion or system cleanup is installed. The original
 `D:\agent\work\coach` checkout and the user's desktop session are untouched.
 Do not use `~/Coach/service/winbox/build.sh` concurrently: that old entrypoint
 does not participate in this limit and mutates its single shared checkout.
+Quarantine failure is logged with the worktree path, preserving the completed
+Gradle result and artifact download. Inspect and quarantine that job manually.
+Trash, remote logs (including archives) and local `.coach-winbox` records have
+no age limit; after review, archive/remove only completed job UUIDs and retain
+active jobs and acceptance evidence. Monitor free space; this runner does not
+perform a machine-wide cleanup.
 
 Logs/metadata live in `.coach-winbox/<job>/{request.json,result.json,remote.log,gradle.log}`.
 `artifacts.zip` preserves repository-relative paths; APKs, `build/outputs`,
-`build/reports` and `build/test-results` are restored into the calling worktree,
+`build/reports`, `build/test-results` and `build/screens` (PNG evidence) are
+restored into the calling worktree,
 including failed-test reports. Reports from an earlier invocation may still
-exist for modules not selected by the current command; use the job archive
+exist for modules/files not selected by the current command; use the job archive
 when provenance matters. Remote logs stay in `D:\agent\logs\<job>`.
+For UI tests kept on Mac, use a fresh worktree or empty `shared/ui/build/screens`
+before collecting evidence; no remote archive is produced for those local runs.
 
 The default mode is `isolated` (no persistent Gradle daemon/configuration cache,
 shared task build cache enabled). `COACH_WINBOX_MODE=reuse` enables daemon and

@@ -38,7 +38,8 @@ def portable_args(command, root):
             value_next = True
         elif arg.startswith(('-P', '-D')):
             # Machine paths / explicit init scripts cannot be transported.
-            if '/' in arg or '\\' in arg or 'org.gradle.java.home' in arg:
+            if ('/' in arg or '\\' in arg
+                    or re.search(r'user\.home|org\.gradle\.(?:java\.home|jvmargs)', arg)):
                 return None
         elif arg in ('--offline', '--rerun-tasks', '--stacktrace', '--info', '--debug',
                      '--no-daemon', '--daemon', '--no-configuration-cache',
@@ -54,6 +55,10 @@ def portable_args(command, root):
             if not re.fullmatch(r':(?:androidApp|shared:(?:domain|protocol|client|ui)):[A-Za-z0-9]+', task):
                 return None
             if re.search(r'connected|device|managed|install|uninstall|run|ios|macos|native|xcode|publish', task, re.I):
+                return None
+            # UI tests read ~/Coach/corpus/render and produce local evidence.
+            # Keep all test variants (including compileTest/testClasses) local.
+            if task.startswith(':shared:ui:') and re.search(r'test|check', task, re.I):
                 return None
             # KMP aggregate tests/check/build can include native targets later.
             if task.startswith(':shared:') and task.rsplit(':', 1)[1] in ('allTests', 'check', 'build'):
@@ -81,6 +86,22 @@ def runner_args(args):
     return result
 
 
+def android_config_fingerprint():
+    """Use the same Properties.load(InputStream) semantics as the build script.
+
+    Send only hashes of the three consumed values, never the configuration file.
+    """
+    java = str(Path(os.environ['JAVA_HOME']) / 'bin/java') if os.environ.get('JAVA_HOME') else 'java'
+    result = subprocess.run([java, str(HERE / 'WinboxConfig.java')], capture_output=True)
+    if result.returncode:
+        raise ValueError('cannot fingerprint local Android configuration (Java 17+ required)')
+    hashes = json.loads(result.stdout)
+    if (set(hashes) != {'coach.tailHost', 'coach.course', 'coach.port'}
+            or any(not re.fullmatch(r'[a-f0-9]{64}', v) for v in hashes.values())):
+        raise ValueError('invalid Android configuration fingerprint')
+    return hashes
+
+
 def git(root, *args, env=None):
     return subprocess.check_output(['git', '-C', str(root), *args], env=env, text=True).strip()
 
@@ -105,7 +126,10 @@ def restore(archive, root):
         for entry in bundle.infolist():
             path = PurePosixPath(entry.filename)
             if (path.is_absolute() or '..' in path.parts or '\\' in entry.filename
-                    or ':' in entry.filename or 'build' not in path.parts):
+                    or ':' in entry.filename
+                    or not any(path.parts[n:n+2] in (('build', 'outputs'), ('build', 'reports'),
+                                                   ('build', 'test-results'), ('build', 'screens'))
+                               for n in range(len(path.parts)-1))):
                 raise ValueError('invalid artifact path: ' + entry.filename)
             target = root.joinpath(*path.parts)
             if not target.resolve().is_relative_to(root.resolve()):
@@ -120,6 +144,9 @@ def main(command):
     root = Path(git(Path.cwd(), 'rev-parse', '--show-toplevel')).resolve()
     args = portable_args(command, root)
     if args is None or Path.cwd().resolve() != root:
+        return 76
+    # These can alter user.home/Gradle configuration on the caller only.
+    if any(os.environ.get(key) for key in ('JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS')):
         return 76
     host = os.environ.get('COACH_WINBOX_HOST', 'winbox')
     if not re.fullmatch(r'[A-Za-z0-9_.@-]+', host) or host.startswith('-'):
@@ -152,16 +179,24 @@ def main(command):
         # Probe first, so an offline winbox costs no bundle write on the Mac.
         probe = ssh(f'-Command "New-Item -ItemType Directory -Force {remote} | Out-Null"')
         if probe.returncode:
-            return 255 if probe.returncode == 255 else 70
+            return 255 if probe.returncode == 255 else 75
+        try:
+            android_config = android_config_fingerprint() if any(
+                arg.lstrip(':').startswith('androidApp:') for arg in args) else None
+        except (OSError, ValueError) as error:
+            print(f'Coach heavy: {error}; using Mac configuration', file=sys.stderr)
+            return 75
         with tempfile.TemporaryDirectory(prefix='coach-winbox-') as scratch:
             tmp = Path(scratch)
             sha = snapshot(root, tmp, ref)
             config = dict(job=job, sha=sha, args=runner_args(args), originalArgs=args, mode=mode,
+                          androidConfig=android_config,
                           queueSeconds=int(os.environ.get('COACH_WINBOX_QUEUE_SECONDS', '900')))
             (out / 'request.json').write_text(json.dumps(config, indent=2) + '\n')
             scp(str(tmp / 'source.bundle'), f'{host}:{remote}/source.bundle')
             scp(str(out / 'request.json'), f'{host}:{remote}/request.json')
             scp(str(HERE / 'winbox.ps1'), f'{host}:{remote}/runner.ps1')
+            scp(str(HERE / 'WinboxConfig.java'), f'{host}:{remote}/WinboxConfig.java')
         with subprocess.Popen(['ssh', *SSH_OPTIONS, host,
                                f'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {remote}/runner.ps1 -Job {job}'],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:

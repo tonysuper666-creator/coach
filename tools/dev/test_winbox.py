@@ -1,5 +1,6 @@
 """Routing, real Git snapshots and heavy fallback; no connection to winbox."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,12 @@ class Transport(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.bin = self.root / 'bin'
         self.bin.mkdir()
+        java_home = self.root / 'jdk'
+        (java_home / 'bin').mkdir(parents=True)
+        fingerprints = {key: '0' * 64 for key in ('coach.tailHost', 'coach.course', 'coach.port')}
+        self.executable(java_home / 'bin/java', "#!/bin/sh\nprintf '%s\\n' '" + json.dumps(fingerprints) + "'\n")
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
+                        JAVA_HOME=str(java_home),
                         COACH_HEAVY_LOCK=str(self.root / 'locks/local'),
                         COACH_HEAVY_LANES_FILE=str(self.root / 'lanes'))
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
@@ -33,7 +39,9 @@ class Transport(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'base')
         (self.root / 'tools/dev').mkdir(parents=True)
-        for name in ('heavy', 'winbox.py', 'winbox.ps1'):
+        for key in ('JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS'):
+            self.env.pop(key, None)
+        for name in ('heavy', 'winbox.py', 'winbox.ps1', 'WinboxConfig.java'):
             shutil.copy2(HERE / name, self.root / 'tools/dev' / name)
 
     def tearDown(self):
@@ -57,16 +65,18 @@ class Transport(unittest.TestCase):
             for command in (
                 ['./gradlew', ':androidApp:assembleDebug', ':shared:domain:jvmTest'],
                 ['bash', './gradlew', 'shared:client:jvmTest', '--tests', 'a test.*'],
-                ['./gradlew', ':shared:ui:jvmTest', '-PcoachApplicationId=com.coach.candidate'],
+                ['./gradlew', ':shared:ui:compileAndroidMain', '-PcoachApplicationId=com.coach.candidate'],
             ):
                 self.assertIsNotNone(winbox.portable_args(command, self.root), command)
             for task in (':server:app:test', 'test', 'build', ':desktopApp:packageDmg',
                          ':androidApp:connectedDebugAndroidTest', ':shared:ui:macosTest',
-                         ':shared:ui:allTests', ':shared:domain:check'):
+                         ':shared:ui:allTests', ':shared:domain:check', ':shared:ui:jvmTest',
+                         ':shared:ui:testDebugUnitTest', ':shared:ui:check', ':shared:ui:compileTestKotlinJvm'):
                 self.assertIsNone(winbox.portable_args(['./gradlew', task], self.root), task)
             for tail in (['-p', '/another'], ['--init-script=x'], ['-Pvalue=a&b'],
-                         ['-Dorg.gradle.java.home=C:\\jdk'], ['--tests']):
-                self.assertIsNone(winbox.portable_args(['./gradlew', ':shared:ui:jvmTest', *tail], self.root), tail)
+                         ['-Dorg.gradle.java.home=C:\\jdk'], ['--tests'], ['-Duser.home=alternate'],
+                         ['-Dorg.gradle.jvmargs=-Duser.home=alternate']):
+                self.assertIsNone(winbox.portable_args(['./gradlew', ':shared:domain:jvmTest', *tail], self.root), tail)
         finally:
             os.chdir(original)
 
@@ -97,9 +107,12 @@ class Transport(unittest.TestCase):
         with zipfile.ZipFile(archive, 'w') as bundle:
             bundle.writestr('androidApp/build/outputs/apk/debug/app.apk', b'apk')
             bundle.writestr('shared/domain/build/test-results/jvmTest/TEST.xml', '<testsuite/>')
+            bundle.writestr('shared/ui/build/screens/records-attempt.png', b'new screenshot')
         winbox.restore(archive, self.root)
         self.assertEqual((self.root / 'androidApp/build/outputs/apk/debug/app.apk').read_bytes(), b'apk')
-        for name in ('../build/escape', 'build/../../escape', 'C:/build/escape', 'build\\escape', 'source'):
+        self.assertEqual((self.root / 'shared/ui/build/screens/records-attempt.png').read_bytes(), b'new screenshot')
+        for name in ('../build/escape', 'build/../../escape', 'C:/build/escape', 'build\\escape', 'source',
+                     'shared/ui/build/src/source.kt'):
             with zipfile.ZipFile(archive, 'w') as bundle:
                 bundle.writestr(name, 'unsafe')
             with self.assertRaises(ValueError):
@@ -138,6 +151,8 @@ elif source.endswith('/gradle.log'): pathlib.Path(dest).write_text('BUILD FAILED
         for args in (
             ['./gradlew', ':server:app:test'],
             ['./gradlew', ':androidApp:assembleDebug', ':server:app:test'],
+            ['./gradlew', ':shared:ui:jvmTest'],
+            ['./gradlew', ':androidApp:assembleDebug', ':shared:ui:check'],
             ['--emulator', './gradlew', ':androidApp:assembleDebug'],
             ['--local', './gradlew', ':shared:domain:jvmTest'],
         ):
@@ -145,6 +160,33 @@ elif source.endswith('/gradle.log'): pathlib.Path(dest).write_text('BUILD FAILED
                 result = self.run_heavy(*args)
                 self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
                 self.assertNotIn('UNEXPECTED_SSH', result.stderr)
+
+    def test_jvm_environment_overrides_stay_local(self):
+        self.executable(self.bin / 'ssh', '#!/bin/sh\necho UNEXPECTED_SSH >&2\nexit 99\n')
+        for key in ('JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS'):
+            with self.subTest(key=key):
+                self.env[key] = '-Duser.home=/private/fixture'
+                result = self.run_heavy('./gradlew', ':androidApp:assembleDebug')
+                self.env.pop(key)
+                self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+                self.assertNotIn('UNEXPECTED_SSH', result.stderr)
+
+    def test_android_configuration_uses_java_properties_and_build_defaults(self):
+        java = str(Path(os.environ['JAVA_HOME']) / 'bin/java') if os.environ.get('JAVA_HOME') else 'java'
+        config = self.root / 'config.properties'
+        def fingerprint():
+            result = subprocess.run([java, str(HERE / 'WinboxConfig.java'), str(config)],
+                                    capture_output=True, text=True, check=True, timeout=30)
+            return json.loads(result.stdout)
+        def hashes(host='', course='', port='18791'):
+            return {key: hashlib.sha256(value.encode()).hexdigest() for key, value in
+                    zip(('coach.tailHost', 'coach.course', 'coach.port'), (host, course, port))}
+        self.assertEqual(fingerprint(), hashes())
+        config.write_bytes(b'coach.tailHost: 10.0.0.1\ncoach.course=synthetic\\u4e2d\\\n  continuation\n'
+                           b'coach.port = 19876\nunrelated.key=ignored\n')
+        self.assertEqual(fingerprint(), hashes('10.0.0.1', 'synthetic中continuation', '19876'))
+        config.write_text('coach.port=\n')
+        self.assertEqual(fingerprint(), hashes(port=''))
 
 
 if __name__ == '__main__':

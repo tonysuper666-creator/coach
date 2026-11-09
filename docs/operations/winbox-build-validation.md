@@ -109,3 +109,76 @@ Raw logs, timing JSON, job metadata, XML test reports and certificate output
 are attached to the TON-1414 delivery comment. QA-C must independently repeat
 the APK/shared test command and unreachable-host command in a new worktree;
 the checks above are the implementer's evidence, not independent acceptance.
+
+## Cross-review corrections
+
+After cross-review, UI test/check tasks stay on Mac, Android jobs compare
+the three configuration value hashes before Gradle, and artifact archives
+include `build/screens`. The original timing table above predates these
+corrections; timings were not repeated or presented as new measurements.
+
+The corrected transport suite has 9 passing cases (exit 0), including Java
+Properties defaults, Unicode escapes/continuations, UI routing, JVM environment
+overrides and screenshots. The existing heavy checks and 7 resource queue
+cases also returned exit 0, as did Python compilation and shell syntax checks.
+
+In a fresh detached worktree containing the corrected transport, both commands
+below returned exit 0 and logged only `host=Mac local lock`:
+
+```sh
+tools/dev/heavy ./gradlew :shared:ui:jvmTest \
+  --tests com.coach.ui.RenderingQualityTest --tests com.coach.ui.RecordsScreenshotTest --rerun-tasks
+tools/dev/heavy --local ./gradlew :shared:ui:jvmTest \
+  --tests com.coach.ui.RenderingQualityTest --tests com.coach.ui.RecordsScreenshotTest --rerun-tasks
+```
+
+Each invocation ran RenderingQuality's 8 tests and RecordsScreenshot's 3
+tests: 11 total, zero skipped/failed/errors. Each produced 3 new records PNGs;
+the first run's screenshot directory was moved aside before the second run.
+The cross-review's `tests="8"` figure described RenderingQuality's suite,
+not the sum of both selected suites.
+
+To verify Windows screenshot return while UI tests remain Mac-only, a temporary
+JVM test fixture was added only to the acceptance worktree's domain test
+sources. It writes a uniquely named PNG to `shared/ui/build/screens` using
+Java ImageIO. This command returned exit 0 on Windows, logged matching Android
+configuration hashes for all 3 keys, and passed the fixture's single test:
+
+```sh
+tools/dev/heavy ./gradlew :androidApp:assembleDebug :shared:domain:jvmTest \
+  --tests com.coach.domain.WinboxScreensRoundTripTest --offline
+```
+
+Job `heavy-3ca31e365dad4e57b1e7af88c98c6287` used slot 0, Idle priority and
+completed Gradle in 21.559 seconds. The screenshot did not exist locally
+before this call, appeared in that job's artifact archive and returned to the
+same repository-relative path on Mac, byte-for-byte identical to its ZIP
+entry. `apksigner verify --print-certs` returned exit 0 with the certificate
+recorded above. The fixture is included in the evidence harness, not in
+application sources.
+
+For each of `coach.tailHost`, `coach.course` and `coach.port`, a separate job
+sent a deliberately different hash in `request.json`. All three real Windows
+runner calls returned 75, named only the differing key, and never started
+Gradle. Neither host's configuration file was changed. A fourth job with
+matching hashes but a missing source bundle also returned 75 before Gradle,
+confirming preparation-failure fallback eligibility.
+
+An SCP shim then changed only the port hash in one uploaded request for the
+following unmodified heavy command (both real host configuration files stayed
+unchanged):
+
+```sh
+tools/dev/heavy ./gradlew :androidApp:assembleDebug --offline
+```
+
+The real runner rejected the request with 75, heavy logged
+`falling back to Mac` and acquired the Mac lock, and the APK build returned 0.
+`apksigner` returned 0 and the signing certificate matched the Windows APK.
+This checks the complete configuration-mismatch fallback, beyond separately
+testing the runner gate and mocked transport.
+
+The evidence attachment contains the foreground harnesses, commands/exit codes,
+test XML, newly generated PNGs, hash-only requests and raw logs. These are
+implementer checks; QA-C must independently repeat UI routing/screens checks
+on the new PR head and arrange `cross_review` before merge.

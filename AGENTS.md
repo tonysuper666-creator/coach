@@ -10,14 +10,17 @@ tools/dev/heavy --emulator bash -c './gradlew :androidApp:assembleDebugAndroidTe
 
 Explicit Android/shared Gradle tasks default to `ssh winbox`, with two remote
 slots and independent job worktrees. Current uncommitted source is included.
-APKs, build reports and test XML return to their normal repository paths;
+APKs, build reports, test XML and `build/screens` return to their repository paths;
 transport logs and the exact snapshot SHA are in `.coach-winbox/<job>/`.
-Remote memory/queue failure (75) or SSH unavailability (255) automatically uses
+Remote preparation/configuration/memory/queue failure (75) or SSH unavailability (255) uses
 the existing Mac heavy lock. A Gradle failure is returned to the caller.
 
 Keep server tasks (including mixed server/shared commands), emulator/device
 tasks, desktop packaging, macOS/native tasks, ambiguous aggregate selectors
 such as `test`, scripts and commands needing local paths/environment on Mac.
+All `shared:ui` test/check tasks stay on Mac because they read the user's corpus.
+Android jobs compare hashes of the three host-local APK configuration keys;
+a mismatch falls back to Mac without editing either host's configuration.
 Use `--local` when that dependency is known only to the caller.
 
 Never reboot winbox, change system settings, touch the user's accounts,

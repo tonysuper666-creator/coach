@@ -68,6 +68,28 @@ class ContentValidationTest(unittest.TestCase):
         self.assertIn('eight-word matches', result.stdout)
         self.assertNotIn('violet robot', result.stdout)
 
+    def test_chinese_threshold_and_private_report(self):
+        phrase = '春夏秋冬东西南北天地山水日月星'
+        self.assertEqual(len(phrase), 15)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            exam_dir = root / 'exams'
+            exam_dir.mkdir()
+            (exam_dir / 'synthetic.txt').write_text(phrase, encoding='utf-8')
+            candidate = root / 'candidate.json'
+            candidate.write_text(json.dumps({'stem': phrase[:14]}, ensure_ascii=False), encoding='utf-8')
+            bank = validate.exam_index(exam_dir)
+            self.assertFalse(validate.check_file(candidate, bank)[1])
+            candidate.write_text(json.dumps({'stem': phrase}, ensure_ascii=False), encoding='utf-8')
+            result = subprocess.run([sys.executable, str(Path(validate.__file__)), str(candidate), '--exam-dir', str(exam_dir)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('15-Han-character matches', result.stdout)
+            self.assertNotIn(phrase, result.stdout + result.stderr)
+            candidate.write_text(json.dumps({'one': phrase[:8], 'two': phrase[8:]}, ensure_ascii=False), encoding='utf-8')
+            self.assertFalse(validate.check_file(candidate, bank)[1])
+            candidate.write_text(json.dumps({'stem': phrase[:8] + '，' + phrase[8:]}, ensure_ascii=False), encoding='utf-8')
+            self.assertFalse(validate.check_file(candidate, bank)[1])
+
     def test_invalid_json_and_unsupported_file_are_not_passes(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'broken.json'

@@ -204,7 +204,13 @@ class MainlineNotesSmoke {
         screenshot("two-click-first")
         if (!fault) {
             fun returnToToday() {
-                click(show("← 选周")); click(show("← 复习")); click(waitFor("导航：今天"))
+                if (compose.onAllNodes(hasText("Coach")).fetchSemanticsNodes().isNotEmpty()) {
+                    // V7's inner desk exposes app navigation through the Coach menu.
+                    click(show("Coach")); click(show("今天"))
+                } else {
+                    click(show("← 选周")); click(show("← 复习")); click(waitFor("导航：今天"))
+                }
+                waitFor("导航：复习")
             }
             returnToToday()
             val warmStart = clicks
@@ -236,11 +242,14 @@ class MainlineNotesSmoke {
             click(show("专心读"))
             waitFor("退出专注")
             target("导航：复习").assertDoesNotExist()
+            compose.onNodeWithTag("mainline-notes").assertDoesNotExist()
             screenshot("focus-reading")
             click(waitFor("退出专注"))
-            // The exit is proven by the app navigation returning; tapping the label a second time would only flip
-            // focus back on, so wait for the frame instead of re-tapping.
-            waitFor("导航：复习")
+            // The V7 shell contains the existing weekly reader. Its heading and back control return
+            // when focus ends; the desk's app navigation belongs to the question screen.
+            waitFor("第 1 周 · 本周要点")
+            compose.onNodeWithTag("mainline-notes").assertIsDisplayed()
+            target("退出专注").assertDoesNotExist()
             click(show("浅色阅读"))
             // The map starts collapsed and one tap on the heading opens it; the heading flips to 收起本周脉络. The
             // heading sits above the passage the previous steps scrolled to, so reach it the way a reader would.
@@ -274,7 +283,8 @@ class MainlineNotesSmoke {
         click(waitFor("关闭"))
         answer("Synthetic apples are grown there", false, "答错了。", "setup")
         if (jointReader && !fault) {
-            val original = compose.onNodeWithTag("mainline-option-0").fetchSemanticsNode().config
+            val selectedAnswer = target("Synthetic apples are grown there", contains = true)
+            val original = selectedAnswer.fetchSemanticsNode().config
             click(show(citation))
             compose.waitUntil(timeoutMillis = 15_000) { compose.onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
@@ -298,7 +308,7 @@ class MainlineNotesSmoke {
             compose.onNodeWithTag("private-document-back").performClick()
             show("答错了。")
             // The immutable displayed choice survives the full-screen PDF dialog.
-            val returned = compose.onNodeWithTag("mainline-option-0").fetchSemanticsNode().config
+            val returned = selectedAnswer.fetchSemanticsNode().config
             assertEquals(original[SemanticsProperties.Selected], returned[SemanticsProperties.Selected])
             assertTrue(returned[SemanticsProperties.Selected])
             show(citation)
@@ -309,14 +319,15 @@ class MainlineNotesSmoke {
             show("答错了。")
         }
         if (!fault) show("我的一句话：Synthetic personal note")
-        show("为什么不选：Synthetic plums ripen after", contains = true)
+        show("B 为什么不选")
+        show("Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")
         show("回看要点：Synthetic basics")
         screenshot("setup-bottom")
-        click(show("下一题"))
+        click(compose.onNodeWithTag("mainline-next").performScrollTo())
         waitFor("细节题 · 第 2/3 题")
         answer("Synthetic pears are grown there", true, "答对了，但标了猜的：不算掌握。", "detail")
-        click(show("下一题"))
+        click(compose.onNodeWithTag("mainline-next").performScrollTo())
         waitFor("桥接题 · 第 3/3 题")
         answer("Synthetic pears are grown there", false, "答对了，算掌握。", "bridge")
         show("步骤批改")

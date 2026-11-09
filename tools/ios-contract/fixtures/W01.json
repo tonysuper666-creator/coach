@@ -1,0 +1,10 @@
+{
+  "id": "contract-W01", "kind": "pack", "course": "contract-course", "minutes": 5,
+  "sections": [{
+    "title": "Synthetic orchard", "instructions": "Choose one.", "choose": null,
+    "items": [
+      {"id":"orchard-1","type":"mcq","kp_week":1,"kp":"orchard","key_state":"VERIFIED","fact_ids":["F1"],"tier":"setup","marks":1,"stem":"Synthetic orchard: which fruit grows here?","options":["Pears","Bolts","Screws","Nails"],"answer":0,"explanation":"Synthetic pears grow here.","source":"Synthetic orchard"},
+      {"id":"orchard-2","type":"mcq","kp_week":1,"kp":"orchard","key_state":"VERIFIED","fact_ids":["F1"],"tier":"detail","marks":1,"stem":"Synthetic orchard: which item is a fruit?","options":["Pears","Bolts","Screws","Nails"],"answer":0,"explanation":"Synthetic pears are fruit.","source":"Synthetic orchard"}
+    ]
+  }]
+}

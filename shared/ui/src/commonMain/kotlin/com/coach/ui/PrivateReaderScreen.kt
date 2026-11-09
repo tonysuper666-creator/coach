@@ -1,6 +1,7 @@
 package com.coach.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -121,6 +123,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             val highlight by rememberHighlight(reader, doc, focus, focusRetry)
             if (showNotes) PrivateReaderAnnotations(reader, doc, page, onShow = { quote -> focus = HighlightFocus(page, quote); showNotes = false }) { showNotes = false }
             var showMap by remember(doc) { mutableStateOf(false) }
+            var readingFocus by remember(doc) { mutableStateOf(false) }
             fun send(write: ProgressWrite) {
                 pending = write
                 busy = true
@@ -151,10 +154,11 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                 val wide = maxWidth >= 840.dp
                 var spread by remember { mutableStateOf(false) }
                 val two = wide && spread && page < doc.pages
-                Column(Modifier.fillMaxSize()) {
+                Column(Modifier.fillMaxSize().background(com.coach.ui.theme.CoachTheme.colors.surface1)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = onBack, enabled = !busy && pending == null, modifier = Modifier.heightIn(min = 48.dp).testTag("private-document-back")) { Text("← 返回") }
-                        Text(doc.title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                        Text(doc.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { readingFocus = !readingFocus }, modifier = Modifier.testTag("private-focus")) { Text(if (readingFocus) "退出专心读" else "专心读") }
                     }
                     HorizontalDivider()
                     if (stale) Text("旧版本的阅读位置未自动套用，请重新定位。", Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error)
@@ -162,7 +166,10 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     if (initialPage != null && initialAnchor.isBlank() && page == initialPage) Text("这条出处只登记到页，没有登记原文位置。", Modifier.padding(horizontal = 16.dp).testTag("private-citation-noanchor"), style = MaterialTheme.typography.labelMedium)
                     Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
                     if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
-                    PageStudyPanel(reader, doc.id, page, practice, onShowAnchor = { quote -> focus = HighlightFocus(page, quote) })
+                    // Keep the panel's expanded state while focus mode gives its space to the page image.
+                    Box(if (readingFocus) Modifier.height(0.dp).clearAndSetSemantics { } else Modifier) {
+                        PageStudyPanel(reader, doc.id, page, practice, onShowAnchor = { quote -> focus = HighlightFocus(page, quote) })
+                    }
                     HighlightStatus(highlight, onRetry = { focusRetry++ }, onClear = { focus = null })
                     val draft = pending
                     if (draft != null && !busy) {
@@ -205,9 +212,11 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                         }, modifier = Modifier.testTag("private-keep-page")) { Text("保留本页并覆盖服务端位置") }
                         TextButton(onClick = onBack, modifier = Modifier.testTag("private-discard")) { Text("放弃未保存位置并返回") }
                     }
-                    TextButton(onClick = { showMap = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-map")) { Text("章节脉络") }
-                    TextButton(onClick = { showNotes = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-notes")) { Text("本页原文与批注") }
-                    if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
+                    if (!readingFocus) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { showMap = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-map")) { Text("章节脉络") }
+                        TextButton(onClick = { showNotes = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-notes")) { Text("本页原文与批注") }
+                        if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
+                    }
                     Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page })
                         if (two) PdfPageImage(reader, doc, page + 1, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page + 1 })

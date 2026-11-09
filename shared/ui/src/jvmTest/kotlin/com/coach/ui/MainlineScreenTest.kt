@@ -260,6 +260,11 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
             onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+            ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png", File("build/screens/mainline-v7-cited-page.png").also { it.parentFile.mkdirs() })
+            onNodeWithTag("private-document-back").performClick()
+            onNodeWithTag("private-citation").assertExists()
+            onNodeWithTag("v7-desk").assertExists()
+            onNodeWithTag("mainline-option-0").assertIsSelected()
         }
         assertTrue(mac.readerRequests.any { it.contains("/resolve?source=") }, "the cited source went through the reader resolve route")
         assertTrue(mac.readerRequests.any { it.contains("/doc/pages/2/boxes") && it.contains("version=v1") }, "coordinates were requested for the resolved document, page and version: ${mac.readerRequests}")

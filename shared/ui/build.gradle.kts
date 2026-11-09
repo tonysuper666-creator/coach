@@ -10,8 +10,13 @@ kotlin {
         namespace = "com.coach.shared.ui"
         compileSdk = 37
         minSdk = 34
+        androidResources { enable = true }
     }
     jvmToolchain(17)
+    sourceSets.jvmMain {
+        resources.srcDir("src/androidMain/res")
+        resources.srcDir("src/androidMain/assets")
+    }
     sourceSets.commonMain.dependencies {
         implementation(project(":shared:domain"))
         api(project(":shared:client"))

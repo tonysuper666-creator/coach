@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import coach.design.tokens.CoachV7
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
@@ -115,11 +115,12 @@ internal fun HighlightOverlay(shown: HighlightState.Shown, imageWidthPx: Int, im
     val aspectPage = shown.boxes.width / shown.boxes.height
     val aspectImage = imageWidthPx.toDouble() / imageHeightPx
     if (kotlin.math.abs(aspectPage - aspectImage) > 0.02 * aspectPage) return
+    val ink = if (com.coach.ui.theme.CoachTheme.colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
     BoxWithConstraints(modifier) {
         val scale = maxWidth.value / shown.boxes.width.toFloat()
         shown.rects.forEachIndexed { i, r ->
             Box(Modifier.offset((r.x0 * scale).dp, (r.y0 * scale).dp).size(((r.x1 - r.x0) * scale).dp, ((r.y1 - r.y0) * scale).dp)
-                .background(Color(0x66FFD400)).semantics { testTag = "private-highlight-$i" })
+                .background(ink).semantics { testTag = "private-highlight-$i" })
         }
     }
 }

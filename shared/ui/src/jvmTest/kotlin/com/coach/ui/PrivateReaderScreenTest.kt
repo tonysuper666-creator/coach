@@ -3,7 +3,9 @@ package com.coach.ui
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.test.*
@@ -13,6 +15,7 @@ import com.coach.client.CourseHttp
 import com.sun.net.httpserver.HttpServer
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.imageio.ImageIO
@@ -221,6 +224,46 @@ class PrivateReaderScreenTest {
             onNodeWithTag("private-prev").performClick()
             waitUntil(timeoutMillis = 10000) { onAllNodesWithText("已保存").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(8L, fake.writes.last().getValue("baseRevision").jsonPrimitive.long)
+        }
+    }
+
+    @Test fun readingFocusAndV7ThemeKeepPageHighlightAndConflictRecovery() {
+        for ((course, offset) in listOf("C" to 1, "OTHER" to 2)) FakeReader(course = course, offset = offset).use { fake ->
+            fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "," + w(85, 40, 120, 55, "beta") + "]"
+            var dark by mutableStateOf(false)
+            runComposeUiTest {
+                setContent { CoachTheme(dark) { Surface { Box(Modifier.size(700.dp, 900.dp)) {
+                    PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha beta")
+                } } } }
+                onNodeWithTag("private-citation").performClick()
+                waitUntil(10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+                val page = 1 + offset
+                onNodeWithTag("private-page-label").assertTextContains("第 $page 页", substring = true)
+                val writes = fake.writes.size
+                onNodeWithTag("private-focus").performClick()
+                onNodeWithTag("private-focus").assertTextContains("退出专心读")
+                onNodeWithTag("private-open-notes").assertDoesNotExist()
+                onNodeWithTag("private-highlight-0").assertExists()
+                assertEquals(writes, fake.writes.size, "focusing must not create a reading-progress mutation")
+                val screens = File("build/screens").also { it.mkdirs() }
+                ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png", File(screens, "reader-v7-focus-$course-light.png"))
+                runOnIdle { dark = true }
+                onNodeWithTag("private-highlight-0").assertExists()
+                onNodeWithTag("private-page-label").assertTextContains("第 $page 页", substring = true)
+                ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png", File(screens, "reader-v7-focus-$course-dark.png"))
+                onNodeWithTag("private-focus").performClick()
+                onNodeWithTag("private-open-notes").assertExists()
+                // A conflicting save must remain recoverable even while ancillary reading controls are hidden.
+                fake.conflictNext = true
+                onNodeWithTag("private-next").performClick()
+                waitUntil(10000) { onAllNodesWithTag("private-load-remote").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-focus").performClick()
+                onNodeWithTag("private-document-back").assertIsNotEnabled()
+                onNodeWithTag("private-load-remote").assertIsDisplayed().performClick()
+                waitUntil(10000) { onAllNodesWithTag("private-document-back").fetchSemanticsNodes().singleOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+                onNodeWithTag("private-document-back").performClick()
+                onNodeWithTag("private-citation").assertExists()
+            }
         }
     }
 

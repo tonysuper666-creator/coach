@@ -62,6 +62,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     sourceSets.getByName("androidTest").kotlin.srcDir("../shared/domain/src/benchmark/kotlin")
+    testOptions { unitTests.isIncludeAndroidResources = true }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -77,11 +78,26 @@ dependencies {
     implementation("androidx.window:window:1.5.1")
     implementation(libs.coroutines.core)
     implementation("androidx.metrics:metrics-performance:1.0.0")
+    testImplementation(project(":shared:domain"))
+    testImplementation(project(":shared:protocol"))
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("androidx.compose.ui:ui-test-junit4:1.12.1")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.78.0")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.78.0")
+    debugImplementation("androidx.compose.ui:ui-test-manifest:1.12.1")
     androidTestImplementation(project(":shared:domain"))
     androidTestImplementation(project(":shared:client"))
     androidTestImplementation("app.cash.sqldelight:android-driver:2.4.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
+// Direct JVM screenshot invocation; no device, emulator or plugin-managed recording state.
+tasks.withType<Test>().configureEach {
+    systemProperty("roborazzi.test.record", providers.gradleProperty("roborazzi.test.record").getOrElse("false"))
+    systemProperty("coach.v7.output", layout.buildDirectory.dir("screens/v7").get().asFile.absolutePath)
+    maxParallelForks = 1
 }

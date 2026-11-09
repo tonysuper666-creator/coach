@@ -1,0 +1,230 @@
+"""Build and preflight two disposable releases with real locked dependencies.
+
+The command-line entry point only stages; it never starts launchd or switches.
+Internal isolated exercises may use the fixture before or after staging and
+must prove cleanup before the private fixture can be removed.
+"""
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+
+from . import ton1175_switch as switch, ton1175_verify as verify
+from . import ton1193_isolated_controller as isolated
+from . import ton1193_synthetic_cli as synthetic
+from .rehearse_ton1175_launchd import port
+
+REPO = Path(__file__).resolve().parents[2]
+OLD = '8d3608f'
+BRIDGE_LOCK = REPO / 'tools/dev/ton1193_bridge_requirements.lock'
+
+
+def cmd(*args, **kwargs):
+    return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
+
+
+def pins(path):
+    result = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9_.-]*)==([A-Za-z0-9][A-Za-z0-9_.-]*)', line)
+        switch.require(match is not None, 'invalid Python lock pin')
+        name = re.sub(r'[-_.]+', '-', match[1]).lower()
+        switch.require(name not in result, 'duplicate Python lock pin')
+        result[name] = match[2]
+    switch.require(result, 'empty Python lock')
+    return result
+
+
+def dependency_preflight(lock, requirements):
+    locked, direct = pins(lock), pins(requirements)
+    switch.require(all(locked.get(name) == version for name, version in direct.items()),
+                   'Python lock differs from direct requirements')
+    return locked
+
+
+def verify_python(python, locked):
+    # pip check evaluates Python 3.15 markers and confirms the full closure.
+    cmd(python, '-m', 'pip', 'check')
+    script = '''import importlib.metadata as m, json, re
+out = {}
+for d in m.distributions():
+ name = re.sub(r'[-_.]+', '-', d.metadata['Name']).lower()
+ if name == 'pip': continue
+ if name in out: raise ValueError('duplicate distribution')
+ out[name] = d.version
+print(json.dumps(out, sort_keys=True))
+'''
+    actual = json.loads(subprocess.check_output([str(python), '-I', '-B', '-c', script], text=True))
+    switch.require(actual == locked, 'installed Python closure differs from lock')
+
+
+def export_revision(repo, revision, destination):
+    """Build the old side from its own tracked sources, not the current tree."""
+    destination.mkdir(mode=0o700)
+    archive = destination.parent / 'old-source.tar'
+    try:
+        cmd('git', 'archive', '--format=tar', '--output', archive, revision, cwd=repo)
+        cmd('tar', '-xf', archive, '-C', destination)
+    finally:
+        archive.unlink(missing_ok=True)
+
+
+def main(exercise=None, unstaged_exercise=None):
+    switch.require(exercise is None or unstaged_exercise is None, 'multiple exercises selected')
+    switch.require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=REPO).strip(),
+                   'checkout must be clean')
+    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
+    old = subprocess.check_output(['git', 'rev-parse', OLD], cwd=REPO, text=True).strip()
+    locked = dependency_preflight(BRIDGE_LOCK, REPO / 'tools/bridge/requirements.txt')
+    java_home = Path(subprocess.check_output(['/usr/libexec/java_home', '-v', '17'], text=True).strip())
+    java = java_home / 'bin/java'
+    node_path = shutil.which('node')
+    switch.require(node_path is not None and shutil.which('npm') is not None, 'Node/npm missing')
+    node = Path(node_path).resolve()
+    python = Path('/opt/homebrew/bin/python3.15')
+    switch.require(python.is_file() and os.access(python, os.X_OK), 'Python 3.15 missing')
+    build_env = dict(os.environ, JAVA_HOME=str(java_home), PYTHONDONTWRITEBYTECODE='1')
+    root = isolated.new_root()  # Budget checked before the first heavy workload.
+    ident = isolated.fixture_nonce(root)
+    try:
+        home = root / 'h'
+        isolated.activity_socket(home)
+        old_source = root / 'old-source'
+        export_revision(REPO, old, old_source)
+        # Refuse to install the shared lock if it does not satisfy either
+        # revision's declared direct dependencies.
+        dependency_preflight(BRIDGE_LOCK, old_source / 'tools/bridge/requirements.txt')
+        releases = home / 'Coach/service/releases'
+        for rel in ('Library/LaunchAgents', 'Coach/service/releases', 'Coach/data',
+                    'Coach/logs', 'Coach/run', 'Coach/bridge'):
+            isolated.private_directories(home / rel, root)
+        for name, source_head, source in (('old', old, old_source), ('new', head, REPO)):
+            cmd(REPO / 'tools/dev/heavy', './gradlew', ':server:app:installDist', '--offline',
+                cwd=source, env=build_env)
+            release = releases / name
+            release.mkdir(mode=0o700)
+            shutil.copytree(source / 'server/app/build/install/app', release / 'app')
+            for item in ('bridge', 'mathsvc'):
+                shutil.copytree(source / 'tools' / item, release / 'tools' / item,
+                    ignore=shutil.ignore_patterns('.venv', 'node_modules', '__pycache__', '*.pyc'))
+            # copytree creates its destination; explicitly fix fixture ancestors.
+            for directory in (release / 'app', release / 'tools',
+                              release / 'tools/bridge', release / 'tools/mathsvc'):
+                directory.chmod(0o700)
+            isolated.private_directories(release / 'tools/dev', root)
+            shutil.copy2(source / 'tools/dev/service-child.py', release / 'tools/dev/service-child.py')
+            cmd(REPO / 'tools/dev/heavy', python, '-m', 'venv', release / 'tools/bridge/.venv', env=build_env)
+            cmd(REPO / 'tools/dev/heavy', release / 'tools/bridge/.venv/bin/python', '-m', 'pip', 'install',
+                '--disable-pip-version-check', '--no-deps', '-r', BRIDGE_LOCK, env=build_env)
+            cmd(REPO / 'tools/dev/heavy', 'npm', 'ci', '--ignore-scripts', '--offline',
+                cwd=release / 'tools/mathsvc', env=build_env)
+            verify_python(release / 'tools/bridge/.venv/bin/python', locked)
+            (release / 'source-head.txt').write_text(source_head + '\n')
+            verify.dependencies(release, str(node))
+        old_release, new_release = releases / 'old', releases / 'new'
+        manifest = root / 'manifest.json'
+        # attest invokes the global heavy lock and checks clean source, actual
+        # dependencies, relocated tree and all external executable hashes.
+        previous = os.environ.get('JAVA_HOME')
+        os.environ['JAVA_HOME'] = str(java_home)
+        try:
+            verify.attest(REPO, new_release, str(node), str(java), manifest, usage_old_head=old)
+        finally:
+            if previous is None:
+                os.environ.pop('JAVA_HOME', None)
+            else:
+                os.environ['JAVA_HOME'] = previous
+        service_port, bridge_port = port(), port()
+        while service_port == bridge_port:
+            bridge_port = port()
+        label = 'local.coach.ton1193.test.' + ident
+        logs = home / 'Coach/logs'
+        for name in ('stdout.log', 'stderr.log'):
+            switch.atomic(logs / name, b'')
+        env_pins = {'BRIDGE_LOG_STDOUT': '1', 'BRIDGE_PORT': str(bridge_port),
+                    'COACH_MANAGE_SERVICES': '1', 'COACH_PORT': str(service_port),
+                    'COACH_TAIL_HOST': '127.0.0.1', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'}
+        plist_pins = {'ExitTimeOut': 20, 'KeepAlive': True, 'RunAtLoad': True,
+                      'StandardErrorPath': str(logs / 'stderr.log'),
+                      'StandardOutPath': str(logs / 'stdout.log'), 'ThrottleInterval': 5, 'Umask': 63}
+        env = dict(env_pins, HOME=str(home), JAVA_HOME=str(java_home), COACH_NODE=str(node),
+                   COACH_SERVICE_ROOT=str(old_release), COACH_PYTHON=str(old_release / 'tools/bridge/.venv/bin/python'),
+                   COACH_MATHSVC=str(old_release / 'tools/mathsvc/src/server.mjs'),
+                   COACH_DATA_DIR=str(home / 'Coach/data'), COACH_LOG_DIR=str(logs),
+                   COACH_RUN_DIR=str(home / 'Coach/run'), COACH_BRIDGE_HOME=str(home / 'Coach/bridge'),
+                   COACH_TRAFFIC='test', COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge_port}')
+        plist = home / 'Library/LaunchAgents/service.plist'
+        installation = home / 'Coach/service/installation.json'
+        switch.atomic(plist, plistlib.dumps(dict(Label=label, ProgramArguments=[str(old_release / 'app/bin/app')],
+                                                   WorkingDirectory=str(old_release), EnvironmentVariables=env,
+                                                   **plist_pins)))
+        switch.atomic(installation, json.dumps(dict(root=str(old_release), sourceHead=old,
+                                                     dataDir=str(home / 'Coach/data'))).encode())
+        cli_proof = synthetic.install(root)
+        proof = json.loads(manifest.read_bytes())
+        proof['isolatedSyntheticCli'] = cli_proof
+        switch.atomic(manifest, json.dumps(proof, sort_keys=True).encode())
+        manifest_hash = switch.file_hash(manifest)
+        config = {'stateDir': str(root / 'stage'), 'adapterSnapshotDir': str(root / 'stage/snapshot'),
+                  'adapterManifest': str(manifest), 'adapterManifestSha256': manifest_hash,
+                  'plist': str(plist), 'installation': str(installation), 'release': str(new_release),
+                  'expectedInstallationSha256': switch.file_hash(installation), 'expectedSourceHead': old,
+                  'candidateHead': head, 'sourceHeadFileSha256': switch.file_hash(new_release / 'source-head.txt'),
+                  'candidateTreeSha256': switch.tree_hash(new_release), 'adapterEnvPins': env_pins,
+                  'adapterPlistPins': plist_pins,
+                  'candidateVerifier': [sys.executable, '-m', 'tools.dev.ton1175_verify', 'candidate',
+                                        '--manifest', str(manifest), '--sha256', manifest_hash],
+                  'controller': [sys.executable, '-m', 'tools.dev.ton1193_isolated_controller',
+                                 '--config', str(root / 'controller.json'), '--apply'],
+                  'acceptanceSnapshot': [sys.executable, '-m', 'tools.dev.ton1193_isolated_acceptance',
+                                         '--config', str(root / 'controller.json'), 'snapshot'],
+                  'acceptanceVerifier': [sys.executable, '-m', 'tools.dev.ton1193_isolated_learning',
+                                         '--config', str(root / 'controller.json')]}
+        switch.atomic(root / 'controller.json', json.dumps(config).encode())
+        metadata = {'head': head, 'oldHead': old,
+                          'candidateRealDependencies': True, 'oldRealDependencies': True,
+                          'switchAttempted': False, 'cli': 'SYNTHETIC', 'syntheticCliSha256': cli_proof['sha256'],
+                          'usageSchemaEqual': proof['usageObservationSchema']['equal'],
+                          'nonce': ident, 'socketPathBytes': len(os.fsencode(isolated.activity_socket(home))),
+                          'environmentKeys': sorted(env), 'environmentKeyCount': len(env)}
+        if unstaged_exercise is not None:
+            # A live JVM creates the lifetime-specific access log. The caller
+            # binds that path into config before staging and hashing it.
+            unstaged_exercise(root, config, metadata)
+        else:
+            switch.stage(config, True)
+            (root / 'stage/snapshot').mkdir(mode=0o700)
+            snapshot = isolated.run(root / 'controller.json', 'preflight', True)
+            metadata.update(stage='staged', snapshotSha256=snapshot)
+            print(json.dumps(metadata), flush=True)
+            if exercise is not None:
+                exercise(root, config, metadata)
+    finally:
+        # A process exercise creates this marker BEFORE bootstrap and removes it
+        # only after proving its label, kernel identities and ports are gone.
+        # Preserve dependencies/logs when cleanup cannot be proved.
+        switch.require(not (root / 'retain-on-cleanup-failure').exists(),
+                       'process cleanup unproved; private fixture retained')
+        if (exercise is not None or unstaged_exercise is not None) and 'label' in locals():
+            result = subprocess.run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'],
+                                    capture_output=True, timeout=10)
+            switch.require(result.returncode == 113, 'test label remains; private fixture retained')
+        # Bound snapshots and quarantined candidate writes require deliberate
+        # operator retention. Never delete either as disposable test cleanup.
+        retained = list((root / 'h/Coach').glob('data.pre-*')) + list((root / 'h/Coach').glob('data.candidate-*'))
+        if not retained:
+            shutil.rmtree(root)
+            switch.require(not root.exists(), 'private root survived cleanup')
+        print(json.dumps({'stageRootRemoved': not bool(retained), 'dataEvidenceRetained': bool(retained),
+                          'launchdUntouched': exercise is None and unstaged_exercise is None}), flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,6 +1,7 @@
 package com.coach.ui.reader.v2
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
@@ -61,12 +62,14 @@ fun ReaderV2Screen(
             val inlineSource = bodyPanes.arrangement != ReaderArrangement.COMPACT && session.drawer == ReaderDrawer.SOURCE
             val displayPage = if (inlineSource) source?.let { target -> pages.firstOrNull { it.pageIndex0 == target.pageIndex0 } } else page
             var displayedColumn by remember(displayPage?.pageIndex0) { mutableStateOf<Int?>(null) }
+            // Keep the original question list's scroll position while SOURCE replaces it.
+            val marginQuestionsScroll = rememberScrollState()
             ReaderPaneLayout(bodyPanes, Modifier.fillMaxSize(), page = {
                 if (bodyPanes.arrangement == ReaderArrangement.COMPACT && session.focus == ReaderFocus.QUESTIONS) {
                     ReaderQuestionPanel(questions, session, onSession)
                 } else Column(Modifier.fillMaxSize()) {
                     Row(Modifier.fillMaxWidth().horizontalScrollForReader()) {
-                        if (inlineSource) TextButton(onClick = close, modifier = Modifier.testTag("reader-return")) { Text("返回原页") }
+                        if (inlineSource) TextButton(onClick = close, modifier = Modifier.testTag("reader-return")) { Text(session.drawerReturnLabel) }
                         else if (page != null && page.columns.isNotEmpty()) {
                             val current = session.position.columnId ?: displayedColumn
                             val next = page.nextColumn(current)
@@ -103,11 +106,11 @@ fun ReaderV2Screen(
                         // counting a deliberate downward dismissal gesture.
                         detectVerticalDragGestures(onDragStart = { distance = 0f }, onDragEnd = { if (distance > 24.dp.toPx()) close() }) { change, amount -> distance += amount; change.consume() }
                     }, contentAlignment = Alignment.Center) {
-                        TextButton(onClick = close, modifier = Modifier.testTag("reader-return")) { Text(if (session.focus == ReaderFocus.QUESTIONS) "返回题目" else "返回原页") }
+                        TextButton(onClick = close, modifier = Modifier.testTag("reader-return")) { Text(session.drawerReturnLabel) }
                     }
                     if (session.drawer == ReaderDrawer.QUESTIONS) ReaderQuestionPanel(questions.filter {
                         (it.source as? ReaderSourceResolution.Found)?.target?.let { target -> target.documentId == session.documentId && target.sha256 == session.sha256 && target.pageIndex0 == session.position.pageIndex0 } == true
-                    }, session, onSession)
+                    }, session, onSession, marginQuestionsScroll)
                     else {
                         val sourcePage = source?.let { t -> pages.firstOrNull { it.pageIndex0 == t.pageIndex0 } }
                         if (sourcePage != null) ReaderV2Page(sourcePage, null, true, source, session.flash, {}, Modifier.weight(1f), pageContent = pageContent)
@@ -121,9 +124,10 @@ fun ReaderV2Screen(
 }
 
 @Composable
-private fun ReaderQuestionPanel(questions: List<ReaderQuestion>, session: ReaderSession, onSession: (ReaderSession) -> Unit) {
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp).testTag("reader-questions")) {
-        if (questions.isEmpty()) Text("这一页还没有核实过的关联题")
+private fun ReaderQuestionPanel(questions: List<ReaderQuestion>, session: ReaderSession, onSession: (ReaderSession) -> Unit,
+    scroll: ScrollState = rememberScrollState()) {
+    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(12.dp).testTag("reader-questions")) {
+        if (questions.isEmpty()) Text("这一页还没有已核实的题目")
         for (q in questions) {
             Text(q.text, style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(session.answers[q.id] ?: "", { onSession(session.answer(q.id, it)) },

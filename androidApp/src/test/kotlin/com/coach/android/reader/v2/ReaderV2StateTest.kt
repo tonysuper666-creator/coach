@@ -6,6 +6,48 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReaderV2StateTest {
+    @Test fun sourceReturnRestoresTheOriginatingQuestionDrawerAndFocusAfterRecheck() {
+        val initial = ReaderV2Fixture.session().copy(drawer = ReaderDrawer.QUESTIONS,
+            position = ReaderPosition(1, 2), focus = ReaderFocus.READING,
+            answers = mapOf("slope" to "原题答案"), noteDraft = "页边批注", selectionAnchorId = "selected")
+        val source = initial.showSource(ReaderV2Fixture.questions.first())
+        assertEquals("返回题目", source.drawerReturnLabel)
+        val rechecked = source.copy(focus = ReaderFocus.QUESTIONS).showSource(ReaderV2Fixture.questions.first())
+        val returned = rechecked.closeDrawer()
+        assertEquals(ReaderDrawer.QUESTIONS, returned.drawer)
+        assertEquals(initial.focus, returned.focus)
+        assertEquals(initial.position, returned.position)
+        assertEquals(initial.answers, returned.answers)
+        assertEquals(initial.noteDraft, returned.noteDraft)
+        assertEquals(initial.selectionAnchorId, returned.selectionAnchorId)
+        assertEquals("返回原页", returned.drawerReturnLabel)
+        assertNull(returned.source)
+        assertNull(returned.sourceOrigin)
+        assertEquals(ReaderDrawer.NONE, returned.closeDrawer().drawer)
+    }
+
+    @Test fun sourceOriginSurvivesRestartWithoutRestoringGeometryAndLegacySnapshotsStillReturn() {
+        val initial = ReaderV2Fixture.session().copy(drawer = ReaderDrawer.QUESTIONS, position = ReaderPosition(1, 2),
+            answers = mapOf("slope" to "原题答案"))
+        val opened = initial.showSource(ReaderV2Fixture.questions.first())
+        val restored = ReaderSession.restore(opened.snapshot())!!
+        assertNull(restored.source)
+        assertEquals(ReaderSourceFailure.RECHECK, restored.sourceFailure)
+        assertEquals("返回题目", restored.drawerReturnLabel)
+        val returned = restored.showSource(ReaderV2Fixture.questions.first()).closeDrawer()
+        assertEquals(ReaderDrawer.QUESTIONS, returned.drawer)
+        assertEquals(initial.position, returned.position)
+        assertEquals(initial.focus, returned.focus)
+        assertEquals(initial.answers, returned.answers)
+        val unconfirmed = restored.showSource(ReaderV2Fixture.questions.last()).closeDrawer()
+        assertEquals(ReaderDrawer.QUESTIONS, unconfirmed.drawer)
+        val standalone = ReaderV2Fixture.session().copy(focus = ReaderFocus.QUESTIONS).showSource(ReaderV2Fixture.questions.first())
+        val legacy = JsonObject(Json.parseToJsonElement(standalone.snapshot()).jsonObject.filterKeys { it != "sourceOrigin" })
+        val legacyReturn = ReaderSession.restore(legacy.toString())!!.closeDrawer()
+        assertEquals(ReaderDrawer.NONE, legacyReturn.drawer)
+        assertEquals(ReaderFocus.QUESTIONS, legacyReturn.focus)
+    }
+
     @Test fun currentAndroidWindowBreakpointsKeepPageAndQuestionPanesContiguous() {
         assertEquals(ReaderArrangement.COMPACT, readerPanes(ReaderWindow(699f, 900f), true).arrangement)
         for (width in listOf(700f, 704f, 933f, 1099f)) {

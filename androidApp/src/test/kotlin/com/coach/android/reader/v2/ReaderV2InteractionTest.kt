@@ -66,6 +66,40 @@ class ReaderV2InteractionTest {
         compose.runOnIdle { assertEquals(ReaderPosition(0, 2), session.position) }
     }
 
+    private fun marginQuestionSourceRoundTrip(swipe: Boolean) {
+        host()
+        compose.onNodeWithText("下一页").performScrollTo().performClick()
+        compose.onNodeWithTag("reader-margin").performScrollTo().performClick()
+        compose.onNodeWithTag("reader-answer-slope").performTextInput("页边原题答案")
+        compose.onNodeWithTag("reader-source-slope").performClick()
+        compose.onNodeWithTag("reader-source-highlight").assertIsDisplayed()
+        if (swipe) {
+            compose.onNodeWithTag("reader-sheet-handle").performTouchInput {
+                swipeDown(startY = 1f, endY = height - 1f, durationMillis = 500)
+            }
+        } else {
+            compose.onNodeWithTag("reader-return").assertTextEquals("返回题目").performClick()
+        }
+        compose.runOnIdle {
+            assertEquals(ReaderDrawer.QUESTIONS, session.drawer)
+            assertEquals(ReaderFocus.READING, session.focus)
+            assertEquals(ReaderPosition(1), session.position)
+            assertEquals("slope", session.selectedQuestionId)
+        }
+        compose.onNodeWithTag("reader-half-sheet").assertIsDisplayed()
+        compose.onNodeWithTag("reader-answer-slope").assertIsDisplayed().assertTextContains("页边原题答案")
+        compose.onNodeWithTag("reader-source-highlight").assertDoesNotExist()
+        capture(if (swipe) "margin-question-after-swipe" else "margin-question-after-return")
+        compose.onNodeWithTag("reader-return").assertTextEquals("返回原页").performClick()
+        compose.onNodeWithTag("reader-half-sheet").assertDoesNotExist()
+        compose.onNodeWithTag("reader-page-1").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(ReaderDrawer.NONE, session.drawer) }
+    }
+
+    @Test fun marginQuestionSourceButtonReturnsToTheSameQuestionDrawer() = marginQuestionSourceRoundTrip(swipe = false)
+
+    @Test fun marginQuestionSourceSwipeReturnsToTheSameQuestionDrawer() = marginQuestionSourceRoundTrip(swipe = true)
+
     @Test fun columnsOverviewMarginDrawerAndUnconfirmedSourceAreReachable() {
         host()
         compose.onNodeWithTag("reader-next-column").performClick()
@@ -75,7 +109,7 @@ class ReaderV2InteractionTest {
         compose.runOnIdle { assertTrue(session.overview) }
         capture("phone-overview")
         compose.onNodeWithTag("reader-margin").performClick()
-        compose.onNodeWithText("这一页还没有核实过的关联题").assertIsDisplayed()
+        compose.onNodeWithText("这一页还没有已核实的题目").assertIsDisplayed()
         compose.onNodeWithTag("reader-return").performClick()
         compose.onNodeWithText("做题").performClick()
         compose.onNodeWithTag("reader-source-unconfirmed").performScrollTo().performClick()

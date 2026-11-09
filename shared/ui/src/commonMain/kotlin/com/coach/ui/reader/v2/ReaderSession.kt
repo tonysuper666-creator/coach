@@ -33,6 +33,10 @@ sealed interface ReaderSourceResolution {
 data class ReaderQuestion(val id: String, val text: String, val source: ReaderSourceResolution)
 enum class ReaderFocus { READING, QUESTIONS }
 enum class ReaderDrawer { NONE, QUESTIONS, SOURCE }
+/** Surface and logical focus to resume after a source lookup. */
+data class ReaderSourceOrigin(val drawer: ReaderDrawer, val focus: ReaderFocus) {
+    init { require(drawer != ReaderDrawer.SOURCE) }
+}
 data class ReaderPosition(val pageIndex0: Int = 0, val columnId: Int? = null) {
     init { require(pageIndex0 >= 0) }
 }
@@ -52,6 +56,7 @@ data class ReaderSession(
     val overview: Boolean = false,
     val drawer: ReaderDrawer = ReaderDrawer.NONE,
     val returnPosition: ReaderPosition? = null,
+    val sourceOrigin: ReaderSourceOrigin? = null,
     val source: NativeSourceTarget? = null,
     val sourceFailure: ReaderSourceFailure? = null,
     val flash: Int = 0,
@@ -63,11 +68,24 @@ data class ReaderSession(
             ?: if (valid == null) ReaderSourceFailure.CHANGED else null
         return copy(selectedQuestionId = question.id, drawer = ReaderDrawer.SOURCE,
             returnPosition = returnPosition ?: position, source = valid, sourceFailure = failure,
+            sourceOrigin = if (drawer == ReaderDrawer.SOURCE) sourceOrigin ?: ReaderSourceOrigin(ReaderDrawer.NONE, focus)
+                else ReaderSourceOrigin(drawer, focus),
             confirmationNeeded = failure != null, flash = flash + 1)
     }
 
-    fun closeDrawer() = copy(drawer = ReaderDrawer.NONE, position = returnPosition ?: position,
-        returnPosition = null, source = null, sourceFailure = null)
+    fun closeDrawer(): ReaderSession {
+        val origin = sourceOrigin.takeIf { drawer == ReaderDrawer.SOURCE }
+        return copy(drawer = origin?.drawer ?: ReaderDrawer.NONE, focus = origin?.focus ?: focus,
+            position = if (drawer == ReaderDrawer.SOURCE) returnPosition ?: position else position,
+            returnPosition = null, sourceOrigin = null, source = null, sourceFailure = null)
+    }
+
+    val drawerReturnLabel: String get() {
+        val question = if (drawer == ReaderDrawer.SOURCE) sourceOrigin?.let {
+            it.drawer == ReaderDrawer.QUESTIONS || it.focus == ReaderFocus.QUESTIONS
+        } ?: (focus == ReaderFocus.QUESTIONS) else focus == ReaderFocus.QUESTIONS
+        return if (question) "返回题目" else "返回原页"
+    }
 
     fun answer(questionId: String, text: String) = copy(answers = answers + (questionId to text))
 
@@ -81,6 +99,9 @@ data class ReaderSession(
         put("noteDraft", noteDraft); selectionAnchorId?.let { put("selectionAnchorId", it) }
         put("confirmationNeeded", confirmationNeeded); put("railVisible", railVisible); put("overview", overview)
         put("drawer", drawer.name)
+        sourceOrigin?.let { origin -> put("sourceOrigin", buildJsonObject {
+            put("drawer", origin.drawer.name); put("focus", origin.focus.name)
+        }) }
         returnPosition?.let { p -> put("returnPosition", buildJsonObject {
             put("pageIndex0", p.pageIndex0); p.columnId?.let { put("columnId", it) }
         }) }
@@ -92,10 +113,15 @@ data class ReaderSession(
             require(j.getValue("schemaVersion").jsonPrimitive.int == 1)
             fun text(key: String) = j[key]?.jsonPrimitive?.content
             val drawer = ReaderDrawer.valueOf(j.getValue("drawer").jsonPrimitive.content)
+            val focus = ReaderFocus.valueOf(j.getValue("focus").jsonPrimitive.content)
+            val origin = if (drawer == ReaderDrawer.SOURCE) j["sourceOrigin"]?.jsonObject?.let {
+                ReaderSourceOrigin(ReaderDrawer.valueOf(it.getValue("drawer").jsonPrimitive.content),
+                    ReaderFocus.valueOf(it.getValue("focus").jsonPrimitive.content))
+            } ?: ReaderSourceOrigin(ReaderDrawer.NONE, focus) else null
             ReaderSession(documentId = j.getValue("documentId").jsonPrimitive.content,
                 sha256 = j.getValue("sha256").jsonPrimitive.content,
                 position = ReaderPosition(j.getValue("pageIndex0").jsonPrimitive.int, j["columnId"]?.jsonPrimitive?.int),
-                focus = ReaderFocus.valueOf(j.getValue("focus").jsonPrimitive.content),
+                focus = focus, sourceOrigin = origin,
                 selectedQuestionId = text("questionId"),
                 answers = j.getValue("answers").jsonObject.mapValues { it.value.jsonPrimitive.content },
                 noteDraft = text("noteDraft") ?: "", selectionAnchorId = text("selectionAnchorId"),

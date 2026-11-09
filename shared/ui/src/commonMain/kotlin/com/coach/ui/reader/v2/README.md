@@ -35,6 +35,12 @@ return location. Snapshot storage belongs to the owner, in private account-scope
 storage; the fixture uses a separate synthetic-only preferences file. Source
 geometry isn't persisted: a restored source drawer asks for native verification
 again. This does not implement cross-device sync or durable study events.
+Source navigation saves its originating drawer and logical focus as well as the
+page/column. Returning from a page-margin question restores that question drawer
+and its answer/list scroll position; closing it once more returns to the page.
+Button and swipe use the same return operation and label. Rechecking a source
+never overwrites its original return context. The context is an optional local
+snapshot field; older snapshots retain the former standalone return behavior.
 On RECHECK, the owner must use `selectedQuestionId` to obtain a **fresh** shared
 and native resolution, construct that question with the new result, and call
 `showSource` again. The screen does not start a resolver or reuse pre-restart

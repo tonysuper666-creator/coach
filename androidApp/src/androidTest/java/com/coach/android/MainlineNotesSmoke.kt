@@ -64,6 +64,8 @@ class MainlineNotesSmoke {
                     }
                     bitmap.recycle()
                 }
+                java.io.File(context.cacheDir, "mainline-wait-fail-tree.txt").writeText(
+                    compose.onAllNodes(isRoot(), useUnmergedTree = true).printToString(maxDepth = 50))
             }
             throw AssertionError("Missing synthetic mainline UI: $text\n${compose.onAllNodes(isRoot()).printToString(maxDepth = 50)}")
         }
@@ -73,6 +75,13 @@ class MainlineNotesSmoke {
                 compose.waitUntil(timeoutMillis = 30_000) { runCatching { node.fetchSemanticsNode() }.isSuccess }
             } catch (_: ComposeTimeoutException) { fail(text) }
             return node
+        }
+        // The V7 heading identifies the synthetic knowledge point, not the question tier.
+        // Before a reply it uses the week's target (a); a persisted reply identifies its own KP.
+        fun waitForQuestion(number: Int, total: Int = 3, point: Char = 'a') {
+            val item = if (total == 1) "B1" else listOf("S1", "D1", "B1")[number - 1]
+            waitFor("1.${point - 'a' + 1} Synthetic orchard point $point · 第 $number 题 / $total")
+            waitFor("Synthetic orchard question $item:", contains = true)
         }
         var clicks = 0
         var coldClicks: Int? = null
@@ -187,7 +196,7 @@ class MainlineNotesSmoke {
             show(outcome)
         }
         if (mode == "resumeQuiz") {
-            waitFor("桥接题 · 第 3/3 题")
+            waitForQuestion(3, point = 'c')
             show("答对了，算掌握。")
             show(citation, contains = true)
             if (jointReader) {
@@ -221,24 +230,21 @@ class MainlineNotesSmoke {
         click(waitFor("导航：复习"))
         screenshot("entry")
         clickWhenEnabled("继续第 1 周")
-        waitFor("铺垫题 · 第 1/3 题")
+        waitForQuestion(1)
         coldClicks = clicks - coldStart
         assertTrue("Cold entry must reach the first question within two clicks", coldClicks <= 2)
         screenshot("two-click-first")
         if (!fault) {
             fun returnToToday() {
-                if (compose.onAllNodes(hasText("Coach")).fetchSemanticsNodes().isNotEmpty()) {
-                    // V7's inner desk exposes app navigation through the Coach menu.
-                    click(show("Coach")); click(show("今天"))
-                } else {
-                    click(show("← 选周")); click(show("← 复习")); click(waitFor("导航：今天"))
-                }
+                // Both V7 desk sizes expose app navigation through the Coach menu.
+                // The cover's back control now names the section rather than "选周".
+                click(show("Coach")); click(show("今天"))
                 waitFor("导航：复习")
             }
             returnToToday()
             val warmStart = clicks
             click(waitFor("导航：复习")); clickWhenEnabled("继续第 1 周")
-            waitFor("铺垫题 · 第 1/3 题")
+            waitForQuestion(1)
             warmClicks = clicks - warmStart
             assertTrue("Warm entry must reach the first question within two clicks", warmClicks <= 2)
             screenshot("warm-two-click-first")
@@ -295,16 +301,22 @@ class MainlineNotesSmoke {
         screenshot("notes")
         click(show("Synthetic bridge notes", contains = true))
         click(show("做这一节的题"))
-        waitFor("桥接题 · 第 1/1 题")
+        waitForQuestion(1, total = 1)
         screenshot("filtered")
         click(show("本周要点"))
         click(show("跳过要点，直接做题"))
-        waitFor("铺垫题 · 第 1/3 题")
+        waitForQuestion(1)
         click(show("★ 课上强调"))
         waitFor("01:38:00", contains = true)
         screenshot("question-emphasis")
         click(waitFor("关闭"))
+        // Read the displayed option order: V7 retains the server's shuffled layout.
+        val plumsIndex = (0..3).single { index ->
+            compose.onNodeWithTag("mainline-option-$index").fetchSemanticsNode().config[SemanticsProperties.Text]
+                .any { it.text == "Synthetic plums ripen early" }
+        }
         answer("Synthetic apples are grown there", false, "答错了。", "setup")
+        waitForQuestion(1)
         if (jointReader && !fault) {
             val selectedAnswer = target("Synthetic apples are grown there", contains = true)
             val original = selectedAnswer.fetchSemanticsNode().config
@@ -342,17 +354,19 @@ class MainlineNotesSmoke {
             show("答错了。")
         }
         if (!fault) show("我的一句话：Synthetic personal note")
-        show("B 为什么不选")
+        show("${'A' + plumsIndex} 为什么不选")
         show("Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")
         show("回看要点：Synthetic basics")
         screenshot("setup-bottom")
         click(compose.onNodeWithTag("mainline-next").performScrollTo())
-        waitFor("细节题 · 第 2/3 题")
+        waitForQuestion(2)
         answer("Synthetic pears are grown there", true, "答对了，但标了猜的：不算掌握。", "detail")
+        waitForQuestion(2, point = 'b')
         click(compose.onNodeWithTag("mainline-next").performScrollTo())
-        waitFor("桥接题 · 第 3/3 题")
+        waitForQuestion(3)
         answer("Synthetic pears are grown there", false, "答对了，算掌握。", "bridge")
+        waitForQuestion(3, point = 'c')
         show("步骤批改")
         show("限时论述")
         screenshot("bridge-bottom")
@@ -361,7 +375,7 @@ class MainlineNotesSmoke {
             click(show("重新读取本周内容"))
             waitFor("跳过要点，直接做题")
             clickWhenEnabled("跳过要点，直接做题")
-            waitFor("桥接题 · 第 3/3 题")
+            waitForQuestion(3)
             answer("Synthetic pears are grown there", false, "答对了，算掌握。", "timed-$n")
         }
         // A section is mastered only when all its facts/questions are mastered; guessed detail stays open.

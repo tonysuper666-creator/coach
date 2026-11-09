@@ -42,6 +42,13 @@ smoke = fixture.smoke
 
 
 SUBMIT_P95_BUDGET_MS = 800
+FAILURE_ARTIFACTS = (
+    'mainline-explanation-failure.png',
+    'mainline-explanation-failure-tree.txt',
+    'mainline-explanation-failure-polls.json',
+    'mainline-wait-fail.png',
+    'mainline-wait-fail-tree.txt',
+)
 
 
 def p95_observation(p95):
@@ -280,8 +287,7 @@ def main():
                 record_clock(mode, 'before')
                 # A previous mode/size's cached image must never masquerade as this run's live failure.
                 android('shell', 'run-as', package, 'rm', '-f',
-                        'cache/mainline-explanation-failure.png', 'cache/mainline-explanation-failure-tree.txt',
-                        'cache/mainline-explanation-failure-polls.json', check=False)
+                        *(f'cache/{name}' for name in FAILURE_ARTIFACTS), check=False)
                 result = android('shell', 'am', 'instrument', '-w', '-e', 'class', 'com.coach.android.MainlineNotesSmoke',
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
                     '-e', 'jointReader', '1' if args.joint_reader else '0',
@@ -290,8 +296,7 @@ def main():
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 # App-side diagnostics for a UI failure: connection state transitions and mainline fetches.
                 if result.returncode != 0 or b'OK (1 test)' not in result.stdout:
-                    for suffix in ('png', 'tree.txt', 'polls.json'):
-                        name = 'mainline-explanation-failure' + ('.' if suffix == 'png' else '-') + suffix
+                    for name in FAILURE_ARTIFACTS:
                         captured = android('exec-out', 'run-as', package, 'cat', f'cache/{name}', check=False)
                         if captured.returncode == 0 and captured.stdout:
                             (folder / f'{mode}-{name}').write_bytes(captured.stdout)

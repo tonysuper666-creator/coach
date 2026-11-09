@@ -66,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix='coach-ios-isolated-') as tmp:
         if len(bundles)!=1: raise RuntimeError('unexpected test bundle count: '+str(len(bundles)))
         with (bundles[0]/'IsolatedFixture.plist').open('wb') as f: plistlib.dump({'base':f'http://{host}:{port}', 'code':code,'adminToken':token},f)
         run(['codesign', '-f', '-s', '-', str(bundles[0])])
-        
+
         for test in ['test1PairAndSave', 'test2RestoreAndRevoke']:
             run(['xcodebuild']+common+['-destination', 'id='+sim, '-only-testing:CoachAppIntegrationTests/RealConnectionTests/'+test, 'test-without-building'])
     finally:

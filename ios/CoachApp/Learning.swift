@@ -236,12 +236,12 @@ struct LearningView: View {
         _model = StateObject(wrappedValue: model ?? LearningModel(connection: connection))
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("接着学习").font(.title2.bold())
-            Text("输入课程标识，打开已有练习。")
+        VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
+            Text("接着学习").font(Appearance.title)
+            Text("输入课程标识，打开已有练习。").foregroundStyle(Appearance.secondary)
             TextField("课程标识", text: $model.course).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(model.pending != nil)
                 .accessibilityIdentifier("courseID")
-            Button("打开课程") { Task { await model.loadCourse() } }.disabled(model.busy).accessibilityIdentifier("openCourse")
+            Button("打开课程") { Task { await model.loadCourse() } }.buttonStyle(.bordered).disabled(model.busy).accessibilityIdentifier("openCourse")
             if model.pending != nil {
                 Text("上次答案尚未确认。重试会使用同一次提交。")
                 Button("确认上次答案") { Task { await model.retryPending() } }.disabled(model.busy).accessibilityIdentifier("retryAnswer")
@@ -251,20 +251,24 @@ struct LearningView: View {
                 Button(week.title) { Task { await model.openWeek(week.week) } }.disabled(model.busy).accessibilityIdentifier("week-\(week.week)")
             }
             if let week = model.week {
-                Text(week.title).font(.headline)
+                Text(week.title).font(Appearance.heading)
                 ForEach(week.items) { item in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(item.stem).font(.headline)
-                        Text("状态：\(item.status)").font(.caption)
+                    VStack(alignment: .leading, spacing: CoachV7.Space.s3) {
+                        Text(item.stem).font(.system(.headline, design: .serif))
+                        Text("状态：\(item.status)").font(.caption).foregroundStyle(Appearance.secondary)
                         ForEach(item.options.indices, id: \.self) { index in
                             Button { selections[item.id] = index } label: {
                                 Label(item.options[index], systemImage: selections[item.id] == index ? "largecircle.fill.circle" : "circle")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(CoachV7.Space.s4)
+                                    .background(Appearance.option, in: RoundedRectangle(cornerRadius: CoachV7.Radius.m))
+                                    .overlay(RoundedRectangle(cornerRadius: CoachV7.Radius.m).stroke(Appearance.line, lineWidth: 0.5))
                             }.disabled(model.busy || model.pending != nil)
                         }
                         Button("提交答案") {
                             if let choice = selections[item.id] { Task { await model.submit(item: item, choice: choice) } }
-                        }.disabled(model.busy || model.pending != nil || selections[item.id] == nil)
-                    }.padding(.vertical, 8)
+                        }.buttonStyle(.borderedProminent).disabled(model.busy || model.pending != nil || selections[item.id] == nil)
+                    }.modifier(V7Card())
                 }
             }
             if model.refreshNeeded {

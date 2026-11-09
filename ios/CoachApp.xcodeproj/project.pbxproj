@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A14110000000000000000001 /* CoachV7.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000003 /* CoachV7.swift */; };
+		A14110000000000000000002 /* CoachColor+Hex.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14110000000000000000004 /* CoachColor+Hex.swift */; };
 		35D5C13A16A83B987893CF97 /* Learning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E2890D923AC0A46AB3BCEB /* Learning.swift */; };
 		3AAA8A2AD397A1695FEBB577 /* CoachApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3E42771824AAAB60DEAE54 /* CoachApp.swift */; };
 		3D88815FD6ACCC8CBBF021FB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9CBE383152773C7ECBF87E11 /* Foundation.framework */; };
@@ -30,6 +32,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A14110000000000000000003 /* CoachV7.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachV7.swift; sourceTree = "<group>"; };
+		A14110000000000000000004 /* CoachColor+Hex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CoachColor+Hex.swift"; sourceTree = "<group>"; };
 		0848696FC830180EBB2049C7 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		15DD6E57E9AFA2D7ADCB482C /* CoachAppIntegrationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CoachAppIntegrationTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		48B84D7EF27575125B5870DC /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -67,6 +71,8 @@
 		0B84754F43FAD337A72DAB65 /* CoachApp */ = {
 			isa = PBXGroup;
 			children = (
+				A14110000000000000000003 /* CoachV7.swift */,
+				A14110000000000000000004 /* CoachColor+Hex.swift */,
 				67438094CBC276A427AEA822 /* Appearance.swift */,
 				AF3E42771824AAAB60DEAE54 /* CoachApp.swift */,
 				D95A84F53881855178F20203 /* ConnectionModel.swift */,
@@ -231,6 +237,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A14110000000000000000001 /* CoachV7.swift in Sources */,
+				A14110000000000000000002 /* CoachColor+Hex.swift in Sources */,
 				9BD99C308C66F49618DBA8F6 /* Appearance.swift in Sources */,
 				3AAA8A2AD397A1695FEBB577 /* CoachApp.swift in Sources */,
 				4A544E07E87D3EA11D31A014 /* ConnectionModel.swift in Sources */,

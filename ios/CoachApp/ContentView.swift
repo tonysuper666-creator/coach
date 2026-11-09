@@ -8,7 +8,7 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: CoachV7.Space.s6) {
                     switch connection.state {
                     case .loading:
                         ProgressView("正在恢复连接…")
@@ -18,7 +18,7 @@ struct ContentView: View {
                         realtimeStatus
                         LearningView(connection: connection)
                     case .unavailable, .revoked:
-                        Text("无法连接").font(.title2.bold())
+                        Text("无法连接").font(Appearance.heading)
                         if connection.state == .unavailable {
                             Button("重试") { Task { await connection.reconnect() } }
                                 .disabled(connection.busy)
@@ -30,19 +30,19 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: 600, alignment: .leading)
-                .padding(24)
+                .padding(CoachV7.Space.s6)
             }
             .background(Appearance.paper)
             .foregroundStyle(Appearance.ink)
             .font(Appearance.font)
-            .tint(Appearance.accent)
+            .tint(Appearance.ink)
             .navigationTitle(Appearance.name)
         }
         .task { await connection.restore() }
     }
 
     private var realtimeStatus: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: CoachV7.Space.s2) {
             switch connection.realtime {
             case .connecting: Text("正在连接实时状态…")
             case .online: Text("已连接 Mac")
@@ -51,25 +51,38 @@ struct ContentView: View {
                 Button("重试实时连接") { connection.startRealtime() }
             }
             if let message = connection.ledgerMessage { Text(message) }
-        }.accessibilityIdentifier("realtimeStatus")
+        }
+        .font(.subheadline)
+        .foregroundStyle(Appearance.secondary)
+        .modifier(V7Card())
+        .accessibilityIdentifier("realtimeStatus")
     }
 
     private var pairing: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("连接你的 Mac").font(.title2.bold())
-            Text("在 Mac 上获取配对码，并填写 Tailscale 地址与端口。")
-            TextField("http://地址:端口", text: $address)
-                .textContentType(.URL).keyboardType(.URL)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .accessibilityIdentifier("serverAddress")
-            TextField("六位配对码", text: $code)
-                .keyboardType(.numberPad).accessibilityIdentifier("pairingCode")
-            Button(connection.busy ? "正在连接…" : "配对") {
-                Task { await connection.pair(address: address, code: code) }
+        VStack(alignment: .leading, spacing: CoachV7.Space.s6) {
+            VStack(alignment: .leading, spacing: CoachV7.Space.s3) {
+                Text("开始学习").font(.subheadline).foregroundStyle(Appearance.secondary)
+                Text("连接你的 Mac").font(Appearance.title)
+                Text("在 Mac 上获取配对码，并填写 Tailscale 地址与端口。")
+                    .foregroundStyle(Appearance.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(connection.busy || address.isEmpty || code.isEmpty)
-            .accessibilityIdentifier("pairButton")
+            VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
+                Text("配对设备").font(Appearance.heading)
+                TextField("http://地址:端口", text: $address)
+                    .textContentType(.URL).keyboardType(.URL)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("serverAddress")
+                TextField("六位配对码", text: $code)
+                    .keyboardType(.numberPad).accessibilityIdentifier("pairingCode")
+                Button(connection.busy ? "正在连接…" : "配对") {
+                    Task { await connection.pair(address: address, code: code) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(connection.busy || address.isEmpty || code.isEmpty)
+                .accessibilityIdentifier("pairButton")
+            }
+            .modifier(V7Card())
         }
         .textFieldStyle(.roundedBorder)
     }

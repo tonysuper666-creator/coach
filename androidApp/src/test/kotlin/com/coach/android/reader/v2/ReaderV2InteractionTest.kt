@@ -7,6 +7,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -15,9 +16,11 @@ import androidx.window.layout.FoldingFeature
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
 import com.coach.ui.reader.v2.*
 import com.github.takahirom.roborazzi.captureRoboImage
 import java.io.File
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -34,10 +37,14 @@ class ReaderV2InteractionTest {
     private var session by mutableStateOf(ReaderV2Fixture.session())
     private var window by mutableStateOf(ReaderWindow(390f, 844f))
     private val bodyPixels = mutableMapOf<Int, Float>()
+    private val bodyLinePixels = mutableMapOf<Int, Float>()
+    private var actualDensity = Density(1f)
 
     private fun host() { compose.setContent { MaterialTheme {
+        actualDensity = LocalDensity.current
         Box(Modifier.requiredSize(window.width.dp, window.height.dp).testTag("reader-fixture-frame")) {
-            ReaderV2FixtureHost(window, session, { session = it }, onBodySize = { page, px -> bodyPixels[page] = px })
+            ReaderV2FixtureHost(window, session, { session = it }, onBodySize = { page, px -> bodyPixels[page] = px },
+                onBodyLineHeight = { page, px -> bodyLinePixels[page] = px })
         }
     } } }
 
@@ -144,8 +151,11 @@ class ReaderV2InteractionTest {
         val widestSourceLine = (0 until sourcePixels.height).maxOf { y ->
             (0 until sourcePixels.width).count { x -> sourcePixels[x, y] == border }
         }
-        assertTrue("The source sentence must use the available pane width, even in a shallow Flex pane",
-            widestSourceLine >= sourcePixels.width * .9f)
+        val nativeBody = bodyPixels.getValue(1)
+        val bodySp = with(actualDensity) { nativeBody.toSp().value }
+        assertTrue("Source body must remain in 16..22sp", bodySp in 15.95f..22.05f)
+        val box = (ReaderV2Fixture.questions.first().source as ReaderSourceResolution.Found).target.boxes.single()
+        assertEquals("Highlight must track the bounded native page scale", box.width * nativeBody / .024f, widestSourceLine.toFloat(), 3f)
         capture("flex")
         compose.runOnIdle { window = ReaderWindow(390f, 844f) }
         compose.onNodeWithTag("reader-half-sheet").assertIsDisplayed()
@@ -184,7 +194,7 @@ class ReaderV2InteractionTest {
 
     @Test fun letterboxedColumnCannotLeakAdjacentColumnIntoItsMargins() {
         compose.setContent { Box(Modifier.requiredSize(400.dp, 800.dp).background(Color.White).testTag("crop-probe")) {
-            // A genuinely readable height-fit crop still has letterbox margins.
+            // A bounded readable crop still has letterbox margins.
             val readableCrop = ReaderV2Fixture.pages.first().copy(trim = ReaderV2Fixture.columns[1].region,
                 columns = emptyList(), bodyFontSize = 48f)
             ReaderV2Page(readableCrop, null, false, null, 0, {}, pageContent = {
@@ -200,22 +210,45 @@ class ReaderV2InteractionTest {
         assertEquals(Color.White, pixels[395, 400])
     }
 
-    private fun assertReadableColumn() {
+    private fun assertComfortableReading(name: String) {
         val pixels = compose.onNodeWithTag("reader-page-0").captureToImage().toPixelMap()
-        val ruler = Color(0xFF2F6A4B)
-        val widest = (0 until pixels.height).maxOf { y -> (0 until pixels.width).count { x -> pixels[x, y] == ruler } }
-        assertTrue("Reading column must fill the actual page viewport", widest >= pixels.width * .9f)
-        compose.runOnIdle { assertTrue("Android Paint body must remain at least 16sp at mdpi/fontScale=1", bodyPixels.getValue(0) >= 15.95f) }
+        val bodyPx = bodyPixels.getValue(0)
+        val bodySp = with(actualDensity) { bodyPx.toSp().value }
+        val advance = bodyLinePixels.getValue(0)
+        val lines = pixels.height / advance
+        assertTrue("Actual Android Paint body must remain in 16..22sp: $bodySp", bodySp in 15.95f..22.05f)
+        assertTrue("Actual page viewport must fit at least six measured baseline advances: $lines", lines >= 6f)
+        if (session.position.columnId != null) {
+            val ruler = Color(0xFF2F6A4B)
+            val xs = (0 until pixels.width).filter { x -> (0 until pixels.height).any { y -> pixels[x, y] == ruler } }
+            assertTrue("Focused column ruler must be visible", xs.isNotEmpty())
+            assertTrue("Focused text needs a 16dp left margin", xs.first() >= 16f * actualDensity.density)
+            assertTrue("Focused text needs a 16dp right margin", pixels.width - 1 - xs.last() >= 16f * actualDensity.density)
+        }
+        val dir = requireNotNull(File(requireNotNull(System.getProperty("coach.v7.output"))).parentFile).resolve("reader-v2")
+        dir.mkdirs()
+        dir.resolve("synthetic-$name.json").writeText(buildJsonObject {
+            put("material", "synthetic only; measured Android Paint and baseline advance")
+            put("viewportWidthPx", pixels.width); put("viewportHeightPx", pixels.height)
+            put("density", actualDensity.density); put("fontScale", actualDensity.fontScale)
+            put("androidPaintBodyPx", bodyPx); put("androidPaintBodySp", bodySp)
+            put("baselineAdvancePx", advance); put("bodyLineCapacity", lines)
+            session.position.columnId?.let { put("columnId", it) }
+        }.toString())
     }
 
     @Test fun wideLandscapePhoneReadsAtColumnWidthBeforeAndAfterNextColumn() {
         window = ReaderWindow(914f, 380f)
         host()
-        assertReadableColumn()
+        assertComfortableReading("phone-914-default")
         capture("phone-landscape-914x380-reading")
         compose.onNodeWithTag("reader-next-column").performClick()
+        compose.runOnIdle { assertEquals(1, session.position.columnId) }
+        assertComfortableReading("phone-914-column1")
+        capture("phone-landscape-914x380-column")
+        compose.onNodeWithTag("reader-next-column").performClick()
         compose.runOnIdle { assertEquals(2, session.position.columnId) }
-        assertReadableColumn()
+        assertComfortableReading("phone-914-column2")
     }
 
     @Test fun tabletopOrdinaryReadingUsesWidthAndVerticalScroll() {
@@ -223,11 +256,33 @@ class ReaderV2InteractionTest {
         host()
         compose.onNodeWithTag("reader-half-sheet").assertDoesNotExist()
         compose.onNodeWithTag("reader-source-highlight").assertDoesNotExist()
-        assertReadableColumn()
+        assertComfortableReading("flex-default")
         capture("flex-reading")
         compose.onNodeWithTag("reader-next-column").performClick()
+        compose.runOnIdle { assertEquals(1, session.position.columnId) }
+        assertComfortableReading("flex-column1")
+        capture("flex-reading-column")
+        compose.onNodeWithTag("reader-next-column").performClick()
         compose.runOnIdle { assertEquals(2, session.position.columnId) }
-        assertReadableColumn()
+        assertComfortableReading("flex-column2")
+    }
+
+    @Test fun foldLandscapeDefaultAndSelectedColumnFitSixBodyLines() {
+        window = ReaderWindow(933f, 704f)
+        host()
+        assertComfortableReading("fold-933-default")
+        compose.onNodeWithTag("reader-next-column").performClick()
+        assertComfortableReading("fold-933-column1")
+        compose.onNodeWithTag("reader-next-column").performClick()
+        assertComfortableReading("fold-933-column2")
+    }
+
+    @Test fun anotherWidePhoneLandscapeKeepsTheSameBodyBounds() {
+        window = ReaderWindow(915f, 412f)
+        host()
+        assertComfortableReading("phone-915-default")
+        compose.onNodeWithTag("reader-next-column").performClick()
+        assertComfortableReading("phone-915-column1")
     }
 
     @Test fun expandingAQuestionDrawerDoesNotConsumeAnInvisibleBackPress() {

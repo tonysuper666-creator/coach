@@ -32,7 +32,7 @@ object ReaderV2Fixture {
 
 @Composable
 fun ReaderV2FixtureHost(window: ReaderWindow, session: ReaderSession, onSession: (ReaderSession) -> Unit,
-    onBodySize: (Int, Float) -> Unit = { _, _ -> }) {
+    onBodySize: (Int, Float) -> Unit = { _, _ -> }, onBodyLineHeight: (Int, Float) -> Unit = { _, _ -> }) {
     val density = LocalDensity.current.density
     var bannerHeight by remember { mutableStateOf(0f) }
     Column(Modifier.fillMaxSize()) {
@@ -41,13 +41,14 @@ fun ReaderV2FixtureHost(window: ReaderWindow, session: ReaderSession, onSession:
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val fold = window.fold?.let { it.copy(bounds = it.bounds.copy(top = it.bounds.top - bannerHeight, bottom = it.bounds.bottom - bannerHeight)) }
             ReaderV2Screen(ReaderWindow(maxWidth.value, maxHeight.value, fold), ReaderV2Fixture.pages,
-                ReaderV2Fixture.questions, session, onSession, pageContent = { ReaderV2SyntheticPage(it, onBodySize) })
+                ReaderV2Fixture.questions, session, onSession, pageContent = { ReaderV2SyntheticPage(it, onBodySize, onBodyLineHeight) })
         }
     }
 }
 
 @Composable
-fun ReaderV2SyntheticPage(index: Int, onBodySize: (Int, Float) -> Unit = { _, _ -> }) {
+fun ReaderV2SyntheticPage(index: Int, onBodySize: (Int, Float) -> Unit = { _, _ -> },
+    onBodyLineHeight: (Int, Float) -> Unit = { _, _ -> }) {
     Canvas(Modifier.fillMaxSize()) {
         drawRect(Color(0xFFFCFAF6))
         // Synthetic column rulers make the actual viewport width measurable.
@@ -57,6 +58,7 @@ fun ReaderV2SyntheticPage(index: Int, onBodySize: (Int, Float) -> Unit = { _, _ 
         drawIntoCanvas { canvas ->
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.rgb(40, 37, 32); textSize = size.width * .024f }
             onBodySize(index, paint.textSize)
+            onBodyLineHeight(index, (.145f + .032f) * size.height - .145f * size.height)
             canvas.nativeCanvas.drawText("合成材料 · 非课程原文 · 第${index + 1}页", size.width * .08f, size.height * .075f, paint)
             for (column in 0..1) {
                 val x = size.width * if (column == 0) .08f else .54f

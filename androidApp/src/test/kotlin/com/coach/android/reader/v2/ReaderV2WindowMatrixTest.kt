@@ -58,6 +58,7 @@ class ReaderV2WindowMatrixTest(private val windowName: String, private val width
         app.resources.updateConfiguration(config, app.resources.displayMetrics)
         var session by mutableStateOf(ReaderV2Fixture.session())
         var actualBodyPx = Float.NaN
+        var actualAdvancePx = Float.NaN
         var actualDensity = Density(1f)
         compose.setContent {
             val supplied = Density(2.625f, app.resources.configuration.fontScale)
@@ -66,7 +67,7 @@ class ReaderV2WindowMatrixTest(private val windowName: String, private val width
                 MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
                     Box(Modifier.requiredSize(width.dp, height.dp).testTag("matrix-frame")) {
                         ReaderV2FixtureHost(ReaderWindow(width.toFloat(), height.toFloat()), session, { session = it },
-                            onBodySize = { _, px -> actualBodyPx = px })
+                            onBodySize = { _, px -> actualBodyPx = px }, onBodyLineHeight = { _, px -> actualAdvancePx = px })
                     }
                 }
             }
@@ -82,8 +83,8 @@ class ReaderV2WindowMatrixTest(private val windowName: String, private val width
         // Render before reading the independent Paint measurement.
         compose.onNodeWithTag("matrix-frame").captureToImage()
         compose.runOnIdle {
-            assertTrue("Measured Android Paint size must respect the 16sp body floor: px=$actualBodyPx density=${actualDensity.density} fontScale=${actualDensity.fontScale}",
-                actualBodyPx.isFinite() && with(actualDensity) { actualBodyPx.toSp().value } >= 15.95f)
+            assertTrue("Measured Android Paint size must stay in 16..22sp: px=$actualBodyPx density=${actualDensity.density} fontScale=${actualDensity.fontScale}",
+                actualBodyPx.isFinite() && with(actualDensity) { actualBodyPx.toSp().value } in 15.95f..22.05f)
         }
         if (width >= 700) {
             compose.onNodeWithTag("reader-question-pane").assertIsDisplayed()
@@ -113,6 +114,9 @@ class ReaderV2WindowMatrixTest(private val windowName: String, private val width
             put("resourceFontScale", app.resources.configuration.fontScale); put("dark", dark)
             put("androidPaintBodyPx", nativeBodyPx)
             put("androidPaintBodySp", with(actualDensity) { nativeBodyPx.toSp().value })
+            put("baselineAdvancePx", actualAdvancePx)
+            val viewport = compose.onNodeWithTag("reader-page-0").fetchSemanticsNode().boundsInRoot
+            put("bodyLineCapacity", viewport.height / actualAdvancePx)
         }
         dir.resolve("$name.json").writeText(receipt.toString())
         if (width < 700) compose.onNodeWithText("做题").performClick()

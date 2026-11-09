@@ -62,18 +62,22 @@ class ReaderV2StateTest {
         assertTrue(readerPanes(ReaderWindow(933f, 704f), true).page.width >= 520f)
     }
 
-    @Test fun readingUsesActualPaneHeightAndAFontFloorWhileOverviewStaysExplicit() {
+    @Test fun readingPrefersWidthTrimAndBoundsBothDefaultAndSelectedColumnFonts() {
         val page = ReaderV2Fixture.pages.first()
-        for ((width, height) in listOf(714f to 250f, 900f to 270f, 500f to 700f)) {
+        for ((width, height, expectedColumn) in listOf(Triple(714f, 250f, null), Triple(900f, 270f, null), Triple(500f, 700f, 1))) {
             val plan = readerPagePlan(page, null, false, null, false, width, height, 1f, 16f)
-            assertEquals(1, plan.columnId)
-            assertEquals(width, plan.region.width * plan.viewport.pageWidth, .05f)
-            assertTrue(plan.bodySizePx!! >= 16f)
+            assertEquals(expectedColumn, plan.columnId)
+            assertTrue(plan.region.width * plan.viewport.pageWidth <= width)
+            assertTrue(plan.bodySizePx!! in 16f..22.001f)
             assertTrue(plan.viewport.contentHeight > height)
         }
+        assertEquals(20.4f, readerPagePlan(page, null, false, null, false, 714f, 250f, 1f, 16f).bodySizePx!!, .01f)
         val explicit = readerPagePlan(page, 2, false, null, false, 900f, 270f, 1f, 16f)
         assertEquals(2, explicit.columnId)
-        assertEquals(900f, explicit.region.width * explicit.viewport.pageWidth, .05f)
+        assertEquals(22f, explicit.bodySizePx!!, .001f)
+        val left = explicit.region.left * explicit.viewport.pageWidth + explicit.viewport.x
+        val right = explicit.region.right * explicit.viewport.pageWidth + explicit.viewport.x
+        assertTrue(left >= 16f && right <= 900f - 16f)
         val readablePage = page.copy(bodyFontSize = 48f)
         assertNull(readerPagePlan(readablePage, null, false, null, false, 700f, 700f, 1f, 16f).columnId)
         val unknownFont = page.copy(bodyFontSize = null)
@@ -84,7 +88,7 @@ class ReaderV2StateTest {
         assertTrue(overview.bodySizePx!! < 16f)
         val figure = readerPagePlan(page.copy(columns = emptyList(), trim = ReaderRegion.Full), null, true,
             null, false, 300f, 250f, 1f, 16f)
-        assertTrue(figure.bodySizePx!! >= 16f)
+        assertTrue(figure.bodySizePx!! in 16f..22.001f)
         assertTrue(figure.viewport.contentWidth > 300f)
     }
 

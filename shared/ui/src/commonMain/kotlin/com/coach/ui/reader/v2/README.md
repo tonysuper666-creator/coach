@@ -17,17 +17,23 @@ Available content width uses the current Android 700/1100dp boundaries: below
 700 a single pane with a drawer, 700 through 1099 page/question panes, and 1100+
 adds a page-directory pane. Fold-reserved book/tabletop regions take precedence.
 The actual page viewport (after banners, bars, controls and hinge reservation)
-decides readability independently of this pane count. Below 480dp page height,
-an explicitly selected column, or a height-fit body below 16sp, reading uses
-column width and vertical scroll. Large figures can pan horizontally instead
-of being cut or silently shrinking the text. Only explicit overview can be a
-thumbnail. System fontScale participates in the 16sp floor.
+decides readability independently of pane count. Reading first tries the full
+trimmed page at viewport width. If its measured body would be below 16sp, it
+enters column focus. Default pages, selected columns and source excerpts all
+cap the body at 22sp, center the content and scroll vertically; focused columns
+have at least 16dp horizontal margins. Large figures can pan without being cut.
+Both font bounds follow system fontScale. Only explicit overview fits height
+and may be a thumbnail. Reading starts at the first measured column's top;
+page headers remain reachable by scrolling up. The Fold8 height-fit versus
+readability tradeoff still needs the whole-product integration decision.
 
 The native renderer must provide its measured smallest body font in full-page
 units as `ReaderPageLayout.bodyFontSize`. A missing metric conservatively uses
 width-fit and does not claim a measured font-size pass. Schema-v1 Docling output
 does not provide this metric; do not fabricate it from OCR. The synthetic host
-reports the actual Android Paint size to its tests, independently of the plan.
+reports actual Android Paint size and baseline advance to tests independently
+of the plan. Line-capacity checks use the measured viewport/baseline advance;
+they do not assume a fixed font-to-line-height ratio or claim native reflow.
 
 `ReaderSession` is hoisted outside layout branches. Local snapshots retain the
 answer/note drafts, original column, selected anchor, pending confirmation and

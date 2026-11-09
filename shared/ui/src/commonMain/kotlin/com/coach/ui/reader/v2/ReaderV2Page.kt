@@ -29,42 +29,49 @@ import kotlin.math.roundToInt
 data class ReaderViewport(val pageWidth: Float, val pageHeight: Float, val x: Float, val y: Float,
     val contentHeight: Float, val contentWidth: Float)
 
-fun readerViewport(page: ReaderPageLayout, region: ReaderRegion, width: Float, height: Float, fitHeight: Boolean, minimumScale: Float = 0f): ReaderViewport {
-    require(width > 0 && height > 0)
-    val scaleWidth = width / (page.width * region.width)
-    val scale = maxOf(minimumScale, if (fitHeight) minOf(scaleWidth, height / (page.height * region.height)) else scaleWidth)
+fun readerViewport(page: ReaderPageLayout, region: ReaderRegion, width: Float, height: Float, fitHeight: Boolean,
+    minimumScale: Float = 0f, maximumScale: Float = Float.POSITIVE_INFINITY, horizontalPadding: Float = 0f): ReaderViewport {
+    require(width > 0 && height > 0 && minimumScale >= 0 && maximumScale >= minimumScale && horizontalPadding >= 0)
+    val scaleWidth = (width - 2 * horizontalPadding).coerceAtLeast(1f) / (page.width * region.width)
+    val scale = (if (fitHeight) minOf(scaleWidth, height / (page.height * region.height)) else scaleWidth)
+        .coerceIn(minimumScale, maximumScale)
     val pw = page.width * scale
     val ph = page.height * scale
-    val contentWidth = maxOf(width, pw * region.width)
+    val contentWidth = maxOf(width, pw * region.width + 2 * horizontalPadding)
     return ReaderViewport(pw, ph, (contentWidth - pw * region.width) / 2 - region.left * pw,
         maxOf(0f, (height - ph * region.height) / 2) - region.top * ph, maxOf(height, ph * region.height), contentWidth)
 }
 
 data class ReaderPagePlan(val region: ReaderRegion, val viewport: ReaderViewport, val columnId: Int?, val bodySizePx: Float?)
 
-/** Decide after chrome, hinge reservation and pane controls have been measured.
- * Explicit overview is a thumbnail. Reading requires a measured 16sp body floor;
- * unknown fonts conservatively use width-fit without claiming a measured pass. */
+/** Reading starts with width-fit trimmed pages. Measured body text stays in
+ * 16..22sp, including system fontScale. Too-small pages enter column focus;
+ * selected columns/source excerpts use the same ceiling and centered margins.
+ * Only explicit overview fits height without the reading font bounds. */
 fun readerPagePlan(page: ReaderPageLayout, columnId: Int?, compact: Boolean, source: NativeSourceTarget?,
-    overview: Boolean, widthPx: Float, heightPx: Float, density: Float, minimumBodyPx: Float): ReaderPagePlan {
-    require(density > 0 && minimumBodyPx > 0)
+    overview: Boolean, widthPx: Float, heightPx: Float, density: Float, minimumBodyPx: Float,
+    maximumBodyPx: Float = minimumBodyPx * 22f / 16f): ReaderPagePlan {
+    require(density > 0 && minimumBodyPx > 0 && maximumBodyPx >= minimumBodyPx)
+    if (overview && source == null) {
+        val v = readerViewport(page, ReaderRegion.Full, widthPx, heightPx, true)
+        return ReaderPagePlan(ReaderRegion.Full, v, null, page.bodyFontSize?.let { it * v.pageWidth / page.width })
+    }
     val boxes = source?.boxes?.reduce(ReaderRegion::union)
     val sourceColumn = boxes?.let { box -> page.columns.firstOrNull {
         val r = it.region; r.left <= box.left && r.right >= box.right && r.top <= box.top && r.bottom >= box.bottom
     } }
-    var column = if (source != null) sourceColumn else if (overview) null else page.column(columnId)
-    var region = boxes?.let { sourceColumn?.region ?: page.trim.union(it) }
-        ?: if (overview) ReaderRegion.Full else column?.region ?: page.trim
-    val fitted = readerViewport(page, region, widthPx, heightPx, true)
-    val fittedBodyPx = page.bodyFontSize?.let { it * fitted.pageWidth / page.width }
-    val widthReading = source != null || !overview && (compact || heightPx / density < 480f || columnId != null ||
-        fittedBodyPx == null || fittedBodyPx < minimumBodyPx)
-    if (source == null && !overview && widthReading && column == null) {
+    var column = if (source != null) sourceColumn else page.column(columnId)
+    val fullWidth = readerViewport(page, page.trim, widthPx, heightPx, false)
+    val fullWidthBodyPx = page.bodyFontSize?.let { it * fullWidth.pageWidth / page.width }
+    val tooSmall = fullWidthBodyPx?.let { it < minimumBodyPx } ?: (compact || page.columns.isNotEmpty())
+    if (source == null && column == null && tooSmall) {
         column = page.columns.firstOrNull()
-        region = column?.region ?: page.trim
     }
-    val minimumScale = if (!overview || source != null) page.bodyFontSize?.let { minimumBodyPx / it } ?: 0f else 0f
-    val v = readerViewport(page, region, widthPx, heightPx, !widthReading, minimumScale)
+    val region = boxes?.let { sourceColumn?.region ?: page.trim.union(it) } ?: column?.region ?: page.trim
+    val minimumScale = page.bodyFontSize?.let { minimumBodyPx / it } ?: 0f
+    val maximumScale = page.bodyFontSize?.let { maximumBodyPx / it } ?: Float.POSITIVE_INFINITY
+    val padding = if (source != null || column != null || tooSmall) 16f * density else 0f
+    val v = readerViewport(page, region, widthPx, heightPx, false, minimumScale, maximumScale, padding)
     return ReaderPagePlan(region, v, column?.id, page.bodyFontSize?.let { it * v.pageWidth / page.width })
 }
 
@@ -88,15 +95,19 @@ fun ReaderV2Page(
     LaunchedEffect(source, flash) { if (source != null) { opacity.snapTo(.65f); opacity.animateTo(.18f, tween(850)) } }
     BoxWithConstraints(modifier.fillMaxSize().clipToBounds().testTag("reader-page-${layout.pageIndex0}")) {
         val plan = readerPagePlan(layout, columnId, compact, source, overview, constraints.maxWidth.toFloat(),
-            constraints.maxHeight.toFloat(), density.density, with(density) { 16.sp.toPx() })
+            constraints.maxHeight.toFloat(), density.density, with(density) { 16.sp.toPx() }, with(density) { 22.sp.toPx() })
         val region = plan.region
         val v = plan.viewport
         SideEffect { onPlan(plan) }
         val scroll = rememberScrollState()
         val horizontal = rememberScrollState()
         LaunchedEffect(layout.pageIndex0, columnId, source, flash, v) {
-            val top = source?.boxes?.minOf { it.top } ?: region.top
-            scroll.scrollTo(if (source == null) 0 else (top * v.pageHeight + v.y - constraints.maxHeight * .35f).roundToInt().coerceAtLeast(0))
+            // Normal reading starts at the first measured column; the page header
+            // remains reachable by scrolling up, and overview starts at page top.
+            val top = source?.boxes?.minOf { it.top }
+                ?: if (!overview) layout.columns.minOfOrNull { it.region.top } ?: region.top else region.top
+            scroll.scrollTo((top * v.pageHeight + v.y - if (source != null) constraints.maxHeight * .35f else 0f)
+                .roundToInt().coerceAtLeast(0))
             val center = source?.boxes?.reduce(ReaderRegion::union)?.let { (it.left + it.right) / 2 }
             horizontal.scrollTo(if (center == null) 0 else (center * v.pageWidth + v.x - constraints.maxWidth / 2f).roundToInt().coerceAtLeast(0))
         }

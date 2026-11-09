@@ -39,6 +39,24 @@ Synthetic facts.
 """.trimIndent()
 
 class MainlineTest {
+    @Test fun readerRejectsForgedQuotesOffsetsAndObsoleteVersions() {
+        val dir = Files.createTempDirectory("mainline-selection")
+        try {
+            val library = library(dir.resolve("papers"))
+            val text = "Synthetic pears and plums."
+            Files.writeString(dir.resolve("papers/mcq-mainline/W01-notes.json"), json(
+                "schema_version" to 1, "week" to 1, "sections" to JsonArray(listOf(json("section_id" to "S1", "title" to "Synthetic",
+                    "body" to text, "fact_ids" to listOf("F1", "F2", "F3"), "sources" to listOf("Synthetic lecture 1"))))).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                val valid = json("sectionId" to "S1", "version" to notesVersion(text), "start" to 0, "end" to 9, "quote" to "Synthetic")
+                assertEquals("Synthetic", mainline.selection(store, "C1", 1, valid))
+                for ((field, value) in listOf("quote" to JsonPrimitive("Forged"), "start" to JsonPrimitive(-1),
+                    "end" to JsonPrimitive(9999), "version" to JsonPrimitive("old"), "sectionId" to JsonPrimitive("UNKNOWN")))
+                    assertFailsWith<MockError> { mainline.selection(store, "C1", 1, JsonObject(valid + (field to value))) }
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
     @Test fun optionalClassEmphasisDeduplicatesLongRecordingsAndWithholdsPendingMetadata() {
         val dir = Files.createTempDirectory("mainline-emphasis")
         try {

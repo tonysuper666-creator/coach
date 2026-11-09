@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import socket
 import subprocess
 import tempfile
 import threading
@@ -69,7 +70,11 @@ def main():
     serial = 'emulator-5580'
 
     def android(*cmd, check=True, timeout=60):
-        result = subprocess.run([adb, '-s', serial, *map(str, cmd)], capture_output=True, timeout=timeout)
+        try:
+            result = subprocess.run([adb, '-s', serial, *map(str, cmd)], capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Instrumentation arguments contain the disposable token; never echo the full command.
+            raise TimeoutError('adb operation timed out: ' + str(cmd[:2])) from None
         if check:
             assert result.returncode == 0, 'adb failed: ' + str(cmd[:3])
         return result
@@ -104,9 +109,12 @@ def main():
             notes = dict(schema_version=1, week=1, sections=[
                 dict(section_id='W01-basics', title='Synthetic basics', body='Synthetic apples are sold out. Synthetic pears grow in the orchard.',
                      fact_ids=['F1', 'F2'], sources=['Synthetic lecture 1']),
-                dict(section_id='W01-bridge', title='Synthetic bridge notes', body='Synthetic pears connect the orchard to the next topic.',
+                dict(section_id='W01-bridge', title='Synthetic bridge notes', body='**Synthetic pears** connect the orchard to the next topic.',
                      fact_ids=['F3'], sources=['Synthetic lecture 1'])])
             (base / 'mock/mcq-mainline/W01-notes.json').write_text(json.dumps(notes))
+            emphasis = dict(schema_version=1, week=1, marks=[dict(fact_id='F1', recording_kind='lecture',
+                recording_id='synthetic-L1', timestamp='98:00', summary='Synthetic pears were emphasized.', reviewed=True)])
+            (base / 'mock/mcq-mainline/W01-emphasis.json').write_text(json.dumps(emphasis))
             port = smoke.free_port()
             assert port not in FORBIDDEN
             env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
@@ -150,15 +158,23 @@ def main():
                     (1, event['id'], fixture.COURSE, 'outline_revised', 1, now, now, 'desktop', 'SYSTEM', 0, event['idemKey'], json.dumps(payload), json.dumps(event)))
             start()
             fault = False
+            offline = False
+            unavailable_until = 0
             failures = {'load': 0}
             attempts = {}
+            diagnostics = []
 
             class TailProxy(http.server.BaseHTTPRequestHandler):
                 protocol_version = 'HTTP/1.1'
                 def log_message(self, *ignored):
                     pass
                 def forward(self):
+                    nonlocal unavailable_until
                     raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                    if time.monotonic() < unavailable_until:
+                        self.close_connection = True
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        return
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in ('host', 'content-length', 'connection')}
                     if fault and '/mainline/1?' in self.path and failures['load'] == 0:
                         failures['load'] += 1
@@ -175,8 +191,14 @@ def main():
                             history = attempts.setdefault(sent['submissionId'], [])
                             history.append((sent, json.loads(body)))
                             if fault and len(history) == 1:
+                                if offline:
+                                    unavailable_until = time.monotonic() + 3.5
+                                    self.close_connection = True
+                                    self.connection.shutdown(socket.SHUT_RDWR)
+                                    return
                                 status, body = 503, b'{"error":"Synthetic response lost after commit"}'
                     self.send_response(status)
+                    diagnostics.append(dict(method=self.command, path=self.path, status=status))
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
@@ -199,13 +221,14 @@ def main():
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
                     f'{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner', timeout=300, check=False)
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
-                for name in ('entry', 'two-click-first', 'warm-two-click-first', 'reading-route', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
+                (out / 'http-diagnostics.json').write_text(json.dumps(diagnostics, indent=2))
+                for name in ('entry', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
                              'fault-waiting', 'resumed-quiz', 'reading-before-restart', 'resumed-notes'):
                     image = android('exec-out', 'run-as', PACKAGE, 'cat', f'cache/mainline-{name}.png', check=False)
                     if image.stdout.startswith(b'\x89PNG'):
                         (folder / f'{name}.png').write_bytes(image.stdout)
                 assert result.returncode == 0 and b'OK (1 test)' in result.stdout, f'{mode} UI failed; see redacted instrumentation report'
-                if mode in ('normal', 'fault'):
+                if mode in ('normal', 'fault', 'offline'):
                     timing = json.loads(android('exec-out', 'run-as', PACKAGE, 'cat', 'cache/mainline-timings.json').stdout)
                     (folder / 'timings.json').write_text(json.dumps(timing, indent=2))
                     samples.extend(timing['samples'])
@@ -232,8 +255,17 @@ def main():
             record = None
             android('pull', '/sdcard/ton1394-recovery.mp4', out / 'recovery/recovery.mp4')
             android('shell', 'rm', '/sdcard/ton1394-recovery.mp4')
+            offline = True
+            android('shell', 'am', 'force-stop', PACKAGE)
+            record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
+                                       '/sdcard/ton1394-offline.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            instrument('offline', out / 'offline')
+            record.wait(50)
+            record = None
+            android('pull', '/sdcard/ton1394-offline.mp4', out / 'offline/offline.mp4')
+            android('shell', 'rm', '/sdcard/ton1394-offline.mp4')
             retried = [values for values in attempts.values() if len(values) > 1]
-            assert len(retried) == 3
+            assert len(retried) == 6
             for values in retried:
                 assert len(values) == 2 and values[0] == values[1], 'Replay must preserve wire and stored outcome'
             coverage = request(f'/v1/courses/{fixture.COURSE}/mainline')['weeks'][0]['coverage']
@@ -243,6 +275,7 @@ def main():
             p95 = normal[math.ceil(.95 * len(normal)) - 1] if normal else None
             report = dict(syntheticOnly=True, productionRead=False, package=PACKAGE, runs=runs, samples=samples,
                           transport='Android emulator -> configured Tailscale IPv4 -> isolated HTTP proxy -> candidate',
+                          disconnection='Isolated proxy drops all HTTP connections for 3.5s after commit; emulator network settings unchanged',
                           p95ms=p95, normalSamples=len(normal), faults=failures, immutableReplays=len(retried), coverage=coverage,
                           utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
             (out / 'report.json').write_text(json.dumps(report, indent=2))

@@ -2,6 +2,7 @@ package com.coach.android
 
 import android.content.Intent
 import android.os.SystemClock
+import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -25,10 +26,19 @@ class MainlineNotesSmoke {
         require(context.packageName == "com.coach.android.ton1394")
         require(BuildConfig.COACH_COURSE == "ton1358-synthetic-mainline")
         val mode = args.getString("mode") ?: "normal"
-        val fault = mode == "fault"
+        val fault = mode in setOf("fault", "offline")
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
+        // Fail with a useful network diagnosis before navigating an otherwise disconnected app.
+        val probe = okhttp3.OkHttpClient.Builder().callTimeout(10, java.util.concurrent.TimeUnit.SECONDS).build()
+        try {
+            probe.newCall(okhttp3.Request.Builder().url("$base/v1/hello")
+                .header("Authorization", "Bearer " + requireNotNull(args.getString("coachToken")))
+                .header("X-Coach-Device", "desktop").build()).execute().use { response ->
+                assertEquals("Isolated tailnet candidate must be reachable", 200, response.code)
+            }
+        } finally { probe.connectionPool.evictAll(); probe.dispatcher.executorService.shutdown() }
         KeystoreCredentials(context, base).save(PairedCredentials("desktop", requireNotNull(args.getString("coachToken"))))
-        if (mode in setOf("normal", "fault")) context.deleteDatabase("coach-client.db")
+        if (mode in setOf("normal", "fault", "offline")) context.deleteDatabase("coach-client.db")
         context.startActivity(Intent(context, CoachActivity::class.java).putExtra("coachUrl", base)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         fun find(match: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
@@ -43,7 +53,7 @@ class MainlineNotesSmoke {
         fun waitFor(text: String, contains: Boolean = false): AccessibilityNodeInfo {
             val end = SystemClock.elapsedRealtime() + 30_000
             while (SystemClock.elapsedRealtime() < end) {
-                find { if (contains) text in it.text?.toString().orEmpty() else it.text?.toString() == text }?.let { return it }
+                find { if (contains) text in it.text?.toString().orEmpty() || text in it.contentDescription?.toString().orEmpty() else it.text?.toString() == text || it.contentDescription?.toString() == text }?.let { return it }
                 Thread.sleep(50)
             }
             val seen = mutableListOf<String>()
@@ -72,7 +82,7 @@ class MainlineNotesSmoke {
         }
         // Compose leaves rows scrolled out of view out of the accessibility tree: scroll the page until the text shows up.
         fun show(text: String, contains: Boolean = false): AccessibilityNodeInfo {
-            fun match(node: AccessibilityNodeInfo) = if (contains) text in node.text?.toString().orEmpty() else node.text?.toString() == text
+            fun match(node: AccessibilityNodeInfo) = if (contains) text in node.text?.toString().orEmpty() || text in node.contentDescription?.toString().orEmpty() else node.text?.toString() == text || node.contentDescription?.toString() == text
             for (direction in listOf(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
                 repeat(12) {
                     find(::match)?.let { node ->
@@ -96,6 +106,14 @@ class MainlineNotesSmoke {
                 bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
             }
             bitmap.recycle()
+        }
+        fun selectPassage() {
+            val text = show("本节正文，可选择文字")
+            assertTrue("Real text selection must be accessible", text.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, 9)
+            }))
+            instrumentation.waitForIdleSync()
         }
         val samples = JSONArray()
         fun answer(option: String, guessed: Boolean, outcome: String, shot: String) {
@@ -133,27 +151,61 @@ class MainlineNotesSmoke {
         if (mode == "resumeNotes") {
             waitFor("本周要点")
             show("Synthetic apples are sold out.", contains = true)
+            show("我的一句话：Synthetic personal note")
             screenshot("resumed-notes")
             return
         }
         waitFor("今天")
-        click(waitFor("↻"))
+        click(waitFor("导航：复习"))
         screenshot("entry")
         clickWhenEnabled("继续第 1 周")
         waitFor("铺垫题 · 第 1/3 题")
         screenshot("two-click-first")
         if (!fault) {
             fun returnToToday() {
-                click(show("← 选周")); click(show("← 复习")); click(waitFor("◉"))
+                click(show("← 选周")); click(show("← 复习")); click(waitFor("导航：今天"))
             }
             returnToToday()
-            click(waitFor("↻")); clickWhenEnabled("继续第 1 周")
+            click(waitFor("导航：复习")); clickWhenEnabled("继续第 1 周")
             waitFor("铺垫题 · 第 1/3 题")
             screenshot("warm-two-click-first")
             returnToToday()
-            click(waitFor("↻")); clickWhenEnabled("看本周要点")
+            click(waitFor("导航：复习")); clickWhenEnabled("看本周要点")
             waitFor("跳过要点，直接做题")
             screenshot("reading-route")
+            click(show("★ 课上强调"))
+            waitFor("01:38:00", contains = true)
+            show("Synthetic pears were emphasized.")
+            screenshot("reading-emphasis")
+            click(waitFor("关闭"))
+            selectPassage()
+            click(show("一句批注"))
+            assertTrue(waitFor("一句批注输入框").performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "Synthetic personal note")
+            }))
+            instrumentation.waitForIdleSync()
+            click(waitFor("返回阅读"))
+            show("我的一句话：Synthetic personal note")
+            screenshot("personal-note")
+            click(show("深色阅读"))
+            screenshot("dark-reading")
+            click(show("专心读"))
+            waitFor("退出专注")
+            assertNull("Focus mode must hide app navigation", find { it.contentDescription?.toString() == "导航：复习" })
+            screenshot("focus-reading")
+            click(waitFor("退出专注"))
+            click(show("浅色阅读"))
+            selectPassage()
+            click(show("再讲一遍"))
+            waitFor("缺少可定位的课件或教材页依据", contains = true)
+            screenshot("ai-no-evidence")
+            click(waitFor("返回阅读"))
+            click(show("本周脉络：节 → 考点 → 题"))
+            show("○ 待练 F1")
+            screenshot("weekly-map")
+            click(show("题 S1 · 待练"))
+            waitFor("铺垫题 · 第 1/2 题")
+            click(show("本周要点"))
             click(show("跳过要点，直接做题"))
             waitFor("铺垫题 · 第 1/3 题")
         }
@@ -168,7 +220,12 @@ class MainlineNotesSmoke {
         click(show("本周要点"))
         click(show("跳过要点，直接做题"))
         waitFor("铺垫题 · 第 1/3 题")
+        click(show("★ 课上强调"))
+        waitFor("01:38:00", contains = true)
+        screenshot("question-emphasis")
+        click(waitFor("关闭"))
         answer("Synthetic apples are grown there", false, "答错了。", "setup")
+        if (!fault) show("我的一句话：Synthetic personal note")
         show("为什么不选：Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")
         show("回看要点：Synthetic basics")
@@ -198,6 +255,6 @@ class MainlineNotesSmoke {
         click(show("跳过要点，直接做题"))
         show("答对了，算掌握。")
         java.io.File(context.cacheDir, "mainline-timings.json").writeText(JSONObject()
-            .put("mode", mode).put("samples", samples).put("initialColdClicks", 2).put("warmClicks", 2).put("notesRouteClicks", 3).toString(2))
+            .put("mode", mode).put("samples", samples).put("initialColdClicks", 2).put("warmClicks", 2).put("notesRouteClicks", 2).toString(2))
     }
 }

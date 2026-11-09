@@ -104,6 +104,10 @@ private val tierNames = mapOf("setup" to "铺垫题", "detail" to "细节题", "
 private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, entry: String?, onBack: () -> Unit,
     onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
     val scope = rememberCoroutineScope()
+    var readerState by remember { mutableStateOf(http.readerState(c.sync, number)) }
+    fun saveReader(value: JsonObject) { readerState = value; http.saveReaderState(c.sync, number, value) }
+    val marks = (readerState["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
+    DisposableEffect(Unit) { onDispose { c.readerFocus = false } }
     var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "week:$number")) }
     fun save(vararg fields: Pair<String, JsonElement>) {
         saved = JsonObject(saved + fields)
@@ -168,7 +172,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val b = r.body
             if (b != null) {
                 result = b; pending = null; error = null
-                body = JsonObject(body.orEmpty() + listOfNotNull(b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
+                val updatedItems = JsonArray(items.map { q ->
+                    if (q.str("id") == b.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(b.str("status")))) else q
+                })
+                body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
+                    b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
                 save("result" to b, "pending" to JsonNull, "body" to body!!)
                 break
             }
@@ -195,33 +203,32 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
         position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
     }
-    Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", "← 选周", onBack)
+    LaunchedEffect(reading, readerState.flag("focus")) { c.readerFocus = reading && readerState.flag("focus") }
+    if (!reading || !readerState.flag("focus")) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", "← 选周", onBack)
     if (body == null) {
         CenterMessage(error ?: "正在读取…")
         if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
         return
     }
     if (reading) {
-        Column(Modifier.fillMaxSize().verticalScroll(readingScroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("本周要点", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("mainline-notes"))
-            Button(onClick = { startQuiz() }, modifier = Modifier.testTag("mainline-skip")) { Text("跳过要点，直接做题") }
-            if (sections.isEmpty()) Text(body!!.str("notesError").ifBlank { "本周要点尚未提供，可以直接做题。" })
-            TextButton(enabled = pending == null, onClick = {
+        val currentItems = items.map { q -> if (q.str("id") == result?.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(result!!.str("status")))) else q }
+        WeeklyReader(c, number, sections, section, currentItems, marks, readerState, readingScroll, body!!.str("notesError"),
+            ::saveReader, onSection = { id -> position(true, section = id); scope.launch { readingScroll.scrollTo(0) } },
+            onQuiz = { sectionFilter, id ->
+                startQuiz(sectionFilter)
+                if (id != null && pending == null) {
+                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
+                    position(false, id, selectedFilter = sectionFilter)
+                    scope.launch { scroll.scrollTo(0) }
+                }
+            }, onRefresh = {
+                if (pending == null) {
                 body = null; result = null; chosen = null
                 save("body" to JsonNull, "result" to JsonNull, "choice" to JsonNull)
                 retry++
-            }) { Text("重新读取本周内容") }
-            for (s in sections) TextButton(onClick = { sectionId = s.str("section_id"); position(true, section = sectionId) }, modifier = Modifier.fillMaxWidth()) {
-                Text((if (s.flag("mastered")) "✓ " else "○ ") + s.str("title"), Modifier.fillMaxWidth())
-            }
-            if (section != null) key(section.str("section_id")) {
-                Text(section.str("title"), style = MaterialTheme.typography.titleLarge)
-                ClassEmphasis(emphasis, section.strings("fact_ids"))
-                QuizText(section.str("body"), "notes:${section.str("section_id")}", c.math)
-                Text(section.strings("sources").joinToString("\n"), style = MaterialTheme.typography.labelMedium)
-                Button(onClick = { startQuiz(section.str("section_id")) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
-            }
-        }
+                }
+            }, onFocus = { saveReader(JsonObject(readerState + ("focus" to JsonPrimitive(it)))) },
+            emphasis = { facts -> ClassEmphasis(emphasis, facts) })
         return
     }
     if (item == null) {
@@ -275,6 +282,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             Outcome(done, view.logicalToday(now), onReviewWeek)
+            if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
             explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
             (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { Labeled("出处", it) }
             for (s in sections.filter { s -> s.strings("fact_ids").any { it in item.strings("factIds") } }) {

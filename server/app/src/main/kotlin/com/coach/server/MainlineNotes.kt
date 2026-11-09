@@ -26,9 +26,13 @@ internal fun loadMainlineNotes(file: Path, week: Int, facts: List<MainlineFact>)
         require(sections.flatMap { it.strings("fact_ids") }.toSet() == known.keys) { "要点未覆盖全部事实" }
         // Whitelist fields: never forward unrelated authoring metadata to the learner.
         sections.map { s -> json("section_id" to s.str("section_id"), "title" to s.str("title"), "body" to s.str("body"),
-            "fact_ids" to s.strings("fact_ids"), "sources" to s.strings("sources")) } to null
+            "fact_ids" to s.strings("fact_ids"), "sources" to s.strings("sources"),
+            "content_version" to notesVersion(s.str("body"))) } to null
     }.getOrElse { emptyList<JsonObject>() to "本周要点暂不可用（格式或事实映射校验失败），可以直接做题。" }
 }
+
+internal fun notesVersion(body: String): String = java.security.MessageDigest.getInstance("SHA-256")
+    .digest(body.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
 /** Optional independently checked metadata. Invalid or pending data never publishes stars. */
 internal fun loadMainlineEmphasis(file: Path, week: Int, facts: List<MainlineFact>): List<JsonObject> {

@@ -152,6 +152,19 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
+    /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
+    internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
+        val week = find(courseNames(store.events(course), course), number)
+        val section = week.notes.firstOrNull { it.str("section_id") == input.str("sectionId") }
+            ?: throw MockError(HttpStatusCode.Conflict, "要点已更新，请重新读取后再选中。")
+        val text = section.str("body")
+        val start = input.num("start"); val end = input.num("end")
+        if (input.str("version") != section.str("content_version") || start < 0 || end <= start ||
+            end > text.length || end - start > 2000 || text.substring(start.toInt(), end.toInt()) != input.str("quote"))
+            throw MockError(HttpStatusCode.Conflict, "选中文本与当前要点不一致，请重新读取后再选中。")
+        return input.str("quote")
+    }
+
     fun home(store: LedgerStore, course: String): JsonObject {
         val events = store.events(course)
         val (weeks, invalid) = weeks(courseNames(events, course))
@@ -256,7 +269,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     }
 }
 
-fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline) {
+fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline, reader: ReaderExplanation? = null) {
     suspend fun ApplicationCall.answer(course: String, block: LedgerStore.(JsonObject) -> JsonObject) {
         try {
             val text = if (request.httpMethod == HttpMethod.Post) receiveText() else ""
@@ -278,5 +291,27 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             call.answer(c) { mainline.week(this, c, call.week(), shuffled) }
         }
         post("/v1/courses/{course}/mainline/{week}/answer") { val c = call.parameters["course"]!!; call.answer(c) { mainline.answer(this, c, call.week(), it) } }
+        post("/v1/courses/{course}/mainline/{week}/explain") {
+            try {
+                val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
+                val course = call.parameters["course"]!!
+                val (quote, pages) = actor.execute {
+                    val quote = mainline.selection(this, course, call.week(), input)
+                    quote to searchSourcePages(course, quote).filter { it.learnerVisible }
+                }
+                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages)
+                    ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
+                call.respondText(body.toString(), ContentType.Application.Json)
+            } catch (e: MockError) {
+                call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
+            } catch (e: IllegalArgumentException) {
+                call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
+            }
+        }
+        post("/v1/courses/{course}/mainline/{week}/explain/cancel") {
+            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            reader?.cancel(call.attributes[observedDevice], call.parameters["course"]!!, input?.str("requestId").orEmpty())
+            call.respondText("{}", ContentType.Application.Json)
+        }
     }
 }

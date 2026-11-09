@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -41,8 +42,11 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
-class CourseHttp(baseUrl: String, deviceId: String, token: String, private val course: String) {
+class CourseHttp(baseUrl: String, private val deviceId: String, private val token: String, private val course: String) {
     private val base = baseUrl.trimEnd('/')
+    // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
+    fun readerState(sync: SyncEngine, week: Int): JsonObject = sync.readerState(course, week, "$base\u0000$deviceId\u0000$token")
+    fun saveReaderState(sync: SyncEngine, week: Int, state: JsonObject) = sync.saveReaderState(course, week, "$base\u0000$deviceId\u0000$token", state)
     init { validateCoachBaseUrl(baseUrl) }
     private val http = HttpClient(CIO) {
         followRedirects = false
@@ -87,6 +91,19 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
     suspend fun mainline(): MockReply = mockCall("mainline", null)
     /** 一周的题，按铺垫 → 细节 → 桥接排好；不含答案和讲解。 */
     suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1", null)
+    suspend fun explainSelection(week: Int, input: JsonObject): MockReply = try {
+        val response = http.post("$base/v1/courses/${course.encodeURLPathPart()}/mainline/$week/explain") {
+            timeout { requestTimeoutMillis = 95_000 }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        if (response.status.isSuccess()) MockReply(parsed, null)
+        else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" })
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { MockReply(null, "连不上 Mac，阅读位置已保存。可返回做题或手动重试。") }
+    suspend fun cancelSelection(week: Int, id: String) {
+        mockCall("mainline/$week/explain/cancel", buildJsonObject { put("requestId", id) })
+    }
     /**
      * 一道题答一次：返回对错、全部讲解、复习安排和新的覆盖数。同一个 [submissionId] 重发只算一次。
      * [choice] 是屏幕上的第几个选项，[layout] 原样带回这道题读下来时的 `layout`，Mac 据此认出是哪一种打乱顺序。

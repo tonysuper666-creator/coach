@@ -178,12 +178,49 @@ snapshot hashes and keep all private prose/screenshots off Git and public eviden
 The existing Review tab has “继续第 N 周”, “看本周要点” and “选其他周”.
 Continue targets the previous week if available, otherwise the first week with
 unmastered facts, otherwise the first week. From the paired, course-selected
-Today screen, Review → Continue takes two clicks. Review → Notes → Skip takes
-three. Selecting a week in the picker opens notes, with a separate direct-quiz
+Today screen, Review → Continue takes two clicks. Review → Notes takes two
+clicks; Skip is a separate action. Selecting a week in the picker opens notes, with a separate direct-quiz
 button. Section practice filters questions by intersecting fact IDs. Answer
 pages link back to the relevant sections; bridge links preserve their return
-path through step grading and essays. Today and the five navigation tabs stay
-as before.
+path through step grading and essays. Focus reading hides the surrounding
+navigation; its fixed toolbar keeps Exit, Skip and Section practice available.
+
+## Reading interactions
+
+The reader uses a serif body, 20sp/32sp type and a maximum width of 720dp,
+with local light/dark and focus preferences. Existing Markdown/math rendering
+is preserved. Formatted sections offer “选择原文、划线或追问” to select the exact
+original text, avoiding transformed offsets. Plain sections are directly
+selectable. Only a nonempty selection exposes Highlight, One-sentence note,
+Explain again and Example. A collapsed selection is retained across focus loss
+until an action or explicit dismissal, so clicking a selection action cannot
+discard its input.
+
+Highlights/notes save immediately in SQLite under a digest of the configured
+server/device credential identity, course and week. Each mark retains stable
+section ID, content SHA-256, full original body, exact offsets and quote. An
+updated body/version visibly marks the saved quote as stale; it never silently
+attaches to different text. Wrong and guessed results show related personal
+quotes/notes by fact/section intersection. Personal notes are never source evidence
+and are not included in a selection request. Reading position remains local.
+
+Selection explanations use the existing subscription bridge and existing
+learner-visible course page retrieval. The server revalidates the quote, offsets
+and content version; missing pages return “无法确认” without calling AI. The
+bridge sees only the selected passage and vetted source pages. Each response
+paragraph must pass the existing citation/quotation gate; source buttons use
+actual document/page metadata, never AI-invented page locators. AI elapsed time
+is separate from quiz submission timing. Requests have a 90-second bound;
+cancellation is scoped to device/course/request, including cancellation that
+arrives before the request. Leaving the dialog cancels; failure/retry preserves
+reading and quiz state. No background AI request or permanent chat is added.
+Automated bridge tests use a synthetic stub, not a live subscription response.
+
+The expandable weekly map connects section → fact → question. Every node uses
+ordinary accessible buttons. Fact mastery requires all linked questions to be
+verified non-guessed successes; guesses stay pending. Questions retain their
+current statuses after each answer. Independently approved class emphasis uses
+the same existing overlay in notes, map and quiz; unapproved data stays absent.
 
 Both Android and desktop use the existing SQLite `sync_meta` table, namespaced
 by course/week. It stores route, selected section/filter, reading and quiz scroll,
@@ -219,23 +256,37 @@ credentials/data. It uninstalls both card APKs, restores emulator dimensions and
 stops its processes in `finally`. No physical devices, learner CLI or production
 ports are used. It records two exact pixel sizes, actual cold/warm click paths,
 section filtering, mastery, process restart, 40 raw UI timing samples and injected
-load/committed-response loss recovery. Fault samples are reported separately.
+load/committed-response loss recovery and a 3.5-second proxy disconnection after
+commit. This deliberately drops HTTP connections on the isolated path; it does
+not toggle the emulator's network settings. Fault samples are reported separately.
 Timing starts immediately before the submit action and ends when an explanation
 appears in the real accessibility tree; it is a conservative UI observation,
 not localhost HTTP timing. Its nearest-rank p95 must be at most 800 ms.
 
 ## Current verification status (TON-1394 draft)
 
-JVM suites pass (server 209, client 74, UI 100), as do the six content-tool
-checks and the isolated Android application/test APK builds. Real emulator
-acceptance has **not passed**. Two navigation-locator attempts stopped at
-`No clickable ancestor` and `Missing synthetic mainline UI: ↻` respectively.
-The glyph is not exposed as accessibility text; the next owner must select the
-real clickable navigation label and verify page transitions. Do not remove or
-relax the acceptance assertions. Only the first attempt produced entry and
-first-question screenshots at 2448×1848. There is no validated full-week flow,
-1972×1248 layout, fault recording or p95 result. The protocol above describes
-what the harness is intended to collect, not completed acceptance evidence.
+JVM suites pass (390 tests: server 214, client 74, UI 102; zero failures,
+errors or skips), as do the six content-tool checks, server distribution and
+isolated Android application/test APK builds. The reading interactions above
+are implemented and covered in part by JVM tests; device acceptance has
+**not passed**. The smoke test now selects the real accessible navigation label,
+which reaches Review. Two current attempts both stopped waiting for
+`继续第 1 周`: the accessibility tree still showed `正在连接…` and `Mac 未连接`.
+The diagnostic attempt's in-app health probe passed; the proxy recorded HTTP
+200 for health, snapshot, events and the mainline index. Its WebSocket upgrade
+requests returned 400 (the isolated HTTP proxy does not tunnel WebSockets).
+These observations do not establish why the Continue button failed to update.
+Keep the failure report and sanitized method/path/status diagnostics; do not
+remove assertions or claim network reachability proves a completed UI load.
+
+Both attempts exited 1 and were stopped under the two-failure escalation rule.
+They produced only early entry screenshots at 2448×1848. There is no validated
+full-week flow, 1972×1248 layout, cold/warm click count, restart/fault recording,
+live subscription explanation timing or submission p95 result. C reading
+interactions and actual private W5 integration still need device acceptance.
+The protocol above describes what the harness is intended to collect, not
+completed acceptance evidence. All isolated processes and card APKs were
+cleaned after each attempt; production and physical devices were untouched.
 
 ## Research adoption
 
@@ -246,3 +297,11 @@ implementation adopts those recommendations. It adds no extra tab, daily
 streak, leaderboard, paywall, unlock rule, AI-generated mastery or prerequisite
 barrier. Real W1 prose and content quality are a later product acceptance step;
 only synthetic material is used for engineering evidence here.
+
+TON-1392's later Infinite Reader report used the public Alice sample and seven
+real screenshots; its AI path required sign-in and was not tested. We adopt its
+serif/width/theme/focus reading, exact original-quote notes, explicit grounded
+selection actions, navigable fact map and direct week entry. Those observations
+belong to the researcher; this PR's acceptance uses our synthetic course. We do
+not upload course material to that service. The section practice entry remains
+fixed and visible while reading long text.

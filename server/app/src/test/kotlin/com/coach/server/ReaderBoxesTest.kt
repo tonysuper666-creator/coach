@@ -78,6 +78,25 @@ class ReaderBoxesTest {
         assertEquals(1, turned.getValue("words").jsonArray.size)
     }
 
+    @Test fun quarterTurnSwapsTheTagFrameAndKeepsTheRotatedWordsThatPoppler26Reports() {
+        val lib = ReaderLibrary(null)
+        // Reproduction from Poppler 26.10 on a 400x200 /Rotate 90 page: the tag stays 400x200 while boxes are already in the 200x400 display frame.
+        val page = html("400.000000", "200.000000", word(150, 20, 175, 60, "Alpha"), word(150, 370, 175, 402.022, "tail"))
+        val turned = lib.parseBoxes(doc("turned"), 1, page, rotation = 90)
+        assertEquals(200.0, turned.getValue("width").jsonPrimitive.double); assertEquals(400.0, turned.getValue("height").jsonPrimitive.double)
+        val words = turned.getValue("words").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("Alpha", "tail"), words.map { it.str("text") }, "the word at y 370..402 must survive")
+        assertEquals(400.0, words[1].getValue("y1").jsonPrimitive.double, "a 2 pt glyph overhang is clamped to the page edge")
+        val unturned = lib.parseBoxes(doc("turned"), 1, page, rotation = 0)
+        assertEquals(1, unturned.getValue("words").jsonArray.size, "without the rotation the same boxes would be (wrongly) cut — that is the bug being fixed")
+        // A Poppler that already swapped the tag is recognised from the words and not swapped twice.
+        val already = lib.parseBoxes(doc("turned"), 1, html("200.000000", "400.000000", word(150, 370, 175, 400, "tail")), rotation = 90)
+        assertEquals(200.0, already.getValue("width").jsonPrimitive.double); assertEquals(1, already.getValue("words").jsonArray.size)
+        assertEquals(270, lib.parseRotation("Pages: 1\nPage    1 size: 400 x 200 pts\nPage    1 rot:  270\n", 1))
+        assertEquals(0, lib.parseRotation("Page    3 rot:  0\n", 3))
+        assertFailsWith<ReaderFailure> { lib.parseRotation("no info", 1) }
+    }
+
     @Test fun parserReportsNoTextLayerAndRejectsUnreadablePages() {
         val lib = ReaderLibrary(null)
         val scan = lib.parseBoxes(doc("scan"), 1, html("400", "200"))

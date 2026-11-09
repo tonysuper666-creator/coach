@@ -111,32 +111,49 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
     internal suspend fun image(d: ReaderDocument, page: Int): ByteArray = cached(d, page, true)
 
     /**
-     * Word boxes from Poppler `-bbox`, in PDF points with the origin at the top-left of the page **as displayed** (Poppler applies /Rotate,
-     * so width and height are already swapped for a quarter turn and the page image rendered by pdftoppm shares the same frame). Clients scale by
-     * (rendered width / width, rendered height / height). A page without a text layer yields no words, never made-up ones.
+     * Word boxes from Poppler `-bbox`, in PDF points with the origin at the top-left of the page **as displayed**. Poppler (26.x) rotates the
+     * word boxes but leaves `<page width height>` unrotated, so the displayed size is the tag size swapped when `pdfinfo` reports /Rotate 90 or
+     * 270; that frame is what pdftoppm renders. Clients scale by (rendered width / width). A page without a text layer yields no words.
      */
     internal suspend fun boxes(d: ReaderDocument, page: Int): JsonObject {
-        return parseBoxes(d, page, cached(d, page, false, true).toString(Charsets.UTF_8))
+        val rotation = parseRotation(cached(d, page, false, false, true).toString(Charsets.UTF_8), page)
+        return parseBoxes(d, page, cached(d, page, false, true).toString(Charsets.UTF_8), rotation)
     }
 
-    internal fun parseBoxes(d: ReaderDocument, page: Int, html: String): JsonObject {
+    /** `Page    1 rot:  90` from `pdfinfo -f N -l N`; anything unreadable is an error rather than a guess of 0. */
+    internal fun parseRotation(info: String, page: Int): Int {
+        val m = Regex("(?m)^Page\\s+$page\\s+rot:\\s*(-?[0-9]+)").find(info)
+            ?: throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "无法读取这一页的旋转角度")
+        return ((m.groupValues[1].toInt() % 360) + 360) % 360
+    }
+
+    internal fun parseBoxes(d: ReaderDocument, page: Int, html: String, rotation: Int = 0): JsonObject {
         val head = Regex("<page\\s+width=\"([0-9.]+)\"\\s+height=\"([0-9.]+)\"").find(html)
             ?: throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "无法读取这一页的文字坐标")
-        val width = head.groupValues[1].toDouble(); val height = head.groupValues[2].toDouble()
-        if (!(width > 0 && height > 0)) throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "页面尺寸无效")
+        val tagWidth = head.groupValues[1].toDouble(); val tagHeight = head.groupValues[2].toDouble()
+        if (!(tagWidth > 0 && tagHeight > 0)) throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "页面尺寸无效")
         val word = Regex("<word\\s+xMin=\"([0-9.\\-]+)\"\\s+yMin=\"([0-9.\\-]+)\"\\s+xMax=\"([0-9.\\-]+)\"\\s+yMax=\"([0-9.\\-]+)\">([^<]*)</word>")
         fun unescape(t: String) = t.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
-        val words = word.findAll(html).take(20_000).mapNotNull { m ->
-            val v = m.groupValues.subList(1, 5).map { it.toDouble() }
-            if (v[0] < 0 || v[1] < 0 || v[2] > width + 0.5 || v[3] > height + 0.5 || v[2] <= v[0] || v[3] <= v[1]) null
-            else json("x0" to v[0], "y0" to v[1], "x1" to v[2], "y1" to v[3], "text" to unescape(m.groupValues[5]))
-        }.toList()
+        val raw = word.findAll(html).take(20_000).map { m -> m.groupValues.subList(1, 5).map { it.toDouble() } to unescape(m.groupValues[5]) }.toList()
+        // Glyph boxes may overhang the page edge by ascent/descent; tolerate 2% (at least 2 pt) and clamp.
+        fun fits(w: Double, h: Double) = raw.all { (v, _) -> v[2] <= w + maxOf(2.0, 0.02 * w) && v[3] <= h + maxOf(2.0, 0.02 * h) }
+        val quarter = rotation == 90 || rotation == 270
+        // Expected frame first; fall back to the tag's own frame only when every word proves the tag was already rotated.
+        val swapped = quarter && !(fits(tagWidth, tagHeight) && !fits(tagHeight, tagWidth))
+        val width = if (swapped) tagHeight else tagWidth; val height = if (swapped) tagWidth else tagHeight
+        val words = raw.mapNotNull { (v, text) ->
+            if (v[0] < 0 || v[1] < 0 || v[2] > width + maxOf(2.0, 0.02 * width) || v[3] > height + maxOf(2.0, 0.02 * height)) null
+            else {
+                val x1 = minOf(v[2], width); val y1 = minOf(v[3], height)
+                if (x1 <= v[0] || y1 <= v[1]) null else json("x0" to v[0], "y0" to v[1], "x1" to x1, "y1" to y1, "text" to text)
+            }
+        }
         return json("documentId" to d.id, "version" to d.version, "pdfPage" to page, "width" to width, "height" to height,
             "words" to JsonArray(words), "textLayer" to words.isNotEmpty())
     }
 
     // One renderer at a time, off the ledger actor and event loops. Disk cache is version-addressed.
-    private suspend fun cached(d: ReaderDocument, page: Int, image: Boolean, bbox: Boolean = false): ByteArray = withContext(Dispatchers.IO) {
+    private suspend fun cached(d: ReaderDocument, page: Int, image: Boolean, bbox: Boolean = false, rot: Boolean = false): ByteArray = withContext(Dispatchers.IO) {
         if (page !in 1..d.pages) throw ReaderFailure(io.ktor.http.HttpStatusCode.NotFound, "PDF 页码超出文档")
         lock.withLock {
             val realRoot = root!!.toRealPath()
@@ -155,15 +172,16 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
             }
             val cache = Files.createDirectories(realRoot.resolve("cache").resolve(d.version))
             require(cache.toRealPath().startsWith(realRoot)) { "Reader cache outside library" }
-            val target = cache.resolve(if (bbox) "$page-bbox.html" else "$page" + if (image) "-1600.png" else ".txt")
+            val target = cache.resolve(if (rot) "$page-info.txt" else if (bbox) "$page-bbox.html" else "$page" + if (image) "-1600.png" else ".txt")
             if (!Files.exists(target)) {
                 val temp = Files.createTempDirectory(cache, "render-")
                 try {
                     val out = temp.resolve(if (image) "page" else if (bbox) "page.html" else "page.txt")
-                    val command = if (bbox) listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-bbox", "-enc", "UTF-8", d.file.toString(), out.toString())
+                    val command = if (rot) listOf(executable("pdfinfo"), "-f", "$page", "-l", "$page", d.file.toString())
+                        else if (bbox) listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-bbox", "-enc", "UTF-8", d.file.toString(), out.toString())
                         else if (image) listOf(executable("pdftoppm"), "-f", "$page", "-l", "$page", "-singlefile", "-scale-to", "1600", "-png", d.file.toString(), out.toString())
                         else listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-layout", "-enc", "UTF-8", d.file.toString(), out.toString())
-                    val process = try { ProcessBuilder(command).redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start() }
+                    val process = try { ProcessBuilder(command).redirectOutput(if (rot) ProcessBuilder.Redirect.to(out.toFile()) else ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start() }
                         catch (_: Exception) { throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "Mac 缺少本地 PDF 渲染工具") }
                     try {
                         if (!process.waitFor(20, TimeUnit.SECONDS) || process.exitValue() != 0)

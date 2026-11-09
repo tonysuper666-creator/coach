@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.TextRange
@@ -265,6 +267,42 @@ class PrivateReaderScreenTest {
                 fake.study = study("C", "Recovered point", false, 0)
                 onNodeWithTag("private-study-retry").performClick()
                 waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() }
+            }
+        }
+    }
+
+    @Test fun practiceButtonOpensOverReaderAndClosingKeepsTheSamePageWithoutNewProgressWrites() = FakeReader().use { fake ->
+        fake.study = """{"facts":[],"questions":[{"id":"Q1","week":2,"tier":"setup","stem":"Stem","status":"new"},{"id":"Q2","week":2,"tier":"detail","stem":"Stem two","status":"new"}],"unlocated":0}"""
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) {
+                PrivateReaderScreen(fake.http.reader, practice = { week, ids, close -> androidx.compose.material3.TextButton(onClick = close, modifier = Modifier.semantics { testTag = "stub-close" }) { androidx.compose.material3.Text("practice $week ${ids.sorted()}") } }) {}
+            } } } }
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-book-synthetic").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-toggle").fetchSemanticsNodes().isNotEmpty() }
+            val writesBefore = fake.writes.size
+            onNodeWithTag("private-study-practice-2").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("stub-close").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("practice 2 [Q1, Q2]").assertExists()
+            onNodeWithTag("stub-close").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-practice-2").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
+            assertEquals(writesBefore, fake.writes.size)
+        }
+    }
+
+    @Test fun noPracticeButtonWhenPageHasNoQuestionsOrStudyFails() {
+        for (body in listOf<String?>("""{"facts":[{"id":"F","week":1,"text":"Only a point","mastered":false}],"questions":[],"unlocated":0}""", null)) FakeReader().use { fake ->
+            fake.study = body
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) {
+                    PrivateReaderScreen(fake.http.reader, practice = { _, _, _ -> }) {}
+                } } } }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() || onAllNodesWithTag("private-study-failed").fetchSemanticsNodes().isNotEmpty() }
+                onAllNodesWithTag("private-study-practice-1").assertCountEquals(0)
+                onAllNodesWithTag("private-study-practice-2").assertCountEquals(0)
             }
         }
     }

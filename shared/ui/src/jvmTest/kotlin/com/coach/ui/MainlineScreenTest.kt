@@ -134,7 +134,8 @@ class MainlineScreenTest {
                 onNodeWithText("答错了。").performScrollTo().assertIsDisplayed()
                 onNodeWithText("已排进复习：明天再看一次。").performScrollTo().assertIsDisplayed()
                 onNodeWithText("已进第 1 周错题本", substring = true).performScrollTo().assertIsDisplayed()
-                onNodeWithText("Synthetic lecture 1, slide 4").performScrollTo().assertIsDisplayed()
+                // The source is now the reader citation button (label "出处：" + source), so the exact label is asserted on that node.
+                onNodeWithTag("private-citation").performScrollTo().assertTextEquals("出处：Synthetic lecture 1, slide 4")
                 capture("mainline-explained-bottom-$width")
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
@@ -175,4 +176,49 @@ class MainlineScreenTest {
     @Test fun lostWrongReplyMarksTheRecordedChoiceAfterChangingBothChoiceAndGuess() = walk(412, 915, 0, false)
     @Test fun lostGuessedReplyKeepsTheRecordedGuessAfterAnUnguessedRetry() = walk(1000, 800, 1, true)
     @Test fun lostCorrectReplyKeepsTheRecordedPassAfterAGuessedRetry() = walk(412, 915, 1, false)
+
+    private fun controller(mac: FakeMac): CoachController {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("No ledger network in this test")
+            override suspend fun snapshot(course: String): Snapshot = error("No network")
+            override suspend fun events(course: String, after: Long): EventsPage = error("No network")
+            override suspend fun command(command: WireCommand): Receipt = error("No network")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("No network")
+        }
+        return CoachController("C", SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
+            TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now })), formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
+    }
+
+    @Test fun pagePracticeShowsOnlyThePagesQuestionsAndReturns() = FakeMac(today, false).use { mac ->
+        val c = controller(mac)
+        val view = CourseView(emptyList(), project(emptyList()))
+        var closed = 0
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PagePracticeBody(c, view, 1, setOf("D1"), onClose = { closed++ }) } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("question D1", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithText("question S1", substring = true).assertCountEquals(0)
+            onAllNodesWithText("question B1", substring = true).assertCountEquals(0)
+            onNodeWithText("← 回到阅读").performClick()
+            assertEquals(1, closed)
+        }
+    }
+
+    @Test fun pagePracticeNeverPretendsWhenQuestionsAreMissingOrNoLocalRecord() = FakeMac(today, false).use { mac ->
+        val c = controller(mac)
+        val view = CourseView(emptyList(), project(emptyList()))
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PagePracticeBody(c, view, 1, setOf("GONE"), onClose = {}) } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("在这一周的选择题里找不到", substring = true).fetchSemanticsNodes().isNotEmpty() }
+        }
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PagePracticeBody(c, null, 1, setOf("D1"), onClose = {}) } } } }
+            onNodeWithText("暂时不能开始练习", substring = true).assertExists()
+        }
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PagePracticeBody(c, view, 1, emptySet(), onClose = {}) } } } }
+            onNodeWithText("本页没有登记的题", substring = true).assertExists()
+        }
+    }
 }

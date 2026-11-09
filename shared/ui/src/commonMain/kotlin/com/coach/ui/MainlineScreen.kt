@@ -92,12 +92,12 @@ private val tierNames = mapOf("setup" to "铺垫题", "detail" to "细节题", "
 
 @Composable
 private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, onBack: () -> Unit,
-    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
+    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, only: Set<String>? = null) {
     val scope = rememberCoroutineScope()
     var reload by remember { mutableStateOf(0) }
     val reply by produceState<MockReply?>(null, reload) { value = http.mainlineWeek(number) }
     val body = reply?.body
-    val items = remember(body) { (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject } }
+    val items = remember(body, only) { (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only } }
     var index by remember(body) { mutableStateOf(items.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0)) }
     var coverage by remember(body) { mutableStateOf(body?.get("coverage") as? JsonObject) }
     var chosen by remember(index, body) { mutableStateOf<Int?>(null) }
@@ -109,11 +109,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val now = rememberCourseNow(c)
     val scroll = rememberScrollState()
     LaunchedEffect(index) { scroll.scrollTo(0) }
-    Header("第 $number 周 · 选择题", "← 选周", onBack)
+    Header("第 $number 周 · 选择题", if (only == null) "← 选周" else "← 回到阅读", onBack)
     when {
         reply == null -> { CenterMessage("正在读取…"); return }
         body == null -> { CenterMessage(reply!!.error ?: "连不上 Mac，读不到这一周的题。"); return }
-        items.isEmpty() -> { CenterMessage("这一周还没有题。"); return }
+        items.isEmpty() -> { CenterMessage(if (only == null) "这一周还没有题。" else "本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
     }
     val item = items[index]
     val options = item.strings("options")
@@ -175,7 +175,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
             (explanation?.str("source")?.takeIf { it.isNotBlank() } ?: done.str("source").takeIf { it.isNotBlank() })?.let { PrivateSourceReference(http.reader, it) }
             val next = done.str("next").takeIf { it.isNotBlank() }
-            if (done.str("tier") == "bridge") {
+            if (done.str("tier") == "bridge" && only == null) {
                 Text("桥接题连着大题：接着练一道步骤批改，或写一篇限时论述。", style = MaterialTheme.typography.bodyMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onOpenSteps, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("mainline-steps")) { Text("步骤批改") }
@@ -223,6 +223,32 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
                 color = if (r.str("status") == "missed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
             queued?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
             if (week != null) TextButton(onClick = { onReviewWeek(week) }, contentPadding = PaddingValues(0.dp)) { Text("已进第 $week 周错题本 ›") }
+        }
+    }
+}
+
+/** The reader's "去做这几题": the existing weekly walk restricted to the questions registered on one page; closing returns to the reader untouched. */
+@Composable
+internal fun PagePractice(c: CoachController, week: Int, ids: Set<String>, onClose: () -> Unit) {
+    val revision by c.sync.revision.collectAsState()
+    val view by produceState<CourseView?>(null, revision) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val events = c.sync.localEvents(c.courseId)
+            if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
+        }
+    }
+    PagePracticeBody(c, view, week, ids, onClose)
+}
+
+@Composable
+internal fun PagePracticeBody(c: CoachController, view: CourseView?, week: Int, ids: Set<String>, onClose: () -> Unit) {
+    val http = c.course
+    Column(Modifier.fillMaxSize()) {
+        when {
+            http == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("要连接 Mac 才能做题。") }
+            ids.isEmpty() -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本页没有登记的题。") }
+            view == null -> { Header("本页练习", "← 回到阅读", onClose); CenterMessage("本机还没有这门课的学习记录，暂时不能开始练习。") }
+            else -> MainlineWeek(c, http, view, week, onBack = onClose, onOpenSteps = onClose, onOpenEssay = onClose, onReviewWeek = { onClose() }, only = ids)
         }
     }
 }

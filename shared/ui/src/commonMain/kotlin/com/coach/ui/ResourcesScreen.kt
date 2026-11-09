@@ -42,7 +42,7 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
     val http = c.course
     var privateReader by remember(jump) { mutableStateOf(false) }
     if (privateReader && http != null) {
-        PrivateReaderScreen(http.reader) { privateReader = false }
+        PrivateReaderScreen(http.reader, practice = { week, ids, close -> PagePractice(c, week, ids, close) }) { privateReader = false }
         return
     }
     var attempt by remember { mutableStateOf(0) }

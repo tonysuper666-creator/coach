@@ -46,7 +46,8 @@ internal sealed interface ReaderLoad<out T> {
 
 /** Only registered private PDFs, through the existing paired client; no content enters tutor requests. */
 @Composable
-internal fun PrivateReaderScreen(reader: ReaderHttp, onBack: () -> Unit) {
+internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null,
+                                 onBack: () -> Unit) {
     var retry by remember { mutableIntStateOf(0) }
     val catalog by produceState<ReaderLoad<List<PrivateDocument>>>(ReaderLoad.Loading, reader, retry) {
         value = ReaderLoad.Loading
@@ -64,7 +65,7 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, onBack: () -> Unit) {
         }
         val selected = document
         when {
-            selected != null -> PrivatePdfDocument(reader, selected) { document = null }
+            selected != null -> PrivatePdfDocument(reader, selected, practice = practice) { document = null }
             catalog is ReaderLoad.Loading -> CenterMessage("正在读取教材目录…")
             catalog is ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("教材目录暂时不可用，请检查 Mac 连接。")
@@ -87,7 +88,8 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, onBack: () -> Unit) {
 
 @OptIn(ExperimentalUuidApi::class)
 @Composable
-private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, onBack: () -> Unit) {
+private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null,
+                               practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null, onBack: () -> Unit) {
     var retry by remember(doc) { mutableIntStateOf(0) }
     val state by produceState<ReaderLoad<JsonObject>>(ReaderLoad.Loading, reader, doc, retry) {
         value = ReaderLoad.Loading
@@ -151,7 +153,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     if (initialPage != null) Text("已按出处定位到页；页面内容仍需核对。", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
                     Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
                     if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
-                    PageStudyPanel(reader, doc.id, page)
+                    PageStudyPanel(reader, doc.id, page, practice)
                     val draft = pending
                     if (draft != null && !busy) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

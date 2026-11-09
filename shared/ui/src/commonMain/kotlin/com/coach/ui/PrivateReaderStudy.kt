@@ -39,7 +39,8 @@ private fun statusLabel(status: String) = when (status) {
 
 /** "本页考点 n 个 · 已掌握 m · 题 k 道": the index of this page only, loaded per page and never from another course. */
 @Composable
-internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int) {
+internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int,
+                            practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null) {
     var retry by remember(documentId, page) { mutableIntStateOf(0) }
     val result by produceState<ReaderLoad<PageStudy>>(ReaderLoad.Loading, reader, documentId, page, retry) {
         value = ReaderLoad.Loading
@@ -47,6 +48,12 @@ internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int) {
         value = (if (reply.ok) pageStudy(reply.body) else null)?.let { ReaderLoad.Ready(it) } ?: ReaderLoad.Failed
     }
     var open by remember(documentId, page) { mutableStateOf(false) }
+    var practicing by remember(documentId, page) { mutableStateOf<Pair<Int, Set<String>>?>(null) }
+    practicing?.let { (week, ids) ->
+        androidx.compose.ui.window.Dialog(onDismissRequest = {}, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)) {
+            Surface(Modifier.fillMaxSize().testTag("private-practice")) { practice?.invoke(week, ids) { practicing = null; retry++ } }
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("private-study")) {
         when (val r = result) {
             ReaderLoad.Loading -> Text("正在读取本页考点…", style = MaterialTheme.typography.labelMedium)
@@ -64,6 +71,8 @@ internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("private-study-unlocated"))
                 if (s.facts.isNotEmpty() || s.questions.isNotEmpty()) {
                     TextButton(onClick = { open = !open }, modifier = Modifier.heightIn(min = 48.dp).testTag("private-study-toggle")) { Text(if (open) "收起" else "看本页考点和题") }
+                    if (practice != null) for ((week, qs) in s.questions.groupBy { it.week }.toSortedMap())
+                        OutlinedButton(onClick = { practicing = week to qs.map { it.id }.toSet() }, modifier = Modifier.heightIn(min = 48.dp).testTag("private-study-practice-$week")) { Text("去做这几题（第 $week 周 ${qs.size} 题）") }
                     if (open) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         for (f in s.facts) Text("• ${f.text}" + if (f.mastered) "（已掌握）" else "", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-fact-${f.id}"))
                         for (q in s.questions) Text("题 W${q.week} ${q.id}：${q.stem}（${statusLabel(q.status)}）", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-question-${q.id}"))

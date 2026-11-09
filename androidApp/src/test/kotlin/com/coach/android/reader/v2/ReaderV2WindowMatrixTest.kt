@@ -10,6 +10,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
@@ -87,6 +89,12 @@ class ReaderV2WindowMatrixTest(private val windowName: String, private val width
             compose.onNodeWithTag("reader-question-pane").assertIsDisplayed()
             compose.onNodeWithTag("reader-answer-slope").assertIsDisplayed()
             compose.onNodeWithTag("reader-source-slope").assertIsDisplayed()
+            if (dark) {
+                val title = compose.onNodeWithText(ReaderV2Fixture.questions.first().text).captureToImage().toPixelMap()
+                val ink = darkColorScheme().onBackground.toArgb()
+                assertTrue("Dark question text must render with the light theme ink",
+                    (0 until title.height).any { y -> (0 until title.width).any { x -> title[x, y].toArgb() == ink } })
+            }
         } else compose.onNodeWithTag("reader-question-pane").assertDoesNotExist()
         if (windowName == "inner-landscape") assertTrue(page.width / actualDensity.density >= 520f)
 

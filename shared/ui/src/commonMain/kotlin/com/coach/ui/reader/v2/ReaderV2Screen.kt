@@ -40,6 +40,7 @@ fun ReaderV2Screen(
     fun column(id: Int?) { onSession(session.copy(position = session.position.copy(columnId = id), overview = false)) }
     var chromeHeight by remember { mutableStateOf(0f) }
     val density = LocalDensity.current.density
+    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).testTag("reader-${panes.arrangement.name.lowercase()}")) {
         Row(Modifier.fillMaxWidth().onSizeChanged { chromeHeight = it.height / density }.horizontalScrollForReader(), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { onSession(session.copy(focus = ReaderFocus.READING)) }) { Text("读原文") }
@@ -115,6 +116,7 @@ fun ReaderV2Screen(
                 }
             }
         }
+    }
     }
 }
 

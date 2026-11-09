@@ -35,4 +35,26 @@ final class ReaderExperienceTests: XCTestCase {
         XCTAssertEqual(SourceResolution.changedOrAmbiguous.message, "原句改过了，对不上")
         XCTAssertNotNil(SourceResolution.unavailable.message)
     }
+
+    func testFileStoreRestoresAndRejectsStaleOrWrongScope() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("draft.json")
+        let first = FileReaderDraftStore(url: url, scope: "synthetic-book")
+        let stale = FileReaderDraftStore(url: url, scope: "synthetic-book")
+        XCTAssertNil(try first.load())
+        XCTAssertNil(try stale.load())
+        let draft = ReaderDraft(position: .pdf(pageIndex: 2, columnIndex: 1), selectedQuestionID: "q", answers: ["q": "B"], notes: ["a": "note"])
+        try first.save(draft)
+        XCTAssertThrowsError(try stale.save(draft)) { XCTAssertEqual($0 as? FileReaderDraftStore.StoreError, .conflict) }
+        XCTAssertEqual(try FileReaderDraftStore(url: url, scope: "synthetic-book").load(), draft)
+        XCTAssertThrowsError(try FileReaderDraftStore(url: url, scope: "different-book").load()) { XCTAssertEqual($0 as? FileReaderDraftStore.StoreError, .wrongScope) }
+    }
+
+    func testPageContractDoesNotBecomeVerifiedSentence() throws {
+        let json = #"{"docId":"synthetic","pdfPage":3,"bookPage":null,"text":"invented text"}"#.data(using: .utf8)!
+        let page = try JSONDecoder().decode(CoachSourcePage.self, from: json)
+        XCTAssertNil(page.bookPage)
+        XCTAssertEqual(page.sourceWithoutSentenceAnchor(), .unavailable)
+    }
 }

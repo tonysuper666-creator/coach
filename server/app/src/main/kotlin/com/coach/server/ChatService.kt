@@ -84,7 +84,7 @@ class ChatService(
     val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
-    private val preparation = LessonPreparation(actor,bridge,packsDirectory,examMaterials)
+    private val preparation = LessonPreparation(actor,bridge,packsDirectory,examMaterials,log)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()
 
@@ -361,7 +361,10 @@ class ChatService(
         val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan, FirstWordTrace(messageId, null, receivedAt), receivedAt)
         session.examIdentity = examIdentity
         protectExams(session)
-        session.examContext = examMaterials.context(session.examIdentity, question + "\n" + sourcePack.take(1_000))
+        val examResult = examMaterials.contextWithStatus(session.examIdentity, question + "\n" + sourcePack.take(1_000))
+        session.examContext = examResult.text
+        // Status only: never the definition, aliases or any source text.
+        if (examResult.text.isNotEmpty()) log("COACH exam-definition msg=$messageId src=chat status=${examResult.status}")
         sessions[messageId] = session
         val recent = actor.execute { recentTurns(threadId,beforeMessage=userMessageId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }

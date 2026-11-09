@@ -4,7 +4,11 @@ import kotlin.test.*
 
 /** Synthetic fixtures only: no course, question or answer text. */
 class ExamSourceIndexTest {
-    private val exams = listOf("Amber badgers carry delicate emerald feathers gently home.", "Ivory jaguars keep lemons near old purple quails.")
+    // Long enough that the past-paper section really reaches its cap (the join separator once pushed it over).
+    private val exams = listOf(
+        List(8) { "Amber badgers $it carry delicate emerald feathers gently home." }.joinToString(" "),
+        List(8) { "Ivory jaguars $it keep lemons near old purple quails." }.joinToString(" "),
+    )
     private val course = "ECNM10119"
     // Tokens the synthetic noise paragraphs never contain, so only intended paragraphs score.
     private val english = "Explain quokkaphase trilemma."
@@ -109,18 +113,20 @@ class ExamSourceIndexTest {
         assertFalse(result.text.contains(tooLong.take(10)), "no prefix of an unsupported definition")
         assertFalse(result.text.contains("<course-definition>"))
         val parts = body(result.text)
-        assertTrue(parts.adjudications.startsWith("[课程定义未载入"), "the model is told")
-        assertTrue(parts.adjudications.length <= 160, "the notice is paid for inside the 160 budget")
+        assertTrue(result.text.contains(ExamMaterials.UNLOADED_TAG), "a fixed tag says the definition was not loaded")
+        assertTrue(parts.adjudications.length <= 160, "relevant rulings keep their whole 160")
+        assertEquals(baseline.text.length + ExamMaterials.UNLOADED_TAG.length, result.text.length, "only the fixed tag is added")
         assertTrue(parts.sum <= 700)
         assertTrue(parts.planning.length - 1 <= 380 && parts.papers.length <= 160)
         assertEquals(DefinitionStatus.NO_INDEX, baseline.status)
+        assertFalse(materials(rulings(tooLong), null).context(course, english).contains(ExamMaterials.UNLOADED_TAG))
     }
 
     @Test fun theFixedHeaderAndTagsAreNotUsedToGrowTheTotal() {
         val text = def(426)
         val plain = body(materials(rulings(text), null).context(course, english))
         val injected = body(materials(rulings(text), sidecar(entry("d", "rulings", text, listOf("quokkaphase")))).context(course, english))
-        assertEquals(plain.overhead + "<course-definition>\n".length + "\n</course-definition>\n".length, injected.overhead)
+        assertEquals(plain.overhead + "<course-definition id=\"d\">\n".length + "\n</course-definition>\n".length, injected.overhead)
     }
 
     // ---- no index / no alias: baseline unchanged, nothing guessed ---------------------------------------------
@@ -136,7 +142,7 @@ class ExamSourceIndexTest {
         val unrelated = withIndex.contextWithStatus(course, "Please teach discounting with fresh numbers")
         assertEquals(DefinitionStatus.NONE, unrelated.status)
         assertEquals(baseline.context(course, "Please teach discounting with fresh numbers"), unrelated.text)
-        assertFalse(unrelated.text.contains("[课程定义未载入"), "no notice when nothing matched")
+        assertFalse(unrelated.text.contains("<course-definition"), "no tag when nothing matched")
     }
 
     @Test fun anIrrelevantDefinitionNeverCrowdsOutARulingThatMatches() {
@@ -173,7 +179,8 @@ class ExamSourceIndexTest {
         val result = tied.contextWithStatus(course, english)
         assertEquals(DefinitionStatus.AMBIGUOUS, result.status)
         assertFalse(result.text.contains("<course-definition>"))
-        assertTrue(body(result.text).adjudications.startsWith("[课程定义未载入"))
+        assertTrue(result.text.contains(ExamMaterials.UNLOADED_TAG))
+        assertFalse(body(result.text).adjudications.contains("课程定义未载入"))
 
         val prioritised = materials(source, sidecar(entry("a", "rulings", a, listOf("quokkaphase"), 0), entry("b", "rulings", b, listOf("quokkaphase"), 5)))
         assertEquals("b", prioritised.contextWithStatus(course, english).definitionId)
@@ -188,7 +195,8 @@ class ExamSourceIndexTest {
         val result = materials(rulings(changed), sidecar(entry("d", "rulings", original, listOf("quokkaphase")))).contextWithStatus(course, english)
         assertEquals(DefinitionStatus.ENTRY_INVALID, result.status)
         assertFalse(result.text.contains("<course-definition>"))
-        assertTrue(body(result.text).adjudications.startsWith("[课程定义未载入"))
+        assertTrue(result.text.contains(ExamMaterials.UNLOADED_TAG))
+        assertFalse(body(result.text).adjudications.contains("课程定义未载入"))
     }
 
     @Test fun shortAndHanAliasesFollowTheLengthRule() {
@@ -200,6 +208,56 @@ class ExamSourceIndexTest {
         assertEquals(0, parsed("abc").rejected)
         val m = materials(rulings(text), sidecar(entry("d", "rulings", text, listOf("夜航"))))
         assertEquals(DefinitionStatus.INJECTED, m.contextWithStatus(course, "请用夜航定价讲一个新例子").status)
+    }
+
+    // ---- the total is proven on the real output, not on the allocation ---------------------------------------------
+
+    @Test fun everyDefinitionLengthKeepsEverySectionAndTheWholeBodyWithinTheCaps() {
+        for (length in 1..454) {
+            val text = def(length, "L")
+            val result = materials(rulings(text), sidecar(entry("d", "rulings", text, listOf("quokkaphase")))).contextWithStatus(course, english)
+            assertEquals(DefinitionStatus.INJECTED, result.status, "length $length")
+            val caps = checkNotNull(ExamBudget.capsFor(length))
+            val parts = body(result.text)
+            assertEquals(text, parts.definition, "length $length")
+            assertTrue(parts.planning.length - 1 <= caps.overview + caps.planning, "planning at $length")
+            assertTrue(parts.adjudications.length <= caps.adjudications, "adjudications at $length")
+            assertTrue(parts.papers.length <= caps.papers, "papers ${parts.papers.length} > ${caps.papers} at $length")
+            assertTrue(parts.sum <= 700, "body ${parts.sum} at $length")
+        }
+        val tooLong = def(455, "L")
+        assertEquals(DefinitionStatus.TOO_LONG, materials(rulings(tooLong), sidecar(entry("d", "rulings", tooLong, listOf("quokkaphase")))).contextWithStatus(course, english).status)
+    }
+
+    @Test fun withoutAnyDefinitionTheSectionsStayWithinTheOriginalCaps() {
+        for (query in listOf("Please teach discounting", english, "Explain zebrafoo")) {
+            val parts = body(materials(rulings(null, "zebrafoo ruling ".repeat(20)), null).context(course, query))
+            assertTrue(parts.planning.length - 1 <= 380 && parts.adjudications.length <= 160 && parts.papers.length <= 160 && parts.sum <= 700, "baseline body ${parts.sum}")
+        }
+    }
+
+    @Test fun theDefinitionCarriesItsSourceIdAndNothingAboutAliasesOrPaths() {
+        val text = def(300)
+        val result = materials(rulings(text), sidecar(entry("def-01", "rulings", text, listOf("quokkaphase")))).contextWithStatus(course, english)
+        assertTrue(result.text.contains("<course-definition id=\"def-01\">"))
+        assertFalse(result.text.contains("quokkaphase"))
+        assertFalse(result.text.contains("rulings") || result.text.contains(ExamSourceIndex.FILE_NAME))
+    }
+
+    @Test fun aDefinitionThatIsTheFormatParagraphIsNotInjectedTwice() {
+        val formatDefinition = "**考试格式：** " + "甲乙丙丁".repeat(50)
+        val g = formatDefinition + "\n\n" + List(4) { "Synthetic planning paragraph $it. ".repeat(10) }.joinToString("\n\n")
+        val m = ExamMaterials.fromTexts(exams, g, rulings(), sidecar(entry("f", "guidance", formatDefinition, listOf("quokkaphase"))))
+        val result = m.contextWithStatus(course, english)
+        assertEquals(DefinitionStatus.INJECTED, result.status)
+        assertEquals(1, Regex("考试格式").findAll(result.text).count())
+    }
+
+    @Test fun staleAndRejectedEntriesAreCountedSeparately() {
+        val text = def(100)
+        val stale = ExamSourceIndex.parse(sidecar(entry("d", "rulings", text.replace("甲", "乙"), listOf("quokkaphase"))), "", rulings(text))
+        assertEquals(0, stale.rejected)
+        assertEquals(1, stale.stale)
     }
 
     // ---- malicious or broken sources --------------------------------------------------------------------------

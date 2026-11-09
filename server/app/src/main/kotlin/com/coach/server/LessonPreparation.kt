@@ -14,7 +14,7 @@ import java.time.Instant
 
 /** Local course assets only. A prepared lesson never marks a concept taught until displayed. */
 class LessonPreparation(private val actor: LedgerActor, private val bridge: BridgeClient, private val packs: Path,
-    private val examMaterials: ExamMaterials = ExamMaterials.load()) {
+    private val examMaterials: ExamMaterials = ExamMaterials.load(), private val log: (String) -> Unit = {}) {
     companion object {
         const val MAX_LESSON_INPUT_CHARS = 15_000
         /** A graded-mistake reteach already carries the reasoning in the reviewed explanation; a short source keeps the model from deliberating before its first character. */
@@ -128,7 +128,11 @@ class LessonPreparation(private val actor: LedgerActor, private val bridge: Brid
                 }
             } ?: course
     }
-    private fun examReference(identity: String, source: String) = examMaterials.context(identity, source.take(1_000))
+    private fun examReference(identity: String, source: String): String {
+        val result = examMaterials.contextWithStatus(identity, source.take(1_000))
+        if (result.text.isNotEmpty()) log("COACH exam-definition src=prepare status=${result.status}")
+        return result.text
+    }
     private fun examHash(reference: String) = if (reference.isBlank()) "" else sha256(reference.toByteArray())
     suspend fun cached(course: String, kp: String, source: String, identity: String? = null): Prepared? {
         val reference = examReference(identity ?: examIdentity(course), source)

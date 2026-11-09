@@ -40,6 +40,8 @@ class ExamSourceIndex private constructor(
     private val entries: List<Entry>,
     /** Entries rejected while loading (counts only; nothing about their content is kept). */
     val rejected: Int,
+    /** Well-formed entries whose paragraph no longer matches the source or is unsafe; they still block a wrong pick. */
+    val stale: Int = 0,
 ) {
     enum class State { MISSING, REJECTED, READY }
 
@@ -108,8 +110,7 @@ class ExamSourceIndex private constructor(
             val duplicated = parsed.groupBy { it.id }.filterValues { it.size > 1 }.keys
             rejected += parsed.count { it.id in duplicated }
             val kept = parsed.filter { it.id !in duplicated }.map { Entry(it.id, it.aliases, it.priority, it.text) }
-            rejected += kept.count { it.text == null }
-            return ExamSourceIndex(State.READY, kept, rejected)
+            return ExamSourceIndex(State.READY, kept, rejected, kept.count { it.text == null })
         }
 
         private fun hashed(source: String): Map<String, String> =

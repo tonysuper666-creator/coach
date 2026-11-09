@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -29,6 +30,48 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class V7InteractionTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test fun mediumWindowCanHideNotesAndChangeTypeWithoutLosingTheDraft() {
+        compose.setContent { CoachTheme(false) {
+            Box(Modifier.requiredSize(933.dp, 704.dp)) {
+                Desk("合成课程", directory = { Text("合成周目录") }, margin = { Text("合成页边") }) {
+                    var draft by remember { mutableStateOf("") }
+                    Column {
+                        Text("正文随字号重排", Modifier.testTag("sample-body"), style = MaterialTheme.typography.bodyLarge)
+                        OutlinedTextField(draft, { draft = it }, Modifier.testTag("draft"))
+                    }
+                }
+            }
+        } }
+        compose.onNodeWithTag("draft").performTextInput("keep this draft")
+        val before = compose.onNodeWithTag("sample-body").getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        compose.onNodeWithTag("v7-directory").assertDoesNotExist()
+        compose.onNodeWithTag("v7-margin").assertIsDisplayed()
+        compose.onNodeWithTag("v7-directory-toggle").performClick()
+        compose.onNodeWithTag("v7-directory-drawer").assertIsDisplayed()
+        compose.onNodeWithText("收起目录").performClick()
+        compose.onNodeWithTag("v7-margin-toggle").performClick()
+        compose.onNodeWithTag("v7-margin").assertDoesNotExist()
+        compose.onNodeWithTag("v7-type-menu").performClick()
+        compose.onNodeWithTag("v7-type-大").performClick()
+        val after = compose.onNodeWithTag("sample-body").getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        assertTrue(after > before)
+        compose.onNodeWithTag("draft").assertTextContains("keep this draft")
+        compose.onNodeWithTag("v7-margin-toggle").performClick()
+        compose.onNodeWithTag("v7-margin").assertIsDisplayed()
+    }
+
+    @Test fun phoneNotesRemainReachableInABottomSheet() {
+        compose.setContent { CoachTheme(false) {
+            Box(Modifier.requiredSize(411.dp, 900.dp)) {
+                Desk("合成课程", margin = { Text("窄屏参考原文") }) { Text("正文") }
+            }
+        } }
+        compose.onNodeWithTag("v7-margin").assertDoesNotExist()
+        compose.onNodeWithTag("v7-margin-toggle").performClick()
+        compose.onNodeWithTag("v7-margin-sheet").assertIsDisplayed()
+        compose.onNodeWithText("窄屏参考原文").assertIsDisplayed()
+    }
 
     @Test fun focusAndFoldKeepTheSameReadingDraftAndSelection() {
         compose.setContent { CoachTheme(false) {

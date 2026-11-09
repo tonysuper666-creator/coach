@@ -10,6 +10,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.testTag
 import com.coach.client.*
 
 /** 选项点按区最小高度（dp）。验收按 ≥56dp 量。 */
@@ -49,12 +50,12 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
         val bounds=it.boundsInWindow();headerVisible=bounds.width>0 && bounds.height>0
     }.drawWithContent { drawContent();if(headerVisible) onFirstDraw() } else Modifier
     Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.padding(if (com.coach.ui.v7.LocalDeskMetrics.current.inner) 14.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("第 $number / $total 题", modifier=trace, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (card.untaught) StatusChip("这点还没讲过", MaterialTheme.colorScheme.tertiary)
             }
-            QuizText(card.stem, "q:${card.attemptId}", math, MaterialTheme.typography.titleMedium)
+            Box(Modifier.testTag("study-stem-${card.attemptId}")) { QuizText(card.stem, "q:${card.attemptId}", math, MaterialTheme.typography.titleMedium) }
             val shown = card.answer ?: selected
             if (card.options.isEmpty()) {
                 OutlinedTextField(value = shown.orEmpty(), onValueChange = onSelect, readOnly = locked,
@@ -71,7 +72,7 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
                     isMine && cardGrade != null -> cardGrade.correct
                     else -> null
                 }
-                com.coach.ui.v7.AnswerOption(letter, isMine, optionVerdict, !locked, onClick = { onSelect(letter) }) {
+                com.coach.ui.v7.AnswerOption(letter, isMine, optionVerdict, !locked, modifier = Modifier.testTag("study-option-${card.attemptId}-$letter"), onClick = { onSelect(letter) }) {
                     QuizText(text, "o:${card.attemptId}:$letter", math)
                 }
             }

@@ -204,16 +204,17 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val pageHeight = maxHeight - m.topPadding - 24.dp - (if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp)
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .padding(bottom = if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp).verticalScroll(scroll)
+                .padding(bottom = if (m.inner) 0.dp else if (m.window == DeskWindow.Outer) 85.dp else 69.dp).testTag("mainline-scroll-viewport").verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(if (d.sectionLabel.isBlank()) "${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1} / ${items.size} 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 ${index + 1} 题 / ${items.size}",
-                        style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text("不计时", style = MaterialTheme.typography.labelMedium)
                 }
                 Spacer(Modifier.height(12.dp))
-                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium.copy(lineHeight = 30.4.sp))
+                QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math, MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(20.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     options.forEachIndexed { i, option ->

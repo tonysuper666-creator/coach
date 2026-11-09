@@ -28,6 +28,8 @@ class PrivateReaderScreenTest {
         val notes = CopyOnWriteArrayList<JsonObject>()
         val noteWrites = CopyOnWriteArrayList<JsonObject>()
         @Volatile var version = "v1"
+        /** null → the study route fails; otherwise the exact body for any page. */
+        @Volatile var study: String? = null
         val auth = CopyOnWriteArrayList<String>()
         private val png = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(30, 40, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -74,6 +76,7 @@ class PrivateReaderScreenTest {
                             """{"revision":$revision}""".toByteArray()
                         }
                     }
+                    path.endsWith("/study") -> study?.toByteArray() ?: run { status = 503; "{}".toByteArray() }
                     path.endsWith("/state") -> buildJsonObject {
                         put("document", buildJsonObject { put("version", version) })
                         put("progress", buildJsonObject { put("version", if (stale) "old" else version); put("pdfPage", currentPage); put("revision", revision); put("stale", stale) })
@@ -226,6 +229,43 @@ class PrivateReaderScreenTest {
             waitUntil(timeoutMillis = 10000) { onAllNodesWithText("已保存").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(3, fake.currentPage)
             assertEquals(8L, fake.writes.last().getValue("baseRevision").jsonPrimitive.long)
+        }
+    }
+
+    private fun study(course: String, fact: String, mastered: Boolean, unlocated: Int) =
+        """{"facts":[{"id":"f-$course","week":1,"text":"$fact","mastered":$mastered}],"questions":[{"id":"q-$course","week":1,"tier":"setup","stem":"Stem $course","status":"${if (mastered) "mastered" else "missed"}"}],"unlocated":$unlocated}"""
+
+    @Test fun pageStudyShowsEachCoursesOwnPointsAndMissingSourcesHonestly() {
+        for ((course, mastered, unlocated) in listOf(Triple("C", true, 0), Triple("OTHER", false, 3))) FakeReader(course = course).use { fake ->
+            fake.study = study(course, "Invented point $course", mastered, unlocated)
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-study-summary").assertTextContains("本页考点 1 个 · 已掌握 ${if (mastered) 1 else 0}", substring = true)
+                if (unlocated > 0) onNodeWithTag("private-study-unlocated").assertTextContains("另有 3 条", substring = true) else onAllNodesWithTag("private-study-unlocated").assertCountEquals(0)
+                onNodeWithTag("private-study-toggle").performClick()
+                onNodeWithTag("private-study-fact-f-$course").assertExists()
+                onNodeWithTag("private-study-question-q-$course").assertExists()
+                onAllNodesWithTag("private-study-fact-f-${if (course == "C") "OTHER" else "C"}").assertCountEquals(0)
+            }
+        }
+    }
+
+    @Test fun pageStudyFailureAndMalformedReplyAreNotShownAsAnEmptyPage() = FakeReader().use { fake ->
+        for (body in listOf<String?>(null, """{"facts":"oops"}""")) {
+            fake.study = body
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-failed").fetchSemanticsNodes().isNotEmpty() }
+                onAllNodesWithTag("private-study-summary").assertCountEquals(0)
+                fake.study = study("C", "Recovered point", false, 0)
+                onNodeWithTag("private-study-retry").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() }
+            }
         }
     }
 }

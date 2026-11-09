@@ -38,7 +38,7 @@ internal fun privateDocuments(body: JsonObject?): List<PrivateDocument>? =
         if (id.isBlank() || title.isBlank() || version.isBlank() || pages < 1) null else PrivateDocument(id, title, version, pages)
     }
 
-private sealed interface ReaderLoad<out T> {
+internal sealed interface ReaderLoad<out T> {
     data object Loading : ReaderLoad<Nothing>
     data object Failed : ReaderLoad<Nothing>
     data class Ready<T>(val value: T) : ReaderLoad<T>
@@ -151,6 +151,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     if (initialPage != null) Text("已按出处定位到页；页面内容仍需核对。", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
                     Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
                     if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
+                    PageStudyPanel(reader, doc.id, page)
                     val draft = pending
                     if (draft != null && !busy) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -90,7 +90,7 @@ internal class ReaderLedger {
 }
 
 /** Authenticated, course-scoped routes. Also enforce auth when mounted without ledgerRoutes in a test. */
-fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, library: ReaderLibrary) {
+fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, library: ReaderLibrary, mainline: Mainline? = null) {
     val ledger = ReaderLedger()
     suspend fun ApplicationCall.answer(block: suspend (String, String) -> Unit) {
         response.header(HttpHeaders.CacheControl, "no-store")
@@ -123,6 +123,14 @@ fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 val version = call.request.queryParameters["version"]
                 if (version != null && version != d.version) conflictReader("资料版本已改变，请重新定位")
                 call.respondBytes(library.image(d, call.page()), ContentType.Image.PNG)
+            } }
+            get("/{document}/pages/{page}/study") { call.answer { course, _ ->
+                val d = library.document(course, call.parameters["document"]!!)
+                val page = call.page().also { if (it !in 1..d.pages) throw ReaderFailure(HttpStatusCode.NotFound, "PDF 页码超出文档") }
+                val locate = { source: String -> runCatching { library.resolve(course, source) }.getOrNull()?.let { it.str("documentId") to it.num("pdfPage").toInt() } }
+                call.json(if (mainline == null) json("documentId" to d.id, "pdfPage" to page, "facts" to JsonArray(emptyList()), "questions" to JsonArray(emptyList()),
+                    "factsMastered" to 0, "questionsMastered" to 0, "unlocated" to 0, "available" to false)
+                else actor.execute { mainline.pageStudy(this, course, d.id, page, locate) })
             } }
             get("/{document}/state") { call.answer { course, _ ->
                 val d = library.document(course, call.parameters["document"]!!)

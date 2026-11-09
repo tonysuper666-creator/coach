@@ -139,6 +139,37 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             "mastered" to status.count { it.value == "mastered" }, "keysPending" to week.items.count { !it.verified })
     }
 
+    /**
+     * Facts and questions whose registered source lands on one PDF page. A source that is blank, unregistered or ambiguous is counted
+     * as `unlocated` for the whole course and never guessed onto a page, so the reader can say the index is incomplete.
+     */
+    internal fun pageStudy(store: LedgerStore, course: String, documentId: String, page: Int, locate: (String) -> Pair<String, Int>?): JsonObject {
+        val events = store.events(course)
+        val (weeks, _) = weeks(courseNames(events, course))
+        val history = ChoiceHistory(events)
+        fun refs(source: String) = source.split(Regex("[;；\n]")).map { it.trim() }.filter { it.isNotEmpty() }
+        fun onPage(source: String) = refs(source).any { locate(it) == documentId to page }
+        val questions = mutableListOf<JsonObject>(); val facts = mutableListOf<JsonObject>(); var unlocated = 0
+        for (w in weeks) {
+            for (item in w.items) {
+                if (item.source.isBlank() || refs(item.source).none { locate(it) != null }) unlocated++
+                else if (onPage(item.source)) questions += json("week" to w.week, "id" to item.unit.itemId, "tier" to item.tier,
+                    "stem" to item.unit.stem.take(160), "status" to history.status(item))
+            }
+            for (f in w.facts) {
+                if (f.source.isBlank() || refs(f.source).none { locate(it) != null }) unlocated++
+                else if (onPage(f.source)) {
+                    val linked = w.items.filter { f.id in it.factIds }
+                    facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp,
+                        "questions" to linked.size, "mastered" to (linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }))
+                }
+            }
+        }
+        return json("documentId" to documentId, "pdfPage" to page, "facts" to JsonArray(facts), "questions" to JsonArray(questions),
+            "factsMastered" to facts.count { it.flag("mastered") }, "questionsMastered" to questions.count { it.str("status") == "mastered" },
+            "unlocated" to unlocated)
+    }
+
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
     fun home(store: LedgerStore, course: String): JsonObject {

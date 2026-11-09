@@ -1,0 +1,497 @@
+{
+  "schemaVersion": 1,
+  "material": "All content in this file is synthetic.",
+  "cases": [
+    {
+      "name": "pdf-context-migration",
+      "anchor": {
+        "id": "sentence-1",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "The moon is round.",
+          "prefix": "Before. ",
+          "suffix": " After.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 8,
+          "endUtf16": 26
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Other. The moon is round. Finish.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "New chapter.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 2,
+              "href": null
+            },
+            "text": "Before. The moon is round. After.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 3,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "sentence-1",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "status": "RESOLVED",
+        "reason": "UNIQUE_EXACT_CONTEXT",
+        "evidence": {
+          "exactCandidates": 2,
+          "contextCandidates": 1,
+          "searchedUnits": 3,
+          "searchComplete": true,
+          "normalization": "reader-whitespace-v1"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "format": "PDF"
+          },
+          "resource": {
+            "pdfPageIndex0": 2,
+            "href": null
+          },
+          "range": {
+            "startUtf16": 8,
+            "endUtf16": 26
+          },
+          "geometry": null,
+          "locator": null
+        }
+      }
+    },
+    {
+      "name": "duplicate",
+      "anchor": {
+        "id": "sentence-1",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "The moon is round.",
+          "prefix": "Before. ",
+          "suffix": " After.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 8,
+          "endUtf16": 26
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Before. The moon is round. After.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Before. The moon is round. After.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "sentence-1",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "status": "STALE",
+        "reason": "AMBIGUOUS",
+        "evidence": {
+          "exactCandidates": 2,
+          "contextCandidates": 2,
+          "searchedUnits": 2,
+          "searchComplete": true,
+          "normalization": "reader-whitespace-v1"
+        },
+        "target": null
+      }
+    },
+    {
+      "name": "deleted",
+      "anchor": {
+        "id": "sentence-1",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "The moon is round.",
+          "prefix": "Before. ",
+          "suffix": " After.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 8,
+          "endUtf16": 26
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Before. Sentence removed. After.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 1,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "sentence-1",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "status": "STALE",
+        "reason": "QUOTE_NOT_FOUND",
+        "evidence": {
+          "exactCandidates": 0,
+          "contextCandidates": 0,
+          "searchedUnits": 1,
+          "searchComplete": true,
+          "normalization": "reader-whitespace-v1"
+        },
+        "target": null
+      }
+    },
+    {
+      "name": "scan",
+      "anchor": {
+        "id": "sentence-1",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "The moon is round.",
+          "prefix": "Before. ",
+          "suffix": " After.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 8,
+          "endUtf16": 26
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": null,
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 1,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "sentence-1",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "format": "PDF"
+        },
+        "status": "STALE",
+        "reason": "NO_TEXT_LAYER",
+        "evidence": {
+          "exactCandidates": 0,
+          "contextCandidates": 0,
+          "searchedUnits": 0,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1"
+        },
+        "target": null
+      }
+    },
+    {
+      "name": "epub-unicode-migration",
+      "anchor": {
+        "id": "epub-sentence",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "EPUB"
+        },
+        "resource": {
+          "pdfPageIndex0": null,
+          "href": "chapters/old.xhtml"
+        },
+        "quote": {
+          "exact": "水沿河床流动。",
+          "prefix": "示例：",
+          "suffix": "结束。",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": null,
+        "geometry": null,
+        "locator": {
+          "href": "chapters/old.xhtml",
+          "type": "application/xhtml+xml",
+          "locations": {
+            "fragments": [
+              "sentence-9"
+            ],
+            "progression": 0.5,
+            "position": 4,
+            "totalProgression": 0.2
+          },
+          "text": {
+            "highlight": "水沿河床流动。",
+            "before": "示例：",
+            "after": "结束。"
+          }
+        },
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "format": "EPUB"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": null,
+              "href": "parts/new.xhtml"
+            },
+            "text": "😀示例：水沿河床流动。结束。",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": null,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "epub-sentence",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "EPUB"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "format": "EPUB"
+        },
+        "status": "RESOLVED",
+        "reason": "UNIQUE_EXACT_CONTEXT",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 1,
+          "searchedUnits": 1,
+          "searchComplete": true,
+          "normalization": "reader-whitespace-v1"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "format": "EPUB"
+          },
+          "resource": {
+            "pdfPageIndex0": null,
+            "href": "parts/new.xhtml"
+          },
+          "range": {
+            "startUtf16": 5,
+            "endUtf16": 12
+          },
+          "geometry": null,
+          "locator": {
+            "href": "parts/new.xhtml",
+            "type": "application/xhtml+xml",
+            "locations": {
+              "fragments": [],
+              "progression": null,
+              "position": null,
+              "totalProgression": null
+            },
+            "text": {
+              "highlight": "水沿河床流动。",
+              "before": "示例：",
+              "after": "结束。"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "entry": {
+    "anchor": {
+      "id": "sentence-1",
+      "version": {
+        "documentId": "synthetic-book",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "format": "PDF"
+      },
+      "resource": {
+        "pdfPageIndex0": 0,
+        "href": null
+      },
+      "quote": {
+        "exact": "The moon is round.",
+        "prefix": "Before. ",
+        "suffix": " After.",
+        "type": "TextQuoteSelector"
+      },
+      "originalRange": {
+        "startUtf16": 8,
+        "endUtf16": 26
+      },
+      "geometry": null,
+      "locator": null,
+      "schemaVersion": 1
+    },
+    "note": "Synthetic note retained on its captured edition.",
+    "progress": 0.4,
+    "revision": 1
+  },
+  "pageLabels": {
+    "version": {
+      "documentId": "synthetic-book",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "format": "PDF"
+    },
+    "pdfPageCount": 5,
+    "entries": [
+      {
+        "pdfPageIndex0": 0,
+        "label": "iv"
+      },
+      {
+        "pdfPageIndex0": 2,
+        "label": "1"
+      },
+      {
+        "pdfPageIndex0": 3,
+        "label": "3"
+      }
+    ],
+    "verificationId": "synthetic-checked-map"
+  }
+}

@@ -22,10 +22,15 @@ class V7ReadingLayoutTest {
         tops.zipWithNext().forEachIndexed { i, (first, second) -> assertTrue(second >= first + heights[i] + 12) }
     }
 
-    @Test fun coverLandscapeRemainsOneColumnAtReferenceAndPhysicalDensities() {
-        for (scale in listOf(1f, .9f, .8f)) assertEquals(DeskWindow.OuterLandscape, deskWindow(986f * scale, 624f * scale))
+    @Test fun availableWidthDeterminesColumnsAcrossRotationAndSplitScreen() {
+        assertEquals(DeskWindow.OuterLandscape, deskWindow(699f, 411f))
+        assertEquals(DeskWindow.Medium, deskWindow(700f, 933f))
+        assertEquals(DeskWindow.Medium, deskWindow(704f, 933f))
+        assertEquals(DeskWindow.Medium, deskWindow(986f, 624f))
+        assertEquals(DeskWindow.Medium, deskWindow(1099f, 700f))
+        assertEquals(DeskWindow.Inner, deskWindow(1100f, 700f))
         assertEquals(DeskWindow.Inner, deskWindow(1224f, 924f))
-        assertEquals(DeskWindow.Inner, deskWindow(933f, 704f))
+        assertEquals(DeskWindow.Medium, deskWindow(933f, 704f))
         assertEquals(DeskWindow.Outer, deskWindow(624f, 986f))
     }
 

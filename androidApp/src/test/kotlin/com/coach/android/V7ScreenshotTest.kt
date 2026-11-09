@@ -39,9 +39,9 @@ import java.io.File
 
 /** Actual production pages with entirely synthetic course data; no server, bridge, corpus or emulator. */
 @RunWith(ParameterizedRobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w1224dp-h924dp-xhdpi")
+@Config(sdk = [34], qualifiers = "w933dp-h704dp-420dpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-class V7ScreenshotTest(private val device: String, private val width: Int, private val height: Int, private val scene: String, private val dark: Boolean) {
+class V7ScreenshotTest(private val device: String, private val width: Int, private val height: Int, private val scene: String, private val dark: Boolean, private val fontScale: Float) {
     @get:Rule val compose = createComposeRule()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private lateinit var driver: AndroidSqliteDriver
@@ -52,16 +52,15 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
     private val now = 1_794_052_800_000L
 
     companion object {
-        @JvmStatic @Parameters(name = "{0}-{3}-{4}") fun cases(): List<Array<Any>> = buildList {
-            for ((name, dimensions) in listOf("inner" to (1224 to 924), "outerL" to (986 to 624), "outer" to (624 to 986))) {
-                for (scene in listOf("week", "read", "quiz")) for (dark in listOf(false, true))
-                    add(arrayOf(name, dimensions.first, dimensions.second, scene, dark))
+        @JvmStatic @Parameters(name = "{0}-{3}-{4}-{5}") fun cases(): List<Array<Any>> = buildList {
+            for ((name, dimensions) in listOf("inner-landscape" to (933 to 704), "inner-portrait" to (704 to 933), "outer" to (411 to 900))) {
+                for (scene in listOf("week", "read", "quiz", "studyQuiz", "quizFocus", "focus")) for (dark in listOf(false, true)) for (scale in listOf(1f, 1.15f))
+                    add(arrayOf(name, dimensions.first, dimensions.second, scene, dark, scale))
             }
-            for (dark in listOf(false, true)) add(arrayOf("inner", 1224, 924, "focus", dark))
         }
     }
 
-    private val titles = listOf("道德风险是什么", "事前道德风险", "事后道德风险", "共付和起付线", "供方诱导需求", "实验证据怎么读", "政策含义")
+    private val titles = listOf("道德风险是什么", "事前道德风险", "美欧医学培训回报形状：欧洲前期牺牲少、后期收入低，美国更后置", "共付和起付线", "供方诱导需求", "实验证据怎么读", "政策含义")
     private val prose = """
         保险把看病时自己掏的钱压低了，于是同一个人在**价格变低后会多买医疗服务**。这不是骗保，而是对价格的正常反应★¹：需求曲线向右下倾斜，自付价格从全价降到共付比例，需求量就沿曲线往右走。
 
@@ -76,8 +75,8 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
         [^3]: 示意批注：一个在投保后，一个在投保前。
     """.trimIndent()
 
-    private fun event(seq: Long, type: String, payload: JsonObject) = Event(seq, "fixture-$seq", "SYNTHETIC-V7", type,
-        recordedAt = now, occurredAt = now, deviceId = "screenshot", actor = "SYSTEM", payload = payload)
+    private fun event(seq: Long, type: String, payload: JsonObject, thread: String? = null) = Event(seq, "fixture-$seq", "SYNTHETIC-V7", type,
+        recordedAt = now, occurredAt = now, deviceId = "screenshot", actor = "SYSTEM", payload = payload, threadId = thread)
 
     private fun courseView(): CourseView {
         val outline = event(1, "outline_revised", json(
@@ -85,7 +84,12 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
             "knowledgePoints" to JsonArray(titles.mapIndexed { i, title -> json("id" to "K$i", "title" to "【W8】$title", "moduleId" to "M",
                 "sourceAnchor" to json("docId" to "synthetic-textbook", "pdfPage" to 214, "bookPage" to 214)) })))
         val active = event(2, "study_scope_set", json("week" to 8, "kpIds" to titles.indices.map { "K$it" }))
-        val events = listOf(outline, active)
+        val events = listOf(outline, active) + if (scene in setOf("studyQuiz", "quizFocus")) listOf(event(3, "question_posed", json(
+            "attemptId" to "A1", "questionId" to "Q1", "groupId" to "G1", "kpIds" to listOf("K2"),
+            "format" to "SINGLE_CHOICE", "keyState" to "VERIFIED",
+            "stem" to "US internal rates of return to entering medicine have stayed well above market interest rates for decades. According to the chapter, what is the most plausible explanation for why this high IRR persists rather than being competed away?",
+            "options" to JsonArray(listOf("The IRR is high only because physicians work far fewer hours than other college graduates, which the calculation ignores.", "Medical students have systematically lower discount rates than all other graduates, which drives the IRR up.", "Free entry of new doctors has raised physician salaries, because a larger supply of doctors increases demand for physician services.", "Restrictions on training places and entry limit the supply of physicians, so competition does not eliminate the high returns.").mapIndexed { i, text -> json("optionId" to "o$i", "text" to text) }),
+            "letterMap" to json("o0" to "A", "o1" to "B", "o2" to "C", "o3" to "D")), "kp:K2")) else emptyList()
         val projection = project(events)
         return CourseView(events, projection.copy(
             position = Position(current = "K2"),
@@ -95,7 +99,8 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
     }
 
     @Before fun fixture() {
-        RuntimeEnvironment.setQualifiers("w${width}dp-h${height}dp-xhdpi")
+        RuntimeEnvironment.setQualifiers("w${width}dp-h${height}dp-420dpi")
+        RuntimeEnvironment.setFontScale(fontScale)
         driver = AndroidSqliteDriver(ClientDatabase.Schema, ApplicationProvider.getApplicationContext(), null)
         val transport = object : LedgerTransport {
             override suspend fun hello(epoch: String?): Hello = error("No ledger network")
@@ -133,7 +138,7 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
         compose.setContent { CoachTheme(dark) { CompositionLocalProvider(LocalV7PageDetails provides fixtureDetails(dark), LocalV7ReducedMotion provides true, com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(if (scene == "quiz") AppTab.REVIEW else if (scene == "read") AppTab.ROUTE else AppTab.TODAY, vertical) {} }) { Surface { Box(Modifier.requiredSize(width.dp, height.dp)) {
             when (scene) {
                 "week" -> TodayScreen(controller, view, ui, null, {}, { _, _ -> }, WeekActions(controller, scope))
-                "read", "focus" -> StudyScreen(controller, kp, view, ui, false, {}, onOpenReference = {}, initialFocus = scene == "focus")
+                "read", "focus", "studyQuiz", "quizFocus" -> StudyScreen(controller, kp, view, ui, false, {}, onOpenReference = {}, initialFocus = scene in setOf("focus", "quizFocus"))
                 "quiz" -> MainlineScreen(controller, view, {}, {}, {}, {})
             }
         } } } } }
@@ -141,24 +146,38 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("mainline-week-8").performClick()
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
+            for (i in 0..2) assertFullyInsidePaper("mainline-option-$i")
+            capture("quiz-unanswered")
             compose.onNodeWithTag("mainline-option-2").performScrollTo().performClick()
             compose.onNodeWithTag("mainline-submit").performScrollTo().performClick()
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("mainline-heading").performScrollTo()
         }
         compose.waitForIdle()
+        capture(scene)
         compose.onNodeWithTag("v7-paper").assertExists()
-        val expected = if (device == "inner") DeskWindow.Inner else if (device == "outerL") DeskWindow.OuterLandscape else DeskWindow.Outer
+        val expected = if (width >= 700) DeskWindow.Medium else DeskWindow.Outer
         assertEquals(expected, deskWindow(width.toFloat(), height.toFloat()))
-        if (scene == "focus") {
+        if (scene in setOf("focus", "quizFocus")) {
             compose.onNodeWithTag("v7-directory").assertDoesNotExist()
             compose.onNodeWithTag("v7-margin").assertDoesNotExist()
-        } else if (device == "inner") {
-            compose.onNodeWithTag("v7-directory").assertExists()
+        } else if (width >= 700) {
+            compose.onNodeWithTag("v7-directory").assertDoesNotExist()
             compose.onNodeWithTag("v7-margin").assertExists()
         } else {
             compose.onNodeWithTag("v7-directory").assertDoesNotExist()
             compose.onNodeWithTag("v7-margin").assertDoesNotExist()
+        }
+        if (device == "inner-landscape") {
+            val paper = compose.onNodeWithTag("v7-paper").getUnclippedBoundsInRoot()
+            assertTrue("Landscape paper must leave at least 520dp for text", (paper.right - paper.left).value - 48 >= 520)
+        }
+        if (scene in setOf("studyQuiz", "quizFocus")) {
+            compose.waitForIdle()
+            assertFullyInsidePaper("study-stem-A1")
+            for (letter in listOf("A", "B", "C", "D")) assertFullyInsidePaper("study-option-A1-$letter")
+            compose.onAllNodes(hasSetTextAction()).assertCountEquals(0)
+            if (scene == "studyQuiz") compose.onNodeWithTag("study-ask").assertIsDisplayed()
         }
         if (scene == "week") {
             assertEquals(2, compose.onAllNodesWithText("✓ 已通过").fetchSemanticsNodes().size)
@@ -170,9 +189,20 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
             val second = compose.onNodeWithTag("mainline-option-1").getUnclippedBoundsInRoot()
             assertEquals("Reference option gap", 10f, (second.top - first.bottom).value, .5f)
         }
+        capture(scene)
+    }
+
+    private fun assertFullyInsidePaper(tag: String) {
+        val node = compose.onNodeWithTag(tag).assertIsDisplayed().getUnclippedBoundsInRoot()
+        val viewportTag = if (tag.startsWith("study-")) "study-scroll-viewport" else "mainline-scroll-viewport"
+        val viewport = compose.onNodeWithTag(viewportTag).getUnclippedBoundsInRoot()
+        assertTrue("$tag must be completely visible without scrolling: $node inside $viewport", node.top >= viewport.top && node.bottom <= viewport.bottom && node.left >= viewport.left && node.right <= viewport.right)
+    }
+
+    private fun capture(label: String) {
         if (System.getProperty("roborazzi.test.record").toBoolean()) {
             val directory = File(System.getProperty("coach.v7.output", "build/screens/v7")).apply { mkdirs() }
-            val name = "$device-$scene-${if (dark) "dark" else "light"}.png"
+            val name = "$device-$label-${if (dark) "dark" else "light"}-font$fontScale.png"
             compose.onNodeWithTag("v7-desk").captureRoboImage(File(directory, name).absolutePath)
         }
     }

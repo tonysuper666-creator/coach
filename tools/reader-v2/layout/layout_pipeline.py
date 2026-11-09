@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = "2"   # bump on any behaviour change: it is part of the cache version key
+PIPELINE_VERSION = "3"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -93,7 +93,7 @@ def assign_columns(blocks: list[dict], page_h: float | None = None) -> int:
 def layout_ambiguous(blocks: list[dict]) -> bool:
     """Single-column verdict is not trustworthy when narrow text blocks sit side by
     side (a missed or partial multi-column layout)."""
-    flow = [b for b in blocks if b["kind"] in TEXT_FLOW and b["bbox"]]
+    flow = [b for b in blocks if (b["kind"] in TEXT_FLOW or b["kind"] == "table") and b["bbox"]]
     if len(flow) < 2:
         return False
     x0 = min(b["bbox"][0] for b in flow)
@@ -105,6 +105,39 @@ def layout_ambiguous(blocks: list[dict]) -> bool:
     right = [b for b in narrow if (b["bbox"][0] + b["bbox"][2]) / 2 >= mid]
     return any(a["bbox"][1] < c["bbox"][3] and c["bbox"][1] < a["bbox"][3]
                for a in left for c in right)
+
+
+def structure_insufficient(blocks: list[dict], page_area: float) -> bool:
+    """Body mostly classified as table/document_index: the model did not understand
+    the page, so no text order may be trusted."""
+    body = [b for b in blocks if b["bbox"] and b["kind"] != "header_footer"]
+    if not body:
+        return False
+    text = [b for b in body if b["kind"] in TEXT_FLOW]
+    tab = [b for b in body if b["kind"] == "table"]
+    if any(b.get("raw_label") == "document_index" for b in tab):
+        return True
+    tab_area = sum(max(0.0, b["bbox"][2] - b["bbox"][0]) * max(0.0, b["bbox"][3] - b["bbox"][1]) for b in tab)
+    if page_area and tab_area >= 0.35 * page_area:
+        return True
+    return len(tab) > len(text) and len(tab) >= 2
+
+
+def table_grid_valid(t) -> bool:
+    """Cells must lie inside rows x cols and cover every grid slot exactly once."""
+    if not t or not t["cells"] or not t["rows"] or not t["cols"]:
+        return False
+    seen = set()
+    for c in t["cells"]:
+        r, cc, rs, cs = c["r"], c["c"], c["rs"], c["cs"]
+        if r < 0 or cc < 0 or rs < 1 or cs < 1 or r + rs > t["rows"] or cc + cs > t["cols"]:
+            return False
+        for i in range(r, r + rs):
+            for j in range(cc, cc + cs):
+                if (i, j) in seen:
+                    return False
+                seen.add((i, j))
+    return len(seen) == t["rows"] * t["cols"]
 
 
 def _single_column_order(blocks: list[dict]) -> bool:
@@ -266,9 +299,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
         if kind == "table":
             t = b.get("table")
             blk["table"] = t
-            full = bool(t and t["cells"] and t["rows"] and t["cols"] and
-                        sum(c["rs"] * c["cs"] for c in t["cells"]) >= t["rows"] * t["cols"])
-            blk["status"] = "ok" if full else "unknown"   # partial grids are not trusted
+            blk["status"] = "ok" if table_grid_valid(t) else "unknown"   # partial/overlapping grids are not trusted
             if blk["status"] == "unknown":
                 blk["fallback"] = "original_page_region"
             blk["in_reading_flow"] = False   # a grid is never a run of sentences
@@ -289,7 +320,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
         blocks.append(blk)
     ncols = assign_columns(blocks, mb[3] - mb[1])
     ro_status, suggested = check_reading_order(blocks, ncols)
-    if rotated:
+    if rotated or structure_insufficient(blocks, (mb[2] - mb[0]) * (mb[3] - mb[1])):
         ro_status, suggested = "unknown", None
     pj.update(status="ok", size=[round(mb[2] - mb[0], 2), round(mb[3] - mb[1], 2)],
               layout_score=raw["layout_score"], columns=ncols,

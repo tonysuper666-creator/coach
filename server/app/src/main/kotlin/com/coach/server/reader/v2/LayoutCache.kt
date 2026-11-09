@@ -12,7 +12,7 @@ import java.nio.file.Path
 data class LayoutBlock(
     val id: String, val kind: String, val bbox: List<Double>, val readingOrder: Int,
     val column: Int, val status: String, val text: String?, val inReadingFlow: Boolean,
-    val fallback: String?,
+    val fallback: String?, val rawLabel: String? = null,
 )
 
 data class LayoutPage(
@@ -22,7 +22,37 @@ data class LayoutPage(
     /** True only when text order may be used for sentence anchoring; otherwise use the original page. */
     val orderTrusted: Boolean
         get() = status == "ok" && fallback == null && readingOrderStatus in setOf("ok", "single_column") &&
-            blocksRunTopDown()
+            blocksRunTopDown() && !structureInsufficient() && !sideBySide()
+
+    private fun area(b: LayoutBlock) =
+        if (b.bbox.size < 4) 0.0 else maxOf(0.0, b.bbox[2] - b.bbox[0]) * maxOf(0.0, b.bbox[3] - b.bbox[1])
+
+    /** Body mostly table/document_index: the producer did not understand the page. */
+    private fun structureInsufficient(): Boolean {
+        val body = blocks.filter { it.kind != "header_footer" && it.bbox.size >= 4 }
+        if (body.isEmpty()) return false
+        val tab = body.filter { it.kind == "table" }
+        val text = body.count { it.kind in setOf("text", "heading", "list", "caption", "footnote") }
+        val pageArea = size?.let { it[0] * it[1] } ?: 0.0
+        return tab.any { it.rawLabel == "document_index" } ||
+            (pageArea > 0 && tab.sumOf { area(it) } >= 0.35 * pageArea) || (tab.size > text && tab.size >= 2)
+    }
+
+    /** Narrow text/table blocks side by side that the producer did not turn into columns. */
+    private fun sideBySide(): Boolean {
+        if (columns != null && columns >= 2) return false
+        val kinds = setOf("text", "heading", "list", "caption", "footnote", "table")
+        val flow = blocks.filter { it.kind in kinds && it.bbox.size >= 4 }
+        if (flow.size < 2) return false
+        val x0 = flow.minOf { it.bbox[0] }
+        val x1 = flow.maxOf { it.bbox[2] }
+        val span = maxOf(x1 - x0, 1.0)
+        val mid = (x0 + x1) / 2
+        val narrow = flow.filter { it.bbox[2] - it.bbox[0] < 0.6 * span }
+        val left = narrow.filter { (it.bbox[0] + it.bbox[2]) / 2 < mid }
+        val right = narrow.filter { (it.bbox[0] + it.bbox[2]) / 2 >= mid }
+        return left.any { a -> right.any { c -> a.bbox[1] < c.bbox[3] && c.bbox[1] < a.bbox[3] } }
+    }
 
     /** Independent sanity check (does not rely on the producer's verdict): within each column,
      *  text-flow blocks must follow reading order from top to bottom (2pt tolerance). */
@@ -58,7 +88,7 @@ class LayoutCache(private val root: Path) {
             LayoutBlock(
                 s(b, "id")!!, s(b, "kind")!!, nums(b["bbox"]).orEmpty(), b["reading_order"]!!.jsonPrimitive.int,
                 b["column"]?.jsonPrimitive?.int ?: 0, s(b, "status") ?: "unknown", s(b, "text"),
-                b["in_reading_flow"]?.jsonPrimitive?.boolean ?: true, s(b, "fallback"),
+                b["in_reading_flow"]?.jsonPrimitive?.boolean ?: true, s(b, "fallback"), s(b, "raw_label"),
             )
         }
         return LayoutPage(

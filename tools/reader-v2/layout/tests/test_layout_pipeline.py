@@ -113,6 +113,41 @@ class CacheLogic(Base):
         self.assertTrue((self.cache / "d" / "latest.json").exists())
         self.assertEqual((self.cache / "d" / "latest.json").read_bytes()[:1], b"{")   # no BOM
 
+    def test_document_index_page_is_unknown_with_fallback(self):
+        def tb(b, o, label):
+            return {"label": label, "bbox": b, "text": None, "order": o,
+                    "table": {"rows": 1, "cols": 1, "cells": [{"r": 0, "c": 0, "rs": 1, "cs": 1, "text": "x"}]}}
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        raw = {"size": (595, 842), "layout_score": None,
+               "blocks": [tb([60, 100, 280, 700], 0, "document_index"), tb([320, 100, 540, 700], 1, "document_index")]}
+        pj = lp.build_page_json(1, raw, meta, "s")
+        self.assertEqual((pj["reading_order_status"], pj["fallback"]), ("unknown", "original_page"))
+        raw = {"size": (595, 842), "layout_score": None,
+               "blocks": [tb([60, 100, 280, 400], 0, "table"), tb([320, 100, 540, 400], 1, "table"),
+                          blk("text", [60, 500, 540, 540], 2)]}
+        pj = lp.build_page_json(1, raw, meta, "s")
+        self.assertEqual(pj["fallback"], "original_page")
+
+    def test_normal_text_with_one_table_stays_trusted(self):
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        raw = {"size": (595, 842), "layout_score": None, "blocks": [
+            blk("text", [72, 72, 520, 120], 0),
+            {"label": "table", "bbox": [72, 140, 520, 260], "text": None, "order": 1,
+             "table": {"rows": 1, "cols": 1, "cells": [{"r": 0, "c": 0, "rs": 1, "cs": 1, "text": "x"}]}},
+            blk("text", [72, 280, 520, 330], 2)]}
+        pj = lp.build_page_json(1, raw, meta, "s")
+        self.assertEqual((pj["reading_order_status"], pj.get("fallback")), ("single_column", None))
+
+    def test_table_grid_bounds_and_unique_cover(self):
+        def g(rows, cols, cells):
+            return {"rows": rows, "cols": cols,
+                    "cells": [{"r": r, "c": c, "rs": rs, "cs": cs, "text": ""} for r, c, rs, cs in cells]}
+        self.assertTrue(lp.table_grid_valid(g(2, 2, [(0, 0, 1, 2), (1, 0, 1, 1), (1, 1, 1, 1)])))
+        self.assertFalse(lp.table_grid_valid(g(1, 2, [(0, 0, 1, 1), (0, 0, 1, 1)])))
+        self.assertFalse(lp.table_grid_valid(g(1, 2, [(0, 0, 1, 1), (0, 1, 1, 3)])))
+        self.assertFalse(lp.table_grid_valid(g(1, 2, [(0, 0, 1, 1), (0, 5, 1, 1)])))
+        self.assertFalse(lp.table_grid_valid(g(2, 2, [(0, 0, 1, 1)])))
+
     def test_pipeline_version_change_invalidates_cache(self):
         from unittest import mock
         pdf = self.syn / "mixed.pdf"
@@ -122,7 +157,7 @@ class CacheLogic(Base):
         s = lp.ingest(pdf, self.cache, "d", eng)
         self.assertFalse(s["cache_hit"])
         self.assertEqual(len(eng.calls), 1)
-        self.assertIn("-p2-", s["version"])
+        self.assertIn("-p3-", s["version"])
 
     def test_resume_skips_done_pages(self):
         pdf = self.syn / "mixed.pdf"

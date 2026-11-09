@@ -21,6 +21,14 @@ class LayoutCacheTest {
           "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
           {"id":"a","kind":"text","bbox":[72,300,500,350],"reading_order":0,"column":0,"status":"ok","text":"x"},
           {"id":"b","kind":"text","bbox":[72,100,500,150],"reading_order":1,"column":0,"status":"ok","text":"y"}]}""")
+        Files.writeString(v.resolve("pages/00005.json"), """{"schema_version":1,"status":"ok","columns":1,
+          "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
+          {"id":"a","kind":"table","raw_label":"document_index","bbox":[60,100,280,700],"reading_order":0,"column":0,"status":"ok"},
+          {"id":"b","kind":"table","raw_label":"document_index","bbox":[320,100,540,700],"reading_order":1,"column":0,"status":"ok"}]}""")
+        Files.writeString(v.resolve("pages/00006.json"), """{"schema_version":1,"status":"ok","columns":1,
+          "reading_order_status":"single_column","rotation":0,"size":[595,842],"blocks":[
+          {"id":"a","kind":"text","bbox":[60,100,280,300],"reading_order":0,"column":0,"status":"ok","text":"x"},
+          {"id":"b","kind":"text","bbox":[320,110,540,300],"reading_order":1,"column":0,"status":"ok","text":"y"}]}""")
         Files.writeString(v.resolve("pages/00003.json"), """{"schema_version":2,"status":"ok","blocks":[]}""")
         return root
     }
@@ -36,6 +44,15 @@ class LayoutCacheTest {
     @Test fun upsideDownOrderIsNotTrustedEvenIfProducerSaysSingleColumn() {
         val p = assertNotNull(LayoutCache(fixture()).page("doc", 4))
         assertEquals("single_column", p.readingOrderStatus); assertFalse(p.orderTrusted)
+    }
+
+    @Test fun indexTablesAndSideBySideBlocksAreNotTrustedEvenIfProducerSaysOk() {
+        val c = LayoutCache(fixture())
+        for (n in listOf(5, 6)) {
+            val p = assertNotNull(c.page("doc", n))
+            assertEquals("single_column", p.readingOrderStatus)
+            assertFalse(p.orderTrusted, "page $n")
+        }
     }
 
     @Test fun missingPageUnknownDocAndFutureSchemaAreNull() {

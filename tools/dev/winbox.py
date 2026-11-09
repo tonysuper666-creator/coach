@@ -34,7 +34,7 @@ def portable_args(command, root):
         if value_next:
             value_next = False
             continue
-        if arg in ('--tests', '--console', '--max-workers', '--warning-mode'):
+        if arg in ('--tests', '--console', '--max-workers', '--warning-mode', '--priority'):
             value_next = True
         elif arg.startswith(('-P', '-D')):
             # Machine paths / explicit init scripts cannot be transported.
@@ -45,7 +45,7 @@ def portable_args(command, root):
                      '--configuration-cache', '--no-build-cache', '--build-cache',
                      '--continue', '--dry-run', '-q', '--quiet'):
             pass
-        elif arg.startswith(('--console=', '--max-workers=', '--warning-mode=')):
+        elif arg.startswith(('--console=', '--max-workers=', '--warning-mode=', '--priority=')):
             pass
         elif arg.startswith('-'):
             return None
@@ -60,6 +60,25 @@ def portable_args(command, root):
                 return None
             tasks.append(task)
     return args if tasks and not value_next else None
+
+
+def runner_args(args):
+    """Replace runner-owned switches, avoiding Gradle's duplicate-option error."""
+    result = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in ('--max-workers', '--console', '--priority'):
+            skip = True
+        elif arg.startswith(('--max-workers=', '--console=', '--priority=')):
+            continue
+        elif arg in ('--daemon', '--no-daemon', '--configuration-cache', '--no-configuration-cache'):
+            continue
+        else:
+            result.append(arg)
+    return result
 
 
 def git(root, *args, env=None):
@@ -137,7 +156,7 @@ def main(command):
         with tempfile.TemporaryDirectory(prefix='coach-winbox-') as scratch:
             tmp = Path(scratch)
             sha = snapshot(root, tmp, ref)
-            config = dict(job=job, sha=sha, args=args, mode=mode,
+            config = dict(job=job, sha=sha, args=runner_args(args), originalArgs=args, mode=mode,
                           queueSeconds=int(os.environ.get('COACH_WINBOX_QUEUE_SECONDS', '900')))
             (out / 'request.json').write_text(json.dumps(config, indent=2) + '\n')
             scp(str(tmp / 'source.bundle'), f'{host}:{remote}/source.bundle')

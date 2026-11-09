@@ -55,7 +55,10 @@ try {
             $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
             Set-Content -Encoding Ascii "$work/local.properties" 'sdk.dir=D:/agent/android-sdk'
             Set-Location $work
-            $gradleArgs = @('--build-cache') + @($config.args)
+            $gradleArgs = @($config.args)
+            if (($gradleArgs -notcontains '--build-cache') -and ($gradleArgs -notcontains '--no-build-cache')) {
+                $gradleArgs += '--build-cache'
+            }
             if ($config.mode -eq 'reuse') {
                 $gradleArgs += @('--daemon', '--configuration-cache')
             } else {

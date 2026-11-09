@@ -85,6 +85,13 @@ class Transport(unittest.TestCase):
         self.assertEqual(index, (self.root / '.git/index').read_bytes())
         self.assertEqual(head, self.git('rev-parse', 'HEAD'))
 
+    def test_caller_limits_are_replaced_without_duplicate_gradle_options(self):
+        self.assertEqual(winbox.runner_args([
+            ':androidApp:assembleDebug', '--max-workers=8', '--console', 'rich',
+            '--priority=normal', '--daemon', '--no-configuration-cache',
+            '--tests', 'sample.*', '--no-build-cache',
+        ]), [':androidApp:assembleDebug', '--tests', 'sample.*', '--no-build-cache'])
+
     def test_artifacts_restore_standard_paths_and_reject_escape(self):
         archive = self.root / 'artifacts.zip'
         with zipfile.ZipFile(archive, 'w') as bundle:

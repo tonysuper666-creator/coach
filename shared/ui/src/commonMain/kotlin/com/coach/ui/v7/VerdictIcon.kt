@@ -10,12 +10,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.*
 import androidx.compose.ui.unit.sp
 
 @Composable
 internal fun VerdictIcon(correct: Boolean, modifier: Modifier, color: Color) {
-    Canvas(modifier) {
+    Canvas(modifier.semantics { text = AnnotatedString(if (correct) "✓" else "✗") }) {
         fun line(x: Float, y: Float, endX: Float, endY: Float) = drawLine(color,
             Offset(size.width * x, size.height * y), Offset(size.width * endX, size.height * endY),
             size.width / 9, StrokeCap.Round)

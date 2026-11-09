@@ -77,8 +77,7 @@ internal fun coursePageDetails(course: String, view: CourseView, week: Int?, kp:
         emphasis = Regex("\\*\\*(.+?)\\*\\*").find(reading)?.groupValues?.get(1).orEmpty(),
         types = types,
         weekStats = "通过 $passed · 在读 $active · 还缺 ${missing.size}",
-        nextStep = kp?.let { "先把 ${splitTitle(it.title).second} ${if (view.isResume(it)) "读完" else "开始学习"}。" }.orEmpty(),
-        mustKnow = points.filter { it.status != KpStatus.PASSED && it.status != KpStatus.SOLID }.map { splitTitle(it.title).second },
+        nextStep = kp?.let { "先把${splitTitle(it.title).second}${if (view.isResume(it)) "读完" else "开始学习"}。" }.orEmpty(),
         missing = missing.map { splitTitle(it.title).second },
         directory = view.weeks.map { n ->
             val rows = view.weekKps(n)

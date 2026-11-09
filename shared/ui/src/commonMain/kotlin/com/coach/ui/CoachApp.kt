@@ -2,6 +2,10 @@ package com.coach.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import com.coach.ui.v7.paperShadow
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,6 +16,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.coach.client.CourseView
 import com.coach.ui.adaptive.LayoutRules
 import com.coach.ui.adaptive.NavStyle
@@ -238,7 +243,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val reading = source
                         // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
                         val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
-                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference, reviewMode) } }
+                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, ({ open = null }), openReference, reviewMode) } }
                         val mockId = mock
                         if (mockId != null && current != null) {
                             key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
@@ -256,13 +261,6 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                             covered = reading != null,
                             base = {
                                 when {
-                                    wide && paired -> Row(Modifier.fillMaxSize()) {
-                                        Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
-                                        VerticalDivider()
-                                        Box(Modifier.weight(1f).fillMaxHeight()) {
-                                            if (paneArgs != null) studyPane(paneArgs) else CenterMessage("选一个知识点，或点「继续」。")
-                                        }
-                                    }
                                     paneArgs != null -> studyPane(paneArgs)
                                     else -> tabContent()
                                 }
@@ -272,7 +270,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     }
                     // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
                     val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen || mainline))
-                    if (bottomBar) Column(Modifier.fillMaxSize()) {
+                    val deskWindow = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
+                    val deskScreen = (target != null || (tab == AppTab.TODAY && current?.projection?.studyScope != null) || mainline) && source == null && !essayOpen && mock == null && reviewWeek == null
+                    if (deskScreen) CompositionLocalProvider(
+                        com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(if (mainline) AppTab.REVIEW else if (target != null) AppTab.ROUTE else tab, vertical, select) },
+                        com.coach.ui.v7.LocalDeskSelect provides select,
+                        com.coach.ui.v7.LocalDeskWindow provides deskWindow,
+                    ) { body() }
+                    else if (bottomBar) Column(Modifier.fillMaxSize()) {
                         Box(Modifier.weight(1f).fillMaxWidth()) { body() }
                         if (navVisible) AppNavBar(tab, select)
                     } else Row(Modifier.fillMaxSize()) {
@@ -308,11 +313,32 @@ internal fun SourceOverlay(covered: Boolean, base: @Composable () -> Unit, overl
     }
 }
 
+/** Shared by the actual app and JVM captures, including the narrow-screen bottom navigation. */
 @Composable
-private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+fun DeskNavigation(selected: AppTab, vertical: Boolean, onSelect: (AppTab) -> Unit) {
+    val tabs = listOf(AppTab.TODAY, AppTab.ROUTE, AppTab.REVIEW, AppTab.RESOURCES)
+    val c = com.coach.ui.theme.CoachTheme.colors
+    val item: @Composable (AppTab) -> Unit = { tab ->
+        val active = selected == tab
+        Column(Modifier.width(64.dp).then(if (active) Modifier.paperShadow("card", c.dark) else Modifier)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp)).background(if (active) c.surface1 else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable { onSelect(tab) }.padding(vertical = if (active) 6.dp else if (vertical) 8.dp else 0.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            com.coach.ui.v7.DeskNavIcon(tab, Modifier.size(22.dp), if (active) c.fgPrimary else c.fgSecondary)
+            Text(tab.label, style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = if (active) c.fgPrimary else c.fgSecondary)
+        }
+    }
+    if (vertical) Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) { tabs.forEach { item(it) } }
+    else Row(Modifier.fillMaxWidth().height(68.dp).background(c.bgCanvas), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) { tabs.forEach { item(it) } }
+}
+
+@Composable
+private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit, v7: Boolean = false) {
+    val ink = com.coach.ui.theme.CoachTheme.colors
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = if (v7) 0.dp else 3.dp,
+        modifier = if (v7) Modifier.height(coach.design.tokens.V7Windows.Outer.footH) else Modifier,
+        windowInsets = if (v7) WindowInsets(0.dp) else NavigationBarDefaults.windowInsets) {
         AppTab.entries.forEach { t ->
-            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = { Text(t.label) })
+            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, colors = if (v7) NavigationBarItemDefaults.colors(selectedIconColor = ink.accent, selectedTextColor = ink.fgPrimary, indicatorColor = ink.surface2, unselectedIconColor = ink.fgSecondary, unselectedTextColor = ink.fgSecondary) else NavigationBarItemDefaults.colors(), icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = { Text(t.label) })
         }
     }
 }
@@ -368,8 +394,8 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     }
 }
 
-/** 标签底色 = 字色的这么多分之几：太深会把字色压成低对比，由 StudyChromeTest 守住 ≥4.5。 */
-internal const val CHIP_TINT = .12f
+/** V7 status labels use plain ink on the current paper/desk; StudyChromeTest checks both actual surfaces. */
+internal const val CHIP_TINT = 0f
 
 @Composable
 internal fun StatusChip(text: String, color: Color) {

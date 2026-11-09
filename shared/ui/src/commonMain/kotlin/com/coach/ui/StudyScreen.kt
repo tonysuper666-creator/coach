@@ -19,10 +19,10 @@ import com.coach.ui.input.EnterGate
 import kotlinx.coroutines.launch
 
 /** 阅读栏最大宽度：内屏/桌面宽窗口下正文不拉成一整行。 */
-private val READING_WIDTH = 600.dp
+private val READING_WIDTH = coach.design.tokens.CoachV7.Layout.colw
 
 @Composable
-fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null, reviewMode: Boolean = false) {
+fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiState, autoStart: Boolean, onBack: (() -> Unit)?, initialDraft: String? = null, onOpenReference: ((KpRow) -> Unit)? = null, weekActions: WeekActions? = null, reviewMode: Boolean = false, initialFocus: Boolean = false) {
     val thread = if (reviewMode) view.reviewThreadId(kp.id) else view.tutorThreadId(kp.id)
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
@@ -85,27 +85,49 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
     }
 
-    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+    var readingFocus by remember(kp.id) { mutableStateOf(initialFocus) }
+    var conversation by remember(kp.id) { mutableStateOf(initialDraft != null) }
+    val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
+    if (!reviewMode && !conversation && completed != null && groups.isEmpty() && !tv.busy) {
+        com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
+            onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
+            onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions)
+        return
+    }
+    val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
+    val notes = remember(tv.items, kp.reference) {
+        tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
+    }
+    CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
+    com.coach.ui.v7.Desk(crumb = kp.module.ifBlank { c.courseId }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = if (reviewMode) "← 复习" else "← 今天",
+        directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.takeIf { ui.connected && !it.busy }?.let { it::select }) },
+        margin = { com.coach.ui.v7.MarginNotes(notes) {
+            if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {
+                Text("本次参考", style = MaterialTheme.typography.labelMedium)
+                Text(kp.reference, style = MaterialTheme.typography.bodyMedium)
+                if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }) { Text("看原文") }
+            }
+        } }) {
+    Column(Modifier.fillMaxSize().padding(horizontal = com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding).padding(top = com.coach.ui.v7.LocalDeskMetrics.current.topPadding), horizontalAlignment = Alignment.CenterHorizontally) {
         Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Top) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 // Back button and the title's first line sit on one row; the scope toggle lines up with the title's left edge.
-                if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (reviewMode) "← 复习" else "← 今天") }
+
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
-                    Text(main, Modifier.padding(top = if (onBack != null) 11.dp else 8.dp), style = MaterialTheme.typography.titleMedium)
+                    com.coach.ui.v7.PageHeader(if (reviewMode) "到期复习" else view.weekProgress(kp.id).orEmpty(), main)
                     // 范围、看原文（点开就是本知识点锚点所在的教材页）、状态放在同一组里，放不下就换行，不压标题。
                     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
+                    if (!readingFocus) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Text(if (showScope) "收起学习范围" else tag.ifBlank { "学习范围" } + if (additionalScope.isNotEmpty()) " · 共 ${additionalScope.size + 1} 项 ▾" else " · 范围 ▾", style = MaterialTheme.typography.labelMedium)
                         }
-                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) OutlinedButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) com.coach.ui.v7.PaperButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
                             Text("看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
                         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }
-                    if (reviewMode) Text("到期复习", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    view.weekProgress(kp.id)?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) }
+
                     if (showScope) {
                         Text(main, style = MaterialTheme.typography.bodyMedium)
                         additionalScope.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
@@ -114,7 +136,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 }
             }
         }
-        HorizontalDivider()
+        Spacer(Modifier.height(8.dp))
 
         // Reading position lives with the screen state (and this screen is `movableContentOf` in CoachApp): a fold/unfold keeps it.
         val chat = remember(kp.id) { ChatListState() }
@@ -164,7 +186,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 AnchoredChatList(
                     items = rows, key = { it.key }, state = chat, windowKey = constraints.maxWidth,
-                    modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), spacing = 14.dp,
+                    modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 16.dp), spacing = 20.dp,
                 ) { row ->
                     when (row) {
                         is StudyRow.Message -> when (val item = row.item) {
@@ -187,8 +209,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 FilledTonalButton(onClick = { scope.launch { chat.scrollToTail() } }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp).heightIn(min = 48.dp)) { Text("回到最新") }
             }
         }
-        HorizontalDivider()
-        Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(8.dp))
+        if (!readingFocus) Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // 答题时「下一步 / 出题」本来就点不了，不占高度，把空间让给题目；键盘弹出时同样收起。
             if (!imeOpen && pending == null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 // 服务端只在需要时给特殊文字（「换个例子再讲」）；还没讲过、线程里什么都没有时按钮就叫「开始讲解」。
@@ -198,13 +220,13 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     !kp.explained && tv.items.isEmpty() && groups.isEmpty() -> "开始讲解"
                     else -> "下一步"
                 }
-                Button(onClick = { next(false) }, enabled = ui.connected && !tv.busy,
+                com.coach.ui.v7.PrimaryButton(onClick = { next(false) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
-                OutlinedButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
+                com.coach.ui.v7.PaperButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
             }
             if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
-                OutlinedButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
+                com.coach.ui.v7.PaperButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一个知识点 →") }
                 weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
@@ -216,6 +238,9 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             )
         }
     }
+}
+
+}
 }
 
 private sealed interface StudyRow {

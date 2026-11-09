@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
 import com.coach.client.*
@@ -17,7 +18,7 @@ import com.coach.ui.theme.CoachTheme
 
 @Composable
 internal fun WeekDirectory(view: CourseView, active: Int?, onWeek: ((Int) -> Unit)?) {
-    val d = LocalV7PageDetails.current
+    val d = LocalV7PageDetails.current ?: V7PageDetails()
     val c = CoachTheme.colors
     Text("周目录", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.labelMedium, color = c.fgSecondary)
     Spacer(Modifier.height(12.dp))
@@ -27,7 +28,7 @@ internal fun WeekDirectory(view: CourseView, active: Int?, onWeek: ((Int) -> Uni
     } }
     entries.forEach { e ->
         Row(Modifier.fillMaxWidth().then(if (e.week == active) Modifier.paperShadow("card", c.dark).clip(RoundedCornerShape(8.dp)).background(c.surface1) else Modifier)
-            .then(if (onWeek != null) Modifier.clickable { onWeek(e.week) } else Modifier).padding(horizontal = 12.dp, vertical = 8.dp),
+            .then(if (onWeek != null) Modifier.clickable { onWeek(e.week) } else Modifier).padding(horizontal = 12.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("第 ${e.week} 周 · ${e.title}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
                 fontWeight = if (e.week == active) FontWeight.SemiBold else FontWeight.Normal, color = if (e.state == "未读") c.fgTertiary else c.fgPrimary, maxLines = 1)
@@ -65,7 +66,7 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
         }
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             PaperButton(onClick = onSource) { Text("回到原页") }
-            PrimaryButton(onClick = onQuiz) { Text("做这一节 ${d.question?.count ?: ""} 题") }
+            PrimaryButton(onClick = onQuiz) { Text(d.question?.let { "做这一节 ${it.count} 题" } ?: "开始练习") }
         }
         if (d.revisit.isNotBlank()) NoteCard(d.revisitLabel, d.revisit)
     }
@@ -83,14 +84,21 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
     val missing = points.count { it.status == KpStatus.NEEDS_REPAIR }
     val target = view.weekTarget
     val targetLabel = "$week.${(points.indexOfFirst { it.id == target?.id } + 1).coerceAtLeast(1)}"
-    val d = LocalV7PageDetails.current
+    val d = pageDetails(c, view, week)
     val colors = CoachTheme.colors
     val title = points.firstOrNull()?.module?.ifBlank { null } ?: "第 $week 周"
     val weeks = d.directory.map { it.week }.ifEmpty { view.weeks }
     val select = LocalDeskSelect.current
     val railAnchors = remember(week) { MarginAnchors() }
-    CompositionLocalProvider(LocalMarginAnchors provides railAnchors) {
+    var choosingWeek by remember { mutableStateOf(false) }
+    val canSelect = ui.connected && !actions.busy
+    CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
+    if (choosingWeek) AlertDialog(onDismissRequest = { choosingWeek = false }, title = { Text("换周") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) { view.weeks.forEach { n ->
+            TextButton(onClick = { choosingWeek = false; actions.select(n) }, enabled = canSelect) { Text(view.weekLabel(n)) }
+        } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = "距考 · ${if (view.projection.examDay == null) "日期未公布" else "见学习计划"}",
+        compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
         backLabel = "← 书架", onBack = { select(AppTab.RESOURCES) }, directory = { WeekDirectory(view, week, if (ui.connected && !actions.busy) actions::select else null) },
         margin = {
             if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { target?.let { onOpen(it.id, true) } })
@@ -100,10 +108,10 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
             }
         }, footer = {
             val previous = weeks.lastOrNull { it < week }
-            Text(previous?.let { "‹  第 $it 周" }.orEmpty(), Modifier.clickable(enabled = previous != null && ui.connected) { previous?.let(actions::select) }, style = MaterialTheme.typography.labelLarge)
+            Text(previous?.let { "‹  第 $it 周" }.orEmpty(), Modifier.testTag("v7-previous-week").clickable(enabled = previous != null && canSelect) { previous?.let(actions::select) }, style = MaterialTheme.typography.labelLarge)
             Text("第 $week 周", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
             val next = weeks.firstOrNull { it > week }
-            Text(next?.let { "第 $it 周  ›" }.orEmpty(), Modifier.clickable(enabled = next != null && ui.connected) { next?.let(actions::select) }, style = MaterialTheme.typography.labelLarge)
+            Text(next?.let { "第 $it 周  ›" }.orEmpty(), Modifier.testTag("v7-next-week").clickable(enabled = next != null && canSelect) { next?.let(actions::select) }, style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
         Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState())
@@ -113,7 +121,7 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
             Spacer(Modifier.height(if (m.inner) 0.dp else 0.dp))
             PaperCard(contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {
                 points.forEachIndexed { index, kp ->
-                    if (index > 0) HorizontalDivider(color = if (colors.dark) Color(0xFF2A2722) else Color(0xFFEFE9DE))
+                    if (index > 0) HorizontalDivider(color = if (colors.dark) coach.design.tokens.CoachV7.Dark.line else coach.design.tokens.CoachV7.Light.line)
                     Row(Modifier.fillMaxWidth().then(if (kp.id == target?.id) Modifier.railAnchor("week-target") else Modifier).clickable { onOpen(kp.id, false) }.padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("$week.${index + 1}", Modifier.width(if (m.window == DeskWindow.Outer) 46.8.dp else 57.6.dp), style = MaterialTheme.typography.labelLarge,
@@ -125,7 +133,10 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                         }
                         if (m.window != DeskWindow.Outer) d.types.getOrNull(index)?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
                         val state = when (kp.status) { KpStatus.PASSED, KpStatus.SOLID -> "✓ 已通过"; KpStatus.IN_PROGRESS -> "● 在读"; KpStatus.NEEDS_REPAIR -> "○ 还缺"; else -> "未读" }
-                        Text(androidx.compose.ui.text.buildAnnotatedString {
+                        if (kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID)) PassedLabel(
+                            Modifier.width(if (m.window == DeskWindow.Outer) 68.dp else 100.8.dp),
+                            MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.End), colors.successFg)
+                        else Text(androidx.compose.ui.text.buildAnnotatedString {
                             append(state)
                             if (kp.status == KpStatus.IN_PROGRESS) addStyle(androidx.compose.ui.text.SpanStyle(color = colors.dangerFg), 0, 1)
                         }, Modifier.width(if (m.window == DeskWindow.Outer) 68.dp else 100.8.dp), style = MaterialTheme.typography.labelLarge,

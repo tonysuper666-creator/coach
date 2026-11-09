@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Synthetic acceptance only; never reachable from the production reader. -->
+        <activity android:name="com.coach.android.reader.v2.ReaderV2FixtureActivity"
+            android:exported="true" android:label="阅读器合成材料"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden|uiMode" />
+    </application>
+</manifest>

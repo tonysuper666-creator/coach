@@ -1,0 +1,26 @@
+{
+  "contract_version": "1.0.0",
+  "id": "SYN-W01-Q001",
+  "course_id": "SYNTHETIC",
+  "week": 1,
+  "section_id": "SYN-W01-S01",
+  "kp_id": "SYN-W01-K01",
+  "fact_ids": ["SYN-W01-F01"],
+  "kind": "introduction",
+  "prerequisite_kp_ids": [],
+  "difficulty": 0,
+  "variant_group_id": "SYN-W01-V01",
+  "try_first_refs": [{"question_id": "SYN-W01-T01", "position": 1}],
+  "stem": "A box contains two red balls and one blue ball. How many balls are there?",
+  "options": ["One", "Two", "Three"],
+  "answer": 2,
+  "remember": "The total is the sum of the two groups.",
+  "explanation": {
+    "correct": "Two plus one is three.",
+    "wrong": [{"option": 0, "reason": "One counts only the blue ball."}, {"option": 1, "reason": "Two counts only the red balls."}],
+    "background": "Addition combines the sizes of separate groups. This connects to the first '先试试' question.",
+    "source": "Synthetic textbook, page 1."
+  },
+  "sources": [{"kind": "textbook", "document_id": "SYN-BOOK", "locator": "p.1", "anchor": "Two and one make three."}],
+  "key_state": "UNREVIEWED"
+}

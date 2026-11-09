@@ -12,6 +12,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
@@ -124,6 +125,29 @@ class CourseHttp(baseUrl: String, deviceId: String, token: String, private val c
                 (o["fromMockPaper"] as? JsonPrimitive)?.booleanOrNull == true)
         }, (root["weeks"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }, root.i("unmatched"))
     }
+
+    /** Separate private reader surface; it shares auth/timeouts but has no connection to the AI client. */
+    val reader = ReaderHttp(
+        request = { path, body ->
+            try {
+                val url = readerUrl(path)
+                val r = if (body == null) http.get(url) else http.post(url) { setBody(TextContent(body.toString(), ContentType.Application.Json)) }
+                ReaderReply(r.status.value, runCatching { Json.parseToJsonElement(r.bodyAsText()).jsonObject }.getOrNull())
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { ReaderReply(null, null) }
+        },
+        bytes = { path ->
+            try { http.get(readerUrl(path)).let { if (it.status.isSuccess()) it.bodyAsBytes() else null } }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { null }
+        },
+        text = { path ->
+            try { http.get(readerUrl(path)).let { if (it.status.isSuccess()) it.bodyAsText() else null } }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { null }
+        },
+    )
+    private fun readerUrl(path: String) = "$base/v1/courses/${course.encodeURLPathPart()}/reader" + if (path.isBlank()) "" else "/$path"
 
     fun close() { http.close() }
 

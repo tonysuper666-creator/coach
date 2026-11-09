@@ -70,7 +70,7 @@ internal fun AlignedRail(keys: List<String?>, gap: Dp = 12.dp, finalGap: Dp = ga
     BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInRoot().y }) {
         val viewportHeight = maxHeight
         Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            Text("页边", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
+            Text("出处与批注", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
             Layout(content = content, modifier = Modifier.fillMaxWidth().testTag("v7-aligned-rail")) { measurables, constraints ->
                 val children = measurables.map { it.measure(constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity)) }
                 val gaps = children.indices.map { i -> (if (i == children.lastIndex - 1) finalGap else gap).roundToPx() }
@@ -129,7 +129,7 @@ private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighligh
         }
         HorizontalDivider(color = c.borderSubtle)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("让 AI 再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
             Text("举个例子", Modifier.clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
@@ -142,7 +142,7 @@ private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighligh
 private fun MarginQuestion(q: V7MarginQuestion, onQuiz: () -> Unit) {
     PaperCard(contentSpacing = 0.dp) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("这一节 · 第 1 题 / ${q.count}", style = MaterialTheme.typography.labelMedium)
+            Text("本节最近一题 · 共做过 ${q.count} 题", style = MaterialTheme.typography.labelMedium)
             Text("不计时", style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.fgSecondary)
         }
         Spacer(Modifier.height(8.dp))
@@ -256,11 +256,11 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
             saveNote("> ${noteQuote.orEmpty()}\n\n${noteText.trim()}"); noteQuote = null; noteText = ""
         }) { Text("保存") } }, dismissButton = { TextButton(onClick = { noteQuote = null }) { Text("取消") } })
     Desk(crumb = d.course.ifBlank { kp.module.ifBlank { c.courseId } } + week?.let { " · 第 $it 周" }.orEmpty(), focus = focus, onFocus = onFocus,
-        status = d.readStatus.ifBlank { "上次读到" }, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = "← 本周",
+        status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = "← 本周",
         directory = { WeekDirectory(view, week, weekActions?.let { it::select }) },
         margin = {
             if (d.lecture.isNotBlank() || d.personalNote.isNotBlank() || d.sourceLabel.isNotBlank() || d.question != null || d.selection.isNotBlank()) AlignedRail(listOf("p0", "p1", "p1", "p3", "end")) {
-                if (d.lecture.isNotBlank()) NoteCard("★  1  ${d.lectureLabel}", d.lecture)
+                if (d.lecture.isNotBlank()) NoteCard("${d.lectureLabel} · 1", d.lecture)
                 if (d.selection.isNotBlank()) SelectionMenu(d.selection, onSelectionAsk,
                     onHighlight = { saveNote("> ${d.selection}") }, onNote = { noteQuote = d.selection }, enabled = !saving)
                 if (d.sourceLabel.isNotBlank()) SourceThumbnail(d, onSource)
@@ -282,20 +282,20 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
         BoxWithConstraints(Modifier.fillMaxSize()) {
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
                 .verticalScroll(rememberScrollState()).padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 100.dp)) {
-                PageHeader("本周要点 · ${index + 1} / ${points.size}", splitTitle(kp.title).second, d.deck, d.meta.ifBlank { kp.reference })
+                PageHeader("第 ${index + 1} 节 / 共 ${points.size} 节", splitTitle(kp.title).second, d.deck, d.meta.ifBlank { kp.reference })
                 saveError?.let { Text(it, color = CoachTheme.colors.dangerFg) }
                 if (!Regex("(?m)^#{1,6} |^```|^\\||\\$|!\\[").containsMatchIn(text)) {
                     withoutFootnoteDefinitions(text).trim().split(Regex("\\n\\s*\\n")).forEachIndexed { i, paragraph ->
                         Box(Modifier.railAnchor("p$i")) { MarkedParagraph(paragraph.replace('\n', ' '), d, i) { selection = it } }
                         Spacer(Modifier.height(15.3.dp))
-                        if (!m.inner && !focus && i == 0 && d.lecture.isNotBlank()) { NoteCard("★ ${d.lectureLabel}", d.lecture); Spacer(Modifier.height(15.3.dp)) }
+                        if (!m.inner && !focus && i == 0 && d.lecture.isNotBlank()) { NoteCard(d.lectureLabel, d.lecture); Spacer(Modifier.height(15.3.dp)) }
                         if (!m.inner && !focus && i == 2 && d.personalNote.isNotBlank()) { NoteCard("我的批注", d.personalNote, true); Spacer(Modifier.height(15.3.dp)) }
                     }
                 } else Markdown(text, true, "reading:${kp.id}", c.math)
                 Spacer(Modifier.height(8.7.dp))
                 Row(Modifier.fillMaxWidth().railAnchor("end"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("追问…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
-                    Text(d.question?.let { "整节 ${it.count} 题 →" } ?: "开始练习 →", Modifier.clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
+                    Text("问一句…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
+                    Text("开始做题 →", Modifier.clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
                 }
             }
             if (!m.inner && !focus) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (d.selection.isNotBlank()) 84.dp else 40.dp)

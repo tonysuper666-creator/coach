@@ -95,10 +95,10 @@ class MainlineScreenTest {
                     MainlineScreen(c, view, onBack = {}, onOpenSteps = { steps = true }, onOpenEssay = {}, onReviewWeek = {})
                 } } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("知识点 3 · 有题 3 · 已掌握 0").assertIsDisplayed()
+                onNodeWithText("考点 3 · 有题 3 · 会了 0").assertIsDisplayed()
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("铺垫题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
 
                 if (retryChoice != null) {
                     onNodeWithTag("mainline-option-$retryChoice").performClick()
@@ -118,7 +118,7 @@ class MainlineScreenTest {
                     val wrongMark = hasText("✗") and hasAnyAncestor(hasTestTag("mainline-option-$retryChoice"))
                     if (retryChoice == 0) onNode(wrongMark, useUnmergedTree = true).assertExists()
                     else onNodeWithText("✗", useUnmergedTree = true).assertDoesNotExist()
-                    val outcome = if (retryChoice == 0) "答错了。" else if (firstGuessed) "答对了，但标了猜的：不算掌握。" else "答对了，算掌握。"
+                    val outcome = if (retryChoice == 0) "答错。" else if (firstGuessed) "猜对：不算会。" else "答对。"
                     onNodeWithText(outcome).performScrollTo().assertIsDisplayed()
                     capture("mainline-retry-$retryChoice-$firstGuessed-$width")
                     return@runComposeUiTest
@@ -131,7 +131,7 @@ class MainlineScreenTest {
                 onNodeWithText("为什么对", substring = true).assertIsDisplayed()
                 for (reason in listOf("sold out", "ripen after", "imported")) onNodeWithText(reason, substring = true).assertExists()
                 capture("mainline-explained-$width")
-                onNodeWithText("答错了。").performScrollTo().assertIsDisplayed()
+                onNodeWithText("答错。").performScrollTo().assertIsDisplayed()
                 onNodeWithText("已排进复习：明天再看一次。").performScrollTo().assertIsDisplayed()
                 onNodeWithText("已进第 1 周错题本", substring = true).performScrollTo().assertIsDisplayed()
                 onNodeWithText("Synthetic lecture 1, slide 4").performScrollTo().assertIsDisplayed()
@@ -143,19 +143,19 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-guess").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("答对了，但标了猜的：不算掌握。").performScrollTo().assertIsDisplayed()
+                onNodeWithText("猜对：不算会。").performScrollTo().assertIsDisplayed()
                 onNodeWithText("已排进复习：明天再看一次。").performScrollTo().assertIsDisplayed()
                 assertEquals(listOf(false, true), mac.answers.map { it["guessed"]!!.jsonPrimitive.boolean })
                 capture("mainline-guessed-$width")
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
                 // The bridge question leads on to step grading and the timed essay.
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("桥接题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("综合题", substring = true).fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-submit").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("答对了，算掌握。").performScrollTo().assertIsDisplayed()
-                onNodeWithText("知识点 3 · 有题 3 · 已掌握 1").assertExists()
+                onNodeWithText("答对。").performScrollTo().assertIsDisplayed()
+                onNodeWithText("考点 3 · 有题 3 · 会了 1").assertExists()
                 onNodeWithTag("mainline-essay").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-steps").performClick()
                 assertTrue(steps, "the bridge question opens step grading")

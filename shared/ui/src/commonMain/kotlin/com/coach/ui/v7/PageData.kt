@@ -57,8 +57,6 @@ internal fun coursePageDetails(course: String, view: CourseView, week: Int?, kp:
         .mapNotNull { (it.payload["content"] as? JsonPrimitive)?.contentOrNull }.filter { it.isNotBlank() }
     val highlights = notes.flatMap { note -> note.lines().filter { it.startsWith("> ") }.map { it.removePrefix("> ") } }.distinct()
     val personal = notes.map { note -> note.lines().filterNot { it.startsWith("> ") }.joinToString("\n").trim() }.filter { it.isNotBlank() }
-    val passed = points.count { it.status == KpStatus.PASSED || it.status == KpStatus.SOLID }
-    val active = points.count { it.status == KpStatus.IN_PROGRESS }
     val missing = points.filter { it.status == KpStatus.NEEDS_REPAIR }
     val index = points.indexOfFirst { it.id == kp?.id }
     val source = page?.takeIf { it.docId == kp?.anchorDoc && it.pdfPage == kp?.anchorPdfPage && it.text.isNotBlank() }
@@ -76,18 +74,13 @@ internal fun coursePageDetails(course: String, view: CourseView, week: Int?, kp:
         sourceText = source?.text.orEmpty(),
         emphasis = Regex("\\*\\*(.+?)\\*\\*").find(reading)?.groupValues?.get(1).orEmpty(),
         types = types,
-        weekStats = "通过 $passed · 在读 $active · 还缺 ${missing.size}",
-        nextStep = kp?.let { "先把${splitTitle(it.title).second}${if (view.isResume(it)) "读完" else "开始学习"}。" }.orEmpty(),
+        weekStats = statusSummary(points),
+        nextStep = kp?.let { "${if (view.isResume(it)) "继续" else "开始"} · ${splitTitle(it.title).second}" }.orEmpty(),
         missing = missing.map { splitTitle(it.title).second },
         directory = view.weeks.map { n ->
             val rows = view.weekKps(n)
-            V7DirectoryEntry(n, rows.firstOrNull()?.let { it.module.ifBlank { splitTitle(it.title).second } }.orEmpty(), when {
-                n in view.midtermExemptionWeeks -> "豁免"
-                n == week -> "在读"
-                rows.any { it.status == KpStatus.NEEDS_REPAIR } -> "要回炉"
-                rows.isNotEmpty() && rows.all { it.status == KpStatus.PASSED || it.status == KpStatus.SOLID } -> "已读"
-                else -> "未读"
-            })
+            V7DirectoryEntry(n, if (n in view.midtermExemptionWeeks) "期中周" else weekName(rows),
+                if (n in view.midtermExemptionWeeks) "无新课" else "${rows.count { it.status.isLearned }}/${rows.size}")
         },
         shelf = docs.map { it.title }.filter { it.isNotBlank() }.distinct(), question = question,
     )

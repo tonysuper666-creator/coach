@@ -823,7 +823,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     val values = weights?.values?.map { (it as? JsonPrimitive)?.intOrNull }
                     if (weights == null || weights.keys.any { it.isBlank() } || values!!.any { it == null || it < 0 } ||
                         values.filterNotNull().sumOf { it.toLong() } > Int.MAX_VALUE) { status="REJECTED"; error="INVALID_EXAM_WEIGHTS" }
-                    else emit("exam_weights_set",json("weights" to weights))
+                    else emit("exam_weights_set",if(p.str("scope")=="FINAL") json("weights" to weights,"scope" to "FINAL") else json("weights" to weights))
                 }
                 "file_quick_ask" -> {
                     val filed = runCatching { fileQuickAsk(body.courseId,p) }

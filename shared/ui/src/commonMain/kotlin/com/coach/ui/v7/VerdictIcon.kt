@@ -28,8 +28,9 @@ internal fun VerdictIcon(correct: Boolean, modifier: Modifier, color: Color) {
 
 /** Keep the accessible label while drawing the mark without a font fallback. */
 @Composable
-internal fun PassedLabel(modifier: Modifier, style: TextStyle, color: Color) {
-    Text(buildAnnotatedString { appendInlineContent("passed", "✓"); append(" 已通过") }, modifier,
-        color = color, style = style, inlineContent = mapOf("passed" to InlineTextContent(
-            Placeholder(12.sp, 12.sp, PlaceholderVerticalAlign.Center)) { VerdictIcon(true, Modifier.fillMaxSize(), color) }))
+internal fun PassedLabel(modifier: Modifier, style: TextStyle, color: Color, label: String = com.coach.client.KpStatus.PASSED.label, checks: Int = 1) {
+    // 「稳了」画双勾，和中央映射里的符号一致。
+    val icon = InlineTextContent(Placeholder(12.sp, 12.sp, PlaceholderVerticalAlign.Center)) { VerdictIcon(true, Modifier.fillMaxSize(), color) }
+    Text(buildAnnotatedString { repeat(checks) { appendInlineContent("passed$it", "✓") }; append(" $label") }, modifier,
+        color = color, style = style, inlineContent = (0 until checks).associate { "passed$it" to icon })
 }

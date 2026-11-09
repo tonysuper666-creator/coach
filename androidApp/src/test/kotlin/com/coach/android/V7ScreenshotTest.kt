@@ -180,7 +180,7 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
             if (scene == "studyQuiz") compose.onNodeWithTag("study-ask").assertIsDisplayed()
         }
         if (scene == "week") {
-            assertEquals(2, compose.onAllNodesWithText("✓ 已通过").fetchSemanticsNodes().size)
+            assertEquals(2, compose.onAllNodesWithText("✓ 会了").fetchSemanticsNodes().size + compose.onAllNodesWithText("✓✓ 稳了").fetchSemanticsNodes().size)
         }
         if (scene == "quiz") {
             compose.onNodeWithText("正确").assertExists()

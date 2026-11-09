@@ -207,8 +207,13 @@ and are not included in a selection request. Reading position remains local.
 Selection explanations use the existing subscription bridge and existing
 learner-visible course page retrieval. The server revalidates the quote, offsets
 and content version; missing pages return “无法确认” without calling AI. The
-bridge sees only the selected passage and vetted source pages. Each response
-paragraph must pass the existing citation/quotation gate; source buttons use
+bridge sees only the selected passage and vetted source pages. The model returns
+one JSON object containing one or two paragraphs, each with plain text and an
+explicit nonempty list of source anchor IDs. Unknown fields, missing/unknown
+anchors, extra prose and embedded paragraph breaks are rejected. The server
+renders only the declared anchors and then checks the entire answer with the
+existing citation/quotation gate; invalid quotes are never stripped or repaired.
+Source buttons use
 actual document/page metadata, never AI-invented page locators. AI elapsed time
 is separate from quiz submission timing. Requests have a 90-second bound;
 cancellation is scoped to device/course/request, including cancellation that
@@ -273,9 +278,18 @@ p95 must be at most 800 ms. The proxy deliberately does not tunnel WebSockets:
 HTTP recovery does not validate the global connected banner, which remains
 `Mac 未连接` in this fixture.
 
+Each sample also records `locateMs`, `dispatchMs`, `awaitVisibleMs` and `verifyMs`.
+They partition the same original total, including the final repeated visibility
+assertion. The proxy records `upstreamMs` through reading the candidate response.
+Per-poll node counts and query durations distinguish missing content from a slow
+semantics query. Wall timestamps and before/after ADB clock brackets bound host
+and Android clock skew; they are diagnostic and never replace the monotonic gate.
+These diagnostics are not subtracted from the gate and do not isolate the Android
+socket or first rendered frame. Test synchronization and HTTP work can overlap.
+
 ## Current verification status (TON-1394 draft)
 
-JVM suites pass (391 tests: server 214, client 74, UI 103; zero failures,
+JVM suites pass (392 tests: server 215, client 74, UI 103; zero failures,
 errors or skips), as do the six content-tool checks, server distribution and
 isolated Android application/test APK builds. The UI regression includes exiting
 focus and then changing theme without restoring an obsolete focus snapshot.
@@ -294,6 +308,36 @@ above the unchanged 800 ms limit (range 333.316375–1216.455 ms). Six fault sam
 are separate. Test synchronization is included; these samples alone cannot assign
 the delay to network or rendering. Keep the raw report and the failure.
 
+Expert's single-size diagnostic runs retain the same timer and 800 ms gate.
+The baseline/poll/transport runs each collect 20 samples and exit **1**, with p95
+1166.579 / 1166.307 / 1182.952 ms. In the transport run, candidate forwarding takes
+14.309–30.712 ms. Slow samples spend roughly 535–595 ms before proxy receipt and
+540–600 ms after proxy write, using clock-offset bounds; these are coarse spans,
+not isolated Android I/O measurements. Individual semantics queries do not account
+for the whole delay. Enabling proxy TCP_NODELAY still exits **1** at 1183.636 ms;
+that ineffective configuration change was reverted.
+
+A diagnostic copy binds the same isolated native Netty server directly to the
+configured tailnet address, without the HTTP fault proxy. At 1972×1248 its 20
+samples pass at 716.373 ms. This narrows investigation to differences in the proxy
+path; it does not establish a particular TCP cause, fix application performance,
+or replace the full proxy/recovery acceptance gate. The copy and raw report are
+retained with the evidence.
+
+Another diagnostic copy buffers response headers and body together and explicitly
+flushes the response. It still exits **1**, with 20 samples at 1167.055 ms p95.
+Neither packet-writing experiment justifies a TCP root-cause claim; neither
+configuration is included in the default harness.
+
+The final default run (`build/ton1394-expert-full-final`, 2026-11-09) again passes
+all eight UI scenarios, both sizes' two-click entries and six immutable replays.
+It exits **1**: 40 normal samples have nearest-rank p95 **1182.403834 ms**
+(range 299.286626–1183.885667 ms); six fault samples remain separate. The four
+timing partitions sum to each original total without subtraction. Their p95s are
+33.656 ms locating the button, 24.538 ms dispatching the click, 1094.348 ms waiting
+for visible content, and 34.258 ms repeating the visibility check. Marginal
+partition p95s are not additive. Extra proxy latency remains unresolved.
+
 Real subscription CLI evidence is a separate opt-in command. It starts disposable
 server and bridge instances, seeds only synthetic source pages, exercises the real
 reader route, records generated synthetic text and the AI call ledger, and reaps
@@ -309,14 +353,31 @@ tools/dev/heavy python3 tools/dev/check-reader-selection-live.py \
   --output build/ton1394-evidence-cli-final
 ```
 
-The recorded final run exits **1**: two physical `READER_SELECTION` calls served by
+The Builder handoff run exits **1**: two physical `READER_SELECTION` calls served by
 `claude-sonnet-5-5` complete, but only the example passes the source gate. Explain
 takes 3435.411 ms and example 4366.163 ms round trip. The rejected explain answer
 quotes a paraphrase and adds an uncited self-correction; the strict gate correctly
-returns an inability to confirm. Prompt guidance now requests plain paragraphs
-and exact quotations, but does not resolve this case. Earlier failed samples are
-retained; stop repeated prompt retries under the two-failure escalation rule.
-This is source-gate evidence, not independent factual grading or Android AI timing.
+returns an inability to confirm. Earlier failed samples are retained.
+
+The reader now requests a strict JSON object with one or two paragraphs and
+explicit, known anchor IDs for each. Extra keys, embedded anchors, multiline text,
+missing anchors and trailing self-correction are rejected as a whole. The server
+renders only the declared anchors and applies the existing whole-answer source
+and exact-quotation gate unchanged. It never strips quotes or salvages a failed
+paragraph. The prompt asks for unquoted prose to avoid quoting translated terms;
+the gate still accepts a valid exact source quotation.
+
+The first structured run (`build/ton1394-expert-cli-structured`) still exits **1**:
+the explain call quotes a Chinese paraphrase. With the unquoted-prose constraint,
+`build/ton1394-expert-cli-noquotes` exits **0**, with explain/example both passing
+the unchanged gate (4429.610 / 4405.907 ms round trip, 2026-11-09
+05:13:39Z–05:13:44Z). Both physical subscription calls completed. This is only two
+passing synthetic samples, not evidence of general reliability, independent
+factual accuracy or Android AI timing. The historical failures remain evidence;
+do not repeat unchanged live prompts to hunt for a passing run.
+In particular, the explain answer interprets the isolated word synthetic as
+artificial/non-natural before acknowledging insufficient context. Source-pointer
+and quotation validation cannot decide whether that inference is justified.
 
 Full acceptance remains pending: submission p95, reliable live citation output,
 the global WebSocket connection state, Android AI timing/cancel/recovery, and the

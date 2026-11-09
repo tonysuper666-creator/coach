@@ -181,6 +181,8 @@ def main():
                     pass
                 def forward(self):
                     nonlocal unavailable_until
+                    started = time.monotonic_ns()
+                    received_utc_ms = time.time_ns() / 1_000_000
                     raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
                     if time.monotonic() < unavailable_until:
                         self.close_connection = True
@@ -209,12 +211,17 @@ def main():
                                     return
                                 status, body = 503, b'{"error":"Synthetic response lost after commit"}'
                     self.send_response(status)
-                    diagnostics.append(dict(method=self.command, path=self.path, status=status))
+                    diagnostic = dict(method=self.command, path=self.path, status=status,
+                                      receivedUtcMs=received_utc_ms, responseBytes=len(body),
+                                      tcpNoDelay=self.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY),
+                                      upstreamMs=(time.monotonic_ns() - started) / 1_000_000)
+                    diagnostics.append(diagnostic)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
                     try:
                         self.wfile.write(body)
+                        diagnostic['sentUtcMs'] = time.time_ns() / 1_000_000
                     except BrokenPipeError:
                         pass
                 do_GET = do_POST = forward
@@ -224,14 +231,25 @@ def main():
             proxy.daemon_threads = True
             proxy_thread = threading.Thread(target=proxy.serve_forever)
             proxy_thread.start()
-            samples, runs = [], []
+            samples, runs, clock_brackets = [], [], []
+
+            def record_clock(mode, phase):
+                # Bound clock skew for cross-device diagnostics only; the gate uses Android monotonic time.
+                before = time.time_ns() / 1_000_000
+                device = int(android('shell', 'date', '+%s%3N').stdout.strip())
+                after = time.time_ns() / 1_000_000
+                clock_brackets.append(dict(mode=mode, phase=phase, hostBeforeMs=before, deviceMs=device,
+                                           hostAfterMs=after, offsetLowMs=device - after, offsetHighMs=device - before))
+                (out / 'clock-brackets.json').write_text(json.dumps(clock_brackets, indent=2))
 
             def instrument(mode, folder):
                 folder.mkdir(parents=True, exist_ok=True)
                 android('logcat', '-c', check=False)
+                record_clock(mode, 'before')
                 result = android('shell', 'am', 'instrument', '-w', '-e', 'class', 'com.coach.android.MainlineNotesSmoke',
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
                     f'{PACKAGE}.test/androidx.test.runner.AndroidJUnitRunner', timeout=300, check=False)
+                record_clock(mode, 'after')
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 # App-side diagnostics for a UI failure: connection state transitions and mainline fetches.
                 if result.returncode != 0 or b'OK (1 test)' not in result.stdout:
@@ -315,10 +333,20 @@ def main():
                 coverage = request(f'/v1/courses/{fixture.COURSE}/mainline')['weeks'][0]['coverage']
             normal = sorted(s['ms'] for s in samples if not s['fault'])
             p95 = normal[math.ceil(.95 * len(normal)) - 1] if normal else None
+            partitions = ('locateMs', 'dispatchMs', 'awaitVisibleMs', 'verifyMs')
+            for sample in samples:
+                assert abs(sample['ms'] - sum(sample[key] for key in partitions)) < .000001
+            partition_summary = {}
+            for key in partitions:
+                values = sorted(sample[key] for sample in samples if not sample['fault'])
+                if values:
+                    partition_summary[key] = dict(meanMs=sum(values) / len(values),
+                                                  p95ms=values[math.ceil(.95 * len(values)) - 1])
             report = dict(syntheticOnly=True, productionRead=False, package=PACKAGE, runs=runs, samples=samples,
                           transport='Android emulator -> configured Tailscale IPv4 -> isolated HTTP proxy -> candidate',
                           disconnection='Isolated proxy drops all HTTP connections for 3.5s after commit; emulator network settings unchanged',
-                          p95ms=p95, normalSamples=len(normal), faults=failures, immutableReplays=len(retried), coverage=coverage,
+                          p95ms=p95, timingPartitions=partition_summary,
+                          normalSamples=len(normal), faults=failures, immutableReplays=len(retried), coverage=coverage,
                           utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
             (out / 'report.json').write_text(json.dumps(report, indent=2))
             print(json.dumps({k: report[k] for k in ('normalSamples', 'p95ms', 'immutableReplays', 'coverage')}), flush=True)

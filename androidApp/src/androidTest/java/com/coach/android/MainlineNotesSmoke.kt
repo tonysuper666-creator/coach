@@ -111,19 +111,43 @@ class MainlineNotesSmoke {
             show(submit)
             val ready = SystemClock.elapsedRealtime() + 5000
             while (!runCatching { waitFor(submit).assertIsEnabled() }.isSuccess && SystemClock.elapsedRealtime() < ready) Thread.sleep(10)
+            val startedUtcMs = System.currentTimeMillis()
             val started = SystemClock.elapsedRealtimeNanos()
-            click(waitFor(submit))
+            val button = waitFor(submit)
+            button.assertIsEnabled()
+            val located = SystemClock.elapsedRealtimeNanos()
+            button.performClick()
+            clicks++
+            val dispatched = SystemClock.elapsedRealtimeNanos()
             if (fault) {
                 waitFor("答案已保存在本机，正在自动重连", contains = true)
                 waitFor(submit).assertIsNotEnabled()
                 screenshot("fault-waiting")
             }
             val explanations = compose.onAllNodes(hasText("为什么", substring = true))
-            fun explanationVisible() = explanations.fetchSemanticsNodes().indices.any { explanations[it].isDisplayed() }
+            val polls = JSONArray()
+            fun explanationVisible(): Boolean {
+                val began = SystemClock.elapsedRealtimeNanos()
+                val nodes = explanations.fetchSemanticsNodes()
+                val fetched = SystemClock.elapsedRealtimeNanos()
+                val displayed = nodes.indices.any { explanations[it].isDisplayed() }
+                polls.put(JSONObject().put("nodes", nodes.size).put("displayed", displayed)
+                    .put("fetchMs", (fetched - began) / 1_000_000.0)
+                    .put("displayMs", (SystemClock.elapsedRealtimeNanos() - fetched) / 1_000_000.0))
+                return displayed
+            }
             compose.waitUntil(timeoutMillis = 15_000) { explanationVisible() }
+            val visible = SystemClock.elapsedRealtimeNanos()
             assertTrue("Explanation must appear automatically", explanationVisible())
-            val elapsed = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
-            samples.put(JSONObject().put("item", shot).put("ms", elapsed).put("fault", fault).put("utc", java.time.Instant.now().toString()))
+            val verified = SystemClock.elapsedRealtimeNanos()
+            fun ms(from: Long, to: Long) = (to - from) / 1_000_000.0
+            // Keep the original conservative total and timer boundaries. These segments expose
+            // synchronization cost without subtracting it from the 800ms acceptance gate.
+            samples.put(JSONObject().put("item", shot).put("ms", ms(started, verified))
+                .put("locateMs", ms(started, located)).put("dispatchMs", ms(located, dispatched))
+                .put("awaitVisibleMs", ms(dispatched, visible)).put("verifyMs", ms(visible, verified))
+                .put("visibilityPolls", polls).put("startedUtcMs", startedUtcMs)
+                .put("fault", fault).put("utc", java.time.Instant.now().toString()))
             screenshot(shot)
             show(outcome)
         }

@@ -17,10 +17,29 @@ import java.util.concurrent.TimeUnit
 internal data class ReaderDocument(
     val id: String, val course: String, val title: String, val file: Path,
     val version: String, val pages: Int, val offset: Int?, val kind: String, val week: Int?,
+    val outline: List<OutlineNode> = emptyList(),
 ) {
     fun view() = json("id" to id, "title" to title, "version" to version, "pages" to pages,
         "printedPageOffset" to offset, "kind" to kind, "week" to week)
     fun printedPage(page: Int): Int? = offset?.let { page - it }?.takeIf { it > 0 }
+}
+
+/** Chapter (depth 0) or section (depth 1) registered by the catalog at a PDF page; ranges run to the next sibling. Never inferred from text. */
+internal data class OutlineNode(val title: String, val page: Int, val sections: List<OutlineNode> = emptyList())
+
+internal fun parseOutline(raw: JsonElement?, pages: Int): List<OutlineNode> {
+    val array = raw as? JsonArray ?: return emptyList()
+    require(array.size <= 200) { "Reader outline too large" }
+    fun node(o: JsonObject, depth: Int): OutlineNode {
+        val title = o.str("title"); val page = (o["pdfPage"] as? JsonPrimitive)?.intOrNull
+        require(title.length in 1..200 && page != null && page in 1..pages) { "Invalid reader outline" }
+        val subs = if (depth == 0) (o["sections"] as? JsonArray).orEmpty().map { node(it.jsonObject, 1) } else emptyList()
+        require(subs.all { it.page >= page } && subs.zipWithNext().all { (a, b) -> a.page < b.page }) { "Invalid reader outline order" }
+        return OutlineNode(title, page, subs)
+    }
+    val chapters = array.map { node(it.jsonObject, 0) }
+    require(chapters.zipWithNext().all { (a, b) -> a.page < b.page && (a.sections.lastOrNull()?.page ?: 0) < b.page }) { "Invalid reader outline order" }
+    return chapters
 }
 
 internal class ReaderFailure(val status: io.ktor.http.HttpStatusCode, message: String) : RuntimeException(message)
@@ -53,7 +72,7 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
                 (offset == null || offset in 0 until pages) && kind in setOf("textbook", "slides", "reading") &&
                 (kind != "slides" || week != null && week in 1..100) &&
                 d.str("course").length in 1..128 && d.str("title").length in 1..300) { "Invalid reader metadata" }
-            ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week)
+            ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week, parseOutline(d["outline"], pages))
         }
         require(docs.size <= 500 && docs.map { it.course to it.id }.distinct().size == docs.size) { "Duplicate reader document" }
         return docs

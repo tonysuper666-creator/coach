@@ -170,6 +170,61 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             "unlocated" to unlocated)
     }
 
+    /**
+     * Chapter → section → exam point → question for one document. Placement uses only registered sources resolved through [locate]
+     * and the catalog outline: a point with no placeable source, with sources on several different pages, or outside every chapter
+     * is counted and reported, never guessed into the tree.
+     */
+    internal fun documentMap(store: LedgerStore, course: String, documentId: String, pages: Int, outline: List<OutlineNode>,
+                             locate: (String) -> Pair<String, Int>?): JsonObject {
+        val events = store.events(course)
+        val (weeks, _) = weeks(courseNames(events, course))
+        val history = ChoiceHistory(events)
+        var unlocated = 0; var ambiguous = 0; var outside = 0
+        fun refs(source: String) = source.split(Regex("[;；\n]")).map { it.trim() }.filter { it.isNotEmpty() }
+        /** null when it must not be placed; the counters say why. */
+        fun place(source: String): Int? {
+            val resolved = refs(source).mapNotNull(locate)
+            if (resolved.isEmpty()) { unlocated++; return null }
+            val here = resolved.filter { it.first == documentId }.map { it.second }.distinct()
+            if (here.size > 1) { ambiguous++; return null }
+            return here.singleOrNull()
+        }
+        class Bucket(val title: String, val page: Int, val end: Int) {
+            val facts = mutableListOf<JsonObject>(); val questions = mutableListOf<JsonObject>()
+            val sections = mutableListOf<Bucket>()
+            fun view(): JsonObject = json("title" to title, "pdfPage" to page, "endPage" to end, "facts" to JsonArray(facts), "questions" to JsonArray(questions),
+                "factsMastered" to facts.count { it.flag("mastered") }, "questionsMastered" to questions.count { it.str("status") == "mastered" },
+                "sections" to JsonArray(sections.map { it.view() }))
+        }
+        val chapters = outline.mapIndexed { i, c ->
+            val end = (outline.getOrNull(i + 1)?.page ?: (pages + 1)) - 1
+            Bucket(c.title, c.page, end).also { b -> b.sections += c.sections.mapIndexed { j, s ->
+                Bucket(s.title, s.page, (c.sections.getOrNull(j + 1)?.page ?: (end + 1)) - 1) } }
+        }
+        fun bucket(page: Int): Bucket? {
+            val chapter = chapters.lastOrNull { it.page <= page && page <= it.end } ?: return null
+            return chapter.sections.lastOrNull { it.page <= page && page <= it.end } ?: chapter
+        }
+        for (w in weeks) {
+            for (item in w.items) {
+                val page = place(item.source) ?: continue
+                val b = bucket(page) ?: run { outside++; null } ?: continue
+                b.questions += json("week" to w.week, "id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem.take(160),
+                    "status" to history.status(item), "pdfPage" to page)
+            }
+            for (f in w.facts) {
+                val page = place(f.source) ?: continue
+                val b = bucket(page) ?: run { outside++; null } ?: continue
+                val linked = w.items.filter { f.id in it.factIds }
+                b.facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp, "pdfPage" to page,
+                    "questions" to linked.size, "mastered" to (linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }))
+            }
+        }
+        return json("documentId" to documentId, "hasOutline" to outline.isNotEmpty(), "chapters" to JsonArray(chapters.map { it.view() }),
+            "unlocated" to unlocated, "ambiguous" to ambiguous, "outsideOutline" to outside)
+    }
+
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
     fun home(store: LedgerStore, course: String): JsonObject {

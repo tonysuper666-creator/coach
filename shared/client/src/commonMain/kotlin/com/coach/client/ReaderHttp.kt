@@ -25,6 +25,8 @@ class ReaderHttp internal constructor(
     )
     /** Facts and questions whose registered source is this page; sources that cannot be placed are only counted. */
     suspend fun study(document: String, pdfPage: Int): ReaderReply = request("${document.encodeURLPathPart()}/pages/$pdfPage/study", null)
+    /** Registered chapter → section → point → question tree; unplaceable items are only counted. */
+    suspend fun map(document: String): ReaderReply = request("${document.encodeURLPathPart()}/map", null)
     suspend fun state(document: String): ReaderReply = request("${document.encodeURLPathPart()}/state", null)
     suspend fun exportMarkdown(document: String): String? = text("${document.encodeURLPathPart()}/notes.md")
     suspend fun saveProgress(document: String, version: String, pdfPage: Int, baseRevision: Long, mutationId: String): ReaderReply =

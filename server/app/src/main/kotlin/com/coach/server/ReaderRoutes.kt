@@ -132,6 +132,13 @@ fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                     "factsMastered" to 0, "questionsMastered" to 0, "unlocated" to 0, "available" to false)
                 else actor.execute { mainline.pageStudy(this, course, d.id, page, locate) })
             } }
+            get("/{document}/map") { call.answer { course, _ ->
+                val d = library.document(course, call.parameters["document"]!!)
+                val locate = { source: String -> runCatching { library.resolve(course, source) }.getOrNull()?.let { it.str("documentId") to it.num("pdfPage").toInt() } }
+                call.json(if (mainline == null) json("documentId" to d.id, "hasOutline" to d.outline.isNotEmpty(), "chapters" to JsonArray(emptyList()),
+                    "unlocated" to 0, "ambiguous" to 0, "outsideOutline" to 0, "available" to false)
+                else actor.execute { mainline.documentMap(this, course, d.id, d.pages, d.outline, locate) })
+            } }
             get("/{document}/state") { call.answer { course, _ ->
                 val d = library.document(course, call.parameters["document"]!!)
                 call.json(actor.execute { ledger.state(this, course, d) })

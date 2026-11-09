@@ -117,6 +117,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             val scope = rememberCoroutineScope()
             var showNotes by remember(doc) { mutableStateOf(false) }
             if (showNotes) PrivateReaderAnnotations(reader, doc, page) { showNotes = false }
+            var showMap by remember(doc) { mutableStateOf(false) }
             fun send(write: ProgressWrite) {
                 pending = write
                 busy = true
@@ -136,6 +137,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                 page = target
                 send(ProgressWrite(target, revision, Uuid.random().toString()))
             }
+            if (showMap) ChapterMapDialog(reader, doc.id, doc.pages, onJump = { target -> showMap = false; if (target != page) move(target) }, onClose = { showMap = false }, practice = practice)
             LaunchedEffect(doc, loaded.value, initialPage) {
                 if (initialPage != null && initialPage != restored) move(initialPage)
             }
@@ -195,6 +197,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                         }, modifier = Modifier.testTag("private-keep-page")) { Text("保留本页并覆盖服务端位置") }
                         TextButton(onClick = onBack, modifier = Modifier.testTag("private-discard")) { Text("放弃未保存位置并返回") }
                     }
+                    TextButton(onClick = { showMap = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-map")) { Text("章节脉络") }
                     TextButton(onClick = { showNotes = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-notes")) { Text("本页原文与批注") }
                     if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
                     Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

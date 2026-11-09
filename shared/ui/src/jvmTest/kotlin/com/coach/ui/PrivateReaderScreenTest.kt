@@ -32,6 +32,8 @@ class PrivateReaderScreenTest {
         @Volatile var version = "v1"
         /** null → the study route fails; otherwise the exact body for any page. */
         @Volatile var study: String? = null
+        /** null → the map route fails; otherwise the exact body. */
+        @Volatile var map: String? = null
         val auth = CopyOnWriteArrayList<String>()
         private val png = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(30, 40, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -78,6 +80,7 @@ class PrivateReaderScreenTest {
                             """{"revision":$revision}""".toByteArray()
                         }
                     }
+                    path.endsWith("/map") -> map?.toByteArray() ?: run { status = 503; "{}".toByteArray() }
                     path.endsWith("/study") -> study?.toByteArray() ?: run { status = 503; "{}".toByteArray() }
                     path.endsWith("/state") -> buildJsonObject {
                         put("document", buildJsonObject { put("version", version) })
@@ -303,6 +306,66 @@ class PrivateReaderScreenTest {
                 waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() || onAllNodesWithTag("private-study-failed").fetchSemanticsNodes().isNotEmpty() }
                 onAllNodesWithTag("private-study-practice-1").assertCountEquals(0)
                 onAllNodesWithTag("private-study-practice-2").assertCountEquals(0)
+            }
+        }
+    }
+
+    private fun mapBody(tag: String, hasOutline: Boolean = true, unplaced: Int = 0) = if (!hasOutline) """{"hasOutline":false,"chapters":[],"unlocated":0,"ambiguous":0,"outsideOutline":0}""" else
+        """{"hasOutline":true,"unlocated":$unplaced,"ambiguous":0,"outsideOutline":0,"chapters":[
+            {"title":"Chapter $tag","pdfPage":1,"endPage":4,"facts":[],"questions":[],"factsMastered":0,"questionsMastered":0,"sections":[
+              {"title":"Section $tag","pdfPage":3,"endPage":4,"facts":[{"id":"f-$tag","week":1,"text":"Point $tag","pdfPage":3,"mastered":false}],
+               "questions":[{"id":"q-$tag","week":1,"tier":"setup","stem":"Stem $tag","status":"new","pdfPage":3}],"sections":[]}]}]}"""
+
+    @Test fun chapterMapJumpsToRegisteredPagesAndIsolatesCourses() {
+        for (tag in listOf("C", "OTHER")) FakeReader(course = tag).use { fake ->
+            fake.map = mapBody(tag, unplaced = 2)
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) {
+                    PrivateReaderScreen(fake.http.reader, practice = { week, ids, close -> androidx.compose.material3.TextButton(onClick = close, modifier = Modifier.semantics { testTag = "stub-close" }) { androidx.compose.material3.Text("practice $week ${ids.sorted()}") } }) {}
+                } } } }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-open-map").fetchSemanticsNodes().firstOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+                onNodeWithTag("private-open-map").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-map-fact-f-$tag").fetchSemanticsNodes().isNotEmpty() }
+                onAllNodesWithTag("private-map-fact-f-${if (tag == "C") "OTHER" else "C"}").assertCountEquals(0)
+                onNodeWithTag("private-map-unplaced").assertTextContains("有 2 条", substring = true)
+                // A question opens the existing practice over the map; closing it returns to the map, not to another page.
+                onNodeWithTag("private-map-question-q-$tag").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("stub-close").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("practice 1 [q-$tag]").assertExists()
+                onNodeWithTag("stub-close").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-map-fact-f-$tag").fetchSemanticsNodes().isNotEmpty() }
+                // A point jumps to its own page, saves the position once, and the map closes.
+                onNodeWithTag("private-map-fact-f-$tag").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-3").fetchSemanticsNodes().isNotEmpty() && fake.currentPage == 3 }
+                onNodeWithTag("private-page-label").assertTextContains("第 3 页", substring = true)
+                onAllNodesWithTag("private-map").assertCountEquals(0)
+            }
+        }
+    }
+
+    @Test fun chapterMapNeverInventsStructure() = FakeReader().use { fake ->
+        for ((body, expect) in listOf<Pair<String?, String>>(mapBody("C", hasOutline = false) to "private-map-empty", null to "private-map-failed",
+            """{"hasOutline":true,"chapters":[{"title":"No page","facts":[],"questions":[],"sections":[]}],"unlocated":0}""" to "private-map-failed")) {
+            fake.map = body
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(412.dp, 800.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-open-map").fetchSemanticsNodes().firstOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+                onNodeWithTag("private-open-map").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag(expect).fetchSemanticsNodes().isNotEmpty() }
+                if (expect == "private-map-failed") {
+                    fake.map = mapBody("C")
+                    onNodeWithTag("private-map-retry").performClick()
+                    waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-map-fact-f-C").fetchSemanticsNodes().isNotEmpty() }
+                }
+                onNodeWithTag("private-map-close").performClick()
+                onAllNodesWithTag("private-map").assertCountEquals(0)
+                onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
             }
         }
     }

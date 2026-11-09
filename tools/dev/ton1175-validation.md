@@ -104,8 +104,30 @@ fail closed. Other platforms retain the `lsof` whole-file lock check.
 requires enabled `SocketRead`, `ActiveSetting`, `DataLoss`, `CPULoad` and
 `JVMInformation` evidence, zero socket threshold, no disabling during the window,
 no data loss, and CPU heartbeat coverage bracketing the window with at most
-two-second gaps. Every positive socket read overlapping the window counts,
-including hello/bridge traffic; there are no asserted JSON exclusions. Missing
+two-second gaps. By default every positive socket read overlapping the window
+counts, including hello and bridge traffic. A staged managed verifier may bind
+the bridge port to the active transaction's old plist and configuration hash.
+Only a non-truncated stack with the observed old `ChildServices` health frame,
+no client/routing/session frame, loopback address, matching port and at most
+1024 bytes can be attributed to health checks. SocketRead stack traces must be
+enabled throughout. Attributed reads are ordered by start time. A read belongs
+to the previous round only if its start is less than 100 ms after the previous
+read's end; otherwise it begins a new round. Each round spans at most five
+seconds, uses one event thread, and contains at most four reads and 1024 bytes.
+Consecutive round starts must be at least nine seconds apart, and the number of
+rounds cannot exceed `ceil(seconds/10)+2`. This distinction relies on the old
+`8d3608f` health loop's minimum 250 ms retry delay after completing a probe;
+the verifier requires that exact full old source head in the staged installation
+and transaction configuration, and `HEALTH_FRAME` pins the recorded frame. A
+long pause between reads in one probe can cause a safe rejection.
+The gate establishes absence of client reads and the shape of attributed reads;
+it cannot prove continuous bridge health, since failed connections may yield no reads.
+All other positive reads count as client reads and reject idle; evidence JSON
+cannot declare exclusions. Inspector output reports total, attributed health and
+client reads, rounds, per-round maxima, minimum round gap, maximum in-round gap
+in microseconds, and a fixed rejection code,
+including on rejection. The stage files, old plist and installation are read
+without following links and rechecked around inspection. Missing
 events/settings/coverage fail closed. Old recordings made without these enabled
 events cannot be used. The unit fixture is deliberately short; it verifies the
 real parser and proves the Python entrypoint rejects it as a production idle proof.

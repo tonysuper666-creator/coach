@@ -21,6 +21,13 @@ import sys
 import tempfile
 import time
 
+if __name__ == '__main__' and not __package__:
+    # The foreground supervisor launches this file by absolute path. Keep
+    # package imports and GateError identity shared with adapter modules.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    __package__ = 'tools.dev'
+    sys.modules['tools.dev.ton1175_switch'] = sys.modules[__name__]
+
 
 class GateError(Exception):
     pass
@@ -150,7 +157,12 @@ def check_idle(c, old_head, stopped=False, coverage_seal=None):
     # The verifier must fail closed if it cannot check the JFR, same PID and
     # identity, recording coverage and unchanged installation. No output leaks.
     if not stopped:
-        run(c['idleVerifier'] + [c['idleEvidence'], c['installation']])
+        verifier = list(c['idleVerifier'])
+        if '--stage-config' in verifier:
+            require(verifier.count('--stage-config') == 1 and '--stage-config-sha256' not in verifier,
+                    'ambiguous stage verifier configuration')
+            verifier += ['--stage-config-sha256', digest(json.dumps(c, sort_keys=True).encode())]
+        run(verifier + [c['idleEvidence'], c['installation']])
     logs = c['accessLogs']
     require(isinstance(logs, list) and logs, 'access log coverage missing')
     for name in logs:
@@ -197,7 +209,17 @@ def load_state(c):
 
 
 def set_journal(ops, value):
-    atomic(ops / 'journal.json', json.dumps({'phase': value}).encode())
+    journal = load(ops / 'journal.json') if (ops / 'journal.json').exists() else {}
+    journal['phase'] = value
+    atomic(ops / 'journal.json', json.dumps(journal).encode())
+
+
+def data_transaction(c):
+    if 'adapterSnapshotDir' not in c:
+        return None
+    # This entry point can also be executed directly by the supervisor.
+    from tools.dev import ton1193_data_transaction
+    return ton1193_data_transaction
 
 
 def current(c, ops):
@@ -212,9 +234,19 @@ def current(c, ops):
 
 def restore(c, ops, state):
     # Journal stays recoverable if the process or host fails between operations.
+    data = data_transaction(c)
+    journal = load(ops / 'journal.json')
+    require(journal.get('dataState') != 'committed', 'committed data requires forward repair')
     set_journal(ops, 'recovering')
     try:
-        command(c, 'stop')
+        # Incomplete renames deliberately fail ordinary inode preflight.
+        # Resume only the journal-bound layout after absent-label/PID/lock checks.
+        if data and data.restoring(c):
+            data.restore(c)
+        else:
+            command(c, 'stop')
+            if data and 'dataSnapshotHash' in journal:
+                data.restore(c)
         for target, source, mode in ((c['plist'], 'old.plist', state['plistMode']),
                                       (c['installation'], 'old.json', state['installationMode'])):
             atomic(target, (ops / source).read_bytes(), mode)
@@ -324,6 +356,9 @@ def operate(c, action, apply):
                 return
             require(phase in ('staged', 'rolled_back') and pointers == ['old', 'old'],
                     'incomplete transaction; use recover')
+            if 'adapterSnapshotDir' in c:
+                require('dataSnapshotHash' not in load(ops / 'journal.json'),
+                        'retained data requires a new stage for the next switch')
             require(tree_hash(c['release']) == state['candidateTreeSha256'], 'candidate release changed')
             run(c['candidateVerifier'] + [c['release'], c['candidateHead'], c['plist']])
             check_idle(c, c['expectedSourceHead'])
@@ -343,6 +378,10 @@ def operate(c, action, apply):
                     command(c, 'stop')
                     require(current(c, ops) == ['old', 'old'], 'pointers changed while stopping')
                     check_idle(c, c['expectedSourceHead'], stopped=True, coverage_seal=seal)
+                    data = data_transaction(c)
+                    if data:
+                        data.capture(c, seal)
+                        set_journal(ops, 'switching')
                     atomic(c['plist'], (ops / 'new.plist').read_bytes(), state['plistMode'])
                     atomic(c['installation'], (ops / 'new.json').read_bytes(), state['installationMode'])
                     # The startup itself spends the same five-minute budget.
@@ -361,6 +400,8 @@ def operate(c, action, apply):
                         timeout=deadline - time.monotonic())
                     require(time.monotonic() <= deadline, 'acceptance deadline expired')
                     require(current(c, ops) == ['new', 'new'], 'pointers changed during acceptance')
+                    if data:
+                        data.commit(c)
                     set_journal(ops, 'switched')
                     print('candidate accepted within five-minute transaction')
                 except BaseException as original:
@@ -373,7 +414,9 @@ def operate(c, action, apply):
             if phase == 'rolled_back' and pointers == ['old', 'old']:
                 print('already rolled back; no action')
                 return
-            require(phase in ('switching', 'validating', 'switched', 'recovering', 'recovery_required'),
+            require(load(ops / 'journal.json').get('dataState') != 'committed',
+                    'committed data requires forward repair')
+            require(phase in ('switching', 'snapshotted', 'validating', 'switched', 'recovering', 'recovery_required'),
                     'no switch transaction to recover')
             if not apply:
                 print('rollback dry-run: no stop or pointer changes')

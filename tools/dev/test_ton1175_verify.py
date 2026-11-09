@@ -17,6 +17,37 @@ from unittest import mock
 from tools.dev import ton1175_verify as verify
 
 
+class ManagedHealthSourceTest(unittest.TestCase):
+    def test_port_pin_requires_reviewed_old_source_on_both_sides(self):
+        from tools.dev import ton1193_transaction, ton1193_trust
+        old = verify.HEALTH_LOOP_OLD_HEAD
+        for expected, actual, allowed in ((old, old, True), ('a' * 40, old, False),
+                                           (old, 'a' * 40, False), ('a' * 40, 'a' * 40, False)):
+            with self.subTest(expected=expected, actual=actual):
+                config = {'installation': '/private/installation', 'plist': '/private/plist',
+                          'stateDir': '/private/state', 'expectedSourceHead': expected,
+                          'adapterEnvPins': {'BRIDGE_PORT': '41500', 'COACH_MANAGE_SERVICES': '1'}}
+                raw = json.dumps(config).encode()
+                installation = json.dumps({'sourceHead': actual}).encode()
+                plist = plistlib.dumps({'EnvironmentVariables': config['adapterEnvPins']})
+                state = {'plistMode': 0o600, 'installationMode': 0o600,
+                         'files': {'old.plist': verify.digest(plist), 'old.json': verify.digest(installation)}}
+                contents = {'/private/config': raw, '/private/installation': installation, '/private/plist': plist}
+                def read(path, *_args):
+                    return contents[str(path)], 1
+                with mock.patch.object(ton1193_transaction, '_read_file', side_effect=read), \
+                     mock.patch.object(ton1193_transaction, 'load_bound_state', return_value=(state, 'hash')), \
+                     mock.patch.object(ton1193_trust, 'directory_snapshot', return_value='directory'):
+                    config_hash = verify.digest(json.dumps(config, sort_keys=True).encode())
+                    if allowed:
+                        with verify.staged_bridge_port('/private/config', '/private/installation', config_hash) as port:
+                            self.assertEqual(port, 41500)
+                    else:
+                        with self.assertRaisesRegex(verify.GateError, 'unreviewed managed health loop source'):
+                            with verify.staged_bridge_port('/private/config', '/private/installation', config_hash):
+                                self.fail('unreviewed source was accepted')
+
+
 class EvidenceTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -41,6 +41,14 @@ fixture = module('mainline_fixture', ROOT / 'tools/dev/check-mainline-copy.py')
 smoke = fixture.smoke
 
 
+SUBMIT_P95_BUDGET_MS = 800
+
+
+def p95_observation(p95):
+    """Submit-latency budget is an observation in the report, never a functional failure (TON-1394)."""
+    return dict(budgetMs=SUBMIT_P95_BUDGET_MS, withinBudget=None if p95 is None else p95 <= SUBMIT_P95_BUDGET_MS)
+
+
 def stop(process):
     if process is not None and process.poll() is None:
         process.terminate()
@@ -345,12 +353,13 @@ def main():
             report = dict(syntheticOnly=True, productionRead=False, package=PACKAGE, runs=runs, samples=samples,
                           transport='Android emulator -> configured Tailscale IPv4 -> isolated HTTP proxy -> candidate',
                           disconnection='Isolated proxy drops all HTTP connections for 3.5s after commit; emulator network settings unchanged',
-                          p95ms=p95, timingPartitions=partition_summary,
+                          p95ms=p95, p95Budget=p95_observation(p95), timingPartitions=partition_summary,
                           normalSamples=len(normal), faults=failures, immutableReplays=len(retried), coverage=coverage,
                           utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
             (out / 'report.json').write_text(json.dumps(report, indent=2))
-            print(json.dumps({k: report[k] for k in ('normalSamples', 'p95ms', 'immutableReplays', 'coverage')}), flush=True)
-            assert p95 is None or p95 <= 800, 'Tailnet submit-to-first-visible-explanation p95 exceeds 800ms'
+            print(json.dumps({k: report[k] for k in ('normalSamples', 'p95ms', 'p95Budget', 'immutableReplays', 'coverage')}), flush=True)
+            if report['p95Budget']['withinBudget'] is False:
+                print('OBSERVATION: submit-to-first-visible-explanation p95 %.3fms exceeds the %dms budget (reported, not a functional failure)' % (p95, SUBMIT_P95_BUDGET_MS), flush=True)
     finally:
         stop(record)
         if proxy:

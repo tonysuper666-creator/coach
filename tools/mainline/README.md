@@ -274,7 +274,8 @@ UiAutomation. Click counts are measured actions, not preset values.
 Timing starts before locating and dispatching Submit and ends when the explanation
 is displayed in Compose. It includes test synchronization and click overhead, so
 it is a conservative UI observation, not localhost HTTP timing. Its nearest-rank
-p95 must be at most 800 ms. The proxy deliberately does not tunnel WebSockets:
+p95 has an 800 ms budget that the script reports as `p95Budget` in `report.json` (an
+observation: exceeding it no longer fails the run; functional, HTTP, recovery and source assertions still do). The proxy deliberately does not tunnel WebSockets:
 HTTP recovery does not validate the global connected banner, which remains
 `Mac 未连接` in this fixture.
 

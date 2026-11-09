@@ -22,6 +22,10 @@ fun TodayScreen(
     onOpenReview: () -> Unit, onOpen: (kpId: String, startNow: Boolean) -> Unit, weekActions: WeekActions? = null,
 ) {
     if (view == null) return CenterMessage("正在加载课程…")
+    if (weekActions != null && view.projection.studyScope != null) {
+        com.coach.ui.v7.WeekPage(c, view, ui, weekActions, onOpen)
+        return
+    }
     val now = rememberCourseNow(c)
     val kps = view.kps
     if (kps.isEmpty()) {
@@ -132,7 +136,7 @@ internal fun statusColor(status: KpStatus): Color = kpStatusColor(status, Materi
 /** 状态标签的字色。「未开始」用 onSurfaceVariant（outline 在深色下压在同色底上读不清）；「学习中」用 secondary（primary 在淡底上只有 4.1:1）。 */
 internal fun kpStatusColor(status: KpStatus, scheme: ColorScheme, success: Color): Color = when (status) {
     KpStatus.NEW -> scheme.onSurfaceVariant
-    KpStatus.IN_PROGRESS -> scheme.secondary
+    KpStatus.IN_PROGRESS -> scheme.onSurface
     KpStatus.PASSED, KpStatus.SOLID -> success
     KpStatus.NEEDS_REPAIR -> scheme.error
 }

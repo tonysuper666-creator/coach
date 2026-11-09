@@ -56,4 +56,5 @@ formulas/unknown/rotated pages anchor to the original-page region.
 - Display formulas are not enriched by default; a standalone formula line may be labelled `figure`/`text`. Do not infer formula correctness from OCR.
 - Scanned pages go through Docling's built-in RapidOCR (local); a blank/undetected scan gives `empty`.
 - Column detection is geometric (≥2 disjoint x-intervals with ≥2 narrow blocks each); full-width headings on a two-column page may land in column 1.
-- Not done here: the server-side `reader/v2` Kotlin consumer (Mac-only `server:*` tests), real-textbook runs (Mac-resident material), cross-platform path handling beyond `pathlib`.
+- Server consumer: `server/app/.../reader/v2/LayoutCache.kt` (read-only; `LayoutPage.orderTrusted` is the single gate for sentence anchoring). Its test passed on Windows via `./gradlew :server:app:test --tests 'com.coach.server.reader.v2.*'`; the Python test `test_page_json_has_every_field_the_kotlin_consumer_reads` pins the contract.
+- Not done here: real-textbook runs (Mac-resident material).

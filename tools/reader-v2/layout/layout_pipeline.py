@@ -96,10 +96,14 @@ def check_reading_order(blocks: list[dict], ncols: int):
     if ncols < 2:
         return "single_column", None
     seen_max = 0
+    last_top: dict = {}
     for b in sorted(blocks, key=lambda b: b["reading_order"]):
         if b["column"] == 0:
             continue
-        if b["column"] < seen_max:
+        top = b["bbox"][1]
+        reversed_in_col = b["column"] in last_top and top < last_top[b["column"]] - 2.0
+        last_top[b["column"]] = max(top, last_top.get(b["column"], top))
+        if b["column"] < seen_max or reversed_in_col:
             keyed = sorted((x for x in blocks if x["bbox"]),
                            key=lambda x: (x["column"], x["bbox"][1]))
             return "conflict", [x["id"] for x in keyed]
@@ -225,6 +229,8 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
             t = b.get("table")
             blk["table"] = t
             blk["status"] = "ok" if t and t["cells"] else "unknown"
+            if blk["status"] == "unknown":
+                blk["fallback"] = "original_page_region"
             blk["in_reading_flow"] = False   # a grid is never a run of sentences
         elif kind == "figure":
             blk["in_reading_flow"] = False
@@ -330,10 +336,25 @@ def ingest(pdf: Path, cache: Path, doc_id: str | None, engine, force: bool = Fal
                 "block_counts": kinds, "blocks_unknown_or_missing": unk,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     atomic_write_json(part / "manifest.json", manifest)   # written last: marks completeness
-    if final.exists():
-        shutil.rmtree(final)
-    os.replace(part, final)
-    atomic_write_json(ddir / "latest.json", {"version": vkey})   # old latest stays valid until here
+    aside = ddir / f".old-{vkey}"
+    if aside.exists():
+        shutil.rmtree(aside)
+    had_old = final.exists()
+    if had_old:
+        os.replace(final, aside)          # old data is only moved, never deleted before success
+    try:
+        os.replace(part, final)
+        atomic_write_json(ddir / "latest.json", {"version": vkey})
+    except Exception as e:
+        if final.exists() and had_old:
+            shutil.rmtree(final, ignore_errors=True)
+        if had_old:
+            os.replace(aside, final)      # restore the previous complete version
+        stats.update(error=f"promote failed: {type(e).__name__}: {e}"[:300],
+                     seconds=round(time.time() - t0, 3))
+        return stats
+    if had_old:
+        shutil.rmtree(aside, ignore_errors=True)
     stats["seconds"] = round(time.time() - t0, 3)
     return stats
 

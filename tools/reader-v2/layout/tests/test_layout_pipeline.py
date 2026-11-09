@@ -79,6 +79,40 @@ class CacheLogic(Base):
         self.assertEqual(latest, s3["version"])      # pointer untouched by the failure
         self.assertTrue((self.cache / "d" / s1["version"] / "manifest.json").exists())
 
+    def test_promotion_failure_keeps_old_version(self):
+        import os
+        from unittest import mock
+        pdf = self.syn / "mixed.pdf"
+        s1 = lp.ingest(pdf, self.cache, "d", FakeEngine())
+        before = sorted(p.name for p in (self.cache / "d" / s1["version"] / "pages").glob("*.json"))
+        real = os.replace
+
+        def flaky(src, dst):
+            if Path(src).name.startswith(".partial-"):
+                raise OSError("disk says no")
+            return real(src, dst)
+        with mock.patch.object(lp.os, "replace", flaky):
+            s2 = lp.ingest(pdf, self.cache, "d", FakeEngine(), force=True)
+        self.assertIn("promote failed", s2["error"])
+        after = sorted(p.name for p in (self.cache / "d" / s1["version"] / "pages").glob("*.json"))
+        self.assertEqual(before, after)
+        self.assertTrue((self.cache / "d" / s1["version"] / "manifest.json").exists())
+        self.assertEqual(lp.load_page(self.cache, "d", 4)["page_number"], 4)
+        self.assertFalse(list((self.cache / "d").glob(".old-*")))
+
+    def test_page_json_has_every_field_the_kotlin_consumer_reads(self):
+        # contract with server/.../reader/v2/LayoutCache.kt (runs on Windows, no JVM needed)
+        lp.ingest(self.syn / "mixed.pdf", self.cache, "d", FakeEngine())
+        p = lp.load_page(self.cache, "d", 1)
+        for k in ("schema_version", "status", "columns", "reading_order_status", "rotation", "size", "blocks"):
+            self.assertIn(k, p)
+        for k in ("id", "kind", "bbox", "reading_order", "column", "status"):
+            self.assertIn(k, p["blocks"][0])
+        self.assertEqual(p["schema_version"], 1)
+        self.assertRegex(json.dumps(p), r'"id": "p1b0"')
+        self.assertTrue((self.cache / "d" / "latest.json").exists())
+        self.assertEqual((self.cache / "d" / "latest.json").read_bytes()[:1], b"{")   # no BOM
+
     def test_resume_skips_done_pages(self):
         pdf = self.syn / "mixed.pdf"
         bad = FakeEngine(fail_pages={3})
@@ -113,6 +147,20 @@ class Heuristics(unittest.TestCase):
         st, sug = lp.check_reading_order(bl, 2)
         self.assertEqual(st, "conflict")
         self.assertEqual(sug[:3], ["a0", "a1", "a2"])
+
+    def test_reversed_order_inside_a_column_is_conflict(self):
+        bl = [{"kind": "text", "bbox": [60, 100 + 100 * i, 270, 150 + 100 * i], "reading_order": i, "id": f"a{i}"} for i in range(3)]
+        bl += [{"kind": "text", "bbox": [320, 100 + 100 * i, 530, 150 + 100 * i], "reading_order": 3 + i, "id": f"b{i}"} for i in range(3)]
+        self.assertEqual(lp.assign_columns(bl), 2)
+        bl[0]["reading_order"], bl[2]["reading_order"] = 2, 0     # column 1 read bottom-to-top
+        self.assertEqual(lp.check_reading_order(bl, 2)[0], "conflict")
+
+    def test_empty_table_has_fallback(self):
+        raw = {"size": (595, 842), "layout_score": None, "blocks": [
+            {"label": "table", "bbox": [1, 1, 5, 5], "text": None, "order": 0, "table": {"rows": 0, "cols": 0, "cells": []}}]}
+        meta = {"rotation": 0, "mediabox": [0, 0, 595, 842], "cropbox": [0, 0, 595, 842]}
+        b = lp.build_page_json(1, raw, meta, "s")["blocks"][0]
+        self.assertEqual((b["status"], b["fallback"]), ("unknown", "original_page_region"))
 
     def test_full_width_blocks_stay_single_column(self):
         bl = [{"kind": "text", "bbox": [72, 100 + 80 * i, 520, 150 + 80 * i], "reading_order": i, "id": f"a{i}"} for i in range(5)]

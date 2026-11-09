@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.PairedCredentials
+import com.coach.client.SubmissionTrace
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -30,6 +31,9 @@ class MainlineNotesSmoke {
         require(context.packageName == "com.coach.android.ton1394")
         require(BuildConfig.COACH_COURSE == "ton1358-synthetic-mainline")
         val mode = args.getString("mode") ?: "normal"
+        // Opt-in diagnosis only (instrumentation arg ton1394Trace=1); off leaves the run unchanged.
+        SubmissionTrace.enabled = args.getString("ton1394Trace") == "1"
+        SubmissionTrace.clear()
         val fault = mode in setOf("fault", "offline")
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         // Fail with a useful network diagnosis before navigating an otherwise disconnected app.
@@ -112,10 +116,12 @@ class MainlineNotesSmoke {
             val ready = SystemClock.elapsedRealtime() + 5000
             while (!runCatching { waitFor(submit).assertIsEnabled() }.isSuccess && SystemClock.elapsedRealtime() < ready) Thread.sleep(10)
             val startedUtcMs = System.currentTimeMillis()
+            SubmissionTrace.clear()
             val started = SystemClock.elapsedRealtimeNanos()
             val button = waitFor(submit)
             button.assertIsEnabled()
             val located = SystemClock.elapsedRealtimeNanos()
+            SubmissionTrace.mark("test", "test.clickStart")
             button.performClick()
             clicks++
             val dispatched = SystemClock.elapsedRealtimeNanos()
@@ -127,10 +133,12 @@ class MainlineNotesSmoke {
             val explanations = compose.onAllNodes(hasText("为什么", substring = true))
             val polls = JSONArray()
             fun explanationVisible(): Boolean {
+                SubmissionTrace.mark("test", "test.queryStart")
                 val began = SystemClock.elapsedRealtimeNanos()
                 val nodes = explanations.fetchSemanticsNodes()
                 val fetched = SystemClock.elapsedRealtimeNanos()
                 val displayed = nodes.indices.any { explanations[it].isDisplayed() }
+                SubmissionTrace.mark("test", "test.queryEnd")
                 polls.put(JSONObject().put("nodes", nodes.size).put("displayed", displayed)
                     .put("fetchMs", (fetched - began) / 1_000_000.0)
                     .put("displayMs", (SystemClock.elapsedRealtimeNanos() - fetched) / 1_000_000.0))
@@ -146,7 +154,8 @@ class MainlineNotesSmoke {
             samples.put(JSONObject().put("item", shot).put("ms", ms(started, verified))
                 .put("locateMs", ms(started, located)).put("dispatchMs", ms(located, dispatched))
                 .put("awaitVisibleMs", ms(dispatched, visible)).put("verifyMs", ms(visible, verified))
-                .put("visibilityPolls", polls).put("startedUtcMs", startedUtcMs)
+                .put("visibilityPolls", polls)
+                .put("trace", JSONArray().also { arr -> SubmissionTrace.snapshot().forEach { arr.put(JSONObject().put("id", it.id).put("event", it.event).put("ns", it.nanos)) } }).put("startedUtcMs", startedUtcMs)
                 .put("fault", fault).put("utc", java.time.Instant.now().toString()))
             screenshot(shot)
             show(outcome)

@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.MockReply
+import com.coach.client.SubmissionTrace
 import com.coach.domain.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -175,20 +176,26 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     LaunchedEffect(item?.str("id")) { if (item != null && itemId != item.str("id")) position(reading, item.str("id")) }
     LaunchedEffect(pending, retry) {
         val wire = pending ?: return@LaunchedEffect
+        val traceId = wire.str("submissionId")
+        SubmissionTrace.mark(traceId, "ui.effectStart")
         do {
             val r = withContext(Dispatchers.IO) {
+                SubmissionTrace.mark(traceId, "ui.ioStart")
                 http.answerMainline(number, wire.str("itemId"), wire.num("choice").toInt(), wire.flag("guessed"), wire.str("submissionId"),
-                    (wire["layout"] as? JsonPrimitive)?.intOrNull)
+                    (wire["layout"] as? JsonPrimitive)?.intOrNull).also { SubmissionTrace.mark(traceId, "ui.answerReturned") }
             }
+            SubmissionTrace.mark(traceId, "ui.mainResumed")
             val b = r.body
             if (b != null) {
                 result = b; pending = null; error = null
+                SubmissionTrace.mark(traceId, "ui.resultAssigned")
                 val updatedItems = JsonArray(items.map { q ->
                     if (q.str("id") == b.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(b.str("status")))) else q
                 })
                 body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
                     b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
                 save("result" to b, "pending" to JsonNull, "body" to body!!)
+                SubmissionTrace.mark(traceId, "ui.persisted")
                 break
             }
             retryable = r.retryable
@@ -204,6 +211,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             "submissionId" to Random.nextLong().toULong().toString(16), "layout" to item["layout"])
         // Commit the immutable payload and original displayed options BEFORE any network I/O.
         save("pending" to wire, "item" to JsonPrimitive(item.str("id")), "body" to body!!)
+        SubmissionTrace.mark(wire.str("submissionId"), "ui.pendingSaved")
         pending = wire; error = null
     }
     fun startQuiz(selectedFilter: String = "") {

@@ -63,10 +63,18 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
         null
     }
 
-    private suspend fun mockCall(path: String, body: JsonObject?): MockReply = try {
+    private suspend fun mockCall(path: String, body: JsonObject?, traceId: String? = null): MockReply = try {
         val url = "$base/v1/courses/${course.encodeURLPathPart()}/$path"
+        SubmissionTrace.mark(traceId, "http.postStart")
         val response: HttpResponse = if (body == null) http.get(url) else http.post(url) { setBody(TextContent(body.toString(), ContentType.Application.Json)) }
-        val parsed = runCatching { Json.parseToJsonElement(response.bodyAsText()).jsonObject }.getOrNull()
+        // postReturned = the suspending call returned; it makes no claim about when headers arrived.
+        SubmissionTrace.mark(traceId, "http.postReturned")
+        val parsed = runCatching {
+            SubmissionTrace.mark(traceId, "http.bodyAsTextStart")
+            val text = response.bodyAsText()
+            SubmissionTrace.mark(traceId, "http.bodyAsTextDone")
+            Json.parseToJsonElement(text).jsonObject.also { SubmissionTrace.mark(traceId, "http.parsed") }
+        }.getOrNull()
         if (response.status.isSuccess()) MockReply(parsed, null, parsed == null) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）", response.status.value in setOf(408, 429) || response.status.value >= 500)
     } catch (error: kotlinx.coroutines.CancellationException) {
         throw error
@@ -111,7 +119,7 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
     suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String, layout: Int?): MockReply =
         mockCall("mainline/$week/answer", buildJsonObject {
             put("itemId", itemId); put("choice", choice); put("guessed", guessed); put("submissionId", submissionId); layout?.let { put("layout", it) }
-        })
+        }, submissionId)
 
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")

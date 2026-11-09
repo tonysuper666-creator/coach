@@ -157,7 +157,16 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-option-0").performClick()
                 onNodeWithTag("mainline-submit").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("为什么对", substring = true).assertIsDisplayed()
+                try {
+                    onNodeWithText("为什么对", substring = true).assertIsDisplayed()
+                } catch (failure: AssertionError) {
+                    runCatching {
+                        capture("mainline-explanation-failure-${width}x$height")
+                        File("build/screens/mainline-explanation-failure-${width}x$height.txt").writeText(
+                            onRoot(useUnmergedTree = true).printToString(maxDepth = 50))
+                    }.onFailure { failure.addSuppressed(it) }
+                    throw failure
+                }
                 for (reason in listOf("sold out", "ripen after", "imported")) onNodeWithText(reason, substring = true).assertExists()
                 capture("mainline-explained-$width")
                 onNodeWithText("答错了。").performScrollTo().assertIsDisplayed()
@@ -323,6 +332,9 @@ class MainlineScreenTest {
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
     @Test fun desktopWalksOneWeekWithExplanationsOnTheSamePage() = walk(1000, 800)
+    // 1972×1248 pixels at Android density 320 is 986×624 dp, before system insets.
+    // No performScrollTo before the explanation assertion: submitting must expose it automatically.
+    @Test fun outerLandscapeShowsExplanationAutomaticallyAtDensity320() = walk(986, 624)
     @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)
     @Test fun lostGuessedReplyAutomaticallyResendsRecordedGuess() = walk(1000, 800, 1, true)
     @Test fun lostCorrectReplyAutomaticallyResendsRecordedPass() = walk(412, 915, 1, false)

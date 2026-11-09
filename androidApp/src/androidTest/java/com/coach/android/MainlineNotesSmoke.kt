@@ -147,7 +147,19 @@ class MainlineNotesSmoke {
                     .put("displayMs", (SystemClock.elapsedRealtimeNanos() - fetched) / 1_000_000.0))
                 return displayed
             }
-            compose.waitUntil(timeoutMillis = 15_000) { explanationVisible() }
+            try {
+                compose.waitUntil(timeoutMillis = 15_000) { explanationVisible() }
+            } catch (failure: ComposeTimeoutException) {
+                // Preserve the live Activity before instrumentation teardown replaces it with the launcher.
+                // Never scroll to the explanation here: automatic visibility is the assertion under test.
+                runCatching {
+                    screenshot("explanation-failure")
+                    java.io.File(context.cacheDir, "mainline-explanation-failure-tree.txt").writeText(
+                        compose.onAllNodes(isRoot(), useUnmergedTree = true).printToString(maxDepth = 50))
+                    java.io.File(context.cacheDir, "mainline-explanation-failure-polls.json").writeText(polls.toString(2))
+                }.onFailure { failure.addSuppressed(it) }
+                throw failure
+            }
             val visible = SystemClock.elapsedRealtimeNanos()
             assertTrue("Explanation must appear automatically", explanationVisible())
             val verified = SystemClock.elapsedRealtimeNanos()

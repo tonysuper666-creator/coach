@@ -278,6 +278,10 @@ def main():
                 folder.mkdir(parents=True, exist_ok=True)
                 android('logcat', '-c', check=False)
                 record_clock(mode, 'before')
+                # A previous mode/size's cached image must never masquerade as this run's live failure.
+                android('shell', 'run-as', package, 'rm', '-f',
+                        'cache/mainline-explanation-failure.png', 'cache/mainline-explanation-failure-tree.txt',
+                        'cache/mainline-explanation-failure-polls.json', check=False)
                 result = android('shell', 'am', 'instrument', '-w', '-e', 'class', 'com.coach.android.MainlineNotesSmoke',
                     '-e', 'coachPort', proxy.server_address[1], '-e', 'coachToken', token, '-e', 'mode', mode,
                     '-e', 'jointReader', '1' if args.joint_reader else '0',
@@ -286,6 +290,11 @@ def main():
                 (folder / f'{mode}-instrument.txt').write_text((result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 # App-side diagnostics for a UI failure: connection state transitions and mainline fetches.
                 if result.returncode != 0 or b'OK (1 test)' not in result.stdout:
+                    for suffix in ('png', 'tree.txt', 'polls.json'):
+                        name = 'mainline-explanation-failure' + ('.' if suffix == 'png' else '-') + suffix
+                        captured = android('exec-out', 'run-as', package, 'cat', f'cache/{name}', check=False)
+                        if captured.returncode == 0 and captured.stdout:
+                            (folder / f'{mode}-{name}').write_bytes(captured.stdout)
                     pid = android('shell', 'pidof', package, check=False).stdout.decode().strip().split()
                     log = android('logcat', '-d', '-v', 'time', *(['--pid', pid[0]] if pid else []), check=False)
                     (folder / f'{mode}-logcat.txt').write_text(log.stdout.decode(errors='replace').replace(token, '<redacted>'))

@@ -56,7 +56,14 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--emulator', type=Path, default=Path('/opt/homebrew/share/android-commandlinetools/emulator/emulator'))
     parser.add_argument('--fault-only', action='store_true')
+    # A full pass outlives one foreground shell on this machine, so the same script can be run in two
+    # segments over one head. Filtering only chooses which already-defined modes run; nothing is relaxed.
+    parser.add_argument('--sizes', default='2448x1848,1972x1248')
+    parser.add_argument('--modes', default='normal,resumeQuiz,resumeNotes,fault,offline')
     args = parser.parse_args()
+    sizes = [] if args.fault_only else [s for s in args.sizes.split(',') if s]
+    modes = {m for m in args.modes.split(',') if m}
+    partial = modes != {'normal', 'resumeQuiz', 'resumeNotes', 'fault', 'offline'} or len(sizes) < 2
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     os.umask(0o077)
@@ -235,7 +242,7 @@ def main():
                     (folder / f'{mode}-failure-tree.xml').write_bytes(dump.stdout)
                     android('shell', 'rm', '-f', '/sdcard/ton1394-fail.xml', check=False)
                 (out / 'http-diagnostics.json').write_text(json.dumps(diagnostics, indent=2))
-                for name in ('entry', 'wait-fail', 'click-fail', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
+                for name in ('entry', 'wait-fail', 'click-fail', 'two-click-first', 'warm-two-click-first', 'reading-route', 'personal-note', 'dark-reading', 'focus-reading', 'ai-no-evidence', 'weekly-map', 'weekly-map-open', 'reading-emphasis', 'question-emphasis', 'notes', 'filtered', 'setup', 'setup-bottom', 'detail', 'bridge', 'bridge-bottom', 'mastery',
                              'fault-waiting', 'resumed-quiz', 'reading-before-restart', 'resumed-notes'):
                     image = android('exec-out', 'run-as', PACKAGE, 'cat', f'cache/mainline-{name}.png', check=False)
                     if image.stdout.startswith(b'\x89PNG'):
@@ -248,42 +255,51 @@ def main():
                 runs.append(dict(mode=mode, passed=True))
                 print('UI ' + mode + ': PASS', flush=True)
 
-            for size in ([] if args.fault_only else ['2448x1848', '1972x1248']):
+            for size in sizes:
                 android('shell', 'wm', 'size', size)
                 android('shell', 'wm', 'density', '240')
-                android('shell', 'am', 'force-stop', PACKAGE)
-                instrument('normal', out / size)
-                android('shell', 'am', 'force-stop', PACKAGE)
-                instrument('resumeQuiz', out / size)
-                android('shell', 'am', 'force-stop', PACKAGE)
-                instrument('resumeNotes', out / size)
+                if 'normal' in modes:
+                    android('shell', 'am', 'force-stop', PACKAGE)
+                    instrument('normal', out / size)
+                if 'resumeQuiz' in modes:
+                    android('shell', 'am', 'force-stop', PACKAGE)
+                    instrument('resumeQuiz', out / size)
+                if 'resumeNotes' in modes:
+                    android('shell', 'am', 'force-stop', PACKAGE)
+                    instrument('resumeNotes', out / size)
             fault = True
             android('shell', 'wm', 'size', '1972x1248')
             android('shell', 'wm', 'density', '240')
-            android('shell', 'am', 'force-stop', PACKAGE)
-            record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
-                                       '/sdcard/ton1394-recovery.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            instrument('fault', out / 'recovery')
-            record.wait(50)
-            record = None
-            android('pull', '/sdcard/ton1394-recovery.mp4', out / 'recovery/recovery.mp4')
-            android('shell', 'rm', '/sdcard/ton1394-recovery.mp4')
+            if 'fault' in modes:
+                android('shell', 'am', 'force-stop', PACKAGE)
+                record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
+                                           '/sdcard/ton1394-recovery.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                instrument('fault', out / 'recovery')
+                record.wait(50)
+                record = None
+                android('pull', '/sdcard/ton1394-recovery.mp4', out / 'recovery/recovery.mp4')
+                android('shell', 'rm', '/sdcard/ton1394-recovery.mp4')
             offline = True
-            android('shell', 'am', 'force-stop', PACKAGE)
-            record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
-                                       '/sdcard/ton1394-offline.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            instrument('offline', out / 'offline')
-            record.wait(50)
-            record = None
-            android('pull', '/sdcard/ton1394-offline.mp4', out / 'offline/offline.mp4')
-            android('shell', 'rm', '/sdcard/ton1394-offline.mp4')
+            if 'offline' in modes:
+                android('shell', 'am', 'force-stop', PACKAGE)
+                record = subprocess.Popen([adb, '-s', serial, 'shell', 'screenrecord', '--size', '986x624', '--time-limit', '45',
+                                           '/sdcard/ton1394-offline.mp4'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                instrument('offline', out / 'offline')
+                record.wait(50)
+                record = None
+                android('pull', '/sdcard/ton1394-offline.mp4', out / 'offline/offline.mp4')
+                android('shell', 'rm', '/sdcard/ton1394-offline.mp4')
             retried = [values for values in attempts.values() if len(values) > 1]
-            assert len(retried) == 6
-            for values in retried:
-                assert len(values) == 2 and values[0] == values[1], 'Replay must preserve wire and stored outcome'
-            coverage = request(f'/v1/courses/{fixture.COURSE}/mainline')['weeks'][0]['coverage']
-            assert (coverage['answered'], coverage['mastered'], coverage['factsMastered']) == (3, 1, 1), coverage
-            assert smoke.Bridge.calls == 0
+            # Cross-mode accounting only exists after every mode has run; a filtered segment reports its own modes.
+            if not partial:
+                assert len(retried) == 6
+                for values in retried:
+                    assert len(values) == 2 and values[0] == values[1], 'Replay must preserve wire and stored outcome'
+                coverage = request(f'/v1/courses/{fixture.COURSE}/mainline')['weeks'][0]['coverage']
+                assert (coverage['answered'], coverage['mastered'], coverage['factsMastered']) == (3, 1, 1), coverage
+                assert smoke.Bridge.calls == 0
+            else:
+                coverage = request(f'/v1/courses/{fixture.COURSE}/mainline')['weeks'][0]['coverage']
             normal = sorted(s['ms'] for s in samples if not s['fault'])
             p95 = normal[math.ceil(.95 * len(normal)) - 1] if normal else None
             report = dict(syntheticOnly=True, productionRead=False, package=PACKAGE, runs=runs, samples=samples,

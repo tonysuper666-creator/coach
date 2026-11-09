@@ -56,7 +56,7 @@ class WeeklyReaderTest {
                     var state by remember { mutableStateOf(http.readerState(engine, 1)) }
                     WeeklyReader(c, 1, listOf(section), section, emptyList(),
                         (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
-                        { state = it; persisted = it; http.saveReaderState(engine, 1, it) }, {}, { _, _ -> }, {},
+                        { transform -> state = transform(state); persisted = state; http.saveReaderState(engine, 1, state) }, {}, { _, _ -> }, {},
                         { state = JsonObject(state + ("focus" to JsonPrimitive(it))); persisted = state; http.saveReaderState(engine, 1, state) }, {})
                 }
                 onNodeWithText("再讲一遍").assertDoesNotExist()
@@ -67,9 +67,22 @@ class WeeklyReaderTest {
                 onNodeWithText("我的一句话：My synthetic note").performScrollTo().assertIsDisplayed()
                 onNodeWithText("深色阅读").performScrollTo().performClick()
                 onNodeWithText("浅色阅读").assertIsDisplayed()
+                // The weekly map starts collapsed and the tap must actually draw its rows, not just flip a flag.
+                onNodeWithText("要点：Synthetic section").assertDoesNotExist()
+                onNodeWithText("本周脉络：节 → 考点 → 题").performScrollTo().performClick()
+                onNodeWithText("要点：Synthetic section").assertIsDisplayed()
+                onNodeWithText("○ 待练 F1").assertIsDisplayed()
+                onNodeWithText("收起本周脉络").performClick()
+                onNodeWithText("要点：Synthetic section").assertDoesNotExist()
                 onNodeWithText("专心读").performClick()
                 onNodeWithText("退出专注").assertIsDisplayed()
                 onNodeWithText("跳过要点，直接做题").assertIsDisplayed()
+                // Leaving focus and then touching another control must not bring focus back: the write that follows
+                // has to extend the current state, not re-save the snapshot taken while focus mode was still on.
+                onNodeWithText("退出专注").performClick()
+                onNodeWithText("浅色阅读").performScrollTo().performClick()
+                onNodeWithText("本周脉络：节 → 考点 → 题").performScrollTo().assertIsDisplayed()
+                onNodeWithText("退出专注").assertDoesNotExist()
             }
             driver.close()
             driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")

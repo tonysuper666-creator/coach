@@ -11,6 +11,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -60,12 +62,17 @@ internal fun PersonalMarks(marks: List<JsonObject>, sections: List<JsonObject>) 
 internal fun WeeklyReader(
     c: CoachController, number: Int, sections: List<JsonObject>, section: JsonObject?, items: List<JsonObject>,
     marks: List<JsonObject>, state: JsonObject, scroll: ScrollState, error: String,
-    saveState: (JsonObject) -> Unit, onSection: (String) -> Unit, onQuiz: (String, String?) -> Unit,
+    updateState: ((JsonObject) -> JsonObject) -> Unit, onSection: (String) -> Unit, onQuiz: (String, String?) -> Unit,
     onRefresh: () -> Unit, onFocus: (Boolean) -> Unit, emphasis: @Composable (List<String>) -> Unit,
 ) {
     val http = c.course!!
     val dark = state.flag("dark"); val focus = state.flag("focus")
     var selected by remember(section?.str("section_id"), section?.str("body")) { mutableStateOf(TextRange.Zero) }
+    // The reader is only selectable once the passage itself holds the caret: a programmatic range that never reaches
+    // the field would show no handles and leave the mark buttons hidden, so the passage asks for focus as it selects.
+    val passageFocus = remember { FocusRequester() }
+    LaunchedEffect(selected) { println("TON1394 reader selection state=$selected") }
+    LaunchedEffect(focus) { println("TON1394 reader focus=$focus") }
     var editMark by remember { mutableStateOf<String?>(null) }
     var action by remember { mutableStateOf<JsonObject?>(null) }
     var answer by remember { mutableStateOf<JsonObject?>(null) }
@@ -73,7 +80,7 @@ internal fun WeeklyReader(
     var page by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val formatted = section?.str("body")?.let { it.contains('\n') || it.any { ch -> ch in "*$`#[]_\\" } } == true
     var selectOriginal by remember(section?.str("section_id"), section?.str("body")) { mutableStateOf(false) }
-    fun set(key: String, value: JsonElement) = saveState(JsonObject(state + (key to value)))
+    fun set(key: String, value: JsonElement) = updateState { JsonObject(it + (key to value)) }
     fun addMark(edit: Boolean) {
         val s = section ?: return
         val start = selected.min; val end = selected.max
@@ -153,19 +160,24 @@ internal fun WeeklyReader(
                                 Box(Modifier.fillMaxWidth().testTag("reader-text").semantics {
                                     contentDescription = "本节正文，可选择文字"
                                     setSelection { start, end, _ ->
-                                        if (start < 0 || end < 0 || start > bodyLength || end > bodyLength) false
-                                        else {
+                                        val ok = !(start < 0 || end < 0 || start > bodyLength || end > bodyLength)
+                                        if (ok) {
                                             selected = TextRange(minOf(start, end), maxOf(start, end))
-                                            true
+                                            runCatching { passageFocus.requestFocus() }
                                         }
+                                        println("TON1394 reader setSelection $start..$end of $bodyLength -> $ok")
+                                        ok
                                     }
                                 }) {
                                     BasicTextField(value = TextFieldValue(annotated, selected), onValueChange = {
                                         // Focus loss can collapse the field before a selection action receives its click.
                                         // Keep the chosen range until the user acts or explicitly dismisses it.
-                                        if (!it.selection.collapsed) selected = it.selection
+                                        if (!it.selection.collapsed) {
+                                            selected = it.selection
+                                            println("TON1394 reader onValueChange selection=${it.selection}")
+                                        }
                                     },
-                                        readOnly = true, modifier = Modifier.fillMaxWidth(),
+                                        readOnly = true, modifier = Modifier.fillMaxWidth().focusRequester(passageFocus),
                                         textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Serif, fontSize = 20.sp,
                                             lineHeight = 32.sp, color = MaterialTheme.colorScheme.onSurface))
                                 }
@@ -191,8 +203,14 @@ internal fun WeeklyReader(
                             }
                         }
                         if (!focus) {
-                            var map by remember { mutableStateOf(false) }
-                            TextButton(onClick = { map = !map }) { Text(if (map) "收起本周脉络" else "本周脉络：节 → 考点 → 题") }
+                            // The map's open state travels with the rest of the reader state instead of a local
+                            // remember: a remembered flag was written but never re-read by the composition that drew
+                            // the heading, so tapping it left the rows hidden. Lifting it also keeps the reader's
+                            // chosen view across visits, like 深色阅读 and 专心读 below/above.
+                            val map = state.flag("map")
+                            TextButton(onClick = { set("map", JsonPrimitive(!map)); println("TON1394 reader map=${!map}") }) {
+                                Text(if (map) "收起本周脉络" else "本周脉络：节 → 考点 → 题")
+                            }
                             if (map) for (s in sections) {
                                 TextButton(onClick = { onSection(s.str("section_id")) }) { Text("要点：" + s.str("title")) }
                                 for (fact in s.strings("fact_ids")) {

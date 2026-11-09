@@ -108,7 +108,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
     val scope = rememberCoroutineScope()
     var readerState by remember { mutableStateOf(http.readerState(c.sync, number)) }
-    fun saveReader(value: JsonObject) { readerState = value; http.saveReaderState(c.sync, number, value) }
+    // Every reader write goes through a transform of the value held here instead of a whole object captured in an
+    // older composition: a control tapped one frame after another would otherwise re-save its stale snapshot and
+    // resurrect a flag the first tap just cleared (exiting focus mode and then touching the theme brought focus back,
+    // which hides the weekly map).
+    fun saveReader(transform: (JsonObject) -> JsonObject) {
+        val next = transform(readerState); readerState = next; http.saveReaderState(c.sync, number, next)
+    }
     val marks = (readerState["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
     DisposableEffect(Unit) { onDispose { c.readerFocus = false } }
     var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "week:$number")) }
@@ -232,7 +238,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 save("body" to JsonNull, "result" to JsonNull, "choice" to JsonNull)
                 retry++
                 }
-            }, onFocus = { saveReader(JsonObject(readerState + ("focus" to JsonPrimitive(it)))) },
+            }, onFocus = { focused -> saveReader { JsonObject(it + ("focus" to JsonPrimitive(focused))) } },
             emphasis = { facts -> ClassEmphasis(emphasis, facts) })
         return
     }

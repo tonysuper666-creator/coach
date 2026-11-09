@@ -64,6 +64,8 @@ fun Desk(
     status: String = "",
     compactStatus: String = "",
     compactTypeControl: Boolean = true,
+    compactFooter: Boolean = false,
+    onCrumbClick: (() -> Unit)? = null,
     directory: @Composable () -> Unit = {},
     margin: @Composable () -> Unit = {},
     footer: (@Composable RowScope.() -> Unit)? = null,
@@ -98,7 +100,7 @@ fun Desk(
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxWidth().height(if (landscape) V7Windows.OuterL.barH else CoachV7.Layout.barH).padding(horizontal = if (inner) CoachV7.Layout.pad else 20.dp)) {
                     Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-                        if (inner && backLabel != "← 复习") Box {
+                        Box {
                             var menu by remember { mutableStateOf(false) }
                             val select = LocalDeskSelect.current
                             Text("Coach", Modifier.clickable { menu = true }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
@@ -106,14 +108,17 @@ fun Desk(
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
                         }
-                        else if (onBack != null) Text(backLabel, Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
-                        else Text("Coach", style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
+                        if (onBack != null && (!inner || backLabel == "← 复习")) {
+                            Spacer(Modifier.width(12.dp))
+                            Text(backLabel, Modifier.clickable(onClick = onBack), style = MaterialTheme.typography.labelLarge)
+                        }
                     }
                     Text(buildAnnotatedString {
                         append(crumb)
                         val start = crumb.lastIndexOf('·').takeIf { it >= 0 }?.plus(1) ?: 0
                         addStyle(SpanStyle(fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary), start, crumb.length)
-                    }, Modifier.align(Alignment.Center).widthIn(max = windowWidth * .44f), style = MaterialTheme.typography.labelLarge,
+                    }, Modifier.align(Alignment.Center).widthIn(max = windowWidth * .44f)
+                        .then(if (onCrumbClick != null) Modifier.clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                         val barStatus = if (inner) status else compactStatus
@@ -149,7 +154,7 @@ fun Desk(
                         if (marginWidth > 0.dp) Box(Modifier.fillMaxSize().padding(start = 24.dp, end = 28.dp, top = 20.dp, bottom = 20.dp).testTag("v7-margin")) { margin() }
                     }
                 }
-                if (footer != null && inner) Row(Modifier.fillMaxWidth().background(colors.bgCanvas).height(if (inner) CoachV7.Layout.footH else 52.dp).padding(horizontal = 28.dp),
+                if (footer != null && (inner || compactFooter)) Row(Modifier.fillMaxWidth().background(colors.bgCanvas).height(if (inner) CoachV7.Layout.footH else 52.dp).padding(horizontal = 28.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = footer)
                 if (!inner && !landscape && !focused) LocalDeskNavigation.current?.invoke(false)
             }
@@ -221,7 +226,7 @@ fun AnswerOption(letter: String, selected: Boolean, correct: Boolean?, enabled: 
                 MaterialTheme(typography = MaterialTheme.typography.copy(bodyLarge = MaterialTheme.typography.bodyLarge.copy(fontSize = 17.sp, lineHeight = 24.65.sp))) { content() }
             }
             if (correct != null) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (correct) "✓" else "✗", style = MaterialTheme.typography.labelMedium, color = verdictColor)
+                VerdictIcon(correct, Modifier.size(14.dp), verdictColor)
                 Text(if (correct) "正确" else "你选的", style = MaterialTheme.typography.labelMedium, color = verdictColor)
             }
             else if (selected) Text("●", style = MaterialTheme.typography.labelMedium, color = colors.fgPrimary)

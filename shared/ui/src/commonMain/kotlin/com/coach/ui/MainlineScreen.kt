@@ -280,7 +280,15 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val letters = optionLetters(options.size)
     val done = result
     val explanation = done?.get("explanation") as? JsonObject
-    val d = LocalV7PageDetails.current
+    // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
+    val sourceKp = done?.str("kpId")?.let(view::kp)
+    val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
+    var sourceOpen by remember { mutableStateOf(false) }
+    val openSource = { if (sourceKp != null) sourceOpen = true else onBack() }
+    if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }) }
+    }
     val railAnchors = remember { MarginAnchors() }
     val answer = done?.num("answer")?.toInt()
     // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
@@ -310,13 +318,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             }
         }
     }
-    CompositionLocalProvider(LocalMarginAnchors provides railAnchors) {
+    CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "这一节 ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (only != null) "← 回到阅读" else if (d.sectionLabel.isNotBlank()) "← ${d.sectionLabel}" else "← 选周",
 
         directory = { WeekDirectory(view, number, null) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
-                if (d.sourceSvg.isNotBlank()) SourceThumbnail(d, onBack)
+                if (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank()) SourceThumbnail(d, openSource)
                 if (d.lecture.isNotBlank()) NoteCard("★ ${d.lectureLabel}", d.lecture)
                 if (d.related.isNotEmpty()) PaperCard(contentSpacing = 8.dp) {
                     Text("相关", style = MaterialTheme.typography.labelMedium)
@@ -381,7 +389,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             PrivateSourceReference(http.reader, source, done.str("anchor"))
                         }
                     }
-                    if (!m.inner && d.sourceSvg.isNotBlank()) { Spacer(Modifier.height(20.dp)); FigureSvg(d.sourceSvg) }
+                    if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }
                 Spacer(Modifier.height(24.dp))
                 if (m.inner) actions()

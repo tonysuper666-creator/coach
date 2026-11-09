@@ -8,6 +8,7 @@ import androidx.compose.material3.Typography
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.v7.*
@@ -17,10 +18,11 @@ fun CoachTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () ->
     val fonts = rememberV7Fonts()
     val reduced = rememberReducedMotion()
     val typography = remember(fonts, dark) {
-        val reading = TextStyle(fontFamily = fonts.reading, fontSize = CoachV7.Size.body,
+        val leading = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None)
+        val reading = TextStyle(lineHeightStyle = leading, fontFamily = fonts.reading, fontSize = CoachV7.Size.body,
             lineHeight = CoachV7.Size.body * CoachV7.LineHeight.body,
             fontWeight = if (dark) CoachV7.Weight.bodyDark else CoachV7.Weight.body)
-        val ui = TextStyle(fontFamily = fonts.ui, fontSize = CoachV7.Size.ui, lineHeight = 20.sp)
+        val ui = TextStyle(lineHeightStyle = leading, fontFamily = fonts.ui, fontSize = CoachV7.Size.ui, lineHeight = 20.sp)
         val cap = ui.copy(fontSize = CoachV7.Size.cap, lineHeight = 18.sp, fontWeight = CoachV7.Weight.cap, letterSpacing = CoachV7.Tracking.cap)
         val title = reading.copy(fontSize = CoachV7.Size.title, lineHeight = CoachV7.Size.title * CoachV7.LineHeight.title,
             fontWeight = CoachV7.Weight.title, letterSpacing = CoachV7.Tracking.title)

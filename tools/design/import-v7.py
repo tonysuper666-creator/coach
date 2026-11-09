@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import re
 import sys
+import subprocess
 from fontTools import subset
 from fontTools.ttLib import TTFont
 
@@ -20,6 +21,7 @@ def write(path, content):
 common = root / "shared/ui/src/commonMain/kotlin/coach/design/tokens"
 token = (source / "tokens/CoachV7.kt").read_text(encoding="utf-8")
 write(common / "CoachV7.kt", token[:token.index("    object FontChain")] + "}\n")
+subprocess.run([sys.executable, str(Path(__file__).with_name("import-v7-surfaces.py")), str(source)], check=True)
 data = json.loads((source / "tokens/V7.json").read_text(encoding="utf-8"))
 write(root / "tools/design/V7.json", json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 metrics = ["// Generated from approved V7.json; rerun tools/design/import-v7.py.",

@@ -2,6 +2,10 @@ package com.coach.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import com.coach.ui.v7.paperShadow
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,6 +16,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.coach.client.CourseView
 import com.coach.ui.adaptive.LayoutRules
 import com.coach.ui.adaptive.NavStyle
@@ -268,7 +273,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     val deskWindow = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
                     val deskScreen = (target != null || (tab == AppTab.TODAY && current?.projection?.studyScope != null) || mainline) && source == null && !essayOpen && mock == null && reviewWeek == null
                     if (deskScreen) CompositionLocalProvider(
-                        com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(tab, vertical, select) },
+                        com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(if (mainline) AppTab.REVIEW else if (target != null) AppTab.ROUTE else tab, vertical, select) },
+                        com.coach.ui.v7.LocalDeskSelect provides select,
                         com.coach.ui.v7.LocalDeskWindow provides deskWindow,
                     ) { body() }
                     else if (bottomBar) Column(Modifier.fillMaxSize()) {
@@ -310,13 +316,19 @@ internal fun SourceOverlay(covered: Boolean, base: @Composable () -> Unit, overl
 /** Shared by the actual app and JVM captures, including the narrow-screen bottom navigation. */
 @Composable
 fun DeskNavigation(selected: AppTab, vertical: Boolean, onSelect: (AppTab) -> Unit) {
-    if (vertical) Column(Modifier.fillMaxWidth()) {
-        AppTab.entries.forEach { tab ->
-            TextButton(onClick = { onSelect(tab) }) {
-                Text(tab.label, color = if (selected == tab) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+    val tabs = listOf(AppTab.TODAY, AppTab.ROUTE, AppTab.REVIEW, AppTab.RESOURCES)
+    val c = com.coach.ui.theme.CoachTheme.colors
+    val item: @Composable (AppTab) -> Unit = { tab ->
+        val active = selected == tab
+        Column(Modifier.width(64.dp).then(if (active) Modifier.paperShadow("card", c.dark) else Modifier)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp)).background(if (active) c.surface1 else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable { onSelect(tab) }.padding(vertical = if (active) 6.dp else if (vertical) 8.dp else 0.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            com.coach.ui.v7.DeskNavIcon(tab, Modifier.size(22.dp), if (active) c.fgPrimary else c.fgSecondary)
+            Text(tab.label, style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = if (active) c.fgPrimary else c.fgSecondary)
         }
-    } else AppNavBar(selected, onSelect, v7 = true)
+    }
+    if (vertical) Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) { tabs.forEach { item(it) } }
+    else Row(Modifier.fillMaxWidth().height(68.dp).background(c.bgCanvas), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) { tabs.forEach { item(it) } }
 }
 
 @Composable

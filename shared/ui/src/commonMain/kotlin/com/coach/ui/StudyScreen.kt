@@ -86,6 +86,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
 
     var readingFocus by remember(kp.id) { mutableStateOf(initialFocus) }
+    var conversation by remember(kp.id) { mutableStateOf(initialDraft != null) }
+    val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
+    if (!reviewMode && !conversation && completed != null && groups.isEmpty() && !tv.busy) {
+        com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
+            onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
+            onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions)
+        return
+    }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
     val notes = remember(tv.items, kp.reference) {
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }

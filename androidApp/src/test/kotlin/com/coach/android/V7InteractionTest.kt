@@ -86,4 +86,16 @@ class V7InteractionTest {
         assertEquals(Color(0xFFFCFAF6).green, paper.green, .005f)
         assertEquals(Color(0xFFFCFAF6).blue, paper.blue, .005f)
     }
+    @Test fun innerBrandMenuKeepsRecordsReachable() {
+        var selected = AppTab.TODAY
+        compose.setContent { CoachTheme(false) {
+            CompositionLocalProvider(com.coach.ui.v7.LocalDeskSelect provides { selected = it }) {
+                Desk("合成周页") { Text("合成正文") }
+            }
+        } }
+        compose.onNodeWithText("Coach").performClick()
+        compose.onNodeWithText("记录").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(AppTab.RECORDS, selected) }
+    }
+
 }

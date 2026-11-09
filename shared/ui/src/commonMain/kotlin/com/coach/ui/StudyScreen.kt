@@ -88,10 +88,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     var readingFocus by remember(kp.id) { mutableStateOf(initialFocus) }
     var conversation by remember(kp.id) { mutableStateOf(initialDraft != null) }
     val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
-    if (!reviewMode && !conversation && completed != null && groups.isEmpty() && !tv.busy) {
+    if (!reviewMode && !conversation && completed != null && pending == null && !tv.busy) {
         com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
             onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
-            onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions)
+            onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions,
+            onSelectionAsk = { draft = TextFieldValue(it); conversation = true })
         return
     }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }

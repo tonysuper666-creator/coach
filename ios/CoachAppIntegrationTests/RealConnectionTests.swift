@@ -80,4 +80,93 @@ final class RealConnectionTests: XCTestCase {
         XCTAssertEqual(learning.week?.items.first?.status, "mastered")
     }
 
+    private func control(_ action: String, fixture: [String: String]) async throws {
+        let base = try XCTUnwrap(fixture["control"])
+        var request = URLRequest(url: try XCTUnwrap(URL(string: base + "/" + action)))
+        request.httpMethod = "POST"
+        request.setValue(try XCTUnwrap(fixture["controlSecret"]), forHTTPHeaderField: "X-Test-Control")
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
+    }
+
+    private func waitUntil(_ label: String, seconds: Int = 20, _ condition: () -> Bool) async throws {
+        let start = ContinuousClock.now
+        while !condition() && start.duration(to: .now) < .seconds(seconds) {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        XCTAssertTrue(condition(), "Timed out: \(label)")
+        print("\(label) elapsed: \(start.duration(to: .now))")
+    }
+
+    func testRealtimeOfflineAndRetry() async throws {
+        let values = try fixture()
+        let connection = ConnectionModel()
+        await connection.pair(address: try XCTUnwrap(values["base"]), code: try XCTUnwrap(values["code"]))
+        guard case .connected = connection.state else { XCTFail("Pair failed"); return }
+        try await waitUntil("WS initial hello") { connection.realtime == .online }
+        let learning = LearningModel(connection: connection)
+        learning.course = "contract-course"
+        await learning.loadCourse()
+        await learning.openWeek(1)
+        let item = try XCTUnwrap(learning.week?.items.first)
+        let choice = try XCTUnwrap(item.options.firstIndex(of: "Pears"))
+        try await control("down", fixture: values)
+        try await waitUntil("WS disconnected") { connection.realtime == .offline }
+        await learning.submit(item: item, choice: choice)
+        let pending = try XCTUnwrap(learning.pending)
+        XCTAssertNil(learning.receipt)
+        XCTAssertNotNil(learning.message)
+        try await control("up", fixture: values)
+        try await waitUntil("WS reconnected") { connection.realtime == .online }
+        await learning.retryPending()
+        XCTAssertNil(learning.pending)
+        XCTAssertEqual(learning.receipt?.attemptId, "mainline-" + pending.submissionId)
+        XCTAssertEqual(learning.receipt?.status, "mastered")
+        await learning.loadCourse()
+        await learning.openWeek(1)
+        XCTAssertEqual(learning.week?.items.first?.status, "mastered")
+    }
+
+    func testRealtimeRestoreAndRevoke() async throws {
+        let values = try fixture()
+        let store = CredentialStore(service: "coach.ton1411.device")
+        defer { try? store.delete() }
+        let (address, credential) = try XCTUnwrap(store.load())
+        let connection = ConnectionModel()
+        await connection.restore()
+        guard case .connected = connection.state else { XCTFail("Keychain restore failed"); return }
+        try await waitUntil("restored WS hello") { connection.realtime == .online }
+        var parts = URLComponents(url: address.url.appendingPathComponent("v1/ws"), resolvingAgainstBaseURL: false)!
+        parts.scheme = "ws"
+        var request = URLRequest(url: try XCTUnwrap(parts.url))
+        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        let probe = URLSession.shared.webSocketTask(with: request)
+        probe.resume()
+        _ = try await probe.receive() // Server's authenticated hello.
+        let hint = try await probe.receive() // Initial ledger hint may already be queued.
+        guard case .string(let text) = hint, text.contains("\"ledger\"") else {
+            XCTFail("Expected the initial ledger hint"); return
+        }
+        var revoke = URLRequest(url: address.url.appendingPathComponent("v1/devices/\(credential.deviceId)"))
+        revoke.httpMethod = "DELETE"
+        revoke.setValue("Bearer \(try XCTUnwrap(values["adminToken"]))", forHTTPHeaderField: "Authorization")
+        revoke.setValue("desktop", forHTTPHeaderField: "X-Coach-Device")
+        let (_, response) = try await URLSession.shared.data(for: revoke)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
+        do { _ = try await probe.receive(); XCTFail("Revoked socket unexpectedly received a frame") }
+        catch { XCTAssertEqual(probe.closeCode, .policyViolation) }
+        try await waitUntil("revoked active WS") { connection.state == .revoked }
+        do { _ = try await PairingClient(address: address).hello(credential: credential); XCTFail("Revoked HTTP accepted") }
+        catch ConnectionError.unauthorized { print("Revoked HTTP: 401") }
+        let rejected = URLSession.shared.webSocketTask(with: request)
+        rejected.resume()
+        do { _ = try await rejected.receive(); XCTFail("Revoked WS accepted") }
+        catch {
+            XCTAssertEqual((rejected.response as? HTTPURLResponse)?.statusCode, 401)
+            print("Revoked WS handshake: 401; open socket close: 1008")
+        }
+        rejected.cancel(with: .goingAway, reason: nil)
+    }
+
 }

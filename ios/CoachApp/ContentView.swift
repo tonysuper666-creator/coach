@@ -15,6 +15,7 @@ struct ContentView: View {
                     case .unpaired:
                         pairing
                     case .connected:
+                        realtimeStatus
                         LearningView(connection: connection)
                     case .unavailable, .revoked:
                         Text("无法连接").font(.title2.bold())
@@ -38,6 +39,18 @@ struct ContentView: View {
             .navigationTitle(Appearance.name)
         }
         .task { await connection.restore() }
+    }
+
+    private var realtimeStatus: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch connection.realtime {
+            case .connecting: Text("正在连接实时状态…")
+            case .online: Text("已连接 Mac")
+            case .offline:
+                Text("实时连接已断开，正在重试。待确认的答案会保留。")
+                Button("重试实时连接") { connection.startRealtime() }
+            }
+        }.accessibilityIdentifier("realtimeStatus")
     }
 
     private var pairing: some View {

@@ -6,6 +6,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.TextRange
 import com.coach.client.CourseHttp
 import com.sun.net.httpserver.HttpServer
 import java.awt.image.BufferedImage
@@ -24,6 +25,9 @@ class PrivateReaderScreenTest {
         @Volatile var revision = 7L
         @Volatile var conflictNext = false
         val writes = CopyOnWriteArrayList<JsonObject>()
+        val notes = CopyOnWriteArrayList<JsonObject>()
+        val noteWrites = CopyOnWriteArrayList<JsonObject>()
+        @Volatile var version = "v1"
         val auth = CopyOnWriteArrayList<String>()
         private val png = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(30, 40, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -41,6 +45,22 @@ class PrivateReaderScreenTest {
                         if (query == "source=教材 p.1") """{"documentId":"synthetic","version":"v1","pdfPage":${1 + offset},"anchorStatus":"page_only"}""".toByteArray()
                         else { status = 422; "{}".toByteArray() }
                     }
+                    path.endsWith("/notes") -> {
+                        val body = Json.parseToJsonElement(ex.requestBody.readBytes().decodeToString()).jsonObject
+                        noteWrites += body
+                        val existing = notes.singleOrNull { it["id"] == body["id"] }
+                        val base = body.getValue("baseRevision").jsonPrimitive.long
+                        val oldRevision = existing?.get("revision")?.jsonPrimitive?.long ?: 0L
+                        if (base != oldRevision || body.getValue("version").jsonPrimitive.content != version) {
+                            status = 409; "{}".toByteArray()
+                        } else {
+                            val next = oldRevision + 1
+                            notes.removeIf { it["id"] == body["id"] }
+                            notes += JsonObject(body + mapOf("revision" to JsonPrimitive(next), "stale" to JsonPrimitive(false)))
+                            """{"revision":$next}""".toByteArray()
+                        }
+                    }
+                    path.matches(Regex(".*/pages/[0-9]+")) -> """{"version":"$version","text":"Synthetic page text","textSha256":"hash-$version"}""".toByteArray()
                     path.endsWith("/progress") -> {
                         val body = Json.parseToJsonElement(ex.requestBody.readBytes().decodeToString()).jsonObject
                         writes += body
@@ -54,8 +74,12 @@ class PrivateReaderScreenTest {
                             """{"revision":$revision}""".toByteArray()
                         }
                     }
-                    path.endsWith("/state") -> """{"document":{"version":"v1"},"progress":{"version":"${if (stale) "old" else "v1"}","pdfPage":$currentPage,"revision":$revision,"stale":$stale}}""".toByteArray()
-                    else -> """{"documents":[{"id":"synthetic","title":"Synthetic book","version":"v1","pages":4}]}""".toByteArray()
+                    path.endsWith("/state") -> buildJsonObject {
+                        put("document", buildJsonObject { put("version", version) })
+                        put("progress", buildJsonObject { put("version", if (stale) "old" else version); put("pdfPage", currentPage); put("revision", revision); put("stale", stale) })
+                        put("notes", JsonArray(notes.map { JsonObject(it + ("stale" to JsonPrimitive(it["version"]?.jsonPrimitive?.content != version))) }))
+                    }.toString().toByteArray()
+                    else -> """{"documents":[{"id":"synthetic","title":"Synthetic book","version":"$version","pages":4}]}""".toByteArray()
                 }
                 ex.sendResponseHeaders(status, bytes.size.toLong())
                 ex.responseBody.use { it.write(bytes) }
@@ -64,6 +88,41 @@ class PrivateReaderScreenTest {
         }
         val http = CourseHttp("http://127.0.0.1:${server.address.port}", "test-device", "synthetic-token", course)
         override fun close() { http.close(); server.stop(0) }
+    }
+
+    @Test fun annotationAutosavesAndReopensAndOldVersionIsClearlyMarked() = FakeReader().use { fake ->
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(600.dp, 900.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-book-synthetic").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-open-notes").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-text").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-note-text").performTextInputSelection(TextRange(0, 9))
+            onNodeWithTag("private-note-add").performClick()
+            onNodeWithTag("private-note-editor").performTextInput("my observation")
+            waitUntil(timeoutMillis = 10000) { fake.notes.singleOrNull()?.get("note")?.jsonPrimitive?.content == "my observation" }
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-editor-close").fetchSemanticsNodes().firstOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+            onNodeWithTag("private-note-editor-close").performClick()
+            onNodeWithTag("private-notes-close").performClick()
+            onNodeWithTag("private-document-back").performClick()
+            onNodeWithTag("private-book-synthetic").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-open-notes").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithText("我的批注：my observation").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals("Synthetic", fake.notes.single().getValue("quote").jsonPrimitive.content)
+        }
+        fake.version = "v2"
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(600.dp, 900.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-book-synthetic").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-open-notes").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-stale").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("我的批注：my observation").assertExists()
+            onAllNodesWithTag("private-note-edit-${fake.notes.single().getValue("id").jsonPrimitive.content}").assertCountEquals(0)
+        }
     }
 
     @Test fun phoneRestoresSameVersionAndTurnsPages() = FakeReader().use { fake ->

@@ -26,6 +26,9 @@ kotlin {
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
     sourceSets.jvmTest.dependencies {
+        implementation(project(":server:app"))
+        implementation(project(":server:core"))
+        implementation(libs.ktor.netty)
         @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
         implementation(compose.uiTest)
         implementation(compose.desktop.currentOs)

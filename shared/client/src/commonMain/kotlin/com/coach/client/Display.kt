@@ -6,15 +6,12 @@ package com.coach.client
  */
 
 private val BRACKETED = Regex("【[^】]*】")
-private val SEPARATOR = Regex("\\s+[｜|]\\s+(?=【)")
-private val SPACES = Regex("[ \\t\\u00A0\\u3000]+")
 
-/** Display title: first segment of the raw title with every 【…】 marker removed. */
-fun titleMain(raw: String): String =
-    raw.split(SEPARATOR, limit = 2).first().replace(BRACKETED, "").replace(SPACES, " ").trim()
+/** Display title: first segment of the raw title with every 【…】 marker removed (shared with the chat answers). */
+fun titleMain(raw: String): String = com.coach.domain.cleanTitle(raw)
 
-/** Leftover text when a title is nothing but markers, so the line is never empty. */
-fun displayTitle(raw: String): String = titleMain(raw).ifBlank { raw.replace("【", "").replace("】", "").trim() }
+/** Same as [titleMain]; a title that is only markers never renders empty. */
+fun displayTitle(raw: String): String = com.coach.domain.cleanTitle(raw)
 
 /** Plain-language source line from the markers: 【W3·slides】【Essay】 → 「第 3 周 · 课件 · 论述常考」. */
 fun titleSource(raw: String): String {

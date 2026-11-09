@@ -25,7 +25,10 @@ internal fun ExamPanelCard(
     c: CoachController, view: CourseView, focus: ExamFocus?,
     onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit,
 ) {
-    val panel = remember(view, focus) { view.examPanel(c.nowMillis(), focus) }
+    // 跨午夜也要刷新：时钟每秒读一次，按课程时区的日历日变了才重算。
+    val now = rememberCourseNow(c)
+    val today = remember(now, view) { com.coach.domain.calendarDay(now, view.zone) }
+    val panel = remember(view, focus, today) { view.examPanel(now, focus) }
     var picking by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -89,7 +92,7 @@ internal fun emptyFocusText(panel: ExamPanel): String {
     if (panel.allSolid) return "各周都稳了，没有要补的。"
     return buildList {
         if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没会，但分值为 0，没有排进来。")
-        if (panel.unplanned.isNotEmpty()) add("有分值的 ${weekSpans(panel.unplanned)} 在课程里还没有对应的节，暂时没法学。")
+        if (panel.unplanned.isNotEmpty()) add("有分值的${weekSpans(panel.unplanned)}在课程里还没有对应的节，暂时没法学。")
     }.joinToString("")
 }
 

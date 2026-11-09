@@ -51,4 +51,35 @@ class DisplayTest {
         assertEquals("第 3 周 · 医院与医生 · 2/3", view.weekDirectoryLine(3))
         assertFalse("03" in view.weekDirectoryLine(3))
     }
+
+    private var seq = 10L
+    private fun ev(type: String, p: kotlinx.serialization.json.JsonObject) = Event(++seq, "x$seq", "C", type, recordedAt = seq, occurredAt = seq, deviceId = "a", actor = "LEARNER", payload = p)
+
+    @Test fun anOpenedPointStaysInProgressAfterAnotherIsOpened() {
+        val outline = ev("outline_revised", json("knowledgePoints" to JsonArray(listOf(
+            json("id" to "A", "title" to "【W3·slides】合成甲"), json("id" to "B", "title" to "【W3·slides】合成乙"), json("id" to "C", "title" to "【W3·slides】合成丙")))))
+        val events = listOf(outline, ev("kp_opened", json("kpId" to "A")), ev("kp_opened", json("kpId" to "B")))
+        val view = CourseView(events, project(events))
+        assertEquals(KpStatus.IN_PROGRESS, view.kp("A")!!.status)
+        assertEquals(KpStatus.IN_PROGRESS, view.kp("B")!!.status)
+        assertEquals(KpStatus.NEW, view.kp("C")!!.status)
+    }
+
+    @Test fun chatAnswerUsesTheListsPriorityAndCleanTitles() {
+        val titles = mapOf("A" to "【W3·slides】合成甲", "B" to "【W3·slides】合成乙", "C" to "【W3·slides】合成丙", "D" to "合成丁")
+        val state = Projection(kpTitles = titles, position = Position(current = "B"),
+            mastery = mapOf("A" to Mastery(passed = true, needsRepair = true), "C" to Mastery(passed = true), "D" to Mastery(passed = true, solid = true)))
+        fun say(id: String) = state.today(1_800_000_000_000L, id).answer(ProgressIntent.CURRENT_KP)
+        assertEquals("合成甲：要补，会了之后又答错，已排进复习。", say("A"))
+        assertEquals("合成乙：在学，还没会。", say("B"))
+        assertEquals("合成丙：会了，还没稳。", say("C"))
+        assertEquals("合成丁：稳了。", say("D"))
+        for (id in titles.keys) assertFalse(Regex("[【】]").containsMatchIn(say(id)))
+        for (id in titles.keys) {
+            val row = CourseView(emptyList(), state).let { KpRow(id, titles.getValue(id), when (kpState(state.mastery[id], id == "B")) {
+                KpState.NEEDS_REPAIR -> KpStatus.NEEDS_REPAIR; KpState.SOLID -> KpStatus.SOLID; KpState.PASSED -> KpStatus.PASSED
+                KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS; KpState.NEW -> KpStatus.NEW }, false, listOf(id)) }
+            assertTrue(say(id).contains("：${row.status.label}"), "${say(id)} vs ${row.status.label}")
+        }
+    }
 }

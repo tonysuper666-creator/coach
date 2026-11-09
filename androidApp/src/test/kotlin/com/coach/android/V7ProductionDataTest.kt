@@ -152,7 +152,7 @@ class V7ProductionDataTest {
 
     @Test fun innerReadingUsesLoadedSourceAndLedgerQuestion() {
         show(reading = true)
-        compose.onNodeWithText("★  1  课上强调").assertExists()
+        compose.onNodeWithText("课上强调 · 1").assertExists()
         compose.onNodeWithText("共付提高后，需求沿曲线怎样变化？").assertExists()
         compose.onNodeWithText("我的批注", substring = true).assertExists()
         compose.onNodeWithTag("v7-reading-paragraph-1").performTextInputSelection(androidx.compose.ui.text.TextRange(0, 15))
@@ -167,7 +167,7 @@ class V7ProductionDataTest {
         compose.onNodeWithText("保存").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("新增的合成批注", substring = true).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-reading-paragraph-1").performTextInputSelection(androidx.compose.ui.text.TextRange(0, 15))
-        compose.onNodeWithText("让 AI 再讲一遍").performClick()
+        compose.onNodeWithText("再讲一遍").performClick()
         compose.onNode(hasSetTextAction()).assertTextContains("请再讲一遍：", substring = true)
     }
 

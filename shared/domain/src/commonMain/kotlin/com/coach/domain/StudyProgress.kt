@@ -25,6 +25,8 @@ fun progressIntent(text: String): ProgressIntent? {
     val day: Long, val fromSeq: Long, val examCoverage: ExamCoverage,
     val coverageText: String, val dueKpIds: List<String>, val currentKpId: String?, val currentMastery: Mastery?,
     val kpTitles: Map<String, String> = emptyMap(),
+    /** The current point was opened, explained or answered before (so it reads 在学, not 未学). */
+    val currentOpened: Boolean = false,
 )
 
 fun Projection.today(epochMillis: Long, kpId: String? = position.current): TodayProgress {
@@ -35,18 +37,23 @@ fun Projection.today(epochMillis: Long, kpId: String? = position.current): Today
         else "期末分值：会了覆盖 ${points.passed} / ${points.total} 分，稳了 ${points.solid} 分"
     return TodayProgress(day, lastSeq, points, text,
         reviewsOn(day).keys.toList(),
-        kpId, kpId?.let { mastery[it] },kpTitles)
+        kpId, kpId?.let { mastery[it] },kpTitles,
+        currentOpened = kpId != null && (kpId == position.current || kpId in explainedKpIds || kpId in mastery))
 }
 
 fun TodayProgress.answer(intent: ProgressIntent): String = when (intent) {
     ProgressIntent.COVERAGE -> coverageText
     ProgressIntent.REMAINING -> if (examCoverage.total == 0 || examCoverage.scope != "FINAL") coverageText else
         "$coverageText。还差 ${examCoverage.total - examCoverage.passed} 分覆盖，${examCoverage.total - examCoverage.solid} 分到稳了。"
-    ProgressIntent.REVIEW_TODAY -> if (dueKpIds.isEmpty()) "今天没有到期复习。" else "今天到期复习：${dueKpIds.joinToString("、") { kpTitles[it] ?: "未命名知识点" }}。"
-    ProgressIntent.CURRENT_KP -> when {
-        currentKpId == null -> "当前还没有打开知识点。"
-        currentMastery?.solid == true -> "${kpTitles[currentKpId] ?: "当前这一节"}：稳了。"
-        currentMastery?.passed == true -> "${kpTitles[currentKpId] ?: "当前这一节"}：会了，还没稳。"
-        else -> "${kpTitles[currentKpId] ?: "当前这一节"}：还没会。"
+    ProgressIntent.REVIEW_TODAY -> if (dueKpIds.isEmpty()) "今天没有到期复习。" else "今天到期复习：${dueKpIds.joinToString("、") { kpTitles[it]?.let(::cleanTitle) ?: "未命名的一节" }}。"
+    ProgressIntent.CURRENT_KP -> {
+        val title = kpTitles[currentKpId]?.let(::cleanTitle) ?: "当前这一节"
+        if (currentKpId == null) "当前还没有打开任何一节。" else when (kpState(currentMastery, currentOpened)) {
+            KpState.NEEDS_REPAIR -> "$title：要补，会了之后又答错，已排进复习。"
+            KpState.SOLID -> "$title：稳了。"
+            KpState.PASSED -> "$title：会了，还没稳。"
+            KpState.IN_PROGRESS -> "$title：在学，还没会。"
+            KpState.NEW -> "$title：未学。"
+        }
     }
 }

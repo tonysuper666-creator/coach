@@ -143,7 +143,7 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                         val state = kp.status.symbol + " " + kp.status.label
                         if (kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID)) PassedLabel(
                             Modifier.width(if (m.window == DeskWindow.Outer) 68.dp else 100.8.dp),
-                            MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.End), colors.successFg, kp.status.label)
+                            MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.End), colors.successFg, kp.status.label, if (kp.status == KpStatus.SOLID) 2 else 1)
                         else Text(androidx.compose.ui.text.buildAnnotatedString {
                             append(state)
                             if (kp.status == KpStatus.IN_PROGRESS) addStyle(androidx.compose.ui.text.SpanStyle(color = colors.dangerFg), 0, 1)

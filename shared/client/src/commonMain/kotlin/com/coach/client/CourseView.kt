@@ -76,6 +76,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()
         val explained = HashSet<String>()
+        val opened = HashSet<String>()
         val modules = HashMap<String, String>()
         val moduleOf = HashMap<String, String>()
         val references = HashMap<String, String>()
@@ -112,7 +113,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
-            "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
+            "kp_opened" -> { opened += e.payload.s("kpId"); e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) } }
             "explanation_delivered" -> explained += e.payload.s("kpId")
         }
         projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
@@ -121,13 +122,13 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
             val m = projection.mastery[id]
-            val status = when {
-                m == null -> KpStatus.NEW
-                m.needsRepair -> KpStatus.NEEDS_REPAIR
-                m.solid -> KpStatus.SOLID
-                m.passed -> KpStatus.PASSED
-                id in explained || id in attempted || projection.position.current == id -> KpStatus.IN_PROGRESS
-                else -> KpStatus.NEW
+            // 打开过的节不会因为再打开别的节而退回「未学」：历史来自 kp_opened 事件，不只看当前位置。
+            val status = when (com.coach.domain.kpState(m, id in explained || id in attempted || id in opened || projection.position.current == id)) {
+                com.coach.domain.KpState.NEEDS_REPAIR -> KpStatus.NEEDS_REPAIR
+                com.coach.domain.KpState.SOLID -> KpStatus.SOLID
+                com.coach.domain.KpState.PASSED -> KpStatus.PASSED
+                com.coach.domain.KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS
+                com.coach.domain.KpState.NEW -> KpStatus.NEW
             }
             val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]

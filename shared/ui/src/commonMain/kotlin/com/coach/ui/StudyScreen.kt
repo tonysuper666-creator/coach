@@ -123,7 +123,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                             style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (!readingFocus) TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("study-ask")) { Text("问一句") }
                     }
-                    else com.coach.ui.v7.PageHeader(if (reviewMode) "复习" else view.weekProgress(kp.id).orEmpty(), main)
+                    else com.coach.ui.v7.PageHeader(if (reviewMode) "到期复习" else view.weekProgress(kp.id).orEmpty(), main)
                     // 范围、看原文（点开就是本知识点锚点所在的教材页）、状态放在同一组里，放不下就换行，不压标题。
                     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
                     if (!readingFocus && pending == null) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {

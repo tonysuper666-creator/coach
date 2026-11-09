@@ -107,11 +107,11 @@ class ExamPanelStartTest {
                 var focus by mutableStateOf(ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(2, 0.0))))
                 setContent { CoachTheme(false) { ExamPanelCard(c, v, focus, { _, _ -> }, {}) } }
                 onNodeWithText("各周都稳了，没有要补的。").assertDoesNotExist()
-                onNodeWithText("W2 还没掌握", substring = true).assertExists()
+                onNodeWithText("第 2 周 还没会", substring = true).assertExists()
 
                 focus = ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(2, 0.0), WeekFocus(7, 2.0), WeekFocus(8, 1.0)))
                 waitForIdle()
-                onNodeWithText("押题的 W7–W8 在大纲里还没有知识点", substring = true).assertExists()
+                onNodeWithText("有分值的第 7–8 周在课程里还没有对应的节", substring = true).assertExists()
             }
         } finally { tutor.close(); queue.cancel() }
     }

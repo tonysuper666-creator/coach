@@ -29,3 +29,31 @@ internal fun loadMainlineNotes(file: Path, week: Int, facts: List<MainlineFact>)
             "fact_ids" to s.strings("fact_ids"), "sources" to s.strings("sources")) } to null
     }.getOrElse { emptyList<JsonObject>() to "本周要点暂不可用（格式或事实映射校验失败），可以直接做题。" }
 }
+
+/** Optional independently checked metadata. Invalid or pending data never publishes stars. */
+internal fun loadMainlineEmphasis(file: Path, week: Int, facts: List<MainlineFact>): List<JsonObject> {
+    if (!Files.isRegularFile(file)) return emptyList()
+    return runCatching {
+        val raw = LedgerJson.parseToJsonElement(Files.readString(file)).jsonObject
+        require(raw.num("schema_version") == 1L && raw.num("week") == week.toLong())
+        val unique = linkedMapOf<String, JsonObject>()
+        for (element in (raw["marks"] as? JsonArray).orEmpty()) {
+            val mark = element.jsonObject
+            require(mark.str("fact_id") in facts.map { it.id } && mark.flag("reviewed"))
+            require(mark.str("recording_kind") in setOf("lecture", "tutorial"))
+            require(mark.str("recording_id").matches(Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")))
+            val stamp = mark.str("timestamp")
+            require(stamp.matches(Regex("(?:[0-9]{1,9}:[0-5][0-9]|[0-9]{1,9}:[0-5][0-9]:[0-5][0-9])")))
+            val parts = stamp.split(':').map { it.toLong() }
+            val seconds = parts.last() + parts[parts.size - 2] * 60 + if (parts.size == 3) parts[0] * 3600 else 0
+            require(mark.str("summary").isNotBlank())
+            val published = json("fact_id" to mark.str("fact_id"), "week" to week, "recording_id" to mark.str("recording_id"),
+                "recording_kind" to mark.str("recording_kind"), "timestamp" to "%02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60),
+                "summary" to mark.str("summary").trim())
+            val key = "${mark.str("fact_id")}:${mark.str("recording_kind")}:${mark.str("recording_id")}:$seconds"
+            require(unique[key] == null || unique[key] == published)
+            unique[key] = published
+        }
+        unique.values.toList()
+    }.getOrElse { emptyList() }
+}

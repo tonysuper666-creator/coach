@@ -125,6 +125,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
+    val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
     var reading by remember { mutableStateOf(entry?.let { it == "notes" } ?: (saved.str("mode") != "quiz")) }
     var sectionId by remember { mutableStateOf(saved.str("section")) }
     var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
@@ -215,6 +216,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             }
             if (section != null) key(section.str("section_id")) {
                 Text(section.str("title"), style = MaterialTheme.typography.titleLarge)
+                ClassEmphasis(emphasis, section.strings("fact_ids"))
                 QuizText(section.str("body"), "notes:${section.str("section_id")}", c.math)
                 Text(section.strings("sources").joinToString("\n"), style = MaterialTheme.typography.labelMedium)
                 Button(onClick = { startQuiz(section.str("section_id")) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
@@ -236,6 +238,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         coverage?.let { CoverageLines(it) }
         HorizontalDivider()
         Text("${tierNames[item.str("tier")] ?: "题"} · 第 ${index + 1}/${filtered.size} 题", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        ClassEmphasis(emphasis, item.strings("factIds"))
         QuizText(item.str("stem"), "mainline:${item.str("id")}", c.math)
         val done = result
         val explanation = done?.get("explanation") as? JsonObject
@@ -297,6 +300,24 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         if (pending != null && !retryable) TextButton(onClick = { retry++ }) { Text("重试原答案") }
     }
+}
+
+/** A modal overlay preserves the underlying question, choices and scroll position. */
+@Composable
+private fun ClassEmphasis(all: List<JsonObject>, factIds: List<String>) {
+    val linked = all.filter { it.str("fact_id") in factIds }
+    if (linked.isEmpty()) return
+    var opened by remember { mutableStateOf(false) }
+    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("mainline-emphasis")) { Text("★ 课上强调") }
+    if (opened) AlertDialog(onDismissRequest = { opened = false },
+        title = { Text("课上强调") },
+        text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            for (m in linked) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("${m.str("fact_id")} · 第 ${m.num("week")} 周 · ${if (m.str("recording_kind") == "tutorial") "习题课" else "讲课"} ${m.str("recording_id")} · ${m.str("timestamp")}", style = MaterialTheme.typography.labelLarge)
+                Text(m.str("summary"), style = MaterialTheme.typography.bodyMedium)
+            }
+        } },
+        confirmButton = { TextButton(onClick = { opened = false }, modifier = Modifier.testTag("mainline-emphasis-close")) { Text("关闭") } })
 }
 
 @Composable

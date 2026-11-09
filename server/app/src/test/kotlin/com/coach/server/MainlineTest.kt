@@ -39,6 +39,42 @@ Synthetic facts.
 """.trimIndent()
 
 class MainlineTest {
+    @Test fun optionalClassEmphasisDeduplicatesLongRecordingsAndWithholdsPendingMetadata() {
+        val dir = Files.createTempDirectory("mainline-emphasis")
+        try {
+            val library = library(dir.resolve("papers"))
+            val file = dir.resolve("papers/mcq-mainline/W01-emphasis.json")
+            val mark = json("fact_id" to "F1", "recording_kind" to "lecture", "recording_id" to "L1",
+                "timestamp" to "121:03", "summary" to "Synthetic pears were emphasized.", "reviewed" to true,
+                "answer" to 3)
+            fun write(marks: List<JsonObject>, week: Int = 1) = Files.writeString(file,
+                json("schema_version" to 1, "week" to week, "marks" to JsonArray(marks)).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                fun body() = mainline.week(store, "C1", 1)
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                write(listOf(mark, mark, JsonObject(mark + ("recording_kind" to JsonPrimitive("tutorial")))))
+                val published = body()["emphasis"]!!.jsonArray
+                assertEquals(2, published.size)
+                assertEquals("02:01:03", published.first().jsonObject.str("timestamp"))
+                assertFalse("answer" in published.first().jsonObject)
+                for (bad in listOf(JsonObject(mark + ("reviewed" to JsonPrimitive(false))),
+                    JsonObject(mark + ("fact_id" to JsonPrimitive("UNKNOWN"))),
+                    JsonObject(mark + ("timestamp" to JsonPrimitive("01:99"))),
+                    JsonObject(mark + ("timestamp" to JsonPrimitive(""))))) {
+                    write(listOf(bad))
+                    assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                    assertEquals(4, body()["items"]!!.jsonArray.size)
+                    assertEquals(0L, body()["coverage"]!!.jsonObject.num("factsMastered"))
+                }
+                write(listOf(mark), 2)
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                write(listOf(mark, JsonObject(mark + ("summary" to JsonPrimitive("Conflicting")))))
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun notesCoverFactsFilterQuestionsAndNeverMasterGuessesOrUnverifiedKeys() {
         val dir = Files.createTempDirectory("mainline-notes")
         try {

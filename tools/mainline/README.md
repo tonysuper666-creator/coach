@@ -63,6 +63,116 @@ quiet private authoring directory, not a live concurrently edited library.
 `test_content.py` exercises a **24-file** dry run, rejected key edit, backup and
 apply. These are synthetic files, not claims of editing real course content.
 
+### Independently authorized correction snapshots
+
+When QA and the independent cross reviewer have frozen a correction snapshot,
+use a fresh working copy of that snapshot as `--original`, keeping the raw
+pre-correction library and approved snapshot immutable:
+
+```sh
+python3 tools/mainline/content.py explanations --baseline PRIVATE/pre-correction \
+  --original PRIVATE/approved-workcopy --corrections PRIVATE/corrections.json \
+  --candidate PRIVATE/explanations --report PRIVATE/two-stage-dry-run.json
+```
+
+The tool checks two boundaries in the same invocation: raw library → exact
+authorized corrections, then corrected working copy → explanation-only edits.
+`--baseline` and `--corrections` must be supplied together. Omitting both retains
+the original strict explanation-only workflow. `--apply --backup PRIVATE/new-dir`
+backs up and updates only the working copy; it never writes the raw baseline,
+facts files or independently approved snapshot. Reports/backups must be outside
+the immutable baseline. A second application requires a fresh approved working
+copy, since the frozen correction hash must still match before explanation edits.
+
+Example **synthetic** ledger (replace hashes with complete SHA-256 digests):
+
+```json
+{
+  "schema_version": 1,
+  "authorization": {
+    "issue": "SYNTHETIC-ONLY",
+    "qa": "independent QA evidence reference",
+    "cross_review": "independent cross-review evidence reference"
+  },
+  "files": [{
+    "file": "W05.json",
+    "original_sha256": "FULL_ORIGINAL_HASH",
+    "corrected_sha256": "FULL_APPROVED_HASH",
+    "changes": [{"item_id": "S1", "field": "answer", "before": 0, "after": 1}]
+  }]
+}
+```
+
+The ledger permits exact changes to existing item fields `stem`, `options`,
+`answer`, `key_state`, `source`, `sources`, and `fact_ids`. Each file/item/field
+must be listed once with its exact old/new JSON value, and file hashes must
+match. Everything else, including IDs, item counts, order and metadata, remains
+unchanged. An unlisted edit is rejected even inside an otherwise authorized file.
+New questions cannot be counted as rewrites. Answer booleans are distinct from
+numeric indexes. The second boundary permits only explanation changes, even to
+items whose keys were authorized for correction in the first boundary.
+
+Approval references are mandatory metadata, **not authenticated signatures**:
+the caller must obtain actual QA/cross-review approval through the correction
+issue. This tool does not assess factual correctness, grant authorization,
+edit facts/keys, import candidates or restore reviewed states. Correction ledger
+values stay private; public reports contain only counts and hashes. The tests
+cover allowed W05/W06 synthetic corrections, rejected unlisted changes, stale
+hashes, extra questions, rewritten keys/states and missing review references.
+
+## Class emphasis metadata
+
+The optional private `W05-emphasis.json` uses the normalized interface below.
+It is separate from notes, so related questions can show stars even when notes
+are absent. Only records linked to existing weekly facts and marked independently
+reviewed can publish. Do not invent markers or import supplemental questions to
+make validation pass. F/S IDs are treated equally once present in the actual
+fact list; unimported supplemental IDs remain in the private pending mapping.
+
+```json
+{"schema_version":1,"week":5,"marks":[{"fact_id":"F1","recording_kind":"lecture","recording_id":"L1","timestamp":"98:00","summary":"Synthetic pears were emphasized.","reviewed":true}]}
+```
+
+```sh
+python3 tools/mainline/content.py emphasis --input PRIVATE/approved-mapping.json \
+  --facts PRIVATE/W05-facts.md --week 5 --inline PRIVATE/W05-讲解.md \
+  --output PRIVATE/W05-emphasis.json
+```
+
+Omit `--output` for dry-run and `--inline` when only the independent mapping is
+used. Reports contain counts only. This is an explicit normalized adapter for
+the private authoring material, not an automatic factual verifier of arbitrary
+Markdown. A bare timestamp cannot identify its fact or recording. Inline entries
+therefore carry explicit context before the author marker, using the same schema:
+
+```markdown
+<!-- coach-emphasis {"fact_id":"F1","recording_kind":"lecture","recording_id":"L1","summary":"Synthetic pears were emphasized.","reviewed":true} -->【课上强调 98:00】
+```
+
+Both inputs merge/deduplicate by week, fact, recording kind/ID and normalized
+time. Conflicting summaries require private review instead of picking a winner.
+`86:00`, `98:00`, `121:03` and `02:01:03` are supported without truncating long
+recordings; output is normalized to hours/minutes/seconds. Unknown facts,
+unreviewed records, absent context, invalid timestamps or blank summaries fail
+conversion. Keep pending records separately; only the QA/cross-reviewed subset
+belongs in the published mapping. The server independently validates and
+whitelists metadata, withholding an invalid optional file without blocking the
+question pack. `reviewed` is caller-supplied metadata, not approval authentication.
+
+Notes and related questions show an accessible “★ 课上强调” text button only
+when linked metadata exists. Its scrollable dialog identifies fact/week/recording,
+time and summary. Closing it preserves the original question, choice, reading
+position and guessed/mastery rules. Metadata travels in the existing cached week
+body, so the database reopen regression also exercises the overlay with a
+simulated unavailable server. No answer/key fields are forwarded in this payload.
+
+The latest W5 handoff requires the real private sample after independently
+approved mapping is available (16 records including 5 supplemental IDs; latest
+36-candidate version supersedes 33). That integration, independent verification
+and real App acceptance remain pending with Expert. Synthetic tests do not
+establish W5 factual correctness or publication readiness. Preserve approved
+snapshot hashes and keep all private prose/screenshots off Git and public evidence.
+
 ## User flow and persistence
 
 The existing Review tab has “继续第 N 周”, “看本周要点” and “选其他周”.
@@ -98,7 +208,7 @@ All build/test/emulator commands must use the current `tools/dev/heavy`:
 ```sh
 tools/dev/heavy ./gradlew :server:app:test :shared:client:jvmTest :shared:ui:jvmTest --console=plain
 python3 -m unittest discover -s tools/mainline -v
-tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest \
+tools/dev/heavy ./gradlew :server:app:installDist :androidApp:assembleDebug :androidApp:assembleDebugAndroidTest \
   -PcoachApplicationId=com.coach.android.ton1394 -Pcoach.course=ton1358-synthetic-mainline --console=plain
 tools/dev/heavy --emulator python3 tools/dev/check-mainline-notes.py --output build/ton1394-evidence
 ```
@@ -116,7 +226,7 @@ not localhost HTTP timing. Its nearest-rank p95 must be at most 800 ms.
 
 ## Current verification status (TON-1394 draft)
 
-JVM suites pass (server 208, client 74, UI 100), as do the two content-tool
+JVM suites pass (server 209, client 74, UI 100), as do the six content-tool
 checks and the isolated Android application/test APK builds. Real emulator
 acceptance has **not passed**. Two navigation-locator attempts stopped at
 `No clickable ancestor` and `Missing synthetic mainline UI: ↻` respectively.

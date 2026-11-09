@@ -27,6 +27,7 @@ class MainlineScreenTest {
     private val today = logicalDay(now, "Europe/London")
 
     private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0) : AutoCloseable {
+        @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
@@ -41,6 +42,10 @@ class MainlineScreenTest {
                 val bytes = body.toByteArray(); ex.sendResponseHeaders(status, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
             }
             createContext("/v1/courses/C/mainline") { ex ->
+                if (offline) {
+                    reply(ex, """{"error":"Synthetic offline"}""", 503)
+                    return@createContext
+                }
                 val path = ex.requestURI.path
                 when {
                     path.endsWith("/answer") -> {
@@ -65,7 +70,7 @@ class MainlineScreenTest {
                     path.endsWith("/mainline/1") && initialFailures-- > 0 -> reply(ex, """{"error":"Synthetic Mac temporarily unavailable"}""", 503)
                     path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
                         items.joinToString(",") { (id, tier) -> """{"id":"$id","tier":"$tier","stem":"Synthetic orchard question $id: which statement about the orchard holds?",
-                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}]""" else "") + "}")
+                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}],"emphasis":[{"fact_id":"F-B1","week":1,"recording_id":"T1","recording_kind":"tutorial","timestamp":"02:01:03","summary":"Synthetic pears were emphasized."}]""" else "") + "}")
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
             }
@@ -194,9 +199,27 @@ class MainlineScreenTest {
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic Mac temporarily unavailable").fetchSemanticsNodes().isNotEmpty() }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("○ Synthetic bridge notes").performScrollTo().performClick()
+                onNodeWithTag("mainline-emphasis").performScrollTo()
+                waitForIdle()
+                val readingBeforeStar = c.sync.mainlineState("C", "week:1")
+                onNodeWithTag("mainline-emphasis").performClick()
+                onNodeWithText("Synthetic pears were emphasized.").assertIsDisplayed()
+                onNodeWithText("02:01:03", substring = true).assertExists()
+                onNodeWithTag("mainline-emphasis-close").performClick()
+                waitForIdle()
+                assertEquals(readingBeforeStar, c.sync.mainlineState("C", "week:1"))
                 onNodeWithTag("mainline-section-quiz").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("桥接题 · 第 1/1 题").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("mainline-option-1").performScrollTo().performClick()
+                onNodeWithTag("mainline-emphasis").performScrollTo()
+                waitForIdle()
+                val quizBeforeStar = c.sync.mainlineState("C", "week:1")
+                onNodeWithTag("mainline-emphasis").performClick()
+                onNodeWithText("Synthetic pears were emphasized.").assertIsDisplayed()
+                onNodeWithTag("mainline-emphasis-close").performClick()
+                waitForIdle()
+                assertEquals(quizBeforeStar, c.sync.mainlineState("C", "week:1"))
+                onNodeWithTag("mainline-option-1").assertIsSelected()
                 onNodeWithTag("mainline-guess").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("答对了，但标了猜的：不算掌握。").performScrollTo().assertIsDisplayed()
@@ -223,10 +246,14 @@ class MainlineScreenTest {
             driver.close()
             driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
             c = controller(driver)
+            mac.offline = true
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
                 onNodeWithTag("mainline-notes").performScrollTo().assertIsDisplayed()
                 onNodeWithText("Synthetic pears connect", substring = true).performScrollTo().assertIsDisplayed()
+                onNodeWithTag("mainline-emphasis").performScrollTo().performClick()
+                onNodeWithText("Synthetic pears were emphasized.").assertIsDisplayed()
+                onNodeWithTag("mainline-emphasis-close").performClick()
             }
         } finally { driver.close(); tutor.close(); file.delete() }
     }

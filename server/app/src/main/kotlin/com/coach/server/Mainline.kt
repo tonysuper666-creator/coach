@@ -31,7 +31,7 @@ internal fun optionOrder(fingerprint: String, round: Int, size: Int): List<Int> 
 }
 
 internal class MainlineWeek(val week: Int, val title: String, val items: List<MainlineItem>, val facts: List<MainlineFact>,
-    val notes: List<JsonObject>, val notesError: String?)
+    val notes: List<JsonObject>, val notesError: String?, val emphasis: List<JsonObject>)
 
 private val tiers = listOf("setup", "detail", "bridge")
 
@@ -127,7 +127,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             }
         }
         val (notes, notesError) = loadMainlineNotes(factsFile.resolveSibling("W%02d-notes.json".format(week)), week, facts)
-        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts, notes, notesError)
+        val emphasis = loadMainlineEmphasis(factsFile.resolveSibling("W%02d-emphasis.json".format(week)), week, facts)
+        return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts, notes, notesError, emphasis)
     }
 
     private fun notes(week: MainlineWeek, history: ChoiceHistory) = JsonArray(week.notes.map { section ->
@@ -165,7 +166,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val week = find(courseNames(events, course), number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
-            "notes" to notes(week, history), "notesError" to week.notesError,
+            "notes" to notes(week, history), "notesError" to week.notesError, "emphasis" to JsonArray(week.emphasis),
             "items" to JsonArray(week.items.map { item ->
                 val layout = round(events, item)
                 val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()

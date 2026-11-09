@@ -10,6 +10,13 @@ final class ConnectionModel: ObservableObject {
     private let store = CredentialStore(service: "coach.ton1411.device")
     private var saved: (ServerAddress, DeviceCredential)?
 
+    var learningCredentials: (ServerAddress, DeviceCredential)? { saved }
+
+    func markRevoked() {
+        state = .revoked
+        message = "此设备的访问已被拒绝，请重新配对。"
+    }
+
     func restore() async {
         do {
             saved = try store.load()

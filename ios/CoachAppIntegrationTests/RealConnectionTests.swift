@@ -41,4 +41,43 @@ final class RealConnectionTests: XCTestCase {
         await model.reconnect()
         guard case .revoked = model.state else { XCTFail("Revoked credential was not rejected"); return }
     }
+
+    func testLearningPairAndSubmit() async throws {
+        let values = try fixture()
+        let connection = ConnectionModel()
+        await connection.pair(address: try XCTUnwrap(values["base"]), code: try XCTUnwrap(values["code"]))
+        guard case .connected = connection.state else { XCTFail("Pair failed"); return }
+        let learning = LearningModel(connection: connection)
+        learning.course = "contract-course"
+        await learning.loadCourse()
+        XCTAssertEqual(learning.weeks.count, 1)
+        await learning.openWeek(1)
+        let item = try XCTUnwrap(learning.week?.items.first)
+        let choice = try XCTUnwrap(item.options.firstIndex(of: "Pears"))
+        await learning.submit(item: item, choice: choice)
+        let receipt = try XCTUnwrap(learning.receipt)
+        XCTAssertEqual(receipt.status, "mastered")
+        XCTAssertNil(learning.pending)
+        // Model a committed answer whose response was lost: the identical retry must
+        // return the original receipt even in a later test-host process.
+        let (server, credential) = try XCTUnwrap(connection.learningCredentials)
+        let submission = String(receipt.attemptId.dropFirst("mainline-".count))
+        let pending = PendingAnswer(course: "contract-course", week: 1, itemId: item.id, choice: choice, layout: item.layout, submissionId: submission, server: server.url.absoluteString, deviceId: credential.deviceId)
+        try PendingAnswerStore().save(pending)
+    }
+
+    func testLearningRestoreAndRetry() async throws {
+        let connection = ConnectionModel()
+        await connection.restore()
+        guard case .connected = connection.state else { XCTFail("Restore failed"); return }
+        let learning = LearningModel(connection: connection)
+        let pending = try XCTUnwrap(learning.pending)
+        await learning.retryPending()
+        XCTAssertNil(learning.pending)
+        XCTAssertEqual(learning.receipt?.attemptId, "mainline-" + pending.submissionId)
+        await learning.loadCourse()
+        await learning.openWeek(1)
+        XCTAssertEqual(learning.week?.items.first?.status, "mastered")
+    }
+
 }

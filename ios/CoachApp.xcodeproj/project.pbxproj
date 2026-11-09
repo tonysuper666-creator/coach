@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		35D5C13A16A83B987893CF97 /* Learning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E2890D923AC0A46AB3BCEB /* Learning.swift */; };
 		3AAA8A2AD397A1695FEBB577 /* CoachApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3E42771824AAAB60DEAE54 /* CoachApp.swift */; };
 		3D88815FD6ACCC8CBBF021FB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9CBE383152773C7ECBF87E11 /* Foundation.framework */; };
 		4A544E07E87D3EA11D31A014 /* ConnectionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D95A84F53881855178F20203 /* ConnectionModel.swift */; };
@@ -34,6 +35,7 @@
 		48B84D7EF27575125B5870DC /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		5A524CF59AB2B8F8627D30FF /* CredentialStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
 		67438094CBC276A427AEA822 /* Appearance.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Appearance.swift; sourceTree = "<group>"; };
+		95E2890D923AC0A46AB3BCEB /* Learning.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Learning.swift; sourceTree = "<group>"; };
 		964F92EB522EBE423ED3BA17 /* RealConnectionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RealConnectionTests.swift; sourceTree = "<group>"; };
 		9CBE383152773C7ECBF87E11 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		A5C8D52DA135553A641A41ED /* CoachApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CoachApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -70,6 +72,7 @@
 				D95A84F53881855178F20203 /* ConnectionModel.swift */,
 				48B84D7EF27575125B5870DC /* ContentView.swift */,
 				0848696FC830180EBB2049C7 /* Info.plist */,
+				95E2890D923AC0A46AB3BCEB /* Learning.swift */,
 			);
 			name = CoachApp;
 			path = CoachApp;
@@ -234,6 +237,7 @@
 				B829034815E958976FBF66BD /* ContentView.swift in Sources */,
 				7B981169BCAF9B990109C7A3 /* CredentialStore.swift in Sources */,
 				9200EAD73892D68AB77CA019 /* Pairing.swift in Sources */,
+				35D5C13A16A83B987893CF97 /* Learning.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

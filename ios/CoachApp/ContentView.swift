@@ -15,9 +15,7 @@ struct ContentView: View {
                     case .unpaired:
                         pairing
                     case .connected:
-                        Text("已连接 Mac").font(.title2.bold())
-                        Text("接着读、批注和练习正在接入。")
-                        Button("移除此设备的连接", role: .destructive) { connection.forget() }
+                        LearningView(connection: connection)
                     case .unavailable, .revoked:
                         Text("无法连接").font(.title2.bold())
                         if connection.state == .unavailable {

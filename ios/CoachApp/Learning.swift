@@ -1,0 +1,219 @@
+import Foundation
+import Security
+import SwiftUI
+
+private final class LearningNoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+struct WeekList: Decodable { let weeks: [WeekSummary] }
+struct WeekSummary: Decodable, Identifiable { let week: Int; let title: String; var id: Int { week } }
+struct PracticeWeek: Decodable { let title: String; let items: [PracticeItem] }
+struct PracticeItem: Decodable, Identifiable { let id: String; let stem: String; let options: [String]; let layout: Int?; let status: String }
+struct AnswerReceipt: Decodable { let itemId: String; let attemptId: String; let choice: Int; let status: String; let keyState: String }
+struct PendingAnswer: Codable {
+    let course: String; let week: Int; let itemId: String; let choice: Int; let layout: Int?; let submissionId: String; let server: String; let deviceId: String
+}
+struct PendingAnswerStore {
+    private var query: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "coach.ton1411.pending-answer", kSecAttrAccount as String: "pending"]
+    }
+    func load() throws -> PendingAnswer? {
+        var q = query; q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError(status) }
+        guard let data = item as? Data else { throw ConnectionError.invalidResponse }
+        return try JSONDecoder().decode(PendingAnswer.self, from: data)
+    }
+    func save(_ pending: PendingAnswer) throws {
+        let data = try JSONEncoder().encode(pending)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound else { throw KeychainError(status) }
+        var q = query; q[kSecValueData as String] = data; q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let added = SecItemAdd(q as CFDictionary, nil)
+        guard added == errSecSuccess else { throw KeychainError(added) }
+    }
+    func delete() throws {
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status) }
+    }
+}
+private struct AnswerBody: Encodable { let itemId: String; let choice: Int; let layout: Int?; let submissionId: String }
+
+@MainActor
+final class LearningModel: ObservableObject {
+    @Published var course = UserDefaults.standard.string(forKey: "coach.learning.course") ?? ""
+    @Published var weeks: [WeekSummary] = []
+    @Published var week: PracticeWeek?
+    @Published var selectedWeek: Int?
+    @Published var receipt: AnswerReceipt?
+    @Published var pending: PendingAnswer?
+    @Published var message: String?
+    @Published var busy = false
+    private let connection: ConnectionModel
+    private let pendingStore = PendingAnswerStore()
+    private var storageAvailable = true
+    private let session: URLSession
+
+    init(connection: ConnectionModel) {
+        self.connection = connection
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 10
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        session = URLSession(configuration: config, delegate: LearningNoRedirects(), delegateQueue: nil)
+        do {
+            pending = try pendingStore.load()
+            if let pending { course = pending.course }
+        } catch {
+            storageAvailable = false
+            message = "无法读取待确认答案，请检查设备解锁状态。"
+        }
+    }
+
+    private func request<T: Decodable>(_ type: T.Type, path: [String], query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
+        guard let (address, credential) = connection.learningCredentials else { throw ConnectionError.unauthorized }
+        var url = address.url
+        for component in path { url.appendPathComponent(component) }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        guard let finalURL = components.url else { throw ConnectionError.invalidAddress }
+        var req = URLRequest(url: finalURL)
+        req.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        req.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        if let body {
+            req.httpMethod = "POST"; req.httpBody = body
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw ConnectionError.invalidResponse }
+        if http.statusCode == 401 { throw ConnectionError.unauthorized }
+        guard (200...299).contains(http.statusCode) else { throw ConnectionError.httpStatus(http.statusCode) }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func fail(_ error: Error) {
+        if case ConnectionError.unauthorized = error { connection.markRevoked(); return }
+        if case ConnectionError.httpStatus(409) = error {
+            message = "提交与服务器记录冲突。请保留当前状态并联系支持。"
+        } else { message = "未能从 Mac 确认结果，请检查网络后重试。" }
+    }
+
+    func loadCourse() async {
+        guard !busy else { return }
+        let name = course.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.utf8.count <= 128,
+              name.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.")).contains($0) }),
+              name != ".", name != ".." else { message = "请输入有效的课程标识。"; return }
+        guard pending == nil || pending?.course == name else { message = "请先确认上一次答题。"; return }
+        course = name; UserDefaults.standard.set(name, forKey: "coach.learning.course")
+        busy = true; defer { busy = false }; message = nil
+        weeks = []; week = nil; receipt = nil; selectedWeek = nil
+        do {
+            let list = try await request(WeekList.self, path: ["v1", "courses", name, "mainline"])
+            weeks = list.weeks; week = nil; receipt = nil; selectedWeek = nil
+            if weeks.isEmpty { message = "这门课程还没有可用练习。" }
+        } catch { fail(error) }
+    }
+
+    func openWeek(_ number: Int) async {
+        guard !busy else { return }
+        guard pending == nil || pending?.week == number else { message = "请先确认上一次答题。"; return }
+        busy = true; defer { busy = false }; message = nil
+        do {
+            week = try await request(PracticeWeek.self, path: ["v1", "courses", course, "mainline", String(number)], query: [URLQueryItem(name: "layout", value: "shuffled-v1")])
+            selectedWeek = number; receipt = nil
+        } catch { fail(error) }
+    }
+
+    func submit(item: PracticeItem, choice: Int) async {
+        guard !busy, storageAvailable, pending == nil, let selectedWeek, let (server, credential) = connection.learningCredentials, item.options.indices.contains(choice) else { return }
+        let value = PendingAnswer(course: course, week: selectedWeek, itemId: item.id, choice: choice, layout: item.layout, submissionId: UUID().uuidString, server: server.url.absoluteString, deviceId: credential.deviceId)
+        do {
+            try pendingStore.save(value)
+            pending = value
+            await retryPending()
+        } catch { message = "无法保存待确认的答案，请重试。" }
+    }
+
+    func discardPending() {
+        do {
+            try pendingStore.delete()
+            pending = nil
+            message = "已清除本机待确认记录。请重新打开课程检查服务器上的状态。"
+        } catch { message = "无法清除待确认记录，请检查设备解锁状态。" }
+    }
+
+    func retryPending() async {
+        guard !busy, let value = pending else { return }
+        guard let (server, credential) = connection.learningCredentials, value.server == server.url.absoluteString, value.deviceId == credential.deviceId else {
+            message = "待确认答案属于另一台 Mac 或设备，请恢复原连接后重试。"; return
+        }
+        busy = true; defer { busy = false }; message = nil
+        do {
+            let body = try JSONEncoder().encode(AnswerBody(itemId: value.itemId, choice: value.choice, layout: value.layout, submissionId: value.submissionId))
+            let result = try await request(AnswerReceipt.self, path: ["v1", "courses", value.course, "mainline", String(value.week), "answer"], body: body)
+            guard result.itemId == value.itemId, result.choice == value.choice, !result.attemptId.isEmpty else { throw ConnectionError.invalidResponse }
+            try pendingStore.delete()
+            pending = nil; receipt = result
+        } catch { fail(error) }
+    }
+}
+
+struct LearningView: View {
+    @ObservedObject var connection: ConnectionModel
+    @StateObject private var model: LearningModel
+    @State private var selections: [String: Int] = [:]
+    @State private var showDiscard = false
+    init(connection: ConnectionModel) { self.connection = connection; _model = StateObject(wrappedValue: LearningModel(connection: connection)) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("接着学习").font(.title2.bold())
+            Text("输入课程标识，打开已有练习。")
+            TextField("课程标识", text: $model.course).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(model.pending != nil)
+                .accessibilityIdentifier("courseID")
+            Button("打开课程") { Task { await model.loadCourse() } }.disabled(model.busy).accessibilityIdentifier("openCourse")
+            if model.pending != nil {
+                Text("上次答案尚未确认。重试会使用同一次提交。")
+                Button("确认上次答案") { Task { await model.retryPending() } }.disabled(model.busy).accessibilityIdentifier("retryAnswer")
+                Button("清除待确认记录", role: .destructive) { showDiscard = true }.disabled(model.busy)
+            }
+            ForEach(model.weeks) { week in
+                Button(week.title) { Task { await model.openWeek(week.week) } }.disabled(model.busy).accessibilityIdentifier("week-\(week.week)")
+            }
+            if let week = model.week {
+                Text(week.title).font(.headline)
+                ForEach(week.items) { item in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(item.stem).font(.headline)
+                        Text("状态：\(item.status)").font(.caption)
+                        ForEach(item.options.indices, id: \.self) { index in
+                            Button { selections[item.id] = index } label: {
+                                Label(item.options[index], systemImage: selections[item.id] == index ? "largecircle.fill.circle" : "circle")
+                            }.disabled(model.busy || model.pending != nil)
+                        }
+                        Button("提交答案") {
+                            if let choice = selections[item.id] { Task { await model.submit(item: item, choice: choice) } }
+                        }.disabled(model.busy || model.pending != nil || selections[item.id] == nil)
+                    }.padding(.vertical, 8)
+                }
+            }
+            if let receipt = model.receipt {
+                Text("已收到答案 · \(receipt.status) · \(receipt.keyState)").accessibilityIdentifier("answerReceipt")
+            }
+            if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("learningMessage") }
+            Button("移除此设备的连接", role: .destructive) { connection.forget() }
+        }
+        .alert("清除待确认记录？", isPresented: $showDiscard) {
+            Button("清除记录", role: .destructive) { model.discardPending() }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("答案可能已经记录在 Mac 上。清除只影响本机，之后请重新打开课程检查状态。")
+        }
+    }
+}

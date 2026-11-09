@@ -32,6 +32,14 @@ class DisplayTest {
         assertEquals("", titleSource("X"))
     }
 
+    @Test fun moduleNamesHideMetadataAndNumberingWithoutChangingTheSubject() {
+        assertEquals("医院与医生", moduleDisplayName("【W3·slides】03 医院与医生"))
+        assertEquals("工具：基础计算", moduleDisplayName("02、工具：基础计算"))
+        assertEquals("3D 建模", moduleDisplayName("3D 建模"))
+        assertEquals("2026年政策", moduleDisplayName("2026年政策"))
+        assertEquals("", moduleDisplayName("03"))
+    }
+
     @Test fun countsAreShownAsLearnedOverTotal() {
         val rows = listOf(row("a", KpStatus.SOLID), row("b", KpStatus.PASSED), row("c", KpStatus.IN_PROGRESS), row("d", KpStatus.NEEDS_REPAIR), row("e", KpStatus.NEW))
         assertEquals("会了 2 / 5", learnedCount(rows))
@@ -67,7 +75,7 @@ class DisplayTest {
 
     @Test fun chatAnswerUsesTheListsPriorityAndCleanTitles() {
         val titles = mapOf("A" to "【W3·slides】合成甲", "B" to "【W3·slides】合成乙", "C" to "【W3·slides】合成丙", "D" to "合成丁")
-        val state = Projection(kpTitles = titles, position = Position(current = "B"),
+        val state = Projection(kpTitles = titles, position = Position(current = "B"), startedKpIds = setOf("B"),
             mastery = mapOf("A" to Mastery(passed = true, needsRepair = true), "C" to Mastery(passed = true), "D" to Mastery(passed = true, solid = true)))
         fun say(id: String) = state.today(1_800_000_000_000L, id).answer(ProgressIntent.CURRENT_KP)
         assertEquals("合成甲：要补，会了之后又答错，已排进复习。", say("A"))

@@ -63,7 +63,7 @@ fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, on
         for (module in routeModules(kps)) {
             item(key = "m:${module.module}:${module.kps.first().id}") {
                 Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.Bottom) {
-                    Text(module.module.ifBlank { "未分章" }, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                    Text(com.coach.client.moduleDisplayName(module.module).ifBlank { "未分章" }, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
                     Text("${KpStatus.PASSED.label} ${module.passed}/${module.kps.size}" + if (module.solid > 0) " · ${KpStatus.SOLID.label} ${module.solid}" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }

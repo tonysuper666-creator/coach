@@ -102,7 +102,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
     }
     CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
-    com.coach.ui.v7.Desk(crumb = kp.module.ifBlank { c.courseId }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
+    com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
         directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.takeIf { ui.connected && !it.busy }?.let { it::select }) },
         margin = { com.coach.ui.v7.MarginNotes(notes) {
             if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {

@@ -41,9 +41,12 @@ fun statusSummary(rows: List<KpRow>): String = buildList {
     rows.count { it.status == KpStatus.NEEDS_REPAIR }.takeIf { it > 0 }?.let { add("${KpStatus.NEEDS_REPAIR.label} $it") }
 }.joinToString(" · ")
 
+/** Learner-facing module name; the numbered raw value stays available for grouping and association. */
+fun moduleDisplayName(raw: String): String = displayTitle(raw).replace(Regex("^\\s*\\d+(?:[.\\s、:：-]+|$)"), "").trim()
+
 /** Week name from the course, not the module number: 「02 工具：基础计算」 → 「工具：基础计算」. */
 fun weekName(rows: List<KpRow>): String =
-    rows.firstOrNull()?.let { it.module.replace(Regex("^\\s*\\d+[.\\s、:：-]*"), "").trim().ifBlank { displayTitle(it.title) } }.orEmpty()
+    rows.firstOrNull()?.let { moduleDisplayName(it.module).ifBlank { displayTitle(it.title) } }.orEmpty()
 
 /** 「第 3 周 · 医院与医生 · 3/8」; an exempt week reads 「第 7 周 · 期中周，无新课」. */
 fun CourseView.weekDirectoryLine(week: Int): String {

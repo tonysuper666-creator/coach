@@ -75,8 +75,6 @@ class CourseView(val events: List<Event>, val projection: Projection) {
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
         val concepts = HashMap<String, List<String>>()
-        val explained = HashSet<String>()
-        val opened = HashSet<String>()
         val modules = HashMap<String, String>()
         val moduleOf = HashMap<String, String>()
         val references = HashMap<String, String>()
@@ -113,17 +111,15 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
-            "kp_opened" -> { opened += e.payload.s("kpId"); e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) } }
-            "explanation_delivered" -> explained += e.payload.s("kpId")
+            "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
         }
         projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
-        val attempted = events.filter { it.type == "question_posed" }.flatMap { posed -> (posed.payload["kpIds"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }.toSet()
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
             val m = projection.mastery[id]
-            // 打开过的节不会因为再打开别的节而退回「未学」：历史来自 kp_opened 事件，不只看当前位置。
-            val status = when (com.coach.domain.kpState(m, id in explained || id in attempted || id in opened || projection.position.current == id)) {
+            // The list and chat read the same projected facts, including historical opens and quick-ask exclusion.
+            val status = when (com.coach.domain.kpState(m, id in projection.startedKpIds)) {
                 com.coach.domain.KpState.NEEDS_REPAIR -> KpStatus.NEEDS_REPAIR
                 com.coach.domain.KpState.SOLID -> KpStatus.SOLID
                 com.coach.domain.KpState.PASSED -> KpStatus.PASSED
@@ -132,7 +128,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             }
             val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]
-            KpRow(id, titles.getValue(id), status, id in explained, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
+            KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
                 anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
         }

@@ -36,6 +36,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val quickAsks = mutableMapOf<Long, QuickAskThread>()
     val taughtConceptIds = sortedSetOf<String>()
     val explainedKpIds = sortedSetOf<String>()
+    val startedKpIds = sortedSetOf<String>()
     val attempts = mutableMapOf<String, Attempt>()
     val byQuestion = mutableMapOf<String, MutableList<Attempt>>()
     val keys = mutableMapOf<String, String>()
@@ -273,6 +274,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                 }
             }
             "kp_opened" -> {
+                p.str("kpId").takeIf { it.isNotBlank() }?.let(startedKpIds::add)
                 p.str("title").takeIf { it.isNotBlank() }?.let { kpTitles[p.str("kpId")] = it }
                 if (p.str("via") !in setOf("REVIEW", "QUICK")) current = p.str("kpId")
                 updateJournal(day) { it.copy(opened = (it.opened + p.str("kpId")).distinct()) }
@@ -280,9 +282,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             "explanation_delivered" -> {
                 taughtConceptIds.addAll(p.strings("conceptIds"))
                 explainedKpIds.add(p.str("kpId"))
+                p.str("kpId").takeIf { it.isNotBlank() }?.let(startedKpIds::add)
                 updateJournal(day) { it.copy(delivered = (it.delivered + p.str("kpId")).distinct()) }
             }
             "question_posed", "legacy_attempt" -> {
+                startedKpIds.addAll(p.strings("kpIds").filter { it.isNotBlank() })
                 if(p.num("policyVersion",1) != 1L) unsupported.add("policy:${p.num("policyVersion")}")
                 val a = Attempt(if (e.type == "legacy_attempt") e.copy(payload = JsonObject(p + ("origin" to JsonPrimitive("LEGACY")))) else e)
                 attempts[a.id] = a; byQuestion.getOrPut(a.question) { mutableListOf() }.add(a)
@@ -370,7 +374,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
         revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
-        taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
+        taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds, startedKpIds = startedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum(), weightsScope),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())
 }

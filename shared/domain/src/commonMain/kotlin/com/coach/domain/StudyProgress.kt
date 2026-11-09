@@ -38,7 +38,7 @@ fun Projection.today(epochMillis: Long, kpId: String? = position.current): Today
     return TodayProgress(day, lastSeq, points, text,
         reviewsOn(day).keys.toList(),
         kpId, kpId?.let { mastery[it] },kpTitles,
-        currentOpened = kpId != null && (kpId == position.current || kpId in explainedKpIds || kpId in mastery))
+        currentOpened = kpId != null && kpId in startedKpIds)
 }
 
 fun TodayProgress.answer(intent: ProgressIntent): String = when (intent) {

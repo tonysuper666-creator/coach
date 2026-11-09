@@ -61,7 +61,7 @@ fun TodayScreen(
             }
             kps.forEachIndexed { index, kp ->
                 if (kp.module.isNotBlank() && kp.module != kps.getOrNull(index - 1)?.module) item(key = "m:${kp.module}") {
-                    Text(kp.module, Modifier.padding(top = 10.dp, bottom = 2.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text(com.coach.client.moduleDisplayName(kp.module).ifBlank { "未分章" }, Modifier.padding(top = 10.dp, bottom = 2.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 }
                 item(key = kp.id) { KpRowView(kp, kp.id == selectedKpId) { onOpen(kp.id, false) } }
             }

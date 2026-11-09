@@ -12,6 +12,26 @@ import kotlin.test.*
 
 class ReaderExplanationTest {
     private val pack = SourcePack(listOf(SourcePage("synthetic-slides", 4, "Synthetic pears grow in the orchard.")))
+    private fun payload(text: String, vararg anchors: String = arrayOf("S1")) = json(
+        "paragraphs" to JsonArray(listOf(json("text" to text, "anchors" to JsonArray(anchors.map(::JsonPrimitive)))))
+    ).toString()
+
+    @Test fun structuredOutputRequiresDeclaredCitationsAndPreservesTheWholeAnswerGate() {
+        val valid = payload("“Synthetic pears”是这里的例子。")
+        assertEquals("“Synthetic pears”是这里的例子。【S1】", checkedReaderPayload(valid, pack)!!.first)
+        assertEquals(4, checkedReaderPayload(valid, pack)!!.second.single().jsonObject.num("pdfPage"))
+        for (invalid in listOf(
+            payload("“合成梨”是这里的例子。"), // The observed paraphrase-in-quotes failure must still refuse.
+            payload("“synthetic pears”是这里的例子。"),
+            payload("不存在的来源。", "S9"), payload("未声明来源。", *emptyArray()),
+            payload("自行嵌入依据。【S1】"), payload("PDF page 99 says this."),
+            payload("有依据。\n\nWait, I should correct the formatting."),
+            "{\"paragraphs\":[{\"text\":\"有依据。\",\"anchors\":[\"S1\"]},{\"text\":\"漏引。\",\"anchors\":[]}]}",
+            "{\"paragraphs\":[{\"text\":\"有依据。\",\"anchors\":[\"S1\"]}],\"correction\":\"uncited\"}",
+            valid + "\nWait, I should correct the formatting.",
+            "有依据。【S1】\n\nWait, I should correct the formatting."
+        )) assertNull(checkedReaderPayload(invalid, pack), invalid)
+    }
     @Test fun citationsAndVerbatimQuotesMustAllBelongToVisiblePages() {
         val result = checkedReaderAnswer("“Synthetic pears”是这里的例子。【S1】", pack)!!
         assertEquals(4, result.second.single().jsonObject.num("pdfPage"))
@@ -39,7 +59,7 @@ class ReaderExplanationTest {
             val private = SourcePage("sealed", 1, "Synthetic confidential key", learnerVisible = false)
             assertTrue(h.reader.explain("d", "c", request, "Synthetic", listOf(private)).str("text").contains("无法确认"))
             assertEquals(0, h.stub.requests)
-            h.stub.stream(1, "“Synthetic pears”是课件中的例子。【S1】", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(1, payload("“Synthetic pears”是课件中的例子。"), StubTutor.terminal("complete"), StubTutor.DONE)
             val answer = h.reader.explain("d", "c", request, "Synthetic pears", pack.pages + private)
             assertTrue(answer.str("text").contains("Synthetic pears"))
             assertEquals(4, answer["sources"]!!.jsonArray.single().jsonObject.num("pdfPage"))
@@ -47,7 +67,7 @@ class ReaderExplanationTest {
             assertFalse(h.stub.requestBodies.single().contains("confidential"))
             h.stub.httpError(503)
             assertTrue(h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "example"), "Synthetic", pack.pages).str("text").contains("无法确认"))
-            h.stub.stream(1, "恢复后返回的解释。【S1】", StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(1, payload("恢复后返回的解释。"), StubTutor.terminal("complete"), StubTutor.DONE)
             assertTrue(h.reader.explain("d", "c", json("requestId" to "ac", "kind" to "example"), "Synthetic", pack.pages).str("text").contains("恢复后"))
             assertTrue(h.actor.execute { events("c") }.isEmpty(), "AI must not change quiz or mastery state")
         }

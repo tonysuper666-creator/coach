@@ -72,7 +72,7 @@ class ExamMaterials private constructor(
             select(documents.joinToString("\n\n"), sizes.papers)
         else {
             // The "\n\n" between documents is part of the cap, not on top of it.
-            val share = (sizes.papers - ExamBudget.SEPARATOR * (documents.size - 1)) / documents.size.coerceAtLeast(1)
+            val share = ((sizes.papers - ExamBudget.SEPARATOR * (documents.size - 1)) / documents.size.coerceAtLeast(1)).coerceAtLeast(0)
             documents.joinToString("\n\n") { select(it, share) }.take(sizes.papers)
         }
         val planningSelection = select(guidance, sizes.planning, overview)

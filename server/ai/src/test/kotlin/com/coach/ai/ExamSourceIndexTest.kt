@@ -32,9 +32,9 @@ class ExamSourceIndexTest {
         ExamMaterials.fromTexts(exams, guidance, rulings, sidecar)
 
     private fun inner(text: String, tag: String): String? {
-        val open = "<$tag>\n"
-        val start = text.indexOf(open).takeIf { it >= 0 } ?: return null
-        return text.substring(start + open.length, text.indexOf("\n</$tag>", start))
+        // Opening tag with optional attributes (e.g. id="…"); the self-closing unloaded tag has no body.
+        val open = Regex("<" + Regex.escape(tag) + "(?: [^>/]*)?>\n").find(text) ?: return null
+        return text.substring(open.range.last + 1, text.indexOf("\n</$tag>", open.range.last))
     }
 
     private class Body(val planning: String, val adjudications: String, val papers: String, val definition: String?, val overhead: Int) {
@@ -227,6 +227,22 @@ class ExamSourceIndexTest {
         }
         val tooLong = def(455, "L")
         assertEquals(DefinitionStatus.TOO_LONG, materials(rulings(tooLong), sidecar(entry("d", "rulings", tooLong, listOf("quokkaphase")))).contextWithStatus(course, english).status)
+    }
+
+    @Test fun manyPastPaperDocumentsNeverMakeTheSharedBudgetNegative() {
+        val many = List(100) { "Pelican $it drifts over quiet harbours while anchors rest below the pier." }
+        val m = ExamMaterials.fromTexts(many, guidance, rulings(null), null)
+        val parts = body(m.context(course, "Please teach discounting"))
+        assertTrue(parts.papers.length <= 160 && parts.sum <= 700, "papers ${parts.papers.length}")
+    }
+
+    @Test fun theUnloadedTagHasNoBodyForTheParser() {
+        val a = def(100, "AAA")
+        val b = def(100, "BBB")
+        val tied = materials(rulings(a, b), sidecar(entry("a", "rulings", a, listOf("quokkaphase")), entry("b", "rulings", b, listOf("quokkaphase"))))
+        val parts = body(tied.context(course, english))
+        assertNull(parts.definition)
+        assertEquals(ExamMaterials.UNLOADED_TAG.length, parts.overhead - body(materials(rulings(a, b), null).context(course, english)).overhead)
     }
 
     @Test fun withoutAnyDefinitionTheSectionsStayWithinTheOriginalCaps() {

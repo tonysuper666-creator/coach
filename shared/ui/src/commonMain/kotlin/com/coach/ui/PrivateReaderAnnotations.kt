@@ -36,7 +36,7 @@ private fun JsonObject.validAnchor(doc: PrivateDocument, page: Int, text: String
 /** Select against the server's exact text; PDF image coordinates are deliberately not inferred. */
 @OptIn(ExperimentalUuidApi::class)
 @Composable
-internal fun PrivateReaderAnnotations(reader: ReaderHttp, doc: PrivateDocument, page: Int, onClose: () -> Unit) {
+internal fun PrivateReaderAnnotations(reader: ReaderHttp, doc: PrivateDocument, page: Int, onShow: ((String) -> Unit)? = null, onClose: () -> Unit) {
     var reload by remember { mutableIntStateOf(0) }
     var loaded by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
@@ -71,7 +71,7 @@ internal fun PrivateReaderAnnotations(reader: ReaderHttp, doc: PrivateDocument, 
                     TextButton(onClick = { reload++ }) { Text("重试") }
                 } else if (!loaded) Text("正在读取原文和批注…")
                 else {
-                    Text("选择下方提取文字后添加批注。此处标记在文字中，PDF 页图尚不显示高亮。", style = MaterialTheme.typography.labelMedium)
+                    Text("选择下方提取文字后添加批注。可对已保存的批注点「在页上标出」，在页图上显示位置。", style = MaterialTheme.typography.labelMedium)
                     val annotated = AnnotatedString.Builder(text).apply {
                         notes.filter { it.validAnchor(doc, page, text, hash) }.forEach {
                             addStyle(SpanStyle(background = Color(0xffffec99)), it.l("start").toInt(), it.l("end").toInt())
@@ -100,6 +100,7 @@ internal fun PrivateReaderAnnotations(reader: ReaderHttp, doc: PrivateDocument, 
                             if (!valid) Text("原文或资料版本已变化，位置待重新确认（原 PDF 第 ${note.l("pdfPage")} 页）。", color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("private-note-stale"))
                             Text("我的原句：${note.s("quote")}")
                             if (note.s("note").isNotEmpty()) Text("我的批注：${note.s("note")}")
+                            if (valid && onShow != null) TextButton(onClick = { onShow(note.s("quote")) }, modifier = Modifier.testTag("private-note-show-${note.s("id")}")) { Text("在页上标出") }
                             if (valid) TextButton(onClick = { editing = note }, modifier = Modifier.testTag("private-note-edit-${note.s("id")}")) { Text("编辑批注") }
                         }
                     }

@@ -23,6 +23,9 @@ class ReaderHttp internal constructor(
     suspend fun image(document: String, pdfPage: Int, version: String? = null): ByteArray? = bytes(
         "${document.encodeURLPathPart()}/pages/$pdfPage/image" + (version?.let { "?version=${it.encodeURLParameter()}" } ?: "")
     )
+    /** Word boxes in PDF points for the displayed page; the version check keeps an old document from being highlighted. */
+    suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply =
+        request("${document.encodeURLPathPart()}/pages/$pdfPage/boxes?version=${version.encodeURLParameter()}", null)
     /** Facts and questions whose registered source is this page; sources that cannot be placed are only counted. */
     suspend fun study(document: String, pdfPage: Int): ReaderReply = request("${document.encodeURLPathPart()}/pages/$pdfPage/study", null)
     /** Registered chapter → section → point → question tree; unplaceable items are only counted. */

@@ -14,8 +14,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.roundToLong
 
-internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String)
-internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String) {
+internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String, val anchor: String = "")
+internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String, val anchor: String = "") {
     val verified get() = unit.keyState == "VERIFIED"
     val options get() = unit.options.mapIndexed { i, t -> Option("o$i", t) }
     val fingerprint get() = questionFingerprint(unit.stem, options)
@@ -116,13 +116,13 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             val item = items.first { it.str("id") == unit.itemId }
             require(unit.type == "mcq") { "${unit.itemId} 不是选择题" }
             require(item.str("tier") in tiers) { "${unit.itemId} tier 只能是 setup、detail 或 bridge" }
-            MainlineItem(unit, item.str("tier"), item.strings("fact_ids"), item.str("source"))
+            MainlineItem(unit, item.str("tier"), item.strings("fact_ids"), item.str("source"), item.str("anchor"))
         }.sortedBy { tiers.indexOf(it.tier) }
         val facts = if (!Files.isRegularFile(factsFile)) emptyList() else {
             val block = Regex("```jsonl\\s*\\n(.*?)```", RegexOption.DOT_MATCHES_ALL).find(Files.readString(factsFile))?.groupValues?.get(1).orEmpty()
             block.lines().filter { it.isNotBlank() }.map { line ->
                 val f = LedgerJson.parseToJsonElement(line).jsonObject
-                MainlineFact(f.str("fact_id"), f.str("fact"), f.str("type"), f.str("source"), f.str("kp"))
+                MainlineFact(f.str("fact_id"), f.str("fact"), f.str("type"), f.str("source"), f.str("kp"), f.str("anchor"))
             }
         }
         return MainlineWeek(week, (raw["sections"] as JsonArray).first().jsonObject.str("title").ifBlank { "Week $week" }, built, facts)
@@ -154,13 +154,13 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             for (item in w.items) {
                 if (item.source.isBlank() || refs(item.source).none { locate(it) != null }) unlocated++
                 else if (onPage(item.source)) questions += json("week" to w.week, "id" to item.unit.itemId, "tier" to item.tier,
-                    "stem" to item.unit.stem.take(160), "status" to history.status(item))
+                    "stem" to item.unit.stem.take(160), "status" to history.status(item), "anchor" to item.anchor.take(300))
             }
             for (f in w.facts) {
                 if (f.source.isBlank() || refs(f.source).none { locate(it) != null }) unlocated++
                 else if (onPage(f.source)) {
                     val linked = w.items.filter { f.id in it.factIds }
-                    facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp,
+                    facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp, "anchor" to f.anchor.take(300),
                         "questions" to linked.size, "mastered" to (linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }))
                 }
             }
@@ -210,14 +210,14 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             for (item in w.items) {
                 val page = place(item.source) ?: continue
                 val b = bucket(page) ?: run { outside++; null } ?: continue
-                b.questions += json("week" to w.week, "id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem.take(160),
+                b.questions += json("week" to w.week, "id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem.take(160), "anchor" to item.anchor.take(300),
                     "status" to history.status(item), "pdfPage" to page)
             }
             for (f in w.facts) {
                 val page = place(f.source) ?: continue
                 val b = bucket(page) ?: run { outside++; null } ?: continue
                 val linked = w.items.filter { f.id in it.factIds }
-                b.facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp, "pdfPage" to page,
+                b.facts += json("week" to w.week, "id" to f.id, "text" to f.text.take(200), "type" to f.type, "kp" to f.kp, "anchor" to f.anchor.take(300), "pdfPage" to page,
                     "questions" to linked.size, "mastered" to (linked.isNotEmpty() && linked.all { history.status(it) == "mastered" }))
             }
         }

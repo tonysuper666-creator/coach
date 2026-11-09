@@ -34,6 +34,10 @@ class PrivateReaderScreenTest {
         @Volatile var study: String? = null
         /** null → the map route fails; otherwise the exact body. */
         @Volatile var map: String? = null
+        /** Word boxes (PDF points) for any page; null → the boxes route fails with 503. */
+        @Volatile var boxWords: String? = null
+        @Volatile var boxWidth = 300.0
+        @Volatile var boxHeight = 400.0
         val auth = CopyOnWriteArrayList<String>()
         private val png = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(30, 40, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
@@ -79,6 +83,12 @@ class PrivateReaderScreenTest {
                             revision++
                             """{"revision":$revision}""".toByteArray()
                         }
+                    }
+                    path.endsWith("/boxes") -> {
+                        val asked = ex.requestURI.rawQuery.orEmpty().substringAfter("version=", "")
+                        if (asked != version) { status = 409; "{}".toByteArray() }
+                        else boxWords?.let { """{"version":"$version","pdfPage":${path.substringBeforeLast('/').substringAfterLast('/')},"width":$boxWidth,"height":$boxHeight,"words":$it}""".toByteArray() }
+                            ?: run { status = 503; "{}".toByteArray() }
                     }
                     path.endsWith("/map") -> map?.toByteArray() ?: run { status = 503; "{}".toByteArray() }
                     path.endsWith("/study") -> study?.toByteArray() ?: run { status = 503; "{}".toByteArray() }
@@ -368,5 +378,119 @@ class PrivateReaderScreenTest {
                 onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
             }
         }
+    }
+
+    private fun w(x0: Int, y0: Int, x1: Int, y1: Int, t: String) = """{"x0":$x0,"y0":$y0,"x1":$x1,"y1":$y1,"text":"$t"}"""
+    private fun anchorStudy(anchor: String) =
+        """{"facts":[{"id":"f1","week":1,"text":"Point","mastered":false,"anchor":"$anchor"}],"questions":[{"id":"q1","week":1,"tier":"setup","stem":"Stem","status":"new","anchor":""}],"unlocated":0}"""
+
+    private fun ComposeUiTest.openReader(fake: FakeReader, width: Int) {
+        setContent { CoachTheme(false) { Surface { Box(Modifier.size(width.dp, 900.dp)) { PrivateReaderScreen(fake.http.reader) {} } } } }
+        waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithTag("private-book-synthetic").performClick()
+        waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun sourceAnchorHighlightScalesWithThePageForTwoCourses() {
+        // Two invented pages in different frames: 300x400 and 600x800 points; the same on-page share must be marked at every rendered width.
+        for ((course, pageW, pageH) in listOf(Triple("C", 300.0, 400.0), Triple("OTHER", 600.0, 800.0))) FakeReader(course = course).use { fake ->
+            fake.study = anchorStudy("Alpha beta")
+            fake.boxWidth = pageW; fake.boxHeight = pageH
+            val k = pageW / 300.0
+            fake.boxWords = "[" + listOf(w((30 * k).toInt(), (40 * k).toInt(), (80 * k).toInt(), (55 * k).toInt(), "Alpha"), w((85 * k).toInt(), (40 * k).toInt(), (120 * k).toInt(), (55 * k).toInt(), "beta"),
+                w((30 * k).toInt(), (200 * k).toInt(), (60 * k).toInt(), (215 * k).toInt(), "gamma")).joinToString(",") + "]"
+            val ratios = mutableListOf<Double>()
+            for (width in listOf(412, 700)) runComposeUiTest {
+                openReader(fake, width)
+                onNodeWithTag("private-study-toggle").performClick()
+                onNodeWithTag("private-study-anchor-fact-f1").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+                val image = onNodeWithTag("private-page-2").getUnclippedBoundsInRoot(); val mark = onNodeWithTag("private-highlight-0").getUnclippedBoundsInRoot()
+                val shareW = ((mark.right - mark.left).value / (image.right - image.left).value).toDouble(); ratios += shareW
+                assertEquals((120 - 30) / 300.0, shareW, 0.01, "marked share of the page width is (120-30)/300 at width $width")
+                assertEquals(40 / 400.0, ((mark.top - image.top).value / (image.bottom - image.top).value).toDouble(), 0.01, "top edge at 40/400 of the page height")
+                onNodeWithTag("private-study-noanchor-question-q1").assertExists()
+            }
+            assertEquals(ratios[0], ratios[1], 0.01, "highlight follows the page when it is drawn wider")
+        }
+    }
+
+    @Test fun anchorMismatchesNeverInventAPosition() = FakeReader().use { fake ->
+        val cases = listOf(
+            Triple("Alpha beta", "[" + w(30, 40, 80, 55, "Alpha") + "," + w(85, 40, 120, 55, "beta") + "," + w(30, 200, 80, 215, "Alpha") + "," + w(85, 200, 120, 215, "beta") + "]", "出现多处"),
+            Triple("Missing words", "[" + w(30, 40, 80, 55, "Alpha") + "]", "找不到这句话"),
+            Triple("Alpha", "[]", "没有文字层"),
+            Triple("Alpha", "[" + w(30, 40, 500, 55, "Alpha") + "]", "不可用"))
+        for ((anchor, words, message) in cases) {
+            fake.study = anchorStudy(anchor); fake.boxWords = words
+            runComposeUiTest {
+                openReader(fake, 412)
+                onNodeWithTag("private-study-toggle").performClick()
+                onNodeWithTag("private-study-anchor-fact-f1").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-status").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-highlight-status").assertTextContains(message, substring = true)
+                onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            }
+        }
+        // A failing coordinate service can be retried and then marks the page.
+        fake.study = anchorStudy("Alpha"); fake.boxWords = null
+        runComposeUiTest {
+            openReader(fake, 412)
+            onNodeWithTag("private-study-toggle").performClick()
+            onNodeWithTag("private-study-anchor-fact-f1").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-retry").fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            fake.boxWords = "[" + w(30, 40, 80, 55, "Alpha") + "]"
+            onNodeWithTag("private-highlight-retry").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+        }
+    }
+
+    @Test fun savedNoteMarksItsQuoteAfterReopenAndStaleVersionIsNotMarked() = FakeReader().use { fake ->
+        fake.boxWords = "[" + w(30, 40, 90, 55, "Synthetic") + "," + w(95, 40, 125, 55, "page") + "]"
+        fake.notes += buildJsonObject {
+            put("id", "n1"); put("version", "v1"); put("pdfPage", 2); put("textSha256", "hash-v1"); put("start", 0); put("end", 9)
+            put("quote", "Synthetic"); put("note", "mine"); put("revision", 1); put("stale", false)
+        }
+        repeat(2) { // second pass is a fresh composition: reopening restores the marking from the saved note
+            runComposeUiTest {
+                openReader(fake, 412)
+                onNodeWithTag("private-open-notes").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-show-n1").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-note-show-n1").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
+                onNodeWithTag("private-highlight-clear").performClick()
+                onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+            }
+        }
+        fake.version = "v2"
+        runComposeUiTest {
+            openReader(fake, 412)
+            onNodeWithTag("private-open-notes").performClick()
+            waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-stale").fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-note-show-n1").assertCountEquals(0)
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+        }
+    }
+
+    @Test fun boxParsingAndQuoteLocationAreStrict() {
+        fun boxes(vararg words: WordBox) = PageBoxes(300.0, 400.0, words.toList())
+        fun b(x0: Double, y0: Double, x1: Double, y1: Double, t: String) = WordBox(x0, y0, x1, y1, t)
+        val twoLines = boxes(b(10.0, 10.0, 40.0, 20.0, "one"), b(45.0, 10.0, 80.0, 20.0, "two"), b(10.0, 30.0, 50.0, 40.0, "three"), b(60.0, 30.0, 90.0, 40.0, "four"))
+        val found = assertIs<Located.Found>(locateQuote(twoLines, "two three"))
+        assertEquals(2, found.rects.size, "a quote across a line break is one rectangle per line")
+        assertEquals(45.0, found.rects[0].x0); assertEquals(50.0, found.rects[1].x1)
+        assertEquals(Located.NotFound, locateQuote(twoLines, "two four")) // not consecutive
+        assertEquals(Located.NotFound, locateQuote(twoLines, "   "))
+        assertEquals(Located.NoTextLayer, locateQuote(boxes(), "one"))
+        assertEquals(Located.Ambiguous, locateQuote(boxes(b(1.0, 1.0, 5.0, 5.0, "x"), b(1.0, 9.0, 5.0, 12.0, "x")), "x"))
+        val good = Json.parseToJsonElement("""{"version":"v","pdfPage":3,"width":300,"height":400,"words":[${w(1, 1, 5, 5, "a")}]}""").jsonObject
+        assertNotNull(pageBoxes(good, "v", 3))
+        assertNull(pageBoxes(good, "other", 3), "another document version is never drawn")
+        assertNull(pageBoxes(good, "v", 4), "another page is never drawn")
+        assertNull(pageBoxes(Json.parseToJsonElement("""{"version":"v","pdfPage":3,"width":300,"height":400,"words":[${w(1, 1, 500, 5, "a")}]}""").jsonObject, "v", 3), "out of the page frame")
+        assertNull(pageBoxes(Json.parseToJsonElement("""{"version":"v","pdfPage":3,"width":0,"height":400,"words":[]}""").jsonObject, "v", 3))
     }
 }

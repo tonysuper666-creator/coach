@@ -116,7 +116,10 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             var busy by remember(doc, loaded.value) { mutableStateOf(false) }
             val scope = rememberCoroutineScope()
             var showNotes by remember(doc) { mutableStateOf(false) }
-            if (showNotes) PrivateReaderAnnotations(reader, doc, page) { showNotes = false }
+            var focus by remember(doc) { mutableStateOf<HighlightFocus?>(null) }
+            var focusRetry by remember(doc) { mutableIntStateOf(0) }
+            val highlight by rememberHighlight(reader, doc, focus, focusRetry)
+            if (showNotes) PrivateReaderAnnotations(reader, doc, page, onShow = { quote -> focus = HighlightFocus(page, quote); showNotes = false }) { showNotes = false }
             var showMap by remember(doc) { mutableStateOf(false) }
             fun send(write: ProgressWrite) {
                 pending = write
@@ -134,6 +137,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                 }
             }
             fun move(target: Int) {
+                focus = null
                 page = target
                 send(ProgressWrite(target, revision, Uuid.random().toString()))
             }
@@ -155,7 +159,8 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     if (initialPage != null) Text("已按出处定位到页；页面内容仍需核对。", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelMedium)
                     Text("PDF 第 $page${if (two) "–${page + 1}" else ""} 页 / ${doc.pages}", Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("private-page-label"), style = MaterialTheme.typography.labelMedium)
                     if (status.isNotEmpty()) Text(status, Modifier.padding(horizontal = 16.dp).testTag("private-save-status"))
-                    PageStudyPanel(reader, doc.id, page, practice)
+                    PageStudyPanel(reader, doc.id, page, practice, onShowAnchor = { quote -> focus = HighlightFocus(page, quote) })
+                    HighlightStatus(highlight, onRetry = { focusRetry++ }, onClear = { focus = null })
                     val draft = pending
                     if (draft != null && !busy) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -201,8 +206,8 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     TextButton(onClick = { showNotes = true }, enabled = !busy && pending == null, modifier = Modifier.testTag("private-open-notes")) { Text("本页原文与批注") }
                     if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
                     Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight())
-                        if (two) PdfPageImage(reader, doc, page + 1, Modifier.weight(1f).fillMaxHeight())
+                        PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page })
+                        if (two) PdfPageImage(reader, doc, page + 1, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page + 1 })
                     }
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -250,7 +255,7 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String) {
 private data class ProgressWrite(val page: Int, val baseRevision: Long, val id: String)
 
 @Composable
-private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, modifier: Modifier) {
+private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, modifier: Modifier, highlight: HighlightState.Shown? = null) {
     var retry by remember(doc, page) { mutableIntStateOf(0) }
     val image by produceState<ReaderLoad<ImageBitmap>>(ReaderLoad.Loading, reader, doc, page, retry) {
         value = ReaderLoad.Loading
@@ -266,7 +271,10 @@ private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, mo
                 TextButton(onClick = { retry++ }) { Text("重试") }
             }
             is ReaderLoad.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                Image(result.value, contentDescription = "PDF 第 $page 页", modifier = Modifier.fillMaxWidth().testTag("private-page-$page"), contentScale = ContentScale.FillWidth)
+                Box(Modifier.fillMaxWidth()) {
+                    Image(result.value, contentDescription = "PDF 第 $page 页", modifier = Modifier.fillMaxWidth().testTag("private-page-$page"), contentScale = ContentScale.FillWidth)
+                    if (highlight != null) HighlightOverlay(highlight, result.value.width, result.value.height, Modifier.matchParentSize())
+                }
             }
         }
     }

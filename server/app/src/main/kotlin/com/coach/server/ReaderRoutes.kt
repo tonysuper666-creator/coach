@@ -124,6 +124,12 @@ fun Application.readerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Strin
                 if (version != null && version != d.version) conflictReader("资料版本已改变，请重新定位")
                 call.respondBytes(library.image(d, call.page()), ContentType.Image.PNG)
             } }
+            get("/{document}/pages/{page}/boxes") { call.answer { course, _ ->
+                val d = library.document(course, call.parameters["document"]!!)
+                val version = call.request.queryParameters["version"]
+                if (version != null && version != d.version) conflictReader("资料版本已改变，请重新定位")
+                call.json(library.boxes(d, call.page()))
+            } }
             get("/{document}/pages/{page}/study") { call.answer { course, _ ->
                 val d = library.document(course, call.parameters["document"]!!)
                 val page = call.page().also { if (it !in 1..d.pages) throw ReaderFailure(HttpStatusCode.NotFound, "PDF 页码超出文档") }

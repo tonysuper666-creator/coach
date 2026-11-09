@@ -110,8 +110,33 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
 
     internal suspend fun image(d: ReaderDocument, page: Int): ByteArray = cached(d, page, true)
 
+    /**
+     * Word boxes from Poppler `-bbox`, in PDF points with the origin at the top-left of the page **as displayed** (Poppler applies /Rotate,
+     * so width and height are already swapped for a quarter turn and the page image rendered by pdftoppm shares the same frame). Clients scale by
+     * (rendered width / width, rendered height / height). A page without a text layer yields no words, never made-up ones.
+     */
+    internal suspend fun boxes(d: ReaderDocument, page: Int): JsonObject {
+        return parseBoxes(d, page, cached(d, page, false, true).toString(Charsets.UTF_8))
+    }
+
+    internal fun parseBoxes(d: ReaderDocument, page: Int, html: String): JsonObject {
+        val head = Regex("<page\\s+width=\"([0-9.]+)\"\\s+height=\"([0-9.]+)\"").find(html)
+            ?: throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "无法读取这一页的文字坐标")
+        val width = head.groupValues[1].toDouble(); val height = head.groupValues[2].toDouble()
+        if (!(width > 0 && height > 0)) throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "页面尺寸无效")
+        val word = Regex("<word\\s+xMin=\"([0-9.\\-]+)\"\\s+yMin=\"([0-9.\\-]+)\"\\s+xMax=\"([0-9.\\-]+)\"\\s+yMax=\"([0-9.\\-]+)\">([^<]*)</word>")
+        fun unescape(t: String) = t.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+        val words = word.findAll(html).take(20_000).mapNotNull { m ->
+            val v = m.groupValues.subList(1, 5).map { it.toDouble() }
+            if (v[0] < 0 || v[1] < 0 || v[2] > width + 0.5 || v[3] > height + 0.5 || v[2] <= v[0] || v[3] <= v[1]) null
+            else json("x0" to v[0], "y0" to v[1], "x1" to v[2], "y1" to v[3], "text" to unescape(m.groupValues[5]))
+        }.toList()
+        return json("documentId" to d.id, "version" to d.version, "pdfPage" to page, "width" to width, "height" to height,
+            "words" to JsonArray(words), "textLayer" to words.isNotEmpty())
+    }
+
     // One renderer at a time, off the ledger actor and event loops. Disk cache is version-addressed.
-    private suspend fun cached(d: ReaderDocument, page: Int, image: Boolean): ByteArray = withContext(Dispatchers.IO) {
+    private suspend fun cached(d: ReaderDocument, page: Int, image: Boolean, bbox: Boolean = false): ByteArray = withContext(Dispatchers.IO) {
         if (page !in 1..d.pages) throw ReaderFailure(io.ktor.http.HttpStatusCode.NotFound, "PDF 页码超出文档")
         lock.withLock {
             val realRoot = root!!.toRealPath()
@@ -130,12 +155,13 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
             }
             val cache = Files.createDirectories(realRoot.resolve("cache").resolve(d.version))
             require(cache.toRealPath().startsWith(realRoot)) { "Reader cache outside library" }
-            val target = cache.resolve("$page" + if (image) "-1600.png" else ".txt")
+            val target = cache.resolve(if (bbox) "$page-bbox.html" else "$page" + if (image) "-1600.png" else ".txt")
             if (!Files.exists(target)) {
                 val temp = Files.createTempDirectory(cache, "render-")
                 try {
-                    val out = temp.resolve(if (image) "page" else "page.txt")
-                    val command = if (image) listOf(executable("pdftoppm"), "-f", "$page", "-l", "$page", "-singlefile", "-scale-to", "1600", "-png", d.file.toString(), out.toString())
+                    val out = temp.resolve(if (image) "page" else if (bbox) "page.html" else "page.txt")
+                    val command = if (bbox) listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-bbox", "-enc", "UTF-8", d.file.toString(), out.toString())
+                        else if (image) listOf(executable("pdftoppm"), "-f", "$page", "-l", "$page", "-singlefile", "-scale-to", "1600", "-png", d.file.toString(), out.toString())
                         else listOf(executable("pdftotext"), "-f", "$page", "-l", "$page", "-layout", "-enc", "UTF-8", d.file.toString(), out.toString())
                     val process = try { ProcessBuilder(command).redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start() }
                         catch (_: Exception) { throw ReaderFailure(io.ktor.http.HttpStatusCode.ServiceUnavailable, "Mac 缺少本地 PDF 渲染工具") }

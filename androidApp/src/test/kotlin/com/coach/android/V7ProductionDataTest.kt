@@ -195,7 +195,7 @@ class V7ProductionDataTest {
         compose.setContent { Box(Modifier.requiredSize(624.dp, 986.dp)) { CoachApp(controller, dark = false, initialTab = AppTab.REVIEW) } }
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("open-mainline").fetchSemanticsNodes().isNotEmpty() }
         // PR117 made the card a container with separate continue/read/week-picker controls.
-        compose.onNodeWithText("选其他周").performScrollTo().performClick()
+        compose.onNodeWithText("选其他周").assertIsDisplayed().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("mainline-week-8").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-skip").fetchSemanticsNodes().isNotEmpty() }

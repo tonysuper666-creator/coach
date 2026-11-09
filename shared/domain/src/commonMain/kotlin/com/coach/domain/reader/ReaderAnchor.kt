@@ -32,7 +32,7 @@ val ReaderAnchorJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
     }
 }
 
-/** Offsets into the unit's ORIGINAL plain text: UTF-16 code units, start inclusive/end exclusive. */
+/** Offsets into THIS version's index unit text, never a native extractor's string: UTF-16, half-open. */
 @Serializable data class ReaderTextRange(val startUtf16: Int, val endUtf16: Int) {
     init { require(startUtf16 >= 0 && endUtf16 > startUtf16) }
 }
@@ -104,14 +104,15 @@ val ReaderAnchorJson = Json { encodeDefaults = true; ignoreUnknownKeys = true }
 
 @Serializable enum class AnchorStatus { RESOLVED, STALE, UNRESOLVED }
 @Serializable enum class AnchorReason {
-    UNIQUE_EXACT, UNIQUE_EXACT_CONTEXT, DOCUMENT_MISMATCH, FORMAT_MISMATCH,
+    SAME_VERSION_RANGE, CAPTURE_MISMATCH, UNIQUE_EXACT, UNIQUE_EXACT_CONTEXT, DOCUMENT_MISMATCH, FORMAT_MISMATCH,
     INCOMPLETE_INDEX, NO_TEXT_LAYER, MISSING_QUOTE, QUOTE_NOT_FOUND, CONTEXT_CHANGED, AMBIGUOUS
 }
+@Serializable enum class AnchorSearchScope { NONE, CAPTURE_RANGE, CAPTURE_RESOURCE, DOCUMENT }
 /** Confidence is a reproducible proof category, not an invented probability. */
 @Serializable data class AnchorEvidence(
     val exactCandidates: Int = 0, val contextCandidates: Int = 0,
     val searchedUnits: Int = 0, val searchComplete: Boolean = false,
-    val normalization: String = "reader-whitespace-v1"
+    val normalization: String = "reader-whitespace-v1", val searchScope: AnchorSearchScope = AnchorSearchScope.NONE
 )
 @Serializable data class ReaderAnchorTarget(
     val version: DocumentVersion, val resource: ReaderResource, val range: ReaderTextRange,

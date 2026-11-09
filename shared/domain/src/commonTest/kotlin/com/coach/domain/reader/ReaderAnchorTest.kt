@@ -31,18 +31,19 @@ class ReaderAnchorTest {
         assertEquals(currentBoxes, ReaderAnchorResolver.resolve(anchor, index).target?.geometry)
     }
 
-    @Test fun contextCanDisambiguateButOldPageCannotBreakATie() {
+    @Test fun contextCanDisambiguateButOldPageCannotBreakAMigrationTie() {
         val other = "Elsewhere. The moon is round. Finish."
         val resolved = ReaderAnchorResolver.resolve(anchor, pdf(v2, other, original))
         assertEquals(2, resolved.evidence.exactCandidates)
         assertEquals(1, resolved.evidence.contextCandidates)
         assertEquals(1, resolved.target?.resource?.pdfPageIndex0)
-        for (version in listOf(v1, v2)) {
-            val result = ReaderAnchorResolver.resolve(anchor, pdf(version, original, original))
-            assertEquals(AnchorReason.AMBIGUOUS, result.reason)
-            assertEquals(if (version == v1) AnchorStatus.UNRESOLVED else AnchorStatus.STALE, result.status)
-            assertNull(result.target)
-        }
+        val result = ReaderAnchorResolver.resolve(anchor, pdf(v2, original, original))
+        assertEquals(AnchorReason.AMBIGUOUS, result.reason)
+        assertEquals(AnchorStatus.STALE, result.status)
+        assertNull(result.target)
+        val sameFile = ReaderAnchorResolver.resolve(anchor, pdf(v1, original, original))
+        assertEquals(AnchorReason.SAME_VERSION_RANGE, sameFile.reason)
+        assertEquals(page, sameFile.target?.resource)
         val noContext = anchor.copy(quote = TextQuoteSelector("The moon is round."))
         assertEquals(AnchorReason.AMBIGUOUS, ReaderAnchorResolver.resolve(noContext, pdf(v2, other, original)).reason)
     }

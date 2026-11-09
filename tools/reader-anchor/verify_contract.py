@@ -24,9 +24,22 @@ def verify(path):
         raw = unit["text"].encode("utf-16-le")
         selected = raw[bounds["startUtf16"] * 2:bounds["endUtf16"] * 2].decode("utf-16-le")
         assert selected == case["anchor"]["quote"]["exact"], case["name"]
+        if case["anchor"]["version"] == case["index"]["version"]:
+            assert target["resource"] == case["anchor"]["resource"], case["name"]
+            if case["anchor"]["originalRange"] is not None:
+                assert bounds == case["anchor"]["originalRange"], case["name"]
+                assert result["reason"] == "SAME_VERSION_RANGE"
+                assert result["evidence"]["searchScope"] == "CAPTURE_RANGE"
+                assert not result["evidence"]["searchComplete"]  # no full-document claim
+        if case.get("capture"):
+            before = raw[:bounds["startUtf16"] * 2].decode("utf-16-le")
+            after = raw[bounds["endUtf16"] * 2:].decode("utf-16-le")
+            assert before.endswith(case["anchor"]["quote"]["prefix"])
+            assert after.startswith(case["anchor"]["quote"]["suffix"])
         if target["locator"] is not None:
             assert target["locator"]["href"] == target["resource"]["href"]
-            assert not target["locator"]["locations"]["fragments"]
+            if case["anchor"]["version"] != target["version"]:
+                assert not target["locator"]["locations"]["fragments"]
         checked += 1
     labels = payload["pageLabels"]
     assert all(0 <= p["pdfPageIndex0"] < labels["pdfPageCount"] for p in labels["entries"])

@@ -12,6 +12,9 @@ class ReaderAnchorContractTest {
             val case = item.jsonObject
             val anchor = ReaderAnchorJson.decodeFromJsonElement<ReaderAnchor>(case.getValue("anchor"))
             val index = ReaderAnchorJson.decodeFromJsonElement<ReaderDocumentIndex>(case.getValue("index"))
+            if (case["capture"]?.jsonPrimitive?.boolean == true) {
+                assertEquals(anchor, ReaderAnchorResolver.capture(index, anchor.resource, requireNotNull(anchor.originalRange), anchor.id))
+            }
             val resolution = ReaderAnchorResolver.resolve(anchor, index)
             assertEquals(case.getValue("expected"), ReaderAnchorJson.encodeToJsonElement(resolution), case.getValue("name").toString())
             assertEquals(case.getValue("anchor"), ReaderAnchorJson.encodeToJsonElement(anchor))

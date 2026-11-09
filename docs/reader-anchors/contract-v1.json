@@ -84,7 +84,8 @@
           "contextCandidates": 1,
           "searchedUnits": 3,
           "searchComplete": true,
-          "normalization": "reader-whitespace-v1"
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "DOCUMENT"
         },
         "target": {
           "version": {
@@ -179,7 +180,8 @@
           "contextCandidates": 2,
           "searchedUnits": 2,
           "searchComplete": true,
-          "normalization": "reader-whitespace-v1"
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "DOCUMENT"
         },
         "target": null
       }
@@ -250,7 +252,8 @@
           "contextCandidates": 0,
           "searchedUnits": 1,
           "searchComplete": true,
-          "normalization": "reader-whitespace-v1"
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "DOCUMENT"
         },
         "target": null
       }
@@ -321,7 +324,8 @@
           "contextCandidates": 0,
           "searchedUnits": 0,
           "searchComplete": false,
-          "normalization": "reader-whitespace-v1"
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "NONE"
         },
         "target": null
       }
@@ -405,7 +409,8 @@
           "contextCandidates": 1,
           "searchedUnits": 1,
           "searchComplete": true,
-          "normalization": "reader-whitespace-v1"
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "DOCUMENT"
         },
         "target": {
           "version": {
@@ -438,6 +443,631 @@
             }
           }
         }
+      }
+    },
+    {
+      "name": "p1-native-prefix-mismatch",
+      "anchor": {
+        "id": "p1-native-prefix-mismatch",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "Defined. ",
+          "suffix": "",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 10,
+          "endUtf16": 22
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Defiﬁned. Water boils. End.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Defined. Water boils. Other.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p1-native-prefix-mismatch",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "UNRESOLVED",
+        "reason": "CAPTURE_MISMATCH",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 0,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": null
+      }
+    },
+    {
+      "name": "p1-index-capture",
+      "anchor": {
+        "id": "p1-index-capture",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "Defiﬁned. ",
+          "suffix": " End.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 10,
+          "endUtf16": 22
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Defiﬁned. Water boils. End.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Defined. Water boils. Other.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p1-index-capture",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "RESOLVED",
+        "reason": "SAME_VERSION_RANGE",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 1,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "PDF"
+          },
+          "resource": {
+            "pdfPageIndex0": 0,
+            "href": null
+          },
+          "range": {
+            "startUtf16": 10,
+            "endUtf16": 22
+          },
+          "geometry": null,
+          "locator": null
+        }
+      },
+      "capture": true
+    },
+    {
+      "name": "p2-scanned-cover",
+      "anchor": {
+        "id": "p2-scanned-cover",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 1,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "",
+          "suffix": " End.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 0,
+          "endUtf16": 12
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": null,
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Water boils. End.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p2-scanned-cover",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "RESOLVED",
+        "reason": "SAME_VERSION_RANGE",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 1,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "PDF"
+          },
+          "resource": {
+            "pdfPageIndex0": 1,
+            "href": null
+          },
+          "range": {
+            "startUtf16": 0,
+            "endUtf16": 12
+          },
+          "geometry": null,
+          "locator": null
+        }
+      },
+      "capture": true
+    },
+    {
+      "name": "p3-repeated-sentence",
+      "anchor": {
+        "id": "p3-repeated-sentence",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 1,
+          "href": null
+        },
+        "quote": {
+          "exact": "如图所示。",
+          "prefix": "",
+          "suffix": "",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 0,
+          "endUtf16": 5
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "如图所示。",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "如图所示。",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p3-repeated-sentence",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "RESOLVED",
+        "reason": "SAME_VERSION_RANGE",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 1,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "PDF"
+          },
+          "resource": {
+            "pdfPageIndex0": 1,
+            "href": null
+          },
+          "range": {
+            "startUtf16": 0,
+            "endUtf16": 5
+          },
+          "geometry": null,
+          "locator": null
+        }
+      },
+      "capture": true
+    },
+    {
+      "name": "p4-cross-page-prefix",
+      "anchor": {
+        "id": "p4-cross-page-prefix",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 1,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "end of page. ",
+          "suffix": "",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 0,
+          "endUtf16": 12
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Text at end of page.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Water boils. More.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p4-cross-page-prefix",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "UNRESOLVED",
+        "reason": "CAPTURE_MISMATCH",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 0,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": null
+      }
+    },
+    {
+      "name": "p4-local-capture",
+      "anchor": {
+        "id": "p4-local-capture",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 1,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "",
+          "suffix": " More.",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": {
+          "startUtf16": 0,
+          "endUtf16": 12
+        },
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Text at end of page.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Water boils. More.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "p4-local-capture",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "RESOLVED",
+        "reason": "SAME_VERSION_RANGE",
+        "evidence": {
+          "exactCandidates": 1,
+          "contextCandidates": 1,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RANGE"
+        },
+        "target": {
+          "version": {
+            "documentId": "synthetic-book",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "format": "PDF"
+          },
+          "resource": {
+            "pdfPageIndex0": 1,
+            "href": null
+          },
+          "range": {
+            "startUtf16": 0,
+            "endUtf16": 12
+          },
+          "geometry": null,
+          "locator": null
+        }
+      },
+      "capture": true
+    },
+    {
+      "name": "same-file-legacy-wrong-resource",
+      "anchor": {
+        "id": "same-file-legacy-wrong-resource",
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "resource": {
+          "pdfPageIndex0": 0,
+          "href": null
+        },
+        "quote": {
+          "exact": "Water boils.",
+          "prefix": "",
+          "suffix": "",
+          "type": "TextQuoteSelector"
+        },
+        "originalRange": null,
+        "geometry": null,
+        "locator": null,
+        "schemaVersion": 1
+      },
+      "index": {
+        "version": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "units": [
+          {
+            "resource": {
+              "pdfPageIndex0": 0,
+              "href": null
+            },
+            "text": "Other sentence.",
+            "spans": []
+          },
+          {
+            "resource": {
+              "pdfPageIndex0": 1,
+              "href": null
+            },
+            "text": "Water boils.",
+            "spans": []
+          }
+        ],
+        "complete": true,
+        "pdfPageCount": 2,
+        "pageLabels": null
+      },
+      "expected": {
+        "anchorId": "same-file-legacy-wrong-resource",
+        "capturedVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "targetVersion": {
+          "documentId": "synthetic-book",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "format": "PDF"
+        },
+        "status": "UNRESOLVED",
+        "reason": "CAPTURE_MISMATCH",
+        "evidence": {
+          "exactCandidates": 0,
+          "contextCandidates": 0,
+          "searchedUnits": 1,
+          "searchComplete": false,
+          "normalization": "reader-whitespace-v1",
+          "searchScope": "CAPTURE_RESOURCE"
+        },
+        "target": null
       }
     }
   ],

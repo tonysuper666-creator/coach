@@ -7,3 +7,26 @@
 ATS 例外在构建时以 `COACH_ATS_HOST` 设置单个主机，默认是仅用于占位的 `127.0.0.1`，实际目标须用本机私有构建配置注入；例外不包含子域，不设置全局允许。输入的服务地址仍由连接库限制为 Tailscale 地址。此配置对数值地址的实际 HTTP/WS 行为尚未验证，不能据此声称已能访问目标。不要将私有地址、配对码或令牌提交到仓库。
 
 下一步用隔离服务和合成资料在模拟器中实际验证受限 ATS、真实配对及鉴权、Keychain 重启恢复和吊销拒绝，再接入现有做题协议。阅读和批注需要对应接口进入 main 后联测；缺失接口不应模拟成功。模拟器 bundle ID 是开发占位，正式标识和签名由后续打包任务办理。
+
+### Isolated real-server simulator check
+
+From the repository root, build the existing server distribution and run the simulator
+check under the shared heavy-work lock:
+
+```sh
+tools/dev/heavy ./gradlew :server:app:installDist --max-workers=2 --console=plain
+tools/dev/heavy --emulator python3 ios/Tools/run-isolated-connection-tests.py
+```
+
+The runner requires a local Tailscale IPv4 interface, Xcode, and the iOS 27.0
+simulator runtime with an iPhone 17 Pro device type. It creates a disposable simulator,
+server data directory, random ports, and per-run ATS configuration. The temporary
+server binds loopback and the local tailnet address; it does not use the normal Coach
+port or data. Do not run it against production. Its private fixture and generated
+credentials stay in temporary files and are removed with the simulator at the end.
+
+Two separate `xcodebuild test-without-building` invocations exercise the app's
+connection model: pair and store the credential, then reload it from Keychain in a
+new test-host process, reconnect, revoke it through the isolated server, and verify
+the model reports rejection. This does not test manual UI interaction, WebSockets,
+exercise workflows, device rotation, or physical devices.

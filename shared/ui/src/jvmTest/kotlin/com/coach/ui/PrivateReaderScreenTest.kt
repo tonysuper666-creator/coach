@@ -236,7 +236,7 @@ class PrivateReaderScreenTest {
                     PrivateSourceReference(fake.http.reader, "教材 p.1", "Alpha beta")
                 } } } }
                 onNodeWithTag("private-citation").performClick()
-                waitUntil(10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
                 val page = 1 + offset
                 onNodeWithTag("private-page-label").assertTextContains("第 $page 页", substring = true)
                 val writes = fake.writes.size
@@ -256,11 +256,11 @@ class PrivateReaderScreenTest {
                 // A conflicting save must remain recoverable even while ancillary reading controls are hidden.
                 fake.conflictNext = true
                 onNodeWithTag("private-next").performClick()
-                waitUntil(10000) { onAllNodesWithTag("private-load-remote").fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-load-remote").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("private-focus").performClick()
                 onNodeWithTag("private-document-back").assertIsNotEnabled()
                 onNodeWithTag("private-load-remote").assertIsDisplayed().performClick()
-                waitUntil(10000) { onAllNodesWithTag("private-document-back").fetchSemanticsNodes().singleOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-document-back").fetchSemanticsNodes().singleOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
                 onNodeWithTag("private-document-back").performClick()
                 onNodeWithTag("private-citation").assertExists()
             }

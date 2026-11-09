@@ -22,6 +22,26 @@ import javax.imageio.ImageIO
 import kotlin.test.*
 import kotlinx.serialization.json.*
 
+/** Invented page pixels for component evidence; no PDF renderer or private material is involved. */
+internal fun syntheticReaderPage(label: String): ByteArray = ByteArrayOutputStream().also { out ->
+    val page = BufferedImage(300, 400, BufferedImage.TYPE_INT_RGB)
+    page.createGraphics().apply {
+        color = java.awt.Color.WHITE
+        fillRect(0, 0, 300, 400)
+        color = java.awt.Color.BLACK
+        font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, 12)
+        drawString("SYNTHETIC COURSE: $label", 30, 24)
+        font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, 14)
+        drawString("Alpha", 30, 52)
+        drawString("beta", 85, 52)
+        font = java.awt.Font("SansSerif", java.awt.Font.PLAIN, 11)
+        drawString("Invented material for client component checks.", 30, 92)
+        drawString("No textbook or PDF renderer is used here.", 30, 112)
+        dispose()
+    }
+    ImageIO.write(page, "png", out)
+}.toByteArray()
+
 @OptIn(ExperimentalTestApi::class)
 class PrivateReaderScreenTest {
     private class FakeReader(private val stale: Boolean = false, private val course: String = "C", private val offset: Int = 1) : AutoCloseable {
@@ -45,7 +65,7 @@ class PrivateReaderScreenTest {
         @Volatile var boxWidth = 300.0
         @Volatile var boxHeight = 400.0
         val auth = CopyOnWriteArrayList<String>()
-        private val png = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(30, 40, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
+        private val png = syntheticReaderPage(course)
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/v1/courses/$course/reader") { ex ->
                 auth += ex.requestHeaders.getFirst("Authorization").orEmpty()

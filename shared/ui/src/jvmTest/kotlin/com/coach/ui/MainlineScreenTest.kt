@@ -74,7 +74,7 @@ class MainlineScreenTest {
                 val path = ex.requestURI.path
                 readerRequests += ex.requestURI.toString()
                 if (path.endsWith("/image")) {
-                    val png = java.io.ByteArrayOutputStream().also { ImageIO.write(java.awt.image.BufferedImage(30, 40, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
+                    val png = syntheticReaderPage("Orchard")
                     ex.sendResponseHeaders(200, png.size.toLong()); ex.responseBody.use { it.write(png) }
                     return@createContext
                 }
@@ -265,6 +265,7 @@ class MainlineScreenTest {
             onNodeWithTag("private-citation").assertExists()
             onNodeWithTag("v7-desk").assertExists()
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("mainline-v7-answer-after-reader-return")
         }
         assertTrue(mac.readerRequests.any { it.contains("/resolve?source=") }, "the cited source went through the reader resolve route")
         assertTrue(mac.readerRequests.any { it.contains("/doc/pages/2/boxes") && it.contains("version=v1") }, "coordinates were requested for the resolved document, page and version: ${mac.readerRequests}")

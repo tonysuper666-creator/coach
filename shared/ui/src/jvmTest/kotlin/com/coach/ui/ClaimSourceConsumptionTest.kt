@@ -58,7 +58,9 @@ class ClaimSourceConsumptionTest {
             routing {
                 suspend fun ApplicationCall.reply(body: JsonObject, status: HttpStatusCode = HttpStatusCode.OK) {
                     evidence += json("request" to "${request.httpMethod.value} ${request.uri}", "status" to status.value,
-                        "documentId" to body["documentId"], "version" to body["version"], "pdfPage" to body["pdfPage"])
+                        "documentId" to body["documentId"], "version" to body["version"], "pdfPage" to body["pdfPage"],
+                        "documents" to body["documents"], "stateVersion" to (body["document"] as? JsonObject)?.get("version"),
+                        "itemId" to body["itemId"], "choice" to body["choice"])
                     respondText(body.toString(), ContentType.Application.Json, status)
                 }
                 get("/v1/courses/{course}/reader") {
@@ -86,7 +88,10 @@ class ClaimSourceConsumptionTest {
                 get("/v1/courses/{course}/reader/{document}/pages/{page}/image") {
                     val doc = call.parameters["document"]!!
                     val page = call.parameters["page"]!!
-                    if (call.request.queryParameters["version"] != version) call.respond(HttpStatusCode.Conflict)
+                    val changed = call.request.queryParameters["version"] != version
+                    evidence += json("request" to "GET ${call.request.uri}", "status" to if (changed) 409 else 200,
+                        "documentId" to doc, "version" to version, "pdfPage" to page.toInt())
+                    if (changed) call.respond(HttpStatusCode.Conflict)
                     else call.respondBytes(syntheticReaderPage("$doc p$page"), ContentType.Image.PNG)
                 }
                 get("/v1/courses/{course}/reader/{document}/state") {
@@ -178,6 +183,8 @@ class ClaimSourceConsumptionTest {
                 capture("claim-source-multiple")
                 onNodeWithTag("claim-source-close").performClick()
                 assertEquals(before, controller.value.sync.mainlineState("C", "week:1"))
+                service.evidence += json("observation" to "selection-cancelled", "questionStateRetained" to true,
+                    "itemId" to before["item"], "choice" to before["choice"])
                 onNodeWithTag("claim-source-open").performClick()
                 waitTag("claim-source-choice-1")
                 onNodeWithTag("claim-source-choice-1").performClick()
@@ -193,6 +200,8 @@ class ClaimSourceConsumptionTest {
                 onNodeWithTag("claim-source-close").performClick()
                 onNodeWithTag("mainline-option-0").assertIsSelected()
                 assertEquals(before, controller.value.sync.mainlineState("C", "week:1"))
+                service.evidence += json("observation" to "reader-returned", "questionStateRetained" to true,
+                    "itemId" to before["item"], "choice" to before["choice"])
                 ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File("build/screens/claim-source-answer-restored.png"))
                 onNodeWithTag("mainline-next").performClick()
                 onNodeWithText("Synthetic question Q2").assertExists()

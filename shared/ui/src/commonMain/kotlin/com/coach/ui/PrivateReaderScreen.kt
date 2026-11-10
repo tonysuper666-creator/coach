@@ -56,7 +56,11 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
         val response = reader.catalog()
         value = if (response.ok) privateDocuments(response.body)?.let { ReaderLoad.Ready(it) } ?: ReaderLoad.Failed else ReaderLoad.Failed
     }
-    var document by remember { mutableStateOf<PrivateDocument?>(null) }
+    var document by androidx.compose.runtime.saveable.rememberSaveable(stateSaver = androidx.compose.runtime.saveable.Saver<PrivateDocument?, List<Any>>(
+        save = { doc -> if (doc == null) emptyList() else listOf(doc.id, doc.title, doc.version, doc.pages) },
+        restore = { saved -> if (saved.isEmpty()) null else PrivateDocument(saved[0] as String, saved[1] as String, saved[2] as String, saved[3] as Int) }
+    )) { mutableStateOf<PrivateDocument?>(null) }
+    AppBackHandler(document != null, priority = 10) { document = null }
     Column(Modifier.fillMaxSize()) {
         if (document == null) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -124,6 +128,9 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
             if (showNotes) PrivateReaderAnnotations(reader, doc, page, onShow = { quote -> focus = HighlightFocus(page, quote); showNotes = false }) { showNotes = false }
             var showMap by remember(doc) { mutableStateOf(false) }
             var readingFocus by remember(doc) { mutableStateOf(false) }
+            AppBackHandler(priority = 20) { if (!busy && pending == null) onBack() }
+            AppBackHandler(readingFocus, priority = 100) { readingFocus = false }
+            TaskChrome(readingFocus)
             fun send(write: ProgressWrite) {
                 pending = write
                 busy = true
@@ -156,7 +163,7 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                 val two = wide && spread && page < doc.pages
                 Column(Modifier.fillMaxSize().background(com.coach.ui.theme.CoachTheme.colors.surface1)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = onBack, enabled = !busy && pending == null, modifier = Modifier.heightIn(min = 48.dp).testTag("private-document-back")) { Text("← 返回") }
+                        TextButton(onClick = { if (readingFocus) readingFocus = false else onBack() }, enabled = !busy && pending == null, modifier = Modifier.heightIn(min = 48.dp).testTag("private-document-back")) { Text(if (readingFocus) "退出专心读" else "← 教材阅读") }
                         Text(doc.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                         TextButton(onClick = { readingFocus = !readingFocus }, modifier = Modifier.testTag("private-focus")) { Text(if (readingFocus) "退出专心读" else "专心读") }
                     }
@@ -253,9 +260,11 @@ internal fun PrivateSourceReferences(reader: ReaderHttp, source: String, anchor:
 /** A source click resolves through the course catalog; an unregistered or ambiguous source never guesses. */
 @Composable
 internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: String = "", tag: String = "private-citation", label: String = "出处：$source") {
-    var opened by remember(source) { mutableStateOf(false) }
+    var opened by androidx.compose.runtime.saveable.rememberSaveable(source) { mutableStateOf(false) }
+    val back = LocalAppBack.current
+    AppBackHandler(opened, priority = 15) { opened = false }
     TextButton(onClick = { opened = true }, modifier = Modifier.testTag(tag)) { Text(label) }
-    if (opened) Dialog(onDismissRequest = {}, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)) {
+    if (opened) Dialog(onDismissRequest = { if (back == null) opened = false else back.back() }, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
         Surface(Modifier.fillMaxSize()) {
             var retry by remember { mutableIntStateOf(0) }
             val target by produceState<ReaderLoad<Pair<PrivateDocument, Int>>>(ReaderLoad.Loading, reader, source, retry) {

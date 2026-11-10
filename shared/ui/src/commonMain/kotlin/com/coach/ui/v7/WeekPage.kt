@@ -76,11 +76,11 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
 }
 
 @Composable
-internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: WeekActions, onOpen: (String, Boolean) -> Unit) {
-    val week = view.projection.studyScope?.week ?: return
+fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: WeekActions, onOpen: (String, Boolean) -> Unit, week: Int) {
     val points = view.weekKps(week)
     val passed = points.count { it.status.isLearned }
-    val target = view.weekTarget
+    val decision = c.learningTarget(view, week)
+    val target = decision?.kp
     val targetLabel = "$week.${(points.indexOfFirst { it.id == target?.id } + 1).coerceAtLeast(1)}"
     val d = pageDetails(c, view, week)
     val colors = CoachTheme.colors
@@ -89,17 +89,9 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
     val select = LocalDeskSelect.current
     val railAnchors = remember(week) { MarginAnchors() }
     var choosingWeek by remember { mutableStateOf(false) }
-    var pendingWeek by remember { mutableStateOf<Int?>(null) }
-    // A receipt can arrive before the refreshed scope reaches this composition.
-    val canSelect = ui.connected && !actions.busy && (pendingWeek == null || pendingWeek == week)
-    LaunchedEffect(week, actions.error) {
-        if (pendingWeek == week || actions.error != null) pendingWeek = null
-    }
-    fun selectWeek(number: Int) {
-        if (!canSelect) return
-        pendingWeek = number
-        actions.select(number)
-    }
+    val canSelect = true
+    fun selectWeek(number: Int) { actions.select(number) }
+    fun start() { decision?.let { actions.start(view, it) } }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
     if (choosingWeek) AlertDialog(onDismissRequest = { choosingWeek = false }, title = { Text("换周") },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { view.weeks.forEach { n ->
@@ -107,12 +99,18 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
         } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = view.examCountdownText(rememberCourseNow(c)),
         compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
-        backLabel = "← 书架", onBack = { select(AppTab.RESOURCES) }, directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
+        backLabel = "← 路线", onBack = if (LocalAppManagedNavigation.current) null else ({ select(AppTab.ROUTE) }), directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
         margin = {
-            if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { target?.let { onOpen(it.id, true) } })
+            Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { start() })
             else Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                PaperCard { Text("第 $week 周 · ${KpStatus.PASSED.label} $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekSummary(view, actions, ui.connected) }
+                PaperCard { Text("第 $week 周 · ${KpStatus.PASSED.label} $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekBrowseSummary(view, week, actions) }
                 target?.takeIf { it.reference.isNotBlank() }?.let { NoteCard("出处", it.reference) }
+            }
+            if (d.shelf.isNotEmpty()) PaperCard {
+                Text("资料", style = MaterialTheme.typography.labelMedium)
+                d.shelf.forEach { title -> TextButton(onClick = { select(AppTab.RESOURCES) }) { Text(title) } }
+            }
             }
         }, footer = {
             val previous = weeks.lastOrNull { it < week }
@@ -130,7 +128,7 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
             PaperCard(contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {
                 points.forEachIndexed { index, kp ->
                     if (index > 0) HorizontalDivider(color = if (colors.dark) coach.design.tokens.CoachV7.Dark.line else coach.design.tokens.CoachV7.Light.line)
-                    Row(Modifier.fillMaxWidth().then(if (kp.id == target?.id) Modifier.railAnchor("week-target") else Modifier).clickable { onOpen(kp.id, false) }.padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically,
+                    Row(Modifier.fillMaxWidth().testTag("week-section-${kp.id}").then(if (kp.id == target?.id) Modifier.railAnchor("week-target") else Modifier).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("$week.${index + 1}", Modifier.width(if (m.window == DeskWindow.Outer) 46.8.dp else 57.6.dp), style = MaterialTheme.typography.labelLarge,
                             color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers)
@@ -138,6 +136,10 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                             Text(splitTitle(kp.title).second, style = MaterialTheme.typography.bodyLarge.copy(
                                 fontWeight = if (kp.status == KpStatus.IN_PROGRESS) FontWeight.SemiBold else FontWeight.Normal))
                             if (m.window == DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Spacer(Modifier.height(2.dp)); Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
+                            Row {
+                                TextButton(onClick = { actions.start(view, decision?.takeIf { it.kp.id == kp.id } ?: LearningTarget(kp, week, false)) }) { Text("开始") }
+                                TextButton(onClick = { actions.read(LearningTarget(kp, week, false, reading = true)) }) { Text("先看要点") }
+                            }
                         }
                         if (m.window != DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
                         val state = kp.status.symbol + " " + kp.status.label
@@ -153,14 +155,14 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                 }
             }
             Spacer(Modifier.height(24.dp))
-            target?.let { kp -> PaperCard(Modifier.railAnchor("week-next").clickable { onOpen(kp.id, true) }, contentPadding = PaddingValues(16.dp), contentSpacing = 8.dp) {
+            target?.let { kp -> PaperCard(Modifier.railAnchor("week-next").clickable { start() }, contentPadding = PaddingValues(16.dp), contentSpacing = 8.dp) {
                 Text("接着学", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
                 Text(d.nextStep.ifBlank { "${if (view.isResume(kp)) "继续" else "开始"} · ${splitTitle(kp.title).second}" }, style = MaterialTheme.typography.bodyLarge)
             } }
             if (!m.inner) {
                 Spacer(Modifier.height(24.dp))
-                if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { target?.let { onOpen(it.id, true) } })
-                else WeekSummary(view, actions, ui.connected)
+                if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { start() })
+                else WeekBrowseSummary(view, week, actions)
             }
         }
     }

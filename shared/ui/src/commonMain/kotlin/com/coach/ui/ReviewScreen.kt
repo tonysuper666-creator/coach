@@ -31,7 +31,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
         OfflinePractice(c)
-        if (onOpenMainline != null) MainlineEntry(c, onOpenMainline)
+        if (onOpenMainline != null) MainlineEntry(c, view, onOpenMainline)
         if (onOpenMock != null) Surface(onClick = onOpenMock, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 56.dp).testTag("open-mock")) {
             Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -68,7 +68,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
 
 /** Existing Review entry: one click to the current week's question, a separate reading route. */
 @Composable
-private fun MainlineEntry(c: CoachController, onOpen: (Int?, Boolean) -> Unit) {
+private fun MainlineEntry(c: CoachController, view: CourseView, onOpen: (Int?, Boolean) -> Unit) {
     var overview by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject) }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(c) {
@@ -89,11 +89,7 @@ private fun MainlineEntry(c: CoachController, onOpen: (Int?, Boolean) -> Unit) {
         } while (true)
     }
     val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().map { it.jsonObject }
-    val previous = (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull
-    val target = weeks.firstOrNull { it.num("week").toInt() == previous }
-        ?: weeks.firstOrNull { val cov = it["coverage"] as? JsonObject; cov != null && cov.num("factsMastered") < cov.num("facts") }
-        ?: weeks.firstOrNull()
-    val number = target?.num("week")?.toInt()
+    val number = c.mainlineContinuationWeek(view, overview)
     Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).testTag("open-mainline")) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {

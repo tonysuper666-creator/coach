@@ -16,6 +16,22 @@ class ReaderExplanationTest {
         "paragraphs" to JsonArray(listOf(json("text" to text, "anchors" to JsonArray(anchors.map(::JsonPrimitive)))))
     ).toString()
 
+    @Test fun rawTabMatchesFinalValidationWithoutCountingAsBodyProgress() {
+        val prefix = "{\"paragraphs\":[{\"text\":\""
+        val body = "的解释。"
+        val suffix = "\",\"anchors\":[\"S1\"]}]}"
+        val raw = prefix + "有依据\t" + body + suffix
+        assertEquals("有依据\t${body}【S1】", assertNotNull(checkedReaderPayload(raw, pack)).first)
+        val progress = ReaderBodyProgress()
+        assertFalse(progress.push(prefix))
+        assertTrue(progress.push("有依据"))
+        assertFalse(progress.push("\t"), "A raw tab must not renew the content deadline")
+        assertFalse(progress.invalid, "The final validator accepts this raw tab")
+        assertTrue(progress.push(body))
+        assertFalse(progress.push(suffix))
+        assertFalse(progress.invalid)
+    }
+
     @Test fun structuredOutputRequiresDeclaredCitationsAndPreservesTheWholeAnswerGate() {
         val valid = payload("“Synthetic pears”是这里的例子。")
         assertEquals("“Synthetic pears”是这里的例子。【S1】", checkedReaderPayload(valid, pack)!!.first)
@@ -77,7 +93,7 @@ class ReaderExplanationTest {
             h.reader.cancel("d", "c", "aa")
             assertEquals("追问已取消。", h.reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", pack.pages).str("text"))
             assertEquals(0, h.stub.requests)
-            h.stub.stream(200, *Array(30) { "Partial synthetic paragraph " }, StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(200, "{\"paragraphs\":[{\"text\":\"", *Array(30) { "Partial synthetic paragraph " }, StubTutor.terminal("complete"), StubTutor.DONE)
             val pending = async(Dispatchers.Default) {
                 h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic", pack.pages)
             }

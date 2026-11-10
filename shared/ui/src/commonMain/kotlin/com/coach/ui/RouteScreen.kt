@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.selection.selectable
@@ -15,6 +16,7 @@ import com.coach.client.CourseView
 import com.coach.client.ExamFocus
 import com.coach.client.KpRow
 import com.coach.client.KpStatus
+import com.coach.domain.today
 import kotlin.math.roundToInt
 
 /** 一个章节在路线上的小计。 */
@@ -38,7 +40,7 @@ internal fun unmetPrereqs(kp: KpRow, view: CourseView): List<KpRow> =
 
 /** 路线：顶部是期末面板，下面全部知识点按章节排开，两层状态各自按知识点个数的比例显示（分值口径的「学了多少」在今天页顶部）。 */
 @Composable
-fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit = {}) {
+fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit = {}, onBrowseWeek: (Int) -> Unit = {}) {
     if (view == null) return CenterMessage("正在加载课程…")
     val kps = view.kps
     if (kps.isEmpty()) return CenterMessage("课程里还没有知识点。")
@@ -57,7 +59,12 @@ fun RouteScreen(c: CoachController, view: CourseView?, selectedKpId: String?, on
                 Text("路线", style = MaterialTheme.typography.headlineMedium)
                 ProportionBar(KpStatus.PASSED.label, passed, kps.size, MaterialTheme.colorScheme.secondary)
                 ProportionBar(KpStatus.SOLID.label, solid, kps.size, successColor())
-                Text("按节数计。期末分值的覆盖在「今天」页顶部。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(view.projection.today(rememberCourseNow(c)).coverageText, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (view.weeks.isNotEmpty()) item {
+            Column { Text("各周课程", style = MaterialTheme.typography.titleMedium)
+                view.weeks.forEach { week -> TextButton(onClick = { onBrowseWeek(week) }, modifier = Modifier.testTag("browse-week-$week")) { Text(view.weekLabel(week)) } }
             }
         }
         for (module in routeModules(kps)) {

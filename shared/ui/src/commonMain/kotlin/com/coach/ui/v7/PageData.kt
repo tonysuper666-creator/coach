@@ -3,6 +3,7 @@ package com.coach.ui.v7
 import androidx.compose.runtime.*
 import com.coach.client.*
 import com.coach.ui.CoachController
+import com.coach.ui.learningTarget
 import com.coach.ui.PageKey
 import com.coach.ui.splitTitle
 import kotlinx.coroutines.async
@@ -14,7 +15,7 @@ import kotlinx.serialization.json.*
 internal fun pageDetails(c: CoachController, view: CourseView, week: Int?, kp: KpRow? = null, reading: String = "", includeSource: Boolean = true): V7PageDetails {
     LocalV7PageDetails.current?.let { return it }
     val points = week?.let(view::weekKps).orEmpty()
-    val target = kp ?: view.weekTarget?.takeIf { week == null || points.any { p -> p.id == it.id } } ?: points.firstOrNull()
+    val target = kp ?: c.learningTarget(view, week)?.kp ?: points.firstOrNull()
     val http = c.course
     val loaded by produceState<Pair<List<SourceDoc>, SourcePage?>>(emptyList<SourceDoc>() to null, http, Triple(target?.anchorDoc, target?.anchorPdfPage, includeSource)) {
         value = emptyList<SourceDoc>() to null

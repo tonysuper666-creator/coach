@@ -12,6 +12,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -39,16 +40,18 @@ import kotlin.math.roundToLong
  * 中途退出不停表，回来接着做；到点由这里交卷，没开着的考试由 Mac 到点代交。
  */
 @Composable
-fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initialMockId: String? = null, onReviewWeek: (Int) -> Unit = {}) {
+fun MockScreen(c: CoachController, view: CourseView, onBack: () -> Unit, initialMockId: String? = null, onReviewWeek: (Int) -> Unit = {}, backLabel: String = "← 复习") {
     val http = c.course
-    var open by remember { mutableStateOf(initialMockId) }
+    var open by rememberSaveable { mutableStateOf(initialMockId) }
+    val leave: () -> Unit = { if (initialMockId != null) onBack() else open = null }
+    AppBackHandler(open != null) { leave() }
     Column(Modifier.fillMaxSize()) {
         if (http == null) {
-            BackRow("模拟考", "← 复习", onBack)
+            BackRow("模拟考", backLabel, onBack)
             CenterMessage("模拟考要连接 Mac。")
-        } else if (open == null) MockHome(c, http, view, onBack) { open = it }
+        } else if (open == null) MockHome(c, http, view, onBack, backLabel) { open = it }
         // Opened straight from the records page: back goes back there, not to the exam list.
-        else key(open) { MockSessionPane(c, http, view, open!!, onReviewWeek) { if (initialMockId != null) onBack() else open = null } }
+        else key(open) { MockSessionPane(c, http, view, open!!, onReviewWeek, leave) }
     }
 }
 
@@ -63,7 +66,7 @@ private fun BackRow(title: String, back: String, onBack: () -> Unit, trailing: @
 }
 
 @Composable
-private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onBack: () -> Unit, onOpen: (String) -> Unit) {
+private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onBack: () -> Unit, backLabel: String, onOpen: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var reload by remember { mutableStateOf(0) }
     val revision by c.sync.revision.collectAsState()
@@ -82,7 +85,7 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
             } finally { busy = false }
         }
     }
-    BackRow("模拟考", "← 复习", onBack)
+    BackRow("模拟考", backLabel, onBack)
     val home = reply?.body
     if (reply == null) return CenterMessage("正在问 Mac…")
     if (home == null) {
@@ -248,8 +251,9 @@ internal fun MockExam(c: CoachController, http: CourseHttp, exam: JsonObject, on
         val old = answers[key] as? JsonObject ?: JsonObject(emptyMap())
         answers = JsonObject(answers + (key to JsonObject(old + (field to value))))
         c.mockDrafts.update { it + (mockId to answers) }
+        c.persistMockDrafts()
     }
-    fun finished(result: JsonObject) { c.mockDrafts.update { it - mockId }; onResult(result) }
+    fun finished(result: JsonObject) { c.mockDrafts.update { it - mockId }; c.persistMockDrafts(); onResult(result) }
     suspend fun submit(auto: Boolean) {
         if (submitting) return
         submitting = true; submitError = null
@@ -350,7 +354,7 @@ internal suspend fun CoachController.saveMockDraft(http: CourseHttp, mockId: Str
     val pending = mockDrafts.value[mockId] ?: return null
     val seq = maxOf(floor, (mockSeq[mockId] ?: 0) + 1).also { mockSeq[mockId] = it }
     val r = http.saveMock(mockId, pending, seq)
-    if (r.body != null) mockDrafts.update { if (it[mockId] == pending) it - mockId else it }
+    if (r.body != null) { mockDrafts.update { if (it[mockId] == pending) it - mockId else it }; persistMockDrafts() }
     r
 }
 

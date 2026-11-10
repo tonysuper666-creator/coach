@@ -137,7 +137,7 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
         val ui = TutorUiState(connected = true, threads = mapOf(view.tutorThreadId(kp.id) to ThreadView(items = listOf(ChatItem.Tutor(message)), historyLoaded = true)))
         compose.setContent { CoachTheme(dark) { CompositionLocalProvider(LocalV7PageDetails provides fixtureDetails(dark), LocalV7ReducedMotion provides true, com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(if (scene == "quiz") AppTab.REVIEW else if (scene == "read") AppTab.ROUTE else AppTab.TODAY, vertical) {} }) { Surface { Box(Modifier.requiredSize(width.dp, height.dp)) {
             when (scene) {
-                "week" -> TodayScreen(controller, view, ui, null, {}, { _, _ -> }, WeekActions(controller, scope))
+                "week" -> WeekPage(controller, view, ui, WeekActions(controller, scope), { _, _ -> }, week = 8)
                 "read", "focus", "studyQuiz", "quizFocus" -> StudyScreen(controller, kp, view, ui, false, {}, onOpenReference = {}, initialFocus = scene in setOf("focus", "quizFocus"))
                 "quiz" -> MainlineScreen(controller, view, {}, {}, {}, {})
             }

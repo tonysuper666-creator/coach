@@ -32,11 +32,11 @@ internal class EssaySession(val attemptId: String, val posed: JsonObject, val de
  * 练习走自己的线程，不改「继续」；结果记在账本里，记录页「限时论述」可以回看。
  */
 @Composable
-fun EssayScreen(c: CoachController, view: CourseView, onBack: () -> Unit) {
+fun EssayScreen(c: CoachController, view: CourseView, onBack: () -> Unit, backLabel: String = "← 复习") {
     val session = c.essay
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 复习") }
+            TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(backLabel) }
             Text("论述限时练习", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             if (session != null && !session.handedIn) Countdown(c, session)
         }
@@ -168,7 +168,7 @@ private fun EssayWriting(c: CoachController, s: EssaySession) {
                 color = if (words >= s.posed.num("wordTarget", Essay.WORD_TARGET.toLong()) * 0.8) successColor() else MaterialTheme.colorScheme.onSurfaceVariant)
             Text("到点自动交卷", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        OutlinedTextField(s.text, { if (!s.handedIn) s.text = it }, Modifier.fillMaxWidth().weight(1f).testTag("essay-text"),
+        OutlinedTextField(s.text, { if (!s.handedIn) { s.text = it; c.persistEssay() } }, Modifier.fillMaxWidth().weight(1f).testTag("essay-text"),
             placeholder = { Text("先一句话直接回答，再定义、机制、证据（作者、年份、数字）、评价、结论。") })
         Button(onClick = { c.handInEssay(s) }, enabled = s.text.isNotBlank(), modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("交卷") }
     }

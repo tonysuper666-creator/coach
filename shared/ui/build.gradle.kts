@@ -1,4 +1,5 @@
 plugins {
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp)
     alias(libs.plugins.kotlin.compose)
@@ -30,6 +31,7 @@ kotlin {
         implementation(libs.navigationevent)
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
+    sourceSets.androidMain.dependencies { implementation("androidx.activity:activity-compose:1.12.0") }
     sourceSets.jvmTest.dependencies {
         implementation(project(":server:app"))
         implementation(project(":server:core"))

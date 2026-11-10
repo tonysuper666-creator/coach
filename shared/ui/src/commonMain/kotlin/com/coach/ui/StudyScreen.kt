@@ -3,6 +3,8 @@ package com.coach.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -13,6 +15,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
+import com.coach.domain.*
+import kotlinx.serialization.json.*
 import com.coach.ui.chat.AnchoredChatList
 import com.coach.ui.chat.ChatListState
 import com.coach.ui.input.ComposerField
@@ -28,16 +32,19 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
     SideEffect { if(groups.isNotEmpty()) PoolTrace.mark(thread,"composed") }
-    val chosen = remember(kp.id) { mutableStateMapOf<String, String>() }
+    val chosen = rememberSaveable(kp.id, saver = mapSaver<androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>>(
+        save = { it.toMap() }, restore = { it.map { e -> e.key to e.value as String }.toMutableStateMap() })) {
+        (c.sync.mainlineState(c.courseId, "choices:$thread")).map { (key, v) -> key to (v as? JsonPrimitive)?.content.orEmpty() }.toMutableStateMap()
+    }
     val pending = groups.lastOrNull { !it.submitted }
     val additionalScope = remember(kp.title) { additionalTitleScope(kp.title) }
     var showScope by remember(kp.id) { mutableStateOf(false) }
     var askOpen by remember(kp.id) { mutableStateOf(false) }
-    var draft by remember(kp.id) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
+    var draft by rememberSaveable(kp.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
     val enterGate = remember(kp.id) { EnterGate() }
     val focus = LocalFocusManager.current
     var opened by remember(kp.id) { mutableStateOf(false) }
-    var started by remember(kp.id) { mutableStateOf(false) }
+    var started by rememberSaveable(kp.id) { mutableStateOf(false) }
     var pinned by remember(kp.id) { mutableStateOf(false) }
     val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
@@ -73,7 +80,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
         if (autoStart && !started && opened && tv.historyLoaded && !tv.busy) {
             started = true
-            if (pending == null && (reviewMode || tv.items.isEmpty())) next(false, recordTap = false)
+            if (pending == null && (reviewMode || tv.items.isEmpty())) next(true, recordTap = false)
         }
     }
 
@@ -87,23 +94,27 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
     }
 
-    var readingFocus by remember(kp.id) { mutableStateOf(initialFocus) }
-    var conversation by remember(kp.id) { mutableStateOf(initialDraft != null) }
+    var readingFocus by rememberSaveable(kp.id) { mutableStateOf(initialFocus) }
+    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.sync.mainlineState(c.courseId, "learning").str("kind") == "tutor") }
     val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
     if (!reviewMode && !conversation && completed != null && pending == null && !tv.busy) {
         com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
             onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
             onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions,
-            onSelectionAsk = { draft = TextFieldValue(it); conversation = true })
+            onSelectionAsk = { draft = TextFieldValue(it); conversation = true }, backLabel = backLabel)
         return
+    }
+    LaunchedEffect(kp.id, reviewMode) {
+        if (!reviewMode) c.sync.saveMainlineState(c.courseId, json("kind" to "tutor", "kpId" to kp.id), "learning")
     }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
     val notes = remember(tv.items, kp.reference) {
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
     }
     CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
-    com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
-        directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.takeIf { ui.connected && !it.busy }?.let { it::select }) },
+    val parentLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天"
+    com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = if (pending != null) "暂离 · ${parentLabel.removePrefix("← ")}" else parentLabel, showNavigation = pending == null,
+        directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.let { it::select }) },
         margin = { com.coach.ui.v7.MarginNotes(notes) {
             if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {
                 Text("出处", style = MaterialTheme.typography.labelMedium)
@@ -147,7 +158,15 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         Spacer(Modifier.height(8.dp))
 
         // Reading position lives with the screen state (and this screen is `movableContentOf` in CoachApp): a fold/unfold keeps it.
-        val chat = remember(kp.id) { ChatListState() }
+        val savedAnchor = remember(thread) { c.sync.mainlineState(c.courseId, "anchor:$thread") }
+        val chat = remember(kp.id) { ChatListState(anchor = com.coach.ui.chat.ChatAnchor(
+            pinned = !savedAnchor.containsKey("key") || savedAnchor.flag("pinned"),
+            key = savedAnchor.str("key").ifBlank { null }, fraction = (savedAnchor["fraction"] as? JsonPrimitive)?.floatOrNull ?: 0f)) }
+        LaunchedEffect(chat) {
+            snapshotFlow { Triple(chat.anchor.pinned, chat.anchor.key, chat.anchor.fraction) }.collect { (atEnd, key, fraction) ->
+                if (key != null) c.sync.saveMainlineState(c.courseId, json("pinned" to atEnd, "key" to key.toString(), "fraction" to fraction), "anchor:$thread")
+            }
+        }
         val scope = rememberCoroutineScope()
         // 讲解/追问消息和题组按「发生的先后」交错：消息出现时记下当时已有几组题，排在那几组之后。
         val anchors = remember(kp.id) { c.quizMessageAnchors.getOrPut(thread) { HashMap() } }
@@ -169,9 +188,9 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         // 发送、点「下一步/出题」后回到底部继续跟随。
         LaunchedEffect(pinned) { if (pinned) { chat.scrollToTail(); pinned = false } }
         // 新题组出现，或刚打开线程时还没答完的那组：把第 1 题放在最上面，从头读起。
-        var seenGroups by remember(kp.id) { mutableStateOf(0) }
+        var seenGroups by remember(kp.id) { mutableStateOf(if (savedAnchor.containsKey("key")) groups.size else 0) }
         val focusKey = if (groups.size > seenGroups && (pending != null || seenGroups > 0))
-            groups.last().cards.firstOrNull()?.let { "q:${it.attemptId}" } else null
+            (groups.last().cards.firstOrNull { it.answer == null } ?: groups.last().cards.firstOrNull())?.let { "q:${it.attemptId}" } else null
         SideEffect {
             if (focusKey != null) {
                 val index = rows.indexOfFirst { it.key == focusKey }
@@ -181,7 +200,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         LaunchedEffect(groups.size) {
             if (groups.size > seenGroups && (pending != null || seenGroups > 0)) {
                 PoolTrace.mark(thread,"focus_requested")
-                groups.last().cards.firstOrNull()?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
+                (groups.last().cards.firstOrNull { it.answer == null } ?: groups.last().cards.firstOrNull())?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
                 PoolTrace.mark(thread,"focus_settled")
             }
             seenGroups = groups.size
@@ -202,7 +221,10 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                             is ChatItem.Tutor -> TutorBubble(item.message, c.math) { c.tutor.cancel(item.message.id) }
                         }
                         is StudyRow.Question -> QuizCardView(row.index + 1, row.group.cards.size, row.card, row.group.submitted, chosen[row.card.attemptId], c.math, onFirstDraw={ PoolTrace.mark(thread,"first_draw") }) { letter ->
-                            if (!row.group.submitted) { c.tutor.telemetry?.record("tap", "select_option"); chosen[row.card.attemptId] = letter }
+                            if (!row.group.submitted) {
+                                c.tutor.telemetry?.record("tap", "select_option"); chosen[row.card.attemptId] = letter
+                                c.sync.saveMainlineState(c.courseId, JsonObject(chosen.mapValues { JsonPrimitive(it.value) }), "choices:$thread")
+                            }
                         }
                         is StudyRow.GroupFooter -> QuizGroupFooter(row.group, kp, c, view, thread, chosen) { c.tutor.model.onSent(thread, "answer", null); pinned = true }
                         is StudyRow.Note -> when (row.kind) {

@@ -62,5 +62,17 @@ class ReadSyscallsTest(unittest.TestCase):
         for severity in ('error','data_loss'):
             self.assertFalse(summarize_syscalls(scheduling,calls,[dict(severity=severity,value=1)])['complete'])
 
+    def test_signal_restoration_stays_unpaired_and_does_not_clear_strict_failure(self):
+        scheduling,calls,_=self.data()
+        signal=dict(calls[0],syscall_slice_id=9,name='sys_rt_sigreturn',ts=198,dur=0,ret=None)
+        report=summarize_syscalls(scheduling,calls+[signal],[])
+        self.assertFalse(report['complete'])
+        row=report['samples'][0]
+        self.assertEqual(0,row['unattributedSleepSDNs'])
+        self.assertFalse(row['sleepAttributionComplete'])
+        self.assertIn('unfinished_or_cross_boundary_syscall',row['errors'])
+        self.assertEqual([dict(syscallSliceId=9,kind='unpaired_signal_restoration',ordinaryReturnVerified=False)],row['boundaryNotes'])
+        self.assertIn(signal,row['boundaryCalls'])
+
 
 if __name__=='__main__': unittest.main()

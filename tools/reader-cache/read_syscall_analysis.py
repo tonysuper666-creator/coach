@@ -17,7 +17,7 @@ def summarize_syscalls(scheduling,syscalls,quality):
         errors.append('trace_quality_errors_or_data_loss')
     for read in scheduling['samples']:
         marker=read.get('marker');local=[]
-        output=dict(probeId=read['probeId'],route=read.get('route'),errors=local,calls=[],boundaryCalls=[])
+        output=dict(probeId=read['probeId'],route=read.get('route'),errors=local,calls=[],boundaryCalls=[],boundaryNotes=[])
         results.append(output)
         if not marker or read.get('errors'):
             local.append('invalid_read_marker_or_states');continue
@@ -31,6 +31,11 @@ def summarize_syscalls(scheduling,syscalls,quality):
             if identity is None or identity in seen or ts is None or dur is None or not isinstance(name,str) or not name.startswith('sys_'):
                 local.append('duplicate_or_invalid_syscall');continue
             seen.add(identity)
+            if name=='sys_rt_sigreturn' and dur==0 and integer(call,'ret') is None:
+                # Signal restoration is not an ordinary returning call. This note
+                # never supplies a return value or clears the strict error below.
+                output['boundaryNotes'].append(dict(syscallSliceId=identity,
+                    kind='unpaired_signal_restoration',ordinaryReturnVerified=False))
             # ATrace writes can be truncated/replicated by the importer. Preserve them;
             # they cannot identify socket send/receive or a completed blocking call.
             if name=='sys_write' or dur<=0 or ts<start or ts+dur>end:

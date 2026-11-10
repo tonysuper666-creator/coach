@@ -850,3 +850,81 @@ checks, both route distributions, first-block and final-block transients, raw
 states/wakers/arguments, nonzero quality rows, APK hashes and cleanup. Choose any
 further capture from that result, before another performance run. No memory,
 presentation, real hot-update or native/GPU budget conclusion changes here.
+
+## Signal boundary and virtual Ethernet after 6f37f74
+
+The first native syscall capture retained all 16 request/state associations.
+Every read had a returned ppoll of about 500 ms containing its recorded sleep,
+followed by recvfrom returning one byte in about 0.004-0.041 ms. A ppoll return
+of one counts a ready element; it does not identify POLLIN without the returned
+event bits. See the [poll/ppoll interface](https://man7.org/linux/man-pages/man2/poll.2.html).
+
+Route-9 also contains a zero-duration `sys_rt_sigreturn` without a paired ret,
+after both the long ppoll and the one-byte receive. Its raw entry number is 139;
+the nearby raw exit number is -1. Signal restoration resumes the interrupted
+context rather than returning as an ordinary call
+([sigreturn](https://man7.org/linux/man-pages/man2/sigreturn.2.html)). The arm64
+[kernel restoration path](https://github.com/torvalds/linux/blob/v6.6/arch/arm64/kernel/signal.c)
+also clears syscall context. This is compatible with that boundary shape; it
+does not prove the exact emulator kernel/importer implementation or signal cause.
+Do not pair the -1 exit with entry 139 or invent a return value. The analyzer
+adds an explicit unpaired-signal note but keeps the strict local error and
+overall `complete=false`. Zero residual sleep never clears this failure.
+
+The next minimal capture is one identical 16-request route group, with the
+same scheduling/syscall settings and APK hashes, adding only the emulator's
+documented [`-tcpdump <file>` startup option](https://developer.android.com/studio/run/emulator-commandline).
+It captures virtual Ethernet packets and does not require opening the host BPF
+interface. Keep the existing image, account/network policy and permissions.
+Use the current Mac owner/foreground emulator lock, geometry, PDF and Poppler.
+Do not start an emulator on winbox. Reuse the verified native packages; the
+new code here is offline Python and documentation only.
+
+Before starting the owned AVD, choose a new capture path inside this checkout:
+
+```sh
+# Additional argument to the existing owned emulator launch, not a second AVD:
+-tcpdump <checkout>/build/reader-packets-<session>/local-only.pcap
+```
+
+Run one `run_observed.py` group with the same route legacy, observer none,
+`--socket-scheduling-trace --socket-syscalls` arguments. No queue watch, live
+host packet-interface capture, repeated adb sampling or UI performance suite.
+Join Perfetto, stop only the owned emulator, wait for its exit and retain its
+exact launch/version/PID/exit before reading the now-closed capture. Startup
+and file output are new observation overhead; this is not a speed comparison.
+If this option is unsupported, preserve the failure without changing privileges.
+
+The unfiltered capture includes other Ethernet traffic and stays local. Prepare
+shareable fixture-only output **after the owned emulator has stopped**:
+
+```sh
+python3 tools/reader-cache/filter_emulator_capture.py --run <new-run-directory> \
+  --capture <checkout>/build/reader-packets-<session>/local-only.pcap \
+  --emulator-stopped
+```
+
+This helper uses only offline `tcpdump -r`, with the recorded exact configured
+and alias addresses and the isolated fixture's ephemeral port. It retains the
+original, produces `emulator-fixture.pcap`, a sequence-numbered ASCII decode,
+tool logs and `emulator-packet-filter.json`, and refuses existing outputs or an
+input changed during decoding. Failures remain explicit. Decoder exit zero
+alone leaves request association and packet-stream completeness **unverified**.
+Do not attach the unfiltered original. Windows tests mock the offline decoder;
+they do not exercise an emulator or real pcap decoding.
+
+For each of the 16 requests, associate the packet connection and TCP sequence
+with its request nonce and echoed response nonce; retain all candidates, header
+reassembly, retransmissions, missing segments and ambiguous matches. Guest local
+ports are supplied as hints, not assumed identical to host/NAT peer ports. Keep
+SYN/sequence evidence establishing the first response byte; an ACK or the packet
+where an assembled header becomes recognizable is not that endpoint. Report
+request-final-byte to first-response-byte intervals in the **pcap clock only**,
+alongside the separate ppoll/application intervals. A virtual Ethernet trace is
+not a guest-kernel receive timestamp. No cross-clock timestamp subtraction or
+subtraction of unrelated interval medians can locate an unobserved component.
+
+First collect this boundary evidence and repeat the scheduling/syscall SQL on
+its matching new trace, preserving the strict signal/quality failures. Choose
+further diagnosis from the result before a performance rerun. The baseline,
+100 ms actual presentation and physical three-image/native/GPU gaps remain open.

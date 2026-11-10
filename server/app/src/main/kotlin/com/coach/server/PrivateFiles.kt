@@ -77,11 +77,13 @@ internal class PrivateFiles(
     fun secureSocket(path: Path) = protect(path, false, socket = true)
 
     private fun protect(path: Path, directory: Boolean, socket: Boolean = false) {
+        // Refuse invalid paths without conflating an I/O fault with failed permission enforcement.
+        if (Files.isSymbolicLink(path)) throw IOException("Private paths must not be symbolic links")
+        val valid = if (directory) Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+            else if (socket) Files.exists(path, LinkOption.NOFOLLOW_LINKS)
+            else Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+        if (!valid) throw IOException("Invalid private path type")
         try {
-            require(!Files.isSymbolicLink(path)) { "Private paths must not be symbolic links" }
-            require(if (directory) Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
-                else if (socket) Files.exists(path, LinkOption.NOFOLLOW_LINKS)
-                else Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { "Invalid private path type" }
             permissions(path, directory)
         } catch (error: UnsupportedOperationException) {
             throw error
@@ -92,7 +94,7 @@ internal class PrivateFiles(
 
     private fun requireDirectory(path: Path) {
         if (Files.isSymbolicLink(path) || !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
-            throw PrivateFilePermissionException(IOException("Invalid private parent directory"))
+            throw IOException("Invalid private parent directory")
     }
 
     private fun removeEmpty(path: Path, error: Exception) {

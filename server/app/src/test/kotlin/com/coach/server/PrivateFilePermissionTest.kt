@@ -175,6 +175,9 @@ class PrivateFilePermissionTest {
         FileSystems.newFileSystem(uri, mapOf("create" to "true")).use { fs ->
             assertFailsWith<UnsupportedOperationException> { privateFiles.directory(fs.getPath("/private")) }
             assertFalse(Files.exists(fs.getPath("/private")))
+            java.io.PrintStream(ServiceLog(fs.getPath("/"), "server")).use { output ->
+                assertFailsWith<UnsupportedOperationException> { output.println("synthetic log") }
+            }
         }
     }
 
@@ -185,13 +188,34 @@ class PrivateFilePermissionTest {
         }
         val invalid = root.resolve("not-a-directory")
         Files.writeString(invalid, "synthetic preserved content")
-        assertFailsWith<PrivateFilePermissionException> { ActivityCoverage(invalid) }
+        assertFailsWith<IOException> { privateFiles.directory(invalid) }
+        ActivityCoverage(invalid).use { coverage ->
+            assertTrue(coverage.snapshot().getValue("failures").jsonPrimitive.long > 0)
+            assertFails { coverage.seal(coverage.snapshot()) }
+        }
         assertTrue(Files.exists(invalid))
-        val logs = privateFiles.directory(root.resolve("service-logs"))
-        val day = java.time.LocalDate.of(2026, 11, 10)
-        Files.createDirectory(logs.resolve("server-$day.log"))
-        java.io.PrintStream(ServiceLog(logs, "server") { day }).use { output ->
-            assertFailsWith<PrivateFilePermissionException> { output.println("synthetic log") }
+        val invalidFile = Files.createDirectory(root.resolve("not-a-file"))
+        assertFailsWith<IOException> { privateFiles.secureFile(invalidFile) }
+        val denied = PrivateFiles { _, _ -> throw IOException("injected permission failure") }
+        assertFailsWith<PrivateFilePermissionException> { denied.secureFile(invalid) }
+    }
+
+    @Test fun accessLogPathFailureIsStickyAndCannotAuthorizeASeal() = withTemp { root ->
+        val logs = privateFiles.directory(root.resolve("logs"))
+        val day = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+        val accessPath = Files.createDirectory(logs.resolve("access-$day.log"))
+        UsageObservation(logs, root.resolve("state")).use { observation ->
+            assertEquals(0, observation.coverage.snapshot().getValue("failures").jsonPrimitive.long)
+            observation.access(null, "/v1/hello", "GET", 200, 1, null)
+            assertTrue(observation.coverage.snapshot().getValue("failures").jsonPrimitive.long > 0)
+            assertFails { observation.coverage.seal(observation.coverage.snapshot()) }
+            assertTrue(Files.isDirectory(accessPath), "An existing invalid object must not be deleted")
+            Files.delete(accessPath)
+            observation.access(null, "/v1/hello", "GET", 200, 1, null)
+            assertPrivatePath(accessPath, false)
+            assertTrue(observation.coverage.snapshot().getValue("failures").jsonPrimitive.long > 0)
+            assertFails { observation.coverage.seal(observation.coverage.snapshot()) }
+            println("PRIVATE LOGS: path fault recorded; release refused before and after writer recovery")
         }
     }
 

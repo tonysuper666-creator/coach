@@ -16,7 +16,7 @@ internal class ServiceLog(private val directory: Path, private val name: String,
         val today = currentDay()
         if (day != today) {
             output?.close()
-            val path = privateFiles.file(directory.resolve("$name-$today.log"))
+            val path = privateFiles.logFile(directory.resolve("$name-$today.log"))
             output = Files.newOutputStream(path,
                 java.nio.file.StandardOpenOption.APPEND, java.nio.file.LinkOption.NOFOLLOW_LINKS)
             day = today

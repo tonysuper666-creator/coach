@@ -36,6 +36,9 @@ internal class PrivateFiles(
 
     fun file(path: Path): Path = prepareFile(path) { _, _ -> }
 
+    /** Existing log sinks may be FIFOs; secrets and newly created files stay regular. */
+    fun logFile(path: Path): Path = prepareFile(path, log = true) { _, _ -> }
+
     fun writeNew(path: Path, bytes: ByteArray): Path = prepareFile(path) { target, created ->
         if (created) Files.newByteChannel(target, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
             val buffer = java.nio.ByteBuffer.wrap(bytes)
@@ -43,7 +46,7 @@ internal class PrivateFiles(
         }
     }
 
-    private fun prepareFile(path: Path, write: (Path, Boolean) -> Unit): Path {
+    private fun prepareFile(path: Path, log: Boolean = false, write: (Path, Boolean) -> Unit): Path {
         val target = path.toAbsolutePath().normalize()
         val parents = mutableListOf<Path>()
         var created = false
@@ -58,7 +61,8 @@ internal class PrivateFiles(
                     if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) throw error
                 }
             }
-            secureFile(target)
+            if (log && !created) protect(target, false, existingLog = true)
+            else secureFile(target)
             write(target, created)
             return target
         } catch (error: Exception) {
@@ -76,10 +80,11 @@ internal class PrivateFiles(
     // UNIX sockets are not regular files, but have the same private mode.
     fun secureSocket(path: Path) = protect(path, false, socket = true)
 
-    private fun protect(path: Path, directory: Boolean, socket: Boolean = false) {
+    private fun protect(path: Path, directory: Boolean, socket: Boolean = false, existingLog: Boolean = false) {
         // Refuse invalid paths without conflating an I/O fault with failed permission enforcement.
         if (Files.isSymbolicLink(path)) throw IOException("Private paths must not be symbolic links")
         val valid = if (directory) Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+            else if (existingLog) Files.exists(path, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
             else if (socket) Files.exists(path, LinkOption.NOFOLLOW_LINKS)
             else Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
         if (!valid) throw IOException("Invalid private path type")

@@ -347,10 +347,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
     val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
-    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-    AppBackHandler(sourceOpen, priority = 250) { sourceOpen = false }
+    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable(item.str("id"), sourceKp) { mutableStateOf(false) }
+    AppBackHandler(sourceOpen && sourceKp?.sourceReferences?.structured != true, priority = 250) { sourceOpen = false }
     val openSource = { if (sourceKp != null) sourceOpen = true else onBack() }
-    if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
+    if (sourceOpen && sourceKp?.sourceReferences?.structured == true) {
+        ClaimSourceDialog(http.reader, sourceKp, "第 $number 周 · 第 ${index + 1} 题") { sourceOpen = false }
+    } else if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }, backLabel = "← 第 $number 周 · 第 ${index + 1} 题") }
     }
@@ -476,9 +478,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                             Spacer(Modifier.height(16.dp))
                         }
-                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                        }
+                        ClaimSourceReferences(http.reader, sourceKp, explanation.str("source").ifBlank { done.str("source") },
+                            done.str("anchor"), item.str("id"))
                     }
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }
@@ -494,9 +495,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
-                    if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
-                        PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                    }
+                    if (explanation == null) ClaimSourceReferences(http.reader, sourceKp, done.str("source"), done.str("anchor"), item.str("id"))
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.
                     options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->

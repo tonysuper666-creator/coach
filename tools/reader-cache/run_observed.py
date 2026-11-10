@@ -23,7 +23,9 @@ PACKAGE = "com.coach.readermeasurement"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=["desktop", "android"], required=True)
-    parser.add_argument("--suite", choices=["performance", "behavior"], default="performance")
+    parser.add_argument("--suite", choices=["performance", "behavior", "transport", "lifecycle"], default="performance")
+    parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
+                        help="Diagnostic fixture mode; keep legacy for historical comparisons")
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -53,7 +55,7 @@ def main():
                 raise ValueError("Refusing to install an APK outside the isolated measurement package")
             subprocess.run(adb + ["install", "-r", str(apk)], check=True, stdout=subprocess.DEVNULL)
     run_id = uuid.uuid4().hex
-    identity = dict(platform=args.platform, suite=args.suite, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+    identity = dict(platform=args.platform, suite=args.suite, fixtureTransport=args.transport_mode, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     captureBoundary="draw/submission and verified pixel upper bound; first physical present unobserved")
     identity["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
     if args.platform == "android":
@@ -103,7 +105,7 @@ def main():
         except Exception as error:
             sampling_errors.append(type(error).__name__)
 
-    with Fixture(out / "fixture", args.host, renderer=args.renderer) as fixture:
+    with Fixture(out / "fixture", args.host, renderer=args.renderer, transport=args.transport_mode, lifecycle=args.suite == "lifecycle") as fixture:
         identity["materialSha256"] = fixture.material_sha256
         (out / "run.json").write_text(json.dumps(identity, indent=2))
         sampler = threading.Thread(target=sample)
@@ -123,11 +125,13 @@ def main():
             with (out / "test.log").open("w") as log:
                 if args.platform == "desktop":
                     # The caller holds tools/dev/heavy --local; do not nest the same lock.
-                    test_class = "com.coach.ui.ReaderPageObservedTest" if args.suite == "performance" else "com.coach.ui.ReaderPageCachePathTest"
+                    test_class = "com.coach.ui." + dict(performance="ReaderPageObservedTest", behavior="ReaderPageCachePathTest",
+                        transport="ReaderImageTransportTest", lifecycle="ReaderPageLifetimeTest")[args.suite]
                     result = subprocess.run(["./gradlew", ":shared:ui:jvmTest", "--tests", test_class,
                                              "--rerun-tasks"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
                 else:
-                    test_class = "com.coach.android.ReaderPageObservedSmoke" if args.suite == "performance" else "com.coach.android.ReaderPageCachePathSmoke"
+                    test_class = "com.coach.android." + dict(performance="ReaderPageObservedSmoke", behavior="ReaderPageCachePathSmoke",
+                        transport="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke")[args.suite]
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                         test_class, "-e", "readerPort", str(fixture.port), "-e", "readerRunId", run_id,
                         PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
@@ -136,6 +140,12 @@ def main():
                     if args.suite == "performance":
                         captures.append(("reader-closed.json", "closed.json"))
                         captures.append(("reader-before-close.json", "before-close.json"))
+                    if args.suite == "transport":
+                        captures.append(("reader-transport.json", "transport.json"))
+                    if args.suite == "lifecycle":
+                        captures.append(("reader-lifecycle-cases.json", "lifecycle-cases.json"))
+                        for stage in ("baseline_idle", "book_a_ready", "three_pages_ready", "after_close", "closed_decode_paused", "final_closed", "after_gc_request"):
+                            captures.append((f"reader-lifetime-{stage}.json", f"lifetime-{stage}.json"))
                     for remote, local in captures:
                         with (out / local).open("wb") as capture:
                             subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/" + remote], stdout=capture, check=True)
@@ -146,12 +156,25 @@ def main():
                 raise RuntimeError("test command failed; inspect test.log")
             trace = json.loads((out / "trace.json").read_text())
             identity["measurementPid"] = trace["process"]["pid"]
-            expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else None
-            (out / "summary.json").write_text(json.dumps(summarize(trace, expected), indent=2))
+            if args.suite in ("performance", "behavior"):
+                expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else None
+                summary = summarize(trace, expected)
+            elif args.suite == "transport":
+                summary = dict(suite="transport", samples=len(json.loads((out / "transport.json").read_text())["samples"]),
+                               uiPerformanceVerified=False, physicalMemoryBudgetVerified=False)
+            else:
+                cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]
+                required = {"book_a", "switch_book_b", "restore_book_a", "version_changed", "rendering_changed", "closed", "cancelled_decode", "reopened"}
+                complete = {row["case"] for row in cases if row["passed"]} == required
+                if not complete:
+                    raise RuntimeError("Native lifecycle cases incomplete")
+                summary = dict(suite="lifecycle", cases=cases, complete=complete, physicalMemoryBudgetVerified=False, gpuReleaseVerified=False)
+            (out / "summary.json").write_text(json.dumps(summary, indent=2))
             if args.platform == "desktop":
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
             (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
+            (out / "transfers.json").write_text(json.dumps(fixture.transfers, indent=2))
         finally:
             stop.set()
             sampler.join()

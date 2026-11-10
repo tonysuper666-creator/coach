@@ -232,3 +232,81 @@ Windows compilation is not emulator evidence. New native behavior/performance
 runs, the missing/ambiguous frame associations, Mac presentation, full service
 path and native/GPU memory budget remain required before acceptance. Independent
 review and cross-platform verification follow the candidate evidence.
+
+## Early fetch, transport diagnosis and native invalidation
+
+The `ed221f9b` native run still had only 3/40 Android turns decoded before input.
+Its 37 late turns finished decoding a median 10.157 ms after input; request to
+ready took a median 161.378 ms. Moving the loader to a worker did not fix that
+wait. The revised pipeline starts the next neighbour's HTTP request immediately
+after the current bitmap is published, overlapping network with the current
+draw. It waits for visible draw commands before speculative native decoding;
+promotion to a visible page bypasses that wait. Current-page priority and the
+three managed slots, including the load, remain enforced. Measure the result;
+this timing opportunity is not a claim that the target now passes.
+
+Reader image HTTP uses scoped streaming execution so `http_headers_received`
+and `http_body_received` are distinct, without the non-streaming saved-response
+copy. Cancellation propagates and a declared body-length mismatch is rejected.
+These semantics follow [Ktor response streaming](https://ktor.io/docs/client-responses.html#streaming-data).
+Per-request trace tokens match start/headers/body/ready/cancel events. The fixture
+records server handler/header/body queue times and its actual TCP_NODELAY value;
+queue completion does not prove wire delivery. No URL, header, credential or
+material content enters these measurements.
+
+The default `--transport-mode legacy` preserves the prior HTTP/1.0 fixture.
+Do not replace historical samples with a different transport mode. Run the new
+transport suite on Mac using the existing Android parameters, for example:
+
+```sh
+tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
+  --platform android --suite transport --transport-mode legacy \
+  --host <existing-configured-host> --serial <isolated-emulator> \
+  --adb <adb> --aapt2 <aapt2> --apk <isolated-apk> --test-apk <isolated-test-apk> \
+  --output build/reader-observed/android-transport-legacy
+```
+
+Use fresh output directories for `nodelay` and `keepalive` diagnostic controls,
+with identical PNGs and endpoint configuration. These are separate transport
+experiments, not comparable replacements for the legacy baseline/candidate.
+`transport.json` has 12 CIO image transfers plus four HttpURLConnection controls,
+without decoding or drawing. Headers/body timings and `transfers.json` distinguish
+server writes from client continuation; they do not alone identify a TCP cause.
+Only continue to full performance reruns once the request stages are understood.
+The real-service proxy must retain its own transport settings in the report.
+
+`--suite lifecycle` (both platforms, same runner parameters) drives the production
+PDF composable with synthetic book/version/raster variants and changes the local
+density profile. It verifies fresh image identities and pixels, returns to the
+original book, closes, pauses the next decode, closes again, resumes the late
+result and reopens. The pause is **before JNI inside the non-interruptible decode
+scope**, not an interruption within a native decoder. Closing waits for both
+composition ownership and the window's completed retirement callback. The drain
+signal follows disposal of a late result, not just completion of its coroutine.
+
+The version endpoint exists only in this isolated lifecycle fixture. Its second
+book and v2 deliberately map to different synthetic PNG pages; this proves
+client-side native key invalidation and is not a regenerated PDF or a hot update
+of the real candidate ReaderLibrary. Preserve that service-path gap explicitly.
+
+The lifecycle suite records the same PID through idle, two-page-ready,
+three-page-ready, closed, closed-with-decode-paused, final-closed and GC-request
+phases, plus Android graphics/native-heap summaries. Each phase has a one-second
+hold outside performance sampling. `lifecycle-cases.json`, seven phase snapshots,
+memory samples, request logs and the final trace are retained. A phase delta,
+weak-reference count, or native handle-close event still does not prove the
+physical three-image increment or GPU release; those verification flags remain
+false.
+
+For Android presentation, `target_window_draw_commands` records **every** draw
+on a hardware Canvas, including a later redraw after a dropped frame. Software
+Canvas draws cannot create this marker; hardware acceleration alone does not
+prove window presentation ([Android rendering checks](https://developer.android.com/topic/performance/views/hardware-accel-views)).
+`window_frames.sql` links each such
+draw's Choreographer token to candidate app and SurfaceFlinger frames; substitute
+the exact `run.json` PID for `{{PID}}`. Retain all candidates. Reject ambiguous
+layers, dropped/unfinished frames, and frames outside the action. A later unique
+presented redraw is an upper bound on display latency; it is not necessarily the
+first presentation. No continuous frame may be inferred merely from an earlier
+bitmap draw. Keep clock alignment, trace-quality warnings, absent witnesses and
+the missing Mac presentation endpoint visible in the report.

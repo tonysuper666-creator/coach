@@ -13,14 +13,15 @@ class ReaderPageWindowTest {
         val result = CompletableDeferred<Raster?>()
         fun finish(): Raster = Raster("${key.identity}:${key.page}").also { result.complete(it) }
     }
-    private class Driver(context: CoroutineContext, val ignoreCancellationOn: Set<Int> = emptySet()) {
+    private class Driver(context: CoroutineContext, val ignoreCancellationOn: Set<Int> = emptySet(), overlap: Boolean = false) {
         val started = Channel<Call>(Channel.UNLIMITED)
         val all = mutableListOf<Call>()
         val discarded = mutableListOf<Raster>()
-        val window = ReaderPageWindow<Raster>(context, load = { key, prefetch ->
+        val window: ReaderPageWindow<Raster> = ReaderPageWindow(context, prefetchBeforeDraw = overlap, load = { key, prefetch ->
             val call = Call(key, prefetch).also { all += it }
             started.send(call)
-            if (key.page in ignoreCancellationOn) withContext(NonCancellable) { call.result.await() } else call.result.await()
+            val value = if (key.page in ignoreCancellationOn) withContext(NonCancellable) { call.result.await() } else call.result.await()
+            if (prefetch && overlap && !window.awaitPrefetchDecode(key)) null else value
         }, discard = { _, raster -> discarded += raster })
         suspend fun next(page: Int, prefetch: Boolean? = null): Call = withTimeout(3000) {
             started.receive().also { assertEquals(page, it.key.page); if (prefetch != null) assertEquals(prefetch, it.prefetch) }
@@ -218,5 +219,44 @@ class ReaderPageWindowTest {
             next(7, true).finish(); ready(view, 7)
             assertTrue(window.stats().peakOwnedSlots <= 3)
         }
+    }
+
+    @Test fun neighbourFetchOverlapsCurrentDrawButDecodeWaitsForVisibleContent() = runBlocking {
+        val driver = Driver(coroutineContext, overlap = true)
+        try { with(driver) {
+            val view = window.open(identity, 5, 10)
+            next(5, false).finish(); ready(view, 5)
+            val six = next(6, true).finish()
+            yield()
+            assertNull(view.image(6), "received bytes cannot decode ahead of the visible draw")
+            view.presented(5); ready(view, 6)
+            assertSame(six, view.image(6))
+            assertTrue(window.stats().peakOwnedSlots <= 3)
+        } } finally { driver.stop() }
+    }
+
+    @Test fun promotingAnEarlyFetchDoesNotWaitForItsOwnFirstDraw() = runBlocking {
+        val driver = Driver(coroutineContext, overlap = true)
+        try { with(driver) {
+            val view = window.open(identity, 5, 10)
+            next(5).finish(); ready(view, 5)
+            val six = next(6, true).finish()
+            view.show(6)
+            ready(view, 6)
+            assertSame(six, view.image(6))
+            assertEquals(1, all.count { it.key.page == 6 })
+        } } finally { driver.stop() }
+    }
+
+    @Test fun closingWhileEarlyBytesWaitForDrawDoesNotPublishADecodedNeighbour() = runBlocking {
+        val driver = Driver(coroutineContext, overlap = true)
+        try { with(driver) {
+            val view = window.open(identity, 5, 10)
+            next(5).finish(); ready(view, 5)
+            next(6, true).finish(); yield()
+            window.close(); window.join()
+            assertNull(view.image(6))
+            assertEquals(0, window.stats().cached)
+        } } finally { driver.stop() }
     }
 }

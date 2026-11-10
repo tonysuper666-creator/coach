@@ -33,18 +33,20 @@ class ReaderRasterLeaseTest {
     @Test fun decodeCompletingAfterCloseIsRetiredWithoutBeingPublished() = runBlocking {
         var releases = 0
         val started = CompletableDeferred<Unit>()
+        var releasedWhenDrained = -1
         val finish = CompletableDeferred<Unit>()
         val window = ReaderPageWindow<ReaderRasterLease<Any>>(coroutineContext, load = { _, _ ->
             withContext(NonCancellable) {
                 started.complete(Unit); finish.await()
                 ReaderRasterLease(Any()) { _, drawn -> assertFalse(drawn); releases++ }
             }
-        }, discard = { _, value -> value.retire() })
+        }, discard = { _, value -> value.retire() }, onDrained = { releasedWhenDrained = releases })
         val view = window.open(ReaderRasterIdentity("fake", "v1", "png"), 1, 1)
         withTimeout(3000) { started.await() }
         window.close(); finish.complete(Unit)
         withTimeout(3000) { window.join() }
         assertNull(view.image(1))
         assertEquals(1, releases)
+        assertEquals(1, releasedWhenDrained, "drain follows retirement of the late native result")
     }
 }

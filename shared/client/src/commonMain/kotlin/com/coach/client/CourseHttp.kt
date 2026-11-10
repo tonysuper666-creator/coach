@@ -6,6 +6,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
 import io.ktor.client.request.get
+import io.ktor.client.request.prepareGet
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -166,6 +167,22 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
             try { http.get(readerUrl(path)).let { if (it.status.isSuccess()) it.bodyAsBytes() else null } }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (_: Exception) { null }
+        },
+        imageTransfer = { path, stage ->
+            try {
+                stage("http_call_started")
+                // Scoped execution separates headers from body completion and avoids retaining a saved response copy.
+                http.prepareGet(readerUrl(path)).execute { response ->
+                    stage("http_headers_received")
+                    if (!response.status.isSuccess()) null else {
+                        val bytes = response.bodyAsBytes()
+                        stage("http_body_received")
+                        val expected = response.headers["Content-Length"]?.toLongOrNull()
+                        bytes.takeIf { expected == null || expected == it.size.toLong() }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { stage("http_cancelled"); throw e }
+            catch (_: Exception) { stage("http_failed"); null }
         },
         text = { path ->
             try { http.get(readerUrl(path)).let { if (it.status.isSuccess()) it.bodyAsText() else null } }

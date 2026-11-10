@@ -6,6 +6,8 @@ import android.os.SystemClock
 import android.os.Trace
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.nativeCanvas
 import java.lang.ref.WeakReference
 import kotlinx.serialization.json.*
 
@@ -20,6 +22,8 @@ internal actual fun readerProcessMemory(): JsonObject = buildJsonObject {
     put("pid", Process.myPid())
     put("totalPssKiB", memory.totalPss)
     put("nativeHeapAllocatedBytes", Debug.getNativeHeapAllocatedSize())
+    put("graphicsSummaryKiB", memory.getMemoryStat("summary.graphics"))
+    put("nativeHeapSummaryKiB", memory.getMemoryStat("summary.native-heap"))
     put("jvmHeapUsedBytes", runtime.totalMemory() - runtime.freeMemory())
     put("clockSync", buildJsonObject {
         put("traceNsBefore", ReaderPageTrace.nowNs())
@@ -35,6 +39,8 @@ internal actual fun readerTraceMarker(kind: String, action: Long, image: Long) {
         Trace.endSection()
     }
 }
+
+internal actual fun readerWindowDraw(canvas: Canvas): Boolean = canvas.nativeCanvas.isHardwareAccelerated
 
 @Composable
 internal actual fun readerFrameSubmitted(): (ReaderDecodeObservation, Long) -> Unit {

@@ -97,7 +97,7 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
 
 @OptIn(ExperimentalUuidApi::class)
 @Composable
-private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
+internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
                                practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null,
                                openingAction: Long = 0, validatedState: JsonObject? = null, onBack: () -> Unit) {
     val traceSession = remember(reader, doc) { ReaderPageTrace.session() }
@@ -365,8 +365,12 @@ private fun PdfPageImage(images: ReaderImageViewer, page: Int, modifier: Modifie
                         drawContent()
                         // image() validates the full material/version/render key and active viewer before exposing a bitmap.
                         images.presented(page)
-                        if (ReaderPageTrace.drawn(observation, traceAction)) {
-                            observation?.let { submitted(it, traceAction) }
+                        ReaderPageTrace.drawn(observation, traceAction)
+                        if (ReaderPageTrace.enabled && observation != null && readerWindowDraw(drawContext.canvas)) {
+                            // Keep every actual hardware-canvas draw, including a redraw after a dropped frame.
+                            // Software-canvas captures cannot supply this candidate; frame/layer alignment is still required.
+                            ReaderPageTrace.mark("target_window_draw_commands", traceSession, page, traceAction, observation.image)
+                            submitted(observation, traceAction)
                         }
                     }, contentScale = ContentScale.FillWidth)
                     if (highlight != null) HighlightOverlay(highlight, result.value.width, result.value.height, Modifier.matchParentSize())

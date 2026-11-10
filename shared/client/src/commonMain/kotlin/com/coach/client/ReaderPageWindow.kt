@@ -4,6 +4,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 
 /** Reader/account scope belongs to the owning ReaderHttp instance, never to a process-wide document ID. */
 data class ReaderRasterIdentity(val document: String, val version: String, val rendering: String)
@@ -20,9 +21,12 @@ class ReaderPageWindow<T : Any>(
     private val load: suspend (ReaderRasterKey, Boolean) -> T?,
     private val discard: (ReaderRasterKey, T) -> Unit = { _, _ -> },
     private val publish: (ReaderRasterKey, T) -> T = { _, value -> value },
+    private val prefetchBeforeDraw: Boolean = false,
+    private val onDrained: () -> Unit = {},
 ) {
     private val lock = Any()
     private val lifetime = SupervisorJob()
+    private val drained = CompletableDeferred<Unit>()
     private val scope = CoroutineScope(context.minusKey(Job) + lifetime)
     private val revision = MutableStateFlow(0L)
     val changes: StateFlow<Long> get() = revision
@@ -69,9 +73,9 @@ class ReaderPageWindow<T : Any>(
             reconcile()
         }
 
-        /** Draw commands, not physical presentation. Prefetch must not precede the visible content's first draw. */
+        /** Draw commands, not presentation. Early fetches may run; speculative decode waits for this signal. */
         fun presented(page: Int) = synchronized(lock) {
-            if (!closed && !removed && viewers.lastOrNull() === this && drawn.add(page)) pump()
+            if (!closed && !removed && viewers.lastOrNull() === this && drawn.add(page)) { changed(); pump() }
         }
 
         fun close() = synchronized(lock) {
@@ -90,6 +94,19 @@ class ReaderPageWindow<T : Any>(
 
     data class Stats(val cached: Int, val inFlight: Int, val peakOwnedSlots: Int, val viewers: Int)
     fun stats(): Stats = synchronized(lock) { Stats(ready.size, if (work == null) 0 else 1, peakSlots, viewers.size) }
+
+    /** A neighbour fetch may overlap the current draw; decoding still waits for that draw.
+     * Promotion to visible content bypasses this wait, avoiding a wait for its own decode.
+     */
+    suspend fun awaitPrefetchDecode(key: ReaderRasterKey): Boolean {
+        fun mayProceed(): Boolean = synchronized(lock) {
+            val top = viewers.lastOrNull()
+            closed || top == null || key !in desired(top) ||
+                key.page in visible(top) || top.drawn.containsAll(visible(top))
+        }
+        changes.first { mayProceed() }
+        return synchronized(lock) { !closed && viewers.lastOrNull()?.let { key in desired(it) } == true }
+    }
 
     fun open(identity: ReaderRasterIdentity, page: Int, pages: Int, visible: Int = 1, allowPrefetch: Boolean = true): Viewer = synchronized(lock) {
         check(!closed)
@@ -135,11 +152,11 @@ class ReaderPageWindow<T : Any>(
         val priority = (visible.map { ReaderRasterKey(top.identity, it) } + desired(top)).distinct()
         val key = priority.firstOrNull { it !in ready && it !in failures } ?: return
         val prefetch = key.page !in visible
-        if (prefetch && (!top.allowPrefetch || !top.drawn.containsAll(visible))) return
+        if (prefetch && (!top.allowPrefetch || !prefetchBeforeDraw && !top.drawn.containsAll(visible))) return
         val loading = Work(key, prefetch)
         loading.job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                if (prefetch) yield() // let the current draw return before beginning speculative work
+                if (prefetch && !prefetchBeforeDraw) yield()
                 loading.value = load(key, prefetch)
             } catch (_: CancellationException) { loading.cancelled = true }
             catch (_: Exception) { /* foreground gets the existing explicit retry UI */ }
@@ -158,6 +175,7 @@ class ReaderPageWindow<T : Any>(
                     changed()
                     pump()
                 } else value?.let { discard(key, it) }
+                finishDrain()
             }
         }
         work = loading
@@ -177,7 +195,12 @@ class ReaderPageWindow<T : Any>(
         work?.let { it.cancelled = true; it.job.cancel() }
         lifetime.cancel()
         changed()
+        finishDrain()
     }
 
-    suspend fun join() { lifetime.join() }
+    private fun finishDrain() {
+        if (closed && work == null && !drained.isCompleted) { onDrained(); drained.complete(Unit) }
+    }
+
+    suspend fun join() { lifetime.join(); drained.await() }
 }

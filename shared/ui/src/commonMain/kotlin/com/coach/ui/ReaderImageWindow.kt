@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -32,19 +34,26 @@ private class ReaderImageResource(reader: ReaderHttp, session: Int) {
         if (old == null || progressRevision(snapshot.state) >= progressRevision(old)) states[snapshot.document] = snapshot.state
     }
     // In particular, never inherit the pausable composition dispatcher or its test frame clock.
-    val window = ReaderPageWindow<ReaderLoadedImage>(Dispatchers.Default, load = { key, prefetch ->
+    val window: ReaderPageWindow<ReaderLoadedImage> = ReaderPageWindow(Dispatchers.Default, prefetchBeforeDraw = true,
+        onDrained = { ReaderPageTrace.mark("window_drained", session, 0, 0) }, load = { key, prefetch ->
         val action = if (prefetch) 0L else this.action
-        ReaderPageTrace.mark("request_started", session, key.page, action)
-        val bytes = reader.image(key.identity.document, key.page, key.identity.version)
-        ReaderPageTrace.mark(if (bytes != null) "request_ready" else "request_failed", session, key.page, action)
+        val request = ReaderPageTrace.request(session, key.page, action)
+        val bytes = reader.image(key.identity.document, key.page, key.identity.version) { stage ->
+            ReaderPageTrace.mark(stage, session, key.page, action, request)
+        }
+        ReaderPageTrace.mark(if (bytes != null) "request_ready" else "request_failed", session, key.page, action, request)
         bytes?.let {
+            // Fetch overlaps recording the current image. Native decode retains visible priority.
+            if (prefetch && !window.awaitPrefetchDecode(key)) return@let null
             readerDecodeGate.withLock {
+                coroutineContext.ensureActive()
                 // Native decoding cannot be interrupted. Keep its result reachable until the window's
                 // completion handler can publish or retire it, including cancellation during decode.
                 withContext(NonCancellable) {
                     val observation = ReaderPageTrace.decode(session, key.page, action, prefetch)
                     var bitmap: androidx.compose.ui.graphics.ImageBitmap? = null
                     try {
+                        ReaderPageTrace.awaitDecodePermit(observation)
                         bitmap = runCatching { decodeReaderImage(bytes, observation) }.getOrNull()
                         bitmap?.let {
                             val raster = ReaderRasterLease(it) { value, drawn ->
@@ -61,6 +70,7 @@ private class ReaderImageResource(reader: ReaderHttp, session: Int) {
         ReaderPageTrace.mark("cache_evicted", session, key.page, 0, image.observation?.image ?: 0)
         image.raster.retire()
     }, publish = { _, image -> image.copy(readyNs = ReaderPageTrace.nowNs()) })
+    init { ReaderPageTrace.mark("window_opened", session, 0, 0) }
 }
 
 private object ReaderImageResources {

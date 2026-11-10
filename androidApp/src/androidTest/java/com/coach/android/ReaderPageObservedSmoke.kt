@@ -62,6 +62,12 @@ class ReaderPageObservedSmoke {
                 }
                 compose.onNodeWithTag("private-document-back").performTouchInput { click() }
                 compose.waitUntil(15_000) { compose.onAllNodesWithTag("private-page-1").fetchSemanticsNodes().isEmpty() }
+                compose.waitUntil(15_000) {
+                    val snapshot=JSONObject(ReaderPageTrace.snapshot().toString())
+                    val events=snapshot.getJSONArray("events")
+                    fun count(kind: String)=(0 until events.length()).count { events.getJSONObject(it).getString("kind")==kind }
+                    snapshot.getInt("compositionOwners")==0 && count("window_opened")==count("window_drained")
+                }
             }
             clickAndObserve("baseline-source", 1)
             for (page in 2..21) clickAndObserve("private-next", page)

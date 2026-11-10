@@ -52,6 +52,12 @@ class ReaderPageObservedTest {
                     }
                     onNodeWithTag("private-document-back").performMouseInput { click() }
                     waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("private-page-1").fetchSemanticsNodes().isEmpty() }
+                    waitUntil(timeoutMillis = 15_000) {
+                        val snapshot=ReaderPageTrace.snapshot()
+                        val events=snapshot.getValue("events").jsonArray.map { it.jsonObject }
+                        fun count(kind: String)=events.count { it["kind"]?.jsonPrimitive?.content==kind }
+                        snapshot.getValue("compositionOwners").jsonPrimitive.int==0 && count("window_opened")==count("window_drained")
+                    }
                 }
                 close()
                 clickAndObserve("baseline-source", 1)

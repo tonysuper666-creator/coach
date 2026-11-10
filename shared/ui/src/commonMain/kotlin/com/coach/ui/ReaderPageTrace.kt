@@ -2,9 +2,11 @@ package com.coach.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Canvas
 import com.coach.client.ReaderRasterIdentity
 import com.coach.client.ReaderRasterLease
 import kotlin.time.TimeSource
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.*
 
 /** No material identifiers, text, URLs, credentials or strong bitmap references enter this trace. */
@@ -31,21 +33,41 @@ object ReaderPageTrace {
     private val draws = mutableSetOf<Pair<Long, Long>>()
     private val lookups = mutableSetOf<Pair<Long, Int>>()
     private val inputTimes = mutableMapOf<Long, Long>()
+    private var decodePause: ReaderDecodePause? = null
 
     private class Allocation(val image: Long, val storage: String, val width: Int, val height: Int,
                              val bytes: Long, val weak: ReaderBitmapWeakReference)
 
     /** Start before composing a measurement surface. Default production execution does no observation. */
     fun start() = synchronized(lock) {
+        decodePause?.resume(); decodePause = null
         epoch++; sequence = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
         decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
         events.clear(); allocations.clear(); owners.clear(); draws.clear(); lookups.clear(); inputTimes.clear(); enabled = true
     }
 
-    fun stop() { enabled = false }
+    fun stop() = synchronized(lock) { enabled = false; decodePause?.resume(); decodePause = null }
     fun nowNs(): Long = clock.elapsedNow().inWholeNanoseconds
 
     internal fun session(): Int = if (!enabled) 0 else synchronized(lock) { ++sessionSequence }
+
+    internal fun request(session: Int, page: Int, action: Long): Long = if (!enabled) 0 else synchronized(lock) {
+        (++sequence).also { record("request_started", session, page, action, it) }
+    }
+
+    /** Measurement only: pause in the non-interruptible decode section, before entering JNI. */
+    fun pauseNextDecode(): ReaderDecodePause = synchronized(lock) {
+        check(enabled && decodePause == null)
+        ReaderDecodePause().also { decodePause = it }
+    }
+
+    internal suspend fun awaitDecodePermit(observation: ReaderDecodeObservation?) {
+        if (!enabled || observation == null) return
+        val pause = synchronized(lock) { decodePause?.takeIf { !it.taken }?.also { it.taken = true } } ?: return
+        mark("decode_paused_before_native", observation.session, observation.page, observation.action, observation.image)
+        try { pause.entered.complete(observation.image); pause.permit.await() }
+        finally { synchronized(lock) { if (decodePause === pause) decodePause = null } }
+    }
 
     internal fun input(kind: Input, page: Int, session: Int = 0): Long {
         if (!enabled) return 0
@@ -195,10 +217,19 @@ object ReaderPageTrace {
 
 internal class ReaderDecodeObservation(val epoch: Int, val session: Int, val page: Int, val action: Long,
                                      val image: Long, val prefetch: Boolean)
+
+class ReaderDecodePause internal constructor() {
+    internal var taken = false
+    internal val entered = CompletableDeferred<Long>()
+    internal val permit = CompletableDeferred<Unit>()
+    suspend fun awaitEntered(): Long = entered.await()
+    fun resume() { permit.complete(Unit) }
+}
 internal fun interface ReaderBitmapWeakReference { fun alive(): Boolean }
 internal expect fun readerWeakBitmap(value: Any): ReaderBitmapWeakReference
 internal expect fun readerProcessMemory(): JsonObject
 internal expect fun readerTraceMarker(kind: String, action: Long, image: Long)
+internal expect fun readerWindowDraw(canvas: Canvas): Boolean
 
 /** Android additionally observes swap-chain submission. JVM deliberately reports no presentation callback. */
 @Composable

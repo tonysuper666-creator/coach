@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Foreground emulator acceptance. Run under tools/dev/heavy, after preparing N/N+1 fixtures.
+
+Private --artifacts directory contains N.apk, N+1.apk, test.apk, wrong-signer.apk.
+Never use this harness on a phone: phone acceptance requires the testphone queue/lease.
+"""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import subprocess
+import time
+import urllib.request
+import xml.etree.ElementTree as ET
+from local_config import value, tail_host
+
+ROOT = Path(__file__).resolve().parents[2]
+PACKAGE = 'com.coach.android.ton1252'
+PORT = 18852
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--prepare', action='store_true', help='build isolated N/N+1 and a synthetic wrong-signer APK first')
+    parser.add_argument('--database-copy', type=Path, help='read-only source SQLite copy (or synthetic fixture); never modified')
+    args = parser.parse_args()
+    out = args.artifacts.resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    os.chmod(out, 0o700)
+    sdk = Path(value('coach.sdkDir')).expanduser()
+    if args.prepare:
+        for code, name in [(216600001, 'N'), (216600002, 'N+1')]:
+            subprocess.run([str(ROOT / 'gradlew'), ':androidApp:assembleDebug', ':androidApp:assembleDebugAndroidTest',
+                ':server:app:installDist', '-PcoachApplicationId=' + PACKAGE, f'-Pcoach.port={PORT}',
+                f'-PcoachVersionCode={code}', '-PcoachVersionName=0.1.' + name, '--console=plain'], cwd=ROOT, check=True)
+            shutil.copyfile(ROOT / 'androidApp/build/outputs/apk/debug/androidApp-debug.apk', out / (name + '.apk'))
+        shutil.copyfile(ROOT / 'androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk', out / 'test.apk')
+        key = out / 'synthetic-signer.p12'
+        key.unlink(missing_ok=True)
+        subprocess.run(['keytool', '-genkeypair', '-keystore', str(key), '-storepass', 'synthetic-pass',
+            '-keypass', 'synthetic-pass', '-alias', 'synthetic', '-dname', 'CN=Synthetic acceptance',
+            '-keyalg', 'RSA', '-validity', '2'], check=True, capture_output=True)
+        try:
+            subprocess.run([str(sdk / 'build-tools/37.0.0/apksigner'), 'sign', '--ks', str(key),
+                '--ks-pass', 'pass:synthetic-pass', '--out', str(out / 'wrong-signer.apk'), str(out / 'N+1.apk')], check=True)
+        finally:
+            key.unlink(missing_ok=True)
+    serial = 'emulator-5572'
+    adb_bin = str(sdk / 'platform-tools/adb')
+    def adb(*arguments, check=True, timeout=45):
+        return subprocess.run([adb_bin, '-s', serial, *map(str, arguments)], capture_output=True,
+                              check=check, timeout=timeout)
+    if adb('get-state', check=False).returncode == 0:
+        raise RuntimeError('Acceptance emulator already exists; refusing to take ownership')
+    spec = importlib.util.spec_from_file_location('publish_app', ROOT / 'tools/dev/publish-app.py')
+    publisher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(publisher)
+    updates = out / 'updates'
+    updates.mkdir(exist_ok=True)
+    # Each run starts a fresh isolated publication history.
+    shutil.rmtree(updates / PACKAGE, ignore_errors=True)
+    original = publisher.publish(out / 'N.apk', updates, sdk)
+    assert publisher.publish(out / 'N.apk', updates, sdk) == original
+    try:
+        publisher.publish(out / 'wrong-signer.apk', updates, sdk)
+        raise AssertionError('Publisher accepted a changed signing identity')
+    except ValueError as error:
+        assert 'signing identity' in str(error)
+    valid = publisher.publish(out / 'N+1.apk', updates, sdk)
+    assert (updates / (original['sha256'] + '.apk')).is_file()
+    try:
+        publisher.publish(out / 'N.apk', updates, sdk)
+        raise AssertionError('Publisher accepted a downgrade')
+    except ValueError as error:
+        assert 'version must increase' in str(error)
+    print('Publisher same-signing, monotonic version and pinned old APK: PASS', flush=True)
+    wrong_dir = out / 'wrong-publication'
+    shutil.rmtree(wrong_dir, ignore_errors=True)
+    wrong = publisher.publish(out / 'wrong-signer.apk', wrong_dir, sdk)
+    for name, metadata in [('valid', valid), ('wrong-signer', wrong)]:
+        (out / (name + '.json')).write_text(json.dumps(metadata))
+    shutil.copyfile(out / 'N+1.apk', out / 'valid.apk')
+    shutil.copyfile(wrong_dir / (wrong['sha256'] + '.apk'), updates / (wrong['sha256'] + '.apk'))
+    data = out / 'data'
+    shutil.rmtree(data, ignore_errors=True)
+    data.mkdir(mode=0o700)
+    source_database = args.database_copy or Path.home() / 'Coach/data/coach.sqlite'
+    with sqlite3.connect(source_database.resolve().as_uri() + '?mode=ro', uri=True) as source:
+        with sqlite3.connect(data / 'coach.sqlite') as target:
+            source.backup(target)
+    with sqlite3.connect(data / 'coach.sqlite') as db:
+        assert db.execute('pragma integrity_check').fetchone()[0] == 'ok'
+        db.execute("update jobs set state='cancelled',last_error='isolated_update_acceptance' where state in ('queued','running')")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
+    env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data / 'device-token'), COACH_RUN_DIR=str(out / 'run'),
+               COACH_LOG_DIR=str(out / 'logs'), COACH_PACKS_DIR=str(out / 'packs'), COACH_STATE_DIR=str(out / 'state'),
+               COACH_GENERATED_DIR=str(out / 'generated'), COACH_MOCK_DIR=str(out / 'mock'),
+               COACH_PORT=str(PORT), COACH_TAIL_HOST=tail_host(), COACH_TRAFFIC='test',
+               COACH_BRIDGE_URL='http://127.0.0.1:1', COACH_SOURCE_LOOKUP='false', COACH_APP_UPDATE_DIR=str(updates))
+    server = emulator = logcat = None
+    logs = []
+    def log(name):
+        handle = (out / name).open('wb'); logs.append(handle); return handle
+    stages = log('stages.txt')
+    def stage(text):
+        # Content-free timeline so a failure can be placed against server and device logs.
+        stages.write(f'{time.strftime("%H:%M:%S", time.gmtime())}Z {text}\n'.encode()); stages.flush()
+    try:
+        server = subprocess.Popen([str(ROOT / 'server/app/build/install/app/bin/app')], env=env,
+                                  stdout=log('server.log'), stderr=subprocess.STDOUT)
+        def api(path, body=None, token=None):
+            headers = {}
+            if token: headers.update({'X-Coach-Device': 'desktop', 'Authorization': 'Bearer ' + token})
+            if body is not None: headers['Content-Type'] = 'application/json'
+            req = urllib.request.Request(f'http://127.0.0.1:{PORT}' + path,
+                data=json.dumps(body).encode() if body is not None else None, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as response: return json.load(response)
+        deadline = time.monotonic() + 45
+        while True:
+            try:
+                token = (data / 'device-token').read_text().strip()
+                api('/v1/hello', token=token); break
+            except (OSError, ValueError):
+                if server.poll() is not None or time.monotonic() > deadline: raise RuntimeError('Isolated server not ready')
+                time.sleep(.3)
+        code = api('/v1/pairing-code', {}, token)['code']
+        credentials = api('/v1/pair', {'code': code, 'name': 'Synthetic update acceptance'})
+        emulator = subprocess.Popen([str(sdk / 'emulator/emulator'), '-avd', 'sable-api35', '-port', '5572',
+            '-read-only', '-no-snapshot-save', '-no-snapshot-load', '-no-window', '-no-audio', '-no-boot-anim',
+            '-gpu', 'host', '-cores', '2', '-memory', '2048'], stdout=log('emulator.log'), stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 180
+        while adb('shell', 'getprop', 'sys.boot_completed', check=False, timeout=5).stdout.strip() != b'1':
+            if emulator.poll() is not None or time.monotonic() > deadline: raise RuntimeError('Emulator boot failed')
+            time.sleep(1)
+        adb('shell', 'wm', 'dismiss-keyguard')
+        adb('shell', 'settings', 'put', 'system', 'screen_off_timeout', '1800000')
+        adb('uninstall', PACKAGE, check=False)
+        adb('install', out / 'N.apk', timeout=90)
+        adb('install', '-r', out / 'test.apk', timeout=90)
+        logcat = subprocess.Popen([adb_bin, '-s', serial, 'logcat', '-v', 'threadtime'],
+                                  stdout=log('logcat.txt'), stderr=subprocess.STDOUT)
+        # Write as the debuggable target UID: shell-created external files are
+        # not readable by the app under Android 15's scoped-storage rules.
+        fixture = 'files/update-fixtures'
+        adb('shell', 'run-as', PACKAGE, 'mkdir', '-p', fixture)
+        for name in ['valid.apk', 'valid.json', 'wrong-signer.apk', 'wrong-signer.json']:
+            with (out / name).open('rb') as source:
+                subprocess.run([adb_bin, '-s', serial, 'shell', '-T', 'run-as', PACKAGE,
+                    'tee', fixture + '/' + name], stdin=source, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, check=True, timeout=45)
+        url = f'http://{tail_host()}:{PORT}'
+        def instrument(method, extra=()):
+            result = adb('shell', 'am', 'instrument', '-w', '-e', 'class',
+                'com.coach.android.AppUpdateSmoke#' + method, *extra,
+                PACKAGE + '.test/androidx.test.runner.AndroidJUnitRunner', timeout=100)
+            text = result.stdout.decode()
+            # Only content-free test output is retained; credentials never enter output.
+            (out / (method + '.txt')).write_text(text)
+            if 'OK (1 test)' not in text: raise RuntimeError(method + ' failed; inspect private test output')
+            print(method + ': PASS', flush=True)
+        instrument('installerIgnoresThirdPartyDefaultsAndFailsClosedWithoutTrustedHandler')
+        instrument('deviceInstallerIsExplicitAndPrivileged')
+        instrument('acceptsValidUpdateAndRejectsDigestAndSignerMismatch')
+        instrument('seedUpgradeSentinel', ('-e', 'coachUrl', url, '-e', 'deviceId', credentials['deviceId'], '-e', 'token', credentials['token']))
+        def launch():
+            adb('shell', 'am', 'force-stop', PACKAGE)
+            adb('shell', 'am', 'start', '-n', PACKAGE + '/com.coach.android.CoachActivity', '--es', 'coachUrl', url)
+        def tree():
+            adb('shell', 'uiautomator', 'dump', '/sdcard/ton1252.xml', check=False)
+            return ET.fromstring(adb('shell', 'cat', '/sdcard/ton1252.xml').stdout)
+        def find(label, timeout=40):
+            stage('wait ' + label)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                nodes = list(tree().iter('node'))
+                for node in nodes:
+                    if label in (node.get('text', '') + node.get('content-desc', '')): stage('saw ' + label); return node
+                time.sleep(.3)
+            raise RuntimeError('UI did not show: ' + label)
+        def tap(node):
+            a, b, c, d = map(int, re.findall(r'\d+', node.get('bounds')))
+            adb('shell', 'input', 'tap', (a+c)//2, (b+d)//2)
+        def install_button():
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                for node in tree().iter('node'):
+                    if node.get('text', '').lower() in {'install', 'update', '安装', '更新'} and node.get('enabled') == 'true':
+                        return node
+                time.sleep(.3)
+            raise RuntimeError('System installer confirmation not found')
+        def screenshot(name): (out / (name + '.png')).write_bytes(adb('exec-out', 'screencap', '-p').stdout)
+        def release(metadata):
+            adb('shell', 'input', 'keyevent', '3')
+            temp = updates / PACKAGE / 'latest.tmp'
+            temp.write_text(json.dumps(metadata)); temp.replace(updates / PACKAGE / 'latest.json')
+            adb('shell', 'am', 'start', '-n', PACKAGE + '/com.coach.android.CoachActivity', '--es', 'coachUrl', url)
+            find('Coach 有新版本')
+        # Check startup and foreground before granting the installer permission.
+        launch(); find('Coach 有新版本'); screenshot('01-update-offer')
+        tap(find('稍后')); time.sleep(3)
+        instrument('snapshotLearningReplica')
+        before = adb('shell', 'dumpsys', 'package', PACKAGE).stdout.decode()
+        (out / 'version-before.txt').write_text('\n'.join(line.strip() for line in before.splitlines() if 'versionCode=' in line or 'versionName=' in line))
+        # Server fault injection is confined to the isolated publication directory.
+        release(wrong)
+        adb('emu', 'network', 'speed', '10000:10000'); stage('network limited')
+        tap(find('下载并更新')); find('正在下载'); screenshot('02-download-progress')
+        adb('emu', 'network', 'speed', 'full'); stage('network full')
+        find('签名与当前应用不一致'); screenshot('02-signature-rejected')
+        print('Wrong signing identity rejected in app: PASS', flush=True)
+        bad_hash = dict(valid, sha256='0' * 64)
+        shutil.copyfile(out / 'N+1.apk', updates / ('0' * 64 + '.apk'))
+        release(bad_hash); tap(find('下载并更新')); find('校验失败'); screenshot('03-digest-rejected')
+        print('Wrong digest rejected in app: PASS', flush=True)
+        release(valid); tap(find('下载并更新'))
+        # Android's first-use permission is changed through the actual settings UI.
+        tap(find('Allow from this source')); screenshot('04-install-permission')
+        adb('shell', 'input', 'keyevent', '4')
+        button = install_button()
+        screenshot('05-system-installer'); tap(button)
+        deadline = time.monotonic() + 90
+        while True:
+            after = adb('shell', 'dumpsys', 'package', PACKAGE).stdout.decode()
+            if f'versionCode={valid["versionCode"]}' in after: break
+            if time.monotonic() > deadline: raise RuntimeError('Installer did not upgrade package')
+            time.sleep(.5)
+        (out / 'version-after.txt').write_text('\n'.join(line.strip() for line in after.splitlines() if 'versionCode=' in line or 'versionName=' in line))
+        # The installer's success dialog sits over the launcher, where no update prompt could ever appear;
+        # close it so it cannot stand in for Coach's own same-version check.
+        done = find('Done'); screenshot('06-installer-success'); tap(done)
+        deadline = time.monotonic() + 20
+        while any(node.get('package', '').endswith('packageinstaller') for node in tree().iter('node')):
+            if time.monotonic() > deadline: raise RuntimeError('Installer success dialog did not close')
+            time.sleep(.3)
+        instrument('upgradeRetainsKeystorePairingAndLearningDatabase')
+        def logcat_mark(): return (out / 'logcat.txt').stat().st_size
+        def update_checks(mark, latest, timeout=40):
+            # The app logs one content-free line per finished check; a failed or missing check fails acceptance.
+            stage('wait update check latest=' + latest)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                with (out / 'logcat.txt').open('rb') as handle:
+                    handle.seek(mark); text = handle.read().decode(errors='replace')
+                checks = re.findall(r'CoachUpdate: check (complete latest=(\S+) current=(\d+)|failed \S+)', text)
+                if any(c[0].startswith('failed') for c in checks): raise RuntimeError('Update check failed: ' + checks[-1][0])
+                if any(c[1] == latest for c in checks):
+                    stage('saw update check latest=' + latest); return [(c[1], c[2]) for c in checks]
+                time.sleep(.3)
+            raise RuntimeError('No finished update check for latest=' + latest)
+        current_code = str(valid['versionCode'])
+        mark = logcat_mark(); launch()
+        assert set(update_checks(mark, current_code)) == {(current_code, current_code)}
+        activities = adb('shell', 'dumpsys', 'activity', 'activities').stdout.decode()
+        if not re.search(r'(topResumedActivity|ResumedActivity)[=:] ?ActivityRecord\{\S+ \S+ ' + re.escape(PACKAGE + '/com.coach.android.CoachActivity'), activities):
+            raise RuntimeError('Coach is not the resumed activity after the same-version check')
+        # Leave time for a prompt to compose if one were coming; every sample must be Coach's own window.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            nodes = list(tree().iter('node'))
+            if not nodes or any(node.get('package') != PACKAGE for node in nodes):
+                raise RuntimeError('Coach is not the foreground window after upgrade')
+            if any('Coach 有新版本' in node.get('text', '') for node in nodes):
+                raise AssertionError('Same-version update prompt shown after upgrade')
+            time.sleep(.3)
+        screenshot('07-after-upgrade-foreground')
+        print('Same version after upgrade: foreground check finished without prompt: PASS', flush=True)
+        # Control: the same harness does see a prompt once a strictly newer release is published.
+        newer = dict(valid, versionCode=valid['versionCode'] + 1, versionName='0.1.N+2', sha256='1' * 64)
+        shutil.copyfile(out / 'N+1.apk', updates / ('1' * 64 + '.apk'))
+        mark = logcat_mark(); release(newer); update_checks(mark, str(newer['versionCode']))
+        screenshot('08-newer-release-offered')
+        print('Newer release still offered after upgrade: PASS', flush=True)
+        snapshot_output = (out / 'snapshotLearningReplica.txt').read_text()
+        event_count = int(re.search(r'Learning replica snapshot: (\d+) events', snapshot_output).group(1))
+        summary = {'versionBefore': 216600001, 'versionAfter': valid['versionCode'], 'signatureRejected': True,
+                   'digestRejected': True, 'pairingRetained': True, 'learningReplicaRetained': True,
+                   'learningEventCount': event_count, 'foregroundCheck': True, 'sameVersionCheck': current_code,
+                   'newerReleaseOffered': newer['versionCode'],
+                   'productionWrites': 0, 'realTutorCalls': 0, 'phoneUsed': False}
+        (out / 'summary.json').write_text(json.dumps(summary, indent=2))
+        print(json.dumps(summary), flush=True)
+    except BaseException:
+        # Keep the failing device state privately before the emulator is torn down.
+        if emulator is not None and emulator.poll() is None:
+            stage('failure capture')
+            failure = out / 'failure'
+            failure.mkdir(mode=0o700, exist_ok=True)
+            for name, command in [('screen.png', ('exec-out', 'screencap', '-p')),
+                                  ('ui.xml', ('exec-out', 'uiautomator', 'dump', '/dev/tty')),
+                                  ('package.txt', ('shell', 'dumpsys', 'package', PACKAGE)),
+                                  ('files.txt', ('shell', 'run-as', PACKAGE, 'ls', '-laR', 'cache', 'files'))]:
+                try: (failure / name).write_bytes(adb(*command, check=False, timeout=20).stdout)
+                except subprocess.TimeoutExpired: pass
+            time.sleep(2)
+        raise
+    finally:
+        if emulator is not None and emulator.poll() is None:
+            adb('emu', 'kill', check=False, timeout=10)
+            try: emulator.wait(timeout=20)
+            except subprocess.TimeoutExpired: emulator.terminate(); emulator.wait(timeout=10)
+        if server is not None and server.poll() is None:
+            server.terminate()
+            try: server.wait(timeout=15)
+            except subprocess.TimeoutExpired: server.kill(); server.wait(timeout=5)
+        if logcat is not None and logcat.poll() is None:
+            logcat.terminate(); logcat.wait(timeout=10)
+        for handle in logs: handle.close()
+
+
+if __name__ == '__main__': main()

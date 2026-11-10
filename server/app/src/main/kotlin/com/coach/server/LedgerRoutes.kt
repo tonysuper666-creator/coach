@@ -32,11 +32,11 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) =
-    ledgerRoutes(actor, pushes, chat, adminDevice, observation) { }
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null, updates: AppUpdates = AppUpdates()) =
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation, { }, updates)
 
 // Test seam: pause an individual connection at the point its nonempty frame is sent.
-internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit) {
+internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit, updates: AppUpdates = AppUpdates()) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
@@ -69,6 +69,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
         return false
     }
     routing {
+        appUpdates(updates)
         post("/v1/usage") {
             val observer = observation ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
             // Bound streamed/chunked bodies as well as Content-Length before parsing.

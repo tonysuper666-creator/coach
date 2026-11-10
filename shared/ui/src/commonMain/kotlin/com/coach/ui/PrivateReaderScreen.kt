@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -26,7 +27,7 @@ import kotlin.uuid.Uuid
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
-internal expect fun decodeReaderImage(bytes: ByteArray): ImageBitmap?
+internal expect fun decodeReaderImage(bytes: ByteArray, observation: ReaderDecodeObservation? = null): ImageBitmap?
 
 internal data class PrivateDocument(val id: String, val title: String, val version: String, val pages: Int)
 private fun JsonObject.string(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
@@ -95,7 +96,14 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
 @OptIn(ExperimentalUuidApi::class)
 @Composable
 private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
-                               practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null, onBack: () -> Unit) {
+                               practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null,
+                               openingAction: Long = 0, onBack: () -> Unit) {
+    val traceSession = remember(reader, doc) { ReaderPageTrace.session() }
+    var traceAction by remember(reader, doc) { mutableLongStateOf(openingAction) }
+    DisposableEffect(traceSession) {
+        ReaderPageTrace.mark("session_open", traceSession, initialPage ?: 0, traceAction)
+        onDispose { ReaderPageTrace.mark("session_close", traceSession, 0, traceAction) }
+    }
     var retry by remember(doc) { mutableIntStateOf(0) }
     val state by produceState<ReaderLoad<JsonObject>>(ReaderLoad.Loading, reader, doc, retry) {
         value = ReaderLoad.Loading
@@ -146,14 +154,15 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                     busy = false
                 }
             }
-            fun move(target: Int) {
+            fun move(target: Int, action: Long = ReaderPageTrace.input(ReaderPageTrace.Input.MAP, target, traceSession)) {
+                traceAction = action
                 focus = null
                 page = target
                 send(ProgressWrite(target, revision, Uuid.random().toString()))
             }
             if (showMap) ChapterMapDialog(reader, doc.id, doc.pages, onJump = { target -> showMap = false; if (target != page) move(target) }, onClose = { showMap = false }, practice = practice)
             LaunchedEffect(doc, loaded.value, initialPage) {
-                if (initialPage != null && initialPage != restored) move(initialPage)
+                if (initialPage != null && initialPage != restored) move(initialPage, openingAction)
                 // move() clears any mark from the previous page; a citation's own anchor belongs to the page it opened on.
                 if (initialPage != null && initialAnchor.isNotBlank()) focus = HighlightFocus(initialPage, initialAnchor)
             }
@@ -225,13 +234,13 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
                         if (wide) TextButton(onClick = { spread = !spread }, modifier = Modifier.testTag("private-spread")) { Text(if (spread) "单页" else "双页") }
                     }
                     Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page })
-                        if (two) PdfPageImage(reader, doc, page + 1, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page + 1 })
+                        PdfPageImage(reader, doc, page, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page }, traceSession, traceAction)
+                        if (two) PdfPageImage(reader, doc, page + 1, Modifier.weight(1f).fillMaxHeight(), (highlight as? HighlightState.Shown)?.takeIf { focus?.page == page + 1 }, traceSession, traceAction)
                     }
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { move((page - if (wide && spread) 2 else 1).coerceAtLeast(1)) }, enabled = !busy && pending == null && page > 1, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-prev")) { Text("上一页") }
-                        OutlinedButton(onClick = { move((page + if (two) 2 else 1).coerceAtMost(doc.pages)) }, enabled = !busy && pending == null && page + (if (two) 1 else 0) < doc.pages, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-next")) { Text("下一页") }
+                        OutlinedButton(onClick = { val target = (page - if (wide && spread) 2 else 1).coerceAtLeast(1); move(target, ReaderPageTrace.input(ReaderPageTrace.Input.PREVIOUS, target, traceSession)) }, enabled = !busy && pending == null && page > 1, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-prev")) { Text("上一页") }
+                        OutlinedButton(onClick = { val target = (page + if (two) 2 else 1).coerceAtMost(doc.pages); move(target, ReaderPageTrace.input(ReaderPageTrace.Input.NEXT, target, traceSession)) }, enabled = !busy && pending == null && page + (if (two) 1 else 0) < doc.pages, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag("private-next")) { Text("下一页") }
                     }
                 }
             }
@@ -260,10 +269,11 @@ internal fun PrivateSourceReferences(reader: ReaderHttp, source: String, anchor:
 /** A source click resolves through the course catalog; an unregistered or ambiguous source never guesses. */
 @Composable
 internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: String = "", tag: String = "private-citation", label: String = "出处：$source") {
+    var openingAction by remember { mutableLongStateOf(0) }
     var opened by androidx.compose.runtime.saveable.rememberSaveable(source) { mutableStateOf(false) }
     val back = LocalAppBack.current
     AppBackHandler(opened, priority = 15) { opened = false }
-    TextButton(onClick = { opened = true }, modifier = Modifier.testTag(tag)) { Text(label) }
+    TextButton(onClick = { openingAction = ReaderPageTrace.input(ReaderPageTrace.Input.CITATION, 0); opened = true }, modifier = Modifier.testTag(tag)) { Text(label) }
     if (opened) Dialog(onDismissRequest = { if (back == null) opened = false else back.back() }, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
         Surface(Modifier.fillMaxSize()) {
             var retry by remember { mutableIntStateOf(0) }
@@ -285,7 +295,7 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: 
                     TextButton(onClick = { retry++ }) { Text("重试") }
                     TextButton(onClick = { opened = false }) { Text("返回题目") }
                 }
-                is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second, anchor) { opened = false }
+                is ReaderLoad.Ready -> PrivatePdfDocument(reader, result.value.first, result.value.second, anchor, openingAction = openingAction) { opened = false }
             }
         }
     }
@@ -294,13 +304,29 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: 
 private data class ProgressWrite(val page: Int, val baseRevision: Long, val id: String)
 
 @Composable
-private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, modifier: Modifier, highlight: HighlightState.Shown? = null) {
+private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, modifier: Modifier, highlight: HighlightState.Shown? = null,
+                         traceSession: Int = 0, traceAction: Long = 0) {
     var retry by remember(doc, page) { mutableIntStateOf(0) }
-    val image by produceState<ReaderLoad<ImageBitmap>>(ReaderLoad.Loading, reader, doc, page, retry) {
+    val image by produceState<ReaderLoad<ReaderLoadedImage>>(ReaderLoad.Loading, reader, doc, page, retry) {
         value = ReaderLoad.Loading
+        ReaderPageTrace.mark("lookup_miss", traceSession, page, traceAction)
+        ReaderPageTrace.mark("request_started", traceSession, page, traceAction)
         val bytes = reader.image(doc.id, page, doc.version)
-        val bitmap = bytes?.let { withContext(Dispatchers.Default) { runCatching { decodeReaderImage(it) }.getOrNull() } }
-        value = bitmap?.let { ReaderLoad.Ready(it) } ?: ReaderLoad.Failed
+        ReaderPageTrace.mark(if (bytes != null) "request_ready" else "request_failed", traceSession, page, traceAction)
+        var observation: ReaderDecodeObservation? = null
+        val bitmap = bytes?.let { withContext(Dispatchers.Default) {
+            observation = ReaderPageTrace.decode(traceSession, page, traceAction)
+            var decoded: ImageBitmap? = null
+            try { decoded = runCatching { decodeReaderImage(it, observation) }.getOrNull(); decoded }
+            finally { ReaderPageTrace.decoded(observation, decoded != null) }
+        } }
+        value = bitmap?.let { ReaderLoad.Ready(ReaderLoadedImage(it, page, traceSession, observation)) } ?: ReaderLoad.Failed
+    }
+    val submitted = readerFrameSubmitted()
+    val loaded = (image as? ReaderLoad.Ready)?.value
+    DisposableEffect(loaded?.observation) {
+        ReaderPageTrace.owner(loaded?.observation, true)
+        onDispose { ReaderPageTrace.owner(loaded?.observation, false) }
     }
     Box(modifier, contentAlignment = Alignment.Center) {
         when (val result = image) {
@@ -311,8 +337,14 @@ private fun PdfPageImage(reader: ReaderHttp, doc: PrivateDocument, page: Int, mo
             }
             is ReaderLoad.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                 Box(Modifier.fillMaxWidth()) {
-                    Image(result.value, contentDescription = "PDF 第 $page 页", modifier = Modifier.fillMaxWidth().testTag("private-page-$page"), contentScale = ContentScale.FillWidth)
-                    if (highlight != null) HighlightOverlay(highlight, result.value.width, result.value.height, Modifier.matchParentSize())
+                    Image(result.value.bitmap, contentDescription = "PDF 第 $page 页", modifier = Modifier.fillMaxWidth().testTag("private-page-$page").drawWithContent {
+                        drawContent()
+                        // produceState can briefly retain the previous image: never attribute its draw to the new target.
+                        if (result.value.sourcePage == page && result.value.sourceSession == traceSession && ReaderPageTrace.drawn(result.value.observation, traceAction)) {
+                            result.value.observation?.let { submitted(it, traceAction) }
+                        }
+                    }, contentScale = ContentScale.FillWidth)
+                    if (highlight != null) HighlightOverlay(highlight, result.value.bitmap.width, result.value.bitmap.height, Modifier.matchParentSize())
                 }
             }
         }

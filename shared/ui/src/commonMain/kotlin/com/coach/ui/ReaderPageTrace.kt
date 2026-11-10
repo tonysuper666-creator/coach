@@ -1,0 +1,190 @@
+package com.coach.ui
+
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.ImageBitmap
+import kotlin.time.TimeSource
+import kotlinx.serialization.json.*
+
+/** No material identifiers, text, URLs, credentials or strong bitmap references enter this trace. */
+object ReaderPageTrace {
+    enum class Input { NEXT, PREVIOUS, CITATION, MAP, RESTORE }
+    private const val LIMIT = 8192
+    private const val ALLOCATION_LIMIT = 2048
+    private val lock = Any()
+    private val clock = TimeSource.Monotonic.markNow()
+    @kotlin.concurrent.Volatile var enabled = false
+        private set
+    private var epoch = 0
+    private var sequence = 0L
+    private var sessionSequence = 0
+    private var dropped = 0
+    private var allocationOverflow = false
+    private var decoding = 0
+    private var peakDecoding = 0
+    private var peakDecoded = 0
+    private var peakReachableBytes = 0L
+    private val events = ArrayDeque<JsonObject>()
+    private val allocations = mutableListOf<Allocation>()
+    private val owners = mutableMapOf<Long, Int>()
+    private val draws = mutableSetOf<Pair<Long, Long>>()
+
+    private class Allocation(val image: Long, val storage: String, val width: Int, val height: Int,
+                             val bytes: Long, val weak: ReaderBitmapWeakReference)
+
+    /** Start before composing a measurement surface. Default production execution does no observation. */
+    fun start() = synchronized(lock) {
+        epoch++; sequence = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
+        decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
+        events.clear(); allocations.clear(); owners.clear(); draws.clear(); enabled = true
+    }
+
+    fun stop() { enabled = false }
+    fun nowNs(): Long = clock.elapsedNow().inWholeNanoseconds
+
+    internal fun session(): Int = if (!enabled) 0 else synchronized(lock) { ++sessionSequence }
+
+    internal fun input(kind: Input, page: Int, session: Int = 0): Long {
+        if (!enabled) return 0
+        return synchronized(lock) {
+            val action = ++sequence
+            record("input_${kind.name.lowercase()}", session, page, action)
+            action
+        }
+    }
+
+    internal fun mark(kind: String, session: Int, page: Int, action: Long, image: Long = 0) {
+        if (enabled) synchronized(lock) { record(kind, session, page, action, image) }
+    }
+
+    internal fun decode(session: Int, page: Int, action: Long, prefetch: Boolean = false): ReaderDecodeObservation? {
+        if (!enabled) return null
+        return synchronized(lock) {
+            decoding++; peakDecoding = maxOf(peakDecoding, decoding)
+            ReaderDecodeObservation(epoch, session, page, action, ++sequence, prefetch).also {
+                record(if (prefetch) "prefetch_decode_started" else "decode_started", session, page, action, it.image)
+            }
+        }
+    }
+
+    internal fun allocation(observation: ReaderDecodeObservation, storage: String, width: Int, height: Int,
+                            bytes: Long, weak: ReaderBitmapWeakReference) {
+        if (!enabled) return
+        synchronized(lock) {
+            if (observation.epoch != epoch) return
+            // Retain bounded allocation metadata after collection so peak sizes remain auditable.
+            if (allocations.size >= ALLOCATION_LIMIT) allocationOverflow = true
+            else allocations += Allocation(observation.image, storage, width, height, bytes, weak)
+            record("allocation_$storage", observation.session, observation.page, observation.action, observation.image)
+        }
+    }
+
+    internal fun decoded(observation: ReaderDecodeObservation?, ok: Boolean) {
+        if (!enabled || observation == null) return
+        synchronized(lock) {
+            if (observation.epoch != epoch) return
+            decoding--
+            record(if (!ok) "decode_failed" else if (observation.prefetch) "prefetch_decode_ready" else "decode_ready",
+                observation.session, observation.page, observation.action, observation.image)
+        }
+    }
+
+    internal fun owner(observation: ReaderDecodeObservation?, attach: Boolean) {
+        if (!enabled || observation == null) return
+        synchronized(lock) {
+            if (observation.epoch != epoch) return
+            val id = observation.image
+            val count = (owners[id] ?: 0) + if (attach) 1 else -1
+            if (count > 0) owners[id] = count else owners.remove(id)
+            record(if (attach) "composition_attach" else "composition_detach", observation.session, observation.page, observation.action, id)
+        }
+    }
+
+    /** Called after target bitmap draw commands; false for repeat draws. This is not a presentation timestamp. */
+    internal fun drawn(observation: ReaderDecodeObservation?, action: Long): Boolean {
+        if (!enabled || observation == null) return false
+        return synchronized(lock) {
+            if (observation.epoch != epoch || !draws.add(action to observation.image)) return@synchronized false
+            if (draws.size >= LIMIT) { draws.clear(); dropped++ }
+            record("target_draw_commands", observation.session, observation.page, action, observation.image)
+            true
+        }
+    }
+
+    internal fun submitted(observation: ReaderDecodeObservation, action: Long) {
+        if (enabled) synchronized(lock) {
+            if (observation.epoch == epoch) record("frame_submitted", observation.session, observation.page, action, observation.image)
+        }
+    }
+
+    /** The harness calls this only after verifying the target page's pixels in a native capture. */
+    fun pixelsObserved(page: Int) {
+        if (enabled) synchronized(lock) { record("pixels_observed", 0, page, 0) }
+    }
+
+    fun checkpoint(label: String) {
+        require(label.matches(Regex("[a-z_]{1,32}")))
+        if (enabled) synchronized(lock) { record("checkpoint_$label", 0, 0, 0) }
+    }
+
+    fun snapshot(): JsonObject = synchronized(lock) {
+        val alive = allocations.filter { it.weak.alive() }
+        buildJsonObject {
+            put("schema", 1)
+            put("clock", "process-local monotonic nanoseconds")
+            put("mode", "baseline_no_cache_no_prefetch")
+            put("inputPoint", "production click handler; excludes dispatch before the handler")
+            put("drawPoint", "target bitmap draw commands recorded; not physical presentation")
+            put("firstPresentLatencyVerified", false)
+            put("gpuRetentionObserved", false)
+            put("weakLivenessIsNativeDeallocationProof", false)
+            put("complete", dropped == 0 && !allocationOverflow)
+            put("droppedEvents", dropped)
+            put("allocationOverflow", allocationOverflow)
+            put("decodeInFlight", decoding)
+            put("peakDecodeInFlight", peakDecoding)
+            put("peakWeakLiveDecodedBackings", peakDecoded)
+            put("peakWeakReachableBackingBytes", peakReachableBytes)
+            put("compositionOwners", owners.values.sum())
+            put("weakLiveBackings", JsonArray(alive.map { allocation -> buildJsonObject {
+                put("image", allocation.image); put("storage", allocation.storage)
+                put("width", allocation.width); put("height", allocation.height); put("bytes", allocation.bytes)
+            } }))
+            put("allocations", JsonArray(allocations.map { allocation -> buildJsonObject {
+                put("image", allocation.image); put("storage", allocation.storage)
+                put("width", allocation.width); put("height", allocation.height); put("bytes", allocation.bytes)
+                put("weakAlive", allocation.weak.alive())
+            } }))
+            put("events", JsonArray(events.toList()))
+            put("process", readerProcessMemory())
+        }
+    }
+
+    private fun record(kind: String, session: Int, page: Int, action: Long, image: Long = 0) {
+        val alive = allocations.filter { it.weak.alive() }
+        val decoded = alive.count { it.storage == "decoded" }
+        val bytes = alive.sumOf { it.bytes }
+        peakDecoded = maxOf(peakDecoded, decoded); peakReachableBytes = maxOf(peakReachableBytes, bytes)
+        if (events.size >= LIMIT) { events.removeFirst(); dropped++ }
+        events.addLast(buildJsonObject {
+            put("kind", kind); put("ns", nowNs()); put("session", session); put("page", page)
+            put("action", action); put("image", image)
+            put("decodeInFlight", decoding); put("compositionOwners", owners.values.sum())
+            put("weakLiveDecodedBackings", decoded); put("weakLiveScratchBackings", alive.count { it.storage == "scratch" })
+            put("weakReachableBackingBytes", bytes)
+        })
+        readerTraceMarker(kind, action, image)
+    }
+}
+
+internal class ReaderDecodeObservation(val epoch: Int, val session: Int, val page: Int, val action: Long,
+                                     val image: Long, val prefetch: Boolean)
+internal fun interface ReaderBitmapWeakReference { fun alive(): Boolean }
+internal expect fun readerWeakBitmap(value: Any): ReaderBitmapWeakReference
+internal expect fun readerProcessMemory(): JsonObject
+internal expect fun readerTraceMarker(kind: String, action: Long, image: Long)
+
+/** Android additionally observes swap-chain submission. JVM deliberately reports no presentation callback. */
+@Composable
+internal expect fun readerFrameSubmitted(): (ReaderDecodeObservation, Long) -> Unit
+
+internal data class ReaderLoadedImage(val bitmap: ImageBitmap, val sourcePage: Int, val sourceSession: Int, val observation: ReaderDecodeObservation?)

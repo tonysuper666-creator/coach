@@ -290,16 +290,28 @@ def analyze_boundary(association, report, run_id, configured_host, port, backend
         errors.append('relay_endpoint_mismatch')
     recording = []
     deltas = {}
+    identity_checks = {}
+    port_domains = {}
     if len(samples) == len(probes) == 1:
         sample, relay = samples[0], probes[0]
         client, server = sample['client'], sample['server']
-        if sample.get('probeId') != expected or client.get('probeId') != expected or \
-                client.get('route') != 'configured' or client.get('destinationHost') != configured_host or \
-                client.get('destinationPort') != port or client.get('requestHost') != configured_host or \
-                client.get('localPort') != relay.get('peerPort') or \
-                server.get('clientPort') != relay.get('outgoingLocalPort') or \
-                server.get('serverBindAddress') != '127.0.0.1' or server.get('serverPort') != backend_port or \
-                server.get('requestHost') != f'{configured_host}:{port}':
+        # Preserve the strict gate, but expose which observation-domain check
+        # failed. Number equality across an emulator boundary is not a verified
+        # translation witness, even when a host-only synthetic test passes.
+        identity_checks = dict(
+            exactNonce=sample.get('probeId') == expected and client.get('probeId') == expected,
+            clientDestination=client.get('route') == 'configured' and client.get('destinationHost') == configured_host
+                and client.get('destinationPort') == port and client.get('requestHost') == configured_host,
+            crossDomainPortNumbersEqual=client.get('localPort') == relay.get('peerPort'),
+            hostRelayFixturePeerPort=server.get('clientPort') == relay.get('outgoingLocalPort'),
+            fixtureEndpoint=server.get('serverBindAddress') == '127.0.0.1' and server.get('serverPort') == backend_port
+                and server.get('requestHost') == f'{configured_host}:{port}')
+        port_domains = dict(
+            clientReported=dict(localPort=client.get('localPort'), destinationPort=client.get('destinationPort')),
+            hostRelayIncoming=dict(peerPort=relay.get('peerPort'), listenerPort=relay.get('listenerPort'), fd=relay.get('incomingFd')),
+            hostRelayOutgoing=dict(localPort=relay.get('outgoingLocalPort'), backendPort=relay.get('backendPort'), fd=relay.get('outgoingFd')),
+            hostFixture=dict(clientPort=server.get('clientPort'), serverPort=server.get('serverPort')))
+        if not all(identity_checks.values()):
             errors.append('nonce_or_socket_tuple_mismatch')
         if client.get('serverConnectionId') != relay.get('serverConnectionId') or \
                 server.get('connectionId') != relay.get('serverConnectionId') or \
@@ -373,6 +385,9 @@ def analyze_boundary(association, report, run_id, configured_host, port, backend
     if not overhead_ok:
         errors.append('observed_recording_budget_exceeded_or_missing')
     return dict(complete=not errors, errors=errors, probeId=expected, matchedNonces=len(probes),
+                identityChecks=identity_checks, portObservationDomains=port_domains,
+                crossDomainPortMappingVerified=False,
+                portContract='Client and host relay ports are separate observations; number equality alone is not a run/nonce-specific translation witness. Strict failures are not waived.',
                 fixtureRelayMonotonicDeltasNs=deltas,
                 fixtureRelayClock=report.get('hostClock'),
                 recording=dict(samples=len(recording), maximumObservedNs=max(recording, default=None),

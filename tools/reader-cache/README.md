@@ -1187,3 +1187,38 @@ offline command. Exact source head, preflight status, one nonce, event counts,
 clock resolutions, observed overhead and all retained gaps must accompany any
 native handoff. None of these tools establishes the 100 ms actual-presentation
 target or the three-image physical/native/GPU budget.
+
+### Port observation domains after the first native single probe
+
+The first native single run at `5e08f585` retained a strict failure: the app
+reported local port 36994 while the host relay observed peer port 58236. The
+same-host relay outgoing port and fixture client port both read 58237. One
+nonce/echo/body hash and seven I/O records matched, but these records did not
+supply a guest-to-host port translation witness. DTrace activation was rejected
+under the current Mac privileges. No new native run is justified by this alone.
+
+The previous cross-domain number-equality assumption was not a valid general
+identity contract. Emulator networking is version-dependent; see the official
+[network address space](https://developer.android.com/studio/run/emulator-networking-address)
+and [interconnection](https://developer.android.com/studio/run/emulator-networking-interconnect)
+descriptions. These documents are context, not proof of the actual translation
+component or mapping in this run. Do not attribute the delay to NAT from unequal
+ports, and do not treat equal port numbers as a verified mapping either.
+
+The checker now adds `identityChecks` and `portObservationDomains`, identifying
+the cross-domain numeric comparison separately from the nonce/target and
+same-host relay-to-fixture checks. All existing strict conditions, failure names,
+recording/byte/cleanup guards, runner exit and filtering gates are preserved.
+`crossDomainPortMappingVerified` stays false, including a host-only test where
+port numbers happen to agree. This is diagnostic detail, not an exception that
+turns the native failure into a pass. Original reports are not overwritten.
+
+A future witness must keep the client/guest flow and host relay flow separate,
+tie each to the exact nonce and complete request/response bytes, retain unique
+TCP stream candidates and the owned capture's provenance, and distinguish
+message-flow linkage from a verified translation mechanism. The existing
+native attachment has no filtered packet records, so it cannot supply that
+witness. First review a bounded offline extraction/linkage contract for the
+already stopped, host-local capture; do not bypass the current filter gate,
+transfer the raw radio file, guess a translated port or launch another emulator.
+500 ms causation, clock alignment and original acceptance gaps remain open.

@@ -102,6 +102,31 @@ class HostSocketBoundaryTest(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 self.assertFalse(analyze(self.run_id,association,report)['complete'])
 
+    def test_cross_domain_port_difference_is_diagnosed_without_waiving_strict_failure(self):
+        association=copy.deepcopy(self.association)
+        client=association['samples'][0]['client']
+        client['localPort']=1 if client['localPort']!=1 else 2
+        result=analyze(self.run_id,association,self.report)
+        self.assertFalse(result['complete'])
+        self.assertEqual(['nonce_or_socket_tuple_mismatch'],result['errors'])
+        failed=[name for name,value in result['identityChecks'].items() if not value]
+        self.assertEqual(['crossDomainPortNumbersEqual'],failed)
+        self.assertEqual(client['localPort'],result['portObservationDomains']['clientReported']['localPort'])
+        self.assertFalse(result['crossDomainPortMappingVerified'])
+        # Preserve every input port; no guessed NAT mapping is written back.
+        self.assertNotEqual(client['localPort'],result['portObservationDomains']['hostRelayIncoming']['peerPort'])
+
+    def test_port_equality_does_not_prove_mapping_and_host_mismatch_is_still_fatal(self):
+        valid=analyze(self.run_id,self.association,self.report)
+        self.assertTrue(valid['identityChecks']['crossDomainPortNumbersEqual'])
+        self.assertFalse(valid['crossDomainPortMappingVerified'])
+        association=copy.deepcopy(self.association)
+        association['samples'][0]['server']['clientPort']+=1
+        result=analyze(self.run_id,association,self.report)
+        self.assertFalse(result['identityChecks']['hostRelayFixturePeerPort'])
+        self.assertFalse(result['complete'])
+        self.assertIn('nonce_or_socket_tuple_mismatch',result['errors'])
+
     def test_large_recording_span_and_error_or_forced_cleanup_fail(self):
         for mutation in ('budget','error','close','unjoined','backwards'):
             report=copy.deepcopy(self.report)

@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -79,8 +80,76 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         private set
     private var openedFromQuestions = false
 
+    // ---- 远端批注：键盘流程 N（选句）→ 上下选行、回车确认 → 输入 → Ctrl+回车保存 / Esc 放弃 ----
+    /** 选句阶段当前行；-1 表示不在选句。 */
+    var noteLine by mutableIntStateOf(-1)
+        private set
+    var noteDraft by mutableStateOf<NoteDraft?>(null)
+        private set
+    var noteText by mutableStateOf("")
+    var noteSaveTick by mutableIntStateOf(0)
+        private set
+    var highlightNoteId by mutableStateOf<String?>(null)
+    val noting: Boolean get() = noteLine >= 0 || noteDraft != null
+
+    private fun currentView(): ReaderPageView? = (remote?.page as? PageState.Ready)?.view
+
+    /** 当前页文字里的非空行（UTF-16 偏移区间），键盘选段的最小单位。 */
+    fun pageLines(): List<IntRange> {
+        val text = currentView()?.text ?: return emptyList()
+        val out = mutableListOf<IntRange>(); var start = 0
+        for (line in text.split('\n')) {
+            if (line.isNotBlank()) out += start until start + line.length
+            start += line.length + 1
+        }
+        return out
+    }
+
+    fun beginNote() {
+        if (remote == null || currentView() == null) { message = "这一页还没加载好，不能写批注"; return }
+        if (pageLines().isEmpty()) { message = "这一页没有可选的文字"; return }
+        noteDraft = null; noteLine = 0
+    }
+
+    fun cancelNote() { noteLine = -1; noteDraft = null; noteText = "" }
+
+    private fun confirmLine() {
+        val r = remote ?: return; val v = currentView() ?: return
+        val range = pageLines().getOrNull(noteLine) ?: return
+        val end = range.last + 1
+        val existing = r.notes.firstOrNull { it.pdfPage == v.pdfPage && it.start == range.first && it.end == end && r.noteValid(it, v) }
+        val doc = r.current ?: return
+        noteDraft = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
+            range.first, end, v.text.substring(range.first, end), existing?.note.orEmpty(), existing?.revision ?: 0L)
+        noteText = existing?.note.orEmpty(); noteLine = -1
+    }
+
+    /** Ctrl+回车 / 按钮：交给窗口的协程去保存；离线后再按一次即原样重试。 */
+    fun requestNoteSave() { if (noteDraft != null) noteSaveTick++ }
+
+    suspend fun commitNote() {
+        val r = remote ?: return; val d = noteDraft ?: return
+        val toSave = d.copy(note = noteText)
+        r.saveNote(toSave)
+        val s = r.noteSave
+        if (s is NoteSaveState.Saved && s.id == d.id && noteDraft?.id == d.id) noteDraft = toSave.copy(baseRevision = s.revision)
+    }
+
+    /** 题目的“这句在哪考过”：study 题目自带登记原句；没有就明说，不猜。 */
+    fun openRemoteProvenance() {
+        val r = remote ?: return
+        val q = r.studyQuestions.getOrNull(selectedQuestion) ?: return
+        if (q.anchor.isBlank()) { message = "这一题没有登记原句"; return }
+        message = null
+        openedFromQuestions = state.focus == ReaderPane.Related
+        state = state.openProvenance(q.id, state.position.page)
+    }
+
     /** 本次组合实际渲染的栏，供测试读取。 */
     var renderedPanes: List<ReaderPane> = emptyList()
+
+    /** 本次组合里原句高亮的状态文字（无引文时为 null），供测试读取。 */
+    var uiHighlight: String? = null
 
     /** 当前窗口实际显示的栏：焦点在被收拢的栏时，该栏单独占满窗口，正文状态原样保留。 */
     fun shownPanes(): List<ReaderPane> = if (state.focus in state.layout.visible) state.layout.visible else listOf(state.focus)
@@ -154,6 +223,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 切到另一本书：旧书页、题目、作答不带过去。失败时保持无书状态，失败原因在 remote.failure。 */
     suspend fun openRemote(documentId: String) {
         val r = remote ?: return
+        cancelNote(); highlightNoteId = null
         val start = r.open(documentId)
         val doc = r.current
         if (start == null || doc == null) {
@@ -173,7 +243,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
 
     /** 鼠标滚轮：正文上滚轮翻页，Ctrl+滚轮缩放；缩放受 50%–300% 限制。 */
     fun onWheel(deltaY: Float, ctrlOrCmd: Boolean) {
-        if (deltaY == 0f) return
+        if (deltaY == 0f || noting) return // 写批注时不翻页，避免草稿被带到别的页
         message = null
         state = if (ctrlOrCmd) state.apply(if (deltaY < 0) ReaderAction.ZoomIn else ReaderAction.ZoomOut)
         else state.apply(if (deltaY > 0) ReaderAction.NextPage else ReaderAction.PrevPage)
@@ -183,12 +253,28 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     fun onKey(input: KeyInput, digit: Int? = null): Boolean {
         message = null
         val s = state
+        if (noteLine >= 0) { // 选句阶段：吞掉所有键，不翻页
+            when (input.key) {
+                ReaderKey.Down -> noteLine = minOf(noteLine + 1, pageLines().lastIndex)
+                ReaderKey.Up -> noteLine = maxOf(noteLine - 1, 0)
+                ReaderKey.Enter -> confirmLine()
+                ReaderKey.Escape -> cancelNote()
+                else -> {}
+            }
+            return true
+        }
+        if (noteDraft != null) { // 输入阶段：文字归输入框；Esc 放弃，Ctrl+回车保存
+            if (input.key == ReaderKey.Escape) { cancelNote(); return true }
+            if (input.ctrlOrCmd && input.key == ReaderKey.Enter) { requestNoteSave(); return true }
+            return false
+        }
         if (s.focus == ReaderPane.Related && !input.ctrlOrCmd && !input.alt) {
+            val count = remote?.studyQuestions?.size ?: fixture.questions.size
             when {
-                input.key == ReaderKey.Down && selectedQuestion < fixture.questions.lastIndex -> { selectedQuestion++; return true }
+                input.key == ReaderKey.Down && selectedQuestion < count - 1 -> { selectedQuestion++; return true }
                 input.key == ReaderKey.Up && selectedQuestion > 0 -> { selectedQuestion--; return true }
-                digit != null && digit in 1..9 -> { answer(digit - 1); return true }
-                input.key == ReaderKey.Enter -> { openProvenanceOfSelected(); return true }
+                remote == null && digit != null && digit in 1..9 -> { answer(digit - 1); return true }
+                input.key == ReaderKey.Enter -> { if (remote != null) openRemoteProvenance() else openProvenanceOfSelected(); return true }
             }
         }
         if (s.focus !in s.layout.visible) {
@@ -202,6 +288,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val action = ReaderKeys.map(input, s) ?: return false
         when (action) {
             ReaderAction.ReturnFromProvenance -> returnFromProvenance()
+            ReaderAction.NewNote -> beginNote()
             ReaderAction.OpenProvenance -> {
                 val a = s.selectedAnchor ?: return true
                 val page = fixture.pageOfAnchor(a)
@@ -229,6 +316,7 @@ internal fun androidx.compose.ui.input.key.KeyEvent.toReaderInput(): Pair<KeyInp
         Key.Escape -> ReaderKey.Escape
         Key.Enter, Key.NumPadEnter -> ReaderKey.Enter
         Key.Back -> ReaderKey.Back
+        Key.N -> ReaderKey.NewNote
         else -> ReaderKey.Other
     }
     val digit = when (key) {
@@ -252,12 +340,13 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
         val remote = session.remote
         if (remote != null) {
             LaunchedEffect(remote) { remote.loadCatalog() }
+            LaunchedEffect(session.noteSaveTick) { if (session.noteSaveTick > 0) session.commitNote() }
             // 切页/切书：只留最后一次导航；页成功后再保存进度，保存失败不影响阅读。
             LaunchedEffect(remote.current?.id, session.state.position.page) {
                 if (remote.current != null) {
                     val pdf = PdfPages.toPdf(session.state.position.page)
                     remote.show(pdf)
-                    if (remote.page is PageState.Ready) remote.saveProgress(pdf)
+                    if (remote.page is PageState.Ready) remote.saveProgressAuto(pdf)
                 }
             }
         }
@@ -386,7 +475,7 @@ private fun BodyPane(session: ReaderSession) {
 
 @Composable
 private fun RelatedPane(session: ReaderSession) {
-    if (session.remote != null) { RemoteStudy(session.remote); return }
+    if (session.remote != null) { RemoteStudy(session, session.remote); return }
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         session.fixture.questions.forEachIndexed { i, q ->
@@ -415,11 +504,7 @@ private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
             PageState.Idle -> Text(if (remote.current == null) "请先在书架里选一本" else "", Modifier.testTag("remote-idle"), fontSize = 14.sp)
             is PageState.Loading -> Text("正在加载 PDF 第${p.pdfPage}页", Modifier.testTag("remote-loading"), fontSize = 13.sp, color = Color(0xFF666666))
             is PageState.Failed -> Text(p.failure.text, Modifier.testTag("remote-failure"), color = Color(0xFFA33B2D), fontSize = 14.sp)
-            is PageState.Ready -> {
-                val bitmap = remember(p.view.image) { p.view.image?.let { b -> runCatching { org.jetbrains.skia.Image.makeFromEncoded(b).toComposeImageBitmap() }.getOrNull() } }
-                if (bitmap != null) Image(bitmap, "PDF 第${p.view.pdfPage}页", Modifier.testTag("remote-image").fillMaxWidth(), contentScale = ContentScale.FillWidth)
-                Text(p.view.text, Modifier.testTag("remote-text").fillMaxWidth().padding(vertical = 4.dp), fontSize = (16 * state.zoomPercent / 100f).sp, color = Ink)
-            }
+            is PageState.Ready -> RemotePage(session, remote, p.view)
         }
         when (val s = remote.save) {
             is SaveState.Conflict -> Column(Modifier.testTag("save-conflict").padding(top = 8.dp)) {
@@ -441,8 +526,110 @@ private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
     }
 }
 
+/** 页面：页图（可叠原句高亮）+ 按行的正文 + 本页批注 + 批注编辑。 */
 @Composable
-private fun RemoteStudy(remote: ReaderRemote) {
+private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView) {
+    val state = session.state
+    val bitmap = remember(view.image) { view.image?.let { b -> runCatching { org.jetbrains.skia.Image.makeFromEncoded(b).toComposeImageBitmap() }.getOrNull() } }
+    // 高亮的引文：题目点出处时是该题登记的原句；否则是用户点选的批注。
+    val quote = remember(state.flashAnchor, session.highlightNoteId, remote.notes, remote.study) {
+        state.flashAnchor?.let { id -> remote.studyQuestions.firstOrNull { it.id == id }?.anchor }
+            ?: session.highlightNoteId?.let { id -> remote.notes.firstOrNull { it.id == id && remote.noteValid(it, view) }?.quote }
+    }
+    val located: Located? = when (val b = remote.boxes) {
+        is BoxesState.Ready -> quote?.let { QuoteLocator.locate(b.boxes, it) }
+        else -> null
+    }
+    if (bitmap != null) {
+        val boxes = (remote.boxes as? BoxesState.Ready)?.boxes
+        val aspectOk = boxes != null && kotlin.math.abs(bitmap.width.toDouble() / bitmap.height - boxes.width / boxes.height) < 0.02
+        Box(Modifier.fillMaxWidth()) {
+            Image(bitmap, "PDF 第${view.pdfPage}页", Modifier.testTag("remote-image").fillMaxWidth(), contentScale = ContentScale.FillWidth)
+            if (located is Located.Found && aspectOk && boxes != null) {
+                Canvas(Modifier.testTag("remote-highlight").matchParentSize()) {
+                    val k = size.width / boxes.width.toFloat()
+                    for (r in located.rects) drawRect(
+                        Flash.copy(alpha = 0.55f),
+                        topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
+                        size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
+                    )
+                }
+            }
+        }
+    }
+    val status = if (quote == null) null else {
+        when {
+            remote.boxes !is BoxesState.Ready -> "文字坐标不可用，不标注原句"
+            located == Located.NoTextLayer -> "这一页没有文字层，无法标出原句"
+            located == Located.NotFound -> "没找到这句原文，无法确认位置"
+            located == Located.Ambiguous -> "这句原文在页上出现多处，无法确认是哪一处"
+            bitmap == null -> "没有页图，无法在页上标出"
+            located is Located.Found -> "已在页上标出原句"
+            else -> "无法确认原句位置"
+        }
+    }
+    SideEffect { session.uiHighlight = status }
+    if (status != null) Text(status, Modifier.testTag("highlight-status").padding(vertical = 4.dp), fontSize = 12.sp, color = Color(0xFF555555))
+    val size = (16 * state.zoomPercent / 100f).sp
+    val lines = session.pageLines()
+    var offset = 0
+    view.text.split('\n').forEachIndexed { i, line ->
+        val range = offset until offset + line.length
+        val picked = session.noteLine >= 0 && lines.getOrNull(session.noteLine) == range && line.isNotBlank()
+        val noted = remote.notes.any { remote.noteValid(it, view) && it.start >= range.first && it.end <= range.last + 1 }
+        Text(
+            line,
+            Modifier.testTag("line-$i").fillMaxWidth()
+                .then(if (picked) Modifier.background(Color(0xFFCFE3F6)) else if (noted) Modifier.background(Color(0xFFFFF4C2)) else Modifier)
+                .padding(vertical = 3.dp),
+            fontSize = size, color = Ink,
+        )
+        offset += line.length + 1
+    }
+    if (session.noteLine >= 0) Text("上下键选一行，回车确认，Esc 放弃", Modifier.testTag("note-pick-hint").padding(top = 4.dp), fontSize = 12.sp, color = Accent)
+    session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
+    NotesSection(session, remote, view)
+}
+
+@Composable
+private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView) {
+    val mine = remote.notes.filter { it.pdfPage == view.pdfPage || it.stale || it.version != remote.current?.version }
+    Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Text("批注（按 N 为一行写批注）", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        if (mine.isEmpty()) Text("这一页还没有批注", Modifier.testTag("notes-empty"), fontSize = 12.sp, color = Color(0xFF666666))
+        for (n in mine) {
+            val valid = remote.noteValid(n, view)
+            Column(Modifier.testTag("note-${n.id}").padding(top = 6.dp)) {
+                if (!valid) Text("原文或资料版本已变化，位置待重新确认（原 PDF 第${n.pdfPage}页）", Modifier.testTag("note-stale-${n.id}"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+                Text("我的原句：${n.quote}", fontSize = 12.sp)
+                if (n.note.isNotEmpty()) Text("我的批注：${n.note}", fontSize = 12.sp)
+                if (valid) Text("在页上标出", Modifier.testTag("note-show-${n.id}").clickable { session.highlightNoteId = n.id }, fontSize = 12.sp, color = Accent)
+            }
+        }
+        val d = session.noteDraft
+        if (d != null) {
+            Column(Modifier.testTag("note-editor").padding(top = 8.dp).border(BorderStroke(1.dp, Accent)).padding(8.dp)) {
+                Text("原句：${d.quote}", fontSize = 12.sp)
+                androidx.compose.foundation.text.BasicTextField(
+                    value = session.noteText, onValueChange = { session.noteText = it },
+                    modifier = Modifier.testTag("note-input").fillMaxWidth().padding(vertical = 6.dp),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                )
+                Text("Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))
+                when (val s = remote.noteSave) {
+                    is NoteSaveState.Saved -> Text("已保存", Modifier.testTag("note-saved"), fontSize = 12.sp, color = Color(0xFF2F6B3A))
+                    is NoteSaveState.Offline -> Text("连不上服务，再按 Ctrl+回车重试（内容原样保留）", Modifier.testTag("note-offline"), fontSize = 12.sp, color = Color(0xFF8A6D1F))
+                    is NoteSaveState.Conflict -> Text("另一台设备改过这条批注，或资料已变；你的草稿保留在这里，没有覆盖对方", Modifier.testTag("note-conflict"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+                    is NoteSaveState.Failed -> Text("没有保存：${s.failure.text}", Modifier.testTag("note-failed"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+                    NoteSaveState.Idle -> {}
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteStudy(session: ReaderSession, remote: ReaderRemote) {
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         when (val s = remote.study) {
@@ -451,9 +638,19 @@ private fun RemoteStudy(remote: ReaderRemote) {
             is StudyState.Failed -> Text(s.failure.text, Modifier.testTag("study-failure"), fontSize = 12.sp, color = Color(0xFFA33B2D))
             is StudyState.Ready -> {
                 if (!s.view.available) Text("这本书还没有登记题目", Modifier.testTag("study-unavailable"), fontSize = 12.sp)
-                s.view.questions.forEachIndexed { i, q -> Text(q.stem, Modifier.testTag("study-$i").padding(top = 8.dp), fontSize = 13.sp) }
+                s.view.questions.forEachIndexed { i, q ->
+                    val selected = session.selectedQuestion == i
+                    Column(Modifier.fillMaxWidth().padding(top = 8.dp).then(if (selected) Modifier.background(Color(0xFFE6EEF6)) else Modifier).testTag("study-$i")) {
+                        Text(q.stem, fontSize = 13.sp)
+                        if (selected) Text(
+                            if (q.anchor.isBlank()) "这题没有登记原句" else "这句在哪考过（回车）",
+                            Modifier.testTag("study-source-$i").clickable { session.openRemoteProvenance() }, color = Accent, fontSize = 12.sp,
+                        )
+                    }
+                }
                 if (s.view.unlocated > 0) Text("另有${s.view.unlocated}题没能定位到页", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = Color(0xFF666666))
             }
         }
+        session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
     }
 }

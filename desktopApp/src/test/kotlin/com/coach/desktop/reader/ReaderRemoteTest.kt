@@ -28,6 +28,20 @@ class FakeReaderService(vararg docs: Triple<String, String, Int>) : ReaderSource
     var pageBodyPatch: (JsonObject) -> JsonObject = { it }
     var staleProgress = false
     var catalogExtra: List<JsonObject> = emptyList()
+    /** 页文字（默认单行；笔记/词框用例换成多行英文词，词框按它逐词生成）。 */
+    var bodyText: (Doc, Int) -> String = { d, p -> "【${d.id}】第${p}页自造正文" }
+    var anchorFor: (Doc, Int) -> String = { _, _ -> "" }
+    var boxesStatus: Int? = 200
+    var boxesPatch: (JsonObject) -> JsonObject = { it }
+    var withImage = false
+    val noteCalls = mutableListOf<JsonObject>()
+    var noteStatus: Int? = 200
+    private val notes = mutableMapOf<String, MutableMap<String, JsonObject>>()
+    private var noteSeq = 100L
+    private val heldBoxes = mutableMapOf<Pair<String, Int>, Pair<CompletableDeferred<Unit>, CompletableDeferred<Unit>>>()
+
+    fun holdBoxes(doc: String, page: Int): Pair<CompletableDeferred<Unit>, CompletableDeferred<Unit>> =
+        (CompletableDeferred<Unit>() to CompletableDeferred<Unit>()).also { heldBoxes[doc to page] = it }
 
     fun hold(doc: String, page: Int): Pair<CompletableDeferred<Unit>, CompletableDeferred<Unit>> =
         (CompletableDeferred<Unit>() to CompletableDeferred<Unit>()).also { held[doc to page] = it }
@@ -50,18 +64,71 @@ class FakeReaderService(vararg docs: Triple<String, String, Int>) : ReaderSource
         return ok(pageBodyPatch(buildJsonObject {
             put("documentId", d.id); put("version", d.version); put("pdfPage", pdfPage)
             put("printedPage", (pdfPage - 2).takeIf { it > 0 }?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull)
-            put("text", "【${d.id}】第${pdfPage}页自造正文"); put("textSha256", "x")
+            put("text", bodyText(d, pdfPage)); put("textSha256", "x")
         }))
     }
 
-    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? = null
+    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? {
+        if (!withImage) return null
+        val img = java.awt.image.BufferedImage(400, 300, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics(); g.color = java.awt.Color.WHITE; g.fillRect(0, 0, 400, 300); g.dispose()
+        return java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(img, "png", it) }.toByteArray()
+    }
+
+    /** 形状对照 ReaderLibrary.parseBoxes：{documentId,version,pdfPage,width,height,words[{x0,y0,x1,y1,text}],textLayer}。 */
+    override suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply {
+        heldBoxes[document to pdfPage]?.let { (entered, gate) -> entered.complete(Unit); gate.await() }
+        if (boxesStatus == null) return ReaderReply(null, null)
+        if (boxesStatus != 200) return ReaderReply(boxesStatus, null)
+        val d = docs[document] ?: return ReaderReply(404, null)
+        if (version != d.version) return ReaderReply(409, null)
+        if (pdfPage !in 1..d.pages) return ReaderReply(404, null)
+        val words = mutableListOf<JsonObject>()
+        bodyText(d, pdfPage).split('\n').forEachIndexed { li, line ->
+            line.split(' ').filter { it.isNotEmpty() }.forEachIndexed { wi, w ->
+                words += buildJsonObject { put("x0", 10.0 + 40 * wi); put("y0", 10.0 + 20 * li); put("x1", 10.0 + 40 * wi + 35); put("y1", 10.0 + 20 * li + 15); put("text", w) }
+            }
+        }
+        return ok(boxesPatch(buildJsonObject {
+            put("documentId", d.id); put("version", d.version); put("pdfPage", pdfPage); put("width", 400.0); put("height", 300.0)
+            put("words", JsonArray(words)); put("textLayer", words.isNotEmpty())
+        }))
+    }
+
+    /** 形状对照 ReaderLedger.save(note=true)：回执 {revision,savedAt,replayed}；409 条件 = 版本不符 / baseRevision != 该批注最新修订。 */
+    var noteHold: Pair<CompletableDeferred<Unit>, CompletableDeferred<Unit>>? = null
+    override suspend fun saveNote(document: String, body: JsonObject): ReaderReply {
+        noteCalls += body
+        noteHold?.let { (entered, gate) -> entered.complete(Unit); gate.await() }
+        if (noteStatus == null) return ReaderReply(null, null)
+        if (noteStatus != 200) return ReaderReply(noteStatus, null)
+        val d = docs[document] ?: return ReaderReply(404, null)
+        fun str(k: String) = (body[k] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+        val mutation = str("mutationId")
+        seenMutations[mutation]?.let { return ok(buildJsonObject { put("revision", it); put("replayed", true) }) }
+        val id = str("id"); val store = notes.getOrPut(d.id) { mutableMapOf() }
+        val last = store[id]?.let { (it["revision"] as kotlinx.serialization.json.JsonPrimitive).content.toLong() } ?: 0L
+        val base = str("baseRevision").toLong()
+        if (str("version") != d.version || base != last) return ReaderReply(409, buildJsonObject { put("error", "conflict") })
+        noteSeq += 1
+        store[id] = JsonObject(body + ("revision" to kotlinx.serialization.json.JsonPrimitive(noteSeq)) + ("stale" to kotlinx.serialization.json.JsonPrimitive(false)) + ("documentId" to kotlinx.serialization.json.JsonPrimitive(d.id)))
+        seenMutations[mutation] = noteSeq
+        return ok(buildJsonObject { put("revision", noteSeq); put("replayed", false) })
+    }
+
+    /** 另一台设备改了这条批注。 */
+    fun otherDeviceEditsNote(doc: String, id: String, text: String) {
+        val store = notes.getValue(doc); val n = store.getValue(id); noteSeq += 1
+        store[id] = JsonObject(n + ("note" to kotlinx.serialization.json.JsonPrimitive(text)) + ("revision" to kotlinx.serialization.json.JsonPrimitive(noteSeq)))
+    }
+    fun serverNote(doc: String, id: String): JsonObject? = notes[doc]?.get(id)
 
     override suspend fun study(document: String, pdfPage: Int): ReaderReply {
         val d = docs[document] ?: return ReaderReply(404, null)
         return ok(buildJsonObject {
             put("documentId", d.id); put("pdfPage", pdfPage)
             put("facts", JsonArray(emptyList()))
-            put("questions", JsonArray(listOf(buildJsonObject { put("id", "q-${d.id}-$pdfPage"); put("stem", "【${d.id}】第${pdfPage}页的题"); put("status", "new") })))
+            put("questions", JsonArray(listOf(buildJsonObject { put("id", "q-${d.id}-$pdfPage"); put("stem", "【${d.id}】第${pdfPage}页的题"); put("status", "new"); put("anchor", anchorFor(d, pdfPage)) })))
             put("unlocated", 0)
         })
     }
@@ -74,7 +141,7 @@ class FakeReaderService(vararg docs: Triple<String, String, Int>) : ReaderSource
             put("progress", d.progressPage?.let { p ->
                 buildJsonObject { put("documentId", d.id); put("version", d.version); put("pdfPage", p); put("revision", d.revision); put("stale", staleProgress) }
             } ?: JsonNull)
-            put("notes", JsonArray(emptyList()))
+            put("notes", JsonArray((notes[d.id]?.values ?: emptyList<JsonObject>()).map { n -> JsonObject(n + ("stale" to kotlinx.serialization.json.JsonPrimitive((n["version"] as kotlinx.serialization.json.JsonPrimitive).content != d.version))) }))
         })
     }
 

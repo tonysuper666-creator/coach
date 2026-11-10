@@ -13,6 +13,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
@@ -33,6 +35,8 @@ interface ReaderSource {
     suspend fun page(document: String, pdfPage: Int): ReaderReply
     suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray?
     suspend fun study(document: String, pdfPage: Int): ReaderReply
+    suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply
+    suspend fun saveNote(document: String, body: JsonObject): ReaderReply
     suspend fun state(document: String): ReaderReply
     suspend fun saveProgress(document: String, version: String, pdfPage: Int, baseRevision: Long, mutationId: String): ReaderReply
 }
@@ -42,6 +46,8 @@ class ReaderHttpSource(private val http: ReaderHttp) : ReaderSource {
     override suspend fun page(document: String, pdfPage: Int) = http.page(document, pdfPage)
     override suspend fun image(document: String, pdfPage: Int, version: String?) = http.image(document, pdfPage, version)
     override suspend fun study(document: String, pdfPage: Int) = http.study(document, pdfPage)
+    override suspend fun boxes(document: String, pdfPage: Int, version: String) = http.boxes(document, pdfPage, version)
+    override suspend fun saveNote(document: String, body: JsonObject) = http.saveNote(document, body)
     override suspend fun state(document: String) = http.state(document)
     override suspend fun saveProgress(document: String, version: String, pdfPage: Int, baseRevision: Long, mutationId: String) =
         http.saveProgress(document, version, pdfPage, baseRevision, mutationId)
@@ -71,8 +77,8 @@ private fun failureOf(r: ReaderReply, pdfPage: Int? = null): ReaderFailure = whe
 }
 
 data class ReaderDocInfo(val id: String, val title: String, val version: String, val pages: Int)
-class ReaderPageView(val document: String, val pdfPage: Int, val printedPage: Int?, val text: String, val image: ByteArray?)
-data class StudyQuestion(val id: String, val stem: String, val status: String)
+class ReaderPageView(val document: String, val pdfPage: Int, val printedPage: Int?, val text: String, val textSha256: String, val image: ByteArray?)
+data class StudyQuestion(val id: String, val stem: String, val status: String, val anchor: String)
 data class StudyView(val questions: List<StudyQuestion>, val unlocated: Int, val available: Boolean)
 data class ServerProgress(val pdfPage: Int, val version: String, val revision: Long, val stale: Boolean)
 
@@ -100,6 +106,67 @@ sealed interface SaveState {
     data class Conflict(val localPage: Int, val remote: ServerProgress?, val versionChanged: Boolean, val refreshFailed: Boolean = false) : SaveState
 }
 
+data class WordBox(val x0: Double, val y0: Double, val x1: Double, val y1: Double, val text: String)
+data class PageBoxes(val width: Double, val height: Double, val words: List<WordBox>)
+
+sealed interface BoxesState {
+    data object Idle : BoxesState
+    data object Loading : BoxesState
+    data class Ready(val boxes: PageBoxes) : BoxesState
+    data class Failed(val failure: ReaderFailure) : BoxesState
+}
+
+sealed interface Located {
+    data class Found(val rects: List<WordBox>) : Located
+    data object NoTextLayer : Located
+    data object NotFound : Located
+    data object Ambiguous : Located
+}
+
+/** 与 shared/ui 的 locateQuote 同一规则：引文按空白切词，必须在词框里恰好出现一次连续序列，不做模糊猜测。 */
+object QuoteLocator {
+    fun locate(boxes: PageBoxes, quote: String): Located {
+        if (boxes.words.isEmpty()) return Located.NoTextLayer
+        val tokens = quote.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (tokens.isEmpty() || tokens.size > boxes.words.size) return Located.NotFound
+        val starts = (0..boxes.words.size - tokens.size).filter { i -> tokens.indices.all { boxes.words[i + it].text == tokens[it] } }
+        if (starts.isEmpty()) return Located.NotFound
+        if (starts.size > 1) return Located.Ambiguous
+        val run = boxes.words.subList(starts.single(), starts.single() + tokens.size)
+        val lines = mutableListOf<WordBox>()
+        for (w in run) {
+            val last = lines.lastOrNull()
+            val overlap = last?.let { minOf(it.y1, w.y1) - maxOf(it.y0, w.y0) } ?: 0.0
+            if (last != null && overlap > 0.5 * minOf(last.y1 - last.y0, w.y1 - w.y0))
+                lines[lines.lastIndex] = WordBox(minOf(last.x0, w.x0), minOf(last.y0, w.y0), maxOf(last.x1, w.x1), maxOf(last.y1, w.y1), "")
+            else lines += w.copy(text = "")
+        }
+        return Located.Found(lines)
+    }
+}
+
+/** 服务端 state.notes 里的一条批注（UTF-16 偏移）。 */
+data class NoteInfo(
+    val id: String, val version: String, val pdfPage: Int, val start: Int, val end: Int, val quote: String, val note: String,
+    val textSha256: String, val revision: Long, val stale: Boolean,
+)
+
+/** 一条正在编辑/保存的批注草稿；baseRevision 新建为 0，已有批注为其当前 revision。 */
+data class NoteDraft(
+    val id: String, val doc: String, val version: String, val pdfPage: Int, val textSha256: String,
+    val start: Int, val end: Int, val quote: String, val note: String, val baseRevision: Long,
+)
+
+sealed interface NoteSaveState {
+    data object Idle : NoteSaveState
+    data class Saved(val id: String, val revision: Long) : NoteSaveState
+    /** 传输失败：草稿与同一 mutationId 保留，可原样重试。 */
+    data class Offline(val id: String) : NoteSaveState
+    /** 409：草稿保留在本机，不自动覆盖。 */
+    data class Conflict(val id: String) : NoteSaveState
+    data class Failed(val failure: ReaderFailure) : NoteSaveState
+}
+
 private fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 private fun JsonObject.int(k: String) = (this[k] as? JsonPrimitive)?.intOrNull
 private fun JsonObject.long(k: String) = (this[k] as? JsonPrimitive)?.longOrNull
@@ -115,6 +182,13 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
     var study by mutableStateOf<StudyState>(StudyState.Idle); private set
     var save by mutableStateOf<SaveState>(SaveState.Clean); private set
     var failure by mutableStateOf<ReaderFailure?>(null); private set
+    var boxes by mutableStateOf<BoxesState>(BoxesState.Idle); private set
+    var notes by mutableStateOf<List<NoteInfo>>(emptyList()); private set
+    var noteSave by mutableStateOf<NoteSaveState>(NoteSaveState.Idle); private set
+    val studyQuestions: List<StudyQuestion> get() = (study as? StudyState.Ready)?.view?.questions.orEmpty()
+    private val noteLock = Mutex()
+    private class PendingNote(val key: String, val mutationId: String)
+    private var pendingNote: PendingNote? = null
 
     private var nav = 0
     private var revision = 0L
@@ -144,6 +218,7 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
     suspend fun open(documentId: String): Int? {
         val my = ++nav
         current = null; page = PageState.Idle; study = StudyState.Idle; save = SaveState.Clean; pending = null; revision = 0L
+        boxes = BoxesState.Idle; notes = emptyList(); noteSave = NoteSaveState.Idle; pendingNote = null
         val doc = documents.firstOrNull { it.id == documentId }
         if (doc == null) { failure = ReaderFailure.BadResponse("没有这本书"); return null }
         val r = source.state(doc.id)
@@ -155,6 +230,7 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
         if (remoteDoc.str("version") != doc.version) { failure = ReaderFailure.VersionChanged; return null }
         val progress = parseProgress(body["progress"])
         revision = progress?.revision ?: 0L
+        notes = parseNotes(body["notes"])
         failure = null
         current = doc
         return progress?.takeIf { !it.stale && it.version == doc.version && it.pdfPage in 1..doc.pages }?.pdfPage ?: 1
@@ -174,13 +250,15 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
         val doc = current ?: return
         val my = ++nav
         if (pdfPage !in 1..doc.pages) { page = PageState.Failed(ReaderFailure.MissingPage(pdfPage)); study = StudyState.Idle; return }
-        page = PageState.Loading(pdfPage); study = StudyState.Loading
+        page = PageState.Loading(pdfPage); study = StudyState.Loading; boxes = BoxesState.Loading
         coroutineScope {
             val studyJob = async { source.study(doc.id, pdfPage) }
             val imageJob = async { source.image(doc.id, pdfPage, doc.version) }
+            val boxesJob = async { source.boxes(doc.id, pdfPage, doc.version) }
             val reply = source.page(doc.id, pdfPage)
             val studyReply = studyJob.await()
             val image = imageJob.await()
+            val boxesReply = boxesJob.await()
             if (my != nav || current?.id != doc.id) return@coroutineScope
             page = when {
                 !reply.ok -> PageState.Failed(failureOf(reply, pdfPage))
@@ -190,12 +268,87 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
                         b == null || b.str("text") == null -> PageState.Failed(ReaderFailure.BadResponse("页文字"))
                         b.str("documentId") != doc.id || b.int("pdfPage") != pdfPage -> PageState.Failed(ReaderFailure.BadResponse("页与请求不符"))
                         b.str("version") != doc.version -> PageState.Failed(ReaderFailure.VersionChanged)
-                        else -> PageState.Ready(ReaderPageView(doc.id, pdfPage, b.int("printedPage"), b.str("text")!!, image))
+                        else -> PageState.Ready(ReaderPageView(doc.id, pdfPage, b.int("printedPage"), b.str("text")!!, b.str("textSha256").orEmpty(), image))
                     }
                 }
             }
             study = parseStudy(studyReply, doc.id, pdfPage)
+            boxes = parseBoxes(boxesReply, doc.version, pdfPage)
         }
+    }
+
+    private fun parseNotes(e: kotlinx.serialization.json.JsonElement?): List<NoteInfo> = (e as? JsonArray).orEmpty().mapNotNull { v ->
+        val o = v as? JsonObject ?: return@mapNotNull null
+        NoteInfo(
+            o.str("id") ?: return@mapNotNull null, o.str("version") ?: return@mapNotNull null, o.int("pdfPage") ?: return@mapNotNull null,
+            o.int("start") ?: return@mapNotNull null, o.int("end") ?: return@mapNotNull null, o.str("quote") ?: return@mapNotNull null,
+            o.str("note").orEmpty(), o.str("textSha256") ?: return@mapNotNull null, o.long("revision") ?: return@mapNotNull null,
+            (o["stale"] as? JsonPrimitive)?.booleanOrNull ?: true,
+        )
+    }
+
+    /** 只接受版本、页码都对得上且坐标在页内的词框；其余一律当作不可用，不画高亮。 */
+    private fun parseBoxes(r: ReaderReply, version: String, pdfPage: Int): BoxesState {
+        if (!r.ok) return BoxesState.Failed(failureOf(r, pdfPage))
+        val bad = BoxesState.Failed(ReaderFailure.BadResponse("词框"))
+        val b = r.body ?: return bad
+        fun d(o: JsonObject, k: String) = (o[k] as? JsonPrimitive)?.takeIf { !it.isString }?.contentOrNull?.toDoubleOrNull()
+        if (b.str("version") != version || b.int("pdfPage") != pdfPage) return BoxesState.Failed(ReaderFailure.BadResponse("词框与页不符"))
+        val w = d(b, "width")?.takeIf { it > 0 } ?: return bad
+        val h = d(b, "height")?.takeIf { it > 0 } ?: return bad
+        val words = (b["words"] as? JsonArray ?: return bad).map { e ->
+            val o = e as? JsonObject ?: return bad
+            val box = WordBox(d(o, "x0") ?: return bad, d(o, "y0") ?: return bad, d(o, "x1") ?: return bad, d(o, "y1") ?: return bad, o.str("text") ?: return bad)
+            if (box.x0 < 0 || box.y0 < 0 || box.x1 > w + 0.5 || box.y1 > h + 0.5 || box.x1 <= box.x0 || box.y1 <= box.y0) return bad
+            box
+        }
+        return BoxesState.Ready(PageBoxes(w, h, words))
+    }
+
+    /** 保存一条批注。重试同内容沿用同一 mutationId；409 保留草稿不自动覆盖；切书后的回执丢弃。 */
+    suspend fun saveNote(d: NoteDraft) = noteLock.withLock {
+        val doc = current ?: return@withLock
+        if (d.doc != doc.id) return@withLock
+        if (d.version != doc.version) { noteSave = NoteSaveState.Failed(ReaderFailure.VersionChanged); return@withLock }
+        if (d.pdfPage !in 1..doc.pages || d.end <= d.start || d.end - d.start > 4000 || d.note.length > 8000) {
+            noteSave = NoteSaveState.Failed(ReaderFailure.BadResponse("批注内容")); return@withLock
+        }
+        val key = "${d.id}|${d.note}|${d.baseRevision}|${d.start}|${d.end}"
+        val mutation = pendingNote?.takeIf { it.key == key }?.mutationId ?: newMutationId()
+        pendingNote = PendingNote(key, mutation)
+        val body = buildJsonObject {
+            put("id", d.id); put("version", d.version); put("pdfPage", d.pdfPage); put("textSha256", d.textSha256)
+            put("start", d.start); put("end", d.end); put("quote", d.quote); put("note", d.note); put("deleted", false)
+            put("baseRevision", d.baseRevision); put("mutationId", mutation)
+        }
+        val r = source.saveNote(doc.id, body)
+        if (current?.id != doc.id) return@withLock
+        when {
+            r.ok -> {
+                val rev = r.body?.long("revision")
+                if (rev == null) noteSave = NoteSaveState.Failed(ReaderFailure.BadResponse("保存回执"))
+                else {
+                    pendingNote = null
+                    notes = notes.filterNot { it.id == d.id } + NoteInfo(d.id, d.version, d.pdfPage, d.start, d.end, d.quote, d.note, d.textSha256, rev, false)
+                    noteSave = NoteSaveState.Saved(d.id, rev)
+                }
+            }
+            r.status == null -> noteSave = NoteSaveState.Offline(d.id)
+            r.status == 409 -> { pendingNote = null; noteSave = NoteSaveState.Conflict(d.id) }
+            else -> { pendingNote = null; noteSave = NoteSaveState.Failed(failureOf(r, d.pdfPage)) }
+        }
+    }
+
+    /** 批注定位是否仍有效：同版本、同页、文字哈希一致且引文与偏移处文字相同；否则位置待重新确认。 */
+    fun noteValid(n: NoteInfo, view: ReaderPageView): Boolean =
+        !n.stale && n.version == current?.version && n.pdfPage == view.pdfPage && n.textSha256 == view.textSha256 &&
+            n.start in 0 until n.end && n.end <= view.text.length && view.text.substring(n.start, n.end) == n.quote
+
+    /** 冲突未解决时翻页不再静默重复保存：只把草稿页更新为当前页。 */
+    suspend fun saveProgressAuto(pdfPage: Int) {
+        val c = save as? SaveState.Conflict
+        if (c != null) { save = c.copy(localPage = pdfPage); return }
+        saveProgress(pdfPage)
     }
 
     private fun parseStudy(r: ReaderReply, doc: String, pdfPage: Int): StudyState {
@@ -205,7 +358,7 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
         val qs = (b["questions"] as? JsonArray ?: return StudyState.Failed(ReaderFailure.BadResponse("题目"))).mapNotNull {
             val o = it as? JsonObject ?: return@mapNotNull null
             val id = o.str("id") ?: return@mapNotNull null
-            StudyQuestion(id, o.str("stem").orEmpty(), o.str("status").orEmpty())
+            StudyQuestion(id, o.str("stem").orEmpty(), o.str("status").orEmpty(), o.str("anchor").orEmpty())
         }
         return StudyState.Ready(StudyView(qs, b.int("unlocated") ?: 0, (b["available"] as? JsonPrimitive)?.booleanOrNull ?: true))
     }

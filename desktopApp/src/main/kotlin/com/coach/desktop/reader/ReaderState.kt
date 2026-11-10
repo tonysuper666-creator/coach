@@ -28,6 +28,7 @@ data class ReaderState(
         ReaderAction.ReturnFromProvenance -> returnFromProvenance()
         ReaderAction.ZoomIn -> copy(zoomPercent = (zoomPercent + 10).coerceAtMost(300))
         ReaderAction.ZoomOut -> copy(zoomPercent = (zoomPercent - 10).coerceAtLeast(50))
+        ReaderAction.NewNote -> this
     }
 
     fun goTo(page: Int): ReaderState {

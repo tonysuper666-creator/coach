@@ -1,6 +1,6 @@
 package com.coach.desktop.reader
 
-enum class ReaderKey { Left, Right, Up, Down, PageUp, PageDown, Home, End, Space, Tab, Escape, Enter, Back, Other }
+enum class ReaderKey { NewNote, Left, Right, Up, Down, PageUp, PageDown, Home, End, Space, Tab, Escape, Enter, Back, Other }
 
 data class KeyInput(val key: ReaderKey, val shift: Boolean = false, val ctrlOrCmd: Boolean = false, val alt: Boolean = false)
 
@@ -17,6 +17,7 @@ sealed interface ReaderAction {
     data object ReturnFromProvenance : ReaderAction
     data object ZoomIn : ReaderAction
     data object ZoomOut : ReaderAction
+    data object NewNote : ReaderAction
 }
 
 /**
@@ -48,6 +49,7 @@ object ReaderKeys {
         input.key == ReaderKey.Space -> if (input.shift) ReaderAction.PrevPage else ReaderAction.NextPage
         input.key == ReaderKey.Down -> ReaderAction.ScrollDown
         input.key == ReaderKey.Up -> ReaderAction.ScrollUp
+        input.key == ReaderKey.NewNote -> ReaderAction.NewNote
         input.key == ReaderKey.Home -> ReaderAction.FirstPage
         input.key == ReaderKey.End -> ReaderAction.LastPage
         input.key == ReaderKey.Enter && state.selectedAnchor != null -> ReaderAction.OpenProvenance

@@ -278,7 +278,8 @@ class Server:
             text = line.strip()
             if text:
                 lines.append(text[:180])
-        return " | ".join(lines[-4:]) or "no server log"
+        picked = [line for line in lines if line.startswith("Exception") or "Main.kt" in line or "posix" in line.lower()]
+        return " | ".join((picked or lines)[:3]) or "no server log"
 
     def stop(self):
         process = self.process

@@ -458,14 +458,25 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val dockActions = m.window != DeskWindow.Inner
         val feedbackRequester = remember { BringIntoViewRequester() }
         var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
+        var feedbackBottom by remember(done) { mutableStateOf<Float?>(null) }
         var inlineActionsBottom by remember(done) { mutableStateOf<Float?>(null) }
         var viewportBottom by remember { mutableStateOf<Float?>(null) }
-        LaunchedEffect(revealFeedback, feedbackSize, dockActions, inlineActionsBottom, viewportBottom) {
+        var viewportHeight by remember { mutableStateOf(0) }
+        LaunchedEffect(revealFeedback, feedbackSize, feedbackBottom, dockActions, inlineActionsBottom, viewportBottom, viewportHeight) {
             if (revealFeedback && feedbackSize != IntSize.Zero) {
                 if (dockActions) {
-                    // Keep the complete card, including its citation, above the fixed bottom fade.
+                    val bottom = feedbackBottom ?: return@LaunchedEffect
+                    val viewport = viewportBottom ?: return@LaunchedEffect
+                    if (viewportHeight == 0) return@LaunchedEffect
+                    // Reveal the correct explanation and its citation above the fixed bottom fade.
                     val fade = with(density) { 40.dp.toPx() }
-                    feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
+                    if (feedbackSize.height + fade <= viewportHeight) {
+                        feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
+                    } else {
+                        // An oversized request cannot fit. Align its citation with the safe bottom;
+                        // the complete explanation remains scrollable above it.
+                        scroll.scrollTo(kotlin.math.ceil(bottom - viewport + fade).toInt().coerceAtLeast(0))
+                    }
                 } else {
                     val bottom = inlineActionsBottom ?: return@LaunchedEffect
                     val viewport = viewportBottom ?: return@LaunchedEffect
@@ -484,7 +495,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
                 .padding(bottom = bottomInset).testTag("mainline-scroll-viewport")
-                .onGloballyPositioned { viewportBottom = it.positionInRoot().y + it.size.height }.verticalScroll(scroll)
+                .onGloballyPositioned { viewportBottom = it.positionInRoot().y + it.size.height; viewportHeight = it.size.height }.verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 Row {
@@ -513,8 +524,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 }
                 if (done != null && explanation != null) {
                     Spacer(Modifier.height(24.dp))
-                    PaperCard(Modifier.railAnchor("why").bringIntoViewRequester(feedbackRequester)
-                        .onGloballyPositioned { feedbackSize = it.size }, contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
+                    PaperCard(Modifier.railAnchor("why"), contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
+                        Column(Modifier.bringIntoViewRequester(feedbackRequester).onGloballyPositioned {
+                            feedbackSize = it.size
+                            feedbackBottom = it.positionInRoot().y + it.size.height + scroll.value
+                        }) {
                         done.str("remember").takeIf { it.isNotBlank() }?.let { Labeled("记住这个", it); Spacer(Modifier.height(12.dp)) }
                         if (done.flag("dontKnow")) Text("这次先看讲解，算学习，不算答对。")
                         (done["tryFirstRefs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { ref ->
@@ -526,17 +540,19 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                         Spacer(Modifier.height(8.dp))
                         Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
                         Spacer(Modifier.height(16.dp))
+                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
+                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
+                        }
+                        }
                         val wrong = displayedChoice?.takeIf { it != answer }
                         if (wrong != null) {
+                            Spacer(Modifier.height(16.dp))
                             Text("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
                             Spacer(Modifier.height(8.dp))
                             Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                             Spacer(Modifier.height(16.dp))
                         }
                         Labeled("背景", explanation.str("background"))
-                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                        }
                     }
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }

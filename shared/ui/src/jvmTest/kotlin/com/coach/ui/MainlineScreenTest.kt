@@ -33,16 +33,18 @@ import kotlin.test.*
 class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
+    private val longCorrect = "Synthetic pears grow in the orchard; this explanation remains available in full. ".repeat(40)
 
     private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
-                          source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false) : AutoCloseable {
+                          source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false,
+                          correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.") : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         /** Every reader request the cited-source component makes through the real CourseHttp. */
         val readerRequests = CopyOnWriteArrayList<String>()
         private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
-        private val explanation = """{"correct":"Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
+        private val explanation = """{"correct":${JsonPrimitive(correct)},
             "options":{"0":"Synthetic apples were sold out before the season started, so they cannot be the answer.",
                        "2":"Synthetic plums ripen after the period described in the question.",
                        "3":"Synthetic figs are imported, not grown in the orchard."},
@@ -439,6 +441,41 @@ class MainlineScreenTest {
             onNodeWithTag("mainline-option-0").assertIsSelected()
         }
     }
+    @Test fun longExplanationKeepsCitationAboveFadeAndFullFeedbackScrollable() = FakeMac(today, includeNotes = true, setupEmphasis = true, correct = longCorrect).use { mac ->
+        val c = controller(mac)
+        c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
+        val view = CourseView(emptyList(), project(emptyList()))
+        runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f)) {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 24.dp)) {
+                MainlineScreen(c, view, {}, {}, {}, {})
+            } } } }
+            awaitQuestion("S1")
+            onNodeWithTag("mainline-option-0").performClick()
+            onNodeWithTag("mainline-submit").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            val scroller = onNode(hasScrollAction() and hasAnyDescendant(hasTestTag("mainline-heading")))
+            waitUntil(timeoutMillis = 15_000) {
+                val viewport = scroller.fetchSemanticsNode().boundsInRoot
+                val citation = onNodeWithTag("private-citation").fetchSemanticsNode().boundsInRoot
+                citation.top >= viewport.top && citation.bottom <= viewport.bottom - 80f
+            }
+            capture("outer-long-feedback-1972x1248")
+            onNodeWithText(longCorrect).assertExists()
+            onNodeWithText("为什么对", substring = true).performScrollTo().assertIsDisplayed()
+            onNodeWithText("Synthetic apples were sold out before the season started, so they cannot be the answer.").performScrollTo().assertIsDisplayed()
+            onNodeWithText("Synthetic plums ripen after the period described in the question.").performScrollTo().assertIsDisplayed()
+            onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
+            val before = scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            onNodeWithText("回到要点").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+        }
+    }
+
     @Test fun innerSubmissionShowsCompleteInlineActionsAndCitationWithoutManualScroll() = FakeMac(today, includeNotes = true, setupEmphasis = true).use { mac ->
         val c = controller(mac)
         c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
@@ -457,7 +494,10 @@ class MainlineScreenTest {
             capture("inner-first-answer-2448x1848")
             val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
             val next = onNodeWithTag("mainline-next").fetchSemanticsNode()
-            val nextText = onNodeWithText("下一题  ›", useUnmergedTree = true).fetchSemanticsNode()
+            val nextText = onNode(
+                hasText("下一题  ›") and hasAnyAncestor(hasTestTag("mainline-next")),
+                useUnmergedTree = true
+            ).fetchSemanticsNode()
             val back = onNodeWithText("回到要点").fetchSemanticsNode()
             val backText = onNodeWithText("回到要点", useUnmergedTree = true).fetchSemanticsNode()
             val citation = onNodeWithTag("private-citation").fetchSemanticsNode()

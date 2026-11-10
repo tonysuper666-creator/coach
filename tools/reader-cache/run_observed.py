@@ -41,6 +41,8 @@ def main():
                         help='Android route with observer none only: concurrent same-socket available() observations')
     parser.add_argument('--socket-scheduling-trace',action='store_true',
                         help='Android plain route/observer none only: own a dedicated read-thread scheduling trace')
+    parser.add_argument('--socket-syscalls',action='store_true',
+                        help='Add syscall entry/exit to the scheduling trace on the existing userdebug emulator only')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -58,6 +60,8 @@ def main():
         parser.error('socket queue observation requires Android route and explicit observer none')
     if args.socket_scheduling_trace and (args.platform!='android' or args.suite!='route' or observer_mode!='none' or args.socket_queue_watch or args.perfetto):
         parser.error('socket scheduling trace requires Android plain route/observer none; separate from queue watch and FrameTimeline')
+    if args.socket_syscalls and not args.socket_scheduling_trace:
+        parser.error('socket syscalls requires the isolated socket scheduling trace')
     capture_perfetto=args.perfetto or args.socket_scheduling_trace
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
@@ -76,6 +80,10 @@ def main():
         adb = [args.adb, "-s", args.serial]
         if subprocess.check_output(adb + ["shell", "getprop", "ro.kernel.qemu"], text=True).strip() != "1":
             raise ValueError("Only an emulator is permitted")
+        if args.socket_syscalls:
+            syscall_build_type=subprocess.check_output(adb+['shell','getprop','ro.build.type'],text=True).strip()
+            if syscall_build_type!='userdebug':
+                raise ValueError('Syscall tracing requires the existing userdebug image; no image or permission change is permitted')
         for apk, expected in ((args.apk, PACKAGE), (args.test_apk, PACKAGE + ".test")):
             badging = subprocess.check_output([args.aapt2, "dump", "badging", str(apk)], text=True)
             if not re.search(r"^package: name='" + re.escape(expected) + "'", badging):
@@ -90,6 +98,8 @@ def main():
     identity['memorySamplerJoined']=False
     identity['socketQueueWatchRequested']=args.socket_queue_watch
     identity['socketSchedulingTraceRequested']=args.socket_scheduling_trace
+    identity['socketSyscallsRequested']=args.socket_syscalls
+    if args.socket_syscalls: identity['syscallBuildType']=syscall_build_type
     observer_counts=dict(stage=0,meminfo=0)
     observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
     if args.platform=='android':
@@ -172,7 +182,7 @@ def main():
                 perfetto_log = (out / "perfetto.log").open("wb")
                 perfetto = subprocess.Popen(adb + ["shell", "perfetto", "--txt", "-c", "-", "-o", remote_trace],
                                             stdin=subprocess.PIPE, stdout=perfetto_log, stderr=subprocess.STDOUT)
-                config_name='socket-scheduling.pbtxt' if args.socket_scheduling_trace else 'frametimeline.pbtxt'
+                config_name=('socket-syscalls.pbtxt' if args.socket_syscalls else 'socket-scheduling.pbtxt') if args.socket_scheduling_trace else 'frametimeline.pbtxt'
                 identity['perfettoConfig']=config_name
                 perfetto.stdin.write((Path(__file__).with_name(config_name)).read_bytes())
                 perfetto.stdin.close()
@@ -274,7 +284,7 @@ def main():
                 try:
                     identity["perfettoExit"] = perfetto.wait(timeout=45)
                     if identity["perfettoExit"] == 0:
-                        trace_name='socket-scheduling.perfetto-trace' if args.socket_scheduling_trace else 'frames.perfetto-trace'
+                        trace_name=('socket-syscalls.perfetto-trace' if args.socket_syscalls else 'socket-scheduling.perfetto-trace') if args.socket_scheduling_trace else 'frames.perfetto-trace'
                         subprocess.run(adb + ["pull", remote_trace, str(out / trace_name)],
                                        check=True, stdout=perfetto_log, stderr=subprocess.STDOUT)
                 except subprocess.TimeoutExpired:

@@ -36,6 +36,27 @@ class RouteRunnerTest(unittest.TestCase):
     def test_scheduling_trace_is_forwarded_collected_and_joined(self):
         self.run_case(False,'none',schedule_trace=True)
 
+    def test_syscalls_use_the_existing_userdebug_image_and_owned_capture(self):
+        self.run_case(False,'none',schedule_trace=True,syscalls=True)
+
+    def test_syscalls_require_the_scheduling_capture(self):
+        args=['run_observed.py','--platform','android','--suite','route','--socket-syscalls','--output','unused']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
+    def test_user_image_is_rejected_before_installs_or_service_start(self):
+        root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
+        args=['run_observed.py','--platform','android','--suite','route','--host','192.0.2.1',
+            '--serial','emulator-unit','--transport-observer','none','--socket-scheduling-trace',
+            '--socket-syscalls','--aapt2','aapt-unit','--apk','unused.apk','--test-apk','unused-test.apk','--output',str(root)]
+        with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
+                patch('run_observed.subprocess.check_output',side_effect=['1','user']) as properties, \
+                patch('run_observed.subprocess.run') as commands,patch('run_observed.Fixture') as service:
+            with self.assertRaisesRegex(ValueError,'existing userdebug image'): run_observed.main()
+        self.assertEqual(['ro.kernel.qemu','ro.build.type'],[call.args[0][-1] for call in properties.call_args_list])
+        commands.assert_not_called();service.assert_not_called()
+
     def test_scheduling_trace_does_not_mix_other_observers_or_frame_capture(self):
         for extra in (['--transport-observer','both'],['--transport-observer','none','--socket-queue-watch'],
                       ['--transport-observer','none','--perfetto']):
@@ -68,7 +89,7 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False):
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
@@ -113,7 +134,7 @@ class RouteRunnerTest(unittest.TestCase):
             def wait(self,*_): self.stopped=True
 
         def check_output(command,**_):
-            if 'getprop' in command: return '1'
+            if 'getprop' in command: return 'userdebug' if command[-1]=='ro.build.type' else '1'
             if command[0]=='aapt-unit':
                 package=run_observed.PACKAGE+('.test' if command[-1]==str(test_apk) else '')
                 return f"package: name='{package}'"
@@ -148,6 +169,7 @@ class RouteRunnerTest(unittest.TestCase):
         if mode is not None: args.extend(['--transport-observer',mode])
         if watch_queue: args.append('--socket-queue-watch')
         if schedule_trace: args.append('--socket-scheduling-trace')
+        if syscalls: args.append('--socket-syscalls')
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
                 patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
                 patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
@@ -168,11 +190,15 @@ class RouteRunnerTest(unittest.TestCase):
             self.assertTrue(json.loads((out/'queue-watch.json').read_text())['complete'])
         if schedule_trace:
             self.assertEqual('enabled',instrument[instrument.index('readerSocketSchedule')+1])
-            self.assertTrue((out/'socket-scheduling.perfetto-trace').exists())
+            self.assertTrue((out/('socket-syscalls.perfetto-trace' if syscalls else 'socket-scheduling.perfetto-trace')).exists())
             self.assertFalse((out/'frames.perfetto-trace').exists())
             self.assertTrue(captures[0].stdin.closed);self.assertTrue(captures[0].waited)
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
+        self.assertIs(syscalls,identity['socketSyscallsRequested'])
+        if syscalls:
+            self.assertEqual('socket-syscalls.pbtxt',identity['perfettoConfig'])
+            self.assertEqual('userdebug',identity['syscallBuildType'])
         for key in ('memorySamplerEnabled','memorySamplerStarted','memorySamplerJoined'):
             self.assertIs(enabled,identity[key])
         self.assertEqual(['constructed','started','joined'] if enabled else [],sampler_events)

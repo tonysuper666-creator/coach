@@ -774,3 +774,79 @@ memory acceptance run, and prior second-group values are not pooled with it.
 Native event availability, exact scheduler coverage and real Trace Processor
 queries remain unverified until this run. Old presentation/trace-quality,
 baseline, lifecycle, real hot-update and native/GPU conclusions remain separate.
+
+## Blocking operation after the 9bd0d1b scheduling capture
+
+The three native scheduling traces passed 48/48 marker identities and continuous
+state coverage. Long read brackets were predominantly S, with sub-millisecond
+Running and Runnable maxima. T2's final four brackets shortened to about 159,
+14, 16 and 97 ms. Their recorded wakers included ksoftirqd, kworker and dhcpclient;
+thread names do not identify why a read blocked or when its socket received data.
+The quality reports retain compact scheduler skips and clock-sync info rows.
+
+The next question is which returned system call contains that sleeping time:
+polling, receiving, a futex, or another operation. Add `--socket-syscalls` to the
+existing scheduling capture for **one initial group of 16 route requests**:
+
+```sh
+tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
+  --platform android --suite route --transport-mode legacy \
+  --transport-observer none --socket-scheduling-trace --socket-syscalls \
+  --host <configured-host> --serial <owned-emulator> \
+  --adb <adb> --aapt2 <aapt2> --apk <isolated-apk> --test-apk <isolated-test-apk> \
+  --output <new-directory>
+```
+
+As before, the surrounding owner holds the emulator lock once, without nesting.
+Keep the same API35 Pixel Fold image, geometry, PDF and Poppler. Native sources
+are unchanged by this addition; the verified 9bd0d1b APK pair may be reused after
+checking both hashes against that run. Do not add queue watch, repeated adb
+observation, FrameTimeline or packet capture. UI/lifecycle default sampling
+requirements are unchanged.
+
+The recorded emulator fingerprint is already userdebug.
+[Perfetto syscall tracing](https://perfetto.dev/docs/data-sources/syscalls)
+records entry arguments and exit return values on Android userdebug builds.
+The runner checks `ro.build.type` before installation and rejects other builds;
+do not change image, permissions or root state. `socket-syscalls.pbtxt` adds only
+raw syscall entry/exit events to the scheduling sources, retaining the 15-second
+foreground session and using a 64 MiB ring buffer. The larger event stream can
+perturb timing or overflow: inspect event availability, all quality records and
+state coverage before interpretation. This group is not a performance rerun.
+
+The new output is `socket-syscalls.perfetto-trace`. Against **that same new trace**,
+first rerun `read_slices.sql`, `read_thread_states.sql`, `read_trace_quality.sql`
+and `read_scheduling.py` as above. Then replace `{{PID}}` in `read_syscalls.sql`
+and `read_syscall_args.sql` with the measured PID and execute both queries with
+the existing Trace Processor. Retain both complete CSV exports and SQL/logs.
+
+```sh
+python3 tools/reader-cache/read_syscall_analysis.py --run <new-run-directory> \
+  --syscalls <read-syscalls.csv> --quality <read-trace-quality.csv>
+```
+
+`read-syscalls.json` validates read labels and PID/TID/UTID, returned call
+durations, exit values and non-overlapping call intervals, then overlays the
+same thread's S/D state intervals. Missing calls, unfinished non-marker calls,
+identity errors, scheduling gaps and error/data-loss quality rows fail the
+requested analysis. Its `complete` field means those records passed structural
+checks; inspect each `unattributedSleepSDNs` and `sleepAttributionComplete`
+separately. Residual sleep remains unknown even if other calls are valid.
+
+All `sys_write` slices are retained as boundary records: the
+[Perfetto importer](https://android.googlesource.com/platform/external/perfetto/+/bae0257cc5901c9368ae25ee1d4acc586390167c/src/trace_processor/importers/ftrace/ftrace_parser.cc)
+handles trace-marker writes specially, so these slices are not socket-send
+evidence. The raw-argument export preserves every argument without dereferencing
+pointers. In particular, poll's first argument is not a verified socket FD.
+Even a returned receive call with an FD-shaped argument does not establish its
+connection identity or kernel packet-arrival time. Negative returns, retries,
+boundary calls and unknown sleep stay visible. A sleeping poll/read can narrow
+the blocked operation; it still cannot identify a network component's cause.
+
+Windows validation uses SQLite tables shaped like Trace Processor exports and
+mocked collectors. Real syscall import, event support and native results remain
+unverified until the Mac capture. Preserve all 16 token/hash/listener/connection
+checks, both route distributions, first-block and final-block transients, raw
+states/wakers/arguments, nonzero quality rows, APK hashes and cleanup. Choose any
+further capture from that result, before another performance run. No memory,
+presentation, real hot-update or native/GPU budget conclusion changes here.

@@ -1294,6 +1294,35 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
     }
 
+    /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
+    private fun outlineAnchors(course: String): List<Pair<String, List<Pair<String, Int>>>> {
+        val moduleOrder = runCatching { query("SELECT module_id,ord FROM course_modules WHERE course_id=?", course) { it.getString(1) to it.getInt(2) }.toMap() }.getOrDefault(emptyMap())
+        return query("SELECT kp_id,module_id,ord,anchors FROM outline_kp WHERE course_id=? AND coalesce(retired,0)=0", course) {
+            val anchors = runCatching { LedgerJson.parseToJsonElement(it.getString(4) ?: "[]").jsonArray.map { a -> a.jsonObject.str("docId") to a.jsonObject.num("pdfPage").toInt() } }.getOrDefault(emptyList())
+            Triple(it.getString(1), (moduleOrder[it.getString(2)] ?: 0) * 100000 + it.getInt(3), anchors)
+        }.sortedBy { it.second }.map { it.first to it.third }
+    }
+
+    /**
+     * Trusted "already studied" ceiling, derived from the learning record: knowledge points with these ids are learned, every other
+     * active point is not. Fails closed ([VisibleScope.NONE]) when nothing learned can be mapped to source pages.
+     */
+    fun learnedScope(course: String, base: com.coach.domain.scope.VisibleScope, learnedKps: Set<String>): com.coach.domain.scope.VisibleScope {
+        val all = outlineAnchors(course)
+        val learned = all.filter { it.first in learnedKps }.flatMap { it.second }
+        if (learned.isEmpty()) return com.coach.domain.scope.VisibleScope.NONE
+        val unlearned = all.filter { it.first !in learnedKps }.flatMap { it.second }
+        return base.limitPages(com.coach.domain.scope.VisibleScope.learnedWindows(learned, unlearned))
+    }
+
+    /** Learned = every point up to and including [currentKp] in outline order. */
+    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKp: String?): com.coach.domain.scope.VisibleScope {
+        val order = outlineAnchors(course).map { it.first }
+        val idx = order.indexOf(currentKp ?: return com.coach.domain.scope.VisibleScope.NONE)
+        if (idx < 0) return com.coach.domain.scope.VisibleScope.NONE
+        return learnedScope(course, base, order.take(idx + 1).toSet())
+    }
+
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()
     private fun markRestored(from: String) = transaction {
         val last = lastSeq(); val epoch = uid()

@@ -240,6 +240,10 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
+    /** Knowledge points of this week and every earlier one: the learner's already-studied set for source scoping. */
+    internal fun learnedKps(store: LedgerStore, course: String, number: Int): Set<String> =
+        weeks(courseNames(store.events(course), course)).first.filter { it.week <= number }.flatMap { w -> w.facts.map { it.kp } }.filter { it.isNotBlank() }.toSet()
+
     /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
     internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
         val week = find(courseNames(store.events(course), course), number)
@@ -383,11 +387,13 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
-                val scope = com.coach.domain.scope.VisibleScope.learner()
-                val (quote, pages) = actor.execute {
+                val (quote, found) = actor.execute {
                     val quote = mainline.selection(this, course, call.week(), input)
-                    quote to searchSourcePages(course, quote, scope)
+                    // Trusted ceiling: learner-visible documents, only up to the point the learning record has reached (fail-closed).
+                    val scope = learnedScope(course, com.coach.domain.scope.VisibleScope.learner(), mainline.learnedKps(this, course, call.week()))
+                    quote to (scope to searchSourcePages(course, quote, scope))
                 }
+                val (scope, pages) = found
                 val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages, scope)
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)

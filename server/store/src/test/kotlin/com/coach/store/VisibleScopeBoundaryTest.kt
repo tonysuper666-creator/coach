@@ -29,6 +29,32 @@ class VisibleScopeBoundaryTest {
         val forged = VisibleScope.learner().narrowToPages("book", 1..10).narrow(VisibleScope.tutorInternal().narrowToPages("book", 1..999))
         assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", forged)))
     }
+    private fun outline(dir: java.nio.file.Path) = java.sql.DriverManager.getConnection("jdbc:sqlite:" + dir.resolve("coach.sqlite")).use { c ->
+        for ((kp, ord, page) in listOf(Triple("k1", 1, 5), Triple("k2", 2, 50)))
+            c.prepareStatement("INSERT INTO outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired,legacy_id) VALUES(?,?,?,?,?,?,?,?,?,0,NULL)").use {
+                it.setString(1, kp); it.setString(2, "c"); it.setString(3, "m"); it.setInt(4, ord); it.setString(5, kp); it.setString(6, "x")
+                it.setString(7, "[]"); it.setString(8, "[]"); it.setString(9, """[{"docId":"book","pdfPage":$page}]"""); it.executeUpdate()
+            }
+    }
+
+    /** Entry-level: the scope each entry builds from the learning record refuses unread chapters. */
+    @Test fun learningRecordWindowRefusesUnreadChapter() {
+        val dir = Files.createTempDirectory("scope-lr"); val s = LedgerStore(dir); seed(s); outline(dir)
+        val atK1 = s.learnedThrough("c", VisibleScope.learner(), "k1")
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", atK1)))        // book:50 (unread) refused
+        assertEquals(setOf("book:5", "book:50"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), "k2"))))
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedScope("c", VisibleScope.learner(), setOf("k1")))))
+        // forged widening cannot bring the unread page back
+        val forged = atK1.narrow(VisibleScope.tutorInternal().narrowToPages("book", 1..999))
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", forged)))
+        // fail-closed: no current point / unknown point / nothing learned
+        assertTrue(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), null)).isEmpty())
+        assertTrue(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), "nope")).isEmpty())
+        assertTrue(s.searchSourcePages("c", "alpha tradeoff", s.learnedScope("c", VisibleScope.learner(), emptySet())).isEmpty())
+        // answer keys are not learner-visible; the tutor ceiling keeps the pre-existing internal-reference behaviour (no new protection claimed)
+        assertTrue(s.searchSourcePages("c", "correct choice", s.learnedThrough("c", VisibleScope.learner(), "k2")).isEmpty())
+    }
+
     @Test fun everyRetrievalCallSitePassesAScope() {
         var dir = java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath()
         while (!Files.exists(dir.resolve("settings.gradle.kts"))) dir = dir.parent

@@ -48,6 +48,7 @@ class PoolWorker(
         val pool = QuestionPool(client)
         if (job.kind == "gen_mcq") {
             val avoid = actor.execute { poolStems(input.str("course"),input.str("kp")) }
+            // Generation-side reference for a question pool, never shown to a learner: deliberately not windowed to the learned range.
             val reference = actor.execute { searchSourcePages(input.str("course"),input.str("objective"),com.coach.domain.scope.VisibleScope.tutorInternal()) }
                 .filterNot { it.learnerVisible }.take(2).map { it.text }
             val overlap = RestrictedSourceGuard(reference,listOf(input.str("excerpt")))

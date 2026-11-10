@@ -45,6 +45,9 @@ class VisibleScope private constructor(
         return VisibleScope(internalReference && other.internalReference, mergedDocs, merged)
     }
 
+    /** Narrow page windows without restricting which documents are listed; documents without a window are unaffected. */
+    fun limitPages(windows: Map<String, IntRange>): VisibleScope = narrow(VisibleScope(true, null, windows))
+
     fun narrowToDocs(vararg ids: String): VisibleScope = narrow(VisibleScope(true, ids.toSet(), emptyMap()))
     /** Current passage / chapter / learned range of one document, as an inclusive pdf page window. */
     fun narrowToPages(doc: String, pages: IntRange): VisibleScope = narrow(VisibleScope(true, setOf(doc), mapOf(doc to pages)))
@@ -54,6 +57,18 @@ class VisibleScope private constructor(
     override fun hashCode() = listOf(internalReference, docs, windows.filterValues { !it.isEmpty() }).hashCode()
 
     companion object {
+        /**
+         * "Already studied" as page windows, from the outline anchors of learned and not-yet-learned points. Within a document the
+         * window ends right before the earliest not-yet-learned anchor; a document whose only anchors are unlearned gets an empty window.
+         */
+        fun learnedWindows(learned: List<Pair<String, Int>>, unlearned: List<Pair<String, Int>>): Map<String, IntRange> {
+            val learnedDocs = learned.map { it.first }.toSet()
+            val frontier = unlearned.groupBy({ it.first }, { it.second }).mapValues { it.value.min() }
+            return (learnedDocs + frontier.keys).associateWith { doc ->
+                if (doc in learnedDocs) 1..((frontier[doc] ?: Int.MAX_VALUE) - 1) else 1..0
+            }
+        }
+
         /** Nothing is visible. The safe default. */
         val NONE = VisibleScope(false, emptySet(), emptyMap())
         /** Ceiling for anything learner-facing: learner-visible documents only. */

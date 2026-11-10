@@ -33,6 +33,14 @@ class VisibleScopeTest {
         val d = learner.narrowToDocs("a").narrowToDocs("b")
         assertFalse(d.permits("a", 1, true)); assertFalse(d.permits("b", 1, true))
     }
+    @Test fun learnedWindowsStopAtFirstUnlearnedAnchor() {
+        val w = VisibleScope.learnedWindows(listOf("book" to 1, "book" to 12), listOf("book" to 30, "book" to 45, "other" to 3))
+        val s = learner.limitPages(w)
+        assertTrue(s.permits("book", 29, true)); assertFalse(s.permits("book", 30, true)); assertFalse(s.permits("book", 50, true))
+        assertFalse(s.permits("other", 3, true))          // only unlearned anchors: closed
+        assertTrue(s.permits("unanchored", 7, true))      // documents with no outline anchors are not windowed
+        assertFalse(s.permits("answers", 1, false))
+    }
     @Test fun internalCeilingStillHonoursNarrowing() {
         val t = VisibleScope.tutorInternal()
         assertTrue(t.permits("ref", 1, false))

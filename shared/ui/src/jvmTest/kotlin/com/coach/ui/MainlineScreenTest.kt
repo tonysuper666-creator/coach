@@ -393,6 +393,52 @@ class MainlineScreenTest {
             onNodeWithTag("mainline-option-0").assertIsSelected()
         }
     }
+    @Test fun innerSubmissionShowsCompleteInlineActionsAndCitationWithoutManualScroll() = FakeMac(today, includeNotes = true, setupEmphasis = true).use { mac ->
+        val c = controller(mac)
+        c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
+        val view = CourseView(emptyList(), project(emptyList()))
+        // QA's inner capture: top system/banner 146px, bottom navigation 64px, paper y=266..1680.
+        runSkikoComposeUiTest(size = Size(2448f, 1848f), density = Density(2f)) {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 32.dp)) {
+                MainlineScreen(c, view, {}, {}, {}, {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-option-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("v7-directory").assertIsDisplayed()
+            onNodeWithTag("mainline-option-0").performClick()
+            onNodeWithTag("mainline-submit").assertIsDisplayed().performClick()
+            waitUntil(timeoutMillis = 15_000) { onNodeWithText("为什么对", substring = true).isDisplayed() }
+            // Capture at the first settled answer, before any performScrollTo or notes navigation.
+            capture("inner-first-answer-2448x1848")
+            val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
+            val next = onNodeWithTag("mainline-next").fetchSemanticsNode()
+            val nextText = onNodeWithText("下一题  ›", useUnmergedTree = true).fetchSemanticsNode()
+            val back = onNodeWithText("回到要点").fetchSemanticsNode()
+            val backText = onNodeWithText("回到要点", useUnmergedTree = true).fetchSemanticsNode()
+            val citation = onNodeWithTag("private-citation").fetchSemanticsNode()
+            val heading = onNodeWithText("为什么对", substring = true).fetchSemanticsNode()
+            assertEquals(next.size.height.toFloat(), next.boundsInRoot.height, "the whole next action must fit on the paper")
+            assertEquals(nextText.size.height.toFloat(), nextText.boundsInRoot.height, "next-action glyphs must not be clipped")
+            assertEquals(back.size.height.toFloat(), back.boundsInRoot.height, "the whole return action must fit on the paper")
+            assertEquals(backText.size.height.toFloat(), backText.boundsInRoot.height, "return-action glyphs must not be clipped")
+            assertEquals(citation.size.height.toFloat(), citation.boundsInRoot.height, "the whole citation must fit on the paper")
+            assertEquals(heading.size.height.toFloat(), heading.boundsInRoot.height, "the explanation heading must remain fully visible")
+            onNodeWithText("回到要点").assertIsDisplayed()
+            onNodeWithTag("private-citation").assertIsDisplayed()
+            assertTrue(next.boundsInRoot.bottom <= viewport.bottom, "actions must be inside the paper: ${next.boundsInRoot}, $viewport")
+            assertTrue(citation.boundsInRoot.top >= viewport.top && citation.boundsInRoot.bottom <= next.boundsInRoot.top,
+                "the complete citation stays above the inline actions: ${citation.boundsInRoot}")
+            // A later deliberate scroll and return to notes must not trigger the submit-only reveal again.
+            val scroller = onNode(hasScrollAction() and hasAnyDescendant(hasTestTag("mainline-heading")))
+            onNodeWithText("答错。").performScrollTo()
+            val before = scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            onNodeWithText("回到要点").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+        }
+    }
     @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)
     @Test fun lostGuessedReplyAutomaticallyResendsRecordedGuess() = walk(1000, 800, 1, true)
     @Test fun lostCorrectReplyAutomaticallyResendsRecordedPass() = walk(412, 915, 1, false)

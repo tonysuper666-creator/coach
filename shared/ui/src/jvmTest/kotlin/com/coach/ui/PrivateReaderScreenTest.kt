@@ -1,15 +1,19 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.text.TextRange
 import com.coach.client.CourseHttp
 import com.sun.net.httpserver.HttpServer
@@ -456,6 +460,35 @@ class PrivateReaderScreenTest {
         waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
         onNodeWithTag("private-book-synthetic").performClick()
         waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun highlightActionsAlignWithTheDocumentHeaderAtDensity320() = FakeReader().use { fake ->
+        fake.study = anchorStudy("Alpha beta")
+        val words = "[" + w(30, 40, 80, 55, "Alpha") + "," + w(85, 40, 125, 55, "beta") + "]"
+        for (shown in listOf(true, false)) for (scale in listOf(1f, 1.3f, 2f)) runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f, scale)) {
+            fake.boxWords = if (shown) words else null
+            setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 28.dp, bottom = 24.dp)) {
+                PrivateReaderScreen(fake.http.reader) {}
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-book-synthetic").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-study-toggle").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-study-toggle").performClick()
+            onNodeWithTag("private-study-anchor-fact-f1").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-highlight-clear").fetchSemanticsNodes().isNotEmpty() }
+            val focus = onNodeWithTag("private-focus").fetchSemanticsNode().boundsInRoot
+            val clear = onNodeWithTag("private-highlight-clear").fetchSemanticsNode()
+            val name = "reader-action-alignment-1972x1248-${if (shown) "shown" else "retry"}-$scale"
+            val readerRoot = onNode(isRoot() and hasAnyDescendant(hasTestTag("private-focus")))
+            ImageIO.write(readerRoot.captureToImage().toAwtImage(), "png", File("build/screens/$name.png").also { it.parentFile.mkdirs() })
+            File("build/screens/$name.txt").writeText(readerRoot.printToString() + "\nheader=$focus\nclear=${clear.boundsInRoot}\n")
+            assertEquals(focus.right, clear.boundsInRoot.right, "header and highlight actions share a right edge at font scale $scale")
+            assertEquals(clear.size.height.toFloat(), clear.boundsInRoot.height, "the complete action must remain visible")
+            if (shown) onNodeWithTag("private-highlight-0").assertExists()
+            else onNodeWithTag("private-highlight-retry").assertIsDisplayed()
+            onNodeWithTag("private-highlight-clear").performClick()
+            onAllNodesWithTag("private-highlight-0").assertCountEquals(0)
+        }
     }
 
     @Test fun sourceAnchorHighlightScalesWithThePageForTwoCourses() {

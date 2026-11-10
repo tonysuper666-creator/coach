@@ -354,12 +354,22 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val dockActions = m.window != DeskWindow.Inner
         val feedbackRequester = remember { BringIntoViewRequester() }
         var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
-        LaunchedEffect(revealFeedback, feedbackSize, dockActions) {
+        var inlineActionsBottom by remember(done) { mutableStateOf<Float?>(null) }
+        var viewportBottom by remember { mutableStateOf<Float?>(null) }
+        LaunchedEffect(revealFeedback, feedbackSize, dockActions, inlineActionsBottom, viewportBottom) {
             if (revealFeedback && feedbackSize != IntSize.Zero) {
                 if (dockActions) {
                     // Keep the complete card, including its citation, above the fixed bottom fade.
                     val fade = with(density) { 40.dp.toPx() }
                     feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
+                } else {
+                    val bottom = inlineActionsBottom ?: return@LaunchedEffect
+                    val viewport = viewportBottom ?: return@LaunchedEffect
+                    // Inner windows keep inline actions. Include them and the page's bottom padding
+                    // in the first answer, even when the heading already fits. Apply the small
+                    // correction immediately rather than leaving clipped glyphs during an animation.
+                    val overflow = bottom - scroll.value - viewport + with(density) { 24.dp.toPx() }
+                    if (overflow > 0f) scroll.scrollTo(scroll.value + kotlin.math.ceil(overflow).toInt())
                 }
                 revealFeedback = false
             }
@@ -369,7 +379,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .padding(bottom = bottomInset).testTag("mainline-scroll-viewport").verticalScroll(scroll)
+                .padding(bottom = bottomInset).testTag("mainline-scroll-viewport")
+                .onGloballyPositioned { viewportBottom = it.positionInRoot().y + it.size.height }.verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("本周要点") }
@@ -414,7 +425,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }
                 Spacer(Modifier.height(24.dp))
-                if (!dockActions) actions()
+                if (!dockActions) Box(Modifier.onGloballyPositioned {
+                    inlineActionsBottom = it.positionInRoot().y + it.size.height + scroll.value
+                }) { actions() }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 if (pending != null && !retryable) TextButton(onClick = { retry++ }) { Text("重试原答案") }
                 if (done == null) Text("拿不准就点「我是猜的」：答对也不算掌握，会排进复习。", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.labelMedium)

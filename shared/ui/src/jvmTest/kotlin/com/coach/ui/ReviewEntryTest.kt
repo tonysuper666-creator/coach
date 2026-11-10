@@ -65,7 +65,7 @@ class ReviewEntryTest {
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("1 节到期").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("1 节到期").assertIsDisplayed()
                 if (integrated) onNodeWithText("每日提醒 08:00").assertDoesNotExist()
-                if (!examKnown) onNodeWithText("还没设期末日期", substring = true).assertIsDisplayed()
+                if (!examKnown) onNodeWithText("未设期末日期", substring = true).assertIsDisplayed()
                 capture("review-today-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("到期复习").performClick()
                 onNodeWithText("1 节到期").assertIsDisplayed()
@@ -89,6 +89,7 @@ class ReviewEntryTest {
                     onNodeWithText("← 复习").performClick()
                     onNodeWithTag("open-mock").assertIsDisplayed()
                     onNode(hasText("今天") and hasClickAction()).performClick()
+                    onNode(hasText("路线") and hasClickAction()).performClick()
                     onNodeWithText("复习知识点", substring = true).performClick()
                     onNodeWithText("开始讲解").assertExists()
                     onNodeWithText("开始复习").assertDoesNotExist()

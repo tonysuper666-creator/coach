@@ -16,6 +16,7 @@ class ReaderHttp internal constructor(
     private val request: suspend (String, JsonObject?) -> ReaderReply,
     private val bytes: suspend (String) -> ByteArray?,
     private val text: suspend (String) -> String?,
+    internal val courseId: String? = null,
 ) {
     suspend fun catalog(): ReaderReply = request("", null)
     suspend fun resolve(source: String): ReaderReply = request("resolve?source=${source.encodeURLParameter()}", null)

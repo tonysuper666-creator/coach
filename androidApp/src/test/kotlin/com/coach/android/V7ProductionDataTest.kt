@@ -136,7 +136,8 @@ class V7ProductionDataTest {
         val width = if (outer) 624 else 1224
         val height = if (outer) 986 else 924
         RuntimeEnvironment.setQualifiers("w${width}dp-h${height}dp-xhdpi")
-        compose.setContent { Box(Modifier.requiredSize(width.dp, height.dp)) { CoachApp(controller, initialKp = if (reading) "K2" else null, dark = false) } }
+        compose.setContent { Box(Modifier.requiredSize(width.dp, height.dp)) { CoachApp(controller, initialKp = if (reading) "K2" else null, initialTab = if (reading) AppTab.TODAY else AppTab.ROUTE, dark = false) } }
+        if (!reading) compose.onNodeWithTag("browse-week-8").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("v7-paper").fetchSemanticsNodes().isNotEmpty() }
         compose.waitUntil(10_000) { requests.any { it.endsWith("/pages/214") } &&
             if (reading) compose.onAllNodesWithTag("v7-source-thumbnail").fetchSemanticsNodes().isNotEmpty()
@@ -174,19 +175,21 @@ class V7ProductionDataTest {
     @Test fun innerWeekUsesProgressAndSourceShelf() { show(false); compose.onNodeWithText("构答").assertDoesNotExist(); capture("inner-week-light.png") }
 
     @Test fun outerWeekCanChangeWeekAndOpenRecords() {
+        val before = ledger.toList()
         show(false, true)
         capture("outer-week-light.png")
         compose.onNodeWithTag("v7-week-picker").performClick()
         compose.onNodeWithText("第 6 周").performClick()
-        compose.waitUntil(10_000) { selectedWeeks.contains(6) }
+        compose.onNodeWithTag("week-section-previous").assertExists()
         compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag("v7-next-week") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-next-week").performClick()
-        compose.waitUntil(10_000) { selectedWeeks.lastOrNull() == 8 }
+        compose.onNodeWithTag("week-section-K0").assertExists()
         compose.waitUntil(10_000) { compose.onAllNodes(hasTestTag("v7-previous-week") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-previous-week").performClick()
-        compose.waitUntil(10_000) { selectedWeeks.lastOrNull() == 6 }
-        compose.onNodeWithText("Coach").performClick()
-        compose.onNodeWithText("记录").performClick()
+        compose.onNodeWithTag("week-section-previous").assertExists()
+        assertEquals(before, ledger.toList())
+        assertTrue(selectedWeeks.isEmpty())
+        compose.onNodeWithContentDescription("导航：记录").performClick()
         compose.onNodeWithTag("v7-paper").assertDoesNotExist()
     }
 
@@ -198,8 +201,7 @@ class V7ProductionDataTest {
         compose.onNodeWithText("选其他周").assertIsDisplayed().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("mainline-week-8").performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-skip").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("mainline-skip").performScrollTo().performClick()
+        compose.onNode(hasText("开始") and hasAnyAncestor(hasTestTag("week-section-K2"))).performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-source-card").assertDoesNotExist()
         compose.onNodeWithTag("mainline-option-1").performScrollTo().performClick()

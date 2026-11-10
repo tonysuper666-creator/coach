@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import com.coach.client.CourseHttp
 import com.coach.client.CourseView
+import com.coach.client.weekName
 import com.coach.client.MockReply
 import com.coach.client.SubmissionTrace
 import com.coach.domain.*
@@ -45,25 +46,32 @@ import kotlin.random.Random
  * 题和答案键都在 Mac 上，答之前手机拿不到答案。选项顺序由 Mac 打乱，这里照收到的顺序显示、按屏幕位置提交。
  */
 @Composable
-fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit) {
+fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, directEntry: Boolean = false, parentLabel: String = "复习", initialWeek: Int? = null, browseOnly: Boolean = false, onBrowseWeek: ((Int) -> Unit)? = null, onStartWeek: ((Int) -> Unit)? = null) {
     val http = c.course
-    var week by remember { mutableStateOf((c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull) }
+    var week by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(if (browseOnly) null else initialWeek ?: (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull) }
     var entry by remember { mutableStateOf(c.sync.mainlineState(c.courseId).str("entry").ifBlank { null }) }
     fun openWeek(n: Int, quiz: Boolean) {
         entry = if (quiz) "quiz" else "notes"; week = n
         c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(n), "entry" to JsonPrimitive(entry))))
     }
-    val closeWeek: () -> Unit = { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }
+    val closeWeek: () -> Unit = {
+        if (directEntry) onBack()
+        else { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }
+    }
     AppBackHandler(week != null) { closeWeek() }
     when {
         http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
             Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
         }
         week == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习",
-            directory = { com.coach.ui.v7.WeekDirectory(view, null, null) }) {
-            Column(Modifier.fillMaxSize()) { MainlineHome(c, http, onBack, ::openWeek) }
+            directory = { com.coach.ui.v7.WeekDirectory(view, null, onBrowseWeek) }) {
+            Column(Modifier.fillMaxSize()) { MainlineHome(c, http, view, onBack) { n, quiz ->
+                if (quiz && onStartWeek != null) onStartWeek(n)
+                else if (!quiz && onBrowseWeek != null) onBrowseWeek(n)
+                else openWeek(n, quiz)
+            } }
         }
-        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek) }
+        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek, directEntry = directEntry, parentLabel = parentLabel, targetKpId = if (directEntry) c.sync.mainlineState(c.courseId).str("targetKp").ifBlank { null } else null, onBrowseWeek = onBrowseWeek) }
     }
 }
 
@@ -77,11 +85,18 @@ private fun Header(title: String, back: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Unit, onOpen: (Int, Boolean) -> Unit) {
+private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView, onBack: () -> Unit, onOpen: (Int, Boolean) -> Unit) {
     val revision by c.sync.revision.collectAsState()
-    val reply by produceState<MockReply?>(null, revision) {
+    val cached = c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject
+    val knownWeeks = json("weeks" to JsonArray(view.weeks.map { n -> json("week" to n, "title" to weekName(view.weekKps(n))) }))
+    val reply by produceState<MockReply?>(MockReply(cached ?: knownWeeks, null), revision) {
         // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
-        do { val r = withContext(Dispatchers.IO) { http.mainline() }; value = r; if (!r.retryable) break; delay(1500) } while (true)
+        do {
+            val r = withContext(Dispatchers.IO) { http.mainline() }
+            if (r.body != null) { value = r; c.sync.saveMainlineState(c.courseId, json("body" to r.body), "home") }
+            if (!r.retryable) break
+            delay(1500)
+        } while (true)
     }
     Header("选择题主线", "← 复习", onBack)
     val body = reply?.body
@@ -98,7 +113,9 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, onBack: () -> Uni
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("mainline-week-$n")) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("第 $n 周 · ${w.str("title")}", style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                        CoverageLines(w["coverage"] as? JsonObject ?: JsonObject(emptyMap()))
+                        val coverage = w["coverage"] as? JsonObject
+                        if (coverage != null) CoverageLines(coverage)
+                        else Text("题目还未同步，连接后可读取。", style = MaterialTheme.typography.labelMedium)
                         TextButton(onClick = { onOpen(n, true) }, modifier = Modifier.testTag("mainline-direct-$n")) { Text("直接做题") }
                     }
                 }
@@ -126,7 +143,7 @@ private val tierNames = mapOf("setup" to "基础题", "detail" to "细节题", "
 
 @Composable
 private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView, number: Int, entry: String?, onBack: () -> Unit,
-    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, only: Set<String>? = null) {
+    onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, only: Set<String>? = null, directEntry: Boolean = false, parentLabel: String = "复习", targetKpId: String? = null, onBrowseWeek: ((Int) -> Unit)? = null) {
     val scope = rememberCoroutineScope()
     var readerState by remember { mutableStateOf(http.readerState(c.sync, number)) }
     // Every reader write goes through a transform of the value held here instead of a whole object captured in an
@@ -163,7 +180,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
     val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
-    var reading by remember { mutableStateOf(only == null && (entry?.let { it == "notes" } ?: (saved.str("mode") != "quiz"))) }
+    var reading by remember { mutableStateOf(only == null && (entry?.takeUnless { it == "resume" }?.let { it == "notes" } ?: (saved.str("mode") != "quiz"))) }
     var sectionId by remember { mutableStateOf(saved.str("section")) }
     var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
     var itemId by remember { mutableStateOf(saved.str("item")) }
@@ -195,7 +212,20 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
+    LaunchedEffect(body != null) {
+        if (body != null && targetKpId != null && entry in setOf("quiz", "notes")) {
+            // Use actual section/fact IDs from the imported course, never infer an answer link from ordering.
+            val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
+            val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
+            if (match != null) {
+                chosen = null; result = null
+                save("choice" to JsonNull, "result" to JsonNull)
+                position(reading, "", match.str("section_id"), if (reading) filter else match.str("section_id"))
+            }
+        }
+    }
     LaunchedEffect(Unit) {
+        if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
         save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "filter" to JsonPrimitive(filter))
         if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
@@ -249,7 +279,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
         position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
     }
-    val goUp: () -> Unit = { if (!reading) position(true) else onBack() }
+    val goUp: () -> Unit = { if (!reading && !directEntry) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
     TaskChrome(!reading || readerState.flag("focus"))
     AppBackHandler(reading && readerState.flag("focus"), priority = 100) { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
@@ -334,8 +364,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, showNavigation = false, onBack = goUp, backLabel = if (only != null) "暂离 · 阅读" else "暂离 · 第 $number 周",
-        directory = { WeekDirectory(view, number, null) },
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, showNavigation = false, onBack = goUp, backLabel = if (only != null) "暂离 · 阅读" else if (directEntry) "暂离 · $parentLabel" else "暂离 · 第 $number 周",
+        directory = { WeekDirectory(view, number, onBrowseWeek) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
                 if (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank()) SourceThumbnail(d, openSource)

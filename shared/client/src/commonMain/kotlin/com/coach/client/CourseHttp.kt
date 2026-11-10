@@ -153,6 +153,7 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
 
     /** Separate private reader surface; it shares auth/timeouts but has no connection to the AI client. */
     val reader = ReaderHttp(
+        courseId = course,
         request = { path, body ->
             try {
                 val url = readerUrl(path)

@@ -361,8 +361,10 @@ class ChatService(
         hub.emit(startFrame(session))
         if(prepared!=null) { session.trace?.prepared(); scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
-            val hits = actor.execute { searchSourcePages(courseId,question,learnedThrough(courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(courseId,threadId).currentKpId)) }
+            val (hits, guardOnly) = actor.execute { searchSourcePages(courseId,question,learnedThrough(courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(courseId,threadId).currentKpId)) to restrictedForGuard(courseId,question) }
             val selected = SourcePack.prepare(sourcePack,hits)
+            // Restricted text never reaches the model; it is kept only so the output guard can still catch an echo of it.
+            if (guardOnly.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(guardOnly, selected.browsable.map { it.text } + selected.legacy)
             if (selected.restricted.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(
                 selected.restricted.map { it.text }, selected.browsable.map { it.text } + selected.legacy)
             selected.render()
@@ -718,7 +720,7 @@ class ChatService(
                 failure = "source_quota_protected"
                 return
             }
-            val hits = actor.execute { searchSourcePages(session.courseId,query,learnedThrough(session.courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(session.courseId,session.threadId).currentKpId)) }
+            val (hits, guardOnly) = actor.execute { searchSourcePages(session.courseId,query,learnedThrough(session.courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(session.courseId,session.threadId).currentKpId)) to restrictedForGuard(session.courseId,query) }
             val pack = SourceReadSandbox().read(SourcePack.prepare("",hits)) { process ->
                 session.sourceProcess = process
                 if (session.forcedStatus != null) process?.destroyForcibly()
@@ -728,8 +730,7 @@ class ChatService(
                 return
             }
             val gate = SourceCitationGate(pack.anchors)
-            val restrictedGuard = if (pack.restricted.isEmpty()) null else RestrictedSourceGuard(
-                pack.restricted.map { it.text },pack.browsable.map { it.text })
+            val restrictedGuard = if (guardOnly.isEmpty()) null else RestrictedSourceGuard(guardOnly,pack.browsable.map { it.text })
             val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false,restrictedSources=restrictedGuard) { attempt ->
                 session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
             }

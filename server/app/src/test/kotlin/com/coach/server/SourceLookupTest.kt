@@ -178,6 +178,14 @@ class SourceLookupTest {
             it.registerSourcePage("c","book","Synthetic book",1,"Adverse selection means hidden risk before contracting.")
         }
         val actor = LedgerActor(scope,store)
+        init {
+            // Real precondition of a learner in the middle of a course: an outline point anchored on the page, opened as the current point.
+            DriverManager.getConnection("jdbc:sqlite:${store.directory.resolve("coach.sqlite")}").use { db ->
+                db.prepareStatement("INSERT INTO outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired,legacy_id) VALUES('k1','c','m',1,'k1','x','[]','[]',?,0,NULL)").use {
+                    it.setString(1,"""[{"docId":"book","pdfPage":1}]"""); it.executeUpdate() }
+            }
+            runBlocking { actor.execute { append("c","kp_opened",json("kpId" to "k1"),thread="t") } }
+        }
         val stub = StubTutor()
         val logs = Collections.synchronizedList(mutableListOf<String>())
         val frames = Collections.synchronizedList(mutableListOf<JsonObject>())
@@ -228,7 +236,25 @@ class SourceLookupTest {
             assertTrue(result.contains("hidden risk before contracting"))
             assertFalse(h.frames.any { it.toString().contains(secret) })
             assertFalse(h.chat.snapshot(id).toString().contains(secret))
-            assertTrue(h.stub.requestBodies.last().contains(secret))
+            // Protected text must never be part of the model input; the output guard still knows it and blocks an echo.
+            assertFalse(h.stub.requestBodies.any { it.contains(secret) })
+        }
+    }
+
+    /** Platform-independent proof of what the lookup entries compute: legal learned page allowed, protected text kept out of the pack but known to the guard, unknown/empty point closed. */
+    @Test fun lookupScopeAllowsLearnedPageKeepsProtectedTextOutOfPackAndClosesWithoutPoint() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute { registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false) }
+            val learner = com.coach.domain.scope.VisibleScope.learner()
+            val (open, none, guard) = h.actor.execute {
+                Triple(searchSourcePages("c","adverse selection",learnedThrough("c",learner,todayProgress("c","t").currentKpId)),
+                    searchSourcePages("c","adverse selection",learnedThrough("c",learner,null as String?)), restrictedForGuard("c","adverse selection"))
+            }
+            assertEquals(listOf("book"),open.map { it.docId })
+            assertTrue(open.none { it.text.contains(secret) })
+            assertEquals(emptyList(),none)
+            assertEquals(listOf(secret),guard)
         }
     }
 

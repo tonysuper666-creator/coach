@@ -1294,6 +1294,10 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
     }
 
+    /** Texts of protected pages matching a query. For OUTPUT GUARDS ONLY: they must never be placed in a model request. */
+    fun restrictedForGuard(course: String, question: String): List<String> =
+        searchSourcePages(course, question, com.coach.domain.scope.VisibleScope.tutorInternal()).filterNot { it.learnerVisible }.take(2).map { it.text }
+
     /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
     /** Knowledge point ids are compared trimmed and case-folded so a cosmetic mismatch between facts and outline does not disable a course. */
     private fun kpKey(id: String) = id.trim().lowercase()

@@ -211,7 +211,7 @@ private fun MarkedParagraph(raw: String, d: V7PageDetails, index: Int, onSelecti
 
 @Composable
 internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: String, focus: Boolean, onFocus: () -> Unit,
-    onBack: (() -> Unit)?, onAsk: () -> Unit, onQuiz: () -> Unit, onSource: () -> Unit, weekActions: WeekActions?, onSelectionAsk: (String) -> Unit) {
+    onBack: (() -> Unit)?, onAsk: () -> Unit, onQuiz: () -> Unit, onSource: () -> Unit, weekActions: WeekActions?, onSelectionAsk: (String) -> Unit, backLabel: String? = null) {
     val railAnchors = remember(kp.id) { MarginAnchors() }
     val scoped = view.projection.studyScope?.week
     val week = scoped?.takeIf { n -> view.weekKps(n).any { it.id == kp.id } }
@@ -256,7 +256,7 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
             saveNote("> ${noteQuote.orEmpty()}\n\n${noteText.trim()}"); noteQuote = null; noteText = ""
         }) { Text("保存") } }, dismissButton = { TextButton(onClick = { noteQuote = null }) { Text("取消") } })
     Desk(crumb = d.course.ifBlank { kp.module.ifBlank { c.courseId } } + week?.let { " · 第 $it 周" }.orEmpty(), focus = focus, onFocus = onFocus,
-        status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = "← 本周",
+        status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = backLabel ?: week?.let { "← 第 $it 周" } ?: "← 今天",
         directory = { WeekDirectory(view, week, weekActions?.let { it::select }) },
         margin = {
             if (d.lecture.isNotBlank() || d.personalNote.isNotBlank() || d.sourceLabel.isNotBlank() || d.question != null || d.selection.isNotBlank()) AlignedRail(listOf("p0", "p1", "p1", "p3", "end")) {

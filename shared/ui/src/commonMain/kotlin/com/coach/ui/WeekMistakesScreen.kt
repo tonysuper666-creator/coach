@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.testTag
@@ -24,8 +25,10 @@ import kotlinx.serialization.json.JsonArray
 @Composable
 fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: String = "← 今天", onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var thread by remember(week) { mutableStateOf<String?>(null) }
-    var choice by remember(thread) { mutableStateOf<String?>(null) }
+    var thread by rememberSaveable(week) { mutableStateOf<String?>(null) }
+    var choice by rememberSaveable(thread) { mutableStateOf<String?>(null) }
+    val goUp: () -> Unit = { if (thread != null) { thread = null; choice = null } else onBack() }
+    AppBackHandler(thread != null, onBack = goUp)
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     fun command(type: String, payload: JsonObject, onResult: (JsonObject) -> Unit) {
@@ -54,7 +57,7 @@ fun WeekMistakesScreen(c: CoachController, view: CourseView, week: Int, back: St
     val group = thread?.let { view.quizGroups(it).lastOrNull() }
     val card = group?.cards?.singleOrNull()
     Column(Modifier.fillMaxSize()) {
-        TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text(back) }
+        TextButton(onClick = goUp, modifier = Modifier.heightIn(min = 48.dp)) { Text(if (thread != null) "← 第 $week 周错题" else back) }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text("第 $week 周错题", style = MaterialTheme.typography.titleLarge) }
             if (card != null) {

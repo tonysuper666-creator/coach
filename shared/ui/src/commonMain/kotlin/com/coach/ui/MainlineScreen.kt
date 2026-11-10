@@ -53,6 +53,8 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
         entry = if (quiz) "quiz" else "notes"; week = n
         c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(n), "entry" to JsonPrimitive(entry))))
     }
+    val closeWeek: () -> Unit = { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }
+    AppBackHandler(week != null) { closeWeek() }
     when {
         http == null -> com.coach.ui.v7.Desk(crumb = "选择题主线", onBack = onBack, backLabel = "← 复习") {
             Column { Header("选择题主线", "← 复习", onBack); CenterMessage("选择题主线要连接 Mac。") }
@@ -61,7 +63,7 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
             directory = { com.coach.ui.v7.WeekDirectory(view, null, null) }) {
             Column(Modifier.fillMaxSize()) { MainlineHome(c, http, onBack, ::openWeek) }
         }
-        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }, onOpenSteps, onOpenEssay, onReviewWeek) }
+        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek) }
     }
 }
 
@@ -247,8 +249,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
         position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
     }
+    val goUp: () -> Unit = { if (!reading) position(true) else onBack() }
+    AppBackHandler(!reading, priority = 10, onBack = goUp)
+    TaskChrome(!reading || readerState.flag("focus"))
+    AppBackHandler(reading && readerState.flag("focus"), priority = 100) { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
     LaunchedEffect(reading, readerState.flag("focus")) { c.readerFocus = reading && readerState.flag("focus") }
-    if ((reading && !readerState.flag("focus")) || (!reading && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", "← 选周", onBack)
+    if ((reading && !readerState.flag("focus")) || (!reading && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", if (reading) "← 选择题主线" else "← 第 $number 周", goUp)
+    if (reading && readerState.flag("focus")) Header("第 $number 周", "退出专心读") { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
     if (body == null) {
         CenterMessage(error ?: "正在读取…")
         if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
@@ -290,11 +297,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
     val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
-    var sourceOpen by remember { mutableStateOf(false) }
+    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    AppBackHandler(sourceOpen, priority = 250) { sourceOpen = false }
     val openSource = { if (sourceKp != null) sourceOpen = true else onBack() }
     if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }) }
+        Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }, backLabel = "← 第 $number 周 · 第 ${index + 1} 题") }
     }
     val railAnchors = remember { MarginAnchors() }
     val answer = done?.num("answer")?.toInt()
@@ -326,7 +334,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, onBack = onBack, backLabel = if (only != null) "← 回到阅读" else "← 选周",
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, showNavigation = false, onBack = goUp, backLabel = if (only != null) "暂离 · 阅读" else "暂离 · 第 $number 周",
         directory = { WeekDirectory(view, number, null) },
         margin = {
             AlignedRail(listOf("why", null, null), gap = 24.dp) {

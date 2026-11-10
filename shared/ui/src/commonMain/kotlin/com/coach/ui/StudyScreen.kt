@@ -3,6 +3,8 @@ package com.coach.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -28,16 +30,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     val tv = ui.threads[thread] ?: ThreadView()
     val groups = view.quizGroups(thread)
     SideEffect { if(groups.isNotEmpty()) PoolTrace.mark(thread,"composed") }
-    val chosen = remember(kp.id) { mutableStateMapOf<String, String>() }
+    val chosen = rememberSaveable(kp.id, saver = mapSaver<androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>>(
+        save = { it.toMap() }, restore = { it.map { e -> e.key to e.value as String }.toMutableStateMap() })) { mutableStateMapOf<String, String>() }
     val pending = groups.lastOrNull { !it.submitted }
     val additionalScope = remember(kp.title) { additionalTitleScope(kp.title) }
     var showScope by remember(kp.id) { mutableStateOf(false) }
     var askOpen by remember(kp.id) { mutableStateOf(false) }
-    var draft by remember(kp.id) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
+    var draft by rememberSaveable(kp.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
     val enterGate = remember(kp.id) { EnterGate() }
     val focus = LocalFocusManager.current
     var opened by remember(kp.id) { mutableStateOf(false) }
-    var started by remember(kp.id) { mutableStateOf(false) }
+    var started by rememberSaveable(kp.id) { mutableStateOf(false) }
     var pinned by remember(kp.id) { mutableStateOf(false) }
     val imeOpen = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
@@ -87,14 +90,14 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         }
     }
 
-    var readingFocus by remember(kp.id) { mutableStateOf(initialFocus) }
-    var conversation by remember(kp.id) { mutableStateOf(initialDraft != null) }
+    var readingFocus by rememberSaveable(kp.id) { mutableStateOf(initialFocus) }
+    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null) }
     val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
     if (!reviewMode && !conversation && completed != null && pending == null && !tv.busy) {
         com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
             onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
             onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions,
-            onSelectionAsk = { draft = TextFieldValue(it); conversation = true })
+            onSelectionAsk = { draft = TextFieldValue(it); conversation = true }, backLabel = backLabel)
         return
     }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
@@ -102,7 +105,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
     }
     CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
-    com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天", showNavigation = pending == null,
+    val parentLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天"
+    com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = if (pending != null) "暂离 · ${parentLabel.removePrefix("← ")}" else parentLabel, showNavigation = pending == null,
         directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.takeIf { ui.connected && !it.busy }?.let { it::select }) },
         margin = { com.coach.ui.v7.MarginNotes(notes) {
             if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {

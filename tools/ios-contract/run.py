@@ -13,6 +13,7 @@ import tempfile
 import time
 import ctypes
 from ctypes import wintypes
+from urllib.parse import quote
 
 from websocket_probe import Closed, WebSocket
 
@@ -142,6 +143,51 @@ def require(condition, message):
         raise ContractFailure(message)
 
 
+def require_http_status(actual, expected, method, path):
+    require(actual == expected,
+            f"{method} {path.split('?')[0]} expected HTTP {expected}, received {actual}")
+
+
+def prove_allowed_reader_is_red():
+    """The revocation check must go red when a reader note response is intentionally allowed."""
+    path = f"{READER}/{TEXT_ID}/notes"
+    try:
+        require_http_status(200, 401, "POST", path)
+    except ContractFailure as failure:
+        require(str(failure) == f"POST {path} expected HTTP 401, received 200",
+                "synthetic allowed reader response did not fail closed")
+        return
+    raise ContractFailure("synthetic allowed reader response was accepted")
+
+
+def reader_entries(document):
+    """Every ReaderHttp method, mounted by ReaderRoutes under the course reader route.
+
+    LedgerRoutes rejects a revoked bearer before the handler, so these stay 401
+    without depending on Poppler or a valid annotation body.
+    """
+    doc = quote(document, safe="")
+    page = f"{READER}/{doc}/pages/1"
+    note = dict(id="revoked-anchor", version="0" * 64, pdfPage=1, textSha256="0" * 64,
+                start=0, end=1, quote="x", note="revoked", deleted=False,
+                baseRevision=0, mutationId="revoked-anchor")
+    progress = dict(version="0" * 64, pdfPage=1, baseRevision=0, mutationId="revoked-progress")
+    return [
+        ("GET", READER, None),
+        ("GET", f"{READER}/resolve?source={quote('教材 p.1')}", None),
+        ("GET", page, None),
+        ("GET", f"{page}/image", None),
+        ("GET", f"{page}/image?version={'0' * 64}", None),
+        ("GET", f"{page}/boxes?version={'0' * 64}", None),
+        ("GET", f"{page}/study", None),
+        ("GET", f"{READER}/{doc}/map", None),
+        ("GET", f"{READER}/{doc}/state", None),
+        ("GET", f"{READER}/{doc}/notes.md", None),
+        ("POST", f"{READER}/{doc}/progress", progress),
+        ("POST", f"{READER}/{doc}/notes", note),
+    ]
+
+
 def git(*args):
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
 
@@ -213,7 +259,7 @@ class Server:
         ])
         (self.library / "catalog.json").write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
 
-    def request(self, path, credential=None, method="GET", body=None, expected=200):
+    def request(self, path, credential=None, method="GET", body=None, expected=200, json_body=True):
         headers = {}
         if credential:
             headers.update({"X-Coach-Device": credential[0], "Authorization": "Bearer " + credential[1]})
@@ -226,15 +272,17 @@ class Server:
             response = connection.getresponse()
             raw = response.read(4 * 1024 * 1024 + 1)
             require(len(raw) <= 4 * 1024 * 1024, "oversized HTTP response")
-            require(response.status == expected,
-                    f"{method} {path.split('?')[0]} expected HTTP {expected}, received {response.status}")
+            require_http_status(response.status, expected, method, path)
+            self.last_status = response.status
             self.last_headers = dict((k.lower(), v) for k, v in response.getheaders())
+            if not json_body:
+                return raw
             if not raw:
                 return None
             try:
                 return json.loads(raw)
             except (ValueError, UnicodeDecodeError):
-                require(expected >= 400, "successful HTTP response was not JSON")
+                require(response.status >= 400, "successful HTTP response was not JSON")
                 return None
         finally:
             connection.close()
@@ -310,8 +358,9 @@ class Server:
 
 
 class Suite:
-    def __init__(self, server, report, inject_failure):
-        self.server, self.report, self.inject_failure = server, report, inject_failure
+    def __init__(self, server, report, inject_failure, inject_reader_allow=False):
+        self.server, self.report = server, report
+        self.inject_failure, self.inject_reader_allow = inject_failure, inject_reader_allow
 
     def check(self, name, function):
         start = time.monotonic()
@@ -637,7 +686,66 @@ class Suite:
         if self.report["scope"] == "full" and not self.inject_failure:
             self.check("reader catalog, page, study, anchored notes, conflict, reconnect and restart", reader)
 
+        def annotation_view(body):
+            progress = body.get("progress") or {}
+            notes = tuple(sorted(
+                (item.get("id"), item.get("note"), item.get("quote"), item.get("version"),
+                 item.get("pdfPage"), item.get("stale"))
+                for item in body.get("notes") or ()))
+            return (progress.get("pdfPage"), progress.get("revision"), progress.get("version"),
+                    progress.get("stale")), notes
+
+        def read_reader(credential, document):
+            state = s.request(f"{READER}/{document}/state", credential)
+            require(state.get("document", {}).get("id") == document and isinstance(state.get("notes"), list),
+                    "anchored notes were unreadable")
+            exported = s.request(f"{READER}/{document}/notes.md", credential, json_body=False)
+            require(isinstance(exported, bytes) and "个人阅读批注".encode("utf-8") in exported,
+                    "annotation export was unreadable")
+            return state
+
+        def read_surface(credential, when):
+            catalog = s.request(READER, credential)
+            require(any(item.get("id") == TEXT_ID for item in catalog.get("documents") or []),
+                    f"reader catalog was unreadable {when}")
+            resolved = s.request(f"{READER}/resolve?source={quote('教材 p.1')}", credential)
+            require(resolved.get("documentId") == TEXT_ID and resolved.get("pdfPage") == 1,
+                    f"reader citation was unreadable {when}")
+            study = s.request(f"{READER}/{TEXT_ID}/pages/1/study", credential)
+            require(study.get("documentId") == TEXT_ID and "questions" in study,
+                    f"reader study page was unreadable {when}")
+            mapped = s.request(f"{READER}/{TEXT_ID}/map", credential)
+            require(mapped.get("documentId") == TEXT_ID, f"reader map was unreadable {when}")
+            if poppler_dir():
+                page = s.request(f"{READER}/{TEXT_ID}/pages/1", credential)
+                require(page.get("documentId") == TEXT_ID and page.get("pdfPage") == 1
+                        and isinstance(page.get("text"), str) and page["text"],
+                        f"reader page was unreadable {when}")
+            # 401 alone cannot prove the path: the ledger interceptor rejects every
+            # non-pair URL. A stale version reaches ReaderRoutes and conflicts before
+            # Poppler or any ledger append. The bare image URL is that same route.
+            for document in (TEXT_ID, READ_ID):
+                for method, path, _ in reader_entries(document):
+                    if method == "POST":
+                        rejected = s.request(path, credential, method, {}, expected=409)
+                        require(rejected.get("error") == "资料版本已改变，请重新定位；旧批注仍保留",
+                                f"anchored save route was not reached {when}")
+                    elif "version=" in path:
+                        rejected = s.request(path, credential, expected=409)
+                        require(rejected.get("error") == "资料版本已改变，请重新定位",
+                                f"reader render route was not reached {when}")
+            return read_reader(credential, TEXT_ID), read_reader(credential, READ_ID)
+
+        def expect_reader_revoked():
+            # --inject-reader-allow deliberately expects 200. A real 401 then fails this check.
+            expected = 200 if self.inject_reader_allow else 401
+            for document in (TEXT_ID, READ_ID):
+                for method, path, body in reader_entries(document):
+                    s.request(path, self.phone, method, body, expected=expected)
+
         def revoke():
+            prove_allowed_reader_is_red()
+            before_text, before_read = read_surface(self.phone, "before revocation")
             with WebSocket(s.port, self.phone) as ws:
                 ws.until(lambda m: "lastSeq" in m)
                 s.request("/v1/devices/" + self.phone[0], s.admin, "DELETE", expected=204)
@@ -650,10 +758,17 @@ class Suite:
             s.request("/v1/hello", self.phone, expected=401)
             s.request("/v1/commands", self.phone, "POST", self.note, expected=401)
             WebSocket(s.port, self.phone, expected_status=401)
+            expect_reader_revoked()
             s.stop()
             s.start()
             s.request("/v1/hello", self.phone, expected=401)
+            expect_reader_revoked()
             s.request("/v1/hello", self.other)
+            after_text, after_read = read_surface(self.other, "for the surviving device")
+            require(annotation_view(after_text) == annotation_view(before_text),
+                    "surviving device lost textbook reading or anchored notes")
+            require(annotation_view(after_read) == annotation_view(before_read),
+                    "surviving device lost the other document's anchored notes")
         self.check("revocation closes established WS and survives restart", revoke)
 
 
@@ -662,13 +777,15 @@ def main():
     parser.add_argument("--scope", choices=("full", "current"), default="full")
     parser.add_argument("--report", type=Path, default=HERE / ".evidence/report.json")
     parser.add_argument("--inject-failure", action="store_true", help="negative control: expect an invalid token to succeed")
+    parser.add_argument("--inject-reader-allow", action="store_true",
+                        help="negative control: after revocation, expect reader and annotation routes to succeed")
     args = parser.parse_args()
     report = dict(schemaVersion=1, status="running", scope=args.scope, sourceCommit=git("rev-parse", "HEAD"),
                   sourceDirty=bool(git("status", "--porcelain", "--", "server", "shared")),
                   sourceFiles={p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in SOURCES},
                   toolFiles={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                              for p in (HERE / "run.py", HERE / "websocket_probe.py")},
-                  negativeControl=args.inject_failure, checks=[],
+                  negativeControl=args.inject_failure, readerAllowControl=args.inject_reader_allow, checks=[],
                   missing=[dict(capability="reader and anchored annotations",
                                 status="unverified", owner="TON-1412",
                                 reason="Full scope has not finished the merged reader/annotation checks.")],
@@ -688,7 +805,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="icc-", dir=temp_parent) as temp:
             server = Server(Path(temp))
             try:
-                Suite(server, report, args.inject_failure).run()
+                Suite(server, report, args.inject_failure, args.inject_reader_allow).run()
             finally:
                 server.stop()
         if report["missing"] and args.scope == "full":

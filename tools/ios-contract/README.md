@@ -13,6 +13,7 @@ From the repository root, with Python 3.9+ and the repository's JDK/Gradle prere
 python3 tools/ios-contract/run.py --scope current --report tools/ios-contract/.evidence/current.json
 python3 tools/ios-contract/run.py --report tools/ios-contract/.evidence/full.json
 python3 tools/ios-contract/run.py --scope current --inject-failure --report tools/ios-contract/.evidence/negative.json
+python3 tools/ios-contract/run.py --scope current --inject-reader-allow --report tools/ios-contract/.evidence/reader-allow.json
 ```
 
 On macOS the build command remains `tools/dev/heavy ./gradlew :server:app:installDist
@@ -31,7 +32,7 @@ The probe does not download Poppler.
 | Exit | Meaning |
 | --- | --- |
 | 0 | `--scope current`: the original supported checks passed. Default `full`: those checks plus the merged reader/anchored-note checks passed. Exit 0 does **not** accept Swift, Android UI, a physical device, or TestFlight. |
-| 1 | Build/request/assertion failed, including the deliberate invalid-token control. The runner stops at the first failed check; remaining checks were not run. |
+| 1 | Build/request/assertion failed, including the deliberate invalid-token control and the revoked-reader allow control. The runner stops at the first failed check; remaining checks were not run. A server that exits before listening is this exit code too, and is not evidence that a reader route returned 401. |
 | 2 | Default `full` finished the older checks, but the reader/anchored-note check did not run. |
 | 130 | Interrupted; cleanup still runs. |
 
@@ -39,6 +40,13 @@ The probe does not download Poppler.
 real server and incorrectly expects HTTP 200; the server's 401 must make the process
 exit 1 and mark that check failed. It never changes the server or relaxes normal checks.
 An unexpected successful response also fails the normal authentication check.
+
+`--inject-reader-allow` is a separate control for the revocation assertions. It still
+revokes a real device, then incorrectly expects HTTP 200 from each `ReaderHttp` route.
+The server's 401 must fail that check and exit 1. It does not change `--inject-failure`,
+which still stops at the invalid hello token. If the isolated server never reaches
+readiness, the report error is the startup failure; that is not a 401 and does not
+satisfy either negative control.
 
 The JSON report includes source HEAD, whether `server/` or `shared/` is dirty, hashes of
 contract sources, probe files and all installed server JARs, build exit status, checks,
@@ -81,7 +89,7 @@ missing `hasMore` means false. These are source-defined defaults, not guessed fi
 | Existing client WS | Without streaming hello, server sends `t:ledger` with empty events and `httpCatchUp:{after,throughSeq,url}`. Fetch that URL to recover events, matching the existing shared transport. An empty hint is never treated as delivered data. |
 | Upstream error | With local bridge deliberately unavailable, `POST /journal/{day}/summary` yields actual 502; manual text is preserved and no summary is fabricated. This tests the summary endpoint; it does not prove every command's possible 5xx-after-commit case. |
 | Restart/outage | Stop owned server, observe a real connection failure, restart same temp data. Events, projection, epoch and original command/answer receipts must persist; stale journal still conflicts; WS catches up. |
-| Revocation | Admin `DELETE /v1/devices/{id}` yields 204. Existing socket closes with 1008; subsequent HTTP read/write and new WS handshake yield 401. Revocation persists after another restart; second client remains authorized. |
+| Revocation | Admin `DELETE /v1/devices/{id}` yields 204. Existing socket closes with 1008; subsequent hello, command and new WS handshake yield 401. Before revocation the same device can read the reader catalog, citation, study page, map, both documents' state and `notes.md`, and the textbook page when `pdftotext` is present. After revocation every `ReaderHttp` route on both documents returns 401, including page, image, boxes, progress and anchored `notes`. The same 401s remain after another restart. The other device can still read those routes, and its anchored notes and progress match the pre-revocation snapshot. |
 
 ## Isolation and limits
 
@@ -119,3 +127,5 @@ questions; a ledger `save_note` is not treated as a reader annotation.
 | Version | Replace only the textbook bytes and catalog hash, restart, and require the old note and progress to stay present with `stale=true`. Posting the old version is 409 and does not rewrite the note. A new note id on the new version is separate. The other document stays current. |
 
 `save_note` on `/v1/commands` remains the older ledger-note check. It does not satisfy this table.
+
+Revocation uses the same routes as `ReaderHttp.kt`, not a guessed alias: catalog, `resolve`, `pages/{page}`, `image` (with and without `version`), `boxes`, `study`, `map`, `state`, `notes.md`, `progress` and `notes`. Before revocation a stale `version` on image, boxes, progress and notes returns that route's own 409, so a later 401 is not an unmatched URL. An intentionally allowed HTTP 200 for `POST .../notes` fails the same status check before any socket is opened. `--inject-reader-allow` repeats that failure against the live revoked token.

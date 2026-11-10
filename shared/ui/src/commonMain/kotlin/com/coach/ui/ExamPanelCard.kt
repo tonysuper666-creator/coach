@@ -55,13 +55,10 @@ internal fun ExamPanelCard(
             Countdown(panel.countdown, busy) { picking = true }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
 
-            Text("今天先补这三块", style = MaterialTheme.typography.titleMedium)
-            if (panel.focus.isEmpty()) Text(emptyFocusText(panel), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            panel.focus.forEachIndexed { i, row -> FocusBlock(c, i + 1, row, onOpen, onPractice) }
-            Text(
-                if (panel.weighted) "按各周分值和还没会的程度排序。" else "还没有各周分值，只按还没会的程度排序。",
-                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val target = c.learningTarget(view)
+            Text("接着学", style = MaterialTheme.typography.titleMedium)
+            if (target == null) Text("今天的都做完了。")
+            else TextButton(onClick = { onOpen(target.kp.id, true) }) { Text(splitTitle(target.kp.title).second) }
 
             Text("各周进度", style = MaterialTheme.typography.titleMedium)
             panel.weeks.forEach { WeekLine(it) }

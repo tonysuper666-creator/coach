@@ -50,4 +50,14 @@ class WeekCourseViewTest {
         val done = CourseView(events, projection.copy(studyScope=StudyScope("scope", 2, listOf("next"), 1)))
         assertNull(done.continueTarget)
     }
+    @Test fun genuinelyPausedWorkWinsOverAnOlderWeekScope() {
+        val events = listOf(
+            e(1, "outline_revised", json("ops" to JsonArray(listOf(json("kpId" to "paused", "title" to "【W1】Paused"), json("kpId" to "next", "title" to "【W2】Next"))))),
+            e(2, "study_scope_set", json("week" to 2, "kpIds" to listOf("next"))),
+            e(3, "kp_opened", json("kpId" to "paused"))
+        )
+        val view = CourseView(events, project(events))
+        assertEquals("paused", view.continueTarget?.id)
+        assertEquals("next", view.weekTarget?.id)
+    }
 }

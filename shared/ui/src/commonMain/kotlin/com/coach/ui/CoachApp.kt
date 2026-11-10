@@ -220,14 +220,22 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val select: (AppTab) -> Unit = navigation::select
     fun openStudy(id: String, start: Boolean, review: Boolean = false) {
         c.tutor.telemetry?.record("tap", "open_kp")
-        if (entry.page == AppPage.HOME && entry.tab == AppTab.TODAY) {
-            view?.projection?.studyScope?.week?.let { n -> navigation.rename("第 $n 周") }
-        }
         val label = view?.kp(id)?.title?.let { splitTitle(it).second } ?: id
         val destination = AppEntry(AppPage.STUDY, id = id, autoStart = start, review = review, label = label)
         if (entry.page == AppPage.STUDY) navigation.replace(destination) else navigation.push(destination)
     }
-    val openKp: (String, Boolean) -> Unit = { id, start -> openStudy(id, start) }
+    fun startLearning(target: LearningTarget) {
+        if (target.legacy || target.week == null) { openStudy(target.kp.id, true); return }
+        val saved = c.sync.mainlineState(c.courseId)
+        c.sync.saveMainlineState(c.courseId, JsonObject(saved + mapOf("week" to JsonPrimitive(target.week), "targetKp" to JsonPrimitive(target.kp.id),
+            "entry" to JsonPrimitive(if (target.resume) "resume" else if (target.reading) "notes" else "quiz"))))
+        navigation.push(AppEntry(AppPage.MAINLINE, id = "continue", week = target.week, label = "第 ${target.week} 周"))
+    }
+    val openKp: (String, Boolean) -> Unit = { id, start ->
+        val current = view
+        if (start && current != null) c.learningTarget(current)?.let { weekActions.start(current, it) }
+        else openStudy(id, false)
+    }
     val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }
     fun openTask(page: AppPage, label: String, id: String = "") {
         if (navigation.current.page == AppPage.MAINLINE) {
@@ -251,6 +259,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     var sourceShown by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
     SideEffect {
+        weekActions.onStart = ::startLearning
+        weekActions.onBrowse = { n ->
+            if (n == 0) navigation.select(AppTab.ROUTE)
+            else {
+                val destination = AppEntry(AppPage.WEEK, week = n, label = "第 $n 周")
+                if (navigation.current.page == AppPage.WEEK) navigation.replace(destination) else navigation.push(destination)
+            }
+        }
         weekActions.onOpen = { id -> if (id != null) openStudy(id, true) else navigation.back() }
         weekActions.onReview = { week -> navigation.push(AppEntry(AppPage.WEEK_REVIEW, week = week, label = "第 $week 周错题")) }
     }
@@ -281,22 +297,26 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                 when (page.page) {
                                     AppPage.HOME -> when (page.tab) {
                                         AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
-                                        AppTab.ROUTE -> RouteScreen(c, current, null, openKp, weekActions.onReview)
+                                        AppTab.ROUTE -> RouteScreen(c, current, null, openKp, weekActions.onReview, weekActions::select)
                                         AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, { id, start -> openStudy(id, start, true) }, if (navigation.canGoBack) ({ navigation.back() }) else null,
                                             onOpenMock = { navigation.push(AppEntry(AppPage.MOCK, label = "模拟考")) }, onOpenEssay = openEssay,
                                             onOpenMainline = { week, direct ->
-                                                c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to (week?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull), "entry" to JsonPrimitive(if (direct) "quiz" else "notes"))))
-                                                navigation.push(AppEntry(AppPage.MAINLINE, label = "选择题主线"))
+                                                val decision = current.let { c.learningTarget(it) }
+                                                if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else if (decision?.resume == true) "resume" else "quiz"))))
+                                                navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
                                             }, reminderSettings = { TextButton(onClick = { navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }) { Text("设置") } }) else CenterMessage("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                                     }
+                                    AppPage.WEEK -> if (current != null) com.coach.ui.v7.WeekPage(c, current, ui, weekActions, openKp, page.week!!) else CenterMessage("正在加载课程…")
                                     AppPage.STUDY -> current?.kp(page.id)?.let { kp ->
                                         StudyScreen(c, kp, current, ui, page.autoStart, { navigation.back() }, initialDraft, openReference,
                                             if (page.review) null else weekActions, page.review, backLabel = "← ${navigation.entries.getOrNull(navigation.entries.indexOf(page) - 1)?.label ?: page.tab.label}")
                                     } ?: CenterMessage("正在加载课程…")
                                     AppPage.MAINLINE -> if (current != null) MainlineScreen(c, current, { navigation.back() },
-                                        { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview)
+                                        { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview, directEntry = page.id == "continue", parentLabel = navigation.parentLabel,
+                                        initialWeek = page.week, browseOnly = page.id == "catalog", onBrowseWeek = weekActions::select,
+                                        onStartWeek = { n -> (c.learningTarget(current, n) ?: current.weekKps(n).firstOrNull()?.let { LearningTarget(it, n, false) })?.let { weekActions.start(current, it) } })
                                     AppPage.MOCK -> if (current != null) MockScreen(c, current, { navigation.back() }, page.id.ifEmpty { null }, weekActions.onReview, backLabel = "← ${navigation.parentLabel}")
                                     AppPage.ESSAY -> if (current != null) EssayScreen(c, current, { navigation.back() }, backLabel = "暂离 · ${navigation.parentLabel}")
                                     AppPage.WEEK_REVIEW -> if (current != null) WeekMistakesScreen(c, current, page.week!!, "← ${navigation.parentLabel}") { navigation.back() }

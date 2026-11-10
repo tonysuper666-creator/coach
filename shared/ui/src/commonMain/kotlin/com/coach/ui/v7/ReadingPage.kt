@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.*
 import coach.design.tokens.CoachV7
 import com.coach.client.*
+import com.coach.domain.num
 import com.coach.ui.*
 import com.coach.ui.theme.CoachTheme
 import com.coach.domain.json
@@ -213,6 +214,13 @@ private fun MarkedParagraph(raw: String, d: V7PageDetails, index: Int, onSelecti
 internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: String, focus: Boolean, onFocus: () -> Unit,
     onBack: (() -> Unit)?, onAsk: () -> Unit, onQuiz: () -> Unit, onSource: () -> Unit, weekActions: WeekActions?, onSelectionAsk: (String) -> Unit, backLabel: String? = null) {
     val railAnchors = remember(kp.id) { MarginAnchors() }
+    val readingScroll = rememberScrollState(c.sync.mainlineState(c.courseId, "reading:${kp.id}").num("offset").toInt())
+    LaunchedEffect(kp.id) {
+        c.sync.saveMainlineState(c.courseId, json("kind" to "reading", "kpId" to kp.id), "learning")
+        snapshotFlow { readingScroll.value }.collect { offset ->
+            c.sync.saveMainlineState(c.courseId, json("offset" to offset), "reading:${kp.id}")
+        }
+    }
     val scoped = view.projection.studyScope?.week
     val week = scoped?.takeIf { n -> view.weekKps(n).any { it.id == kp.id } }
         ?: view.weeks.firstOrNull { n -> view.weekKps(n).any { it.id == kp.id } }
@@ -281,7 +289,7 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
         val m = LocalDeskMetrics.current
         BoxWithConstraints(Modifier.fillMaxSize()) {
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
-                .verticalScroll(rememberScrollState()).padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 100.dp)) {
+                .verticalScroll(readingScroll).padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 100.dp)) {
                 PageHeader("第 ${index + 1} 节 / 共 ${points.size} 节", splitTitle(kp.title).second, d.deck, d.meta.ifBlank { kp.reference })
                 saveError?.let { Text(it, color = CoachTheme.colors.dangerFg) }
                 if (!Regex("(?m)^#{1,6} |^```|^\\||\\$|!\\[").containsMatchIn(text)) {

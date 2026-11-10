@@ -176,10 +176,11 @@ class CourseView(val events: List<Event>, val projection: Projection) {
 
     /** Pending work only wins while its KP is unfinished. A passed old thread cannot trap Continue. */
     val continueTarget: KpRow? by lazy {
-        if (projection.studyScope != null) weekTarget else {
-            projection.position.continueTarget?.let(::kp)?.takeIf { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
-                ?: kps.firstOrNull { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
-        }
+        // Actual unfinished work wins over a previously selected week.
+        projection.position.continueTarget?.let(::kp)?.takeIf { isResume(it) && it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
+            ?: if (projection.studyScope != null) weekTarget else
+                kps.firstOrNull { it.status == KpStatus.NEEDS_REPAIR }
+                    ?: kps.firstOrNull { it.status !in setOf(KpStatus.PASSED, KpStatus.SOLID) }
     }
     fun isResume(kp: KpRow): Boolean = kp.explained || events.any { it.type == "kp_opened" && it.payload.s("kpId") == kp.id }
 

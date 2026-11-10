@@ -3,6 +3,7 @@ package com.coach.desktop.reader
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -15,6 +16,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import kotlinx.coroutines.launch
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -65,7 +69,7 @@ data class ReaderFixture(
 }
 
 /** 窗口会话：状态、题目选择与作答都在这里，窗口缩放或出处往返都不清空。 */
-class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int) {
+class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null) {
     var state by mutableStateOf(ReaderState(DesktopReaderLayouts.forWidth(initialWidthDp), pageCount = fixture.pages.size))
         private set
     var selectedQuestion by mutableIntStateOf(0)
@@ -141,9 +145,29 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int) {
         return true
     }
 
+    /** 远端文档打开后：页数与起始页来自服务（pdfPage 从 1 起，这里统一转成 0 起页序）；作答与选题随书清空。 */
+    fun attachDocument(info: ReaderDocInfo, startPdfPage: Int) {
+        state = ReaderState(state.layout, state.focus, ReaderPosition(PdfPages.toIndex(startPdfPage)), info.pages, state.zoomPercent)
+        answers.clear(); selectedQuestion = 0; message = null; openedFromQuestions = false
+    }
+
+    /** 切到另一本书：旧书页、题目、作答不带过去。失败时保持无书状态，失败原因在 remote.failure。 */
+    suspend fun openRemote(documentId: String) {
+        val r = remote ?: return
+        val start = r.open(documentId) ?: return
+        attachDocument(r.current ?: return, start)
+    }
+
+    /** 用户选择“用另一台的位置”。 */
+    fun useRemotePosition() {
+        val p = remote?.useRemoteAfterConflict() ?: return
+        state = state.goTo(PdfPages.toIndex(p))
+    }
+
     /** 鼠标滚轮：正文上滚轮翻页，Ctrl+滚轮缩放；缩放受 50%–300% 限制。 */
     fun onWheel(deltaY: Float, ctrlOrCmd: Boolean) {
         if (deltaY == 0f) return
+        message = null
         state = if (ctrlOrCmd) state.apply(if (deltaY < 0) ReaderAction.ZoomIn else ReaderAction.ZoomOut)
         else state.apply(if (deltaY > 0) ReaderAction.NextPage else ReaderAction.PrevPage)
     }
@@ -218,6 +242,18 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier.fillMaxSize().background(Paper)) {
         val widthDp = maxWidth.value.toInt()
         LaunchedEffect(widthDp) { session.resize(widthDp) }
+        val remote = session.remote
+        if (remote != null) {
+            LaunchedEffect(remote) { remote.loadCatalog() }
+            // 切页/切书：只留最后一次导航；页成功后再保存进度，保存失败不影响阅读。
+            LaunchedEffect(remote.current?.id, session.state.position.page) {
+                if (remote.current != null) {
+                    val pdf = PdfPages.toPdf(session.state.position.page)
+                    remote.show(pdf)
+                    if (remote.page is PageState.Ready) remote.saveProgress(pdf)
+                }
+            }
+        }
         val state = session.state
         val shown = session.shownPanes()
         SideEffect { session.renderedPanes = shown }
@@ -277,7 +313,13 @@ private fun ReaderBar(session: ReaderSession, shown: List<ReaderPane>) {
                 fontSize = 14.sp,
             )
         }
-        val pos = if (state.pageCount > 0) "第${state.position.page + 1}页 / 共${state.pageCount}页（样张页）" else "页数未知"
+        val remotePage = (session.remote?.page as? PageState.Ready)?.view
+        val pos = when {
+            session.remote != null && state.pageCount <= 0 -> "未打开文档"
+            session.remote != null -> "PDF第${PdfPages.toPdf(state.position.page)}页 / 共${state.pageCount}页" + (remotePage?.printedPage?.let { "（印刷第${it}页）" } ?: "")
+            state.pageCount > 0 -> "第${state.position.page + 1}页 / 共${state.pageCount}页（样张页）"
+            else -> "页数未知"
+        }
         Text(pos, Modifier.testTag("bar-position"), fontSize = 12.sp, color = Color(0xFF666666))
         if (state.provenanceStack.isNotEmpty()) {
             Text("  返回题目", Modifier.testTag("bar-return").clickable { session.returnFromProvenance() }, color = Accent, fontSize = 14.sp)
@@ -287,6 +329,24 @@ private fun ReaderBar(session: ReaderSession, shown: List<ReaderPane>) {
 
 @Composable
 private fun ShelfPane(session: ReaderSession) {
+    val remote = session.remote
+    if (remote != null) {
+        val scope = rememberCoroutineScope()
+        Column {
+            Text("书架", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            remote.failure?.let { Text(it.text, Modifier.testTag("shelf-failure").padding(top = 6.dp), color = Color(0xFFA33B2D), fontSize = 12.sp) }
+            for (d in remote.documents) {
+                Text(
+                    d.title,
+                    Modifier.testTag("doc-${d.id}").fillMaxWidth().clickable { scope.launch { session.openRemote(d.id) } }.padding(top = 6.dp),
+                    fontSize = 13.sp,
+                    color = if (remote.current?.id == d.id) Accent else Ink,
+                    fontWeight = if (remote.current?.id == d.id) FontWeight.Bold else FontWeight.Normal,
+                )
+            }
+        }
+        return
+    }
     Column {
         Text("书架", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         Text(session.fixture.title, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
@@ -296,6 +356,7 @@ private fun ShelfPane(session: ReaderSession) {
 @Composable
 private fun BodyPane(session: ReaderSession) {
     val state = session.state
+    if (session.remote != null) { RemoteBody(session, session.remote); return }
     val page = session.fixture.pages.getOrNull(state.position.page)
     Column(Modifier.verticalScroll(rememberScrollState())) {
         if (page == null) {
@@ -318,6 +379,7 @@ private fun BodyPane(session: ReaderSession) {
 
 @Composable
 private fun RelatedPane(session: ReaderSession) {
+    if (session.remote != null) { RemoteStudy(session.remote); return }
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         session.fixture.questions.forEachIndexed { i, q ->
@@ -335,5 +397,55 @@ private fun RelatedPane(session: ReaderSession) {
             }
         }
         session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
+    val state = session.state
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        when (val p = remote.page) {
+            PageState.Idle -> Text(if (remote.current == null) "请先在书架里选一本" else "", Modifier.testTag("remote-idle"), fontSize = 14.sp)
+            is PageState.Loading -> Text("正在加载 PDF 第${p.pdfPage}页", Modifier.testTag("remote-loading"), fontSize = 13.sp, color = Color(0xFF666666))
+            is PageState.Failed -> Text(p.failure.text, Modifier.testTag("remote-failure"), color = Color(0xFFA33B2D), fontSize = 14.sp)
+            is PageState.Ready -> {
+                val bitmap = remember(p.view.image) { p.view.image?.let { b -> runCatching { org.jetbrains.skia.Image.makeFromEncoded(b).toComposeImageBitmap() }.getOrNull() } }
+                if (bitmap != null) Image(bitmap, "PDF 第${p.view.pdfPage}页", Modifier.testTag("remote-image").fillMaxWidth(), contentScale = ContentScale.FillWidth)
+                Text(p.view.text, Modifier.testTag("remote-text").fillMaxWidth().padding(vertical = 4.dp), fontSize = (16 * state.zoomPercent / 100f).sp, color = Ink)
+            }
+        }
+        when (val s = remote.save) {
+            is SaveState.Conflict -> Column(Modifier.testTag("save-conflict").padding(top = 8.dp)) {
+                Text(
+                    if (s.versionChanged) "资料版本变了，本机位置未保存，已保留在本机" else "另一台设备已保存了新的位置，本机位置没有覆盖",
+                    color = Color(0xFFA33B2D), fontSize = 13.sp,
+                )
+                if (!s.versionChanged) {
+                    val scope = rememberCoroutineScope()
+                    Text("保留本机位置", Modifier.testTag("keep-local").clickable { scope.launch { remote.keepLocalAfterConflict() } }.padding(top = 4.dp), color = Accent, fontSize = 13.sp)
+                    if (s.remote != null) Text("用另一台的位置", Modifier.testTag("use-remote").clickable { session.useRemotePosition() }.padding(top = 4.dp), color = Accent, fontSize = 13.sp)
+                }
+            }
+            is SaveState.Offline -> Text("连不上服务，位置稍后重试保存", Modifier.testTag("save-offline").padding(top = 8.dp), color = Color(0xFF8A6D1F), fontSize = 12.sp)
+            is SaveState.Failed -> Text("位置没有保存：${s.failure.text}", Modifier.testTag("save-failed").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 12.sp)
+            else -> {}
+        }
+    }
+}
+
+@Composable
+private fun RemoteStudy(remote: ReaderRemote) {
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        when (val s = remote.study) {
+            StudyState.Idle -> {}
+            StudyState.Loading -> Text("加载中", fontSize = 12.sp, color = Color(0xFF666666))
+            is StudyState.Failed -> Text(s.failure.text, Modifier.testTag("study-failure"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+            is StudyState.Ready -> {
+                if (!s.view.available) Text("这本书还没有登记题目", Modifier.testTag("study-unavailable"), fontSize = 12.sp)
+                s.view.questions.forEachIndexed { i, q -> Text(q.stem, Modifier.testTag("study-$i").padding(top = 8.dp), fontSize = 13.sp) }
+                if (s.view.unlocated > 0) Text("另有${s.view.unlocated}题没能定位到页", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = Color(0xFF666666))
+            }
+        }
     }
 }

@@ -271,6 +271,7 @@ struct LearningView: View {
     @StateObject private var model: LearningModel
     @State private var selections: [String: Int] = [:]
     @State private var showDiscard = false
+    @FocusState private var courseFieldFocused: Bool
     init(connection: ConnectionModel, model: LearningModel? = nil) {
         self.connection = connection
         _model = StateObject(wrappedValue: model ?? LearningModel(connection: connection))
@@ -280,8 +281,12 @@ struct LearningView: View {
             Text("接着学习").font(Appearance.serif(.title1, size: 28, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
             Text("输入课程标识，打开已有练习。").foregroundStyle(Appearance.secondary)
             TextField("课程标识", text: $model.course).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(model.pending != nil)
+                .focused($courseFieldFocused)
                 .accessibilityIdentifier("courseID")
-            Button("打开课程") { Task { await model.loadCourse() } }.buttonStyle(.bordered).disabled(model.busy).accessibilityIdentifier("openCourse")
+            Button("打开课程") {
+                courseFieldFocused = false
+                Task { await model.loadCourse() }
+            }.buttonStyle(.bordered).disabled(model.busy).accessibilityIdentifier("openCourse")
             if model.pending != nil {
                 Text("上次答案尚未确认。重试会使用同一次提交。")
                 Button("确认上次答案") { Task { await model.retryPending() } }.disabled(model.busy).accessibilityIdentifier("retryAnswer")

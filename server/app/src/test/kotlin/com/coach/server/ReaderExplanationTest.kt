@@ -76,6 +76,10 @@ class ReaderExplanationTest {
             val private = SourcePage("sealed", 1, "Synthetic confidential key", learnerVisible = false)
             assertTrue(h.reader.explain("d", "c", request, "Synthetic", listOf(private), com.coach.domain.scope.VisibleScope.learner()).str("text").contains("无法确认"))
             assertEquals(0, h.stub.requests)
+            // A page outside the (narrowed) scope is refused even though the page itself is learner-visible.
+            val outside = com.coach.domain.scope.VisibleScope.learner().narrowToPages(pack.pages.first().docId, 900..999)
+            assertTrue(h.reader.explain("d", "c", request, "Synthetic", pack.pages, outside).str("text").contains("无法确认"))
+            assertEquals(0, h.stub.requests)
             h.stub.stream(1, payload("“Synthetic pears”是课件中的例子。"), StubTutor.terminal("complete"), StubTutor.DONE)
             val answer = h.reader.explain("d", "c", request, "Synthetic pears", pack.pages + private, com.coach.domain.scope.VisibleScope.learner())
             assertTrue(answer.str("text").contains("Synthetic pears"))

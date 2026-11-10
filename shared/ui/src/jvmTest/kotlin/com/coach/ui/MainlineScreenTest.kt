@@ -12,7 +12,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
@@ -181,6 +183,7 @@ class MainlineScreenTest {
                     else onNodeWithText("✗", useUnmergedTree = true).assertDoesNotExist()
                     val outcome = if (retryChoice == 0) "答错。" else if (firstGuessed) "猜对：不算会。" else "答对。"
                     onNodeWithText(outcome).performScrollTo().assertIsDisplayed()
+                    assertFeedbackTextReadable(outcome)
                     capture("mainline-retry-$retryChoice-$firstGuessed-$width")
                     return@runComposeUiTest
                 }
@@ -386,6 +389,34 @@ class MainlineScreenTest {
         onNodeWithTag("mainline-option-0").assertExists()
     }
 
+    /** Geometry alone cannot detect an overlay that fades otherwise visible text. */
+    private fun ComposeUiTest.assertFeedbackTextReadable(text: String, matchIndex: Int = 0) {
+        val interaction = onAllNodesWithText(text)[matchIndex]
+        val node = interaction.fetchSemanticsNode()
+        val bounds = node.boundsInRoot
+        val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
+        assertEquals(node.size.height.toFloat(), bounds.height, "all lines must be unclipped: $text")
+        assertTrue(bounds.top >= viewport.top && bounds.bottom <= viewport.bottom, "text stays above the action area: $bounds, $viewport")
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertTrue(layouts.isNotEmpty(), "text layout is available")
+        val pixels = onRoot().captureToImage().toAwtImage()
+        val layout = layouts.single()
+        for (line in 0 until layout.lineCount) {
+            val top = kotlin.math.floor(bounds.top + layout.getLineTop(line)).toInt().coerceIn(0, pixels.height - 1)
+            val bottom = kotlin.math.ceil(bounds.top + layout.getLineBottom(line)).toInt().coerceIn(top + 1, pixels.height)
+            val left = kotlin.math.floor(bounds.left).toInt().coerceIn(0, pixels.width - 1)
+            val right = kotlin.math.ceil(bounds.right).toInt().coerceIn(left + 1, pixels.width)
+            val darkest = (top until bottom).minOf { y -> (left until right).minOf { x ->
+                val rgb = pixels.getRGB(x, y)
+                (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+            } }
+            // These fixtures use the light theme's dark body ink. Fully faded lines in the
+            // reported screenshots have minima 175..208; allow antialiasing, not washed-out ink.
+            assertTrue(darkest <= 96, "line ${line + 1} is faded (darkest=$darkest): $text")
+        }
+    }
+
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
     @Test fun desktopWalksOneWeekWithExplanationsOnTheSamePage() = walk(1000, 800)
     // 1972×1248 pixels at Android density 320 is 986×624 dp, before system insets.
@@ -418,16 +449,21 @@ class MainlineScreenTest {
                 waitUntil(timeoutMillis = 15_000) {
                     val viewport = scroll.fetchSemanticsNode().boundsInRoot
                     val source = citation.fetchSemanticsNode().boundsInRoot
-                    // The last 40dp of the scroller is covered by the fixed action bar's fade.
+                    // Preserve the original 40dp citation clearance above the action area.
                     explanation.isDisplayed() && citation.isDisplayed() && source.top >= viewport.top && source.bottom <= viewport.bottom - 80f
                 }
                 explanation.assertIsDisplayed()
                 citation.assertIsDisplayed()
+                assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
                 capture("outer-feedback-1972x1248")
             } catch (failure: Throwable) {
                 capture("outer-feedback-1972x1248-failure")
                 throw failure
             }
+            onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
+            assertFeedbackTextReadable("The synthetic orchard story sets up the supply example used later in the week.")
+            capture("outer-feedback-details-1972x1248")
             // Once the reader scrolls further down, returning from notes must retain that position.
             onNodeWithText("答错。").performScrollTo().assertIsDisplayed()
             val beforeNotes = scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
@@ -459,12 +495,15 @@ class MainlineScreenTest {
                 val citation = onNodeWithTag("private-citation").fetchSemanticsNode().boundsInRoot
                 citation.top >= viewport.top && citation.bottom <= viewport.bottom - 80f
             }
+            assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
             capture("outer-long-feedback-1972x1248")
             onNodeWithText(longCorrect).assertExists()
             onNodeWithText("为什么对", substring = true).performScrollTo().assertIsDisplayed()
             onNodeWithText("Synthetic apples were sold out before the season started, so they cannot be the answer.").performScrollTo().assertIsDisplayed()
             onNodeWithText("Synthetic plums ripen after the period described in the question.").performScrollTo().assertIsDisplayed()
             onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("The synthetic orchard story sets up the supply example used later in the week.")
+            capture("outer-long-feedback-details-1972x1248")
             val before = scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
             onNodeWithText("回到要点").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }

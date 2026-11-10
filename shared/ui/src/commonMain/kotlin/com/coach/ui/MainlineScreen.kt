@@ -3,8 +3,6 @@ package com.coach.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.onSizeChanged
@@ -459,23 +457,27 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val feedbackRequester = remember { BringIntoViewRequester() }
         var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
         var feedbackBottom by remember(done) { mutableStateOf<Float?>(null) }
+        var citationBottom by remember(done) { mutableStateOf<Float?>(null) }
         var inlineActionsBottom by remember(done) { mutableStateOf<Float?>(null) }
         var viewportBottom by remember { mutableStateOf<Float?>(null) }
         var viewportHeight by remember { mutableStateOf(0) }
-        LaunchedEffect(revealFeedback, feedbackSize, feedbackBottom, dockActions, inlineActionsBottom, viewportBottom, viewportHeight) {
+        LaunchedEffect(revealFeedback, feedbackSize, feedbackBottom, citationBottom, dockActions, inlineActionsBottom, viewportBottom, viewportHeight) {
             if (revealFeedback && feedbackSize != IntSize.Zero) {
                 if (dockActions) {
                     val bottom = feedbackBottom ?: return@LaunchedEffect
+                    val sourceBottom = citationBottom ?: return@LaunchedEffect
                     val viewport = viewportBottom ?: return@LaunchedEffect
                     if (viewportHeight == 0) return@LaunchedEffect
-                    // Reveal the correct explanation and its citation above the fixed bottom fade.
-                    val fade = with(density) { 40.dp.toPx() }
-                    if (feedbackSize.height + fade <= viewportHeight) {
-                        feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), feedbackSize.height + fade))
+                    // Include the selected wrong answer's complete reason, while keeping the
+                    // citation at least 40dp above the actual scroll boundary.
+                    val targetBottom = maxOf(bottom + with(density) { 12.dp.toPx() }, sourceBottom + with(density) { 40.dp.toPx() })
+                    val requestedHeight = feedbackSize.height + targetBottom - bottom
+                    if (requestedHeight <= viewportHeight) {
+                        feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), requestedHeight))
                     } else {
-                        // An oversized request cannot fit. Align its citation with the safe bottom;
-                        // the complete explanation remains scrollable above it.
-                        scroll.scrollTo(kotlin.math.ceil(bottom - viewport + fade).toInt().coerceAtLeast(0))
+                        // An oversized explanation remains scrollable above its citation and
+                        // the selected reason; neither tail should be stranded below the buttons.
+                        scroll.scrollTo(kotlin.math.ceil(targetBottom - viewport).toInt().coerceAtLeast(0))
                     }
                 } else {
                     val bottom = inlineActionsBottom ?: return@LaunchedEffect
@@ -529,28 +531,32 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             feedbackSize = it.size
                             feedbackBottom = it.positionInRoot().y + it.size.height + scroll.value
                         }) {
-                        done.str("remember").takeIf { it.isNotBlank() }?.let { Labeled("记住这个", it); Spacer(Modifier.height(12.dp)) }
-                        if (done.flag("dontKnow")) Text("这次先看讲解，算学习，不算答对。")
-                        (done["tryFirstRefs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { ref ->
-                            val primers = items.filter { (it["ladder"] as? JsonObject)?.str("kind") == "try_first" }.take(4)
-                            val position = primers.indexOfFirst { it.str("id") == ref.str("question_id") }
-                            if (position >= 0) Text("开头『先试试』的第${position + 1}题说的就是这个。")
-                        }
-                        Text("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
-                        Spacer(Modifier.height(8.dp))
-                        Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
-                        Spacer(Modifier.height(16.dp))
-                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                        }
-                        }
-                        val wrong = displayedChoice?.takeIf { it != answer }
-                        if (wrong != null) {
-                            Spacer(Modifier.height(16.dp))
-                            Text("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
-                            Spacer(Modifier.height(8.dp))
-                            Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
-                            Spacer(Modifier.height(16.dp))
+                            Column(Modifier.onGloballyPositioned {
+                                citationBottom = it.positionInRoot().y + it.size.height + scroll.value
+                            }) {
+                                done.str("remember").takeIf { it.isNotBlank() }?.let { Labeled("记住这个", it); Spacer(Modifier.height(12.dp)) }
+                                if (done.flag("dontKnow")) Text("这次先看讲解，算学习，不算答对。")
+                                (done["tryFirstRefs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { ref ->
+                                    val primers = items.filter { (it["ladder"] as? JsonObject)?.str("kind") == "try_first" }.take(4)
+                                    val position = primers.indexOfFirst { it.str("id") == ref.str("question_id") }
+                                    if (position >= 0) Text("开头『先试试』的第${position + 1}题说的就是这个。")
+                                }
+                                Text("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
+                                Spacer(Modifier.height(8.dp))
+                                Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
+                                Spacer(Modifier.height(16.dp))
+                                explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
+                                    PrivateSourceReferences(http.reader, source, done.str("anchor"))
+                                }
+                            }
+                            val wrong = displayedChoice?.takeIf { it != answer }
+                            if (wrong != null) {
+                                Spacer(Modifier.height(16.dp))
+                                Text("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
+                                Spacer(Modifier.height(8.dp))
+                                Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
+                                Spacer(Modifier.height(16.dp))
+                            }
                         }
                         Labeled("背景", explanation.str("background"))
                     }
@@ -590,8 +596,6 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                 }
             }
-            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).padding(bottom = bottomInset).fillMaxWidth().height(40.dp)
-                .background(Brush.verticalGradient(listOf(Color.Transparent, com.coach.ui.theme.CoachTheme.colors.surface1))))
             if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { actionHeight = with(density) { it.height.toDp() } }.verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }

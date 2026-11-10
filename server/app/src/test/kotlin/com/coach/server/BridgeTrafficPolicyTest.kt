@@ -24,7 +24,8 @@ class BridgeTrafficPolicyTest {
             assertEquals(64,first.length)
             configureBridgeTraffic(env,true)
             assertEquals(first,Files.readString(key))
-            assertEquals("rw-------",java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(key)))
+            assertPrivatePath(key, directory = false)
+            assertPrivatePath(key.parent, directory = true)
         } finally { home.toFile().deleteRecursively() }
     }
 }

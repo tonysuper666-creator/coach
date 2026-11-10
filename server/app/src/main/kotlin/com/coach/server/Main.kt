@@ -31,7 +31,7 @@ fun main(args: Array<String>): Unit = runBlocking {
     configureBridgeTraffic(System.getenv(), managed)
     // Management commands print their result to the invoking terminal, never service logs.
     if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
-    Files.createDirectories(data)
+    privateFiles.directory(data)
     val fileLock = FileChannel.open(data.resolve("server.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)
     val lock = fileLock.tryLock() ?: error("Another Coach server owns this data directory")
     val store = if(args.firstOrNull() == "restore") {
@@ -46,15 +46,8 @@ fun main(args: Array<String>): Unit = runBlocking {
     }
     val tokenPath = Path.of(System.getenv("COACH_TOKEN_FILE") ?: data.resolve("device-token").toString())
     val device = System.getenv("COACH_DEVICE_ID") ?: "desktop"
-    if(!Files.exists(tokenPath)) {
-        Files.createDirectories(tokenPath.toAbsolutePath().parent)
-        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val mode=java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
-        Files.newByteChannel(tokenPath,setOf(StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE),mode).use { channel ->
-            val encoded=java.nio.ByteBuffer.wrap(Base64.getUrlEncoder().withoutPadding().encode(bytes))
-            while(encoded.hasRemaining()) channel.write(encoded)
-        }
-    }
+    val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+    privateFiles.writeNew(tokenPath, Base64.getUrlEncoder().withoutPadding().encode(bytes))
     secureTokenFile(tokenPath)
     val token = Files.readString(tokenPath).trim()
     store.enroll(device,token)
@@ -100,14 +93,20 @@ fun main(args: Array<String>): Unit = runBlocking {
     val defaultControl = Path.of(System.getenv("COACH_STATE_DIR") ?:
         (if (managed) data.parent else data).resolve("state").toString()).resolve("activity-${observation.coverage.lifetime}.sock")
     val control = System.getenv("COACH_ACTIVITY_SOCKET")?.let(Path::of) ?: defaultControl
+    // Permission failure is fatal; an unsupported/occupied control socket remains optional.
+    privateFiles.directory(control.toAbsolutePath().parent)
     runCatching { observation.coverage.startControl(control) }.onFailure {
+        if (it is PrivateFilePermissionException) throw it
         // Diagnostic/control failure must refuse release evidence, while keeping learning available.
         observation.coverage.writeFailed()
         println("COACH activity control unavailable=${it.javaClass.simpleName}")
     }
     val usageSummary = launch(Dispatchers.IO) {
         while (isActive) {
-            runCatching { observation.summarize() }.onFailure { println("COACH usage summary unavailable=${it.javaClass.simpleName}") }
+            runCatching { observation.summarize() }.onFailure {
+                if (it is PrivateFilePermissionException || it is UnsupportedOperationException) throw it
+                println("COACH usage summary unavailable=${it.javaClass.simpleName}")
+            }
             delay(3_600_000)
         }
     }

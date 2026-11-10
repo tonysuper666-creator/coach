@@ -69,7 +69,8 @@ closed. It never discovers production paths.
 | Installed head | Copy | Old release | First migration | Review on rollback | Mocks on rollback | v6 refusal |
 | --- | --- | --- | --- | --- | --- | --- |
 | `c0c5bb82…` (TON-1298, historical) | v6 | pre-v7 `5ef9989` | v6→v7 window, restore rehearsed | rejected, no durable write | 404 client error | old binary |
-| `cf1f1598…` (TON-1341 #112, current) | v7 | the installed build itself | none; no `backups/pre-*` may appear, schema stays 7 | supported | answers | `--historical-distribution` |
+| `cf1f1598…` (TON-1341 #112, previous; production may still return here) | v7 | the installed build itself | none; no `backups/pre-*` may appear, schema stays 7 | supported | answers | `--historical-distribution` |
+| `5ee14d69…` (#125, installed now) | v7 | the installed build itself | none; no `backups/pre-*` may appear, schema stays 7 | supported | answers | `--historical-distribution` |
 
 For `cf1f1598` the copy and the candidate share schema 7 and the same table
 migrations, so the train is a same-database server swap: old (installed) →
@@ -78,6 +79,22 @@ Its client already keeps Continue learning off review threads, so both clients
 must report zero misroutes. The pre-v7 `5ef9989` binary must still exit 1 with
 "Database schema is newer than this server" on the copy; the run refuses to start
 without it. The `c0c5bb82` rows below remain the reviewed historical contract.
+
+`5ee14d69` keeps every `cf1f1598` check and adds `readerOnRollback`. It is the first
+installed build with the reader routes (`ReaderRoutes`/`ReaderLibrary`, unchanged
+up to the candidate) and the separate `ReaderAnchorStore` module with its three
+tables in its own `reader-anchors.sqlite`; neither build wires that store into the
+server, so `coach.sqlite` keeps schema 7 and the same tables. Reading progress and
+anchored notes are ledger events (`reader_progress_saved`, `reader_note_saved`).
+With this contract the harness serves an invented two-page PDF
+(`tools/dev/mainline-reader-fixture.py`) on its own `ton1254-reader` course via
+`COACH_READER_LIBRARY`. The candidate saves progress (PDF p.2) and one note
+anchored to an exact substring of the served page-1 text and its `textSha256`.
+`/state` and `notes.md` must then read back byte-identical on the 5ee rollback,
+after exit-71 recovery and after the candidate forward roll, with exactly one
+event of each type. Real course content never reaches the reader routes. The
+contract is chosen from the descriptor present at run time: a `cf1f1598`
+descriptor still selects the `cf1f1598` entry, without the reader readback.
 
 **Rollback only the server. Keep the candidate #89 client; do not reinstall an
 old APK.** The c0c5bb8 client chooses the latest `kp_opened` without filtering
@@ -135,6 +152,17 @@ tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
   --historical-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
   --out /PRIVATE/OUTPUT/sanitized-summary.json
 
+# Installed now (5ee14d69, v7 copy made by that build): same flags, its own descriptor/checkout.
+tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
+  --private-data-dir /PRIVATE/INDEPENDENT-SYNTHETIC-V7-5EE/data \
+  --old-distribution /PRIVATE/CLEAN-5EE14D69/server/app/build/install/app \
+  --old-head 5ee14d69faf0f9e6a79a7292a370981263b40d3f \
+  --rollback-checkout /PRIVATE/CLEAN-5EE14D69 \
+  --rollback-head 5ee14d69faf0f9e6a79a7292a370981263b40d3f \
+  --rollback-installation /PRIVATE/5ee14d69-installation.json \
+  --historical-distribution /PRIVATE/BUILT-OLD/server/app/build/install/app \
+  --out /PRIVATE/OUTPUT/5ee-summary.json
+
 # Historical contract (v6 copy).
 tools/dev/heavy --priority release python3 tools/dev/rehearse-release-train.py \
   --private-data-dir /PRIVATE/V6-COPY/data \
@@ -179,6 +207,20 @@ values. All listeners use isolated loopback ports, bridge output is synthetic,
 managed services/source lookup are disabled, JVM home/temp/math state is private,
 and inherited COACH_/BRIDGE_/JVM options are cleared. All owned children are
 reaped and temporary copies deleted. Publish only sanitized metadata.
+
+## Main bb2ff2ba merge and 5ee14d69 contract — 2026-11-10
+
+PR #89 merges main `bb2ff2ba` in one merge commit (no rebase), keeping main's
+paused-answer/reading-position restore and #89's wide-screen first-question
+positioning; no test was removed. Synthetic evidence only, built locally with
+`tools/dev/heavy --local`: clean `5ee14d69`, `cf1f1598` and `5ef9989` checkouts
+(`installDist`, exit 0); fresh v7 fixtures made by the `5ee14d69` and `cf1f1598`
+builds (`prepare-train-fixture.py --schema 7`, exit 0) with synthetic descriptors.
+The `5ee14d69` rehearsal exits 0: schema 7 in every phase, no backup, v6
+refusal by `5ef9989` (exit 1, schema newer), review and mocks 200 on rollback,
+reader state/notes digests identical on rollback, fault recovery and forward roll,
+26 candidate events, 3 RECALL cards, 7 children reaped without forced kill. The
+`cf1f1598` rehearsal with its own descriptor also exits 0 (no reader readback).
 
 ## Follow-main evidence — 2026-11-06
 

@@ -42,7 +42,20 @@ ROLLBACK_CONTRACTS = {
     'cf1f159833a4fd5fadad0b8450b147b4e413f7b2': dict(
         inputSchema=7, oldIsInstalled=True, firstMigration=False, reviewOnRollback=True,
         mocksOnRollback=dict(status=200, clientError=False, completed=True)),
+    # TON-1254: installed head after #125. Still user_version 7 and the same table migrations as the candidate, so
+    # no migration and no backup; it serves review and mocks. It is the first installed build with the reader routes
+    # (and the separate reader anchor store module), so reading progress and anchored notes the candidate wrote must
+    # read back unchanged on it and again after the forward roll. cf1f/c0c5 are kept: production may still return to cf1f.
+    '5ee14d69faf0f9e6a79a7292a370981263b40d3f': dict(
+        inputSchema=7, oldIsInstalled=True, firstMigration=False, reviewOnRollback=True,
+        mocksOnRollback=dict(status=200, clientError=False, completed=True), readerOnRollback=True),
 }
+READER_COURSE = 'ton1254-reader'
+READER_DOCUMENT = 'joint-book'
+READER_QUOTE = 'Synthetic pears'
+_reader_spec = importlib.util.spec_from_file_location('mainline_reader_fixture', ROOT / 'tools/dev/mainline-reader-fixture.py')
+reader_fixture = importlib.util.module_from_spec(_reader_spec)
+_reader_spec.loader.exec_module(reader_fixture)
 
 
 @contextmanager
@@ -265,6 +278,59 @@ def exercise(port, token, phase):
         ws.close()
 
 
+def reader_call(port, token, endpoint, body=None, *, text=False):
+    """Real authenticated reader route on the synthetic library course; nothing read here is printed."""
+    path = '/v1/courses/' + urllib.parse.quote(READER_COURSE, safe='') + '/reader' + (('/' + endpoint) if endpoint else '')
+    headers = {'Authorization': 'Bearer ' + token, 'X-Coach-Device': 'desktop'}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers['Content-Type'] = 'application/json'
+    req = urllib.request.Request(f'http://127.0.0.1:{port}' + path, data=data, headers=headers, method='POST' if body is not None else 'GET')
+    with urllib.request.urlopen(req, timeout=30) as response:
+        require(response.status == 200, 'reader route failed')
+        return response.read().decode() if text else json.load(response)
+
+
+def anchor_note(page, version):
+    """An anchored note over an exact substring of the served page text, bound to that text's digest."""
+    start = page['text'].find(READER_QUOTE)
+    require(start >= 0, 'synthetic reader page text missing the anchor quote')
+    return dict(mutationId='ton1254-reader-note', id='ton1254-anchor', version=version, pdfPage=page['pdfPage'], baseRevision=0,
+                start=start, end=start + len(READER_QUOTE), quote=page['text'][start:start + len(READER_QUOTE)],
+                textSha256=page['textSha256'], note='Synthetic anchored note', deleted=False)
+
+
+def reader_state(port, token):
+    state = reader_call(port, token, READER_DOCUMENT + '/state')
+    progress, notes = state.get('progress'), state.get('notes')
+    require(isinstance(progress, dict) and progress.get('pdfPage') == 2 and progress.get('stale') is False,
+            'reader progress not read back')
+    require(isinstance(notes, list) and len(notes) == 1 and notes[0].get('id') == 'ton1254-anchor' and notes[0].get('stale') is False
+            and notes[0].get('quote') == READER_QUOTE, 'reader anchored note not read back')
+    return dict(state=state, markdown=reader_call(port, token, READER_DOCUMENT + '/notes.md', text=True))
+
+
+def reader_write(port, token):
+    """The candidate saves reading progress and one anchored note through its real routes."""
+    listing = reader_call(port, token, '')
+    require([d.get('id') for d in listing.get('documents', [])] == [READER_DOCUMENT], 'synthetic reader library not served')
+    version = listing['documents'][0]['version']
+    progress = reader_call(port, token, READER_DOCUMENT + '/progress',
+                           dict(mutationId='ton1254-reader-progress', version=version, pdfPage=2, baseRevision=0))
+    note = reader_call(port, token, READER_DOCUMENT + '/notes', anchor_note(reader_call(port, token, READER_DOCUMENT + '/pages/1'), version))
+    require(progress.get('replayed') is False and note.get('replayed') is False, 'candidate reader writes were not new')
+    return reader_state(port, token)
+
+
+def reader_unchanged(expected, actual, phase):
+    """Progress, anchor offsets/quote/digest, revisions and the exported notes must match byte for byte."""
+    require(actual == expected, f'reader progress or anchored note changed on {phase}')
+    return dict(progressPdfPage=actual['state']['progress']['pdfPage'], anchoredNotes=len(actual['state']['notes']),
+                stateSha256=hashlib.sha256(json.dumps(actual['state'], sort_keys=True).encode()).hexdigest(),
+                notesMarkdownSha256=hashlib.sha256(actual['markdown'].encode()).hexdigest(), identical=True)
+
+
 def private_input(path):
     path = path.resolve()
     require(not path.is_relative_to((Path.home() / 'Coach').resolve()), 'private input must be outside the installed Coach tree')
@@ -349,6 +415,10 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                 if source is not None:
                     shutil.copytree(source, base / name)
             hashes = {name: distribution_digest(base / name) for name in ('old', 'candidate', 'rollback', 'historical-v6') if (base / name).exists()}
+            reader = bool(contract.get('readerOnRollback'))
+            if reader:
+                # Invented two-page PDF on its own course; real course content never reaches the reader routes.
+                reader_fixture.write_library(base / 'reader-library', READER_COURSE)
             pointer = base / 'current'
 
             def select(name):
@@ -385,6 +455,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                            COACH_TAIL_HOST='', COACH_PORT=str(port), COACH_SOURCE_LOOKUP='false', COACH_TRAFFIC='test',
                            COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge.server_address[1]}', COACH_MATHSVC=str(base / 'absent-math.mjs'),
                            JAVA_OPTS=f'-Duser.home={base}/jvm-home -Djava.io.tmpdir={base}/jvm-tmp')
+                if reader:
+                    env['COACH_READER_LIBRARY'] = str(base / 'reader-library')
                 with (base / 'server.log').open('ab') as log:
                     log_offset = log.tell()
                     process = subprocess.Popen([str(pointer / 'bin/app')], cwd=base, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -480,7 +552,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
 
             try:
                 timings, schema_versions, readbacks = {}, {}, {}
-                candidate_state = None
+                candidate_state = candidate_reader = None
+                reader_readbacks = {}
                 migration = None
                 for name, phase in [('old', 'old'), ('candidate', 'candidate')]:
                     print(json.dumps({'phase': phase, 'state': 'starting'}), flush=True)
@@ -490,6 +563,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     result = exercise(port, token, phase)
                     if phase == 'candidate':
                         candidate_state = result
+                        if reader:
+                            candidate_reader = reader_write(port, token)
                     timings[phase] = round(time.monotonic() - began, 3)
                     require(timings[phase] < 300, 'isolated acceptance exceeded 300 seconds')
                     stop()
@@ -527,6 +602,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                                      dict(baseUrl=f'http://127.0.0.1:{port}', token=token, course='ton1254-candidate',
                                           expectSupported=contract['mocksOnRollback']['status'] == 200))
                 require(mocks == contract['mocksOnRollback'], 'rollback mocks route differs from the installed contract')
+                if reader:
+                    reader_readbacks['rollback'] = reader_unchanged(candidate_reader, reader_state(port, token), 'rollback')
                 exercise(port, token, 'rollback')
                 timings['rollback'] = round(time.monotonic() - began, 3)
                 require(timings['rollback'] < 300, 'isolated rollback exceeded 300 seconds')
@@ -553,6 +630,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                 port = start()
                 readbacks['fault-recovery'] = dict(candidate=readback(port, token, ['ton1254-candidate'], base / 'rollback', data, candidate_state, review_supported=review),
                                                    original=readback(port, token, real_courses, base / 'rollback', data, review_supported=review))
+                if reader:
+                    reader_readbacks['fault-recovery'] = reader_unchanged(candidate_reader, reader_state(port, token), 'fault-recovery')
                 exercise(port, token, 'fault-recovery')
                 timings['fault-recovery'] = round(time.monotonic() - began, 3)
                 require(timings['fault-recovery'] < 300, 'isolated fault recovery exceeded 300 seconds')
@@ -565,6 +644,8 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                 readbacks['forward-roll'] = dict(
                     candidate=readback(port, token, ['ton1254-candidate'], base / 'candidate', data, candidate_state, review_supported=True),
                     original=readback(port, token, real_courses, base / 'candidate', data, review_supported=True))
+                if reader:
+                    reader_readbacks['forward-roll'] = reader_unchanged(candidate_reader, reader_state(port, token), 'forward-roll')
                 calls = smoke.Bridge.calls
                 ws = smoke.WS(port, 'desktop', token)
                 try:
@@ -592,6 +673,11 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                     require(len(review_cards) == 3 and all(c.get('purpose') == 'RECALL' and c.get('review') is True for c in review_cards),
                             'forward review cards are not RECALL review attempts')
                     schema_versions['forward-roll'] = db.execute('pragma user_version').fetchone()[0]
+                    if reader:
+                        reader_events = db.execute("select type,count(*) from events where course_id=? group by type order by type",
+                                                   (READER_COURSE,)).fetchall()
+                        require(reader_events == [('reader_note_saved', 1), ('reader_progress_saved', 1)],
+                                'reader writes duplicated or lost across rollback/forward roll')
                 summary = dict(oldHead=old_head, candidateHead=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                                candidateSourceTrees={area: subprocess.check_output(['git', 'rev-parse', 'HEAD:' + area], cwd=ROOT, text=True).strip() for area in ('server', 'shared')},
                                rehearsalSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -599,6 +685,7 @@ def run(out, private_data_dir, old_distribution, old_head, rollback_checkout=Non
                                rollbackContract=dict(contract), oldApkReinstallAllowed=False, historicalV6BinaryRejected=refuser is not None,
                                originalRollbackRejected=refuser == 'old', rollbackReviewOpens=review, mocksOnRollback=mocks,
                                forwardReviewRecallCards=len(review_cards), forwardRollSameDatabase=True,
+                               readerReadbacks=reader_readbacks if reader else None,
                                firstMigration=migration, courseReadbacks=readbacks, candidateWrongAnswers=1, candidateRetryNewCards=3,
                                startupFailures=startup_failures, schemaVersions=schema_versions,
                                distributionSha256=hashes, phases=['old', 'candidate'] + (['historical-v6-rollback-refused'] if refuser is not None else []) + ['rollback', 'failed-start', 'fault-recovery', 'forward-roll'],

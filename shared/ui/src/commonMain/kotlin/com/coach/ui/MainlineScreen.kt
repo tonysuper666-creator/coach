@@ -21,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.IntSize
 import com.coach.client.CourseHttp
 import com.coach.client.CourseView
 import com.coach.client.weekName
@@ -197,6 +196,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var result by remember { mutableStateOf(saved["result"] as? JsonObject) }
     // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
     var revealFeedback by remember { mutableStateOf(false) }
+    val feedbackTrace = LocalFeedbackLayoutTrace.current
+    var feedbackSubmissionId by remember { mutableStateOf("") }
+    LaunchedEffect(reading) { if (reading) revealFeedback = false }
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
     // Reading is a separate view of the material, not a replacement for a paused answer.
     var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
@@ -221,6 +223,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val readingScroll = rememberScrollState(saved.num("readScroll").toInt())
     LaunchedEffect(reading) {
         snapshotFlow { if (reading) readingScroll.value else scroll.value }.collect { offset ->
+            feedbackTrace?.invoke("save submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback scroll=$offset")
             save((if (reading) "readScroll" else "quizScroll") to JsonPrimitive(offset))
         }
     }
@@ -288,7 +291,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
                     b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
                 save("result" to b, "pending" to JsonNull, "body" to body!!)
-                revealFeedback = true
+                feedbackSubmissionId = wire.str("submissionId")
+                revealFeedback = !reading
+                feedbackTrace?.invoke("reply submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback scroll=${scroll.value} max=${scroll.maxValue}")
                 SubmissionTrace.mark(traceId, "ui.persisted")
                 break
             }
@@ -451,29 +456,39 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val density = LocalDensity.current
         // Medium describes columns, not spare height: keep submission reachable in these windows too.
         val dockActions = m.window != DeskWindow.Inner
-        var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
-        var feedbackBottom by remember(done) { mutableStateOf<Float?>(null) }
-        var citationBottom by remember(done) { mutableStateOf<Float?>(null) }
+        val coordinates = remember { LessonFeedbackCoordinates() }
+        remember(done) { coordinates.feedback = null; coordinates.citation = null; Unit }
+        var geometry by remember(done) { mutableStateOf<LessonFeedbackGeometry?>(null) }
         var inlineActionsBottom by remember(done) { mutableStateOf<Float?>(null) }
-        var viewportBottom by remember { mutableStateOf<Float?>(null) }
-        var viewportHeight by remember { mutableStateOf(0) }
-        LaunchedEffect(revealFeedback, feedbackSize, feedbackBottom, citationBottom, dockActions, inlineActionsBottom, viewportBottom, viewportHeight) {
-            if (revealFeedback && feedbackSize != IntSize.Zero) {
+        var actionHeight by remember { mutableStateOf(0.dp) }
+        val minInset = if (m.window == DeskWindow.Outer) 85.dp else 69.dp
+        val bottomInset = if (dockActions) maxOf(actionHeight, minInset) else 0.dp
+        fun captureGeometry() {
+            val sample = coordinates.snapshot(scroll.value, scroll.maxValue, with(density) { bottomInset.roundToPx() }, dockActions) ?: return
+            geometry = sample
+            if (revealFeedback) feedbackTrace?.invoke("placement submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback $sample")
+        }
+        LaunchedEffect(revealFeedback, geometry, dockActions, inlineActionsBottom, reading) {
+            val sample = geometry
+            if (revealFeedback && !reading && sample != null) {
                 if (dockActions) {
-                    val bottom = feedbackBottom ?: return@LaunchedEffect
-                    val sourceBottom = citationBottom ?: return@LaunchedEffect
-                    val viewport = viewportBottom ?: return@LaunchedEffect
-                    if (viewportHeight == 0) return@LaunchedEffect
-                    // Include the selected wrong answer's complete reason, while keeping the
-                    // citation at least 40dp above the actual scroll boundary.
-                    val targetBottom = maxOf(bottom + with(density) { 12.dp.toPx() }, sourceBottom + with(density) { 40.dp.toPx() })
-                    // Use the same immediate correction as inline actions. A nested animated
-                    // bring-into-view can settle past the measured segment and clip its opening.
-                    // Long explanations remain scrollable above the citation and selected reason.
-                    scroll.scrollTo(kotlin.math.ceil(targetBottom - viewport).toInt().coerceAtLeast(0))
+                    // The answered action row can shrink before its inset reaches the viewport.
+                    // Do not consume a new answer against a previous placement's visible height.
+                    if (!sample.ready(with(density) { minInset.roundToPx() })) {
+                        feedbackTrace?.invoke("waiting submission=$feedbackSubmissionId $sample")
+                        return@LaunchedEffect
+                    }
+                    val tail = with(density) { 12.dp.toPx() }
+                    val clearance = with(density) { 40.dp.toPx() }
+                    val target = sample.target(tail, clearance)
+                    if (!sample.settled(target, tail, clearance)) {
+                        feedbackTrace?.invoke("request submission=$feedbackSubmissionId target=$target $sample")
+                        scroll.scrollTo(target)
+                        return@LaunchedEffect // The next completed placement must verify the result.
+                    }
                 } else {
                     val bottom = inlineActionsBottom ?: return@LaunchedEffect
-                    val viewport = viewportBottom ?: return@LaunchedEffect
+                    val viewport = sample.viewportBottom
                     // Inner windows keep inline actions. Include them and the page's bottom padding
                     // in the first answer, even when the heading already fits. Apply the small
                     // correction immediately rather than leaving clipped glyphs during an animation.
@@ -481,15 +496,14 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     if (overflow > 0f) scroll.scrollTo(scroll.value + kotlin.math.ceil(overflow).toInt())
                 }
                 revealFeedback = false
+                feedbackTrace?.invoke("consumed submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback $sample")
             }
         }
-        var actionHeight by remember { mutableStateOf(0.dp) }
-        val bottomInset = if (dockActions) maxOf(actionHeight, if (m.window == DeskWindow.Outer) 85.dp else 69.dp) else 0.dp
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { coordinates.container = it; captureGeometry() }) {
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
                 .padding(bottom = bottomInset).testTag("mainline-scroll-viewport")
-                .onGloballyPositioned { viewportBottom = it.positionInRoot().y + it.size.height; viewportHeight = it.size.height }.verticalScroll(scroll)
+                .onGloballyPositioned { coordinates.viewport = it; captureGeometry() }.verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 Row {
@@ -520,11 +534,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Spacer(Modifier.height(24.dp))
                     PaperCard(Modifier.railAnchor("why"), contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
                         Column(Modifier.onGloballyPositioned {
-                            feedbackSize = it.size
-                            feedbackBottom = it.positionInRoot().y + it.size.height + scroll.value
+                            coordinates.feedback = it
+                            captureGeometry()
                         }) {
                             Column(Modifier.onGloballyPositioned {
-                                citationBottom = it.positionInRoot().y + it.size.height + scroll.value
+                                coordinates.citation = it
+                                captureGeometry()
                             }) {
                                 done.str("remember").takeIf { it.isNotBlank() }?.let { Labeled("记住这个", it); Spacer(Modifier.height(12.dp)) }
                                 if (done.flag("dontKnow")) Text("这次先看讲解，算学习，不算答对。")
@@ -588,7 +603,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                 }
             }
-            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged { actionHeight = with(density) { it.height.toDp() } }.verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
+            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .onSizeChanged { coordinates.actionHeight = it.height; actionHeight = with(density) { it.height.toDp() } }
+                .onGloballyPositioned { coordinates.actions = it; captureGeometry() }
+                .verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
         }

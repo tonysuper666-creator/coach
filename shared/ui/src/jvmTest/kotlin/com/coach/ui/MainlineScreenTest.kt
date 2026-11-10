@@ -433,7 +433,10 @@ class MainlineScreenTest {
         // leave the desk at y=146..1200px. The full 986x624dp walk above omits those insets.
         runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f)) {
             setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 24.dp)) {
-                CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.REVIEW, vertical) {} }) {
+                CompositionLocalProvider(
+                    com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.REVIEW, vertical) {} },
+                    LocalFeedbackLayoutTrace provides { event -> println("COACH_FEEDBACK_LAYOUT $event") }
+                ) {
                     MainlineScreen(c, view, {}, {}, {}, {})
                 }
             } } } }

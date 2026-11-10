@@ -8,6 +8,7 @@ import uuid
 
 import run_observed
 import test_route_control
+from test_queue_readiness import add_watch
 
 
 class RouteRunnerTest(unittest.TestCase):
@@ -28,6 +29,17 @@ class RouteRunnerTest(unittest.TestCase):
         for changed in ({'runId':'previous'},{'pid':99},{'stage':'transport_complete'}):
             with self.subTest(changed=changed): self.run_case(False,execute_cycle=True,stage_overrides=changed)
 
+    def test_queue_observation_is_forwarded_and_retains_request_associations(self):
+        self.run_case(False,'none',watch_queue=True)
+
+    def test_queue_observer_requires_route_and_no_repeated_adb_observer(self):
+        for suite,mode in (('route','both'),('route','stage'),('transport','none'),('performance','none')):
+            args=['run_observed.py','--platform','android','--suite',suite,'--transport-observer',mode,
+                '--socket-queue-watch','--output','unused']
+            with self.subTest(suite=suite,mode=mode),patch('sys.argv',args),patch('run_observed.sys.stderr'):
+                with self.assertRaises(SystemExit) as raised: run_observed.main()
+                self.assertEqual(2,raised.exception.code)
+
     def test_sampler_cannot_be_disabled_for_memory_or_ui_acceptance(self):
         for suite in ('performance','behavior','lifecycle'):
             for selection in (['--no-transport-memory-sampler'], *[['--transport-observer',mode] for mode in ('both','stage','meminfo','none')]):
@@ -44,10 +56,12 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None):
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
+        if watch_queue:
+            for client in clients: add_watch(client)
         root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
         root.mkdir(parents=True)
         apk=root/'app.apk';apk.write_bytes(b'invented package')
@@ -109,6 +123,7 @@ class RouteRunnerTest(unittest.TestCase):
             '--serial','emulator-5554','--aapt2','aapt-unit','--apk',str(apk),'--test-apk',str(test_apk),'--output',str(out)]
         if disabled: args.append('--no-transport-memory-sampler')
         if mode is not None: args.extend(['--transport-observer',mode])
+        if watch_queue: args.append('--socket-queue-watch')
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
                 patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
                 patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
@@ -123,6 +138,9 @@ class RouteRunnerTest(unittest.TestCase):
         self.assertEqual('route',json.loads((out/'summary.json').read_text())['suite'])
         instrument=next(command for command in commands if 'instrument' in command)
         self.assertEqual('host-loopback',instrument[instrument.index('readerRouteControl')+1])
+        if watch_queue:
+            self.assertEqual('available',instrument[instrument.index('readerQueueWatch')+1])
+            self.assertTrue(json.loads((out/'queue-watch.json').read_text())['complete'])
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
         for key in ('memorySamplerEnabled','memorySamplerStarted','memorySamplerJoined'):

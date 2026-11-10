@@ -19,6 +19,7 @@ from correlate_transport import correlate
 from route_control import summarize_routes
 from packet_capture import PacketCapture
 from android_observer import MODES, observe_android, audit_transport_stage
+from queue_readiness import analyze_queue_watch
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -36,6 +37,8 @@ def main():
                         help='Android transport/route diagnostic only: omit repeated run-as/dumpsys sampling')
     observers.add_argument('--transport-observer',choices=MODES,
                         help='Android transport/route only: select repeated stage reads, meminfo, both (default), or neither')
+    parser.add_argument('--socket-queue-watch',action='store_true',
+                        help='Android route with observer none only: concurrent same-socket available() observations')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -49,6 +52,8 @@ def main():
     if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
+    if args.socket_queue_watch and (args.platform!='android' or args.suite!='route' or observer_mode!='none'):
+        parser.error('socket queue observation requires Android route and explicit observer none')
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
     if args.packet_interface and args.suite != "transport":
@@ -78,6 +83,7 @@ def main():
     identity['memorySamplerEnabled']=observer_mode!='none'
     identity['memorySamplerStarted']=False
     identity['memorySamplerJoined']=False
+    identity['socketQueueWatchRequested']=args.socket_queue_watch
     observer_counts=dict(stage=0,meminfo=0)
     observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
     if args.platform=='android':
@@ -175,6 +181,7 @@ def main():
                     test_class = "com.coach.android." + dict(performance="ReaderPageObservedSmoke", behavior="ReaderPageCachePathSmoke",
                         transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke")[args.suite]
                     route_args=['-e','readerRouteControl','host-loopback'] if args.suite=='route' else []
+                    if args.socket_queue_watch: route_args+=['-e','readerQueueWatch','available']
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                         test_class, "-e", "readerPort", str(fixture.port), "-e", "readerRunId", run_id,
                         *route_args, PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
@@ -221,6 +228,11 @@ def main():
                         raise RuntimeError('Route control incomplete; inspect route-comparison.json')
                 summary['memorySamplerEnabled']=observer_mode!='none'
                 summary['androidObserverMode']=observer_mode
+                if args.socket_queue_watch:
+                    queue=analyze_queue_watch(association)
+                    (out/'queue-watch.json').write_text(json.dumps(queue,indent=2))
+                    if not queue['complete']:
+                        raise RuntimeError('Requested queue observation is incomplete; inspect queue-watch.json')
             else:
                 cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]
                 required = {"book_a", "switch_book_b", "restore_book_a", "version_changed", "rendering_changed", "closed", "cancelled_decode", "reopened"}

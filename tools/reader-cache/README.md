@@ -637,3 +637,61 @@ The new phase writes change diagnostic instrumentation, so do not merge this
 head with older round samples. Keep host and guest clocks separate. Decide on
 performance reruns from this result; the original baseline, real presentation,
 trace quality, real hot update and native/GPU budget gaps are unchanged.
+
+## Application-readable bytes after fa45e50
+
+The native `fa45e50` phase audit passed. Stage/none effects still did not repeat
+consistently: N1 was lower, while the identical none mode in N2 was about 501 ms.
+Per-request review puts write-return to read-invocation at at most 0.028 ms and
+host accept-return to header-write-return at at most 1.924 ms across N1/N2.
+The main difference remains within read-invocation to its application return
+marker. Host writes do not establish guest receipt, and a read return marker
+does not identify when that thread became runnable.
+
+The next optional diagnostic is `--socket-queue-watch`, accepted only with
+Android route and explicit `--transport-observer none`. The observer thread is
+started and confirmed ready before writing the request. After write-return it
+queries **the same unbuffered input stream's** `available()` without consuming
+bytes, while the original thread performs its ordinary blocking first-byte
+read. Each query retains invocation/return timestamps and estimated readable
+bytes; the result also records actual stream class, read/observer TIDs, startup
+and joined cleanup. Querying stops after the first-read marker or 512 calls,
+with a requested 2 ms park between calls. This is not a guaranteed frequency.
+Socket-close fallback and query exceptions make the requested diagnostic fail;
+all owned threads are joined before returning the request report.
+
+[`available()` is an estimate of nonblocking-readable bytes](https://developer.android.com/reference/java/io/InputStream#available()).
+It is **not** a packet-arrival timestamp, and zero is inconclusive. A positive
+query return recorded before the main read-return marker shows that the other
+thread could observe application-readable bytes on this connection earlier.
+Those may include remaining response bytes; this does not locate the first
+byte's kernel arrival or prove an application wakeup cause. Query invocation is
+not substituted for query return: a query may itself be delayed by scheduling
+or stream locking. Keep positive-before-read-call and positive-during-read cases
+separate. Late returns, zero/empty query sets and limit-reached cases remain
+inconclusive, not evidence of no received packets.
+
+`queue-watch.json` validates observer identity, joined ownership, query order and
+the existing request associations. It retains every request's classification
+and any positive-observation-to-read-marker interval in the same process clock.
+Missing observer records (including an old APK ignoring the new argument), errors,
+forced socket closure or invalid timing fail the requested diagnostic. Ordinary
+route commands retain the blocking-read path without the new thread; UI/default
+memory sampling and production transport are unchanged.
+
+Rebuild both isolated packages and use one AVD, identical hashes/PDF/Poppler and
+fresh output directories. Collect **plain P1 → watch W1 | watch W2 → plain P2**,
+all with `--suite route --transport-mode legacy --transport-observer none`, adding
+only `--socket-queue-watch` in W1/W2. No Perfetto or packet capture. Keep each
+group's 16 token/hash/listener/connection checks, both eight-sample route
+distributions, individual query traces/counts/gaps, thread IDs and join/close
+status, first-block transients, PID and cleanup. Both modes supply no memory data;
+their phase audits remain explicitly not requested.
+
+The new monitor can perturb scheduling and waiting. Compare both order pairs
+separately, without pooling into acceptance or claiming a speedup. An early
+positive witness can narrow the location of part of the observed wait; absent
+witnesses cannot distinguish transport delay from observer/read scheduling.
+This small application-boundary experiment does not replace kernel packet
+evidence, the original performance baseline or actual presentation/native/GPU
+budget validation. Keep previous phase, lifecycle and other open gaps unchanged.

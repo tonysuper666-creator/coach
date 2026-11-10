@@ -33,6 +33,8 @@ class ReaderImageTransportSmoke {
         require(JSONObject(URL("$base/health").readText()).getBoolean("syntheticOnly"))
         val routeControl=InstrumentationRegistry.getArguments().getString("readerRouteControl")
         require(routeControl == null || routeControl == "host-loopback")
+        val watchMode=InstrumentationRegistry.getArguments().getString("readerQueueWatch")
+        require(watchMode == null || (watchMode == "available" && routeControl != null))
         val suite=if (routeControl == null) "transport" else "route"
         val stageFile=AtomicFile(File(context.cacheDir,"reader-stage.json"))
         fun stage(name: String) {
@@ -54,6 +56,7 @@ class ReaderImageTransportSmoke {
                 val report=JSONObject().put("scope","route control only; no CIO or UI timing")
                     .put("socketControl",rows).put("routeControl","host-loopback")
                     .put("configuredHost",BuildConfig.COACH_TAIL_HOST).put("port",port)
+                    .put("queueWatchMode",watchMode ?: "off")
                     .put("probeOrder","ABBA,BAAB,ABBA,BAAB; A=configured B=host-loopback")
                 for (block in 1..4) {
                     val order=if (block % 2 == 1) listOf("configured","host-loopback","host-loopback","configured")
@@ -61,7 +64,7 @@ class ReaderImageTransportSmoke {
                     for (route in order) {
                         val sequence=rows.length()+1
                         val destination=if (route == "configured") BuildConfig.COACH_TAIL_HOST else "10.0.2.2"
-                        rows.put(socketProbe(destination,port,block,"$runId-route-$sequence",BuildConfig.COACH_TAIL_HOST)
+                        rows.put(socketProbe(destination,port,block,"$runId-route-$sequence",BuildConfig.COACH_TAIL_HOST,watchMode!=null)
                             .put("route",route).put("block",block).put("sequence",sequence))
                         // Retain completed rows even if a later route is unavailable.
                         File(context.cacheDir,"reader-transport.json").writeText(report.toString())
@@ -103,19 +106,25 @@ class ReaderImageTransportSmoke {
         }
     }
 
-    private fun socketProbe(host: String,port: Int,page: Int,probe: String,requestHost: String=host): JSONObject = Socket().use { socket ->
+    private fun socketProbe(host: String,port: Int,page: Int,probe: String,requestHost: String=host,watchQueue: Boolean=false): JSONObject = Socket().use { socket ->
         socket.soTimeout=15_000
         val start=ReaderPageTrace.nowNs()
         socket.connect(InetSocketAddress(host,port),3000)
         val connected=ReaderPageTrace.nowNs()
+        val watchedInput=if (watchQueue) socket.getInputStream() else null
+        val observer=watchedInput?.let { ReaderSocketQueueWatch(it) }
+        try {
+        observer?.start() // Joined readiness before write, outside write-to-read timing.
         val request="GET /v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1&readerProbe=$probe HTTP/1.1\r\nHost: $requestHost:$port\r\nAuthorization: Bearer synthetic-baseline-token\r\nX-Coach-Device: baseline-device\r\nConnection: close\r\n\r\n"
         socket.getOutputStream().apply { write(request.toByteArray(Charsets.US_ASCII));flush() }
         val written=ReaderPageTrace.nowNs()
-        val raw=socket.getInputStream()
+        observer?.written(written)
+        val raw=watchedInput ?: socket.getInputStream()
         val header=ByteArrayOutputStream()
         val readRequested=ReaderPageTrace.nowNs()
-        var value=raw.read()
-        val firstByte=ReaderPageTrace.nowNs()
+        var value: Int
+        val firstByte: Long
+        try { value=raw.read();firstByte=ReaderPageTrace.nowNs() } finally { observer?.stop() }
         val input=raw.buffered()
         var end=0
         while(value>=0) {
@@ -132,6 +141,7 @@ class ReaderImageTransportSmoke {
         val bytes=input.readBytes()
         check(bytes.size==expected && bytes.size>8 && bytes[0]==0x89.toByte())
         val completed=ReaderPageTrace.nowNs() // Hashing is outside the transport interval.
+        observer?.finish(socket)
         JSONObject().put("probeId",probe).put("responseEchoVerified",true)
             .put("bodySha256",MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) })
             .put("destinationHost",host).put("destinationPort",port).put("requestHost",requestHost)
@@ -142,5 +152,7 @@ class ReaderImageTransportSmoke {
             .put("page",page).put("startNs",start).put("connectedNs",connected).put("requestWrittenNs",written)
             .put("firstByteNs",firstByte).put("headersNs",headers).put("endNs",completed)
             .put("bytes",bytes.size).put("clientTcpNoDelayEnabled",socket.tcpNoDelay).put("freshConnection",true)
+            .put("readTid",android.os.Process.myTid()).also { row -> observer?.let { row.put("queueWatch",it.report()) } }
+        } finally { observer?.finish(socket) }
     }
 }

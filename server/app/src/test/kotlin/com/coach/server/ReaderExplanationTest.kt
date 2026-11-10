@@ -16,6 +16,22 @@ class ReaderExplanationTest {
         "paragraphs" to JsonArray(listOf(json("text" to text, "anchors" to JsonArray(anchors.map(::JsonPrimitive)))))
     ).toString()
 
+    @Test fun rawTabMatchesFinalValidationWithoutCountingAsBodyProgress() {
+        val prefix = "{\"paragraphs\":[{\"text\":\""
+        val body = "的解释。"
+        val suffix = "\",\"anchors\":[\"S1\"]}]}"
+        val raw = prefix + "有依据\t" + body + suffix
+        assertEquals("有依据\t${body}【S1】", assertNotNull(checkedReaderPayload(raw, pack)).first)
+        val progress = ReaderBodyProgress()
+        assertFalse(progress.push(prefix))
+        assertTrue(progress.push("有依据"))
+        assertFalse(progress.push("\t"), "A raw tab must not renew the content deadline")
+        assertFalse(progress.invalid, "The final validator accepts this raw tab")
+        assertTrue(progress.push(body))
+        assertFalse(progress.push(suffix))
+        assertFalse(progress.invalid)
+    }
+
     @Test fun structuredOutputRequiresDeclaredCitationsAndPreservesTheWholeAnswerGate() {
         val valid = payload("“Synthetic pears”是这里的例子。")
         assertEquals("“Synthetic pears”是这里的例子。【S1】", checkedReaderPayload(valid, pack)!!.first)

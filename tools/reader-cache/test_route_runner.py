@@ -39,6 +39,15 @@ class RouteRunnerTest(unittest.TestCase):
     def test_syscalls_use_the_existing_userdebug_image_and_owned_capture(self):
         self.run_case(False,'none',schedule_trace=True,syscalls=True)
 
+    def test_host_clock_flag_is_forwarded_only_in_the_route_syscall_diagnostic(self):
+        self.run_case(False,'none',schedule_trace=True,syscalls=True,host_clock=True)
+
+    def test_host_clock_flag_requires_the_route_syscall_diagnostic(self):
+        args=['run_observed.py','--platform','android','--suite','route','--host-clock-boundaries','--output','unused']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
     def test_syscalls_require_the_scheduling_capture(self):
         args=['run_observed.py','--platform','android','--suite','route','--socket-syscalls','--output','unused']
         with patch('sys.argv',args),patch('run_observed.sys.stderr'):
@@ -89,7 +98,7 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False):
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False,host_clock=False):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
@@ -116,6 +125,7 @@ class RouteRunnerTest(unittest.TestCase):
                 self.port=45678;self.material_sha256='a'*64
                 self.requests=servers;self.transfers=servers
                 if options.get('loopback_control') is not True: raise AssertionError('missing second listener')
+                if options.get('host_clock',False)!=host_clock: raise AssertionError('wrong host clock mode')
             def __enter__(self): return self
             def __exit__(self,*_): pass
 
@@ -170,6 +180,7 @@ class RouteRunnerTest(unittest.TestCase):
         if watch_queue: args.append('--socket-queue-watch')
         if schedule_trace: args.append('--socket-scheduling-trace')
         if syscalls: args.append('--socket-syscalls')
+        if host_clock: args.append('--host-clock-boundaries')
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
                 patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
                 patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
@@ -196,6 +207,7 @@ class RouteRunnerTest(unittest.TestCase):
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
         self.assertIs(syscalls,identity['socketSyscallsRequested'])
+        self.assertIs(host_clock,identity['hostClockBoundariesRequested'])
         if syscalls:
             self.assertEqual('socket-syscalls.pbtxt',identity['perfettoConfig'])
             self.assertEqual('userdebug',identity['syscallBuildType'])

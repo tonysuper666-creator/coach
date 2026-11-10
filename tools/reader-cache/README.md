@@ -1010,3 +1010,59 @@ guest-kernel arrival. Keep packet and guest clocks separate. No packet counts,
 decoder success or capture-source label prove network cause, presentation or
 memory acceptance. Review coverage first, then choose any performance rerun.
 The strict signal-return failure and all earlier acceptance gaps remain open.
+
+## Host boundary witnesses after F2
+
+F2 independently repeated 16 exact packet/application associations. Each complete
+request was acknowledged early at the captured TCP boundary (median 0.0965 ms),
+while request-final-byte to response-first-byte medians were about 500 ms on both
+routes. The long gap is visible in the recorded virtual-radio packet timeline,
+as well as in guest ppoll. An ACK is not host application receipt. The small host
+accept-to-header-write duration cannot locate that long gap without compatible
+timestamps. F2's later signal restoration still fails strict syscall validation;
+do not clear it or compare unmatched F1/F2 medians as a causal estimate.
+
+The next addition is `--host-clock-boundaries`, allowed only with the isolated
+Android route/observer none/scheduling/syscall diagnostic. Keep F2's owned netsim
+Wi-Fi capture, geometry, image, APK hashes, PDF and Poppler. Collect one group,
+adding only this fixture-side observation flag to the runner:
+
+```sh
+--platform android --suite route --transport-mode legacy --transport-observer none \
+  --socket-scheduling-trace --socket-syscalls --host-clock-boundaries
+```
+
+For each nonce-correlated transfer, `hostClock` records the fixture PID, clock
+implementations/resolutions and four near-boundary samples: accept returned,
+request headers parsed, response header write started, and header write returned.
+Each epoch read has monotonic reads before/after it. The existing monotonic event
+timestamps remain present; the nearby epoch sample is not an exact syscall event.
+HTTP headers, image bytes, transport policy and existing request guards are
+unchanged. The extra clock reads can perturb timing; this is not a performance
+acceptance run. Ordinary UI, transport and lifecycle commands do not enable it.
+
+[Python documents](https://docs.python.org/3/library/time.html) epoch time and
+monotonic clocks separately. `host_clock.offset_bounds` computes the arithmetic
+epoch-minus-monotonic range for one bracketed read. Bracket width alone omits
+clock resolution, drift, possible wall-clock steps and external timestamp-source
+uncertainty. It does not establish that PCAP shares the same clock.
+
+The [PCAP format](https://datatracker.ietf.org/doc/draft-ietf-opsawg-pcap/)
+defines epoch timestamp fields and file resolution; that does not verify the
+installed writer's actual source or capture point. The Mac collector must retain
+source/version evidence for the owned netsim capture's timestamp origin,
+resolution and same-host relation, together with all per-request clock brackets.
+The fixture deliberately leaves `captureClockSourceVerified=false`. A matching
+calendar date, one unbracketed host load sample or similar interval medians are
+not sufficient calibration. Do not retroactively align F1/F2 from such samples.
+
+Only after timestamp source and uncertainty are defensible may a separate
+analysis compare per-connection **same-host** epoch bounds around request capture,
+host parsing/header write and response capture. Keep sampling widths, resolution,
+offset spread/steps and ambiguous/negative ordering explicit; overlapping bounds
+leave that boundary unresolved. Otherwise report each clock separately and leave
+mapping unverified. Never subtract guest and host timestamps, fabricate a paired
+signal return, equate queued writes with kernel transmission, or clear existing
+trace/packet quality failures. This diagnostic is meant to distinguish the
+unobserved pre-host-read and post-host-write portions before any performance rerun.
+All real presentation and physical three-image/native/GPU gaps remain open.

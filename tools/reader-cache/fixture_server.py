@@ -4,6 +4,7 @@ import hashlib
 import http.server
 import ipaddress
 import json
+import os
 from pathlib import Path
 import subprocess
 import socket
@@ -13,6 +14,7 @@ import time
 from urllib.parse import urlsplit, parse_qs
 
 from synthetic_library import write_library
+from host_clock import sample as host_clock_sample
 
 TOKEN = "synthetic-baseline-token"
 COURSE = "READER_BASELINE"
@@ -21,11 +23,13 @@ FORBIDDEN = {8790, 8791, 18791, 3790}
 
 
 class Fixture:
-    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False, loopback_ephemeral=False):
+    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False, loopback_ephemeral=False, host_clock=False):
         if port in FORBIDDEN:
             raise ValueError("production port is forbidden")
         if loopback_ephemeral and (not loopback_control or bind != '127.0.0.1'):
             raise ValueError('ephemeral listener control is limited to dual loopback fixtures')
+        if host_clock and (not loopback_control or transport!='legacy' or lifecycle):
+            raise ValueError('host clock witnesses require the isolated legacy route fixture')
         if loopback_control and (transport != "legacy" or str(ipaddress.IPv4Address(bind)) == '0.0.0.0' or (bind == '127.0.0.1' and not loopback_ephemeral)):
             raise ValueError("route control needs a distinct exact configured IPv4 and legacy transport")
         state.mkdir(parents=True, exist_ok=False)
@@ -42,6 +46,12 @@ class Fixture:
         self.version = "v1"
         self.connection_sequence = 0
         self.accepted = {}
+        self.host_clock_metadata=(dict(hostPid=os.getpid(),
+            epochImplementation=time.get_clock_info('time').implementation,
+            epochResolutionSeconds=time.get_clock_info('time').resolution,
+            monotonicImplementation=time.get_clock_info('monotonic').implementation,
+            monotonicResolutionSeconds=time.get_clock_info('monotonic').resolution,
+            captureClockSourceVerified=False) if host_clock else None)
         if transport not in ("legacy", "nodelay", "keepalive"):
             raise ValueError("unknown synthetic transport")
         self.lock = threading.Lock()
@@ -55,7 +65,7 @@ class Fixture:
                 self.handlerStartedNs = time.monotonic_ns()
                 super().setup()
                 with fixture.lock:
-                    self.connection_id,self.acceptCalledNs,self.socketAcceptedNs = fixture.accepted.pop(id(self.connection))
+                    self.connection_id,self.acceptCalledNs,self.socketAcceptedNs,self.acceptClock = fixture.accepted.pop(id(self.connection))
                 self.connection_request = 0
                 self.acceptInitializedNs = time.monotonic_ns()
 
@@ -69,6 +79,7 @@ class Fixture:
                 self.requestLineReadNs = time.monotonic_ns()
                 result = super().parse_request()
                 self.requestHeadersParsedNs = time.monotonic_ns()
+                self.requestHeadersClock=host_clock_sample() if host_clock else None
                 return result
 
             def log_message(self, *_):
@@ -90,6 +101,9 @@ class Fixture:
                            requestWaitStartedNs=self.requestWaitStartedNs,
                            requestLineReadNs=self.requestLineReadNs,
                            requestHeadersParsedNs=self.requestHeadersParsedNs)
+                if host_clock:
+                    row['hostClock']=dict(metadata=fixture.host_clock_metadata,
+                        samples=dict(acceptReturned=self.acceptClock,requestHeadersParsed=self.requestHeadersClock))
                 with fixture.lock:
                     fixture.transfers.append(row)
                 self.send_response(status)
@@ -100,9 +114,14 @@ class Fixture:
                     self.send_header("X-Coach-Reader-Probe", row["probeId"])
                     self.send_header("X-Coach-Reader-Connection", str(self.connection_id))
                     self.send_header("X-Coach-Reader-Ordinal", str(self.connection_request))
+                if row.get('probeId') or host_clock:
                     row["responseHeaderWriteStartedNs"] = time.monotonic_ns()
+                if host_clock:
+                    row['hostClock']['samples']['responseHeaderWriteStarted']=host_clock_sample()
                 self.end_headers()
                 row["headersQueuedNs"] = time.monotonic_ns()
+                if host_clock:
+                    row['hostClock']['samples']['headersQueued']=host_clock_sample()
                 try:
                     self.wfile.write(data)
                     row["bodyQueuedNs"] = time.monotonic_ns()
@@ -204,9 +223,10 @@ class Fixture:
                 called=time.monotonic_ns()
                 connection,address=super().get_request()
                 accepted=time.monotonic_ns()
+                clock=host_clock_sample() if host_clock else None
                 with fixture.lock:
                     fixture.connection_sequence+=1
-                    fixture.accepted[id(connection)]=(fixture.connection_sequence,called,accepted)
+                    fixture.accepted[id(connection)]=(fixture.connection_sequence,called,accepted,clock)
                 return connection,address
 
         self.server = ObservedServer((bind, port), Handler)

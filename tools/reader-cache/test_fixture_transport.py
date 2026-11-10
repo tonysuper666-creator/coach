@@ -10,6 +10,7 @@ import uuid
 
 from fixture_server import Fixture, PREFIX, TOKEN
 from correlate_transport import correlate
+from host_clock import offset_bounds
 
 
 @contextmanager
@@ -26,6 +27,33 @@ def fixture(**kwargs):
 
 
 class ReaderFixtureTransportTest(unittest.TestCase):
+    def test_opt_in_host_clock_samples_keep_payload_and_connection_identity(self):
+        with fixture(loopback_control=True,loopback_ephemeral=True,host_clock=True) as service:
+            for index,server in enumerate(service.servers):
+                connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+                try:
+                    token=f'clock-unit-{index}'
+                    connection.request('GET',PREFIX+'/synthetic-baseline/pages/1/image?version=v1&readerProbe='+token,
+                        headers={'Authorization':'Bearer '+TOKEN})
+                    response=connection.getresponse()
+                    self.assertEqual(200,response.status)
+                    self.assertEqual(token,response.getheader('X-Coach-Reader-Probe'))
+                    self.assertEqual(b'\x89PNG\r\n\x1a\n\x01',response.read())
+                finally: connection.close()
+        self.assertEqual(2,len(service.requests))
+        for row in service.requests:
+            clocks=row['hostClock'];self.assertFalse(clocks['metadata']['captureClockSourceVerified'])
+            self.assertGreater(clocks['metadata']['hostPid'],0)
+            points=('acceptReturned','requestHeadersParsed','responseHeaderWriteStarted','headersQueued')
+            self.assertEqual(set(points),set(clocks['samples']))
+            last=0
+            for point in points:
+                witness=clocks['samples'][point]
+                self.assertGreaterEqual(witness['hostMonotonicBeforeNs'],last)
+                self.assertGreaterEqual(offset_bounds(witness)['widthNs'],0)
+                last=witness['hostMonotonicAfterNs']
+            self.assertEqual(hashlib.sha256(service.images[1]).hexdigest(),row['bodySha256'])
+
     def test_route_listeners_share_payload_identity_and_both_join_on_exit(self):
         with fixture(loopback_control=True,loopback_ephemeral=True) as service:
             ports=[server.server_port for server in service.servers]
@@ -46,6 +74,7 @@ class ReaderFixtureTransportTest(unittest.TestCase):
         self.assertEqual(order,[r['serverPort'] for r in service.requests])
         self.assertEqual(4,len({r['connectionId'] for r in service.requests}))
         for row in service.requests:
+            self.assertNotIn('hostClock',row)
             self.assertEqual(hashlib.sha256(service.images[1]).hexdigest(),row['bodySha256'])
             self.assertLessEqual(row['acceptCalledNs'],row['socketAcceptedNs'])
             self.assertIsNotNone(row['bodyQueuedNs'])

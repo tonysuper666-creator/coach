@@ -43,6 +43,8 @@ def main():
                         help='Android plain route/observer none only: own a dedicated read-thread scheduling trace')
     parser.add_argument('--socket-syscalls',action='store_true',
                         help='Add syscall entry/exit to the scheduling trace on the existing userdebug emulator only')
+    parser.add_argument('--host-clock-boundaries',action='store_true',
+                        help='Route/syscall diagnostic only: bracket fixture-host epoch reads near I/O boundaries')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -62,6 +64,8 @@ def main():
         parser.error('socket scheduling trace requires Android plain route/observer none; separate from queue watch and FrameTimeline')
     if args.socket_syscalls and not args.socket_scheduling_trace:
         parser.error('socket syscalls requires the isolated socket scheduling trace')
+    if args.host_clock_boundaries and not args.socket_syscalls:
+        parser.error('host clock boundaries require the isolated route/syscall diagnostic')
     capture_perfetto=args.perfetto or args.socket_scheduling_trace
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
@@ -99,6 +103,7 @@ def main():
     identity['socketQueueWatchRequested']=args.socket_queue_watch
     identity['socketSchedulingTraceRequested']=args.socket_scheduling_trace
     identity['socketSyscallsRequested']=args.socket_syscalls
+    identity['hostClockBoundariesRequested']=args.host_clock_boundaries
     if args.socket_syscalls: identity['syscallBuildType']=syscall_build_type
     observer_counts=dict(stage=0,meminfo=0)
     observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
@@ -158,6 +163,7 @@ def main():
         fixture_options["lifecycle"] = True
     if args.suite == 'route':
         fixture_options['loopback_control'] = True
+    if args.host_clock_boundaries: fixture_options['host_clock']=True
     with Fixture(out / "fixture", args.host, renderer=args.renderer, **fixture_options) as fixture:
         identity["materialSha256"] = fixture.material_sha256
         identity["serverTransferTimingsObserved"] = hasattr(fixture, "transfers")

@@ -77,7 +77,7 @@ class ReaderExplanationTest {
             h.reader.cancel("d", "c", "aa")
             assertEquals("追问已取消。", h.reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", pack.pages).str("text"))
             assertEquals(0, h.stub.requests)
-            h.stub.stream(200, *Array(30) { "Partial synthetic paragraph " }, StubTutor.terminal("complete"), StubTutor.DONE)
+            h.stub.stream(200, "{\"paragraphs\":[{\"text\":\"", *Array(30) { "Partial synthetic paragraph " }, StubTutor.terminal("complete"), StubTutor.DONE)
             val pending = async(Dispatchers.Default) {
                 h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic", pack.pages)
             }

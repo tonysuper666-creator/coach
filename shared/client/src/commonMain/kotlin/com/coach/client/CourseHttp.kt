@@ -2,6 +2,11 @@ package com.coach.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.engine.HttpClientEngine
+import io.ktor.client.engine.HttpClientEngineConfig
+import io.ktor.client.engine.HttpClientEngineFactory
+import io.ktor.client.plugins.HttpRequestTimeoutException
+import com.coach.protocol.ReaderTimeoutPolicy
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
@@ -43,13 +48,17 @@ data class EssayBankView(val prompts: List<EssayPrompt>, val weeks: List<Int>, v
  * 只读的课程查询：记录页要的冻结题与评分标准、资料页要的原文。全部要联网问 Mac；
  * 返回 null 的意思就是「这次拿不到」（离线、或 Mac 上的服务还没更新到有这个接口），界面照实说，不拿占位内容顶。
  */
-class CourseHttp(baseUrl: String, private val deviceId: String, private val token: String, private val course: String) {
+class CourseHttp internal constructor(baseUrl: String, private val deviceId: String, private val token: String, private val course: String, createEngine: () -> HttpClientEngine) {
+    constructor(baseUrl: String, deviceId: String, token: String, course: String) : this(baseUrl, deviceId, token, course, { CIO.create() })
     private val base = baseUrl.trimEnd('/')
     // Only a digest of this paired account scope reaches SQLite; credentials never enter note data.
     fun readerState(sync: SyncEngine, week: Int): JsonObject = sync.readerState(course, week, "$base\u0000$deviceId\u0000$token")
     fun saveReaderState(sync: SyncEngine, week: Int, state: JsonObject) = sync.saveReaderState(course, week, "$base\u0000$deviceId\u0000$token", state)
     init { validateCoachBaseUrl(baseUrl) }
-    private val http = HttpClient(CIO) {
+    // Use a factory so HttpClient owns and closes the engine, including the injected test engine.
+    private val http = HttpClient(object : HttpClientEngineFactory<HttpClientEngineConfig> {
+        override fun create(block: HttpClientEngineConfig.() -> Unit) = createEngine()
+    }) {
         followRedirects = false
         install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 3_000 }
         defaultRequest { header("Authorization", "Bearer $token"); header("X-Coach-Device", deviceId) }
@@ -102,13 +111,15 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
     suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1", null)
     suspend fun explainSelection(week: Int, input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/courses/${course.encodeURLPathPart()}/mainline/$week/explain") {
-            timeout { requestTimeoutMillis = 95_000 }
+            // Includes server processing and its final JSON response; coordinate with COACH_READER_TOTAL_TIMEOUT_MS.
+            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
             setBody(TextContent(input.toString(), ContentType.Application.Json))
         }
         val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
         if (response.status.isSuccess()) MockReply(parsed, null)
         else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" })
-    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
+      catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上 Mac，阅读位置已保存。可返回做题或手动重试。") }
     suspend fun cancelSelection(week: Int, id: String) {
         mockCall("mainline/$week/explain/cancel", buildJsonObject { put("requestId", id) })

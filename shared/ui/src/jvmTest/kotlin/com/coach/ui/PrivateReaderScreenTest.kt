@@ -57,6 +57,8 @@ class PrivateReaderScreenTest {
         val notes = CopyOnWriteArrayList<JsonObject>()
         val noteWrites = CopyOnWriteArrayList<JsonObject>()
         @Volatile var version = "v1"
+        /** Extracted page text; plain ASCII so it needs no JSON escaping. */
+        @Volatile var pageText = "Synthetic page text"
         /** null → the study route fails; otherwise the exact body for any page. */
         @Volatile var study: String? = null
         /** null → the map route fails; otherwise the exact body. */
@@ -100,7 +102,7 @@ class PrivateReaderScreenTest {
                             """{"revision":$next}""".toByteArray()
                         }
                     }
-                    path.matches(Regex(".*/pages/[0-9]+")) -> """{"version":"$version","text":"Synthetic page text","textSha256":"hash-$version"}""".toByteArray()
+                    path.matches(Regex(".*/pages/[0-9]+")) -> """{"version":"$version","text":"$pageText","textSha256":"hash-$version"}""".toByteArray()
                     path.endsWith("/progress") -> {
                         val body = Json.parseToJsonElement(ex.requestBody.readBytes().decodeToString()).jsonObject
                         writes += body
@@ -648,5 +650,71 @@ class PrivateReaderScreenTest {
             onNodeWithTag("private-page-label").assertExists()
         }
         assertEquals(listOf("v1"), fake.boxes409.toList(), "the boxes route really answered 409 for the v1 request")
+    }
+
+    @Test fun compositeSourceSplitsOnlyOnCitationSeparatorsAndDropsSentencePunctuation() {
+        assertEquals(listOf("W1 课件 p.26", "教材 p.8"), citationParts("W1 课件 p.26；教材 p.8。"))
+        assertEquals(listOf("教材 p.8", "W2 课件 p.3"), citationParts("教材 p.8;\n W2 课件 p.3."))
+        assertEquals(listOf("教材 p.8"), citationParts("教材 p.8"))
+        assertEquals(listOf("Synthetic lecture 1, slide 4"), citationParts("Synthetic lecture 1, slide 4"))
+        assertEquals(emptyList(), citationParts(" ；。 "))
+    }
+
+    /** A legal quote up to the 4000-character limit must leave the note field visible, focusable and saving at 900×700 and on a phone. */
+    @Test fun longQuoteKeepsTheNoteEditorReachableAutosavesReopensAndResolvesConflicts() {
+        for ((size, length) in listOf((900 to 700) to 3023, (900 to 700) to 4000, (360 to 640) to 4000)) FakeReader().use { fake ->
+            val sentence = "Synthetic invented sentence for a long quote check. "
+            fake.pageText = sentence.repeat(length / sentence.length + 1).take(length)
+            runDesktopComposeUiTest(size.first, size.second) {
+                setContent { CoachTheme(false) { Surface { PrivateReaderScreen(fake.http.reader) {} } } }
+                assertEquals(1f, density.density, "the test window is measured in points like the real macOS window")
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-open-notes").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-text").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-note-text").performTextInputSelection(TextRange(0, length))
+                onNodeWithTag("private-note-add").performScrollTo().performClick()
+                fun editorUsable() {
+                    val editor = onNodeWithTag("private-note-editor")
+                    editor.assertIsDisplayed()
+                    val bounds = editor.fetchSemanticsNode().boundsInRoot
+                    assertTrue(bounds.height >= 48f && bounds.bottom <= size.second, "note field keeps its height inside the window: $bounds")
+                    editor.performClick().assertIsFocused()
+                }
+                editorUsable()
+                capture("reader-long-quote-editor-${size.first}x${size.second}-$length")
+                onNodeWithTag("private-note-editor").performTextInput("kept with spaces")
+                waitUntil(timeoutMillis = 10000) { fake.notes.singleOrNull()?.get("note")?.jsonPrimitive?.content == "kept with spaces" }
+                assertEquals(length, fake.notes.single().getValue("quote").jsonPrimitive.content.length, "the exact quote is saved, never trimmed")
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-editor-close").fetchSemanticsNodes().firstOrNull()?.config?.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled) == false }
+                onNodeWithTag("private-note-editor-close").performClick()
+                onNodeWithTag("private-notes-close").performScrollTo().performClick()
+                onNodeWithTag("private-document-back").performClick()
+                onNodeWithTag("private-book-synthetic").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-open-notes").performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithText("我的批注：kept with spaces").fetchSemanticsNodes().isNotEmpty() }
+                val id = fake.notes.single().getValue("id").jsonPrimitive.content
+                onNodeWithTag("private-note-edit-$id").performScrollTo().performClick()
+                editorUsable()
+                onNodeWithTag("private-note-editor").assertTextContains("kept with spaces")
+                // Another device saved first: the 409 recovery controls stay reachable under the long quote.
+                fake.notes.replaceAll { if (it.getValue("id").jsonPrimitive.content == id) JsonObject(it + ("revision" to JsonPrimitive(it.getValue("revision").jsonPrimitive.long + 1))) else it }
+                onNodeWithTag("private-note-editor").performTextInputSelection(TextRange("kept with spaces".length))
+                onNodeWithTag("private-note-editor").performTextInput(" again")
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-conflict-load").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-note-status").assertTextContains("本地内容尚未保存", substring = true)
+                onNodeWithTag("private-note-conflict-load").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-note-keep-local").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-note-keep-local").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10000) { fake.notes.single().getValue("note").jsonPrimitive.content == "kept with spaces again" }
+                assertEquals(length, fake.notes.single().getValue("quote").jsonPrimitive.content.length)
+            }
+        }
+    }
+
+    private fun SkikoComposeUiTest.capture(name: String) {
+        ImageIO.write(captureToImage().toAwtImage(), "png", File("build/screens/$name.png").also { it.parentFile.mkdirs() })
     }
 }

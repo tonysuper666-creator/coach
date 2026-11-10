@@ -149,9 +149,13 @@ private fun PrivateNoteEditor(reader: ReaderHttp, doc: PrivateDocument, initial:
         if (!busy && pending == null && text != savedText) { delay(500); send(body(text, revision)) }
     }
     AlertDialog(onDismissRequest = {}, title = { Text("批注（自动保存）") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("我的原句：${initial.s("quote")}")
-            OutlinedTextField(value = text, onValueChange = { text = it.take(8000) }, label = { Text("我的批注") }, modifier = Modifier.testTag("private-note-editor"))
+        // A quote may be up to 4000 characters: it scrolls inside a bounded box so the note field always keeps its height and focus.
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.fillMaxWidth().heightIn(max = 120.dp).verticalScroll(rememberScrollState()).testTag("private-note-quote")) {
+                Text("我的原句：${initial.s("quote")}")
+            }
+            OutlinedTextField(value = text, onValueChange = { text = it.take(8000) }, label = { Text("我的批注") },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp, max = 200.dp).testTag("private-note-editor"))
             Text(if (busy) "正在保存…" else if (pending != null) error else if (text != savedText) "等待保存…" else "已保存", modifier = Modifier.testTag("private-note-status"))
             if (pending != null && !busy) {
                 TextButton(onClick = { send(pending!!) }, modifier = Modifier.testTag("private-note-retry")) { Text("重试原保存") }

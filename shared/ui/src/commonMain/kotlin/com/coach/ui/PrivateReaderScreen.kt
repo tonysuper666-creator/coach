@@ -232,11 +232,29 @@ private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initial
     }
 }
 
+/**
+ * A source field may list several citations ("W1 课件 p.26；教材 p.8。"), split on the same separators the server uses for page study.
+ * Sentence-final punctuation is not part of a citation; anything else is sent to resolve exactly as written.
+ */
+internal fun citationParts(source: String): List<String> =
+    source.split(Regex("[;；\n]")).map { it.trim().trimEnd('。', '．', '.', '，', ',', '、').trimEnd() }.filter { it.isNotEmpty() }
+
+/** Each citation of a composite source is offered on its own; none is picked for the reader, and each resolves exactly or says it cannot. */
+@Composable
+internal fun PrivateSourceReferences(reader: ReaderHttp, source: String, anchor: String = "") {
+    val parts = remember(source) { citationParts(source) }
+    if (parts.size <= 1) { parts.singleOrNull()?.let { PrivateSourceReference(reader, it, anchor) }; return }
+    Column(Modifier.testTag("private-citations")) {
+        Text("出处（${parts.size} 条，分别打开）", style = MaterialTheme.typography.labelMedium)
+        parts.forEachIndexed { i, part -> PrivateSourceReference(reader, part, anchor, tag = "private-citation-$i", label = part) }
+    }
+}
+
 /** A source click resolves through the course catalog; an unregistered or ambiguous source never guesses. */
 @Composable
-internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: String = "") {
+internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: String = "", tag: String = "private-citation", label: String = "出处：$source") {
     var opened by remember(source) { mutableStateOf(false) }
-    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("private-citation")) { Text("出处：$source") }
+    TextButton(onClick = { opened = true }, modifier = Modifier.testTag(tag)) { Text(label) }
     if (opened) Dialog(onDismissRequest = {}, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)) {
         Surface(Modifier.fillMaxSize()) {
             var retry by remember { mutableIntStateOf(0) }
@@ -254,7 +272,7 @@ internal fun PrivateSourceReference(reader: ReaderHttp, source: String, anchor: 
             when (val result = target) {
                 ReaderLoad.Loading -> CenterMessage("正在定位出处…")
                 ReaderLoad.Failed -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("无法定位出处：资料未登记、出处不唯一或 Mac 暂不可用。")
+                    Text("无法定位出处：资料未登记、出处不唯一或 Mac 暂不可用。", Modifier.testTag("private-citation-failed"))
                     TextButton(onClick = { retry++ }) { Text("重试") }
                     TextButton(onClick = { opened = false }) { Text("返回题目") }
                 }

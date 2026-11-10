@@ -125,7 +125,8 @@ exclusion. When the window has positive reads, the inspector requires the
 `stackTrace=true` setting at window start and no disabling inside the window.
 It explicitly rejects missing coverage as
 `JFR evidence rejected: SocketRead stackTrace setting missing or disabled`,
-before attempting health classification. A caller's zero count or whitelist
+before attempting health classification. The Python gate preserves this exact
+fixed reason, while still hiding arbitrary subprocess error output. A caller's zero count or whitelist
 is never consumed.
 
 For the next cutover, collect a **new** recording using the checked-in

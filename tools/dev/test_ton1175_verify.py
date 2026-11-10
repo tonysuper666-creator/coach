@@ -292,6 +292,22 @@ class CandidateTest(unittest.TestCase):
                 verify.candidate(manifest, verify.file_hash(manifest), release, 'a'*40, plist)
 
 
+class InspectorFailureTest(unittest.TestCase):
+    def test_missing_stack_setting_reason_survives_inspector_command_failure(self):
+        reason = 'JFR evidence rejected: SocketRead stackTrace setting missing or disabled'
+        failed = subprocess.CompletedProcess(['java'], 1, b'', reason.encode() + b'\n')
+        with mock.patch.object(verify.subprocess, 'run', return_value=failed):
+            with self.assertRaisesRegex(verify.GateError, 'SocketRead stackTrace setting missing or disabled'):
+                verify.captured(['java'], rejection=reason)
+
+    def test_arbitrary_inspector_stderr_is_never_disclosed(self):
+        reason = 'JFR evidence rejected: SocketRead stackTrace setting missing or disabled'
+        failed = subprocess.CompletedProcess(['java'], 1, b'', reason.encode() + b'\nprivate-fixture-data')
+        with mock.patch.object(verify.subprocess, 'run', return_value=failed):
+            with self.assertRaisesRegex(verify.GateError, '^dependency or evidence command failed$'):
+                verify.captured(['java'], rejection=reason)
+
+
 class IdleTest(unittest.TestCase):
     """Exercise the real idle orchestrator with synthetic process/JFR evidence.
 

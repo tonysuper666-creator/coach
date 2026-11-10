@@ -39,10 +39,12 @@ def release_links(release):
     require(os.access(root / 'app/bin/app', os.X_OK), 'candidate app is not executable')
 
 
-def captured(argv, **kwargs):
+def captured(argv, rejection=None, **kwargs):
     # Only closed-schema machine output is consumed, never replayed on failure.
     result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, timeout=60, **kwargs)
+                            stderr=subprocess.PIPE if rejection else subprocess.DEVNULL, timeout=60, **kwargs)
+    if result.returncode != 0 and rejection and result.stderr.strip() == rejection.encode():
+        raise GateError(rejection)  # An exact, fixed inspector reason; never arbitrary stderr.
     require(result.returncode == 0, 'dependency or evidence command failed')
     return result.stdout
 
@@ -242,7 +244,8 @@ def idle(evidence, installation, java, jcmd, lsof):
     before = live_identity()
     inspector = Path(__file__).with_name('Ton1175Jfr.java')
     measured = json.loads(captured([java, str(inspector), str(recording), p['windowStart'],
-                                    p['windowEnd'], pid]))
+                                    p['windowEnd'], pid],
+        rejection='JFR evidence rejected: SocketRead stackTrace setting missing or disabled'))
     require(measured['pid'] == int(pid), 'JFR process mismatch')
     try:
         polls = idle_checks.health_reads(measured, start, end)

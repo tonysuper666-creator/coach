@@ -43,6 +43,16 @@ class MeasurementEvidenceTest(unittest.TestCase):
         report = self.report(event("input_next", 100), event("target_draw_commands", 110), event("pixels_observed", 120))
         self.assertIsNone(report["samples"][0]["decodedCacheHit"])
 
+    def test_ready_hit_and_inflight_prefetch_are_distinct(self):
+        report = self.report(event("prefetch_decode_ready", 90, action=0), event("input_next", 100),
+                             event("lookup_hit", 101), event("target_draw_commands", 110), event("pixels_observed", 120))
+        self.assertTrue(report["samples"][0]["decodedCacheHit"])
+        self.assertTrue(report["samples"][0]["prefetchDecodeReadyBeforeInput"])
+        report = self.report(event("input_next", 100), event("lookup_wait", 101),
+                             event("prefetch_decode_ready", 105, action=0), event("target_draw_commands", 110), event("pixels_observed", 120))
+        self.assertFalse(report["samples"][0]["decodedCacheHit"])
+        self.assertFalse(report["samples"][0]["prefetchDecodeReadyBeforeInput"])
+
 
 if __name__ == "__main__":
     unittest.main()

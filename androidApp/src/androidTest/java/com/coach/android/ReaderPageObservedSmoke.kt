@@ -68,11 +68,23 @@ class ReaderPageObservedSmoke {
             for (page in 20 downTo 1) clickAndObserve("private-prev", page)
             close()
             clickAndObserve("baseline-source", 1)
+            ReaderPageTrace.checkpoint("before_close")
+            File(context.cacheDir, "reader-before-close.json").writeText(ReaderPageTrace.snapshot().toString())
+            fun stage(label: String) {
+                File(context.cacheDir, "reader-stage.json").writeText(JSONObject()
+                    .put("runId", args.getString("readerRunId") ?: "manual").put("stage", label).toString())
+            }
+            stage("before_close")
+            Thread.sleep(600) // outside the 42 latency samples
             close()
             ReaderPageTrace.checkpoint("reader_closed")
             File(context.cacheDir, "reader-closed.json").writeText(ReaderPageTrace.snapshot().toString())
+            stage("after_close")
+            Thread.sleep(600)
             System.gc(); System.runFinalization(); System.gc()
             ReaderPageTrace.checkpoint("after_gc_request")
+            stage("after_gc_request")
+            Thread.sleep(600)
             val trace = JSONObject(ReaderPageTrace.snapshot().toString())
             assertTrue(trace.getBoolean("complete"))
             assertEquals(0, trace.getInt("compositionOwners"))

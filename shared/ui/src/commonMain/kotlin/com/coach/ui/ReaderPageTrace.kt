@@ -2,6 +2,7 @@ package com.coach.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
+import com.coach.client.ReaderRasterIdentity
 import kotlin.time.TimeSource
 import kotlinx.serialization.json.*
 
@@ -27,6 +28,8 @@ object ReaderPageTrace {
     private val allocations = mutableListOf<Allocation>()
     private val owners = mutableMapOf<Long, Int>()
     private val draws = mutableSetOf<Pair<Long, Long>>()
+    private val lookups = mutableSetOf<Pair<Long, Int>>()
+    private val inputTimes = mutableMapOf<Long, Long>()
 
     private class Allocation(val image: Long, val storage: String, val width: Int, val height: Int,
                              val bytes: Long, val weak: ReaderBitmapWeakReference)
@@ -35,7 +38,7 @@ object ReaderPageTrace {
     fun start() = synchronized(lock) {
         epoch++; sequence = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
         decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
-        events.clear(); allocations.clear(); owners.clear(); draws.clear(); enabled = true
+        events.clear(); allocations.clear(); owners.clear(); draws.clear(); lookups.clear(); inputTimes.clear(); enabled = true
     }
 
     fun stop() { enabled = false }
@@ -47,8 +50,20 @@ object ReaderPageTrace {
         if (!enabled) return 0
         return synchronized(lock) {
             val action = ++sequence
-            record("input_${kind.name.lowercase()}", session, page, action)
+            val time = nowNs()
+            inputTimes[action] = time
+            record("input_${kind.name.lowercase()}", session, page, action, timestamp = time)
             action
+        }
+    }
+
+    internal fun lookup(session: Int, page: Int, action: Long, image: ReaderLoadedImage?, pending: Boolean) {
+        if (enabled) synchronized(lock) {
+            if (!lookups.add(action to page)) return
+            if (lookups.size >= LIMIT) { lookups.clear(); inputTimes.clear(); dropped++ }
+            val input = inputTimes[action]
+            val hit = image != null && input != null && image.readyNs <= input
+            record(if (hit) "lookup_hit" else if (pending) "lookup_wait" else "lookup_miss", session, page, action, image?.observation?.image ?: 0)
         }
     }
 
@@ -131,7 +146,8 @@ object ReaderPageTrace {
         buildJsonObject {
             put("schema", 1)
             put("clock", "process-local monotonic nanoseconds")
-            put("mode", "baseline_no_cache_no_prefetch")
+            put("mode", "three_page_window")
+            put("managedWindowLimitIncludingLoad", 3)
             put("inputPoint", "production click handler; excludes dispatch before the handler")
             put("drawPoint", "target bitmap draw commands recorded; not physical presentation")
             put("firstPresentLatencyVerified", false)
@@ -159,14 +175,14 @@ object ReaderPageTrace {
         }
     }
 
-    private fun record(kind: String, session: Int, page: Int, action: Long, image: Long = 0) {
+    private fun record(kind: String, session: Int, page: Int, action: Long, image: Long = 0, timestamp: Long = nowNs()) {
         val alive = allocations.filter { it.weak.alive() }
         val decoded = alive.count { it.storage == "decoded" }
         val bytes = alive.sumOf { it.bytes }
         peakDecoded = maxOf(peakDecoded, decoded); peakReachableBytes = maxOf(peakReachableBytes, bytes)
         if (events.size >= LIMIT) { events.removeFirst(); dropped++ }
         events.addLast(buildJsonObject {
-            put("kind", kind); put("ns", nowNs()); put("session", session); put("page", page)
+            put("kind", kind); put("ns", timestamp); put("session", session); put("page", page)
             put("action", action); put("image", image)
             put("decodeInFlight", decoding); put("compositionOwners", owners.values.sum())
             put("weakLiveDecodedBackings", decoded); put("weakLiveScratchBackings", alive.count { it.storage == "scratch" })
@@ -187,4 +203,5 @@ internal expect fun readerTraceMarker(kind: String, action: Long, image: Long)
 @Composable
 internal expect fun readerFrameSubmitted(): (ReaderDecodeObservation, Long) -> Unit
 
-internal data class ReaderLoadedImage(val bitmap: ImageBitmap, val sourcePage: Int, val sourceSession: Int, val observation: ReaderDecodeObservation?)
+internal data class ReaderLoadedImage(val bitmap: ImageBitmap, val sourcePage: Int, val sourceSession: Int,
+                                     val observation: ReaderDecodeObservation?, val identity: ReaderRasterIdentity, val readyNs: Long)

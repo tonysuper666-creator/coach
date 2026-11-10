@@ -2,10 +2,11 @@
 
 Baseline production source: `1014caf0f57d89bf7b937e8eaa8cd1236675c677`.
 At that revision, `PdfPageImage` requests and decodes on every page change.
-The original baseline is preserved at PR141 head `5f7062c`; its test and fixture
-remain unchanged. Supplemental observation adds opt-in tracing around the same
-request/decode path, without implementing caching. PR131's isolated Reader2
-layout and PR134's desktop window remain separate work.
+The original AWT baseline is preserved at PR141 head `5f7062c`. The measured
+Poppler baseline is `27f07f8` plus the four named `waitUntil` argument fixes from
+the Mac evidence package. Current code implements the three-page decoded window;
+its native candidate measurements and memory/presentation acceptance are pending.
+PR131's isolated Reader2 layout and PR134's desktop window remain separate work.
 
 ## Mac desktop baseline
 
@@ -146,8 +147,65 @@ python3 tools/reader-cache/test_summarize.py
 python3 tools/reader-cache/summarize.py TRACE_JSON --output SUMMARY_JSON
 ```
 
-The cache remains unimplemented. Android compilation is not emulator evidence.
-Mac native compilation/runs, Pixel Fold sampling, actual presentation, full
-service-path checks, and native/GPU memory budget must be collected before a
-complete baseline is claimed. Builder-W then continues this same PR with the
-cache and behavior tests; independent acceptance/review follow implementation.
+## Decoded window and candidate validation
+
+`ReaderPageWindow` owns the current page and its immediate neighbours, with a
+serial loader and at most three owned slots including an in-flight load. Visible
+pages take priority. Speculation waits for their draw commands; returning from
+a source dialog also waits for the underlying viewer's draw before prefetching.
+Repeated selections coalesce, obsolete work is cancelled, and non-cooperative
+completion cannot publish into a different current selection. Prefetch failures
+are retried when promoted to foreground; foreground failures retain explicit
+retry. Stale saved positions hold speculation until explicit navigation.
+
+`ReaderImageWindow` shares that controller only among active viewers of the same
+`ReaderHttp` instance. Keys include material ID/version, page and the current
+native presentation/decode profile. Nested question-source dialogs reuse ready
+rasters and restore their underlying reader; inactive viewers do not compete
+for loading. The last close cancels the scope and clears cache ownership. Native
+decodes across closing/reopening scopes share a serial gate. No displayed bitmap
+is recycled while a renderer may still reference it. Consequently, the three
+managed slots do not establish the native/GPU peak budget; use the existing
+liveness/process evidence and keep that acceptance gate open.
+
+Portable window behavior tests (no corpus or UI test compilation):
+
+```sh
+tools/dev/heavy ./gradlew :shared:client:jvmTest \
+  --tests com.coach.client.ReaderPageWindowTest
+```
+
+Repeat the `run_observed.py` performance commands above using fresh candidate
+output directories and the baseline's exact AVD, window, SDK, density, fontScale
+and Poppler configuration. The performance suite preserves the 42 pointer/pixel
+samples. It now emits hit/miss/unknown groups and prefetch-ready counts, with
+publication-before-input used for a hit; an in-flight prefetch is a miss.
+Both citation opens in that suite are cold because the last viewer closes
+between them. Measure actual cached question-source reuse separately:
+
+```sh
+tools/dev/heavy --local python3 tools/reader-cache/run_observed.py \
+  --platform desktop --suite behavior --output build/reader-observed/desktop-cache-path
+# Use the same Android parameters as the performance command, adding --suite behavior
+# and a new output directory. The class is ReaderPageCachePathSmoke.
+```
+
+The behavior suite uses the production catalog/book view, turns to a prefetched
+page, opens an already cached source page, closes it and checks the original page
+returns without another image request/decode. It asserts trace hit evidence and
+target pixels through the real reader/HTTP/platform-decoder path. Its two timed
+actions are reported separately from the 42-sample performance suite.
+
+The candidate performance hosts retain `before-close.json` and `closed.json` in
+the same live process and hold each lifecycle phase for 600 ms **after** its
+latency sample, so RSS/PSS sampling can observe before-close, after-close and
+after-GC-request states. Unique run IDs exclude stale phase files. These holds
+do not enter page-turn timings. For a matching lifecycle comparison, the same
+observation-only additions can be replayed on the uncached baseline without
+changing its loading path; preserve both source hashes and patches.
+
+The Mac compilation patch is absorbed with its limits/assertions unchanged.
+Windows compilation is not emulator evidence. New native behavior/performance
+runs, the missing/ambiguous frame associations, Mac presentation, full service
+path and native/GPU memory budget remain required before acceptance. Independent
+review and cross-platform verification follow the candidate evidence.

@@ -29,11 +29,11 @@ class ReaderPageObservedTest {
             runDesktopComposeUiTest(1000, 900) {
                 setContent { CoachTheme(false) { Surface { ReaderMeasurementSurface(client.reader) } } }
                 fun clickAndObserve(tag: String, page: Int) {
-                    waitUntil(15_000) {
+                    waitUntil(timeoutMillis = 15_000) {
                         onAllNodesWithTag(tag).fetchSemanticsNodes().singleOrNull()?.let { !it.config.contains(SemanticsProperties.Disabled) } == true
                     }
                     onNodeWithTag(tag).performMouseInput { click() }
-                    waitUntil(15_000) {
+                    waitUntil(timeoutMillis = 15_000) {
                         if (onAllNodesWithTag("private-page-$page").fetchSemanticsNodes().isEmpty()) false
                         else {
                             val pixels = onNodeWithTag("private-page-$page").captureToImage().toAwtImage()
@@ -47,21 +47,35 @@ class ReaderPageObservedTest {
                 for (page in 2..21) clickAndObserve("private-next", page)
                 for (page in 20 downTo 1) clickAndObserve("private-prev", page)
                 fun close() {
-                    waitUntil(15_000) {
+                    waitUntil(timeoutMillis = 15_000) {
                         onAllNodesWithTag("private-document-back").fetchSemanticsNodes().singleOrNull()?.let { !it.config.contains(SemanticsProperties.Disabled) } == true
                     }
                     onNodeWithTag("private-document-back").performMouseInput { click() }
-                    waitUntil(15_000) { onAllNodesWithTag("private-page-1").fetchSemanticsNodes().isEmpty() }
+                    waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("private-page-1").fetchSemanticsNodes().isEmpty() }
                 }
                 close()
                 clickAndObserve("baseline-source", 1)
+                ReaderPageTrace.checkpoint("before_close")
+                File(output, "before-close.json").writeText(ReaderPageTrace.snapshot().toString())
+                File(output, "stage.json").writeText(buildJsonObject {
+                    put("runId", System.getenv("COACH_READER_RUN_ID") ?: "manual"); put("stage", "before_close")
+                }.toString())
+                Thread.sleep(600) // outside all latency samples, let the external PID sampler observe this phase
                 close()
                 ReaderPageTrace.checkpoint("reader_closed")
                 File(output, "closed.json").writeText(ReaderPageTrace.snapshot().toString())
+                File(output, "stage.json").writeText(buildJsonObject {
+                    put("runId", System.getenv("COACH_READER_RUN_ID") ?: "manual"); put("stage", "after_close")
+                }.toString())
+                Thread.sleep(600)
             }
             // Diagnostic checkpoint outside all latency samples. A GC request is not a native-free assertion.
             System.gc(); System.runFinalization(); System.gc()
             ReaderPageTrace.checkpoint("after_gc_request")
+            File(output, "stage.json").writeText(buildJsonObject {
+                put("runId", System.getenv("COACH_READER_RUN_ID") ?: "manual"); put("stage", "after_gc_request")
+            }.toString())
+            Thread.sleep(600)
             val trace = ReaderPageTrace.snapshot()
             assertTrue(trace.getValue("complete").jsonPrimitive.boolean)
             assertEquals(0, trace.getValue("compositionOwners").jsonPrimitive.int)

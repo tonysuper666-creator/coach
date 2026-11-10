@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from fixture_server import Fixture
 from summarize import summarize
@@ -22,6 +23,7 @@ PACKAGE = "com.coach.readermeasurement"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=["desktop", "android"], required=True)
+    parser.add_argument("--suite", choices=["performance", "behavior"], default="performance")
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -50,7 +52,8 @@ def main():
             if not re.search(r"^package: name='" + re.escape(expected) + "'", badging):
                 raise ValueError("Refusing to install an APK outside the isolated measurement package")
             subprocess.run(adb + ["install", "-r", str(apk)], check=True, stdout=subprocess.DEVNULL)
-    identity = dict(platform=args.platform, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+    run_id = uuid.uuid4().hex
+    identity = dict(platform=args.platform, suite=args.suite, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     captureBoundary="draw/submission and verified pixel upper bound; first physical present unobserved")
     identity["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
     if args.platform == "android":
@@ -66,6 +69,14 @@ def main():
                 while not stop.is_set():
                     row = dict(hostMonotonicNs=time.monotonic_ns(), stage="test_process_running")
                     if args.platform == "desktop":
+                        stage_file = out / "stage.json"
+                        if stage_file.exists():
+                            try:
+                                stage = json.loads(stage_file.read_text())
+                                if stage.get("runId") == run_id:
+                                    row["stage"] = stage["stage"]
+                            except (ValueError, KeyError):
+                                pass
                         pid_file = out / "identity.json"
                         if pid_file.exists():
                             try:
@@ -76,6 +87,14 @@ def main():
                             result = subprocess.run(["ps", "-o", "pid=,rss=", "-p", str(pid)], capture_output=True, text=True)
                             row.update(pid=pid, rssKiB=result.stdout.strip(), exit=result.returncode)
                     else:
+                        stage_result = subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/reader-stage.json"], capture_output=True, text=True)
+                        if stage_result.returncode == 0:
+                            try:
+                                stage = json.loads(stage_result.stdout)
+                                if stage.get("runId") == run_id:
+                                    row["stage"] = stage["stage"]
+                            except (ValueError, KeyError):
+                                pass
                         result = subprocess.run(adb + ["shell", "dumpsys", "meminfo", "-s", PACKAGE], capture_output=True, text=True)
                         row.update(meminfo=result.stdout, exit=result.returncode)
                     log.write(json.dumps(row) + "\n")
@@ -100,18 +119,24 @@ def main():
                 perfetto.stdin.write((Path(__file__).with_name("frametimeline.pbtxt")).read_bytes())
                 perfetto.stdin.close()
             env = dict(os.environ, COACH_READER_FIXTURE_HOST=args.host, COACH_READER_FIXTURE_PORT=str(fixture.port),
-                       COACH_READER_OBSERVED_OUTPUT=str(out))
+                       COACH_READER_OBSERVED_OUTPUT=str(out), COACH_READER_RUN_ID=run_id)
             with (out / "test.log").open("w") as log:
                 if args.platform == "desktop":
                     # The caller holds tools/dev/heavy --local; do not nest the same lock.
-                    result = subprocess.run(["./gradlew", ":shared:ui:jvmTest", "--tests", "com.coach.ui.ReaderPageObservedTest",
+                    test_class = "com.coach.ui.ReaderPageObservedTest" if args.suite == "performance" else "com.coach.ui.ReaderPageCachePathTest"
+                    result = subprocess.run(["./gradlew", ":shared:ui:jvmTest", "--tests", test_class,
                                              "--rerun-tasks"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
                 else:
+                    test_class = "com.coach.android.ReaderPageObservedSmoke" if args.suite == "performance" else "com.coach.android.ReaderPageCachePathSmoke"
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
-                        "com.coach.android.ReaderPageObservedSmoke", "-e", "readerPort", str(fixture.port),
+                        test_class, "-e", "readerPort", str(fixture.port), "-e", "readerRunId", run_id,
                         PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
                     # adb may exit 0 even if AndroidJUnitRunner reports a failing test.
-                    for remote, local in (("reader-observed.json", "trace.json"), ("reader-closed.json", "closed.json")):
+                    captures = [("reader-observed.json", "trace.json")]
+                    if args.suite == "performance":
+                        captures.append(("reader-closed.json", "closed.json"))
+                        captures.append(("reader-before-close.json", "before-close.json"))
+                    for remote, local in captures:
                         with (out / local).open("wb") as capture:
                             subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/" + remote], stdout=capture, check=True)
             identity["commandExit"] = result.returncode
@@ -121,9 +146,10 @@ def main():
                 raise RuntimeError("test command failed; inspect test.log")
             trace = json.loads((out / "trace.json").read_text())
             identity["measurementPid"] = trace["process"]["pid"]
-            (out / "summary.json").write_text(json.dumps(summarize(trace), indent=2))
+            expected = {"input_next": 1, "input_citation": 1} if args.suite == "behavior" else None
+            (out / "summary.json").write_text(json.dumps(summarize(trace, expected), indent=2))
             if args.platform == "desktop":
-                xml = ROOT / "shared/ui/build/test-results/jvmTest/TEST-com.coach.ui.ReaderPageObservedTest.xml"
+                xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
             (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
         finally:

@@ -37,9 +37,9 @@ CASES = ('normal', 'before_seal', 'held_seal', 'stopped', 'pointers',
          'validating', 'acceptance_timeout', 'recovery_timeout')
 
 
-def run(argv, timeout=90):
+def run(argv, timeout=90, env=None):
     result = subprocess.run(list(map(str, argv)), stdin=subprocess.DEVNULL,
-                            capture_output=True, timeout=timeout)
+                            capture_output=True, timeout=timeout, env=env)
     require(result.returncode == 0, 'isolated rehearsal subprocess failed: ' + Path(str(argv[0])).name)
     return result.stdout
 
@@ -239,16 +239,7 @@ class Rehearsal:
         self.old_pid = load(self.adapter.owner)['pid']
         write(root / 'rehearsal.json', dict(case=self.case, head=self.head, oldPid=self.old_pid,
                                            java=str(self.java), jcmd=str(self.jcmd)))
-        settings = '<configuration version="2.0" label="TON1175 isolated">'
-        for event in ('SocketRead', 'ActiveSetting', 'DataLoss', 'CPULoad', 'JVMInformation'):
-            settings += f'<event name="jdk.{event}"><setting name="enabled">true</setting>'
-            if event == 'SocketRead':
-                settings += '<setting name="threshold">0 ns</setting>'
-            if event == 'CPULoad':
-                settings += '<setting name="period">1 s</setting>'
-            settings += '</event>'
-        settings += '</configuration>'
-        atomic(root / 'idle.jfc', settings.encode())
+        atomic(root / 'idle.jfc', HERE.with_name('ton1175-idle.jfc').read_bytes())
         run([self.jcmd, self.old_pid, 'JFR.start', 'name=ton1175', f'settings={root / "idle.jfc"}'])
         self.heartbeat_after()  # observe a real sample before opening the window
         with Control(root / 'state/activity.sock') as control:
@@ -260,7 +251,8 @@ class Rehearsal:
         time.sleep(2)
         self.window_start = time.time()
         self.monotonic_start = time.monotonic()
-        self.identity = digest(run(['/bin/ps', '-p', self.old_pid, '-o', 'lstart=', '-o', 'command=']).strip())
+        self.identity = digest(run(['/bin/ps', '-p', self.old_pid, '-o', 'lstart=', '-o', 'command='],
+                                   env=dict(os.environ, LC_ALL='C', TZ='UTC')).strip())
 
     def heartbeat_after(self, after=None):
         """Wait for recorded coverage, rather than assuming JFR startup latency."""

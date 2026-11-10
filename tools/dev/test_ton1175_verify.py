@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from tools.dev import ton1175_verify as verify
+from tools.dev import test_ton1460_idle as idle_fixtures
 
 
 class EvidenceTest(unittest.TestCase):
@@ -291,6 +292,197 @@ class CandidateTest(unittest.TestCase):
                 verify.candidate(manifest, verify.file_hash(manifest), release, 'a'*40, plist)
 
 
+class InspectorFailureTest(unittest.TestCase):
+    def test_missing_stack_setting_reason_survives_inspector_command_failure(self):
+        reason = 'JFR evidence rejected: SocketRead stackTrace setting missing or disabled'
+        failed = subprocess.CompletedProcess(['java'], 1, b'', reason.encode() + b'\n')
+        with mock.patch.object(verify.subprocess, 'run', return_value=failed):
+            with self.assertRaisesRegex(verify.GateError, 'SocketRead stackTrace setting missing or disabled'):
+                verify.captured(['java'], rejection=reason)
+
+    def test_arbitrary_inspector_stderr_is_never_disclosed(self):
+        reason = 'JFR evidence rejected: SocketRead stackTrace setting missing or disabled'
+        failed = subprocess.CompletedProcess(['java'], 1, b'', reason.encode() + b'\nprivate-fixture-data')
+        with mock.patch.object(verify.subprocess, 'run', return_value=failed):
+            with self.assertRaisesRegex(verify.GateError, '^dependency or evidence command failed$'):
+                verify.captured(['java'], rejection=reason)
+
+
+class IdleTest(unittest.TestCase):
+    """Exercise the real idle orchestrator with synthetic process/JFR evidence.
+
+    These tests retain the module's real platform dependencies. The independent
+    test_ton1460_idle suite covers the pure policy on Windows without fcntl.
+    """
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.start = 1794268800
+        self.now = self.start + 910
+        self.pid, self.bridge_pid, self.guard_pid = 1802, 300, 301
+        self.info = dict(root=self.root.as_posix(), runDir=(self.root / 'run').as_posix(),
+                         dataDir=str(self.root / 'data'), sourceHead='a' * 40)
+        Path(self.info['runDir']).mkdir()
+        self.state = dict(pid=self.bridge_pid, guardPid=self.guard_pid, ownerPid=self.pid,
+                          healthy=True, checkedAt=self.now * 1000)
+        self.state_path = Path(self.info['runDir']) / 'bridge.json'
+        self.state_path.write_text(json.dumps(self.state))
+        self.ps = idle_fixtures.process(self.start - 2000,
+            'java -cp ' + str(self.root / 'app/lib') + ' com.coach.server.MainKt')
+        self.bridge = idle_fixtures.process(self.start - 1000,
+            'python ' + self.info['root'] + '/tools/bridge/subscription_bridge.py')
+        self.guard = idle_fixtures.process(self.start - 1001,
+            'python ' + self.info['root'] + '/tools/dev/service-child.py '
+            + self.info['runDir'] + '/bridge-1802.pid ' + self.info['root'] + '/tools/bridge/run.sh')
+        binding = verify.idle_checks.bridge_identity(self.state, self.pid, self.bridge, self.guard,
+            self.guard_pid, self.pid, self.info['root'], self.info['runDir'], self.start, self.now)
+        self.installation = self.root / 'installation.json'
+        self.installation.write_text(json.dumps(self.info))
+        self.recording = self.root / 'idle.jfr'
+        self.recording.write_bytes(b'synthetic recording hash, inspector output is mocked')
+        self.proof = dict(pid=self.pid, sourceHead=self.info['sourceHead'],
+            installationSha256=verify.file_hash(self.installation), recording=str(self.recording),
+            recordingSha256=verify.file_hash(self.recording), processIdentitySha256=verify.digest(self.ps),
+            bridgeIdentitySha256=verify.digest(binding), windowStart=idle_fixtures.stamp(self.start),
+            windowEnd=idle_fixtures.stamp(self.start + 900), clientSocketReads=0)
+        self.evidence = self.root / 'idle.json'
+        self.measured = dict(idle_fixtures.health_recording(self.start), pid=self.pid,
+                             jvmStart=idle_fixtures.stamp(self.start - 1999.875))
+        self.lock_owner = self.pid
+        self.listener_owner = self.bridge_pid
+        self.after_inspect = lambda: None
+        self.captured = mock.Mock(side_effect=self.capture)
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(verify, 'captured', self.captured).start()
+        mock.patch.object(verify.time, 'time', return_value=self.now).start()
+        # Always exercise Darwin's owner check as an independent boundary;
+        # the existing JfrTest below checks its real kernel implementation.
+        mock.patch.object(verify.sys, 'platform', 'darwin').start()
+        self.kernel_lock = mock.patch.object(verify, 'darwin_lock_owner', side_effect=self.check_lock).start()
+
+    def check_lock(self, path, pid):
+        self.assertEqual(path, Path(self.info['dataDir']) / 'server.lock')
+        verify.require(int(pid) == self.lock_owner, 'recorded JVM does not exclusively own whole-file server lock')
+
+    def capture(self, argv, **kwargs):
+        if argv[0] == '/bin/ps':
+            pid = int(argv[2])
+            if argv[-1] == 'ppid=':
+                return str({self.bridge_pid: self.guard_pid, self.guard_pid: self.pid}[pid]).encode()
+            self.assertEqual(kwargs['env']['TZ'], 'UTC')
+            self.assertEqual(kwargs['env']['LC_ALL'], 'C')
+            return {self.pid: self.ps, self.bridge_pid: self.bridge, self.guard_pid: self.guard}[pid]
+        if argv[0] == 'fixture-lsof':
+            return f'p{self.listener_owner}\nn127.0.0.1:8791\n'.encode()
+        if argv[0] == 'fixture-java':
+            self.after_inspect()
+            return json.dumps(self.measured).encode()
+        raise AssertionError('unexpected command; VM.uptime must never be used')
+
+    def run_idle(self):
+        self.evidence.write_text(json.dumps(self.proof))
+        verify.idle(self.evidence, self.installation, 'fixture-java', 'forbidden-jcmd', 'fixture-lsof')
+
+    def test_full_health_window_and_sleep_bind_same_lifetime_without_uptime(self):
+        self.run_idle()
+        self.assertEqual(self.kernel_lock.call_count, 2)
+        self.assertFalse(any(call.args[0][0] == 'forbidden-jcmd' for call in self.captured.call_args_list))
+
+    def test_client_read_cannot_be_hidden_by_callers_zero_count(self):
+        self.measured['reads'][40]['healthOrigin'] = False
+        with self.assertRaisesRegex(verify.GateError, 'non-health'):
+            self.run_idle()
+
+    def test_rehearsal_idle_hook_accepts_strict_zero_reads_without_managed_bridge(self):
+        from tools.dev import rehearse_ton1175_launchd as rehearsal
+        self.measured.update(socketReads=0, reads=[])
+        self.info.pop('runDir')
+        self.installation.write_text(json.dumps(self.info))
+        self.proof['installationSha256'] = verify.file_hash(self.installation)
+        self.proof.pop('bridgeIdentitySha256')
+        self.evidence.write_text(json.dumps(self.proof))
+        (self.root / 'rehearsal.json').write_text(json.dumps(dict(
+            case='normal', java='fixture-java', jcmd='forbidden-jcmd')))
+        with mock.patch.object(rehearsal, 'Adapter'):
+            rehearsal.hook('idle', self.root, [self.evidence, self.installation])
+        self.assertEqual(self.kernel_lock.call_count, 2)
+        self.assertTrue(all(call.args[0][0] in ('/bin/ps', 'fixture-java')
+                            for call in self.captured.call_args_list))
+
+    def test_positive_reads_still_require_observed_bridge_binding(self):
+        self.proof.pop('bridgeIdentitySha256')
+        with self.assertRaises(KeyError):
+            self.run_idle()
+
+    def test_new_lifetime_handles_fork_boundary_but_rejects_five_seconds(self):
+        self.measured['jvmStart'] = idle_fixtures.stamp(self.start - 1998.93)
+        self.run_idle()
+        self.measured['jvmStart'] = idle_fixtures.stamp(self.start - 1995)
+        with self.assertRaisesRegex(verify.GateError, 'different JVM lifetime'):
+            self.run_idle()
+
+    def test_short_stale_future_window_still_rejected(self):
+        for start, end in ((self.start, self.start + 899), (self.start - 131, self.start + 769),
+                           (self.start, self.now + 1)):
+            self.proof.update(windowStart=idle_fixtures.stamp(start), windowEnd=idle_fixtures.stamp(end))
+            with self.subTest(start=start, end=end), self.assertRaisesRegex(verify.GateError, 'short, stale or future'):
+                self.run_idle()
+        self.captured.assert_not_called()
+
+    def test_pid_reuse_wrong_jfr_pid_and_different_lifetime_rejected(self):
+        for field, value in (('pid', self.pid + 1),
+                             ('jvmStart', idle_fixtures.stamp(self.start - 13313))):
+            old = self.measured[field]
+            self.measured[field] = value
+            with self.subTest(field=field), self.assertRaises(verify.GateError):
+                self.run_idle()
+            self.measured[field] = old
+        self.ps = self.ps.replace(b'java', b'foreign-java', 1)
+        with self.assertRaisesRegex(verify.GateError, 'process identity changed'):
+            self.run_idle()
+
+    def test_foreign_lock_listener_and_missing_bridge_attestation_rejected(self):
+        self.lock_owner += 1
+        with self.assertRaisesRegex(verify.GateError, 'whole-file server lock'):
+            self.run_idle()
+        self.lock_owner = self.pid
+        self.listener_owner += 1
+        with self.assertRaisesRegex(verify.GateError, 'health listener'):
+            self.run_idle()
+        self.listener_owner = self.bridge_pid
+        self.proof['bridgeIdentitySha256'] = 'unbound'
+        with self.assertRaisesRegex(verify.GateError, 'bridge identity changed'):
+            self.run_idle()
+
+    def test_recording_and_installation_hashes_checked_before_and_after(self):
+        for path in (self.recording, self.installation):
+            original = path.read_bytes()
+            path.write_bytes(original + b'\n')
+            with self.subTest(path=path.name, phase='before'), self.assertRaises(verify.GateError):
+                self.run_idle()
+            path.write_bytes(original)
+            self.after_inspect = lambda: path.write_bytes(original + b'\n')
+            with self.subTest(path=path.name, phase='after'), self.assertRaisesRegex(verify.GateError, 'identity changed'):
+                self.run_idle()
+            path.write_bytes(original)
+            self.after_inspect = lambda: None
+
+    def test_process_or_bridge_replacement_during_inspection_rejected(self):
+        def replace_process():
+            self.ps += b' changed'
+        self.after_inspect = replace_process
+        old = self.ps
+        with self.assertRaisesRegex(verify.GateError, 'process identity changed'):
+            self.run_idle()
+        self.ps = old
+        def replace_bridge():
+            self.bridge += b' changed'
+        self.after_inspect = replace_bridge
+        with self.assertRaises(verify.GateError):
+            self.run_idle()
+
+
 class JfrTest(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'darwin', 'Darwin kernel ABI')
     def test_kernel_query_binds_actual_java_whole_file_lock_and_rejects_other_owners(self):
@@ -363,7 +555,7 @@ public class MainKt {
    r.enable("jdk.JVMInformation").withPeriod(Duration.ofMillis(20));
    r.enable("jdk.CPULoad").withPeriod(Duration.ofMillis(20));
    r.enable("jdk.ActiveSetting");r.enable("jdk.DataLoss");
-   r.enable("jdk.SocketRead").withThreshold(Duration.ZERO);
+   r.enable("jdk.SocketRead").withThreshold(Duration.ZERO).withStackTrace();
    r.start();Thread.sleep(1500);Instant start=Instant.now();
    Thread.sleep(150);Instant quietEnd=Instant.now();
    try(ServerSocket server=new ServerSocket(0,1,InetAddress.getLoopbackAddress());

@@ -162,7 +162,17 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
             noteStash = null // 保存成功后不再挂着旧草稿的“找回”入口
             noteBaseline = toSave.note // 只把“实际发出去的文字”记为已保存；保存期间继续输入的内容仍算未保存
             noteDraft = toSave.copy(baseRevision = st.revision)
+            highlightNoteId = d.id // 刚保存的批注立刻在页上标出（若能定位）
         }
+    }
+
+    /** 页加载失败后的“重试”：重新加载同一页（含词框/题目），成功后照常保存进度。 */
+    suspend fun retryPage() {
+        val r = remote ?: return
+        if (r.current == null) return
+        val pdf = PdfPages.toPdf(state.position.page)
+        r.show(pdf)
+        if (r.page is PageState.Ready) r.saveProgressAuto(pdf)
     }
 
     // ---- 409 之后的显式处理：都只在用户点击时发生，不自动重试 ----
@@ -185,7 +195,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         try {
             if (r.overwriteWithMine(toSave)) {
                 val st = r.noteSave as NoteSaveState.Saved
-                noteBaseline = toSave.note; noteDraft = toSave.copy(baseRevision = st.revision); noteStash = null
+                noteBaseline = toSave.note; noteDraft = toSave.copy(baseRevision = st.revision); noteStash = null; highlightNoteId = d.id
             }
         } finally { noteSaving = false }
     }
@@ -609,7 +619,11 @@ private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
         when (val p = remote.page) {
             PageState.Idle -> Text(if (remote.current == null) "请先在书架里选一本" else "", Modifier.testTag("remote-idle"), fontSize = 14.sp)
             is PageState.Loading -> Text("正在加载 PDF 第${p.pdfPage}页", Modifier.testTag("remote-loading"), fontSize = 13.sp, color = Color(0xFF666666))
-            is PageState.Failed -> Text(p.failure.text, Modifier.testTag("remote-failure"), color = Color(0xFFA33B2D), fontSize = 14.sp)
+            is PageState.Failed -> Column {
+                Text(p.failure.text, Modifier.testTag("remote-failure"), color = Color(0xFFA33B2D), fontSize = 14.sp)
+                val scope = rememberCoroutineScope()
+                Text("重试", Modifier.testTag("remote-retry").clickable { scope.launch { session.retryPage() } }.padding(top = 4.dp), color = Accent, fontSize = 14.sp)
+            }
             is PageState.Ready -> RemotePage(session, remote, p.view)
         }
         when (val s = remote.save) {

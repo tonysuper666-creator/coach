@@ -9,6 +9,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.File
 import kotlin.test.*
@@ -365,6 +367,63 @@ class ReaderRemoteNotesWindowTest {
             r.session.adoptServerVersion(); assertNotNull(r.session.noteStash)
             r.session.noteText = "采用后又改"; r.key(Key.Enter, ctrl = true)
             assertEquals("已保存", r.session.uiNoteStatus); assertNull(r.session.noteStash)
+        } finally { r.close() }
+    }
+
+    @Test fun aSavedNoteIsHighlightedOnThePageAndAnUnlocatableOneIsStatedNotDrawn() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("看这句"); r.key(Key.Enter, ctrl = true)
+            assertEquals("已在页上标出原句", r.session.uiHighlight, "刚保存的批注立刻标出")
+            val id = r.session.noteDraft!!.id
+            r.session.cancelNote(); r.session.highlightNoteId = null; r.frames()
+            assertNull(r.session.uiHighlight)
+            // 之后服务端词框里找不到这句（版面变了）：只说明无法确认，不画
+            s.boxesPatch = { b -> JsonObject(b + ("words" to JsonArray(emptyList()))) }
+            runBlocking { r.session.remote!!.show(1) }; r.frames()
+            r.session.highlightNoteId = id; r.frames()
+            assertEquals("这一页没有文字层，无法标出原句", r.session.uiHighlight)
+            s.boxesPatch = { it }; s.bodyText = { _, _ -> "Alpha beta gamma\nDelta epsilon zeta\nEta theta iota" }
+            r.shot("notes-saved-highlight")
+        } finally { r.close() }
+    }
+
+    @Test fun failedPageOffersRetryThatReloadsWithoutKeepingStaleData() {
+        val s = service(); val r = rig(s)
+        try {
+            r.session.focusPane(ReaderPane.Body); r.frames()
+            s.pageStatus = null; r.key(Key.PageDown)
+            assertEquals(PageState.Failed(ReaderFailure.Offline), r.session.remote!!.page)
+            s.pageStatus = 200
+            runBlocking { r.session.retryPage() }; r.frames()
+            val view = (r.session.remote!!.page as PageState.Ready).view
+            assertEquals(2, view.pdfPage); assertEquals(1, r.session.state.position.page)
+            assertEquals(SaveState.Saved(2), r.session.remote!!.save, "重试成功后照常保存进度")
+        } finally { r.close() }
+    }
+
+    @Test fun switchingBooksAndBackRestoresTheSavedPageAndNotes() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("A 书第 1 页"); r.key(Key.Enter, ctrl = true); r.session.cancelNote(); r.frames()
+            r.key(Key.PageDown); r.session.focusPane(ReaderPane.Body); r.frames(); r.key(Key.PageDown)
+            val saved = s.docs.getValue("a").progressPage
+            runBlocking { r.session.openRemote("b") }; r.frames(8)
+            assertEquals(0, r.session.state.position.page); assertTrue(r.session.remote!!.notes.isEmpty())
+            runBlocking { r.session.openRemote("a") }; r.frames(8)
+            assertEquals(saved!! - 1, r.session.state.position.page, "回到 A 书上次保存的页")
+            assertEquals(1, r.session.remote!!.notes.size, "A 书的批注从服务端恢复")
+        } finally { r.close() }
+    }
+
+    @Test fun comingBackFromASourceKeepsTheSelectedQuestionAndFocus() {
+        val s = service(); val r = rig(s)
+        try {
+            r.session.focusPane(ReaderPane.Related); r.frames()
+            r.key(Key.Enter); assertEquals(ReaderPane.Body, r.session.state.focus)
+            r.key(Key.Escape)
+            assertEquals(ReaderPane.Related, r.session.state.focus); assertEquals(0, r.session.selectedQuestion)
+            assertEquals(1, r.session.remote!!.studyQuestions.size, "同一页的题目没有被清空")
         } finally { r.close() }
     }
 }

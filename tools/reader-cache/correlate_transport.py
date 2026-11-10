@@ -25,6 +25,8 @@ def correlate(probes, transfers):
                 errors.append(dict(probeId=token,kind=kind,reason='incomplete_server_boundaries'));continue
             if server.get('status')!=200 or client.get('bytes')!=server.get('bytes'):
                 errors.append(dict(probeId=token,kind=kind,reason='status_or_length_mismatch'));continue
+            if 'bodySha256' in client and client['bodySha256']!=server.get('bodySha256'):
+                errors.append(dict(probeId=token,kind=kind,reason='payload_digest_mismatch'));continue
             if 'serverConnectionId' in client and (client['serverConnectionId']!=server['connectionId'] or
                     client.get('serverRequestOrdinal')!=server['requestOnConnection']):
                 errors.append(dict(probeId=token,kind=kind,reason='connection_echo_mismatch'));continue
@@ -34,12 +36,18 @@ def correlate(probes, transfers):
                 serverHandlingToHeaderWriteMs=(points[5]-points[3])/1e6,
                 serverHeaderWriteMs=(points[6]-points[5])/1e6,
                 serverHeadersToBodyQueuedMs=(points[7]-points[6])/1e6)
+            intervals['serverAcceptToHeaderWriteMs']=(points[6]-accepted)/1e6
+            if 'acceptCalledNs' in server:
+                if server['acceptCalledNs']>accepted:
+                    errors.append(dict(probeId=token,kind=kind,reason='invalid_accept_call_order'));continue
+                intervals['serverAcceptCallMs']=(accepted-server['acceptCalledNs'])/1e6
             if kind=='socket':
                 times=[client.get(k) for k in ('startNs','connectedNs','requestWrittenNs','readRequestedNs','firstByteNs','headersNs','endNs')]
                 if any(t is None for t in times) or times!=sorted(times):
                     errors.append(dict(probeId=token,kind=kind,reason='incomplete_client_boundaries'));continue
                 intervals.update(clientConnectMs=(times[1]-times[0])/1e6,
-                    clientWriteMs=(times[2]-times[1])/1e6,clientWriteToFirstReadMs=(times[4]-times[2])/1e6)
+                    clientWriteMs=(times[2]-times[1])/1e6,clientWriteToFirstReadMs=(times[4]-times[2])/1e6,
+                    clientReadInvocationToReturnMs=(times[4]-times[3])/1e6)
             result.append(dict(probeId=token,kind=kind,connectionId=server['connectionId'],
                 requestOnConnection=server['requestOnConnection'],client=client,server=server,intervals=intervals))
     extras=set(servers)-seen

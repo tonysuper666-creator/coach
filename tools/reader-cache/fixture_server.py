@@ -2,6 +2,7 @@
 
 import hashlib
 import http.server
+import ipaddress
 import json
 from pathlib import Path
 import subprocess
@@ -20,9 +21,11 @@ FORBIDDEN = {8790, 8791, 18791, 3790}
 
 
 class Fixture:
-    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False):
+    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False):
         if port in FORBIDDEN:
             raise ValueError("production port is forbidden")
+        if loopback_control and (transport != "legacy" or str(ipaddress.IPv4Address(bind)) in ("0.0.0.0", "127.0.0.1")):
+            raise ValueError("route control needs a distinct exact configured IPv4 and legacy transport")
         state.mkdir(parents=True, exist_ok=False)
         library = state / "library"
         write_library(library, COURSE)
@@ -50,7 +53,7 @@ class Fixture:
                 self.handlerStartedNs = time.monotonic_ns()
                 super().setup()
                 with fixture.lock:
-                    self.connection_id,self.socketAcceptedNs = fixture.accepted.pop(id(self.connection))
+                    self.connection_id,self.acceptCalledNs,self.socketAcceptedNs = fixture.accepted.pop(id(self.connection))
                 self.connection_request = 0
                 self.acceptInitializedNs = time.monotonic_ns()
 
@@ -79,6 +82,7 @@ class Fixture:
                 self.connection_request += 1
                 row.update(connectionId=self.connection_id, requestOnConnection=self.connection_request)
                 row.update(clientPort=self.client_address[1],serverPort=self.server.server_port)
+                row.update(serverBindAddress=self.server.server_address[0],acceptCalledNs=self.acceptCalledNs)
                 row.update(acceptInitializedNs=self.acceptInitializedNs,
                            socketAcceptedNs=self.socketAcceptedNs,handlerStartedNs=self.handlerStartedNs,
                            requestWaitStartedNs=self.requestWaitStartedNs,
@@ -90,6 +94,7 @@ class Fixture:
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 if row.get("probeId"):
+                    row["bodySha256"] = hashlib.sha256(data).hexdigest()
                     self.send_header("X-Coach-Reader-Probe", row["probeId"])
                     self.send_header("X-Coach-Reader-Connection", str(self.connection_id))
                     self.send_header("X-Coach-Reader-Ordinal", str(self.connection_request))
@@ -194,11 +199,12 @@ class Fixture:
 
         class ObservedServer(http.server.ThreadingHTTPServer):
             def get_request(self):
+                called=time.monotonic_ns()
                 connection,address=super().get_request()
                 accepted=time.monotonic_ns()
                 with fixture.lock:
                     fixture.connection_sequence+=1
-                    fixture.accepted[id(connection)]=(fixture.connection_sequence,accepted)
+                    fixture.accepted[id(connection)]=(fixture.connection_sequence,called,accepted)
                 return connection,address
 
         self.server = ObservedServer((bind, port), Handler)
@@ -207,12 +213,31 @@ class Fixture:
             raise ValueError("production port selected")
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs=dict(poll_interval=.1))
+        self.servers = [self.server]
+        self.threads = [self.thread]
+        if loopback_control:
+            try:
+                # Same fixture, Handler, port and payloads; never bind all interfaces.
+                control = ObservedServer(("127.0.0.1", self.port), Handler)
+            except Exception:
+                self.server.server_close()
+                raise
+            self.servers.append(control)
+            self.threads.append(threading.Thread(target=control.serve_forever, kwargs=dict(poll_interval=.1)))
 
     def __enter__(self):
-        self.thread.start()
+        started=[]
+        try:
+            for thread in self.threads:
+                thread.start();started.append(thread)
+        except Exception:
+            for server,thread in zip(self.servers,started):
+                server.shutdown();thread.join()
+            for server in self.servers: server.server_close()
+            raise
         return self
 
     def __exit__(self, *_):
-        self.server.shutdown()
-        self.thread.join()
-        self.server.server_close()
+        for server in self.servers: server.shutdown()
+        for thread in self.threads: thread.join()
+        for server in self.servers: server.server_close()

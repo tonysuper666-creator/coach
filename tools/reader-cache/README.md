@@ -420,3 +420,62 @@ write, or outside the host-observed request/response interval. Keep unresolved
 clock/scheduling/network gaps explicit before deciding to rerun performance.
 The existing first-presentation, trace-quality, real hot-update and physical/GPU
 budget gaps remain open.
+
+## Socket destination control after bd8fa45
+
+At `bd8fa45`, Android legacy transport matched all 20 request/response tokens.
+For every request, host accept-return through header-write-return was at most
+9.708 ms. One socket's write-to-unbuffered-read-return was 501.432 ms while its
+matched host accept-to-header-write interval was 1.564 ms. These durations do
+not locate the gap before accept or after the response write. BPF access failed
+with permission denied; the requested capture runner correctly failed even
+though the instrumentation and token association passed. Do not change BPF
+permissions or attribute this delay to CIO.
+
+The next minimal experiment is Android-only `--suite route` with legacy framing:
+
+```sh
+tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
+  --platform android --suite route --transport-mode legacy \
+  --host <existing-configured-host> --serial <isolated-emulator> \
+  --adb <adb> --aapt2 <aapt2> --apk <isolated-apk> --test-apk <isolated-test-apk> \
+  --output build/reader-observed/android-socket-routes
+```
+
+No packet interface is requested. The original fixture listens on the exact
+configured IPv4. This suite alone creates an additional listener on host
+`127.0.0.1` at the same port, sharing the same Handler, image bytes and connection
+counter. Both listener threads and request workers are joined on exit, including
+failure. It never binds all interfaces. The emulator reaches host loopback via
+the fixed `10.0.2.2` alias ([Android address-space documentation](https://developer.android.com/studio/run/emulator-networking-address)).
+The generated app network policy, production URL and CIO engine are unchanged;
+only this test's raw sockets use the alias. There is no adb redirection, route,
+VPN, firewall or system configuration change.
+
+The test creates 16 fresh sockets, eight per destination, in four blocks:
+`ABBA,BAAB,ABBA,BAAB` (`A=configured`, `B=host-loopback`). Each block requests one
+identical PNG page. Only the socket destination changes; HTTP Host, port,
+credentials, framing, read method and NODELAY settings stay fixed. Every request
+has its own token and verified echo. Body hashing occurs after the transport
+end timestamp. Completed rows are saved after every request so a later failure
+does not erase partial evidence.
+
+`transport-association.json` retains each original sample and host/guest
+intervals separately. New `acceptCalledNs` records the accept invocation after
+the listener's readiness loop; it is **not** SYN arrival or accept-queue entry.
+`route-comparison.json` requires 16 unique associations, the exact sequence,
+eight samples per route, distinct fresh server connections, the expected
+listener/port and identical per-block payload hashes. It reports p50, nearest-rank
+p95 and maximum per route for each measured interval. Missing alias access,
+changed payloads, wrong listeners or partial records fail the experiment;
+they do not become slow or passing samples.
+
+A difference can show dependence on destination/listener path under this emulator
+configuration. It cannot isolate a particular VPN, virtual router, network
+stack, kernel receipt or scheduling component. A similar delay on both routes
+leaves those hypotheses unresolved. Keep all samples and connection identities;
+do not subtract host and guest timestamps, mix these controls into historical
+UI performance, or change production transport based on this experiment alone.
+Collect this single route run before deciding on another performance run.
+Windows tests verify listener cleanup and reject broken associations with
+invented unit payloads; actual Android alias access still requires the Mac run.

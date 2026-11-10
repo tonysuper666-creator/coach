@@ -11,6 +11,7 @@ import java.net.URL
 import java.net.Socket
 import java.net.InetSocketAddress
 import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,9 +30,33 @@ class ReaderImageTransportSmoke {
         require(port in 1024..65535 && port !in setOf(8790,8791,18791,3790))
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         require(JSONObject(URL("$base/health").readText()).getBoolean("syntheticOnly"))
-        val client = CourseHttp(base, "baseline-device", "synthetic-baseline-token", "READER_BASELINE")
+        val routeControl=InstrumentationRegistry.getArguments().getString("readerRouteControl")
+        require(routeControl == null || routeControl == "host-loopback")
+        val client = if (routeControl == null) CourseHttp(base, "baseline-device", "synthetic-baseline-token", "READER_BASELINE") else null
         ReaderPageTrace.start()
         try {
+            if (routeControl != null) {
+                // Only raw diagnostic sockets use the fixed emulator host alias. The
+                // app's cleartext allowlist and CourseHttp endpoint stay unchanged.
+                val rows=JSONArray()
+                val report=JSONObject().put("scope","route control only; no CIO or UI timing")
+                    .put("socketControl",rows).put("routeControl","host-loopback")
+                    .put("configuredHost",BuildConfig.COACH_TAIL_HOST).put("port",port)
+                    .put("probeOrder","ABBA,BAAB,ABBA,BAAB; A=configured B=host-loopback")
+                for (block in 1..4) {
+                    val order=if (block % 2 == 1) listOf("configured","host-loopback","host-loopback","configured")
+                        else listOf("host-loopback","configured","configured","host-loopback")
+                    for (route in order) {
+                        val sequence=rows.length()+1
+                        val destination=if (route == "configured") BuildConfig.COACH_TAIL_HOST else "10.0.2.2"
+                        rows.put(socketProbe(destination,port,block,"$runId-route-$sequence",BuildConfig.COACH_TAIL_HOST)
+                            .put("route",route).put("block",block).put("sequence",sequence))
+                        // Retain completed rows even if a later route is unavailable.
+                        File(context.cacheDir,"reader-transport.json").writeText(report.toString())
+                    }
+                }
+                return@runBlocking
+            }
             val controls = JSONArray()
             for (page in 1..4) {
                 val probe="$runId-url-$page"
@@ -51,23 +76,23 @@ class ReaderImageTransportSmoke {
                         .put("startNs",start).put("headersNs",headers).put("endNs",ReaderPageTrace.nowNs()).put("bytes",bytes.size))
                 } finally { connection.disconnect() }
             }
-            val report=JSONObject(measureSyntheticReaderTransport(client.reader,runId).toString()).put("urlConnectionControl",controls)
+            val report=JSONObject(measureSyntheticReaderTransport(requireNotNull(client).reader,runId).toString()).put("urlConnectionControl",controls)
             val sockets=JSONArray()
             for(page in 1..4) sockets.put(socketProbe(BuildConfig.COACH_TAIL_HOST,port,page,"$runId-socket-$page"))
             report.put("socketControl",sockets).put("probeOrder","URL4,CIO12,socket4")
             File(context.cacheDir,"reader-transport.json").writeText(report.toString())
         } finally {
             File(context.cacheDir,"reader-observed.json").writeText(ReaderPageTrace.snapshot().toString())
-            ReaderPageTrace.stop(); client.close()
+            ReaderPageTrace.stop(); client?.close()
         }
     }
 
-    private fun socketProbe(host: String,port: Int,page: Int,probe: String): JSONObject = Socket().use { socket ->
+    private fun socketProbe(host: String,port: Int,page: Int,probe: String,requestHost: String=host): JSONObject = Socket().use { socket ->
         socket.soTimeout=15_000
         val start=ReaderPageTrace.nowNs()
         socket.connect(InetSocketAddress(host,port),3000)
         val connected=ReaderPageTrace.nowNs()
-        val request="GET /v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1&readerProbe=$probe HTTP/1.1\r\nHost: $host:$port\r\nAuthorization: Bearer synthetic-baseline-token\r\nX-Coach-Device: baseline-device\r\nConnection: close\r\n\r\n"
+        val request="GET /v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1&readerProbe=$probe HTTP/1.1\r\nHost: $requestHost:$port\r\nAuthorization: Bearer synthetic-baseline-token\r\nX-Coach-Device: baseline-device\r\nConnection: close\r\n\r\n"
         socket.getOutputStream().apply { write(request.toByteArray(Charsets.US_ASCII));flush() }
         val written=ReaderPageTrace.nowNs()
         val raw=socket.getInputStream()
@@ -90,12 +115,16 @@ class ReaderImageTransportSmoke {
         check(field("X-Coach-Reader-Probe")==probe)
         val bytes=input.readBytes()
         check(bytes.size==expected && bytes.size>8 && bytes[0]==0x89.toByte())
+        val completed=ReaderPageTrace.nowNs() // Hashing is outside the transport interval.
         JSONObject().put("probeId",probe).put("responseEchoVerified",true)
+            .put("bodySha256",MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) })
+            .put("destinationHost",host).put("destinationPort",port).put("requestHost",requestHost)
+            .put("localPort",socket.localPort)
             .put("serverConnectionId",field("X-Coach-Reader-Connection").toInt())
             .put("serverRequestOrdinal",field("X-Coach-Reader-Ordinal").toInt())
             .put("readRequestedNs",readRequested).put("firstByteReadMode","unbuffered InputStream.read; not kernel receive")
             .put("page",page).put("startNs",start).put("connectedNs",connected).put("requestWrittenNs",written)
-            .put("firstByteNs",firstByte).put("headersNs",headers).put("endNs",ReaderPageTrace.nowNs())
+            .put("firstByteNs",firstByte).put("headersNs",headers).put("endNs",completed)
             .put("bytes",bytes.size).put("clientTcpNoDelayEnabled",socket.tcpNoDelay).put("freshConnection",true)
     }
 }

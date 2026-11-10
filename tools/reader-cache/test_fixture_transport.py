@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import http.client
 import json
+import hashlib
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,28 @@ def fixture(**kwargs):
 
 
 class ReaderFixtureTransportTest(unittest.TestCase):
+    def test_route_listeners_share_payload_identity_and_both_join_on_exit(self):
+        with fixture(bind='127.0.0.2',loopback_control=True) as service:
+            for index,host in enumerate(('127.0.0.2','127.0.0.1','127.0.0.1','127.0.0.2')):
+                connection=http.client.HTTPConnection(host,service.port,timeout=3)
+                try:
+                    token=f'route-unit-{index}'
+                    connection.request('GET',PREFIX+'/synthetic-baseline/pages/1/image?version=v1&readerProbe='+token,
+                        headers={'Authorization':'Bearer '+TOKEN,'Host':f'127.0.0.2:{service.port}'})
+                    response=connection.getresponse()
+                    self.assertEqual(200,response.status)
+                    self.assertEqual(token,response.getheader('X-Coach-Reader-Probe'))
+                    self.assertEqual(b'\x89PNG\r\n\x1a\n\x01',response.read())
+                finally: connection.close()
+        self.assertEqual(['127.0.0.2','127.0.0.1','127.0.0.1','127.0.0.2'],[r['serverBindAddress'] for r in service.requests])
+        self.assertEqual(4,len({r['connectionId'] for r in service.requests}))
+        for row in service.requests:
+            self.assertEqual(hashlib.sha256(service.images[1]).hexdigest(),row['bodySha256'])
+            self.assertLessEqual(row['acceptCalledNs'],row['socketAcceptedNs'])
+            self.assertIsNotNone(row['bodyQueuedNs'])
+        self.assertTrue(all(not thread.is_alive() for thread in service.threads))
+        self.assertTrue(all(server.fileno()==-1 for server in service.servers))
+
     def test_explicit_modes_preserve_payload_and_record_server_write_boundaries(self):
         for mode in ('legacy','nodelay','keepalive'):
             with self.subTest(mode=mode),fixture(transport=mode) as service:

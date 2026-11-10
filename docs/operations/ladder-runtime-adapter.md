@@ -44,6 +44,13 @@ coverage denominator. Missing prerequisite declarations remain unknown. Scheduli
 weight 1 is a fallback; `priorityStar` stays null with distinct `missing`, `null`,
 `unknown` or `unverified` state unless a numeric star has source evidence.
 
+This tightens production candidate admission relative to the previous consumer:
+omitted/null `prerequisite_kp_ids` is withheld, and every nonempty prerequisite
+must resolve in the outline KP catalog. Whether a future approved production
+contract permits out-of-outline KP prerequisites remains unconfirmed; those
+candidates stay withheld until a verified identity catalog/contract is supplied.
+Synthetic v1 confirmation does not establish that production catalog's completeness.
+
 After submission the actual UI consumes the candidate's `essay.model_answer_id`
 and `essay.rubric_point_ids`. It shows the pending full-text endpoint explicitly,
 without exposing IDs as prose or substituting the old EssayBank. The producer's
@@ -55,13 +62,17 @@ complete applicable-KP manifest. Until those are agreed and supplied, the UI
 keeps the endpoint and complete denominator pending. Neither `weekKps` nor the
 synthetic declared scope fills those gaps.
 
+The original PR133 author confirmed the synthetic v1 field semantics on
+2026-11-10 (Multica receipt `01a1c77e-f025-7d17-b438-da63d31541c5`), and explicitly
+kept both production contracts above unsupported.
+
 Windows validation (use the existing Windows queue and memory limits):
 
 ```sh
 tools/dev/heavy --local ./gradlew :shared:domain:jvmTest :shared:client:jvmTest :androidApp:compileDebugKotlin
 ```
 
-Mac-only incremental validation, no private corpus needed by these new cases:
+Focused synthetic validation, no private corpus needed by these new cases:
 
 ```sh
 tools/dev/heavy --local ./gradlew :server:app:test --tests com.coach.server.MainlineLadderTest --tests com.coach.server.SyntheticMainlineTest
@@ -73,8 +84,11 @@ HTTP, CourseHttp, selection, saved client state and the production screen. It
 captures only new answer/scope/essay-pending behavior at 412×915 and 933×704.
 The essay viewport is a component check; the server test separately verifies
 the existing candidate association survives the actual answer response.
-These commands and new screenshots need independent Mac verification; old layout
-screenshots and their prior receipts do not validate this adapter.
+The synthetic checks have independent Windows and Mac receipts at `2d6a85e5`:
+server cases passed, while the essay viewport fixture failed its height check.
+The follow-up fixture fills its Surface to the requested viewport, preserving all
+dimension/readability assertions. Its corrected screenshots need fresh validation;
+old layout screenshots and their prior receipts do not validate this adapter.
 
 PR150 remains draft until formal content permission, actual essay reader,
 complete denominator, whole-issue review and device/release gates are satisfied.

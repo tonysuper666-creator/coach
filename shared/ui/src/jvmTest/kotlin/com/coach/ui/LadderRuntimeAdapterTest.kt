@@ -1,6 +1,7 @@
 package com.coach.ui
 
 import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
@@ -21,13 +22,13 @@ import java.net.InetSocketAddress
 import java.nio.file.Files
 import kotlin.test.*
 
-/** Same producer JSON -> real Mainline -> CourseHttp -> selector -> production Compose screen. Mac only. */
+/** Same public synthetic JSON -> real Mainline -> CourseHttp -> selector -> production Compose screen. */
 @OptIn(ExperimentalTestApi::class)
 class LadderRuntimeAdapterTest {
     @Test fun essayAssociationShowsPendingEndpointWithoutDisplayingIdsOrInventingFullText() {
         for ((width, height) in listOf(412 to 915, 933 to 704)) {
             runSkikoComposeUiTest(size = Size(width.toFloat(), height.toFloat()), density = Density(1f)) {
-                setContent { CoachTheme(false) { Surface(Modifier.padding(24.dp)) {
+                setContent { CoachTheme(false) { Surface(Modifier.fillMaxSize().padding(24.dp)) {
                     LadderEssayFeedback(json("essay" to json("model_answer_id" to "SYN-E1", "rubric_point_ids" to listOf("SYN-R1"))))
                 } } }
                 onNodeWithTag("ladder-essay-status").assertIsDisplayed()

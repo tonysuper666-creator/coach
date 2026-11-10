@@ -105,8 +105,16 @@ def main():
         except Exception as error:
             sampling_errors.append(type(error).__name__)
 
-    with Fixture(out / "fixture", args.host, renderer=args.renderer, transport=args.transport_mode, lifecycle=args.suite == "lifecycle") as fixture:
+    # Existing isolated service adapters implement the original constructor. Default
+    # performance/behavior runs keep that contract; controls apply only when requested.
+    fixture_options = {}
+    if args.transport_mode != "legacy":
+        fixture_options["transport"] = args.transport_mode
+    if args.suite == "lifecycle":
+        fixture_options["lifecycle"] = True
+    with Fixture(out / "fixture", args.host, renderer=args.renderer, **fixture_options) as fixture:
         identity["materialSha256"] = fixture.material_sha256
+        identity["serverTransferTimingsObserved"] = hasattr(fixture, "transfers")
         (out / "run.json").write_text(json.dumps(identity, indent=2))
         sampler = threading.Thread(target=sample)
         sampler.start()
@@ -174,7 +182,7 @@ def main():
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
             (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
-            (out / "transfers.json").write_text(json.dumps(fixture.transfers, indent=2))
+            (out / "transfers.json").write_text(json.dumps(getattr(fixture, "transfers", []), indent=2))
         finally:
             stop.set()
             sampler.join()

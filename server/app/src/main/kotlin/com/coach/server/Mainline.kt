@@ -379,7 +379,7 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             call.answer(c) { mainline.week(this, c, call.week(), shuffled) }
         }
         post("/v1/courses/{course}/mainline/{week}/answer") { val c = call.parameters["course"]!!; call.answer(c) { mainline.answer(this, c, call.week(), it) } }
-        post("/v1/courses/{course}/mainline/{week}/explain") {
+        post("/v1/courses/{course}/mainline/{week}/explain") { call.withReaderConnection {
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
@@ -395,7 +395,7 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             } catch (e: IllegalArgumentException) {
                 call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
             }
-        }
+        } }
         post("/v1/courses/{course}/mainline/{week}/explain/cancel") {
             val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
             reader?.cancel(call.attributes[observedDevice], call.parameters["course"]!!, input?.str("requestId").orEmpty())

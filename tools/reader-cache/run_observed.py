@@ -39,6 +39,8 @@ def main():
                         help='Android transport/route only: select repeated stage reads, meminfo, both (default), or neither')
     parser.add_argument('--socket-queue-watch',action='store_true',
                         help='Android route with observer none only: concurrent same-socket available() observations')
+    parser.add_argument('--socket-scheduling-trace',action='store_true',
+                        help='Android plain route/observer none only: own a dedicated read-thread scheduling trace')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -54,6 +56,9 @@ def main():
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
     if args.socket_queue_watch and (args.platform!='android' or args.suite!='route' or observer_mode!='none'):
         parser.error('socket queue observation requires Android route and explicit observer none')
+    if args.socket_scheduling_trace and (args.platform!='android' or args.suite!='route' or observer_mode!='none' or args.socket_queue_watch or args.perfetto):
+        parser.error('socket scheduling trace requires Android plain route/observer none; separate from queue watch and FrameTimeline')
+    capture_perfetto=args.perfetto or args.socket_scheduling_trace
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
     if args.packet_interface and args.suite != "transport":
@@ -84,6 +89,7 @@ def main():
     identity['memorySamplerStarted']=False
     identity['memorySamplerJoined']=False
     identity['socketQueueWatchRequested']=args.socket_queue_watch
+    identity['socketSchedulingTraceRequested']=args.socket_scheduling_trace
     observer_counts=dict(stage=0,meminfo=0)
     observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
     if args.platform=='android':
@@ -161,12 +167,14 @@ def main():
                 sampler.start()
                 identity['memorySamplerStarted']=True
             packet_capture.start()
-            if args.platform == "android" and args.perfetto:
+            if args.platform == "android" and capture_perfetto:
                 remote_trace = f"/data/misc/perfetto-traces/reader-page-{time.time_ns()}.perfetto-trace"
                 perfetto_log = (out / "perfetto.log").open("wb")
                 perfetto = subprocess.Popen(adb + ["shell", "perfetto", "--txt", "-c", "-", "-o", remote_trace],
                                             stdin=subprocess.PIPE, stdout=perfetto_log, stderr=subprocess.STDOUT)
-                perfetto.stdin.write((Path(__file__).with_name("frametimeline.pbtxt")).read_bytes())
+                config_name='socket-scheduling.pbtxt' if args.socket_scheduling_trace else 'frametimeline.pbtxt'
+                identity['perfettoConfig']=config_name
+                perfetto.stdin.write((Path(__file__).with_name(config_name)).read_bytes())
                 perfetto.stdin.close()
             env = dict(os.environ, COACH_READER_FIXTURE_HOST=args.host, COACH_READER_FIXTURE_PORT=str(fixture.port),
                        COACH_READER_OBSERVED_OUTPUT=str(out), COACH_READER_RUN_ID=run_id)
@@ -182,6 +190,7 @@ def main():
                         transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke")[args.suite]
                     route_args=['-e','readerRouteControl','host-loopback'] if args.suite=='route' else []
                     if args.socket_queue_watch: route_args+=['-e','readerQueueWatch','available']
+                    if args.socket_scheduling_trace: route_args+=['-e','readerSocketSchedule','enabled']
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                         test_class, "-e", "readerPort", str(fixture.port), "-e", "readerRunId", run_id,
                         *route_args, PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
@@ -228,6 +237,10 @@ def main():
                         raise RuntimeError('Route control incomplete; inspect route-comparison.json')
                 summary['memorySamplerEnabled']=observer_mode!='none'
                 summary['androidObserverMode']=observer_mode
+                if args.socket_scheduling_trace:
+                    if any(row['client'].get('readTraceLabel')!='ReaderSocket/first-read/'+row['probeId'] for row in association['samples']):
+                        raise RuntimeError('Requested read trace labels missing; rebuild isolated instrumentation')
+                    summary['schedulingEvidenceVerified']=False
                 if args.socket_queue_watch:
                     queue=analyze_queue_watch(association)
                     (out/'queue-watch.json').write_text(json.dumps(queue,indent=2))
@@ -261,7 +274,8 @@ def main():
                 try:
                     identity["perfettoExit"] = perfetto.wait(timeout=45)
                     if identity["perfettoExit"] == 0:
-                        subprocess.run(adb + ["pull", remote_trace, str(out / "frames.perfetto-trace")],
+                        trace_name='socket-scheduling.perfetto-trace' if args.socket_scheduling_trace else 'frames.perfetto-trace'
+                        subprocess.run(adb + ["pull", remote_trace, str(out / trace_name)],
                                        check=True, stdout=perfetto_log, stderr=subprocess.STDOUT)
                 except subprocess.TimeoutExpired:
                     perfetto.kill()
@@ -283,8 +297,8 @@ def main():
             raise RuntimeError('Current transport run/suite/PID active stage was not observed; inspect stage-audit.json')
     if args.packet_interface and (not identity['packetCapture']['observed'] or identity['packetCapture'].get('decodeExit')!=0):
         raise RuntimeError('Requested packet boundary capture is incomplete; inspect run.json and wire-capture.log')
-    if args.perfetto and identity.get("perfettoExit") != 0:
-        raise RuntimeError("FrameTimeline capture failed; keep first-presentation evidence incomplete")
+    if capture_perfetto and identity.get("perfettoExit") != 0:
+        raise RuntimeError("Requested Perfetto capture failed; keep scheduling/presentation evidence incomplete")
     print("Collected synthetic-only trace; first-present and native/GPU memory budget remain unverified.")
 
 

@@ -1,5 +1,6 @@
 """Runner format integration with a fake device; never starts a native app."""
 import json
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -32,6 +33,17 @@ class RouteRunnerTest(unittest.TestCase):
     def test_queue_observation_is_forwarded_and_retains_request_associations(self):
         self.run_case(False,'none',watch_queue=True)
 
+    def test_scheduling_trace_is_forwarded_collected_and_joined(self):
+        self.run_case(False,'none',schedule_trace=True)
+
+    def test_scheduling_trace_does_not_mix_other_observers_or_frame_capture(self):
+        for extra in (['--transport-observer','both'],['--transport-observer','none','--socket-queue-watch'],
+                      ['--transport-observer','none','--perfetto']):
+            args=['run_observed.py','--platform','android','--suite','route','--socket-scheduling-trace','--output','unused',*extra]
+            with self.subTest(extra=extra),patch('sys.argv',args),patch('run_observed.sys.stderr'):
+                with self.assertRaises(SystemExit) as raised: run_observed.main()
+                self.assertEqual(2,raised.exception.code)
+
     def test_queue_observer_requires_route_and_no_repeated_adb_observer(self):
         for suite,mode in (('route','both'),('route','stage'),('transport','none'),('performance','none')):
             args=['run_observed.py','--platform','android','--suite',suite,'--transport-observer',mode,
@@ -56,12 +68,14 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False):
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
         if watch_queue:
             for client in clients: add_watch(client)
+        if schedule_trace:
+            for client in clients: client.update(readTraceLabel='ReaderSocket/first-read/'+client['probeId'],readTid=1)
         root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
         root.mkdir(parents=True)
         apk=root/'app.apk';apk.write_bytes(b'invented package')
@@ -69,6 +83,12 @@ class RouteRunnerTest(unittest.TestCase):
         out=root/'out'
         commands=[]
         sampler_events=[]
+        captures=[]
+
+        class FakePerfetto:
+            def __init__(self,*args,**kwargs): self.stdin=io.BytesIO();self.waited=False;captures.append(self)
+            def wait(self,**_): self.waited=True;return 0
+            def kill(self): raise AssertionError('unexpected capture termination')
 
         class FakeFixture:
             def __init__(self,*_,**options):
@@ -103,6 +123,9 @@ class RouteRunnerTest(unittest.TestCase):
 
         def run(command,**kwargs):
             commands.append(command)
+            if 'pull' in command:
+                Path(command[-1]).write_bytes(b'invented scheduling trace fixture')
+                return SimpleNamespace(returncode=0)
             if command[-1]=='cache/reader-stage.json':
                 if fail_stage: raise OSError('unit observer failure')
                 data=dict(runId='unit-run',suite='route',pid=1234,stage='transport_running')
@@ -124,9 +147,11 @@ class RouteRunnerTest(unittest.TestCase):
         if disabled: args.append('--no-transport-memory-sampler')
         if mode is not None: args.extend(['--transport-observer',mode])
         if watch_queue: args.append('--socket-queue-watch')
+        if schedule_trace: args.append('--socket-scheduling-trace')
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
                 patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
                 patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
+                patch('run_observed.subprocess.Popen',FakePerfetto), \
                 patch('run_observed.subprocess.check_output',check_output),patch('run_observed.subprocess.run',run):
             if fail_stage:
                 with self.assertRaisesRegex(RuntimeError,'memory sampler failed'): run_observed.main()
@@ -141,6 +166,11 @@ class RouteRunnerTest(unittest.TestCase):
         if watch_queue:
             self.assertEqual('available',instrument[instrument.index('readerQueueWatch')+1])
             self.assertTrue(json.loads((out/'queue-watch.json').read_text())['complete'])
+        if schedule_trace:
+            self.assertEqual('enabled',instrument[instrument.index('readerSocketSchedule')+1])
+            self.assertTrue((out/'socket-scheduling.perfetto-trace').exists())
+            self.assertFalse((out/'frames.perfetto-trace').exists())
+            self.assertTrue(captures[0].stdin.closed);self.assertTrue(captures[0].waited)
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
         for key in ('memorySamplerEnabled','memorySamplerStarted','memorySamplerJoined'):

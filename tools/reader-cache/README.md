@@ -695,3 +695,82 @@ witnesses cannot distinguish transport delay from observer/read scheduling.
 This small application-boundary experiment does not replace kernel packet
 evidence, the original performance baseline or actual presentation/native/GPU
 budget validation. Keep previous phase, lifecycle and other open gaps unchanged.
+
+## Read-thread scheduling after 66c2bb0
+
+The two native early-positive observations were only 1.109167 ms before a
+6.242792 ms read marker and 0.076917 ms before a 501.707167 ms read marker.
+They do not bound a large early-readable portion of the long wait. W1's lower
+latency did not repeat in W2. In four recent, separately configured rounds the
+lower group was second in the invocation order despite different treatments.
+That is an ordinal/state clue, not pooled evidence for a command or monitor cause.
+
+The next plain-route diagnostic is `--socket-scheduling-trace`, requiring Android
+route with explicit `--transport-observer none`. It is separate from queue watch
+and the existing FrameTimeline `--perfetto` flag. It owns a 15-second foreground
+Perfetto session using `socket-scheduling.pbtxt`, with scheduling/waking, task
+identity, application trace markers and process identity polling. No packet or
+syscall trace, root, permission or system configuration change is requested.
+
+The new instrumentation must be rebuilt. It verifies tracing is enabled and
+brackets the ordinary first-byte read with `ReaderSocket/first-read/<probe>` on
+the actual reader TID. Labels are also retained in request JSON; an old APK
+silently ignoring the argument cannot pass. The bracket includes trace/read
+wrapper work through the application return marker; it is not an exact syscall
+or packet interval. Capture output is `socket-scheduling.perfetto-trace`, not a
+FrameTimeline witness. Capture exit zero alone leaves scheduling verification
+false until the following analysis.
+
+[`sched_switch` and `sched_waking`](https://perfetto.dev/docs/data-sources/cpu-scheduling)
+support CPU execution/dispatch state analysis. Using the measured PID from
+`run.json`, replace `{{PID}}` numerically in `read_slices.sql` and
+`read_thread_states.sql`. Execute those and `read_trace_quality.sql` against the
+new trace with the existing Trace Processor, saving each CSV with its header.
+Keep every candidate and every nonzero quality row. Then run:
+
+```sh
+python3 tools/reader-cache/read_scheduling.py --run <run-directory> \
+  --slices <read-slices.csv> --states <read-thread-states.csv> \
+  --quality <read-trace-quality.csv>
+```
+
+`read-scheduling.json` requires one marker per token on the measured PID/TID,
+finished durations and contiguous, non-overlapping state coverage of each read
+bracket. Errors/data loss fail verification; retain missing identity, coverage
+and setup/parser failures. It preserves raw states, optional blocked-function/
+waker fields and durations. Long R/R+ intervals can locate CPU dispatch waiting;
+S/D or other states do not by themselves identify socket receipt, a lock or a
+specific wakeup source. Reader durations and trace state intervals remain in
+their own clock domains; no host/guest timestamp subtraction is used. Windows
+tests use SQLite tables shaped like the exports and fake capture processes, not
+actual Perfetto imports or native scheduler events.
+
+Confirm requested waking/switch events are actually available before interpreting
+their absence; zero Runnable time alone does not exclude missing wakeup evidence.
+Process-stat identity polling can include other process counters and supplies no
+decoded-image/native/GPU budget proof. Earlier FrameTimeline quality gaps are
+not cleared by collecting a different trace.
+
+Use a single isolated AVD and identical newly rebuilt APKs/PDF/Poppler/geometry
+for **three identical sequential groups T1 → T2 → T3**, each with:
+
+```sh
+tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
+  --platform android --suite route --transport-mode legacy \
+  --transport-observer none --socket-scheduling-trace \
+  --host <configured-host> --serial <owned-emulator> \
+  --adb <adb> --aapt2 <aapt2> --apk <isolated-apk> --test-apk <isolated-test-apk> \
+  --output <new-directory-for-each-group>
+```
+
+The surrounding owner holds the emulator lock once across the session, as with
+the prior wrappers; do not nest the lock. Keep all 16 request associations and
+two eight-sample route distributions per group, PID/TID, markers, state rows,
+quality records and cleanup. Do not enable queue watch, repeated adb observation,
+FrameTimeline or packet capture. Process polling and trace markers are themselves
+observation changes, held identical across these groups. The repeated sequence
+checks the ordinal clue without changing treatment. No group is a latency or
+memory acceptance run, and prior second-group values are not pooled with it.
+Native event availability, exact scheduler coverage and real Trace Processor
+queries remain unverified until this run. Old presentation/trace-quality,
+baseline, lifecycle, real hot-update and native/GPU conclusions remain separate.

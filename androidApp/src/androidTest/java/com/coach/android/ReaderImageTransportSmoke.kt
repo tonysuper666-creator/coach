@@ -35,6 +35,8 @@ class ReaderImageTransportSmoke {
         require(routeControl == null || routeControl == "host-loopback")
         val watchMode=InstrumentationRegistry.getArguments().getString("readerQueueWatch")
         require(watchMode == null || (watchMode == "available" && routeControl != null))
+        val scheduleMode=InstrumentationRegistry.getArguments().getString("readerSocketSchedule")
+        require(scheduleMode == null || (scheduleMode == "enabled" && routeControl != null && watchMode == null))
         val suite=if (routeControl == null) "transport" else "route"
         val stageFile=AtomicFile(File(context.cacheDir,"reader-stage.json"))
         fun stage(name: String) {
@@ -64,7 +66,7 @@ class ReaderImageTransportSmoke {
                     for (route in order) {
                         val sequence=rows.length()+1
                         val destination=if (route == "configured") BuildConfig.COACH_TAIL_HOST else "10.0.2.2"
-                        rows.put(socketProbe(destination,port,block,"$runId-route-$sequence",BuildConfig.COACH_TAIL_HOST,watchMode!=null)
+                        rows.put(socketProbe(destination,port,block,"$runId-route-$sequence",BuildConfig.COACH_TAIL_HOST,watchMode!=null,scheduleMode!=null)
                             .put("route",route).put("block",block).put("sequence",sequence))
                         // Retain completed rows even if a later route is unavailable.
                         File(context.cacheDir,"reader-transport.json").writeText(report.toString())
@@ -106,7 +108,7 @@ class ReaderImageTransportSmoke {
         }
     }
 
-    private fun socketProbe(host: String,port: Int,page: Int,probe: String,requestHost: String=host,watchQueue: Boolean=false): JSONObject = Socket().use { socket ->
+    private fun socketProbe(host: String,port: Int,page: Int,probe: String,requestHost: String=host,watchQueue: Boolean=false,traceSchedule: Boolean=false): JSONObject = Socket().use { socket ->
         socket.soTimeout=15_000
         val start=ReaderPageTrace.nowNs()
         socket.connect(InetSocketAddress(host,port),3000)
@@ -124,7 +126,13 @@ class ReaderImageTransportSmoke {
         val readRequested=ReaderPageTrace.nowNs()
         var value: Int
         val firstByte: Long
-        try { value=raw.read();firstByte=ReaderPageTrace.nowNs() } finally { observer?.stop() }
+        val readTraceLabel=if (traceSchedule) "ReaderSocket/first-read/$probe" else null
+        if (readTraceLabel!=null) {
+            check(android.os.Trace.isEnabled()) { "requested socket trace is not enabled" }
+            android.os.Trace.beginSection(readTraceLabel)
+        }
+        try { value=raw.read();firstByte=ReaderPageTrace.nowNs() }
+        finally { if (readTraceLabel!=null) android.os.Trace.endSection();observer?.stop() }
         val input=raw.buffered()
         var end=0
         while(value>=0) {
@@ -152,7 +160,10 @@ class ReaderImageTransportSmoke {
             .put("page",page).put("startNs",start).put("connectedNs",connected).put("requestWrittenNs",written)
             .put("firstByteNs",firstByte).put("headersNs",headers).put("endNs",completed)
             .put("bytes",bytes.size).put("clientTcpNoDelayEnabled",socket.tcpNoDelay).put("freshConnection",true)
-            .put("readTid",android.os.Process.myTid()).also { row -> observer?.let { row.put("queueWatch",it.report()) } }
+            .put("readTid",android.os.Process.myTid()).also { row ->
+                observer?.let { row.put("queueWatch",it.report()) }
+                readTraceLabel?.let { row.put("readTraceLabel",it) }
+            }
         } finally { observer?.finish(socket) }
     }
 }

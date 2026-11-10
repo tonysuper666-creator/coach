@@ -283,6 +283,12 @@ struct LearningView: View {
             TextField("课程标识", text: $model.course).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(model.pending != nil)
                 .focused($courseFieldFocused)
                 .accessibilityIdentifier("courseID")
+                .submitLabel(.go)
+                .onSubmit {
+                    guard !model.busy else { return }
+                    courseFieldFocused = false
+                    Task { await model.loadCourse() }
+                }
             Button("打开课程") {
                 courseFieldFocused = false
                 Task { await model.loadCourse() }
@@ -338,6 +344,12 @@ struct LearningView: View {
             Button("移除此设备的连接", role: .destructive) { connection.forget() }
         }
         .onChange(of: model.selectionRevision) { _ in selections = [:] }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("收起键盘") { courseFieldFocused = false }
+            }
+        }
         .alert("清除待确认记录？", isPresented: $showDiscard) {
             Button("清除记录", role: .destructive) { model.discardPending() }
             Button("取消", role: .cancel) { }

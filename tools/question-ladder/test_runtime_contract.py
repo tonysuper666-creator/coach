@@ -37,6 +37,38 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(result['mastery_evidence'])
         self.assertEqual(reveal(self.pack, 'SYN-Q1@v2', [], True)['answer'], 1)
 
+    def test_alias_rejects_identity_and_scope_changes(self):
+        for field, value in [('id', 'SYN-other'), ('kp', 'SYN-K2'),
+                             ('capability', 'SYN-other-cap'), ('format', 'essay')]:
+            p = copy.deepcopy(self.pack)
+            p['questions'][1][field] = value
+            if field == 'id':
+                p['questions'][1]['ref'] = value + '@v2'
+                p['prerequisite_aliases'][0]['to'] = value + '@v2'
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'alias must preserve'):
+                validate(p)
+
+    def test_alias_rejects_reverse_same_and_unordered_versions(self):
+        for source, target in [('SYN-Q1@v2', 'SYN-Q1@v1'), ('SYN-Q1@v1', 'SYN-Q1@v1')]:
+            p = copy.deepcopy(self.pack)
+            p['prerequisite_aliases'] = [{'from': source, 'to': target}]
+            with self.subTest(source=source, target=target), self.assertRaisesRegex(ValueError, 'newer version'):
+                validate(p)
+        p = copy.deepcopy(self.pack)
+        p['questions'][1]['version'] = '1453-2'
+        p['questions'][1]['ref'] = 'SYN-Q1@1453-2'
+        p['prerequisite_aliases'][0]['to'] = 'SYN-Q1@1453-2'
+        with self.assertRaisesRegex(ValueError, 'canonical vN'):
+            validate(p)
+
+    def test_alias_version_order_is_numeric(self):
+        p = copy.deepcopy(self.pack)
+        p['questions'][1]['version'] = 'v10'
+        p['questions'][1]['ref'] = 'SYN-Q1@v10'
+        p['prerequisite_aliases'][0]['to'] = 'SYN-Q1@v10'
+        validate(p)
+        self.assertEqual(consume(p, ['SYN-add'])['questions'][2]['resolved_prerequisites'], ['SYN-Q1@v10'])
+
     def test_unknown_never_counts_as_complete(self):
         p = copy.deepcopy(self.pack)
         p['applicable_kps'] = None

@@ -16,6 +16,13 @@ The producer emits immutable question/version references, separate question
 format and teaching kind, target and required capability IDs, and separately
 recorded prerequisite references. Aliases resolve prerequisite references only:
 the consumer retains the original references and does not rewrite attempts.
+An alias is a version successor of the same question ID, not a redirect to a
+different question. Both ends must have the same KP, capability and format.
+For this synthetic contract only, alias versions must use canonical `vN`
+positive integers, and the destination must have a larger numeric version.
+Other real-world version formats need an explicitly agreed ordering before
+they can be used as aliases. `teaching_kind` is currently a nonempty free
+string, not an enumerated question format.
 Question references are a nonblocking ordering relation; they do not mean the
 learner must have answered a particular question. The synthetic consumer gates
 on explicitly supplied capability evidence, not question order. Null means

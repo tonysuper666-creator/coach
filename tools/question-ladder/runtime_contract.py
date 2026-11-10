@@ -2,6 +2,7 @@
 """Synthetic contract reference consumer. It is not the production loader."""
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -29,6 +30,15 @@ def validate(pack):
     for a in pack['prerequisite_aliases']:
         if a['from'] in aliases or a['from'] not in index or a['to'] not in index:
             raise ValueError('ambiguous or dangling alias')
+        previous, successor = index[a['from']], index[a['to']]
+        for field in ('id', 'kp', 'capability', 'format'):
+            if not isinstance(previous.get(field), str) or not previous[field] or previous[field] != successor.get(field):
+                raise ValueError('alias must preserve question id, KP, capability and format')
+        versions = [previous.get('version'), successor.get('version')]
+        if not all(isinstance(v, str) and re.fullmatch(r'v[1-9][0-9]*', v) for v in versions):
+            raise ValueError('alias versions must use canonical vN positive integers')
+        if int(versions[1][1:]) <= int(versions[0][1:]):
+            raise ValueError('alias must point to a newer version')
         aliases[a['from']] = a['to']
     for ref in aliases:
         resolve(ref, aliases)

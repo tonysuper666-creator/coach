@@ -85,7 +85,11 @@ class NavigationFlowTest {
         controller = CoachController(id, sync, tutor, formatClock = { "12:00" }, nowMillis = { now }, course = http)
     }
 
-    @After fun close() { tutor.close(); http.close(); server.shutdown(); driver.close() }
+    @After fun close() {
+        // Dispose page effects before closing SQLite: a final overview response must not outlive its screen.
+        compose.activityRule.scenario.close()
+        tutor.close(); http.close(); server.shutdown(); driver.close()
+    }
     private fun back() { compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }; compose.waitForIdle() }
 
     @Test fun systemBackReturnsOneLevelAndRestoresTheStudyDraft() {

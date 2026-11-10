@@ -56,7 +56,7 @@ fun pendingChoiceMistakes(events: List<Event>, ids: Set<String>): List<Event> {
     val voided = events.filter { it.type == "attempt_voided" }.map { it.payload.str("attemptId") }.toSet()
     val grades = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.associateBy { it.payload.str("attemptId") }
     val guessed = events.filter { it.type == "answer_submitted" && it.payload.flag("guessed") }.map { it.payload.str("attemptId") }.toSet()
-    return events.filter { it.type == "question_posed" && it.payload.str("format") == "SINGLE_CHOICE" &&
+    return events.filter { it.type == "question_posed" && !it.payload.flag("tryFirst") && it.payload.str("format") == "SINGLE_CHOICE" &&
         it.payload.strings("kpIds").any { id -> id in ids } && it.payload.str("keyState") != "UNREVIEWED" &&
         (!it.payload.flag("mainline") || it.payload.str("keyState") == "VERIFIED") &&
         it.payload.str("attemptId") in answered && it.payload.str("attemptId") !in voided }

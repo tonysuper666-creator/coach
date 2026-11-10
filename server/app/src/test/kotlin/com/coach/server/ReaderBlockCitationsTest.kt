@@ -30,7 +30,7 @@ class ReaderBlockCitationsTest {
                     Thread.sleep(5000); bound()
                 })
             val start = System.nanoTime()
-            val result = reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", listOf(page))
+            val result = reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", listOf(page), com.coach.domain.scope.VisibleScope.learner())
             assertTrue(result.str("text").contains("正文迟迟未开始"))
             assertTrue((System.nanoTime() - start) / 1_000_000 < 1500, "layout must not retain the timed-out request")
             assertEquals(0, stub.requests)
@@ -43,16 +43,21 @@ class ReaderBlockCitationsTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val actor = LedgerActor(scope, LedgerStore(dir))
         try { StubTutor().use { stub ->
+            actor.execute { registerSourcePage("c", page.docId, "Synthetic book", page.pdfPage, page.text) }
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db ->
+                db.createStatement().use { it.executeUpdate("UPDATE source_docs SET blob_sha256='${page.sourceSha256}'") }
+            }
             val reader = ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), citationLayout = { bound() })
             val id = token(ReaderBlockCitations(SourcePack(listOf(page))) { bound() })
             stub.stream(1, payload(id), StubTutor.terminal("complete"), StubTutor.DONE)
-            val result = reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic pears", listOf(page))
+            val result = reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic pears", listOf(page), com.coach.domain.scope.VisibleScope.learner())
             assertEquals("block", result["sources"]!!.jsonArray.single().jsonObject.str("mode"))
             assertTrue(result.str("text").contains("【S1B1】"))
             assertTrue(stub.requestBodies.single().contains(id))
             assertFalse(stub.requestBodies.single().contains("Other text.")) // outside the provided block
+            actor.execute { registerSourcePage("c", page.docId, "Synthetic book", page.pdfPage, page.text, learnerVisible = false) }
             stub.stream(1, payload(id), StubTutor.terminal("complete"), StubTutor.DONE)
-            val revoked = reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic pears", listOf(page)) { false }
+            val revoked = reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic pears", listOf(page), com.coach.domain.scope.VisibleScope.learner())
             assertTrue(revoked["sources"]!!.jsonArray.isEmpty())
             assertTrue(revoked.str("text").contains("当前不可见"))
             assertFalse(revoked.toString().contains(page.text))

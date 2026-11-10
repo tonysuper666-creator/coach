@@ -29,14 +29,13 @@ class ReaderExplanation(private val actor: LedgerActor, private val bridge: Brid
         cancelled.entries.removeIf { System.nanoTime() - it.value > 120_000_000_000L }
         if (cancelled.size > 256) cancelled.entries.minByOrNull { it.value }?.let { cancelled.remove(it.key, it.value) }
     }
-    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>,
-        stillVisible: suspend (List<SourcePage>) -> Boolean = { true }): JsonObject {
+    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>, scope: com.coach.domain.scope.VisibleScope): JsonObject {
         val id = input.str("requestId")
         require(id.matches(Regex("[a-f0-9]{1,32}")) && input.str("kind") in setOf("explain", "example"))
         val started = System.nanoTime()
         fun reply(text: String, sources: JsonArray = JsonArray(emptyList())) = json(
             "text" to text, "sources" to sources, "elapsedMs" to (System.nanoTime() - started) / 1_000_000)
-        val pack = SourcePack.prepare("", pages.filter { it.learnerVisible })
+        val pack = SourcePack.prepare("", pages.filter { it.learnerVisible && scope.permits(it.docId, it.pdfPage, it.learnerVisible) })
         val key = key(device, course, id)
         if (cancelled.remove(key) != null) return reply("追问已取消。")
         if (pack.browsable.isEmpty()) return reply("缺少可定位的课件或教材页依据，暂时无法确认。")
@@ -74,7 +73,7 @@ class ReaderExplanation(private val actor: LedgerActor, private val bridge: Brid
             if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
             if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
             val checked = citations.check(result.text) ?: throw ReaderFormat()
-            if (!stillVisible(safePack.browsable)) {
+            if (!actor.execute { safePack.browsable.all { readerSourceCurrent(course, it, scope) } }) {
                 outcome = "source_changed"
                 return reply("依据已更新或当前不可见，暂时无法确认。请返回阅读后重新追问。")
             }

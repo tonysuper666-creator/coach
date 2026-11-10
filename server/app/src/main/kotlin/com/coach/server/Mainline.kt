@@ -14,6 +14,11 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.roundToLong
 
+/** Main-only adapter until PR142 passes its section-derived scope. Scoped calls resolve to the required-scope member. */
+private suspend fun ReaderExplanation.explain(device: String, course: String, input: JsonObject, quote: String,
+    pages: List<com.coach.store.SourcePage>): JsonObject =
+    explain(device, course, input, quote, pages, com.coach.domain.scope.VisibleScope.learner())
+
 internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String, val anchor: String = "")
 internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String, val anchor: String = "") {
     val verified get() = unit.keyState == "VERIFIED"
@@ -387,9 +392,7 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
                     val quote = mainline.selection(this, course, call.week(), input)
                     quote to searchSourcePages(course, quote).filter { it.learnerVisible }
                 }
-                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages) { snapshot ->
-                    actor.execute { snapshot.all { readerSourceCurrent(course, it) } }
-                }
+                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages)
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

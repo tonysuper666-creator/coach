@@ -1267,7 +1267,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }.singleOrNull()
 
     /** Recheck the exact evidence snapshot before releasing a delayed reader answer. */
-    fun readerSourceCurrent(course: String, page: SourcePage): Boolean {
+    fun readerSourceCurrent(course: String, page: SourcePage, scope: com.coach.domain.scope.VisibleScope): Boolean {
+        if (!page.learnerVisible || page.pdfPage <= 0 || !scope.permits(page.docId, page.pdfPage, page.learnerVisible)) return false
         val visible = browsablePage(course, page.docId, page.pdfPage) ?: return false
         if (visible.str("text") != page.text) return false
         return query("SELECT blob_sha256 FROM source_docs WHERE course_id=? AND doc_id=? AND tutor_visible=1",

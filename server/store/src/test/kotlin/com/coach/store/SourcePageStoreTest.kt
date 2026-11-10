@@ -62,8 +62,13 @@ class SourcePageStoreTest {
                 s.execute("PRAGMA user_version=6")
             } }
             LedgerStore(dir).use { store ->
+                val importedHash = "a".repeat(64)
+                DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db ->
+                    db.createStatement().use { it.executeUpdate("UPDATE source_docs SET blob_sha256='$importedHash' WHERE doc_id='book'") }
+                }
                 val pages = store.searchSourcePages("c","deductible").associateBy { it.docId }
                 assertTrue(pages.getValue("book").learnerVisible)
+                assertEquals(importedHash, pages.getValue("book").sourceSha256)
                 assertFalse(pages.getValue("appendix").learnerVisible)
                 assertNotNull(store.browsablePage("c","book",1))
                 assertNull(store.browsablePage("c","appendix",1))

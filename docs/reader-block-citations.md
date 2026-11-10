@@ -1,5 +1,34 @@
 # Reader explanation block citations
 
+## PR142 compatibility preparation
+
+PR148 carries only PR142's byte-identical public `VisibleScope` type and its
+contract tests (from `042c242f134f6b981ef48a1ed1d40df9976c9777`), plus the store's
+domain dependency. It does not carry PR142's retrieval, learned-window, tutor or
+outline implementation. PR148 still targets main and can compile independently.
+
+`ReaderExplanation.explain` requires a scope. It filters the input before making
+block IDs and rechecks that same request scope in `readerSourceCurrent` before
+releasing either block or whole-page snapshots. The latter also checks current
+course ownership, learner/tutor permissions, exact text and import hash; callers
+cannot replace this check with a permissive callback. Unknown block IDs may fall
+back only to a page already retained inside this scope. Unknown page IDs fail.
+
+Main's existing route uses a private, file-local adapter with the learner ceiling.
+This preserves main's existing behavior and does not implement learned windows.
+When PR142 is composed, its route supplies the section-derived `learnedThrough`
+scope directly to the required-scope member, bypassing the adapter. Thus the same
+frozen window governs retrieval, block creation, page fallback and delayed release.
+There is no public unscoped explanation overload. PR142's learning-record mapping
+and the composed tests remain prerequisites for claiming unread-page protection.
+
+Composition order: start at frozen main, merge PR142's exact head, then PR148's
+new head. The common type/test files must merge identically; neither branch is
+the other's PR base. Verify the actual composed tree, including
+`ReaderScopedCitationsTest`, `VisibleScopeBoundaryTest`, existing citation and
+three-stage timing tests. Keep real textbook sampling and click-to-draw acceptance
+separate from these synthetic checks.
+
 `ReaderExplanation` keeps the existing structured paragraphs and citation gate.
 For learner-visible source pages, `ReaderCitationLayout` reads completed layout
 caches from `READER_V2_LAYOUT_CACHE` (default `~/Coach/state/reader-v2-layout`).

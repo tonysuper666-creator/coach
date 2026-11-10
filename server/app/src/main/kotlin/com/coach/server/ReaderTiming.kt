@@ -1,15 +1,16 @@
 package com.coach.server
 
 import com.coach.ai.*
+import com.coach.protocol.ReaderTimeoutPolicy
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 
 /** Independent monotonic deadlines, including queue/header time. Invalid configuration fails at startup. */
-data class ReaderTimeouts(val firstMs: Long = 30_000, val gapMs: Long = 30_000, val totalMs: Long = 180_000) {
+data class ReaderTimeouts(val firstMs: Long = 30_000, val gapMs: Long = 30_000, val totalMs: Long = ReaderTimeoutPolicy.DEFAULT_TOTAL_MS) {
     init { require(listOf(firstMs, gapMs, totalMs).all { it in 1..86_400_000 }) { "Reader timeouts must be 1..86400000 ms" } }
     companion object {
         fun environment(env: Map<String, String> = System.getenv()) = ReaderTimeouts(
-            value(env, "FIRST_CONTENT", 30_000), value(env, "CONTENT_GAP", 30_000), value(env, "TOTAL", 180_000))
+            value(env, "FIRST_CONTENT", 30_000), value(env, "CONTENT_GAP", 30_000), value(env, "TOTAL", ReaderTimeoutPolicy.DEFAULT_TOTAL_MS))
         private fun value(env: Map<String, String>, name: String, default: Long): Long =
             env["COACH_READER_${name}_TIMEOUT_MS"]?.let { requireNotNull(it.toLongOrNull()) { "Invalid reader timeout: $name" } } ?: default
     }
@@ -22,6 +23,8 @@ internal class ReaderTimeout(val stage: String) : Exception(stage) {
         else -> "讲解已达到本次总时长上限，已停止。可继续阅读或手动重试。"
     }
 }
+
+internal class ReaderFormat : Exception("Invalid reader JSON")
 
 /** Prefix lexer: only decoded, non-whitespace characters at paragraphs[*].text count.
  * Stores keys/grammar only, never source or explanation text. Final citation gate is separate.
@@ -36,7 +39,7 @@ internal class ReaderBodyProgress {
     private var unicode: String? = null
     private var key = StringBuilder()
     private var highSurrogate = false
-    private var invalid = false
+    var invalid = false; private set
     private var root = false
     private var size = 0
     fun push(delta: String): Boolean {
@@ -111,6 +114,7 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
     @Volatile var last: Long? = null; private set
     @Volatile private var stopped = false
     @Volatile private var expired: String? = null
+    @Volatile private var invalid = false
     @Volatile private var handle: BridgeStreamHandle? = null
     @Volatile private var sourceProcess: Process? = null
     fun source(process: Process?) { sourceProcess = process; if (stopped) process?.destroyForcibly() }
@@ -120,7 +124,9 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
         val worker = async(Dispatchers.IO) {
             bridge.streamChat(prepare(), object : BridgeStreamSink {
                 override fun onDelta(text: String, atMs: Long) {
-                    if (parser.push(text)) {
+                    val progress = parser.push(text)
+                    if (parser.invalid) { invalid = true; signal.trySend(Unit) }
+                    if (progress && !parser.invalid) {
                         val now = System.nanoTime()
                         val previous = last
                         val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (started + limits.firstMs * 1_000_000)
@@ -146,6 +152,7 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
                 val totalDeadline = started + limits.totalMs * 1_000_000
                 val remaining = minOf(bodyDeadline, totalDeadline) - System.nanoTime()
                 if (remaining <= 0) throw ReaderTimeout(if (totalDeadline <= bodyDeadline) "total" else if (previous == null) "first" else "gap")
+                if (invalid) throw ReaderFormat()
                 if (worker.isCompleted) return@coroutineScope worker.await()
                 withTimeoutOrNull((remaining + 999_999) / 1_000_000) { signal.receive() }
             }

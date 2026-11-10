@@ -68,10 +68,13 @@ class ReaderExplanation(private val actor: LedgerActor, private val bridge: Brid
             actor.execute { recordAiCall(result.call.toJson()) }
             if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
             if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
-            val checked = checkedReaderPayload(result.text, safePack)
-                ?: return reply("回答缺少可核对的页码依据，暂时无法确认。")
+            val checked = checkedReaderPayload(result.text, safePack) ?: throw ReaderFormat()
             outcome = "complete"
             return reply(checked.first, checked.second)
+        } catch (_: ReaderFormat) {
+            if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+            outcome = "format"
+            return reply("回答缺少可核对的页码依据，暂时无法确认。")
         } catch (e: ReaderTimeout) {
             outcome = "timeout_${e.stage}"
             return reply(e.userText)

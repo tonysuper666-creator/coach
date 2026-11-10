@@ -2,6 +2,7 @@ package com.coach.server
 
 import com.coach.ai.*
 import com.coach.domain.*
+import com.coach.protocol.ReaderTimeoutPolicy
 import kotlinx.coroutines.*
 import kotlin.test.*
 
@@ -25,6 +26,7 @@ class ReaderTimingTest {
     }
     @Test fun validatesAllThreeIndependentSettings() {
         assertEquals(180_000, ReaderTimeouts.environment(emptyMap()).totalMs)
+        assertTrue(ReaderTimeoutPolicy.CLIENT_REQUEST_MS > ReaderTimeouts.environment(emptyMap()).totalMs)
         assertEquals(ReaderTimeouts(1, 2, 3), ReaderTimeouts.environment(mapOf(
             "COACH_READER_FIRST_CONTENT_TIMEOUT_MS" to "1", "COACH_READER_CONTENT_GAP_TIMEOUT_MS" to "2", "COACH_READER_TOTAL_TIMEOUT_MS" to "3")))
         for (value in listOf("0", "-1", "garbage", "86400001", "9223372036854775807"))
@@ -41,6 +43,20 @@ class ReaderTimingTest {
             }
             assertEquals("first", e.stage)
             assertEquals(0, stub.requests)
+        }
+    }
+    @Test fun invalidJsonStopsTheBridgeBeforeTheContentDeadline() = runBlocking {
+        for (prefix in listOf("```json\n", "Here is the answer:", "{\"paragraphs\":[{\"text\":\"合\\q")) {
+            StubTutor().use { stub ->
+                stub.stream(30, prefix, *Array(100) { " " }, StubTutor.terminal("complete"), StubTutor.DONE)
+                val timing = ReaderTiming(ReaderTimeouts(2000, 2000, 5000))
+                assertFailsWith<ReaderFormat> {
+                    timing.collect(BridgeClient(BridgeConfig(stub.baseUrl)), ChatRequest(task="READER_SELECTION", model=BridgeClient.CLAUDE,
+                        stream=true, effort="medium", system="Synthetic", user="Synthetic"))
+                }
+                assertTrue((System.nanoTime()-timing.started)/1_000_000 < 1800)
+                withTimeout(3000) { while (!stub.aborted) delay(10) }
+            }
         }
     }
     @Test fun structureCannotRenewFirstOrGapAndTotalStillCapsActiveBody() = runBlocking {

@@ -33,6 +33,14 @@ model = 'claude-sonnet-5-5'
 event(dict(type='system', subtype='init', model=model, session_id='synthetic'))
 full = ''
 try:
+    if mode in ('format-first', 'format-gap'):
+        if mode == 'format-gap':
+            delta('{"paragraphs":[{"text":"合', True)
+            delta('\\q')
+        else:
+            delta('```json\n')
+        while True:
+            delta(' '); time.sleep(.2)  # Invalid prefixes must fail immediately, never age into timeouts.
     if mode == 'first':
         delta('{"paragraphs":[{"anchors":["S1')
         while True:

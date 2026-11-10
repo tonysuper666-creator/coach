@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in wall-clock reader fault replay through the real HTTP/bridge/CLI chain (synthetic CLI).
 
-Run via tools/dev/heavy after :server:app:installDist. --bridge-python must be a
+Run via tools/dev/heavy after :server:app:installDist :server:app:testClasses. --bridge-python must be a
 venv with tools/bridge/requirements.txt. No paid CLI, private material, or production writes.
 """
 import argparse
@@ -34,6 +34,8 @@ def main():
     os.umask(0o077)
     args.output.mkdir(parents=True, exist_ok=False)
     rows = []
+    replay_classes = ROOT / 'server/app/build/classes/kotlin/test'
+    assert (replay_classes / 'com/coach/server/ReaderClientReplayKt.class').is_file(), 'Build :server:app:testClasses before replay'
     children, handles = [], []
     with tempfile.TemporaryDirectory(prefix='coach-reader-synthetic-') as temporary:
         base = Path(temporary)
@@ -125,7 +127,7 @@ def main():
             notes_smoke.stop(server)
             import concurrent.futures
             import socket
-            for mode in ('first', 'gap', 'total', 'cancel', 'disconnect', 'long'):
+            for mode in ('first', 'gap', 'total', 'cancel', 'disconnect', 'format-first', 'format-gap', 'long'):
                 for name in ('pids', 'times'):
                     (stub / name).unlink(missing_ok=True)
                 (stub / 'mode').write_text(mode)
@@ -161,6 +163,17 @@ def main():
                         time.sleep(.4)
                         request(route+'/explain/cancel', dict(requestId=request_id))
                         result = pending.result(timeout=5)
+                elif mode in ('long', 'format-first', 'format-gap'):
+                    # The actual shared client must survive 120s without response headers/body.
+                    client_input, client_output = base/'client-input.json', base/'client-output.json'
+                    client_input.write_text(json.dumps(dict(base=f'http://127.0.0.1:{port}', token=token,
+                        course=fixture.COURSE, body=body)))
+                    classpath = os.pathsep.join(map(str, [replay_classes, ROOT/'server/app/build/install/app/lib/*']))
+                    java = Path(env['JAVA_HOME'])/'bin/java' if env.get('JAVA_HOME') else 'java'
+                    done = subprocess.run([str(java), '-cp', classpath, 'com.coach.server.ReaderClientReplayKt',
+                        str(client_input), str(client_output)], env=env, capture_output=True, timeout=200)
+                    assert done.returncode == 0, f'{mode}: CourseHttp replay failed (exit={done.returncode})'
+                    result = json.loads(client_output.read_text())
                 else:
                     result = request(route+'/explain', body)
                 elapsed = (time.monotonic()-started)*1000
@@ -181,7 +194,8 @@ def main():
                 receipts = [line.split('COACH reader.end ',1)[1] for line in (base/'server.log').read_text().splitlines() if 'COACH reader.end ' in line]
                 receipt = receipts[-1]
                 expected = dict(first='timeout_first', gap='timeout_gap', total='timeout_total',
-                    cancel='cancelled', disconnect='disconnected', long='complete')[mode]
+                    cancel='cancelled', disconnect='disconnected', long='complete',
+                    **{'format-first':'format', 'format-gap':'format'})[mode]
                 assert f'status={expected} ' in receipt, (mode, receipt)
                 if mode == 'long':
                     assert result.get('sources') and len(times)==121 and times[-1]-times[0]>=120, 'Not genuine 120s body streaming'
@@ -189,18 +203,23 @@ def main():
                     assert not result.get('sources') and elapsed < limits['total']+2000
                 elif mode == 'cancel':
                     assert result.get('text') == '追问已取消。'
+                elif mode.startswith('format-'):
+                    assert not result.get('sources') and result.get('text') == '回答缺少可核对的页码依据，暂时无法确认。'
+                    assert elapsed < 1800, f'{mode}: format failure waited for a deadline'
                 # The source and reading notes must survive every failure, cancellation and success.
                 with sqlite3.connect(data/'coach.sqlite') as db:
                     assert db.execute('select text from source_pages where doc_id=?', ('reader-synthetic',)).fetchone()[0] == quote
                     assert db.execute('select count(*) from events').fetchone()[0] == 1
                 rows.append(dict(mode=mode, passed=True, thresholdsMs=limits, roundTripMs=round(elapsed,3),
+                    client='CourseHttp(CIO)' if mode in ('long','format-first','format-gap') else 'HTTP fault driver',
+                    clientExitCode=done.returncode if mode in ('long','format-first','format-gap') else None,
                     firstBodyMs=round(times[0]*1000,3) if times else None,
                     lastBodyMs=round(times[-1]*1000,3) if times else None,
                     bodySpanMs=round((times[-1]-times[0])*1000,3) if times else 0, bodyEvents=len(times),
                     cliProcessesRemaining=0, userMessage=result.get('text') if mode != 'long' else None,
                     receipt=receipt, originalPreserved=True))
                 (args.output/'report.json').write_text(json.dumps(dict(syntheticOnly=True,
-                    productionRead=False, path='HTTP -> ReaderExplanation -> BridgeClient -> subscription_bridge -> synthetic CLI',
+                    productionRead=False, path='CourseHttp(CIO)/HTTP fault driver -> ReaderExplanation -> BridgeClient -> subscription_bridge -> synthetic CLI',
                     utc=datetime.datetime.now(datetime.timezone.utc).isoformat(), samples=rows), ensure_ascii=False, indent=2))
                 print(f'{mode}: PASS elapsed={elapsed:.0f}ms bodyEvents={len(times)} CLI remaining=0', flush=True)
         finally:

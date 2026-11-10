@@ -28,7 +28,7 @@ def summarize(logs, start_ms, end_ms):
                 if fields.get('traffic') != 'user':
                     synthetic += 1
                     continue
-                if fields.get('status') in {'complete', 'failed', 'cancelled', 'disconnected', 'timeout_first', 'timeout_gap', 'timeout_total'}:
+                if fields.get('status') in {'complete', 'failed', 'format', 'cancelled', 'disconnected', 'timeout_first', 'timeout_gap', 'timeout_total'}:
                     counts[fields['status']] += 1
     total = sum(counts.values())
     timeouts = sum(n for status, n in counts.items() if status.startswith('timeout_'))

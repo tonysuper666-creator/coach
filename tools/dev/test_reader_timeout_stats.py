@@ -17,12 +17,17 @@ class ReaderStatsTest(unittest.TestCase):
                 'at_ms=100 status=complete traffic=user',
                 'at_ms=101 status=timeout_first traffic=user',
                 'at_ms=102 status=cancelled traffic=user',
+                'at_ms=104 status=format traffic=user',
+                'at_ms=105 status=disconnected traffic=user',
                 'at_ms=103 status=timeout_gap traffic=test',
                 'at_ms=200 status=timeout_total traffic=user',
                 'status=timeout_gap traffic=user']))
             result = stats.summarize(root, 100, 200)
-            self.assertEqual((3, 1, 1/3, 1), (result['requests'], result['timeouts'],
+            self.assertEqual((5, 1, 1/5, 1), (result['requests'], result['timeouts'],
                 result['timeoutRate'], result['excludedSynthetic']))
+            self.assertEqual(1, result['statuses']['format'])
+            self.assertEqual(1, result['statuses']['cancelled'])
+            self.assertEqual(1, result['statuses']['disconnected'])
             self.assertTrue(result['comparable'])
 
     def test_absent_instrumentation_is_not_a_zero_failure_baseline(self):

@@ -15,7 +15,12 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed as ptrCtrl
+import androidx.compose.ui.input.pointer.isMetaPressed as ptrMeta
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -106,12 +111,41 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int) {
         if (openedFromQuestions) { focusPane(ReaderPane.Related); openedFromQuestions = false }
     }
 
-    fun snapshot(): String = state.encode()
+    /** 保存：阅读状态 + 选题 + 未提交作答 + 出处返回来源。缺值恢复时按默认，不猜。 */
+    fun snapshot(): String = buildString {
+        append(state.encode())
+        appendLine("sel=$selectedQuestion")
+        appendLine("from=${if (openedFromQuestions) 1 else 0}")
+        answers.toSortedMap().forEach { (q, o) -> appendLine("ans=$q:$o") }
+    }
 
     fun restore(text: String?, widthDp: Int): Boolean {
-        val r = ReaderState.restore(text, widthDp, fixture.pages.size) ?: return false
+        var r = ReaderState.restore(text, widthDp, fixture.pages.size) ?: return false
+        val kv = text!!.lines().filter { '=' in it }.map { it.substringBefore('=') to it.substringAfter('=') }
+        // 页数未知：不信任快照里的页码与出处栈，回到第 0 页。
+        if (fixture.pages.isEmpty()) r = r.copy(position = ReaderPosition(0), provenanceStack = emptyList(), flashAnchor = null)
+        // 焦点按保存值还原（收拢的栏也算有效焦点）。
+        kv.firstOrNull { it.first == "focus" }?.second
+            ?.let { n -> ReaderPane.entries.firstOrNull { it.name == n } }?.let { r = r.copy(focus = it) }
+        val sel = kv.firstOrNull { it.first == "sel" }?.second?.toIntOrNull()
+        val restored = kv.filter { it.first == "ans" }.mapNotNull {
+            val q = it.second.substringBefore(':', "").toIntOrNull() ?: return@mapNotNull null
+            val o = it.second.substringAfter(':', "").toIntOrNull() ?: return@mapNotNull null
+            if (fixture.questions.getOrNull(q)?.options?.indices?.contains(o) == true) q to o else null
+        }
         state = r
+        selectedQuestion = sel?.takeIf { it in fixture.questions.indices } ?: 0
+        answers.clear(); answers.putAll(restored)
+        openedFromQuestions = kv.firstOrNull { it.first == "from" }?.second == "1" && r.provenanceStack.isNotEmpty()
+        message = null
         return true
+    }
+
+    /** 鼠标滚轮：正文上滚轮翻页，Ctrl+滚轮缩放；缩放受 50%–300% 限制。 */
+    fun onWheel(deltaY: Float, ctrlOrCmd: Boolean) {
+        if (deltaY == 0f) return
+        state = if (ctrlOrCmd) state.apply(if (deltaY < 0) ReaderAction.ZoomIn else ReaderAction.ZoomOut)
+        else state.apply(if (deltaY > 0) ReaderAction.NextPage else ReaderAction.PrevPage)
     }
 
     /** 返回 true 表示键已被消费；false 交还系统，焦点不会被困住。 */
@@ -177,6 +211,7 @@ private val Ink = Color(0xFF222222)
 private val Accent = Color(0xFF2F5D8A)
 private val Flash = Color(0xFFFFE9A8)
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
     val density = LocalDensity.current
@@ -206,6 +241,13 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                             .focusRequester(requesters.getValue(pane))
                             .onFocusChanged { if (it.isFocused) session.focusPane(pane) }
                             .clickable { requesters.getValue(pane).requestFocus() }
+                            .then(
+                                if (pane == ReaderPane.Body) Modifier.onPointerEvent(PointerEventType.Scroll) { ev ->
+                                    val c = ev.changes.first()
+                                    session.onWheel(c.scrollDelta.y, ev.keyboardModifiers.ptrCtrl || ev.keyboardModifiers.ptrMeta)
+                                    c.consume()
+                                } else Modifier,
+                            )
                             .padding(12.dp),
                     ) {
                         when (pane) {

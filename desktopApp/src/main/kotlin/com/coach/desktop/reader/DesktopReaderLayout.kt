@@ -14,8 +14,7 @@ data class ReaderLayout(
 
 object DesktopReaderLayouts {
     const val SHELF_MIN_DP = 1100 // 书架 + 正文 + 关联题
-    const val BODY_RELATED_MIN_DP = 760 // 正文 + 关联题
-    const val MIN_WINDOW_DP = 480
+    const val BODY_RELATED_MIN_DP = 700 // 正文 + 关联题；与合同及 shared/ui v7 deskWindow() 的 1100/700 一致，700 归两栏
 
     fun forWidth(widthDp: Int): ReaderLayout = when {
         widthDp >= SHELF_MIN_DP -> ReaderLayout(listOf(ReaderPane.Shelf, ReaderPane.Body, ReaderPane.Related), emptyList())
@@ -28,5 +27,5 @@ object DesktopReaderLayouts {
         if (focus in layout.visible) focus else ReaderPane.Body
 
     /** 桌面尺寸夹具：用于布局测试与截图，不含任何书库数据。 */
-    val fixtures: Map<String, Int> = linkedMapOf("narrow" to 520, "medium" to 900, "wide" to 1440)
+    val fixtures: Map<String, Int> = linkedMapOf("narrow" to 520, "below-two-pane" to 699, "two-pane-edge" to 700, "medium" to 900, "below-three-pane" to 1099, "three-pane-edge" to 1100, "wide" to 1440)
 }

@@ -38,6 +38,7 @@ data class ReaderState(
 
     private fun movePane(delta: Int): ReaderState {
         val v = layout.visible
+        if (v.isEmpty()) return this
         val i = v.indexOf(focus).let { if (it < 0) 0 else it }
         return copy(focus = v[(i + delta).coerceIn(0, v.lastIndex)])
     }
@@ -70,6 +71,7 @@ data class ReaderState(
         return copy(layout = l, focus = DesktopReaderLayouts.focusAfterResize(focus, l))
     }
 
+    /** 注意：快照不含 selectedAnchor，恢复后需由窗口层重新选中原句才能按 Enter 开出处。 */
     fun encode(): String = buildString {
         appendLine("v=1")
         appendLine("page=${position.page}")
@@ -94,7 +96,11 @@ data class ReaderState(
                 val anchor = kv.firstOrNull { it.first == "anchor" }?.second?.let(::unesc)
                 val zoom = kv.firstOrNull { it.first == "zoom" }?.second?.toInt()?.coerceIn(50, 300) ?: 100
                 val stack = kv.filter { it.first == "back" }.map {
-                    ReaderPosition(it.second.substringBefore('|').toInt(), unesc(it.second.substringAfter('|')).ifEmpty { null })
+                    if ('|' !in it.second) return null
+                    val bp = it.second.substringBefore('|').toInt()
+                    if (pageCount > 0 && bp !in 0 until pageCount) return null
+                    if (bp < 0) return null
+                    ReaderPosition(bp, unesc(it.second.substringAfter('|')).ifEmpty { null })
                 }
                 val layout = DesktopReaderLayouts.forWidth(widthDp)
                 val focus = kv.firstOrNull { it.first == "focus" }?.second

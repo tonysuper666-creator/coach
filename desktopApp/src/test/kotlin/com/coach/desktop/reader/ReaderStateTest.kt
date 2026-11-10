@@ -67,4 +67,30 @@ class ReaderStateTest {
         assertNull(ReaderState.restore("v=1\npage=12\n", 1000, 10))
         assertNull(ReaderState.restore("v=2\npage=1\n", 1000, 10))
     }
+
+    @Test fun contractThresholds() {
+        assertEquals(listOf(ReaderPane.Body), DesktopReaderLayouts.forWidth(699).visible)
+        assertEquals(listOf(ReaderPane.Body, ReaderPane.Related), DesktopReaderLayouts.forWidth(700).visible)
+        assertEquals(listOf(ReaderPane.Body, ReaderPane.Related), DesktopReaderLayouts.forWidth(1099).visible)
+        assertEquals(3, DesktopReaderLayouts.forWidth(1100).visible.size)
+    }
+
+    @Test fun outOfRangeBackStackRejected() {
+        assertNull(ReaderState.restore("v=1\npage=3\nback=99|x\n", 1000, 10))
+        assertNull(ReaderState.restore("v=1\npage=3\nback=-5|x\n", 1000, 10))
+        assertNull(ReaderState.restore("v=1\npage=3\nback=5\n", 1000, 10))
+    }
+
+    @Test fun emptyVisibleDoesNotThrow() {
+        val s = ReaderState(ReaderLayout(emptyList(), emptyList()), pageCount = 3)
+        assertNull(ReaderKeys.map(KeyInput(ReaderKey.Tab), s))
+        assertSame(s, s.apply(ReaderAction.NextPane))
+    }
+
+    @Test fun backKeysPassThroughWhenStackEmpty() {
+        val s = fresh()
+        assertNull(ReaderKeys.map(KeyInput(ReaderKey.Back), s))
+        assertNull(ReaderKeys.map(KeyInput(ReaderKey.Left, alt = true), s))
+        assertEquals(ReaderAction.ReturnFromProvenance, ReaderKeys.map(KeyInput(ReaderKey.Back), s.openProvenance("a", 5)))
+    }
 }

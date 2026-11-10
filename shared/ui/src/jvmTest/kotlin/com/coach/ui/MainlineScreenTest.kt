@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
@@ -46,6 +48,24 @@ class MainlineScreenTest {
                        "3":"Synthetic figs are imported, not grown in the orchard."},
             "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"$source"}"""
         private val items = listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
+        private fun weeklyBody(): JsonObject {
+            val questions = items.map { (id, tier) ->
+                val metadata = LadderQuestion(id, "K", if (id == "B1") "W01-bridge" else "W01-basics",
+                    when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
+                    if (id == "S1") 2 else 0, "synthetic-orchard", "synthetic-$id", eligible = true)
+                json("id" to id, "tier" to tier, "stem" to "Synthetic orchard question $id: which statement about the orchard holds?",
+                    "options" to listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there"),
+                    "status" to "new", "keyState" to "VERIFIED", "factIds" to listOf("F-$id"), "ladder" to LedgerJson.encodeToJsonElement(metadata))
+            }
+            val body = json("week" to 1, "learning" to true, "title" to "Synthetic orchard", "coverage" to LedgerJson.parseToJsonElement(cov(0, 0)), "items" to JsonArray(questions))
+            if (!includeNotes) return body
+            return JsonObject(body + mapOf(
+                "notes" to JsonArray(listOf(
+                    json("section_id" to "W01-basics", "title" to "Synthetic basics", "body" to "Synthetic apples are sold out. ", "fact_ids" to listOf("F-S1", "F-D1"), "sources" to listOf("Synthetic lecture 1")),
+                    json("section_id" to "W01-bridge", "title" to "Synthetic bridge notes", "body" to "Synthetic pears connect the orchard to the next topic.", "fact_ids" to listOf("F-B1"), "sources" to listOf("Synthetic lecture 1")))),
+                "emphasis" to JsonArray(listOf(json("fact_id" to if (setupEmphasis) "F-S1" else "F-B1", "week" to 1,
+                    "recording_id" to "T1", "recording_kind" to "tutorial", "timestamp" to "02:01:03", "summary" to "Synthetic pears were emphasized.")))))
+        }
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String, status: Int = 200) {
                 val bytes = body.toByteArray(); ex.sendResponseHeaders(status, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
@@ -67,19 +87,18 @@ class MainlineScreenTest {
                         }
                         val id = a["itemId"]!!.jsonPrimitive.content
                         val guessed = a["guessed"]!!.jsonPrimitive.boolean
-                        val right = a["choice"]!!.jsonPrimitive.int == 1
+                        val right = a["choice"]!!.jsonPrimitive.int == 1 && !a.flag("dontKnow")
                         val status = if (!right) "missed" else if (guessed) "guessed" else "mastered"
                         val i = items.indexOfFirst { it.first == id }
                         val next = items.getOrNull(i + 1)?.first?.let { "\"$it\"" } ?: "null"
                         val queued = status != "mastered"
                         reply(ex, """{"itemId":"$id","answer":1,"choice":${a["choice"]},"guessed":$guessed,"keyState":"VERIFIED","status":"$status","tier":"${items[i].second}",
+                            "independentCorrect":${right && !guessed},"remember":"Synthetic memory for $id.","dontKnow":${a.flag("dontKnow")},
                             "explanation":$explanation,"source":"Synthetic lecture 1","anchor":"$anchor","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
                             "mistakeWeek":${if (queued) 1 else "null"},"next":$next,"coverage":${cov(if (status == "mastered") 1 else 0, i + 1)}}""")
                     }
                     path.endsWith("/mainline/1") && initialFailures-- > 0 -> reply(ex, """{"error":"Synthetic Mac temporarily unavailable"}""", 503)
-                    path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
-                        items.joinToString(",") { (id, tier) -> """{"id":"$id","tier":"$tier","stem":"Synthetic orchard question $id: which statement about the orchard holds?",
-                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}],"emphasis":[{"fact_id":"${if (setupEmphasis) "F-S1" else "F-B1"}","week":1,"recording_id":"T1","recording_kind":"tutorial","timestamp":"02:01:03","summary":"Synthetic pears were emphasized."}]""" else "") + "}")
+                    path.endsWith("/mainline/1") -> reply(ex, weeklyBody().toString())
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
             }
@@ -137,9 +156,8 @@ class MainlineScreenTest {
                 onNodeWithText("考点 3 · 有题 3 · 会了 0").assertIsDisplayed()
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("mainline-skip").performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("S1")
+                onNodeWithTag("mainline-notes").assertDoesNotExist()
 
                 if (retryChoice != null) {
                     onNodeWithTag("mainline-option-$retryChoice").performClick()
@@ -190,7 +208,7 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
                 // Right but marked as a guess: still not mastered, still queued.
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("细节题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("D1")
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-guess").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -201,7 +219,7 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
                 // The bridge question leads on to step grading and the timed essay.
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("综合题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("B1")
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-submit").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -210,17 +228,16 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-essay").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-steps").performClick()
                 assertTrue(steps, "the bridge question opens step grading")
-                onNodeWithText("这一周做完了").assertExists()
+                onNodeWithTag("mainline-next").performScrollTo().performClick()
+                onNodeWithText("本节脉络").assertExists()
+                assertEquals(listOf("S1", "D1", "B1"), mac.answers.map { it.str("itemId") })
                 capture("mainline-bridge-$width")
             }
         } finally { tutor.close(); driver.close() }
     }
 
-    /**
-     * 复习页的主线入口：课程回答一到，入口就要显示当前周并能点进去。设备烟测在像素已经画出「继续第 1 周」时
-     * 读到的仍是「正在连接…」，所以这个标签必须来自回答到达后才出现的节点，而不是把一个禁用按钮原地改名。
-     */
-    @Test fun reviewEntryShowsTheCurrentWeekOnceTheCourseAnswers() = FakeMac(today).use { mac ->
+    /** Whole-week practice belongs to its week and starts the real question screen in one click. */
+    @Test fun weekPracticeStartsTheDisplayedWeekWithoutReadingOrAnExtraStart() = FakeMac(today).use { mac ->
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val transport = object : LedgerTransport {
@@ -233,21 +250,38 @@ class MainlineScreenTest {
         val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
         val c = CoachController("C", SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
             tutor, formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
-        val view = CourseView(emptyList(), project(emptyList()))
-        var opened: Pair<Int?, Boolean>? = null
+        val events = listOf(Event(1, "synthetic-week", "C", "outline_revised", recordedAt = now, occurredAt = now,
+            deviceId = "synthetic", actor = "SYSTEM", payload = json("knowledgePoints" to JsonArray(listOf(json("id" to "K", "title" to "Synthetic orchard", "week" to 1))))))
+        val view = CourseView(events, project(events))
+        var opened by androidx.compose.runtime.mutableStateOf<Int?>(null)
+        var showReview by androidx.compose.runtime.mutableStateOf(true)
         try {
             runComposeUiTest {
                 setContent {
                     CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 900.dp)) {
-                        ReviewScreen(c, view, { _, _ -> }, {}, onOpenMainline = { number, start -> opened = number to start })
+                        val scope = androidx.compose.runtime.rememberCoroutineScope()
+                        val actions = androidx.compose.runtime.remember(c) { WeekActions(c, scope) }
+                        actions.onPractice = { number ->
+                            c.sync.saveMainlineState("C", json("week" to number, "entry" to "quiz"))
+                            opened = number
+                        }
+                        when {
+                            showReview -> ReviewScreen(c, view, { _, _ -> }, {}, onOpenMainline = { _, _ -> error("Obsolete review entry must not dispatch") })
+                            opened == null -> com.coach.ui.v7.WeekPage(c, view, TutorUiState(), actions, { _, _ -> }, 1)
+                            else -> MainlineScreen(c, view, {}, {}, {}, {}, directEntry = true, initialWeek = opened)
+                        }
                     } } }
                 }
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("继续第 1 周").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("正在连接…").assertDoesNotExist()
-                onNodeWithTag("mainline-continue").assertIsEnabled().performClick()
-                assertEquals(1 to true, opened)
-                onNodeWithText("看本周要点").assertExists()
-                capture("review-mainline-entry")
+                onNodeWithTag("open-mainline").assertDoesNotExist()
+                runOnIdle { showReview = false }
+                onNodeWithTag("week-practice").assertIsEnabled()
+                assertTrue(mac.answers.isEmpty(), "Browsing a week must not answer a question")
+                onNodeWithTag("week-practice").performClick()
+                awaitQuestion("S1")
+                assertEquals(1, opened)
+                onNodeWithTag("mainline-notes").assertDoesNotExist()
+                onNodeWithTag("mainline-open-notes").assertExists()
+                capture("week-practice-direct-entry")
             }
         } finally { tutor.close(); driver.close() }
     }
@@ -276,6 +310,8 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-week-1").performClick()
                 // The first GET fails; retry must recover without another tap.
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic Mac temporarily unavailable").fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("S1")
+                onNodeWithTag("mainline-open-notes").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("○ Synthetic bridge notes").performScrollTo().performClick()
                 onNodeWithTag("mainline-emphasis").performScrollTo()
@@ -288,7 +324,8 @@ class MainlineScreenTest {
                 waitForIdle()
                 assertEquals(readingBeforeStar, c.sync.mainlineState("C", "week:1"))
                 onNodeWithTag("mainline-section-quiz").performScrollTo().performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("综合题 · 第 1/1 题").fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("B1")
+                onNodeWithText("第 1 题").assertExists()
                 onNodeWithTag("mainline-option-1").performScrollTo().performClick()
                 onNodeWithTag("mainline-emphasis").performScrollTo()
                 waitForIdle()
@@ -314,7 +351,8 @@ class MainlineScreenTest {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("综合题 · 第 1/1 题").performScrollTo().assertIsDisplayed()
+                awaitQuestion("B1")
+                onNodeWithText("第 1 题").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-option-1").assertIsSelected()
                 onNodeWithTag("mainline-return-section").performScrollTo().performClick()
                 onNodeWithText("Synthetic pears connect", substring = true).performScrollTo().assertIsDisplayed()
@@ -338,10 +376,12 @@ class MainlineScreenTest {
     }
 
     private fun ComposeUiTest.capture(name: String) {
-        val dir = File("build/screens").also { it.mkdirs() }
-        ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
-        // Keep successful geometry too: a visible heading can coexist with the body below the viewport.
-        File(dir, "$name.txt").writeText(onRoot(useUnmergedTree = true).printToString(maxDepth = 50))
+        captureLessonEvidence(name)
+    }
+
+    private fun ComposeUiTest.awaitQuestion(id: String) {
+        waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic orchard question $id:", substring = true).fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithTag("mainline-option-0").assertExists()
     }
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
@@ -510,9 +550,7 @@ class MainlineScreenTest {
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-week-1").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("mainline-skip").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            awaitQuestion("S1")
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -520,7 +558,8 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
             onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
-            ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png", File("build/screens/mainline-v7-cited-page.png").also { it.parentFile.mkdirs() })
+            assertTrue(ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png",
+                File(System.getProperty("coach.testScreens"), "mainline-v7-cited-page.png").also { it.parentFile.mkdirs() }))
             onNodeWithTag("private-document-back").performClick()
             onNodeWithTag("private-citation").assertExists()
             onNodeWithTag("v7-desk").assertExists()
@@ -541,9 +580,7 @@ class MainlineScreenTest {
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-week-1").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("mainline-skip").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            awaitQuestion("S1")
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }

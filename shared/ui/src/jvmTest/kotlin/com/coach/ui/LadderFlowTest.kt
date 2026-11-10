@@ -2,7 +2,6 @@ package com.coach.ui
 
 import androidx.compose.material3.Surface
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
@@ -15,13 +14,15 @@ import kotlinx.serialization.json.*
 import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.CopyOnWriteArrayList
-import javax.imageio.ImageIO
 import kotlin.test.*
 
 /** The production screen and CourseHttp, invented material, and a real close/reopen of SQLite. Run on Mac. */
 @OptIn(ExperimentalTestApi::class)
 class LadderFlowTest {
-    @Test fun directExplanationThenAdaptiveQuestionsAndRecapSurviveDatabaseReopen() {
+    @Test fun directExplanationThenAdaptiveQuestionsAndRecapSurviveDatabaseReopen() = walk(false)
+    @Test fun darkRecapAndQuestionSurviveDatabaseReopen() = walk(true)
+
+    private fun walk(dark: Boolean) {
         val answers = CopyOnWriteArrayList<JsonObject>()
         val questions = (0..8).map { n -> LadderQuestion("q$n", "K", "S", if (n == 0) "introduction" else "concept",
             if (n == 0) 2 else 0, "fruit", "fingerprint$n", eligible = true) }
@@ -66,7 +67,7 @@ class LadderFlowTest {
             var c = controller(driver)
             c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
             runSkikoComposeUiTest(size = Size(933f, 704f), density = Density(1f)) {
-                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
+                setContent { CoachTheme(dark) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-dont-know").fetchSemanticsNodes().isNotEmpty() }
                 assertEquals(0, answers.size)
                 onNodeWithText("Synthetic basket q0: count two pears.").assertExists()
@@ -89,8 +90,7 @@ class LadderFlowTest {
                 }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-checkpoint").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("刚学会的").assertExists()
-                val screens = File("build/screens").also { it.mkdirs() }
-                ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File(screens, "ladder-recap-933x704.png"))
+                captureLessonEvidence("ladder-recap-933x704-${if (dark) "dark" else "light"}", 933, 704)
             }
             val saved = c.sync.mainlineState("C", "week:1")
             assertTrue(saved.flag("recapVisible"))
@@ -99,11 +99,12 @@ class LadderFlowTest {
             c = controller(driver)
             assertEquals(saved, c.sync.mainlineState("C", "week:1"))
             runSkikoComposeUiTest(size = Size(933f, 704f), density = Density(1f)) {
-                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
+                setContent { CoachTheme(dark) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-recap-continue").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("ladder-recap-continue").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic basket q6: count two pears.").fetchSemanticsNodes().isNotEmpty() }
                 assertEquals(6, answers.size)
+                captureLessonEvidence("ladder-restored-933x704-${if (dark) "dark" else "light"}", 933, 704)
             }
         } finally { driver.close(); tutor.close(); http.close(); server.stop(0); file.delete() }
     }

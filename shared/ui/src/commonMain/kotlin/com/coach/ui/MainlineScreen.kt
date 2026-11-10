@@ -109,7 +109,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
             else Text("选一周，从基础题开始。答对且不是猜的才算会了。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             for (w in weeks) {
                 val n = w.num("week").toInt()
-                Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n, false) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+                Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n, true) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("mainline-week-$n")) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("第 $n 周 · ${w.str("title")}", style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)

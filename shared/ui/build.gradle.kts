@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.compose)
 }
+
+tasks.withType<Test>().configureEach {
+    systemProperty("coach.testScreens", layout.buildDirectory.dir("screens/ton1447").get().asFile.absolutePath)
+}
 kotlin {
     jvm()
     android {

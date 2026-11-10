@@ -98,7 +98,7 @@ def validate(pack):
                 raise ValueError('invalid essay resource identities')
             if q['rubric'] is not None and len(points) != len(q['rubric']):
                 raise ValueError('rubric identities and texts differ in length')
-            if not isinstance(links, list) or len(links) != len(set(links)) or any(not isinstance(r, str) or r not in index or index[r]['format'] != 'mcq' for r in links):
+            if not isinstance(links, list) or any(not isinstance(r, str) for r in links) or len(links) != len(set(links)) or any(r not in index or index[r]['format'] != 'mcq' for r in links):
                 raise ValueError('invalid linked question references')
     visiting, done = set(), set()
     def visit(ref):
@@ -160,7 +160,7 @@ def consume(pack, known_capabilities=()):
             'pr150_adapter': 'base v1 synthetic adapter exists; identity and scope extension unsupported; no production integration'}
 
 
-def reveal(pack, ref, known_capabilities, submitted):
+def _ready_question(pack, ref, known_capabilities, submitted):
     if not submitted:
         raise ValueError('synthetic submission acknowledgement required')
     index, _ = validate(pack)
@@ -169,13 +169,14 @@ def reveal(pack, ref, known_capabilities, submitted):
     row = next(q for q in consume(pack, known_capabilities)['questions'] if q['ref'] == ref)
     if not row['ready_for_synthetic_exercise']:
         raise ValueError('question is not ready for synthetic exercise')
-    q = index[ref]
-    result = {'ref': ref, 'synthetic_only': True, 'mastery_evidence': False}
-    if q['format'] == 'essay':
-        result.update(model_answer=q['model_answer'], rubric=q['rubric'])
-    else:
-        result['answer'] = q['answer']
-    return result
+    return index[ref]
+
+
+def reveal(pack, ref, known_capabilities, submitted):
+    q = _ready_question(pack, ref, known_capabilities, submitted)
+    if q['format'] != 'mcq':
+        raise ValueError('essay must be accessed through read-essay')
+    return {'ref': ref, 'synthetic_only': True, 'mastery_evidence': False, 'answer': q['answer']}
 
 
 def read_essay(pack, course_id, ref, known_capabilities, submitted):
@@ -187,8 +188,9 @@ def read_essay(pack, course_id, ref, known_capabilities, submitted):
         raise ValueError('unknown essay identity')
     if index[ref].get('essay_identity') is None:
         raise ValueError('essay resource identity unknown')
-    result = reveal(pack, ref, known_capabilities, submitted)
-    q = index[ref]
+    q = _ready_question(pack, ref, known_capabilities, submitted)
+    result = {'ref': ref, 'synthetic_only': True, 'mastery_evidence': False,
+              'model_answer': q['model_answer'], 'rubric': q['rubric']}
     identity = q['essay_identity']
     _, aliases = validate(pack)
     return dict(result, course_id=course_id, question_id=q['id'], version=q['version'],

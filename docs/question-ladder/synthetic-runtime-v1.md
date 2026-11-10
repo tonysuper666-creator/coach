@@ -8,7 +8,7 @@ it, then run the reference consumer:
 python3 tools/question-ladder/generate_runtime_fixture.py /tmp/syn-ladder.json
 python3 tools/question-ladder/runtime_contract.py validate /tmp/syn-ladder.json
 python3 tools/question-ladder/runtime_contract.py consume /tmp/syn-ladder.json --known-capability SYN-add
-python3 tools/question-ladder/runtime_contract.py reveal /tmp/syn-ladder.json --ref SYN-Q2@v1 --known-capability SYN-add --synthetic-submitted
+python3 tools/question-ladder/runtime_contract.py reveal /tmp/syn-ladder.json --ref SYN-Q1@v2 --synthetic-submitted
 python3 tools/question-ladder/runtime_contract.py read-essay /tmp/syn-ladder.json --course-id SYN-COURSE-A --ref SYN-Q2@v1 --known-capability SYN-add --synthetic-submitted
 python3 -m unittest discover -s tools/question-ladder -p test_runtime_contract.py
 ```
@@ -35,8 +35,9 @@ is an assertion to be independently verified; this program cannot prove that
 it exhausts the curriculum. Essay model answer and rubric are explicitly
 nullable. Missing either prevents synthetic readiness, and the answer and
 rubric are not sent in the answer-free consumer projection. A synthetic
-submission acknowledgement makes the full model answer and rubric available
-via `reveal`; this demonstration does not capture an actual answer, grade it,
+submission acknowledgement and the course and identity checks make the full
+model answer and rubric available via `read-essay`; `reveal` accepts MCQs only.
+This demonstration does not capture an actual answer, grade it,
 or establish mastery. Superseded versions remain in the history but are not
 offered as exercises. Real essay text is
 not present or authorized here. MCQ keys are likewise omitted from projection.
@@ -44,7 +45,7 @@ not present or authorized here. MCQ keys are likewise omitted from projection.
 ## Optional synthetic identity and scope extension
 
 Existing v1 packs and the `generate`, `validate`, `consume`, and `reveal`
-entry points remain supported. The generator accepts an optional second argument
+entry points remain supported, except that `reveal` now rejects essays. The generator accepts an optional second argument
 for `course_id`; exercise refs are unique within a pack, so readers must use
 the pair `(course_id, question ref)` rather than treating refs as global.
 `read-essay` requires that exact course, an essay ref, known resource identity,
@@ -54,8 +55,8 @@ course, question ID, version, KP and capability to `model_answer_id`, ordered
 contains `linked_question_refs` for associated MCQs. The response retains those
 recorded refs and separately supplies alias-resolved refs; aliases never rewrite
 history. Missing course, identity, answer or rubric, a wrong course/version,
-MCQ ref or absent acknowledgement cannot produce the essay. The old `reveal`
-remains a compatibility demonstration, not a course-scoped reader.
+MCQ ref or absent acknowledgement cannot produce the essay. A missing or null
+course is accepted as unknown by `validate`, but `read-essay` rejects it.
 
 The acknowledgement and supplied course are **synthetic inputs, not identity
 authentication or an authorization mechanism**. A production service must
@@ -75,6 +76,9 @@ or `unknown`. A missing candidate is asserted only when the separate
 refs are excluded from gap counts but retained in historical records. None of
 these states claims learner mastery, semantic coverage or release approval.
 Scope and inventory assertions must be verified independently for real data.
+`required_capabilities` are not restricted to `applicable_capabilities`: the
+latter declares target scope, while a prerequisite can lie outside that scope.
+This contract does not verify such prerequisite IDs against an external catalog.
 
 PR133 describes candidates and proposed identity relations. PR150 commit
 `c1386062b0b77f7953dac8ec87bbcf7093c50346` has an explicitly injected

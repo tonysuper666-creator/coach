@@ -28,14 +28,30 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(consume(self.pack)['questions'][2]['ready_for_synthetic_exercise'])
 
     def test_synthetic_reveal_requires_submission_and_capabilities(self):
-        with self.assertRaises(ValueError): reveal(self.pack, 'SYN-Q2@v1', ['SYN-add'], False)
-        with self.assertRaises(ValueError): reveal(self.pack, 'SYN-Q2@v1', [], True)
-        with self.assertRaises(ValueError): reveal(self.pack, 'SYN-Q3@v1', [], True)
-        result = reveal(self.pack, 'SYN-Q2@v1', ['SYN-add'], True)
+        with self.assertRaises(ValueError): read_essay(self.pack, 'SYN-COURSE-A', 'SYN-Q2@v1', ['SYN-add'], False)
+        with self.assertRaises(ValueError): read_essay(self.pack, 'SYN-COURSE-A', 'SYN-Q2@v1', [], True)
+        with self.assertRaises(ValueError): read_essay(self.pack, 'SYN-COURSE-A', 'SYN-Q3@v1', [], True)
+        result = read_essay(self.pack, 'SYN-COURSE-A', 'SYN-Q2@v1', ['SYN-add'], True)
         self.assertEqual(result['model_answer'], 'Two objects form a pair.')
         self.assertEqual(len(result['rubric']), 2)
         self.assertFalse(result['mastery_evidence'])
         self.assertEqual(reveal(self.pack, 'SYN-Q1@v2', [], True)['answer'], 1)
+
+    def test_reveal_never_serves_essay_even_without_identity(self):
+        for missing_identity in (False, True):
+            pack = copy.deepcopy(self.pack)
+            if missing_identity:
+                del pack['questions'][2]['essay_identity']
+            with self.subTest(missing_identity=missing_identity), self.assertRaisesRegex(ValueError, 'read-essay'):
+                reveal(pack, 'SYN-Q2@v1', ['SYN-add'], True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'pack.json'
+            path.write_text(json.dumps(self.pack), encoding='utf-8')
+            result = subprocess.run([sys.executable, str(HERE/'runtime_contract.py'), 'reveal', str(path),
+                                     '--ref', 'SYN-Q2@v1', '--known-capability', 'SYN-add',
+                                     '--synthetic-submitted'], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('Two objects form a pair.', result.stdout + result.stderr)
 
     def test_alias_rejects_identity_and_scope_changes(self):
         for field, value in [('id', 'SYN-other'), ('kp', 'SYN-K2'),
@@ -120,12 +136,13 @@ class ContractTest(unittest.TestCase):
         with self.assertRaises(ValueError): read_essay(missing, 'SYN-COURSE-A', 'SYN-Q2@v1', ['SYN-add'], True)
 
     def test_essay_identity_rejects_mismatched_points_and_links(self):
-        for mode in ('rubric', 'dangling', 'essay-link'):
+        for mode in ('rubric', 'dangling', 'essay-link', 'nested-link'):
             p = copy.deepcopy(self.pack)
             identity = p['questions'][2]['essay_identity']
             if mode == 'rubric': identity['rubric_point_ids'].pop()
             if mode == 'dangling': identity['linked_question_refs'] = ['SYN-missing@v1']
             if mode == 'essay-link': identity['linked_question_refs'] = ['SYN-Q3@v1']
+            if mode == 'nested-link': identity['linked_question_refs'] = [['SYN-Q1@v1']]
             with self.subTest(mode=mode), self.assertRaises(ValueError): validate(p)
 
     def test_scope_and_missing_candidates_do_not_imply_mastery(self):

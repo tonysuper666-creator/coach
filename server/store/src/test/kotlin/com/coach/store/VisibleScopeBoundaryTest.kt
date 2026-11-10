@@ -55,6 +55,23 @@ class VisibleScopeBoundaryTest {
         assertTrue(s.searchSourcePages("c", "correct choice", s.learnedThrough("c", VisibleScope.learner(), "k2")).isEmpty())
     }
 
+    @Test fun unanchoredDocsKpNamingAndRestrictedPagesAtTheEntries() {
+        val dir = Files.createTempDirectory("scope-lr2"); val s = LedgerStore(dir); seed(s); outline(dir)
+        s.registerSourcePage("c", "extra", "Synthetic extra", 900, "Alpha tradeoff in an unanchored appendix", learnerVisible = true)
+        // 1. a document no outline anchor covers cannot be placed, so it is closed
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), "k1"))))
+        // 2. cosmetic kp naming mismatch (case / spaces) still resolves; the whole course is not disabled
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedScope("c", VisibleScope.learner(), setOf(" K1 ")))))
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), listOf("K1")))))
+        // 3. the selected section's own point bounds the window, not every point of the week
+        assertEquals(setOf("book:5"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), listOf("k1")))))
+        assertEquals(setOf("book:5", "book:50"), docs(s.searchSourcePages("c", "alpha tradeoff", s.learnedThrough("c", VisibleScope.learner(), listOf("k1", "k2")))))
+        // 4. the student-facing base (learner) never returns answer keys or held-out pages, even though they match
+        val chat = s.learnedThrough("c", VisibleScope.learner(), "k2")
+        assertTrue(s.searchSourcePages("c", "correct choice held out", chat).none { !it.learnerVisible })
+        assertTrue(s.searchSourcePages("c", "alpha tradeoff", chat).none { it.docId == "quiz-answers" || it.docId == "heldout" })
+    }
+
     @Test fun everyRetrievalCallSitePassesAScope() {
         var dir = java.nio.file.Path.of(System.getProperty("user.dir")).toAbsolutePath()
         while (!Files.exists(dir.resolve("settings.gradle.kts"))) dir = dir.parent

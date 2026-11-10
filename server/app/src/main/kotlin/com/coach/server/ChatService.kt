@@ -361,7 +361,7 @@ class ChatService(
         hub.emit(startFrame(session))
         if(prepared!=null) { session.trace?.prepared(); scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
-            val hits = actor.execute { searchSourcePages(courseId,question,learnedThrough(courseId,com.coach.domain.scope.VisibleScope.tutorInternal(),todayProgress(courseId,threadId).currentKpId)) }
+            val hits = actor.execute { searchSourcePages(courseId,question,learnedThrough(courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(courseId,threadId).currentKpId)) }
             val selected = SourcePack.prepare(sourcePack,hits)
             if (selected.restricted.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(
                 selected.restricted.map { it.text }, selected.browsable.map { it.text } + selected.legacy)
@@ -718,7 +718,7 @@ class ChatService(
                 failure = "source_quota_protected"
                 return
             }
-            val hits = actor.execute { searchSourcePages(session.courseId,query,learnedThrough(session.courseId,com.coach.domain.scope.VisibleScope.tutorInternal(),todayProgress(session.courseId,session.threadId).currentKpId)) }
+            val hits = actor.execute { searchSourcePages(session.courseId,query,learnedThrough(session.courseId,com.coach.domain.scope.VisibleScope.learner(),todayProgress(session.courseId,session.threadId).currentKpId)) }
             val pack = SourceReadSandbox().read(SourcePack.prepare("",hits)) { process ->
                 session.sourceProcess = process
                 if (session.forcedStatus != null) process?.destroyForcibly()

@@ -240,9 +240,12 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
-    /** Knowledge points of this week and every earlier one: the learner's already-studied set for source scoping. */
-    internal fun learnedKps(store: LedgerStore, course: String, number: Int): Set<String> =
-        weeks(courseNames(store.events(course), course)).first.filter { it.week <= number }.flatMap { w -> w.facts.map { it.kp } }.filter { it.isNotBlank() }.toSet()
+    /** Points cited by the selected section only: the week is a plan, not proof the learner has read all of it. */
+    internal fun sectionKps(store: LedgerStore, course: String, number: Int, sectionId: String): Set<String> {
+        val week = find(courseNames(store.events(course), course), number)
+        val ids = week.notes.firstOrNull { it.str("section_id") == sectionId }?.strings("fact_ids").orEmpty().toSet()
+        return week.facts.filter { it.id in ids }.map { it.kp }.filter { it.isNotBlank() }.toSet()
+    }
 
     /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
     internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
@@ -389,8 +392,8 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
                 val course = call.parameters["course"]!!
                 val (quote, found) = actor.execute {
                     val quote = mainline.selection(this, course, call.week(), input)
-                    // Trusted ceiling: learner-visible documents, only up to the point the learning record has reached (fail-closed).
-                    val scope = learnedScope(course, com.coach.domain.scope.VisibleScope.learner(), mainline.learnedKps(this, course, call.week()))
+                    // Trusted ceiling: learner-visible documents, only up to the selected section's knowledge point in outline order (fail-closed).
+                    val scope = learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), mainline.sectionKps(this, course, call.week(), input.str("sectionId")))
                     quote to (scope to searchSourcePages(course, quote, scope))
                 }
                 val (scope, pages) = found

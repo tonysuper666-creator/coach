@@ -1295,11 +1295,14 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     }
 
     /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
+    /** Knowledge point ids are compared trimmed and case-folded so a cosmetic mismatch between facts and outline does not disable a course. */
+    private fun kpKey(id: String) = id.trim().lowercase()
+
     private fun outlineAnchors(course: String): List<Pair<String, List<Pair<String, Int>>>> {
         val moduleOrder = runCatching { query("SELECT module_id,ord FROM course_modules WHERE course_id=?", course) { it.getString(1) to it.getInt(2) }.toMap() }.getOrDefault(emptyMap())
         return query("SELECT kp_id,module_id,ord,anchors FROM outline_kp WHERE course_id=? AND coalesce(retired,0)=0", course) {
             val anchors = runCatching { LedgerJson.parseToJsonElement(it.getString(4) ?: "[]").jsonArray.map { a -> a.jsonObject.str("docId") to a.jsonObject.num("pdfPage").toInt() } }.getOrDefault(emptyList())
-            Triple(it.getString(1), (moduleOrder[it.getString(2)] ?: 0) * 100000 + it.getInt(3), anchors)
+            Triple(kpKey(it.getString(1)), (moduleOrder[it.getString(2)] ?: 0) * 100000 + it.getInt(3), anchors)
         }.sortedBy { it.second }.map { it.first to it.third }
     }
 
@@ -1309,16 +1312,23 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
      */
     fun learnedScope(course: String, base: com.coach.domain.scope.VisibleScope, learnedKps: Set<String>): com.coach.domain.scope.VisibleScope {
         val all = outlineAnchors(course)
-        val learned = all.filter { it.first in learnedKps }.flatMap { it.second }
+        val keys = learnedKps.map(::kpKey).toSet()
+        val learned = all.filter { it.first in keys }.flatMap { it.second }
         if (learned.isEmpty()) return com.coach.domain.scope.VisibleScope.NONE
-        val unlearned = all.filter { it.first !in learnedKps }.flatMap { it.second }
-        return base.limitPages(com.coach.domain.scope.VisibleScope.learnedWindows(learned, unlearned))
+        val unlearned = all.filter { it.first !in keys }.flatMap { it.second }
+        // Only documents the learned points are anchored in take part; a document without outline anchors cannot be placed, so it is closed.
+        return base.narrowToDocs(*learned.map { it.first }.distinct().toTypedArray())
+            .limitPages(com.coach.domain.scope.VisibleScope.learnedWindows(learned, unlearned))
     }
 
     /** Learned = every point up to and including [currentKp] in outline order. */
-    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKp: String?): com.coach.domain.scope.VisibleScope {
+    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKp: String?): com.coach.domain.scope.VisibleScope =
+        learnedThrough(course, base, listOfNotNull(currentKp))
+
+    /** Several current points (one reading section may cite more than one): the latest of them in outline order bounds what is learned. */
+    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKps: Collection<String>): com.coach.domain.scope.VisibleScope {
         val order = outlineAnchors(course).map { it.first }
-        val idx = order.indexOf(currentKp ?: return com.coach.domain.scope.VisibleScope.NONE)
+        val idx = currentKps.maxOfOrNull { order.indexOf(kpKey(it)) } ?: -1
         if (idx < 0) return com.coach.domain.scope.VisibleScope.NONE
         return learnedScope(course, base, order.take(idx + 1).toSet())
     }

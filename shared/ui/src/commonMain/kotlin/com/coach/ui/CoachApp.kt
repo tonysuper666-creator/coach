@@ -2,8 +2,17 @@ package com.coach.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import com.coach.ui.v7.paperShadow
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.coach.domain.flag
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -12,7 +21,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.coach.client.CourseView
 import com.coach.ui.adaptive.LayoutRules
 import com.coach.ui.adaptive.NavStyle
@@ -58,10 +69,13 @@ class CoachController(
     internal val quizMessageAnchors = HashMap<String, MutableMap<String, Int>>()
     /** 看过（或预取过）的教材页，整个会话里留着：学习页的「看原文」多半不用再等 Mac。 */
     internal val sourcePages = HashMap<PageKey, com.coach.client.SourcePage>()
+    internal var readerFocus by mutableStateOf(false)
     /** 期末面板点「修复 / 开讲 / 开练」留下的一次性启动（kpId → 是否出题）：学习页等历史加载完取走、发一次，重连不会再发。 */
     internal val startRequests = mutableStateMapOf<String, Boolean>()
     /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
-    internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(emptyMap())
+    internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(
+        sync.mainlineState(courseId, "mock-drafts").mapNotNull { (key, value) -> (value as? JsonObject)?.let { key to it } }.toMap())
+    internal fun persistMockDrafts() { sync.saveMainlineState(courseId, JsonObject(mockDrafts.value), "mock-drafts") }
     /** 模拟考的保存和续考时读卷都排这一把锁：同一时刻只有一个请求在路上，旧答案不会后到覆盖新答案，续考读到的也是最后存上的。 */
     internal val mockSaving = kotlinx.coroutines.sync.Mutex()
     /** 每场考试最后发出的保存序号，只增不减（锁内读写）。 */
@@ -71,9 +85,27 @@ class CoachController(
     internal var essay by mutableStateOf<EssaySession?>(null)
         private set
 
+    init {
+        val saved = sync.mainlineState(courseId, "essay-draft")
+        val posed = saved["posed"] as? JsonObject
+        val attempt = (saved["attempt"] as? JsonPrimitive)?.content.orEmpty()
+        val deadline = (saved["deadline"] as? JsonPrimitive)?.content?.toLongOrNull()
+        if (posed != null && attempt.isNotEmpty() && deadline != null) startEssay(EssaySession(attempt, posed, deadline).also {
+            it.text = (saved["text"] as? JsonPrimitive)?.content.orEmpty()
+            it.handedIn = saved.flag("handedIn")
+        })
+    }
+
+    internal fun persistEssay() {
+        val s = essay
+        sync.saveMainlineState(courseId, if (s == null) com.coach.domain.json() else com.coach.domain.json(
+            "attempt" to s.attemptId, "posed" to s.posed, "deadline" to s.deadline, "text" to s.text, "handedIn" to s.handedIn), "essay-draft")
+    }
+
     /** 题目到手，开始计时。截止由这里盯着，不看练习页在不在屏幕上：回复习页、切到别的页，到点照样交卷。 */
     internal fun startEssay(s: EssaySession) {
         essay = s
+        persistEssay()
         essayClock.launch {
             while (essay === s && !s.handedIn) {
                 val left = s.deadline - nowMillis()
@@ -87,11 +119,12 @@ class CoachController(
     /** 交卷：只交一次。草稿就此定稿，命令先落进本机队列再送 Mac，断网也不丢。 */
     internal fun handInEssay(s: EssaySession) {
         if (s.handedIn || essay !== s) return
-        if (s.text.isBlank()) { essay = null; return }
+        if (s.text.isBlank()) { essay = null; persistEssay(); return }
         tutor.telemetry?.record("tap", "essay_submit")
         val cmd = sync.enqueue(CommandBody("submit_answer", courseId, nowMillis(),
             json("attemptId" to s.attemptId, "answer" to s.text, "posedSnapshot" to s.posed, "threadId" to "essay:${s.attemptId}")))
         s.handedIn = true
+        persistEssay()
         essayClock.launch {
             try {
                 withContext(io) { sync.syncOnce() }
@@ -103,7 +136,7 @@ class CoachController(
         }
     }
 
-    internal fun closeEssay() { essay = null }
+    internal fun closeEssay() { essay = null; persistEssay() }
 }
 
 /** 公式 SVG 缓存。缺失的公式显示源码 chip，同时请求 [fetch]；取到后重组。 */
@@ -140,155 +173,187 @@ val WIDE_LAYOUT_MIN_WIDTH = 640.dp
 val SOURCE_SPLIT_MIN_WIDTH = 840.dp
 
 /** 底栏/侧轨的五个入口。「学习」不是入口：它是从「继续」或某个知识点打开的线程。 */
-enum class AppTab(val label: String, val glyph: String) {
-    TODAY("今天", "◉"), ROUTE("路线", "☰"), REVIEW("复习", "↻"), RECORDS("记录", "✓"), RESOURCES("资料", "❖"),
+@kotlinx.serialization.Serializable
+enum class AppTab(val label: String, val glyph: String? = null) {
+    TODAY("今天", "◉"), ROUTE("路线", "☰"), REVIEW("复习", "↻"), RECORDS("记录", "✓"), RESOURCES("资料"),
 }
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, backHandler: @Composable (Boolean, () -> Unit) -> Unit = { _, _ -> }, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}) {
-    val currentSettings by rememberUpdatedState(settings)
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
-    val view by produceState<CourseView?>(null, revision) {
+    val view by produceState<CourseView?>(null, c, revision) {
         value = withContext(Dispatchers.Default) {
             val events = c.sync.localEvents(c.courseId)
             if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
         }
     }
-    var open by remember { mutableStateOf(initialKp?.let { it to initialAutoStart }) }
-    var reviewMode by remember { mutableStateOf(false) }
-    var tab by remember { mutableStateOf(initialTab) }
-    var source by remember { mutableStateOf<SourceJump?>(null) }
-    var reviewWeek by remember { mutableStateOf<Int?>(null) }
-    // 模拟考整屏打开："" 是模拟考首页，其余是某一场考试的 id。
-    var mock by remember { mutableStateOf<String?>(null) }
-    var essayOpen by remember { mutableStateOf(false) }
-    var mainline by remember { mutableStateOf(false) }
-    AppBackHandler(source != null, reviewWeek != null, open != null,
-        closeSource = { source = null }, closeReview = { reviewWeek = null },
-        closeStudy = { open = null; tab = AppTab.TODAY }, register = backHandler)
-    val actionScope = rememberCoroutineScope()
-    val weekActions = remember(c) { WeekActions(c, actionScope) }
-    val openKp: (String, Boolean) -> Unit = { id, start -> c.tutor.telemetry?.record("tap", "open_kp"); reviewMode = false; reviewWeek = null; mock = null; essayOpen = false; mainline = false; source = null; open = id to start }
-    val practiceReview: (String, Boolean) -> Unit = { id, start -> reviewMode = true; mock = null; essayOpen = false; mainline = false; source = null; reviewWeek = null; open = id to start }
-    val openReview: () -> Unit = { c.tutor.telemetry?.record("tap", "review"); tab = AppTab.REVIEW; open = null; source = null }
-    val openEssay: () -> Unit = { c.tutor.telemetry?.record("tap", "essay"); reviewWeek = null; mock = null; mainline = false; open = null; source = null; essayOpen = true }
-    val select: (AppTab) -> Unit = { reviewWeek = null; mock = null; essayOpen = false; mainline = false; tab = it; open = null; source = null }
-    val focus = LocalFocusManager.current
-    // 打开的知识点有教材锚点：先把那一页取到本机，「看原文」点下去时通常已经在手里。
-    val anchorOfOpen = open?.let { (id, _) -> view?.kpAny(id) }?.takeIf { it.anchorDoc.isNotBlank() }
-    LaunchedEffect(anchorOfOpen?.id, ui.connected) {
-        if (anchorOfOpen != null && ui.connected) runCatching { prefetchSourcePage(c, anchorOfOpen.anchorDoc, anchorOfOpen.anchorPdfPage) }
+    val navigation = androidx.compose.runtime.saveable.rememberSaveable(c.courseId, saver = AppNavigation.saver) {
+        val saved = c.sync.mainlineState(c.courseId, "navigation")["stack"]?.let { (it as? JsonPrimitive)?.content }
+        if (initialKp == null && initialTab == AppTab.TODAY && saved != null) AppNavigation.restore(saved) ?: AppNavigation(listOf(AppEntry(tab = initialTab)))
+        else if (initialKp == null && initialTab == AppTab.TODAY && c.sync.mainlineState(c.courseId).flag("open"))
+            AppNavigation(listOf(AppEntry(tab = AppTab.REVIEW), AppEntry(AppPage.MAINLINE, AppTab.REVIEW, label = "选择题主线")))
+        else AppNavigation(listOf(AppEntry(tab = initialTab)) + listOfNotNull(initialKp?.let {
+            AppEntry(AppPage.STUDY, initialTab, it, initialAutoStart, label = it)
+        }))
     }
+    val entry = navigation.current
+    LaunchedEffect(entry.page, entry.tab) {
+        c.tutor.telemetry?.record("screen", when (entry.page) {
+            AppPage.HOME -> entry.tab.name.lowercase()
+            AppPage.STUDY -> "study"
+            else -> entry.page.name.lowercase()
+        })
+    }
+    val mainline = navigation.entries.any { it.page == AppPage.MAINLINE }
     SideEffect {
-        weekActions.onOpen = { id -> reviewMode = false; source = null; reviewWeek = null; mock = null; essayOpen = false; mainline = false; tab = AppTab.TODAY; open = id?.let { it to true } }
-        weekActions.onReview = { week -> reviewWeek = week; essayOpen = false; mainline = false; open = null; source = null }
+        c.sync.saveMainlineState(c.courseId, com.coach.domain.json("stack" to navigation.encode()), "navigation")
+        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + ("open" to JsonPrimitive(mainline))))
     }
-    LaunchedEffect(open, tab, source, essayOpen) {
-        val screen = when {
-            essayOpen -> "essay"
-            open != null -> "study"
-            source != null -> null
-            else -> when (tab) {
-                AppTab.TODAY -> "today"
-                AppTab.ROUTE -> "route"
-                AppTab.REVIEW -> "review"
-                AppTab.RECORDS -> "records"
-                AppTab.RESOURCES -> "resources"
+    val dispatcher = remember { AppBackDispatcher() }
+    PlatformBackHandler(dispatcher.enabled) { dispatcher.back() }
+    val holder = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
+    val scope = rememberCoroutineScope()
+    val weekActions = remember(c) { WeekActions(c, scope) }
+    val focus = LocalFocusManager.current
+    val select: (AppTab) -> Unit = navigation::select
+    fun openStudy(id: String, start: Boolean, review: Boolean = false) {
+        c.tutor.telemetry?.record("tap", "open_kp")
+        val label = view?.kpAny(id)?.title?.let { splitTitle(it).second } ?: id
+        val destination = AppEntry(AppPage.STUDY, id = id, autoStart = start, review = review, label = label)
+        if (entry.page == AppPage.STUDY) navigation.replace(destination) else navigation.push(destination)
+    }
+    fun startLearning(target: LearningTarget) {
+        if (target.legacy || target.week == null) { openStudy(target.kp.id, true); return }
+        val saved = c.sync.mainlineState(c.courseId)
+        c.sync.saveMainlineState(c.courseId, JsonObject(saved + mapOf("week" to JsonPrimitive(target.week), "targetKp" to JsonPrimitive(target.kp.id),
+            "entry" to JsonPrimitive(target.entry))))
+        navigation.push(AppEntry(AppPage.MAINLINE, id = "continue", week = target.week, label = "第 ${target.week} 周"))
+    }
+    val openKp: (String, Boolean) -> Unit = { id, start ->
+        val current = view
+        if (start && current != null) {
+            val common = c.learningTarget(current)?.takeIf { it.kp.id == id }
+            val explicit = current.kp(id)?.let { kp ->
+                val week = current.weeks.firstOrNull { n -> current.weekKps(n).any { it.id == id } }
+                LearningTarget(kp, week, false, legacy = week == null)
+            }
+            (common ?: explicit)?.let { weekActions.start(current, it) }
+        }
+        else openStudy(id, false)
+    }
+    val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }
+    fun openTask(page: AppPage, label: String, id: String = "") {
+        if (navigation.current.page == AppPage.MAINLINE) {
+            (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.content?.toIntOrNull()?.let { navigation.rename("第 $it 周") }
+        }
+        navigation.push(AppEntry(page, id = id, label = label))
+    }
+    val openEssay: () -> Unit = { openTask(AppPage.ESSAY, "论述限时练习") }
+    val studyEntry = navigation.entries.lastOrNull { it.page == AppPage.STUDY }
+    // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
+    val target = studyEntry?.let { view?.kpAny(it.id) }
+    LaunchedEffect(target?.id, ui.connected) {
+        if (target != null && ui.connected && target.anchorDoc.isNotBlank()) runCatching { prefetchSourcePage(c, target.anchorDoc, target.anchorPdfPage) }
+    }
+    val openReference: (KpRow) -> Unit = { kp ->
+        if (kp.anchorDoc.isNotBlank()) {
+            focus.clearFocus()
+            navigation.rename(splitTitle(kp.title).second)
+            navigation.push(AppEntry(AppPage.SOURCE, id = kp.anchorDoc, pdfPage = kp.anchorPdfPage, label = "原文"))
+        }
+    }
+    var sourceShown by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
+    SideEffect {
+        weekActions.onStart = ::startLearning
+        weekActions.onBrowse = { n ->
+            if (n == 0) navigation.select(AppTab.ROUTE)
+            else {
+                val destination = AppEntry(AppPage.WEEK, week = n, label = "第 $n 周")
+                if (navigation.current.page == AppPage.WEEK) navigation.replace(destination) else navigation.push(destination)
             }
         }
-        if (screen != null) c.tutor.telemetry?.record("screen", screen)
+        weekActions.onOpen = { id -> if (id != null) openStudy(id, true) else navigation.back() }
+        weekActions.onReview = { week -> navigation.push(AppEntry(AppPage.WEEK_REVIEW, week = week, label = "第 $week 周错题")) }
     }
-
+    var hideTaskChrome by remember { mutableStateOf(false) }
+    val updateChrome = remember { { hidden: Boolean -> hideTaskChrome = hidden } }
     CoachTheme(dark ?: isSystemInDarkTheme()) {
-        Surface(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                OfflineBanner(ui, c)
-                val current = view
-                if (current != null) courseActions(current)
-                // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
-                val target = open?.let { (id, _) -> current?.kpAny(id) }
-                // The panes are movable: when the window changes shape (fold/unfold, Pad rotation) a pane that moves between the
-                // single-column and two-column layouts keeps its composition: reading position, draft, chosen answers, running stream.
-                val studyPane = remember(c) { movableContentOf<StudyPaneArgs> { args ->
-                    key(args.kp.id, args.reviewMode) { StudyScreen(c, args.kp, args.view, args.ui, args.autoStart, args.onBack, initialDraft, args.onOpenReference, if (args.reviewMode) null else weekActions, reviewMode = args.reviewMode) }
-                } }
-                val reviewPane = remember(c) { movableContentOf<CourseView> { reviewView ->
-                    ReviewScreen(c, reviewView, onOpenKp = practiceReview, onBack = null, onOpenMock = { mock = "" }, onOpenEssay = openEssay,
-                        onOpenMainline = { c.tutor.telemetry?.record("tap", "mainline"); mainline = true }, reminderSettings = { currentSettings() })
-                } }
-                val openReference: (KpRow) -> Unit = { kp -> if (kp.anchorDoc.isNotBlank()) { focus.clearFocus(); source = SourceJump(kp.anchorDoc, kp.anchorPdfPage) } }
-                var sourceShown by remember { mutableStateOf(false) }
-                LaunchedEffect(target?.id) { if (initialSource && !sourceShown && target != null) { sourceShown = true; openReference(target) } }
-                BoxWithConstraints(Modifier.fillMaxSize()) {
-                    // The soft keyboard does not change the window's shape. Counting the height it covers flips a phone
-                    // (~750dp tall, ~400dp left with the keyboard up) into the short-height rail, which rebuilds the
-                    // open page: the focused field loses focus, the keyboard drops, and the next keystrokes go nowhere.
-                    val keyboard = with(LocalDensity.current) {
-                        (WindowInsets.safeDrawing.getBottom(this) - WindowInsets.systemBars.union(WindowInsets.displayCutout).getBottom(this)).coerceAtLeast(0).toDp()
-                    }
-                    val layout = LayoutRules.compute(WindowSpec(maxWidth.value, (maxHeight + keyboard).value))
-                    val bottomBar = layout.nav == NavStyle.BottomBar
-                    val contentWidth = maxWidth - layout.navWidthDp.dp
-                    val wide = contentWidth >= WIDE_LAYOUT_MIN_WIDTH
-                    LaunchedEffect(wide) { c.tutor.telemetry?.record("screen", if (wide) "wide" else "compact") }
-                    // Review, Records and Resources use the whole width; Today and Route pair a list with the study thread.
-                    val paired = tab == AppTab.TODAY || tab == AppTab.ROUTE
-                    val body: @Composable () -> Unit = {
-                        val tabContent: @Composable () -> Unit = {
-                            when (tab) {
-                                AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = if (wide) target?.id else null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
-                                AppTab.ROUTE -> RouteScreen(c, current, if (wide) target?.id else null, openKp, { weekActions.onReview(it) })
-                                AppTab.REVIEW -> if (current != null) reviewPane(current) else CenterMessage("正在加载课程…")
-                                AppTab.RECORDS -> RecordsScreen(c, current, wide, onOpenMock = { id -> mock = id }) { id -> openKp(id, false) }
-                                AppTab.RESOURCES -> ResourcesScreen(c, null, null)
+        CompositionLocalProvider(LocalAppBack provides dispatcher, LocalAppManagedNavigation provides true, LocalTaskChrome provides updateChrome,
+            com.coach.ui.v7.LocalDeskSelect provides select) {
+            AppBackHandler(navigation.canGoBack, priority = -100) { navigation.back() }
+            AppBackHandler(entry.page == AppPage.SOURCE, priority = 250) { navigation.back() }
+            Surface(Modifier.fillMaxSize().onPreviewKeyEvent {
+                it.key == Key.Escape && it.type == KeyEventType.KeyUp && dispatcher.back()
+            }) {
+                Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                    OfflineBanner(ui, c)
+                    view?.let { courseActions(it) }
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val keyboard = with(LocalDensity.current) {
+                            (WindowInsets.safeDrawing.getBottom(this) - WindowInsets.systemBars.union(WindowInsets.displayCutout).getBottom(this)).coerceAtLeast(0).toDp()
+                        }
+                        val window = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
+                        val layout = LayoutRules.navigation(window)
+                        val current = view
+                        val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY, AppPage.SETTINGS)
+                        val showNav = !task && !hideTaskChrome
+                        val render: @Composable (AppEntry) -> Unit = { page ->
+                            holder.SaveableStateProvider("${c.courseId}:${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
+                                when (page.page) {
+                                    AppPage.HOME -> when (page.tab) {
+                                        AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
+                                        AppTab.ROUTE -> RouteScreen(c, current, null, openKp, weekActions.onReview, weekActions::select)
+                                        AppTab.REVIEW -> if (current != null) ReviewScreen(c, current, { id, start -> openStudy(id, start, true) }, if (navigation.canGoBack) ({ navigation.back() }) else null,
+                                            onOpenMock = { navigation.push(AppEntry(AppPage.MOCK, label = "模拟考")) }, onOpenEssay = openEssay,
+                                            onOpenMainline = { week, direct ->
+                                                val decision = current.let { c.learningTarget(it) }
+                                                if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
+                                                navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
+                                            }, reminderSettings = { TextButton(onClick = { navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }) { Text("设置") } }) else CenterMessage("正在加载课程…")
+                                        AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
+                                        AppTab.RESOURCES -> ResourcesScreen(c, null, null)
+                                    }
+                                    AppPage.WEEK -> if (current != null) com.coach.ui.v7.WeekPage(c, current, ui, weekActions, openKp, page.week!!) else CenterMessage("正在加载课程…")
+                                    AppPage.STUDY -> current?.kpAny(page.id)?.let { kp ->
+                                        StudyScreen(c, kp, current, ui, page.autoStart, { navigation.back() }, initialDraft, openReference,
+                                            if (page.review) null else weekActions, page.review, backLabel = "← ${navigation.entries.getOrNull(navigation.entries.indexOf(page) - 1)?.label ?: page.tab.label}")
+                                    } ?: CenterMessage("正在加载课程…")
+                                    AppPage.MAINLINE -> if (current != null) MainlineScreen(c, current, { navigation.back() },
+                                        { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview, directEntry = page.id == "continue", parentLabel = navigation.parentLabel,
+                                        initialWeek = page.week, browseOnly = page.id == "catalog", onBrowseWeek = weekActions::select,
+                                        onStartWeek = { n -> (c.learningTarget(current, n) ?: current.weekKps(n).firstOrNull()?.let { LearningTarget(it, n, false) })?.let { weekActions.start(current, it) } })
+                                    AppPage.MOCK -> if (current != null) MockScreen(c, current, { navigation.back() }, page.id.ifEmpty { null }, weekActions.onReview, backLabel = "← ${navigation.parentLabel}")
+                                    AppPage.ESSAY -> if (current != null) EssayScreen(c, current, { navigation.back() }, backLabel = "暂离 · ${navigation.parentLabel}")
+                                    AppPage.WEEK_REVIEW -> if (current != null) WeekMistakesScreen(c, current, page.week!!, "← ${navigation.parentLabel}") { navigation.back() }
+                                    AppPage.SETTINGS -> Column {
+                                        TextButton(onClick = { navigation.back() }) { Text("← ${navigation.parentLabel}") }
+                                        Text("设置", style = MaterialTheme.typography.titleLarge)
+                                        settings()
+                                    }
+                                    AppPage.SOURCE -> Unit
+                                }
                             }
                         }
-                        val reading = source
-                        // Pad 横屏：左讲解、右原文并排（列表栏让出位置）；窄一点的窗口原文盖在讲解上面，讲解一直留在下面，返回后进度原样。
-                        val split = reading != null && wide && paired && target != null && current != null && contentWidth >= SOURCE_SPLIT_MIN_WIDTH
-                        val paneArgs = target?.let { t -> current?.let { v -> StudyPaneArgs(t, v, ui, open?.second == true, if (wide && paired) null else ({ open = null }), openReference, reviewMode) } }
-                        val mockId = mock
-                        if (mockId != null && current != null) {
-                            key(mockId) { MockScreen(c, current, onBack = { mock = null }, initialMockId = mockId.ifEmpty { null }, onReviewWeek = { week -> mock = null; reviewWeek = week }) }
-                        } else if (essayOpen && current != null) {
-                            EssayScreen(c, current, onBack = { essayOpen = false })
-                        } else if (mainline && current != null) {
-                            MainlineScreen(c, current, onBack = { mainline = false }, onOpenSteps = { mainline = false; mock = "" }, onOpenEssay = openEssay,
-                                onReviewWeek = { week -> mainline = false; reviewWeek = week })
-                        } else if (reviewWeek != null && current != null) {
-                            WeekMistakesScreen(c, current, reviewWeek!!, back = if (tab == AppTab.REVIEW) "← 复习" else "← 今天", onBack = { reviewWeek = null })
-                        } else if (split) SourceSplit(
-                            study = { studyPane(paneArgs!!) },
-                            source = { ResourcesScreen(c, reading, onBack = { source = null }, backLabel = "✕ 关闭原文") },
-                        ) else SourceOverlay(
-                            covered = reading != null,
-                            base = {
-                                when {
-                                    wide && paired -> Row(Modifier.fillMaxSize()) {
-                                        Box(Modifier.width((contentWidth * 0.38f).coerceIn(300.dp, 400.dp)).fillMaxHeight()) { tabContent() }
-                                        VerticalDivider()
-                                        Box(Modifier.weight(1f).fillMaxHeight()) {
-                                            if (paneArgs != null) studyPane(paneArgs) else CenterMessage("选一个知识点，或点「继续」。")
-                                        }
-                                    }
-                                    paneArgs != null -> studyPane(paneArgs)
-                                    else -> tabContent()
-                                }
-                            },
-                            overlay = { ResourcesScreen(c, reading, onBack = { source = null }) },
-                        )
-                    }
-                    // Wide windows keep the nav on the side; the single-column phone layout hides it while a thread or page is open.
-                    val navVisible = !(bottomBar && (open != null || source != null || reviewWeek != null || mock != null || essayOpen || mainline))
-                    if (bottomBar) Column(Modifier.fillMaxSize()) {
-                        Box(Modifier.weight(1f).fillMaxWidth()) { body() }
-                        if (navVisible) AppNavBar(tab, select)
-                    } else Row(Modifier.fillMaxSize()) {
-                        AppNavRail(tab, layout.nav == NavStyle.IconRail, select)
-                        VerticalDivider()
-                        Box(Modifier.weight(1f).fillMaxHeight()) { body() }
+                        val content by rememberUpdatedState<@Composable () -> Unit> {
+                            CompositionLocalProvider(com.coach.ui.v7.LocalDeskWindow provides window) {
+                                val reading = entry.page == AppPage.SOURCE
+                                SourceOverlay(reading,
+                                    base = { render(if (reading) navigation.entries[navigation.entries.lastIndex - 1] else entry) },
+                                    overlay = { holder.SaveableStateProvider("${c.courseId}:$entry") { ResourcesScreen(c, SourceJump(entry.id, entry.pdfPage), { navigation.back() }, "← ${navigation.parentLabel}") } })
+                            }
+                        }
+                        // One movable page and one chrome owner, including a rail/bottom-bar transition.
+                        val page = remember { movableContentOf { content() } }
+                        if (layout.nav == NavStyle.BottomBar) Column(Modifier.fillMaxSize()) {
+                            Box(Modifier.weight(1f).fillMaxWidth()) { page() }
+                            if (showNav) AppNavBar(entry.tab, select)
+                        } else Row(Modifier.fillMaxSize()) {
+                            if (showNav) { AppNavRail(entry.tab, layout.nav == NavStyle.IconRail, select); VerticalDivider() }
+                            Box(Modifier.weight(1f).fillMaxHeight()) { page() }
+                        }
                     }
                 }
             }
@@ -296,7 +361,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
 }
 
-/** Let Android own the system callback; the shared navigation decides which layer to close. */
+/**
+ * 系统返回键的关闭顺序：原文 → 周复习 → 学习线程。应用里由 [AppNavigation] 的返回栈按同一顺序出栈；
+ * 这里保留分层规则本身，供 [AppBackTest] 钉住顺序。
+ */
 @Composable
 internal fun AppBackHandler(sourceOpen: Boolean, reviewOpen: Boolean, studyOpen: Boolean,
                             closeSource: () -> Unit, closeReview: () -> Unit, closeStudy: () -> Unit,
@@ -332,27 +400,61 @@ internal fun SourceOverlay(covered: Boolean, base: @Composable () -> Unit, overl
     }
 }
 
+/** Shared by the actual app and JVM captures, including the narrow-screen bottom navigation. */
 @Composable
-private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
+fun DeskNavigation(selected: AppTab, vertical: Boolean, onSelect: (AppTab) -> Unit) {
+    val tabs = AppTab.entries
+    val c = com.coach.ui.theme.CoachTheme.colors
+    val item: @Composable (AppTab) -> Unit = { tab ->
+        val active = selected == tab
+        Column(Modifier.width(64.dp).then(if (active) Modifier.paperShadow("card", c.dark) else Modifier)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp)).background(if (active) c.surface1 else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable { onSelect(tab) }.padding(vertical = if (active) 6.dp else if (vertical) 8.dp else 0.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            com.coach.ui.v7.DeskNavIcon(tab, Modifier.size(22.dp), if (active) c.fgPrimary else c.fgSecondary)
+            Text(tab.label, style = MaterialTheme.typography.labelMedium.copy(lineHeight = 22.2.sp), color = if (active) c.fgPrimary else c.fgSecondary)
+        }
+    }
+    if (vertical) Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) { tabs.forEach { item(it) } }
+    else Row(Modifier.fillMaxWidth().height(68.dp).background(c.bgCanvas), horizontalArrangement = Arrangement.SpaceAround, verticalAlignment = Alignment.CenterVertically) { tabs.forEach { item(it) } }
+}
+
+@Composable
+private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit, v7: Boolean = false) {
+    val ink = com.coach.ui.theme.CoachTheme.colors
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = if (v7) 0.dp else 3.dp,
+        modifier = (if (v7) Modifier.height(coach.design.tokens.V7Windows.Outer.footH) else Modifier).testTag("app-navigation"),
+        windowInsets = if (v7) WindowInsets(0.dp) else NavigationBarDefaults.windowInsets) {
         AppTab.entries.forEach { t ->
-            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, style = MaterialTheme.typography.titleMedium) }, label = { Text(t.label) })
+            NavigationBarItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, colors = if (v7) NavigationBarItemDefaults.colors(selectedIconColor = ink.accent, selectedTextColor = ink.fgPrimary, indicatorColor = ink.surface2, unselectedIconColor = ink.fgSecondary, unselectedTextColor = ink.fgSecondary) else NavigationBarItemDefaults.colors(), icon = { AppNavIcon(t) }, label = { Text(t.label) })
         }
     }
 }
 
 @Composable
 internal fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) -> Unit) {
-    NavigationRail(containerColor = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxHeight()) {
+    NavigationRail(containerColor = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxHeight().testTag("app-navigation")) {
         Spacer(Modifier.weight(1f))
         AppTab.entries.forEach { t ->
-            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, icon = { Text(t.glyph, modifier = Modifier.clearAndSetSemantics { if (compact) contentDescription = t.label }, style = MaterialTheme.typography.titleMedium) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
+            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" },
+                // 窄侧轨只画图标：读屏读名称，不读「◉」「☰」这类字形。
+                icon = { Box(if (compact) Modifier.clearAndSetSemantics { contentDescription = t.label } else Modifier) { AppNavIcon(t) } },
+                label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
         }
         Spacer(Modifier.weight(1f))
     }
 }
 
-private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?, val reviewMode: Boolean)
+@Composable
+private fun AppNavIcon(tab: AppTab) {
+    val glyph = tab.glyph
+    if (glyph == null) {
+        com.coach.ui.v7.DeskNavIcon(tab, Modifier.size(22.dp), LocalContentColor.current)
+    } else {
+        Text(glyph, style = MaterialTheme.typography.titleMedium)
+    }
+}
+
+private data class StudyPaneArgs(val kp: KpRow, val view: CourseView, val ui: TutorUiState, val autoStart: Boolean, val onBack: (() -> Unit)?, val onOpenReference: ((KpRow) -> Unit)?, val reviewMode: Boolean, val backLabel: String)
 
 /**
  * 横幅跟的是「站稳了」的连接状态：断线持续 [DISCONNECT_GRACE_MS] 才出现，恢复后稳定 [RECONNECT_SETTLE_MS] 才收起，
@@ -392,8 +494,8 @@ private fun OfflineBanner(ui: TutorUiState, c: CoachController) {
     }
 }
 
-/** 标签底色 = 字色的这么多分之几：太深会把字色压成低对比，由 StudyChromeTest 守住 ≥4.5。 */
-internal const val CHIP_TINT = .12f
+/** V7 status labels use plain ink on the current paper/desk; StudyChromeTest checks both actual surfaces. */
+internal const val CHIP_TINT = 0f
 
 @Composable
 internal fun StatusChip(text: String, color: Color) {

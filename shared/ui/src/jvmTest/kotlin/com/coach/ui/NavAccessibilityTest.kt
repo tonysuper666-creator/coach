@@ -9,7 +9,7 @@ class NavAccessibilityTest {
         setContent { CoachTheme(false) { AppNavRail(AppTab.TODAY, compact = true) {} } }
         for (tab in AppTab.entries) {
             onNodeWithContentDescription(tab.label).assertExists()
-            onNodeWithText(tab.glyph).assertDoesNotExist()
+            tab.glyph?.let { onNodeWithText(it).assertDoesNotExist() }
         }
     }
 }

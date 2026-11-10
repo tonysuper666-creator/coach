@@ -7,6 +7,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -40,23 +41,33 @@ internal suspend fun prefetchSourcePage(c: CoachController, docId: String, pdfPa
 @Composable
 fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?, backLabel: String = "← 学习") {
     val http = c.course
+    var privateReader by rememberSaveable(jump?.docId, jump?.pdfPage) { mutableStateOf(false) }
+    AppBackHandler(privateReader, priority = 0) { privateReader = false }
+    if (privateReader && http != null) {
+        PrivateReaderScreen(http.reader, practice = { week, ids, close -> PagePractice(c, week, ids, close) }) { privateReader = false }
+        return
+    }
     var attempt by remember { mutableStateOf(0) }
     val docs by produceState<Load<List<SourceDoc>>>(Load.Pending, http, attempt) {
         value = http?.sources()?.let { Load.Ready(it) } ?: Load.Failed
     }
-    var open by remember(jump) { mutableStateOf(jump?.let { PageKey(it.docId, it.pdfPage) }) }
+    var openDoc by rememberSaveable(jump?.docId, jump?.pdfPage) { mutableStateOf(jump?.docId) }
+    var openPage by rememberSaveable(jump?.docId, jump?.pdfPage) { mutableIntStateOf(jump?.pdfPage ?: 1) }
+    val open = openDoc?.let { PageKey(it, openPage) }
+    AppBackHandler(open != null && jump == null, priority = 10) { openDoc = null }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp).testTag("source-back")) { Text(backLabel) }
-            else if (open != null) TextButton(onClick = { open = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 全部章节") }
+            else if (open != null) TextButton(onClick = { openDoc = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 资料") }
             Text("资料", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleLarge)
+            if (jump == null && http != null) TextButton(onClick = { privateReader = true }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-private-reader")) { Text("教材阅读") }
         }
         HorizontalDivider()
         val list = (docs as? Load.Ready)?.value
         val key = open
         when {
             http == null -> CenterMessage("这个版本没有接入资料浏览。")
-            key != null -> PageReader(c, list, key, onPage = { open = it }, onRetry = { attempt++ })
+            key != null -> PageReader(c, list, key, onPage = { openDoc = it.docId; openPage = it.pdfPage }, onRetry = { attempt++ })
             docs is Load.Pending -> CenterMessage("正在取课程原文…")
             list == null -> Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("取不到课程原文：Mac 没连上，或 Mac 上的服务还没更新到有资料接口。", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -64,7 +75,7 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
                 OutlinedButton(onClick = { attempt++ }, modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
             }
             list.isEmpty() -> CenterMessage("课程里还没有可浏览的原文。")
-            else -> DocList(list) { doc -> open = PageKey(doc.docId, doc.firstPdfPage) }
+            else -> DocList(list) { doc -> openDoc = doc.docId; openPage = doc.firstPdfPage }
         }
     }
 }

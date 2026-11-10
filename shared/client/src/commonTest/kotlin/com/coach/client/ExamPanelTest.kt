@@ -98,7 +98,7 @@ class ExamPanelTest {
         assertTrue(missing.focus.isEmpty())
         assertFalse(missing.allSolid)
         assertEquals(listOf(7, 8, 10), missing.unplanned, "a zero-weight week without points is not on the exam, so it is not missing")
-        assertEquals("W7–W8、W10", weekSpans(missing.unplanned))
+        assertEquals("第 7–8 周、第 10 周", weekSpans(missing.unplanned))
     }
 
     @Test fun aMidtermWeekTheOutlineExemptsIsShownAsExemptNotMissingAndNeverMastered() {

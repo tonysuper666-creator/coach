@@ -1,4 +1,5 @@
 plugins {
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kmp)
     alias(libs.plugins.kotlin.compose)
@@ -10,8 +11,13 @@ kotlin {
         namespace = "com.coach.shared.ui"
         compileSdk = 37
         minSdk = 34
+        androidResources { enable = true }
     }
     jvmToolchain(17)
+    sourceSets.jvmMain {
+        resources.srcDir("src/androidMain/res")
+        resources.srcDir("src/androidMain/assets")
+    }
     sourceSets.commonMain.dependencies {
         implementation(project(":shared:domain"))
         api(project(":shared:client"))
@@ -25,7 +31,11 @@ kotlin {
         implementation(libs.navigationevent)
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
+    sourceSets.androidMain.dependencies { implementation("androidx.activity:activity-compose:1.12.0") }
     sourceSets.jvmTest.dependencies {
+        implementation(project(":server:app"))
+        implementation(project(":server:core"))
+        implementation(libs.ktor.netty)
         @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
         implementation(compose.uiTest)
         implementation(compose.desktop.currentOs)

@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.domain.*
+import kotlinx.serialization.json.*
 
 /**
  * 错题卡片的标题：错题是历史，退休点上的错题仍要显示知识点名，
@@ -24,7 +26,7 @@ internal fun mistakeTitle(view: CourseView, kpId: String): String = view.kpAny(k
 
 /** Due queue from the ledger; Start opens the independent review tutor thread. */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: (() -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     var tab by remember(c.courseId) { mutableStateOf(if (due.isNotEmpty()) 1 else 0) }
@@ -36,7 +38,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         }
         HorizontalDivider()
         Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
-        ReviewShortcuts(c, onOpenMainline, onOpenMock, onOpenEssay)
+        ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
         PrimaryTabRow(selectedTabIndex = tab) {
             listOf("错题 ${view.mistakes.items.size}", "到期 ${due.size}", "离线练习").forEachIndexed { index, label ->
                 Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label) })
@@ -52,13 +54,13 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 if (due.isEmpty()) {
                     CenterMessage("今天没有到期的复习。")
                 } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item { Text("${due.size} 个知识点到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    item { Text("${due.size} 节到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                     items(due, key = { it.kp.id }) { item ->
                         val (tag, main) = splitTitle(item.kp.title)
                         Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Column(Modifier.weight(1f)) {
-                                    if (tag.isNotBlank()) Text(tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    if (tag.isNotBlank()) Text(sourceLine(tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                     Text((if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
                                 }
@@ -173,14 +175,65 @@ internal fun MistakeCard(mistake: com.coach.client.Mistake, title: String, math:
  * 说明文字只在宽窗口显示。
  */
 @Composable
-private fun ReviewShortcuts(c: CoachController, onOpenMainline: (() -> Unit)?, onOpenMock: (() -> Unit)?, onOpenEssay: (() -> Unit)?) {
+private fun ReviewShortcuts(c: CoachController, view: CourseView, onOpenMainline: ((Int?, Boolean) -> Unit)?, onOpenMock: (() -> Unit)?, onOpenEssay: (() -> Unit)?) {
     if (onOpenMainline == null && onOpenMock == null && onOpenEssay == null) return
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         val wide = maxWidth >= 600.dp
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (onOpenMainline != null) ShortcutTile("选择题主线", "按周从铺垫题做到桥接题，答完立刻看讲解".takeIf { wide }, "open-mainline", onOpenMainline)
+            if (onOpenMainline != null) MainlineTile(c, view, wide, onOpenMainline)
             if (onOpenMock != null) ShortcutTile("模拟考与单选速刷", "限时整卷看现在能拿几分、丢在哪；单选 7 题 14 分钟".takeIf { wide }, "open-mock", onOpenMock)
             if (onOpenEssay != null) EssayEntry(c, wide, onOpenEssay)
+        }
+    }
+}
+
+/**
+ * 主线入口（main 的 MainlineEntry）放进并排的一格：一键继续本周、看本周要点、选其他周；
+ * 窄屏这一格多给一点宽度，三个按钮竖排，说明文字只在宽窗口显示。
+ */
+@Composable
+private fun RowScope.MainlineTile(c: CoachController, view: CourseView, wide: Boolean, onOpen: (Int?, Boolean) -> Unit) {
+    var overview by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(c) {
+        val http = c.course ?: return@LaunchedEffect
+        do {
+            // The course endpoint is a blocking call: keep it off the composition dispatcher, or the frame that
+            // has to show the answer waits for the socket and the entry stays on 正在连接… while it does.
+            val reply = withContext(Dispatchers.IO) { http.mainline() }
+            error = reply.error
+            val body = reply.body
+            if (body != null) {
+                overview = body
+                c.sync.saveMainlineState(c.courseId, json("body" to body), "home")
+                break
+            }
+            if (!reply.retryable) break
+            delay(1500)
+        } while (true)
+    }
+    val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().map { it.jsonObject }
+    val number = c.mainlineContinuationWeek(view, overview)
+    val compactButton = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+    Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.weight(if (wide) 1f else 1.4f).fillMaxHeight().testTag("open-mainline")) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("选择题主线", style = MaterialTheme.typography.bodyLarge)
+            if (wide) Text("按周从基础题做起，答完立刻看讲解", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val links: @Composable () -> Unit = {
+                // Swap the placeholder for the real entry instead of renaming one button in place: the label of the
+                // week is then carried by a button that already exists, so the screen reader hears the current week.
+                if (number != null) {
+                    Button(onClick = { onOpen(number, true) }, contentPadding = compactButton, modifier = Modifier.testTag("mainline-continue")) { Text("继续第 $number 周") }
+                    TextButton(onClick = { onOpen(number, false) }, contentPadding = compactButton) { Text("看本周要点") }
+                } else {
+                    Text("正在连接…", Modifier.padding(vertical = 14.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(onClick = { onOpen(null, false) }, contentPadding = compactButton) { Text("选其他周") }
+            }
+            if (wide) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { links() } else links()
+            if (number == null && error != null) Text("Mac 暂时不可用，正在自动重连…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+            else if (overview != null && weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -230,7 +283,7 @@ private fun OfflinePractice(c: CoachController) {
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("离线练习", style = MaterialTheme.typography.titleMedium)
         if (group == null) {
-            Text("${groups.filter { !it.submitted }.sumOf { it.cards.size }} 题可做 · 下载后无需连接 Mac")
+            Text("${groups.filter { !it.submitted }.sumOf { it.cards.size }} 题可做 · 存到本机后没网也能做")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { active = groups.firstOrNull { !it.submitted }?.groupId; chosen = emptyMap() },
                     enabled = groups.any { !it.submitted }, modifier = Modifier.heightIn(min = 56.dp)) { Text("复习 ${groups.firstOrNull { !it.submitted }?.cards?.size ?: 3} 题") }
@@ -243,7 +296,7 @@ private fun OfflinePractice(c: CoachController) {
                         catch (_: Exception) { c.tutor.telemetry?.record("error", "offline_pack"); error = "Mac 未连接，下载未完成；已有题仍可练习。" }
                         finally { downloading = false }
                     }
-                },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在下载…" else "下载练习包") }
+                },enabled = !downloading,modifier = Modifier.heightIn(min = 56.dp)) { Text(if (downloading) "正在存到本机…" else "存到本机") }
             }
             groups.lastOrNull { it.submitted }?.let { last ->
                 TextButton(onClick = { active = last.groupId }) { Text("查看上组结果") }

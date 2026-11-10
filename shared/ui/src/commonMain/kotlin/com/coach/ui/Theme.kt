@@ -1,31 +1,53 @@
 package com.coach.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.sp
+import coach.design.tokens.CoachV7
+import coach.design.tokens.ReadingSizes
+import com.coach.ui.v7.*
 
-/** 阅读为主的排版：正文 17sp / 27sp，题干与选项同一档，Fold8 外屏单手握持时也不挤。 */
-private val CoachTypography = Typography().let { base ->
-    base.copy(
-        headlineMedium = base.headlineMedium.copy(fontSize = 30.sp, lineHeight = 38.sp),
-        titleLarge = base.titleLarge.copy(fontSize = 22.sp, lineHeight = 30.sp),
-        titleMedium = base.titleMedium.copy(fontSize = 18.sp, lineHeight = 26.sp),
-        bodyLarge = base.bodyLarge.copy(fontSize = 17.sp, lineHeight = 27.sp),
-        bodyMedium = base.bodyMedium.copy(fontSize = 15.sp, lineHeight = 22.sp),
-        labelLarge = base.labelLarge.copy(fontSize = 15.sp),
-    )
-}
+val LocalV7TextScale = staticCompositionLocalOf<MutableState<Float>> { mutableStateOf(1f) }
 
 @Composable
 fun CoachTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    // Colours are the DESIGN §9 semantic tokens (theme/CoachColors); this layer only adds the reading typography.
-    com.coach.ui.theme.CoachTheme(dark) { MaterialTheme(typography = CoachTypography, content = content) }
+    val fonts = rememberV7Fonts()
+    val reduced = rememberReducedMotion()
+    val textScale = rememberSaveable { mutableStateOf(1f) }
+    val scale = textScale.value
+    val typography = remember(fonts, dark, scale) {
+        val leading = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.None)
+        val reading = TextStyle(lineHeightStyle = leading, fontFamily = fonts.reading, fontSize = ReadingSizes.body * scale,
+            lineHeight = 25.sp * scale,
+            fontWeight = if (dark) CoachV7.Weight.bodyDark else CoachV7.Weight.body)
+        val ui = TextStyle(lineHeightStyle = leading, fontFamily = fonts.ui, fontSize = ReadingSizes.ui * scale, lineHeight = 18.sp * scale)
+        val cap = ui.copy(fontSize = ReadingSizes.caption * scale, lineHeight = 16.sp * scale, fontWeight = CoachV7.Weight.cap, letterSpacing = CoachV7.Tracking.cap)
+        val title = reading.copy(fontSize = ReadingSizes.section * scale, lineHeight = 29.sp * scale,
+            fontWeight = CoachV7.Weight.title, letterSpacing = CoachV7.Tracking.title)
+        Typography(displayLarge = title, displayMedium = title, displaySmall = title,
+            headlineLarge = title.copy(fontSize = ReadingSizes.week * scale, lineHeight = 34.sp * scale), headlineMedium = title, headlineSmall = title,
+            titleLarge = title,
+            titleMedium = reading.copy(fontSize = ReadingSizes.stem * scale, lineHeight = 25.sp * scale, fontWeight = CoachV7.Weight.stem),
+            titleSmall = ui.copy(fontSize = ReadingSizes.body * scale, lineHeight = 23.sp * scale, fontWeight = CoachV7.Weight.uiStrong),
+            bodyLarge = reading, bodyMedium = reading,
+            bodySmall = ui, labelLarge = ui, labelMedium = cap, labelSmall = cap)
+    }
+    CompositionLocalProvider(LocalV7Fonts provides fonts, LocalV7ReducedMotion provides reduced, LocalV7TextScale provides textScale) {
+        com.coach.ui.theme.CoachTheme(dark) {
+            MaterialTheme(typography = typography, shapes = Shapes(
+                extraSmall = RoundedCornerShape(CoachV7.Radius.s), small = RoundedCornerShape(CoachV7.Radius.btn),
+                medium = RoundedCornerShape(CoachV7.Radius.m), large = RoundedCornerShape(CoachV7.Radius.sheet),
+                extraLarge = RoundedCornerShape(CoachV7.Radius.sheet)), content = content)
+        }
+    }
 }
 
-/** 「对」的绿，来自令牌（深色下自动换亮一档）。 */
-@Composable
-fun successColor(): Color = com.coach.ui.theme.CoachTheme.colors.successFg
+@Composable fun successColor(): Color = com.coach.ui.theme.CoachTheme.colors.successFg

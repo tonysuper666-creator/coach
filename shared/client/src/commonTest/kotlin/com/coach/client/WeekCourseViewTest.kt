@@ -31,7 +31,7 @@ class WeekCourseViewTest {
         val view = CourseView(events, project(events))
         assertEquals((1..11).toList(), view.weeks)
         assertEquals(setOf(7), view.midtermExemptionWeeks)
-        assertEquals("第 7 周 · 期中周（无新课，豁免）", view.weekLabel(7))
+        assertEquals("第 7 周 · 期中周，无新课", view.weekLabel(7))
         assertTrue(view.weekKps(7).isEmpty())
     }
     @Test fun passedOldThreadCannotTrapContinueAndScopeOverridesUnfinishedWorkElsewhere() {
@@ -49,5 +49,15 @@ class WeekCourseViewTest {
         assertEquals("第 2 周 · 第 1 / 1 个", scoped.weekProgress("next"))
         val done = CourseView(events, projection.copy(studyScope=StudyScope("scope", 2, listOf("next"), 1)))
         assertNull(done.continueTarget)
+    }
+    @Test fun genuinelyPausedWorkWinsOverAnOlderWeekScope() {
+        val events = listOf(
+            e(1, "outline_revised", json("ops" to JsonArray(listOf(json("kpId" to "paused", "title" to "【W1】Paused"), json("kpId" to "next", "title" to "【W2】Next"))))),
+            e(2, "study_scope_set", json("week" to 2, "kpIds" to listOf("next"))),
+            e(3, "kp_opened", json("kpId" to "paused"))
+        )
+        val view = CourseView(events, project(events))
+        assertEquals("paused", view.continueTarget?.id)
+        assertEquals("next", view.weekTarget?.id)
     }
 }

@@ -107,7 +107,7 @@ class SourceViewTest {
     }
 
     private fun controller(http: CourseHttp?) = CoachController(
-        courseId = "C", sync = unused(), tutor = unused(), formatClock = { "" }, course = http,
+        courseId = "C", sync = SyntheticLocalLedger("C").sync, tutor = unused(), formatClock = { "" }, course = http,
     )
 
     /** These screens never touch the sync engine or the tutor client; allocate without running a constructor. */

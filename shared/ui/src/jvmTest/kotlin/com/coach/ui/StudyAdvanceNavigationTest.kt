@@ -25,8 +25,8 @@ class StudyAdvanceNavigationTest {
 
     @Suppress("UNCHECKED_CAST")
     private fun unusedSync(): SyncEngine {
-        val field = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }
-        return (field.get(null) as sun.misc.Unsafe).allocateInstance(SyncEngine::class.java) as SyncEngine
+        // CoachController reads device-local mainline state on construction: use a real in-memory ledger.
+        return SyntheticLocalLedger("C").sync
     }
 
     @Test fun openingPreviouslyPassedPointKeepsItsStudyScreenVisible() = runDesktopComposeUiTest(width = 390, height = 800) {

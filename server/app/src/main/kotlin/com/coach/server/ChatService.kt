@@ -83,6 +83,7 @@ class ChatService(
     val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
+    val reader = ReaderExplanation(actor, bridge)
     private val preparation = LessonPreparation(actor,bridge,packsDirectory)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()

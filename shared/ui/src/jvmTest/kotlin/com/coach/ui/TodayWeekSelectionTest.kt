@@ -20,7 +20,8 @@ class TodayWeekSelectionTest {
             "week7" to json("knowledgePoints" to 0, "reason" to "Midterm Exam"),
             "ops" to JsonArray(listOf(json("op" to "add", "kpId" to "kp6", "title" to "【W6】甲"), json("op" to "add", "kpId" to "kp8", "title" to "【W8】乙")))))
         var current by mutableStateOf(CourseView(listOf(outline), project(listOf(outline))))
-        val exemption = "第 7 周 · 期中周（无新课，豁免）"
+        // 期中豁免周的文案随 main 改为「期中周，无新课」（CourseView.weekLabel）；看得到、选不了的断言不变。
+        val exemption = "第 7 周 · 期中周，无新课"
         try {
             setContent { CoachTheme(false) { TodayScreen(f.controller, current, TutorUiState(connected = true), null, {}, { _, _ -> }, actions) } }
             onNodeWithText(exemption).assertIsDisplayed().assertIsNotEnabled().performClick()
@@ -129,7 +130,7 @@ class TodayWeekSelectionTest {
         var current by mutableStateOf(view(scoped = true))
         try {
             setContent { CoachTheme(false) { TodayScreen(f.controller, current, TutorUiState(connected = true), null, {}, { _, _ -> }, actions) } }
-            onNode(hasText("开始下一个") and hasText("甲")).assertIsDisplayed()
+            onNode(hasText("接着学") and hasText("开始 · 甲")).assertIsDisplayed()
             onNodeWithText("第 1 周 · 换周 ▾").performClick()
             onNodeWithText("第 2 周 · 1 个待学").assertIsDisplayed()
             onNodeWithText("全部课程").assertIsDisplayed()

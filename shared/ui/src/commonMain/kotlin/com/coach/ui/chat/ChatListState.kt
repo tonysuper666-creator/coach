@@ -78,6 +78,7 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
         if (requestedKey != key || list.layoutInfo.visibleItemsInfo.none { it.key == key }) {
             list.scrollToItem(index, 0)
         }
+        // Main (537f2cfe) re-establishes the bottom baseline unconditionally; offset-relative scrolling below covers a row left at any offset.
         val item = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key } }.filterNotNull().first()
         val info = list.layoutInfo
         val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - item.size

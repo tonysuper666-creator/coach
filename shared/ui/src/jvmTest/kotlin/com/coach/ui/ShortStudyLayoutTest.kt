@@ -30,7 +30,9 @@ class ShortStudyLayoutTest {
         val view = CourseView(events, project(events))
         val kp = assertNotNull(view.weekTarget)
         val tutor = TutorClient("http://127.0.0.1:29169", "d", "test", TutorModel(wallClock = { 1000L }))
-        val controller = CoachController("C", unused(SyncEngine::class.java), tutor, formatClock = { "" })
+        val controller = CoachController("C", SyntheticLocalLedger("C").sync, tutor, formatClock = { "" })
+        // main 的 v7：讲解已完成且不在对话里时先进阅读页。这里测的是对话视图，所以按「上次停在对话」恢复（与 main 的阅读位置恢复同一条路径）。
+        controller.sync.saveMainlineState("C", json("kind" to "tutor", "kpId" to "a"), "learning")
         val message = TutorMessage("m", "synthetic", false, "第一行讲解。\n第二行讲解。\n第三行讲解。", status = "complete")
         val ui = TutorUiState(threads = mapOf("kp:a" to ThreadView(items = listOf(ChatItem.Tutor(message)))))
         try {
@@ -53,8 +55,10 @@ class ShortStudyLayoutTest {
         val kp = KpRow("a", "【W2】合成知识点二", KpStatus.IN_PROGRESS, true, emptyList())
         var clicked = false
         setContent { CoachTheme(false) { ContinueCard(kp, true) { clicked = true } } }
-        onNodeWithText("继续学习").assertIsDisplayed()
-        onNodeWithText("合成知识点二（没学完）").assertIsDisplayed().performClick()
+        // 文案已随 main 的 v7 改为「接着学 / 继续 · 名称」；名称仍只出现一次。
+        onNodeWithText("接着学").assertIsDisplayed()
+        onNodeWithText("继续 · 合成知识点二").assertIsDisplayed().performClick()
+        onAllNodesWithText("合成知识点二", substring = true).assertCountEquals(1)
         onNodeWithText("回到（没学完）").assertDoesNotExist()
         assertTrue(clicked)
     }

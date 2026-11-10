@@ -59,7 +59,7 @@ class ReviewThreadTest {
         val outgoing = Channel<String>(Channel.UNLIMITED)
         TutorClient::class.java.getDeclaredField("live").apply { isAccessible = true }.set(tutor, outgoing)
         model.onConnection(true)
-        val controller = CoachController("C", unused(com.coach.client.SyncEngine::class.java), tutor, formatClock = { "" })
+        val controller = CoachController("C", SyntheticLocalLedger("C").sync, tutor, formatClock = { "" })
         try {
             var currentView by mutableStateOf(view(thread))
             setContent { CoachTheme(false) { ReviewScreen(controller, currentView, { _, _ -> }, null) } }

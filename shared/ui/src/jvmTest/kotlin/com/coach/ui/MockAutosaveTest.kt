@@ -67,7 +67,7 @@ class MockAutosaveTest {
 
     /** The exam page, and a stand-in for the review page it leaves to; coming back reloads what the Mac has. */
     private fun ComposeUiTest.mount(mac: FakeMac) {
-        val c = CoachController("C", unused(), unused(), formatClock = { "" }, nowMillis = { 1000 }, course = mac.http)
+        val c = CoachController("C", SyntheticLocalLedger("C").sync, unused(), formatClock = { "" }, nowMillis = { 1000 }, course = mac.http)
         setContent {
             var inExam by remember { mutableStateOf(true) }
             CoachTheme(false) {

@@ -43,6 +43,15 @@ object LayoutRules {
     const val AsideLargeDp = 380f
     const val OutlineDp = 300f
 
+    /** App chrome contract, also used by Desk: portrait Fold is single-column; the directory is a drawer. */
+    fun navigation(spec: WindowSpec): PaneLayout {
+        val layout = compute(spec)
+        val portrait = !layout.shortHeight && spec.widthDp < 840f && spec.heightDp > spec.widthDp && spec.hinge == null
+        return if (portrait) layout.copy(nav = NavStyle.BottomBar, navWidthDp = 0f, aside = AsidePlacement.BottomSheet,
+            asideWidthDp = 0f, outlineDocked = false, outlineWidthDp = 0f)
+        else layout.copy(outlineDocked = false, outlineWidthDp = 0f)
+    }
+
     fun widthClass(widthDp: Float) = when {
         widthDp < 600f -> WidthClass.Compact
         widthDp < 840f -> WidthClass.Medium

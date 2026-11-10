@@ -383,11 +383,12 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
+                val scope = com.coach.domain.scope.VisibleScope.learner()
                 val (quote, pages) = actor.execute {
                     val quote = mainline.selection(this, course, call.week(), input)
-                    quote to searchSourcePages(course, quote).filter { it.learnerVisible }
+                    quote to searchSourcePages(course, quote, scope)
                 }
-                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages)
+                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages, scope)
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

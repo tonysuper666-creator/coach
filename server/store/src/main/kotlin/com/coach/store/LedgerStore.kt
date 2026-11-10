@@ -1272,7 +1272,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
            WHERE q.course_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY' GROUP BY k.kp_id""",course) { it.getString(1) to it.getInt(2) }.toMap()
 
     /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
-    fun searchSourcePages(course: String, question: String): List<SourcePage> {
+    fun searchSourcePages(course: String, question: String, scope: com.coach.domain.scope.VisibleScope): List<SourcePage> {
         val terms = Regex("[\\p{IsHan}]{3,}|[A-Za-z0-9]{2,}").findAll(question.take(2000))
             .flatMap { match ->
                 val value = match.value
@@ -1288,7 +1288,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
             }
         }
-        val unique = found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
+        val unique = found.filter { scope.permits(it.docId, it.pdfPage, it.learnerVisible) }
+            .groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
         return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
             unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
     }

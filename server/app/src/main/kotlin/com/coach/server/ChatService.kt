@@ -361,7 +361,7 @@ class ChatService(
         hub.emit(startFrame(session))
         if(prepared!=null) { session.trace?.prepared(); scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
-            val hits = actor.execute { searchSourcePages(courseId,question) }
+            val hits = actor.execute { searchSourcePages(courseId,question,com.coach.domain.scope.VisibleScope.tutorInternal()) }
             val selected = SourcePack.prepare(sourcePack,hits)
             if (selected.restricted.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(
                 selected.restricted.map { it.text }, selected.browsable.map { it.text } + selected.legacy)
@@ -718,7 +718,7 @@ class ChatService(
                 failure = "source_quota_protected"
                 return
             }
-            val hits = actor.execute { searchSourcePages(session.courseId,query) }
+            val hits = actor.execute { searchSourcePages(session.courseId,query,com.coach.domain.scope.VisibleScope.tutorInternal()) }
             val pack = SourceReadSandbox().read(SourcePack.prepare("",hits)) { process ->
                 session.sourceProcess = process
                 if (session.forcedStatus != null) process?.destroyForcibly()

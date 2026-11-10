@@ -127,7 +127,7 @@ class SourceLookupTest {
             store.registerSourcePage("c","answers","答案",1,"Adverse selection")
             store.registerSourcePage("c","Answers/book","Solutions",1,"Adverse selection")
             store.registerSourcePage("c","answer-keys/book","Solutions",1,"Adverse selection")
-            val hits = store.searchSourcePages("c","adverse selection")
+            val hits = store.searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal())
             assertEquals("book",hits.first().docId)
             assertTrue(hits.drop(1).isNotEmpty())
             assertTrue(hits.drop(1).all { !it.learnerVisible && it.docId.contains("answer",ignoreCase=true) })
@@ -135,11 +135,11 @@ class SourceLookupTest {
             val pack = SourcePack.prepare("",hits)
             assertEquals(mapOf("S1" to hits.first().text),pack.anchors)
             hits.drop(1).forEach { assertNull(store.browsablePage("c",it.docId,it.pdfPage)) }
-            assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么").map { it.docId })
+            assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
             store.registerSourcePage("c","book","Book",1,"Moral hazard is different.")
-            assertTrue(store.searchSourcePages("c","adverse selection").all { !it.learnerVisible })
-            assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard").map { it.docId })
-            assertEquals(emptyList(),store.searchSourcePages("c","\" OR * : ( )"))
+            assertTrue(store.searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal()).all { !it.learnerVisible })
+            assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
+            assertEquals(emptyList(),store.searchSourcePages("c","\" OR * : ( )",com.coach.domain.scope.VisibleScope.tutorInternal()))
         }
     }
 

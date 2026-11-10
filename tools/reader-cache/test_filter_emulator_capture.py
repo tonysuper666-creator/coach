@@ -51,6 +51,20 @@ class EmulatorCaptureTest(unittest.TestCase):
             with patch('filter_emulator_capture.subprocess.run',side_effect=command): report=filter_capture(directory,source)
             self.assertFalse(report['offlineDecodeComplete']);self.assertTrue(report['errors']);self.assertTrue(source.exists())
 
+    def test_declared_netsim_source_is_separate_from_origin_and_packet_verification(self):
+        directory,source,_,_=self.prepare();self.commands=[]
+        with patch('filter_emulator_capture.subprocess.run',side_effect=self.fake):
+            report=filter_capture(directory,source,capture_source='netsim-wifi')
+        self.assertTrue(report['offlineDecodeComplete'])
+        self.assertEqual('netsim-wifi',report['declaredCaptureSource'])
+        self.assertFalse(report['captureOriginVerified'])
+        self.assertFalse(report['packetRequestAssociationVerified'])
+        self.assertFalse(report['kernelReceiveObserved'])
+        with patch('filter_emulator_capture.subprocess.run') as decoder:
+            with self.assertRaisesRegex(ValueError,'Known capture source'):
+                filter_capture(directory,source,capture_source='assume-any-interface')
+            decoder.assert_not_called()
+
     def test_incomplete_association_or_foreign_port_rejected_before_decode(self):
         for kind in ('association','port','observer','token'):
             directory,source,identity,association=self.prepare()

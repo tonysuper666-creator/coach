@@ -10,9 +10,14 @@ import subprocess
 from fixture_server import FORBIDDEN
 
 ROOT=Path(__file__).resolve().parents[2]
+CAPTURE_BOUNDARIES={
+    'qemu-ethernet':'Declared QEMU Ethernet capture; netsim Wi-Fi coverage is not established',
+    'netsim-wifi':'Declared netsim Wi-Fi chip capture; radio ownership and guest receipt are not established',
+}
 
 
-def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump'):
+def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump',capture_source='qemu-ethernet'):
+    if capture_source not in CAPTURE_BOUNDARIES: raise ValueError('Known capture source required')
     identity=json.loads((directory/'run.json').read_text())
     association=json.loads((directory/'transport-association.json').read_text())
     routes=json.loads((directory/'route-comparison.json').read_text())
@@ -36,12 +41,13 @@ def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump'):
             destinationHost=client['destinationHost'],destinationPort=port,serverConnectionId=client['serverConnectionId']))
     outputs={name:directory/name for name in ('emulator-fixture.pcap','emulator-fixture.txt','emulator-filter.log','emulator-packet-filter.json')}
     if any(path.exists() for path in outputs.values()): raise ValueError('Fresh packet-filter outputs required')
-    # The emulator captures its whole virtual Ethernet. Only these exact fixture
+    # Both inputs can contain unrelated traffic. Only these exact fixture
     # endpoints may enter shareable output; the unfiltered original stays local.
     addresses=f'(host {configured} or host {alias})'
     packet_filter=f'tcp and (((dst host {configured} or dst host {alias}) and dst port {port}) or ((src host {configured} or src host {alias}) and src port {port}))'
     original=hashlib.sha256(capture.read_bytes()).hexdigest()
-    report=dict(captureBoundary='Emulator virtual Ethernet only; not guest kernel receipt',
+    report=dict(captureBoundary=CAPTURE_BOUNDARIES[capture_source],declaredCaptureSource=capture_source,
+        captureOriginVerified=False,
         sourceSha256=original,runId=identity['runId'],fixturePort=port,filter=packet_filter,
         requestedEndpoints=addresses,requests=requests,offlineDecodeComplete=False,errors=[],
         packetRequestAssociationVerified=False,packetStreamCompletenessVerified=False,
@@ -77,10 +83,12 @@ def main():
     parser.add_argument('--emulator-stopped',action='store_true',required=True,
         help='Confirm the owned emulator exited and the input file is no longer being written')
     parser.add_argument('--tcpdump',default='/usr/sbin/tcpdump')
+    parser.add_argument('--capture-source',choices=CAPTURE_BOUNDARIES,default='qemu-ethernet',
+        help='Declare the input source; this does not verify chip ownership or capture coverage')
     args=parser.parse_args()
     directory=args.run.resolve();capture=args.capture.resolve()
     directory.relative_to(ROOT);capture.relative_to(ROOT)
-    report=filter_capture(directory,capture,args.tcpdump)
+    report=filter_capture(directory,capture,args.tcpdump,args.capture_source)
     print(json.dumps(dict(offlineDecodeComplete=report['offlineDecodeComplete'],errors=report['errors'],
         packetRequestAssociationVerified=False)))
     return 0 if report['offlineDecodeComplete'] else 1

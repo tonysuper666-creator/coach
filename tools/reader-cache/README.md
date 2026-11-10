@@ -874,6 +874,8 @@ overall `complete=false`. Zero residual sleep never clears this failure.
 The next minimal capture is one identical 16-request route group, with the
 same scheduling/syscall settings and APK hashes, adding only the emulator's
 documented [`-tcpdump <file>` startup option](https://developer.android.com/studio/run/emulator-commandline).
+This was the cdccbe4 experiment. Its empty fixture capture did not establish
+Wi-Fi coverage; use the netsim-specific correction below for the current image.
 It captures virtual Ethernet packets and does not require opening the host BPF
 interface. Keep the existing image, account/network policy and permissions.
 Use the current Mac owner/foreground emulator lock, geometry, PDF and Poppler.
@@ -928,3 +930,83 @@ First collect this boundary evidence and repeat the scheduling/syscall SQL on
 its matching new trace, preserving the strict signal/quality failures. Choose
 further diagnosis from the result before a performance rerun. The baseline,
 100 ms actual presentation and physical three-image/native/GPU gaps remain open.
+
+## Capture coverage after cdccbe4: netsim Wi-Fi
+
+The native run used emulator 37.2.13.0; its log records initialized netsim Wi-Fi.
+The QEMU Ethernet file contained 91 packets: 59 IPv4, 28 IPv6 and four ARP. Of the
+IPv4 packets, 37 had protocol TCP. The reported fixture-port and nonce counts
+were both zero, and all 16 packet associations failed. This is missing target
+coverage, not evidence of no TCP, no application traffic or zero network delay.
+The raw all-traffic file stayed on the Mac; Windows rechecks the supplied
+aggregate and empty filtered file, not that private original.
+
+[Android's console reference](https://developer.android.com/studio/run/emulator-console#network)
+distinguishes modern netsim Wi-Fi from legacy QEMU/slirp console capture.
+The observed version/log/zero-target result is consistent with a capture-path
+mismatch; it does not prove the installed QEMU implementation or a 500 ms cause.
+The prior `-tcpdump` candidate must not be described as verified Wi-Fi coverage.
+The documented Wi-Fi candidate is
+[`-netsim-args="--pcap"`](https://developer.android.com/studio/run/emulator-networking-advanced),
+which writes a separate capture per radio chip. This version's actual support,
+file link type and target visibility remain unverified until the next capture.
+
+Before another native group, the Mac owner must establish capture ownership:
+
+1. Under the existing foreground emulator lock, record pre-existing netsim
+   processes and the owned emulator's exact launch/version/PID. Do not attach
+   capture to, reconfigure or stop a daemon owned by another session. If exclusive
+   ownership cannot be established, return that gap before running probes.
+2. Give the child launch a fresh checkout-local `ANDROID_TMP` directory and add
+   `--pcap` to its existing `-netsim-args` value. This is a process environment
+   setting, not a global setting. Retain the same image, Wi-Fi/network defaults,
+   AVD geometry, native APK hashes, PDF and Poppler. Do not disable netsim, switch
+   to cellular, change root/permissions or introduce new delay/speed settings.
+3. Retain the actual netsim executable/version, PID/start/parent/command and its
+   emitted artifact path. `ANDROID_TMP` chooses artifact storage; it is **not**
+   proof of a new or exclusive daemon. Confirm the daemon/session and Wi-Fi chip
+   belong to this owned AVD, with files beneath the fresh directory. A filename
+   containing "wifi", an old chip or a Bluetooth capture is insufficient.
+4. Only then collect one 16-request original route legacy/observer none group
+   with the same scheduling/syscall trace. No performance suite, queue watch or
+   repeated adb sampler. Stop/join the owned emulator and close its owned capture
+   writer before offline reading; record cleanup for both. Never kill unrelated
+   netsim processes. Unsupported flags, wrong ownership, missing Wi-Fi captures
+   or unsupported link types are explicit failures, not reasons to change setup.
+
+Example additions to the existing owner wrapper, using a new task directory:
+
+```sh
+# Child environment only; preserve the existing SDK environment and launch args.
+ANDROID_TMP=<checkout>/build/reader-netsim-<session>/tmp
+# Append to existing netsim args if any; do not discard them.
+-netsim-args="--pcap"
+```
+
+The documented artifact layout is below that temporary root in
+`android[-<user>]/netsimd/pcap/`. Use the actual emitted path and chip receipts;
+do not search shared temporary directories or assume a daemon implementation
+from the directory name. Preserve raw per-chip files locally. After ownership
+and writer-close checks, extract only the owned Wi-Fi chip file:
+
+```sh
+python3 tools/reader-cache/filter_emulator_capture.py --run <new-run-directory> \
+  --capture <owned-netsim-wifi-pcap> --emulator-stopped \
+  --capture-source netsim-wifi
+```
+
+The helper records the **declared** source, with `captureOriginVerified=false`.
+Offline decoding alone cannot establish daemon/chip ownership or path coverage;
+deliver the separate launch/chip/file/cleanup receipts. Exact fixture filtering,
+fresh outputs and input stability guards stay in force. Use the decoder's actual
+link type; unsupported Wi-Fi encoding or an empty filtered capture stays failed.
+Do not relabel a QEMU/other-radio capture or pass a Bluetooth file as Wi-Fi.
+
+For all 16 requests, retain token/echo/TCP-sequence candidates, reassembly,
+retransmissions, gaps and ambiguity. Only uniquely associated target streams
+can supply packet-clock request-final-byte to first-response-byte intervals.
+Packet timestamps are at the declared virtual-radio capture boundary, not
+guest-kernel arrival. Keep packet and guest clocks separate. No packet counts,
+decoder success or capture-source label prove network cause, presentation or
+memory acceptance. Review coverage first, then choose any performance rerun.
+The strict signal-return failure and all earlier acceptance gaps remain open.

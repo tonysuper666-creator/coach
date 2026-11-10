@@ -24,8 +24,8 @@ class ReaderRemoteNotesWindowTest {
         fun key(k: Key, ctrl: Boolean = false) {
             scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyDown, isCtrlPressed = ctrl)); scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyUp, isCtrlPressed = ctrl)); frames(10)
         }
-        fun wheel(dy: Float) {
-            val pos = Offset(700f, 300f)
+        fun wheel(dy: Float, x: Float = 700f) {
+            val pos = Offset(x, 300f)
             scene.sendPointerEvent(PointerEventType.Move, pos); scene.sendPointerEvent(PointerEventType.Scroll, pos, scrollDelta = Offset(0f, dy)); frames(8)
         }
         fun shot(name: String) {
@@ -294,14 +294,64 @@ class ReaderRemoteNotesWindowTest {
         } finally { r.close() }
     }
 
-    @Test fun wheelOnALongPageTurnsThePageAndLeavesTheBodyAtItsFirstLine() {
-        val s = service(); s.bodyText = { _, p -> (0 until 60).joinToString("\n") { "Line $it of page $p" } }
-        val r = rig(s)
+    private fun longService() = service().apply {
+        withImage = false
+        bodyText = { _, p -> (0 until 60).joinToString("\n") { "Line $it of page $p" } }
+    }
+
+    /** 这一行真的落在窗口可见范围内（700 高的窗口，顶部栏约 30）。 */
+    private fun Rig.visible(i: Int): Boolean = session.uiLineBounds[i]?.let { it.top >= 30f && it.bottom <= 700f } ?: false
+
+    @Test fun longPageWheelScrollsInsideThePageThenTurnsAtTheEdgeAndComesBackToTheEnd() {
+        val s = longService(); val r = rig(s, 700)
         try {
-            r.wheel(1f); r.wheel(1f); r.wheel(1f)
-            assertEquals(3, r.session.state.position.page)
-            assertEquals(0, r.session.uiBodyScroll, "滚轮只翻页，不再叠加滚动；新页从第一行开始")
-            r.shot("wheel-long-page")
+            assertTrue(r.visible(0)); assertFalse(r.visible(59), "60 行在 700 高的窗口里放不下")
+            r.shot("long-page-top")
+            var guard = 0
+            while (r.session.uiBodyScroll < r.session.uiBodyScrollMax && guard++ < 400) {
+                r.wheel(1f, x = 200f)
+                assertEquals(0, r.session.state.position.page, "页内还没滚到底，不得翻页")
+            }
+            assertTrue(r.session.uiBodyScrollMax > 0)
+            assertTrue(r.visible(59), "滚到底：末行可见"); assertFalse(r.visible(0))
+            r.shot("long-page-bottom")
+            r.wheel(1f, x = 200f)
+            assertEquals(1, r.session.state.position.page, "到页边界才翻页")
+            assertEquals(0, r.session.uiBodyScroll); assertTrue(r.visible(0), "新页从首行开始")
+            r.wheel(-1f, x = 200f)
+            assertEquals(0, r.session.state.position.page)
+            assertEquals(r.session.uiBodyScrollMax, r.session.uiBodyScroll, "往回翻停在上一页末尾")
+            assertTrue(r.visible(59))
+            guard = 0
+            while (r.session.uiBodyScroll > 0 && guard++ < 400) { r.wheel(-1f, x = 200f); assertEquals(0, r.session.state.position.page) }
+            assertTrue(r.visible(0))
+            r.wheel(-1f, x = 200f); assertEquals(0, r.session.state.position.page, "第一页顶部再往上滚也不越界")
+        } finally { r.close() }
+    }
+
+    @Test fun longPageKeysScrollInPageAndPageKeysStillTurn() {
+        val s = longService(); val r = rig(s, 700)
+        try {
+            r.session.focusPane(ReaderPane.Body); r.frames()
+            repeat(5) { r.key(Key.DirectionDown) }
+            assertTrue(r.session.uiBodyScroll > 0); assertEquals(0, r.session.state.position.page)
+            repeat(5) { r.key(Key.DirectionUp) }
+            assertEquals(0, r.session.uiBodyScroll)
+            var guard = 0
+            while (r.session.uiBodyScroll < r.session.uiBodyScrollMax && guard++ < 100) r.key(Key.DirectionDown)
+            assertTrue(r.visible(59), "只用方向键也能读到末行"); assertEquals(0, r.session.state.position.page)
+            r.key(Key.PageDown)
+            assertEquals(1, r.session.state.position.page); assertEquals(0, r.session.uiBodyScroll); assertTrue(r.visible(0))
+            r.key(Key.PageUp)
+            assertEquals(0, r.session.state.position.page); assertEquals(0, r.session.uiBodyScroll)
+        } finally { r.close() }
+    }
+
+    @Test fun ctrlWheelStillZoomsAndShortPagesStillTurnImmediately() {
+        val s = service().apply { withImage = false }; val r = rig(s, 1440)
+        try {
+            r.wheel(1f); r.wheel(1f)
+            assertEquals(2, r.session.state.position.page, "短页没有可滚动范围：滚轮直接翻页")
         } finally { r.close() }
     }
 

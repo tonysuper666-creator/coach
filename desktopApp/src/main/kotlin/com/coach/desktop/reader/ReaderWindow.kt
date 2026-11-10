@@ -22,6 +22,8 @@ import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.launch
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed as ptrCtrl
@@ -215,7 +217,24 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     var uiHighlight: String? = null
 
     /** 本次组合里正文的滚动位置（远端正文），供测试读取：滚轮翻页后应停在起始行。 */
-    var uiBodyScroll: Int = -1
+    val uiBodyScroll: Int get() = bodyScroll?.value ?: -1
+    val uiBodyScrollMax: Int get() = bodyScroll?.maxValue ?: -1
+
+    /** 远端正文的滚动状态（由 RemoteBody 登记）；滚轮/方向键据此在页内滚动。 */
+    var bodyScroll by mutableStateOf<androidx.compose.foundation.ScrollState?>(null)
+    /** 往回翻到上一页时，新页应停在末尾（而不是顶部）。 */
+    var scrollToEndOnArrive by mutableStateOf(false)
+    /** 每一行正文在窗口里的位置，供测试判断首尾行是否真的可见。 */
+    val uiLineBounds = HashMap<Int, androidx.compose.ui.geometry.Rect>()
+
+    fun bodyCanScroll(deltaY: Float): Boolean {
+        val sc = bodyScroll ?: return false
+        if (remote == null || deltaY == 0f) return false
+        return if (noting) sc.maxValue > 0 else if (deltaY > 0) sc.value < sc.maxValue else sc.value > 0
+    }
+
+    /** 方向键在页内滚动一小段（不翻页，也不抢焦点）。 */
+    fun scrollBody(down: Boolean) { bodyScroll?.dispatchRawDelta(if (down) 80f else -80f) }
 
     /** 当前窗口实际显示的栏：焦点在被收拢的栏时，该栏单独占满窗口，正文状态原样保留。 */
     fun shownPanes(): List<ReaderPane> = if (state.focus in state.layout.visible) state.layout.visible else listOf(state.focus)
@@ -311,6 +330,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     fun onWheel(deltaY: Float, ctrlOrCmd: Boolean) {
         if (deltaY == 0f || noting) return // 写批注时不翻页，避免草稿被带到别的页
         message = null
+        if (!ctrlOrCmd && remote != null) scrollToEndOnArrive = deltaY < 0
         state = if (ctrlOrCmd) state.apply(if (deltaY < 0) ReaderAction.ZoomIn else ReaderAction.ZoomOut)
         else state.apply(if (deltaY > 0) ReaderAction.NextPage else ReaderAction.PrevPage)
     }
@@ -360,6 +380,9 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
                 val page = fixture.pageOfAnchor(a)
                 if (page < 0) message = "这一页没找到出处" else state = s.openProvenance(a, page)
             }
+            ReaderAction.ScrollDown -> scrollBody(true)
+            ReaderAction.ScrollUp -> scrollBody(false)
+            ReaderAction.NextPage, ReaderAction.PrevPage -> { scrollToEndOnArrive = false; state = s.apply(action) }
             else -> state = s.apply(action)
         }
         return true
@@ -442,7 +465,10 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                             .then(
                                 if (pane == ReaderPane.Body) Modifier.onPointerEvent(PointerEventType.Scroll, PointerEventPass.Initial) { ev ->
                                     val c = ev.changes.first()
-                                    session.onWheel(c.scrollDelta.y, ev.keyboardModifiers.ptrCtrl || ev.keyboardModifiers.ptrMeta)
+                                    val ctrl = ev.keyboardModifiers.ptrCtrl || ev.keyboardModifiers.ptrMeta
+                                    // 页内还能滚（或正在写批注）就交给下面的滚动区；只有到页边界才翻页。Ctrl+滚轮始终是缩放。
+                                    if (!ctrl && session.bodyCanScroll(c.scrollDelta.y)) return@onPointerEvent
+                                    session.onWheel(c.scrollDelta.y, ctrl)
                                     c.consume()
                                 } else Modifier,
                             )
@@ -450,7 +476,15 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                     ) {
                         when (pane) {
                             ReaderPane.Shelf -> ShelfPane(session)
-                            ReaderPane.Body -> BodyPane(session)
+                            ReaderPane.Body -> {
+                                BodyPane(session)
+                                session.bodyScroll?.let { sc ->
+                                    androidx.compose.foundation.VerticalScrollbar(
+                                        androidx.compose.foundation.rememberScrollbarAdapter(sc),
+                                        Modifier.align(androidx.compose.ui.Alignment.CenterEnd).fillMaxHeight().testTag("body-scrollbar"),
+                                    )
+                                }
+                            }
                             ReaderPane.Related -> RelatedPane(session)
                         }
                     }
@@ -565,9 +599,12 @@ private fun RelatedPane(session: ReaderSession) {
 @Composable
 private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
     val state = session.state
-    // 滚轮只翻页：在 Initial 阶段先 consume，不让子级 verticalScroll 同时滚动；换页/换书时滚动位置也归零。
+    // 滚轮先在页内滚动，到边界才翻页（由外层 Initial 阶段判断）；换页/换书时滚动位置归零，往回翻则停在末尾。
     val scroll = remember(remote.current?.id, state.position.page) { androidx.compose.foundation.ScrollState(0) }
-    SideEffect { session.uiBodyScroll = scroll.value }
+    SideEffect { session.bodyScroll = scroll }
+    LaunchedEffect(scroll.maxValue, remote.page, session.scrollToEndOnArrive) {
+        if (session.scrollToEndOnArrive && remote.page is PageState.Ready) { scroll.scrollTo(scroll.maxValue); session.scrollToEndOnArrive = false }
+    }
     Column(Modifier.verticalScroll(scroll)) {
         when (val p = remote.page) {
             PageState.Idle -> Text(if (remote.current == null) "请先在书架里选一本" else "", Modifier.testTag("remote-idle"), fontSize = 14.sp)
@@ -648,7 +685,7 @@ private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: Reade
         val noted = remote.notes.any { remote.noteValid(it, view) && it.start >= range.first && it.end <= range.last + 1 }
         Text(
             line,
-            Modifier.testTag("line-$i").fillMaxWidth()
+            Modifier.testTag("line-$i").fillMaxWidth().onGloballyPositioned { session.uiLineBounds[i] = it.boundsInRoot() }
                 .then(if (picked) Modifier.background(Color(0xFFCFE3F6)) else if (noted) Modifier.background(Color(0xFFFFF4C2)) else Modifier)
                 .padding(vertical = 3.dp),
             fontSize = size, color = Ink,

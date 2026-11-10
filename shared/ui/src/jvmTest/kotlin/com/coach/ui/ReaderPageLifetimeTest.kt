@@ -78,6 +78,11 @@ class ReaderPageLifetimeTest {
                 click("lifetime-density");image=pixels(2,image);record("rendering_changed",image)
                 close();record("closed");stage("after_close")
                 pause=ReaderPageTrace.pauseNextDecode();click("lifetime-open")
+                // Advance/synchronize the UI after input before blocking for the worker's permit.
+                waitUntil(timeoutMillis=15_000) {
+                    onAllNodesWithTag("private-document-back").fetchSemanticsNodes().size==1 &&
+                        events().any { it["kind"]?.jsonPrimitive?.content=="decode_paused_before_native" }
+                }
                 val late=runBlocking { withTimeout(15_000) { pause!!.awaitEntered() } }
                 click("private-document-back")
                 waitUntil(timeoutMillis=15_000) { onAllNodesWithTag("private-document-back").fetchSemanticsNodes().isEmpty() }

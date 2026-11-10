@@ -34,12 +34,19 @@ class ReaderFixtureTransportTest(unittest.TestCase):
                     self.assertEqual(200,response.status)
                     self.assertEqual(b'\x89PNG\r\n\x1a\n\x01',response.read())
                     self.assertEqual(11 if mode=='keepalive' else 10,response.version)
+                    connection.request('GET',PREFIX+'/synthetic-baseline/pages/2/image?version=v1',headers={'Authorization':'Bearer '+TOKEN})
+                    response=connection.getresponse()
+                    self.assertEqual(200,response.status)
+                    self.assertEqual(b'\x89PNG\r\n\x1a\n\x02',response.read())
                 finally: connection.close()
                 # Server completion is joined by fixture exit before inspecting final write fields.
             row=service.requests[0]
-            self.assertEqual(int(mode!='legacy'),row['tcpNoDelay'])
+            self.assertIs(mode!='legacy',row['tcpNoDelayEnabled'])
             self.assertLessEqual(row['startedNs'],row['headersQueuedNs'])
             self.assertLessEqual(row['headersQueuedNs'],row['bodyQueuedNs'])
+            second=service.requests[1]
+            self.assertEqual(mode=='keepalive',row['connectionId']==second['connectionId'])
+            self.assertEqual(2 if mode=='keepalive' else 1,second['requestOnConnection'])
 
     def test_lifecycle_version_rejects_old_key_and_returns_different_pixels(self):
         with fixture(lifecycle=True) as service:

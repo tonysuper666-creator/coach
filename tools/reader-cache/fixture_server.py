@@ -34,6 +34,7 @@ class Fixture:
         self.requests = []
         self.transfers = []
         self.version = "v1"
+        self.connection_sequence = 0
         if transport not in ("legacy", "nodelay", "keepalive"):
             raise ValueError("unknown synthetic transport")
         self.lock = threading.Lock()
@@ -43,6 +44,13 @@ class Fixture:
             protocol_version = "HTTP/1.1" if transport == "keepalive" else "HTTP/1.0"
             disable_nagle_algorithm = transport != "legacy"
 
+            def setup(self):
+                super().setup()
+                with fixture.lock:
+                    fixture.connection_sequence += 1
+                    self.connection_id = fixture.connection_sequence
+                self.connection_request = 0
+
             def log_message(self, *_):
                 pass  # no request URLs, headers, credentials, or material in logs
 
@@ -51,6 +59,10 @@ class Fixture:
                 row = {} if row is None else row
                 row.update(status=status, bytes=len(data), handlerNs=time.monotonic_ns(),
                            protocol=self.protocol_version, tcpNoDelay=self.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+                # Darwin may return a nonzero flag such as 4. Preserve the raw value as evidence.
+                row["tcpNoDelayEnabled"] = bool(row["tcpNoDelay"])
+                self.connection_request += 1
+                row.update(connectionId=self.connection_id, requestOnConnection=self.connection_request)
                 with fixture.lock:
                     fixture.transfers.append(row)
                 self.send_response(status)

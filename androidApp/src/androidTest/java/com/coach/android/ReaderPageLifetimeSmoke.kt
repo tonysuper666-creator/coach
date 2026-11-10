@@ -89,6 +89,11 @@ class ReaderPageLifetimeSmoke {
             click("lifetime-density"); image=pixels(2,image); record("rendering_changed",image)
             close(); record("closed"); stage("after_close")
             pause=ReaderPageTrace.pauseNextDecode(); click("lifetime-open")
+            // Let input commit and the worker reach its pause before blocking the test dispatcher.
+            compose.waitUntil(timeoutMillis=15_000) {
+                compose.onAllNodesWithTag("private-document-back").fetchSemanticsNodes().size==1 &&
+                    events().any { it.getString("kind")=="decode_paused_before_native" }
+            }
             val late=runBlocking { withTimeout(15_000) { pause!!.awaitEntered() } }
             click("private-document-back")
             compose.waitUntil(timeoutMillis=15_000) { compose.onAllNodesWithTag("private-document-back").fetchSemanticsNodes().isEmpty() }

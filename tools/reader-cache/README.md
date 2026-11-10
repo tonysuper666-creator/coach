@@ -269,7 +269,8 @@ tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
 Use fresh output directories for `nodelay` and `keepalive` diagnostic controls,
 with identical PNGs and endpoint configuration. These are separate transport
 experiments, not comparable replacements for the legacy baseline/candidate.
-`transport.json` has 12 CIO image transfers plus four HttpURLConnection controls,
+`transport.json` has 12 CIO image transfers, four HttpURLConnection controls and
+four fresh-socket controls,
 without decoding or drawing. Headers/body timings and `transfers.json` distinguish
 server writes from client continuation; they do not alone identify a TCP cause.
 Only continue to full performance reruns once the request stages are understood.
@@ -310,3 +311,45 @@ presented redraw is an upper bound on display latency; it is not necessarily the
 first presentation. No continuous frame may be inferred merely from an earlier
 bitmap draw. Keep clock alignment, trace-quality warnings, absent witnesses and
 the missing Mac presentation endpoint visible in the report.
+
+## Barrier driver and connection evidence after 93301ca
+
+The `93301ca` native lifecycle run passed the first six checks on both platforms,
+then timed out after reopening with no new window/decode events. The driver
+blocked in `runBlocking` immediately after injecting input. It now pumps the UI
+through `waitUntil` until the reopened document and decode-pause marker exist,
+then obtains the permit token. The original 15-second limit and the cancellation,
+retirement, reopen and pixel assertions remain. This driver correction still
+needs its native rerun; earlier six-case output cannot stand in for completion.
+
+Darwin reported TCP_NODELAY as raw `4`. The fixture preserves `tcpNoDelay` and
+adds `tcpNoDelayEnabled`; assertions check enabled/disabled behavior, not a
+platform integer encoding. Payload, protocol, version rejection and server write
+ordering checks remain. `connectionId` and `requestOnConnection` identify real
+reuse; the fixture tests verify the distinction between persistent HTTP/1.1 and
+closing HTTP/1.0 responses. Boolean socket options use nonzero to represent
+enabled ([Apple socket option semantics](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getsockopt.2.html)).
+
+Source inspection found that CIO 3.3.3 defaults to `pipelining=false` and also
+chooses a dedicated connection when a plugin connect/socket timeout is present
+([engine defaults](https://github.com/ktorio/ktor/blob/3.3.3/ktor-client/ktor-client-core/common/src/io/ktor/client/engine/HttpClientEngineConfig.kt),
+[dedicated-request condition](https://github.com/ktorio/ktor/blob/3.3.3/ktor-client/ktor-client-cio/common/src/io/ktor/client/engine/cio/EngineTasks.kt)).
+Both apply to the current reader transport. A Windows regression measured three
+TCP connections for three HTTP/1.1 images. That explains lack of connection reuse,
+but does not establish which portion of Android's pre-header wait is connect,
+write, network receipt or selector/continuation scheduling.
+
+A reader-only serial-pool experiment did not pass HTTP/1.0 and repeated-cancel
+regressions; it is not in the candidate. Production CIO configuration is retained.
+The failed experiment and XML are evidence, not passing tests. Native reports
+must keep the pre-header cause unresolved until the new probes run.
+
+The diagnostic order is now `URL4,CIO12,socket4`. Each fresh socket records
+connect completion, request write, first response byte, headers and full body,
+using the same synthetic endpoint and an explicit `Connection: close` request.
+It records the socket's actual client NODELAY setting. These test-host probes
+do not replace production transport. They distinguish fresh TCP establishment
+from write-to-first-byte waiting; they cannot by themselves attribute a difference
+to CIO's selector. Compare matched modes and server connection IDs. Do not
+subtract host timestamps from guest clocks, combine controls with UI performance,
+or replace historical baseline samples.

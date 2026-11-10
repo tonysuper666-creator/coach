@@ -168,7 +168,10 @@ def main():
                 expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else None
                 summary = summarize(trace, expected)
             elif args.suite == "transport":
-                summary = dict(suite="transport", samples=len(json.loads((out / "transport.json").read_text())["samples"]),
+                probes = json.loads((out / "transport.json").read_text())
+                summary = dict(suite="transport", samples=len(probes["samples"]),
+                               urlControlSamples=len(probes.get("urlConnectionControl", [])),
+                               socketControlSamples=len(probes.get("socketControl", [])),
                                uiPerformanceVerified=False, physicalMemoryBudgetVerified=False)
             else:
                 cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]

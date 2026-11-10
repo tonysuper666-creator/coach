@@ -8,6 +8,8 @@ import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
 import com.coach.domain.logicalDay
+import com.coach.domain.reader.KnowledgeSourceReferences
+import com.coach.domain.reader.readKnowledgeSources
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -39,6 +41,10 @@ data class KpRow(
     val prereqs: List<String> = emptyList(),
     /** 备课教材页的文档与起止页（PDF 页），资料页用它跳到「本次参考」。 */
     val anchorDoc: String = "", val anchorPdfPage: Int = 0, val anchorBookPage: Int = 0,
+    /** Claim-specific references keep documents/ranges separate; the legacy jump is blank for this wire format. */
+    val sourceReferences: KnowledgeSourceReferences = KnowledgeSourceReferences(),
+    /** Provenance of these outline references; a reader from another course must not consume them. */
+    val sourceCourseId: String? = null,
 )
 
 data class QuizCard(
@@ -80,6 +86,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val references = HashMap<String, String>()
         val prereqs = HashMap<String, List<String>>()
         val anchorDocs = HashMap<String, Triple<String, Int, Int>>()
+        val sourceReferences = HashMap<String, KnowledgeSourceReferences>()
+        val sourceCourses = HashMap<String, String>()
         for (e in events) when (e.type) {
             "outline_revised" -> {
             // 课程内容装载（TON-1127）把整份 CourseContent 放在事件里：知识点名、模块、概念、教材页锚点。
@@ -91,15 +99,21 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
                 for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }
+                val sources = readKnowledgeSources(o)
+                sourceReferences[id] = sources
+                sourceCourses[id] = e.courseId
                 // 课程内容装载写的是单个 `sourceAnchor`（旧形态是 `anchors` 数组），两种都认。
                 // 「看原文」选页与备课选页同口径：先看 `anchors[]` 里第一个有文档和页码的，没有再用 `sourceAnchor`。
                 val anchorObjects = (o["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject } + listOfNotNull(o["sourceAnchor"] as? JsonObject)
                 val openable = { a: JsonObject -> a.s("docId").isNotBlank() && ((a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0) > 0 }
-                anchorObjects.firstOrNull(openable)?.let { a ->
+                if (sources.structured) {
+                    anchorDocs.remove(id)
+                    references.remove(id)
+                } else anchorObjects.firstOrNull(openable)?.let { a ->
                     anchorDocs[id] = Triple(a.s("docId"), (a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0, (a["bookPage"] as? JsonPrimitive)?.intOrNull ?: 0)
                 }
                 val pages = anchorObjects.mapNotNull { a -> (a["bookPage"] as? JsonPrimitive)?.intOrNull }
-                if (pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
+                if (!sources.structured && pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
             }
             for (op in (e.payload["ops"] as? JsonArray).orEmpty()) {
                 val o = op as? JsonObject ?: continue
@@ -130,7 +144,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             val anchor = anchorDocs[id]
             KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
-                anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
+                anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0,
+                sourceReferences = sourceReferences[id] ?: KnowledgeSourceReferences(), sourceCourseId = sourceCourses[id])
         }
     }
 

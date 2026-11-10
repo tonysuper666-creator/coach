@@ -3,10 +3,30 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from android_observer import observe_android
+from android_observer import observe_android, audit_transport_stage
 
 
 class AndroidObserverTest(unittest.TestCase):
+    def test_transport_stage_requires_the_current_run_suite_and_valid_pid(self):
+        original=dict(runId='current',suite='route',pid=42,stage='transport_running')
+        for changes,status in (({},'matched'),({'runId':'old'},'stale_run'),({'suite':'lifecycle'},'wrong_suite'),
+                               ({'pid':None},'invalid_pid'),({'pid':True},'invalid_pid'),({'stage':''},'invalid_phase')):
+            with self.subTest(changes=changes):
+                row=observe_android(['adb-unit'],'isolated-package','current','stage',
+                    lambda *_,**kwargs:SimpleNamespace(returncode=0,stdout=json.dumps(dict(original,**changes))),expected_suite='route')
+                self.assertEqual(status,row['stageReadStatus'])
+                self.assertEqual(status=='matched',row['stageRunMatched'])
+                self.assertIn('stageObservedRunHash',row)
+
+    def test_stage_audit_needs_an_active_phase_for_the_measured_process(self):
+        row=dict(operations={'stage':{}},stageReadStatus='matched',stageRunMatched=True,
+            stageSuite='route',stagePid=42,stage='transport_running')
+        self.assertTrue(audit_transport_stage([row],True,'route',42)['verified'])
+        for changed in (dict(row,stagePid=99),dict(row,stage='transport_complete'),dict(row,stageRunMatched=False)):
+            self.assertFalse(audit_transport_stage([changed],True,'route',42)['verified'])
+        skipped=audit_transport_stage([],False,'route',42)
+        self.assertFalse(skipped['requested']);self.assertFalse(skipped['verified'])
+
     def test_modes_execute_only_selected_operations_and_keep_host_boundaries(self):
         for mode,expected in (('both',['stage','meminfo']),('stage',['stage']),('meminfo',['meminfo'])):
             commands=[]

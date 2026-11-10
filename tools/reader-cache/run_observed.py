@@ -18,7 +18,7 @@ from summarize import summarize
 from correlate_transport import correlate
 from route_control import summarize_routes
 from packet_capture import PacketCapture
-from android_observer import MODES, observe_android
+from android_observer import MODES, observe_android, audit_transport_stage
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -115,7 +115,8 @@ def main():
                             result = subprocess.run(["ps", "-o", "pid=,rss=", "-p", str(pid)], capture_output=True, text=True)
                             row.update(pid=pid, rssKiB=result.stdout.strip(), exit=result.returncode)
                     else:
-                        row=observe_android(adb,PACKAGE,run_id,observer_mode)
+                        row=observe_android(adb,PACKAGE,run_id,observer_mode,
+                            expected_suite=args.suite if args.suite in ('transport','route') else None)
                         for kind,span in row['operations'].items():
                             observer_counts[kind]+=1
                             if 'error' in span: sampling_errors.append(span['error'])
@@ -261,6 +262,13 @@ def main():
             (out / "run.json").write_text(json.dumps(identity, indent=2))
     if sampling_errors:
         raise RuntimeError("memory sampler failed; keep the measurement incomplete")
+    if args.platform=='android' and args.suite in ('transport','route'):
+        requested=observer_mode in ('both','stage')
+        rows=[json.loads(line) for line in (out/observer_file).read_text().splitlines()] if requested else []
+        audit=audit_transport_stage(rows,requested,args.suite,identity['measurementPid'])
+        (out/'stage-audit.json').write_text(json.dumps(audit,indent=2))
+        if requested and not audit['verified']:
+            raise RuntimeError('Current transport run/suite/PID active stage was not observed; inspect stage-audit.json')
     if args.packet_interface and (not identity['packetCapture']['observed'] or identity['packetCapture'].get('decodeExit')!=0):
         raise RuntimeError('Requested packet boundary capture is incomplete; inspect run.json and wire-capture.log')
     if args.perfetto and identity.get("perfettoExit") != 0:

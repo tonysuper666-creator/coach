@@ -2,6 +2,7 @@ package com.coach.android
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import android.util.AtomicFile
 import com.coach.client.CourseHttp
 import com.coach.ui.ReaderPageTrace
 import com.coach.ui.measureSyntheticReaderTransport
@@ -32,9 +33,20 @@ class ReaderImageTransportSmoke {
         require(JSONObject(URL("$base/health").readText()).getBoolean("syntheticOnly"))
         val routeControl=InstrumentationRegistry.getArguments().getString("readerRouteControl")
         require(routeControl == null || routeControl == "host-loopback")
+        val suite=if (routeControl == null) "transport" else "route"
+        val stageFile=AtomicFile(File(context.cacheDir,"reader-stage.json"))
+        fun stage(name: String) {
+            val data=JSONObject().put("runId",runId).put("suite",suite).put("pid",android.os.Process.myPid())
+                .put("stage",name).put("deviceMonotonicNs",ReaderPageTrace.nowNs()).toString().toByteArray(Charsets.UTF_8)
+            val stream=stageFile.startWrite()
+            try { stream.write(data);stageFile.finishWrite(stream) }
+            catch (error: Throwable) { stageFile.failWrite(stream);throw error }
+        }
         val client = if (routeControl == null) CourseHttp(base, "baseline-device", "synthetic-baseline-token", "READER_BASELINE") else null
+        var completed=false
         ReaderPageTrace.start()
         try {
+            stage("transport_running") // Before probe timing; never retag a previous run's file.
             if (routeControl != null) {
                 // Only raw diagnostic sockets use the fixed emulator host alias. The
                 // app's cleartext allowlist and CourseHttp endpoint stay unchanged.
@@ -55,6 +67,7 @@ class ReaderImageTransportSmoke {
                         File(context.cacheDir,"reader-transport.json").writeText(report.toString())
                     }
                 }
+                completed=true
                 return@runBlocking
             }
             val controls = JSONArray()
@@ -81,9 +94,12 @@ class ReaderImageTransportSmoke {
             for(page in 1..4) sockets.put(socketProbe(BuildConfig.COACH_TAIL_HOST,port,page,"$runId-socket-$page"))
             report.put("socketControl",sockets).put("probeOrder","URL4,CIO12,socket4")
             File(context.cacheDir,"reader-transport.json").writeText(report.toString())
+            completed=true
         } finally {
-            File(context.cacheDir,"reader-observed.json").writeText(ReaderPageTrace.snapshot().toString())
-            ReaderPageTrace.stop(); client?.close()
+            try {
+                stage(if (completed) "transport_complete" else "transport_failed")
+                File(context.cacheDir,"reader-observed.json").writeText(ReaderPageTrace.snapshot().toString())
+            } finally { ReaderPageTrace.stop();client?.close() }
         }
     }
 

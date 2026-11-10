@@ -581,3 +581,59 @@ waiting elsewhere. Host command/server intervals share a clock, but do not
 subtract host and guest timestamps or claim kernel receipt. Decide on any UI
 performance rerun only after this control; the fixed baseline, presentation,
 trace-quality, real-hot-update and native/GPU gaps remain open.
+
+## Unmatched phases and reversed order after c0daf35
+
+The `c0daf35` five-condition run passed all 80 associations and Mac's 30 Python
+checks. Only stage-only was lower (route medians 13/160 ms); none, meminfo-only
+and both references were still about 501 ms. Thus disabling the observer did
+not consistently remove waiting. The previous on/off/on observation remains
+evidence for that round, not a stable observer or single-command explanation.
+
+All 78 stage reads exited zero but failed run matching. Source inspection found
+that the transport test never wrote `reader-stage.json`; only other reader
+measurement suites wrote it. A previous cache file is a plausible explanation,
+but the old observer rows did not retain its body or run fingerprint, so they
+cannot identify which earlier run produced it. None of those 78 rows establishes
+the current phase. Exit zero and a joined observer do not repair this gap.
+
+The Android transport test now atomically writes its actual run/suite/PID with
+`transport_running` before probe timing, then `transport_complete` or
+`transport_failed` after it. These two writes are outside the individual request
+intervals and apply to every observer mode. It does not retag an old file or
+write per-request stage markers. **Rebuild both isolated APKs for this head**;
+the old reused instrumentation binary lacks the writer.
+
+Observer rows now distinguish matched, stale-run, wrong-suite, invalid-PID,
+invalid-phase, malformed and failed-command reads. A hash of an observed run ID
+helps compare stale reads without retaining the old file body. Transport/route
+diagnostics additionally validate suite and PID structure; default UI/lifecycle
+stage matching remains compatible with its existing writer. `stage-audit.json`
+is produced after the observer joins and the measured PID is extracted. When
+stage reading was selected, at least one `transport_running` row must match the
+current run/suite and the measured PID. Otherwise the runner fails while
+retaining request associations and phase-audit results. Pre-start stale reads
+are retained and counted, not relabelled. None/meminfo-only report stage audit
+as not requested/unverified; they do not invent a phase witness. This is coarse
+test-phase identity, not per-request display or memory-budget evidence.
+
+Use one isolated AVD and identical newly built APK hashes/PDF/Poppler/geometry
+for the minimum reversed-order repetition: **stage S1 → none N1 | none N2 →
+stage S2**. The two adjacent pairs have opposite mode order; each mode appears
+twice. Each group uses the route legacy workload with a fresh output directory,
+changing only `--transport-observer stage|none`. Do not request Perfetto or
+packet capture. Keep all 16 associations, both eight-sample route distributions,
+first-block transients, PID, sampler flags, phase-audit outcomes, actual operation
+counts/statuses/times, and cleanup for every group. Neither mode provides memory
+data. Report stage observation frequency with its explicit first-invocation to
+last-return denominator, plus current-active-phase counts; setup/extraction
+observations and after-cycle waits are not equal-frequency probe exposure.
+
+Compare the S1/N1 and N2/S2 route results separately, retaining direction and
+all values; do not pool them into a latency acceptance number. This is one AB
+and one BA pair within one AVD, not replication across independent device
+sessions. A reversal in the apparent effect leaves the explanation unstable.
+The new phase writes change diagnostic instrumentation, so do not merge this
+head with older round samples. Keep host and guest clocks separate. Decide on
+performance reruns from this result; the original baseline, real presentation,
+trace quality, real hot update and native/GPU budget gaps are unchanged.

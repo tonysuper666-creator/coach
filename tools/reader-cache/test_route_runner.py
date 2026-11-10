@@ -24,6 +24,10 @@ class RouteRunnerTest(unittest.TestCase):
     def test_observer_exception_keeps_failed_span_and_fails_runner(self):
         self.run_case(False,execute_cycle=True,fail_stage=True)
 
+    def test_stale_or_wrong_process_stage_fails_after_retaining_associations(self):
+        for changed in ({'runId':'previous'},{'pid':99},{'stage':'transport_complete'}):
+            with self.subTest(changed=changed): self.run_case(False,execute_cycle=True,stage_overrides=changed)
+
     def test_sampler_cannot_be_disabled_for_memory_or_ui_acceptance(self):
         for suite in ('performance','behavior','lifecycle'):
             for selection in (['--no-transport-memory-sampler'], *[['--transport-observer',mode] for mode in ('both','stage','meminfo','none')]):
@@ -40,7 +44,7 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False):
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
@@ -87,7 +91,9 @@ class RouteRunnerTest(unittest.TestCase):
             commands.append(command)
             if command[-1]=='cache/reader-stage.json':
                 if fail_stage: raise OSError('unit observer failure')
-                return SimpleNamespace(returncode=0,stdout=json.dumps(dict(runId='unit-run',stage='unit-stage')))
+                data=dict(runId='unit-run',suite='route',pid=1234,stage='transport_running')
+                data.update(stage_overrides or {})
+                return SimpleNamespace(returncode=0,stdout=json.dumps(data))
             if 'dumpsys' in command:
                 return SimpleNamespace(returncode=0,stdout='unit meminfo')
             if 'instrument' in command:
@@ -109,6 +115,8 @@ class RouteRunnerTest(unittest.TestCase):
                 patch('run_observed.subprocess.check_output',check_output),patch('run_observed.subprocess.run',run):
             if fail_stage:
                 with self.assertRaisesRegex(RuntimeError,'memory sampler failed'): run_observed.main()
+            elif stage_overrides:
+                with self.assertRaisesRegex(RuntimeError,'active stage was not observed'): run_observed.main()
             else:
                 run_observed.main()
         self.assertTrue(json.loads((out/'route-comparison.json').read_text())['complete'])
@@ -135,6 +143,10 @@ class RouteRunnerTest(unittest.TestCase):
             if fail_stage: self.assertEqual('OSError',row['operations']['stage']['error'])
         self.assertEqual(['OSError'] if fail_stage else [],identity['memorySamplerErrors'])
         if selected in ('stage','none'): self.assertFalse((out/'memory.jsonl').exists())
+        if not fail_stage:
+            audit=json.loads((out/'stage-audit.json').read_text())
+            self.assertEqual(selected in ('both','stage'),audit['requested'])
+            self.assertEqual(selected in ('both','stage') and not stage_overrides,audit['verified'])
 
 
 if __name__=='__main__': unittest.main()

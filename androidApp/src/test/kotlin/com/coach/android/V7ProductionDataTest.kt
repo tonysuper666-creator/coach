@@ -194,9 +194,12 @@ class V7ProductionDataTest {
         RuntimeEnvironment.setQualifiers("w624dp-h986dp-xhdpi")
         compose.setContent { Box(Modifier.requiredSize(624.dp, 986.dp)) { CoachApp(controller, dark = false, initialTab = AppTab.REVIEW) } }
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("open-mainline").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("open-mainline").performClick()
+        // PR117 made the card a container with separate continue/read/week-picker controls.
+        compose.onNodeWithText("选其他周").assertIsDisplayed().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("mainline-week-8").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-skip").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("mainline-skip").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-source-card").assertDoesNotExist()
         compose.onNodeWithTag("mainline-option-1").performScrollTo().performClick()

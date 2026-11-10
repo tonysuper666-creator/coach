@@ -326,6 +326,11 @@ struct LearningView: View {
             if let receipt = model.receipt {
                 Text("已收到答案 · \(receipt.status) · \(receipt.keyState)").accessibilityIdentifier("answerReceipt")
             }
+            if model.week != nil {
+                Button("返回课程") { Task { await model.loadCourse() } }
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("returnToCourse")
+            }
             if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("learningMessage") }
             Button("移除此设备的连接", role: .destructive) { connection.forget() }
         }

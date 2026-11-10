@@ -27,7 +27,7 @@ final class ReaderLayoutHostUITests: XCTestCase {
         app.buttons["下一页"].tap()
         app.switches["标记这一段"].tap()
         app.textFields["写下笔记"].tap()
-        app.textFields["写下笔记"].typeText("sample")
+        app.textFields["写下笔记"].typeText("sample\n")
 
         let canvas = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "canvasInstance-")).firstMatch
         XCTAssertTrue(canvas.exists)
@@ -42,6 +42,7 @@ final class ReaderLayoutHostUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["第 2 页"].exists)
             XCTAssertEqual(app.textFields["写下笔记"].value as? String, "sample")
             XCTAssertEqual(app.switches["标记这一段"].value as? String, "1")
+            capture(app, name: "manual-\(name)")
         }
         app.buttons["poseMenu"].tap()
         app.buttons["自动选择"].tap()

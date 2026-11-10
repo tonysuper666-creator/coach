@@ -35,6 +35,7 @@ private struct HostView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var content: FlatReaderLayout.Content = .pdf
     @State private var closed = false
+    @State private var systemHinge: ReaderGeometry.Hinge = .unavailable
     @State private var manual: ReaderPose?
     @State private var page = 1
     @State private var selection = false
@@ -43,9 +44,31 @@ private struct HostView: View {
     @State private var showingSource = false
 
     var body: some View {
+        if #available(iOS 27.1, *) {
+            host.onHingeChange { _, context in
+                guard let status = context.hinge?.status else {
+                    systemHinge = .unavailable
+                    return
+                }
+                if status == .closed {
+                    systemHinge = .closed
+                } else if status == .fullyOpen {
+                    systemHinge = .open
+                } else if status == .partiallyOpen {
+                    systemHinge = .partiallyOpen
+                } else {
+                    systemHinge = .unavailable
+                }
+            }
+        } else {
+            host
+        }
+    }
+
+    private var host: some View {
         GeometryReader { proxy in
             let geometry = ReaderGeometry(width: proxy.size.width, height: proxy.size.height,
-                                          hinge: closed ? .closed : .unavailable,
+                                          hinge: closed ? .closed : systemHinge,
                                           division: .none, surface: .unknown,
                                           compactWidth: proxy.size.width < 600)
             let pose = ReaderPoseResolver.resolve(geometry, manual: manual)
@@ -71,7 +94,7 @@ private struct HostView: View {
                 }.buttonStyle(.bordered)
                 Text("\(poseLabel(pose)) · \(layoutLabel(layout))")
                     .font(.subheadline)
-                Text("形态为模拟示例，未接入折痕避让").font(.caption).foregroundStyle(.secondary)
+                Text("布局示例，手选形态为模拟输入，未接入折痕避让").font(.caption).foregroundStyle(.secondary)
                 ReaderCanvas(pose: pose, layout: layout, page: $page, selection: $selection,
                              draft: $draft, drawer: $drawer)
                     // Exercise an actual child view teardown on pose changes.

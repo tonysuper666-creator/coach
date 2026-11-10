@@ -8,10 +8,14 @@ division, occlusion, container geometry, size class and face-up information
 from supported system APIs. An unknown or not-yet-reported division is never
 inferred from a device model, hinge angle or a fixed fold width.
 
-This is **not** the requested completed layout module. Xcode 27.0 lacks the
-27.1 APIs. The adapter, `ArrangementView` layout, reserved-region avoidance,
-event recording and real foldable state-continuity verification remain to be
-implemented and built with the actual 27.1 SDK. Manual pose selection
+This is **not** the requested completed layout module. The host uses
+`onHingeChange` on iOS 27.1 and later to map reported system hinge status into
+the pose suggestion. Until a status is reported, and for an unknown status,
+it uses unavailable; the closed button and pose menu remain manual fixtures.
+The host does not yet read system divisions or reserved regions, so its
+automatic suggestion is not a fold-safe layout. `ArrangementView` layout,
+reserved-region avoidance, event recording and real foldable state-continuity
+verification remain to be implemented. Manual pose selection
 must never override collision avoidance. A host must keep page, question,
 selection and draft state above any view rebuilt by a pose change. StandBy
 preservation needs separate device verification. Nothing here exposes reading

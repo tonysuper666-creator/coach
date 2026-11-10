@@ -101,4 +101,6 @@ tasks.withType<Test>().configureEach {
     systemProperty("roborazzi.test.record", providers.gradleProperty("roborazzi.test.record").getOrElse("false"))
     systemProperty("coach.v7.output", layout.buildDirectory.dir("screens/v7").get().asFile.absolutePath)
     maxParallelForks = 1
+    // Robolectric's native graphics buffers must be released between test classes.
+    forkEvery = 1
 }

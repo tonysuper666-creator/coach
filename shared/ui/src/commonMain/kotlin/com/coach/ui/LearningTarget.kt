@@ -31,7 +31,8 @@ internal fun CoachController.learningTarget(view: CourseView, browseWeek: Int? =
         val question = items.firstOrNull { it.str("id") == saved.str("item") }
         val facts = if (reading) section?.strings("fact_ids").orEmpty() else question?.strings("factIds").orEmpty()
         val rows = view.weekKps(previous)
-        val kp = rows.firstOrNull { it.id == question?.str("kpId") || it.id == section?.str("section_id") || it.conceptIds.any { f -> f in facts } }
+        val linkedId = if (reading) section?.str("section_id") else question?.str("kpId")
+        val kp = rows.firstOrNull { it.id == linkedId || it.conceptIds.any { f -> f in facts } }
             ?: rows.firstOrNull { it in unfinished } ?: rows.firstOrNull()
         if (kp != null && (active || readingActive)) return LearningTarget(kp, previous, true, reading = reading)
     }

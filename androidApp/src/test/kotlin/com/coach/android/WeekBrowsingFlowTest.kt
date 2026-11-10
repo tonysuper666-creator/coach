@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.*
@@ -194,6 +195,30 @@ class WeekBrowsingFlowTest {
     }
     @Test fun todayWithoutScopeEntersTheFirstQuestionInOneClick() = today(false)
     @Test fun todayWithScopeHasTheSameEntryAndNoExtraScopeWrite() = today(true)
+    @Test fun examPanelSkipsPassedSectionsAndStartsTheSharedTarget() {
+        course(complete = true, sameWeekSection = true)
+        show(AppTab.ROUTE)
+        waitTag("exam-continue")
+        compose.onAllNodesWithTag("exam-continue").assertCountEquals(1)
+        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
+        waitTag("mainline-option-0")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        assertTrue(commands.isEmpty())
+    }
+    @Test fun examPanelResumesTheSamePausedQuestionAndFeedbackAsToday() {
+        course(scoped = true, sameWeekSection = true)
+        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
+        controller.sync.saveMainlineState("SYNTHETIC", json("body" to body, "mode" to "quiz", "item" to "Q2", "choice" to 1,
+            "result" to json("itemId" to "Q2", "answer" to 0, "choice" to 1, "status" to "missed", "explanation" to json("correct" to "Invented original feedback"))), "week:3")
+        show(AppTab.ROUTE)
+        waitTag("exam-continue")
+        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
+        waitTag("mainline-option-1")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
+        compose.onNodeWithText("Invented original feedback").assertExists()
+        assertTrue(requests.none { it.contains("/answer") })
+    }
     @Test fun pausedQuestionRestoresItsExactChoiceAndFeedbackFromToday() {
         course(scoped = true)
         controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
@@ -212,6 +237,53 @@ class WeekBrowsingFlowTest {
         assertTrue(commands.isEmpty())
         assertTrue(requests.none { it.contains("/answer") })
     }
+    private fun pausedQuestionThenRead(kp: String) {
+        course(scoped = true, sameWeekSection = true)
+        // Course IDs can be the section IDs: reading K3 must not relabel the paused K3b question.
+        val notes = JsonArray((body["notes"] as JsonArray).mapIndexed { index, section ->
+            JsonObject(section.jsonObject + ("section_id" to JsonPrimitive(if (index == 0) "K3" else "K3b")))
+        })
+        val sessionBody = JsonObject(body + ("notes" to notes))
+        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
+        controller.sync.saveMainlineState("SYNTHETIC", json("kind" to "mainline", "week" to 3), "learning")
+        controller.sync.saveMainlineState("SYNTHETIC", json("body" to sessionBody, "mode" to "quiz", "item" to "Q2", "choice" to 1,
+            "result" to json("itemId" to "Q2", "answer" to 0, "choice" to 1, "status" to "missed", "explanation" to json("correct" to "Invented original feedback"))), "week:3")
+        show(AppTab.ROUTE)
+        compose.onNodeWithTag("browse-week-3").performScrollTo().performClick()
+        compose.onNode(hasText("先看要点") and hasAnyAncestor(hasTestTag("week-section-$kp"))).performClick()
+        waitTag("mainline-notes")
+    }
+    @Test fun optionalReadingDoesNotReplaceThePausedQuestionChoiceOrFeedback() {
+        pausedQuestionThenRead("K3")
+        compose.runOnIdle {
+            val saved = controller.sync.mainlineState("SYNTHETIC", "week:3")
+            assertEquals("Q2", saved.str("item"))
+            assertEquals(1, saved.num("choice").toInt())
+            assertEquals("Q2", (saved["result"] as JsonObject).str("itemId"))
+            assertEquals("quiz", saved.str("mode"))
+        }
+        back()
+        compose.onNodeWithContentDescription("导航：今天").performClick()
+        waitTag("today-continue")
+        compose.onNodeWithText("继续 · Invented second section").assertExists()
+        compose.onNodeWithTag("today-continue").performClick()
+        waitTag("mainline-option-1")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
+        compose.onNodeWithText("Invented original feedback").assertExists()
+        capture("paused-question-after-optional-reading")
+        assertTrue(commands.isEmpty())
+        assertTrue(requests.none { it.contains("/answer") })
+    }
+    @Test fun returningFromNotesToTheSameQuestionPreservesItsAnswer() {
+        pausedQuestionThenRead("K3b")
+        compose.onNodeWithTag("mainline-section-quiz").performClick()
+        waitTag("mainline-option-1")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
+        compose.onNodeWithText("Invented original feedback").assertExists()
+        assertTrue(requests.none { it.contains("/answer") })
+    }
     @Test fun deliberatelyOpenedReadingRestoresItsSectionAndParagraphOffline() {
         course(scoped = true)
         controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
@@ -226,6 +298,8 @@ class WeekBrowsingFlowTest {
             assertEquals("S2", saved.str("section"))
             assertEquals(250, saved.num("readScroll").toInt())
         }
+        val actualScroll = compose.onNodeWithTag("mainline-reading-scroll").fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+        assertEquals(250f, actualScroll, .5f)
         capture("restored-reading")
         assertTrue(commands.isEmpty())
     }

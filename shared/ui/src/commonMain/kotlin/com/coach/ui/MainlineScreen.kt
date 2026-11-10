@@ -189,6 +189,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
     var revealFeedback by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
+    // Reading is a separate view of the material, not a replacement for a paused answer.
+    var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
     val busy = pending != null
     val now = rememberCourseNow(c)
     val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
@@ -208,8 +210,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     fun position(mode: Boolean, id: String = itemId, section: String = sectionId, selectedFilter: String = filter) {
         if (mode && only != null) { onBack(); return }
+        if (!mode) quizStarted = true
         reading = mode; itemId = id; sectionId = section; filter = selectedFilter
-        save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "item" to JsonPrimitive(id),
+        save("mode" to JsonPrimitive(if (mode && !quizStarted) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
     LaunchedEffect(body != null) {
@@ -218,18 +221,25 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
             val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
             if (match != null) {
-                chosen = null; result = null
-                save("choice" to JsonNull, "result" to JsonNull)
-                position(reading, "", match.str("section_id"), if (reading) filter else match.str("section_id"))
+                if (reading) {
+                    if (sectionId != match.str("section_id")) readingScroll.scrollTo(0)
+                    position(true, section = match.str("section_id"))
+                } else {
+                    val candidates = items.filter { q -> q.strings("factIds").any { it in match.strings("fact_ids") } }
+                    val next = candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+                    val id = next?.str("id").orEmpty()
+                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull); scroll.scrollTo(0) }
+                    position(false, id, match.str("section_id"), match.str("section_id"))
+                }
             }
         }
     }
     LaunchedEffect(Unit) {
         if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
-        save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "filter" to JsonPrimitive(filter))
+        save("mode" to JsonPrimitive(if (reading && !quizStarted) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
         if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
-    LaunchedEffect(item?.str("id")) { if (item != null && itemId != item.str("id")) position(reading, item.str("id")) }
+    LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }
     LaunchedEffect(pending, retry) {
         val wire = pending ?: return@LaunchedEffect
         val traceId = wire.str("submissionId")
@@ -273,11 +283,17 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     fun startQuiz(selectedFilter: String = "") {
         if (pending != null) { position(false); return }
-        if (selectedFilter != filter) {
+        val facts = sections.firstOrNull { it.str("section_id") == selectedFilter }?.strings("fact_ids").orEmpty()
+        val candidates = if (selectedFilter.isBlank()) items else items.filter { q -> q.strings("factIds").any { it in facts } }
+        val next = candidates.firstOrNull { it.str("id") == itemId }
+            ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+        val id = next?.str("id").orEmpty()
+        if (id != itemId) {
             chosen = null; result = null
             save("choice" to JsonNull, "result" to JsonNull)
+            scope.launch { scroll.scrollTo(0) }
         }
-        position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
+        position(false, id, selectedFilter = selectedFilter)
     }
     val goUp: () -> Unit = { if (!reading && !directEntry) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)

@@ -233,7 +233,14 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
     val openKp: (String, Boolean) -> Unit = { id, start ->
         val current = view
-        if (start && current != null) c.learningTarget(current)?.let { weekActions.start(current, it) }
+        if (start && current != null) {
+            val common = c.learningTarget(current)?.takeIf { it.kp.id == id }
+            val explicit = current.kp(id)?.let { kp ->
+                val week = current.weeks.firstOrNull { n -> current.weekKps(n).any { it.id == id } }
+                LearningTarget(kp, week, false, legacy = week == null)
+            }
+            (common ?: explicit)?.let { weekActions.start(current, it) }
+        }
         else openStudy(id, false)
     }
     val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }

@@ -7,7 +7,15 @@ if [ "$(uname -s)" != Darwin ]; then
     exit 64
 fi
 cd "$(dirname "$0")/../.." || exit 64
-mkdir -p build
+mkdir -p build || exit 64
+# A reused worktree can retain screenshots from failing tests that now pass.
+# Preserve the old receipt separately so the new manifest contains only this run.
+for receipt_dir in shared/ui/build/screens/ton1447 shared/ui/build/test-results/jvmTest; do
+    if [ -e "$receipt_dir" ]; then
+        mv "$receipt_dir" "$receipt_dir.previous.$(date -u +%Y%m%dT%H%M%SZ).$$" || exit 64
+    fi
+done
+mkdir -p shared/ui/build/screens/ton1447 || exit 64
 tools/dev/heavy --local ./gradlew :shared:ui:jvmTest \
     --tests com.coach.ui.MainlineScreenTest \
     --tests com.coach.ui.ReviewEntryTest \

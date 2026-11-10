@@ -419,7 +419,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             Spacer(Modifier.height(16.dp))
                         }
                         explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                            PrivateSourceReference(http.reader, source, done.str("anchor"))
+                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
                         }
                     }
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
@@ -437,7 +437,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Outcome(done, view.logicalToday(now), onReviewWeek)
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
                     if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
-                        PrivateSourceReference(http.reader, source, done.str("anchor"))
+                        PrivateSourceReferences(http.reader, source, done.str("anchor"))
                     }
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.

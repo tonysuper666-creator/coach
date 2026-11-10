@@ -32,7 +32,8 @@ class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false) : AutoCloseable {
+    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
+                          source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         /** Every reader request the cited-source component makes through the real CourseHttp. */
@@ -43,7 +44,7 @@ class MainlineScreenTest {
             "options":{"0":"Synthetic apples were sold out before the season started, so they cannot be the answer.",
                        "2":"Synthetic plums ripen after the period described in the question.",
                        "3":"Synthetic figs are imported, not grown in the orchard."},
-            "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"Synthetic lecture 1, slide 4"}"""
+            "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"$source"}"""
         private val items = listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String, status: Int = 200) {
@@ -92,13 +93,18 @@ class MainlineScreenTest {
                 }
                 ex.requestBody.readBytes()
                 reply(ex, when {
+                    // Strict mode mirrors the server: one exact registered citation resolves; the slides of week 1 are not registered.
+                    path.endsWith("/resolve") && strictResolve -> {
+                        if (java.net.URLDecoder.decode(ex.requestURI.rawQuery, "UTF-8") == "source=教材 p.8") """{"documentId":"doc","version":"v1","pdfPage":39,"anchorStatus":"page_only"}"""
+                        else { reply(ex, "{}", 422); return@createContext }
+                    }
                     path.endsWith("/resolve") -> """{"documentId":"doc","version":"v1","pdfPage":2,"anchorStatus":"page_only"}"""
                     path.endsWith("/boxes") -> """{"version":"v1","pdfPage":2,"width":300,"height":400,"words":[
                         {"x0":30,"y0":40,"x1":80,"y1":55,"text":"Alpha"},{"x0":85,"y0":40,"x1":120,"y1":55,"text":"beta"}]}"""
                     path.endsWith("/progress") -> """{"revision":1}"""
                     path.endsWith("/study") -> """{"facts":[],"questions":[],"unlocated":0}"""
                     path.endsWith("/state") -> """{"document":{"version":"v1"},"progress":null,"notes":[]}"""
-                    else -> """{"documents":[{"id":"doc","title":"Synthetic reading","version":"v1","pages":4}]}"""
+                    else -> """{"documents":[{"id":"doc","title":"Synthetic reading","version":"v1","pages":${if (strictResolve) 60 else 4}}]}"""
                 })
             }
             start()
@@ -523,5 +529,44 @@ class MainlineScreenTest {
         }
         assertTrue(mac.readerRequests.any { it.contains("/resolve?source=") }, "the cited source went through the reader resolve route")
         assertTrue(mac.readerRequests.any { it.contains("/doc/pages/2/boxes") && it.contains("version=v1") }, "coordinates were requested for the resolved document, page and version: ${mac.readerRequests}")
+    }
+
+    @Test fun compositeSourceOffersEachCitationAndOnlyTheRegisteredTextbookPageOpens() =
+        FakeMac(today, false, source = "W1 课件 p.26；教材 p.8。", strictResolve = true).use { mac ->
+        val c = controller(mac)
+        val view = CourseView(emptyList(), project(emptyList()))
+        runComposeUiTest {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.size(900.dp, 700.dp)) {
+                MainlineScreen(c, view, onBack = {}, onOpenSteps = {}, onOpenEssay = {}, onReviewWeek = {})
+            } } } }
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-week-1").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-option-0").performClick()
+            onNodeWithTag("mainline-submit").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-citation").assertCountEquals(0)
+            onNodeWithTag("private-citation-0").performScrollTo().assertTextEquals("W1 课件 p.26")
+            onNodeWithTag("private-citation-1").assertTextEquals("教材 p.8")
+            capture("mainline-composite-citation-900x700")
+            // The unregistered slides say so and never open a guessed page.
+            onNodeWithTag("private-citation-0").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-citation-failed").fetchSemanticsNodes().isNotEmpty() }
+            onAllNodesWithTag("private-page-label").assertCountEquals(0)
+            onNodeWithText("返回题目").performClick()
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+            onNodeWithTag("private-citation-1").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-page-label").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("private-page-label").assertTextContains("PDF 第 39 页", substring = true)
+            onNodeWithTag("private-document-back").performClick()
+            onNodeWithTag("private-citation-1").assertExists()
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+            onNodeWithTag("mainline-outcome").assertExists()
+        }
+        val resolved = mac.readerRequests.filter { it.contains("/resolve?") }.map { java.net.URLDecoder.decode(it.substringAfter("source="), "UTF-8") }
+        assertEquals(listOf("W1 课件 p.26", "教材 p.8"), resolved.distinct(), "each citation resolves on its own, never the composite string")
+        assertTrue(mac.readerRequests.any { it.contains("/doc/pages/39/") }, "the registered textbook opened its own PDF page: ${mac.readerRequests}")
     }
 }

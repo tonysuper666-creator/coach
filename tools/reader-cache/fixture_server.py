@@ -23,12 +23,14 @@ FORBIDDEN = {8790, 8791, 18791, 3790}
 
 
 class Fixture:
-    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False, loopback_ephemeral=False, host_clock=False):
+    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False, loopback_ephemeral=False, host_clock=False, single_boundary=False):
         if port in FORBIDDEN:
             raise ValueError("production port is forbidden")
         if loopback_ephemeral and (not loopback_control or bind != '127.0.0.1'):
             raise ValueError('ephemeral listener control is limited to dual loopback fixtures')
-        if host_clock and (not loopback_control or transport!='legacy' or lifecycle):
+        if single_boundary and (bind!='127.0.0.1' or transport!='legacy' or lifecycle or loopback_control or not host_clock):
+            raise ValueError('single boundary requires one clocked legacy loopback fixture')
+        if host_clock and (not (loopback_control or single_boundary) or transport!='legacy' or lifecycle):
             raise ValueError('host clock witnesses require the isolated legacy route fixture')
         if loopback_control and (transport != "legacy" or str(ipaddress.IPv4Address(bind)) == '0.0.0.0' or (bind == '127.0.0.1' and not loopback_ephemeral)):
             raise ValueError("route control needs a distinct exact configured IPv4 and legacy transport")
@@ -104,6 +106,8 @@ class Fixture:
                 if host_clock:
                     row['hostClock']=dict(metadata=fixture.host_clock_metadata,
                         samples=dict(acceptReturned=self.acceptClock,requestHeadersParsed=self.requestHeadersClock))
+                if single_boundary:
+                    row['requestHost']=self.headers.get('Host')
                 with fixture.lock:
                     fixture.transfers.append(row)
                 self.send_response(status)

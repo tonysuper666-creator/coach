@@ -1066,3 +1066,124 @@ signal return, equate queued writes with kernel transmission, or clear existing
 trace/packet quality failures. This diagnostic is meant to distinguish the
 unobserved pre-host-read and post-host-write portions before any performance rerun.
 All real presentation and physical three-image/native/GPU gaps remain open.
+
+### One nonce at a host socket boundary
+
+Expert's static audit of the installed SHA `7154f4b8…55457a` found export-trie
+addresses beyond the earlier nlist table. `CapturedSink::start_send` takes time
+at `0x1006d0ef0`, before capture enqueue and its internal forwarding call;
+`CapturedStream::poll_next` reads its internal stream at `0x1006d0fe4`, then
+takes time on the successful branch at `0x1006d101c`. Both call
+`SystemTime::now` through `clock_gettime(0)`. The inspected Wi-Fi/PCAP writer
+path preserves that input timestamp and truncates nanoseconds to microseconds
+(less than 1 microsecond loss per record). This does not bound queue residence,
+dispatch, clock steps, or the full clock relationship. In particular, a writer
+flush interval is not automatically added to a previously captured timestamp.
+The exact build-to-source pin and per-packet dynamic dispatch remain unverified.
+
+The next tool is explicitly an **alternative, changed diagnostic path**:
+`--single-socket-boundary`. It forwards one exact synthetic nonce through an
+owned Python relay to an owned loopback fixture. It records real `recv`/`send`
+**Python return points on the relay's sockets**, with FD/port identities,
+byte offsets, partial writes, sequence numbers, thread/PID, and nearby bracketed
+epoch reads. These are not netsimd's syscall returns or kernel send/receive
+timestamps. No SDK process is attached, patched or replaced. No production
+transport or network settings change. Do not compare its latency with the direct
+F1/F2/F3 path as a speed improvement.
+
+The fixture and relay share the same Python process and `time.monotonic_ns`
+implementation/resolution; the offline checker verifies those identities before
+reporting two signed local deltas: complete relay request read to fixture parsed
+headers, and fixture header-write return record to relay first response read
+record. A negative value may reflect overlapping userspace return records; it
+is retained. No PCAP/host or guest/host timestamp subtraction occurs. The three
+capture-clock validation flags stay false, as do UI/physical-memory acceptance
+and actual netsimd-socket observation. Old samples and route-9's strict failure
+are never reinterpreted by this mode.
+
+Before the nonce, `host-probe-preflight.json` records an actual attempt to enable
+four DTrace syscall-return probes under existing privileges. The program has an
+always-excluding userspace PID predicate and exits from BEGIN; it neither
+attaches to netsimd nor records traffic. No sudo, image, SDK or permission change
+is attempted. The receipt preserves command, exit and diagnostic output. Missing
+executable, rejection, timeout and successful activation are distinct. Activation
+alone still does not supply the missing netsimd FD/nonce/dynamic-dispatch
+collector. This mode deliberately selects the relay alternative regardless of
+activation status and never silently claims full netsimd instrumentation.
+The [DTrace probe syntax reference](https://docs.oracle.com/cd/E18752_01/html/819-5488/gcfar.html)
+describes provider/module/function/name; actual Mac provider availability is a
+local preflight result, not inferred from this reference.
+
+A standalone preflight needs no emulator (a nonzero exit is retained evidence,
+not an instruction to obtain privileges):
+
+```sh
+python3 tools/reader-cache/host_probe.py --output build/reader-host-probe-fresh.json
+```
+
+Windows reports `unsupported_platform`/exit 1 and cannot establish Mac rights.
+On this Windows Python 3.12, the real boundary clock was `GetTickCount64()` with
+15.625 ms resolution. It can quantize short deltas to zero. Recording overhead
+is therefore measured separately using **perf_counter duration spans**, with its
+own implementation/resolution in the receipt (observed Windows QPC resolution
+100 ns). No absolute perf-counter timestamp is subtracted from a monotonic one.
+Each I/O record includes an observed local recording cost, and the checker
+rejects a missing cost, inadequate cost-clock resolution or a maximum above
+`--socket-recording-budget-us` (default 1000). This sampled interval excludes
+some wrapper/tail and scheduling effects; it is not a complete overhead or
+clock-error bound. A passed budget is not a latency acceptance result.
+
+After rebuilding the isolated test APK, the Mac collector should run **one**
+foreground heavy/emulator session, using its existing original-config owner and
+netsim Wi-Fi capture procedure, with this runner invocation:
+
+```sh
+python3 tools/reader-cache/run_observed.py \
+  --platform android --suite route --transport-mode legacy \
+  --transport-observer none --single-socket-boundary \
+  --host "$EXISTING_CONFIGURED_IPV4" --serial "$OWNED_EMULATOR_SERIAL" \
+  --adb "$ANDROID_SDK_ROOT/platform-tools/adb" \
+  --aapt2 "$EXISTING_AAPT2" \
+  --apk androidApp/build/outputs/apk/debug/androidApp-debug.apk \
+  --test-apk androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk \
+  --output build/reader-observed/android-one-boundary-fresh
+```
+
+These variables refer to the collector's existing configuration/owned serial;
+never copy account settings or real materials into the result. Keep API35 Pixel
+Fold, 2208x1840/420dpi/fontScale1.0, PDF/Poppler and SDK binary receipts. The new
+test APK is required: a stale report without `boundaryControl=single-relay`
+fails. This command sends one `/health` control and exactly one configured-route
+nonce, no 16-request ABBA loop, CIO, UI, memory sampler or FrameTimeline. Optional
+existing scheduling/syscall flags can collect a separate guest trace but do not
+make its clock compatible with the host. Do not add them without a specific
+missing boundary. No performance/behavior/real-service suite is requested.
+
+The relay permits only health and an exact authenticated synthetic page-1 nonce,
+preserves HTTP bytes, and rejects other or repeated requests before forwarding.
+The checker joins the app echo/body hash, both relay socket-port identities and
+fixture connection/ordinal; it fails missing/duplicate/dropped/errored events,
+incomplete byte coverage, invalid timing, failed observed recording budget or
+unjoined/forced cleanup. Save failed artifacts. Foreground completion joins all
+owned relay/fixture work. After the owned AVD/daemon exits and the radio writer
+closes, the existing offline filter supports the single mode too, with only its
+exact configured host/relay port entering shared output. Filtering is not yet
+per-packet nonce/dynamic-dispatch verification; keep original radio traffic local.
+
+Replay the exact single run offline:
+
+```sh
+python3 tools/reader-cache/host_socket_boundary.py \
+  --run-dir build/reader-observed/android-one-boundary-fresh
+```
+
+Windows synthetic checks use invented PNG bytes and real local TCP sockets,
+including partial-send/error and missing-event regressions. Runner tests use
+fake Android/SDK commands and real host sockets; they do not count as native
+compile or measurement evidence. The self-check output is labeled
+`platform=synthetic-host-check,nativeExecuted=false` under
+`build/reader-single-boundary-check/<runId>/`, and can be replayed with the same
+offline command. Exact source head, preflight status, one nonce, event counts,
+clock resolutions, observed overhead and all retained gaps must accompany any
+native handoff. None of these tools establishes the 100 ms actual-presentation
+target or the three-image physical/native/GPU budget.

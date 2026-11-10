@@ -37,6 +37,8 @@ class ReaderImageTransportSmoke {
         require(watchMode == null || (watchMode == "available" && routeControl != null))
         val scheduleMode=InstrumentationRegistry.getArguments().getString("readerSocketSchedule")
         require(scheduleMode == null || (scheduleMode == "enabled" && routeControl != null && watchMode == null))
+        val boundaryMode=InstrumentationRegistry.getArguments().getString("readerSocketBoundary")
+        require(boundaryMode == null || (boundaryMode == "single-relay" && routeControl != null && watchMode == null))
         val suite=if (routeControl == null) "transport" else "route"
         val stageFile=AtomicFile(File(context.cacheDir,"reader-stage.json"))
         fun stage(name: String) {
@@ -60,6 +62,14 @@ class ReaderImageTransportSmoke {
                     .put("configuredHost",BuildConfig.COACH_TAIL_HOST).put("port",port)
                     .put("queueWatchMode",watchMode ?: "off")
                     .put("probeOrder","ABBA,BAAB,ABBA,BAAB; A=configured B=host-loopback")
+                if (boundaryMode != null) {
+                    report.put("boundaryControl",boundaryMode).put("probeOrder","single configured relay; changed path")
+                    rows.put(socketProbe(BuildConfig.COACH_TAIL_HOST,port,1,"$runId-boundary-1",BuildConfig.COACH_TAIL_HOST,false,scheduleMode!=null)
+                        .put("route","configured").put("block",1).put("sequence",1))
+                    File(context.cacheDir,"reader-transport.json").writeText(report.toString())
+                    completed=true
+                    return@runBlocking
+                }
                 for (block in 1..4) {
                     val order=if (block % 2 == 1) listOf("configured","host-loopback","host-loopback","configured")
                         else listOf("host-loopback","configured","configured","host-loopback")

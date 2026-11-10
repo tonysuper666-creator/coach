@@ -51,6 +51,23 @@ class EmulatorCaptureTest(unittest.TestCase):
             with patch('filter_emulator_capture.subprocess.run',side_effect=command): report=filter_capture(directory,source)
             self.assertFalse(report['offlineDecodeComplete']);self.assertTrue(report['errors']);self.assertTrue(source.exists())
 
+    def test_single_boundary_filters_only_exact_configured_port_and_needs_its_own_result(self):
+        directory,source,identity,association=self.prepare();self.commands=[]
+        identity['singleSocketBoundaryRequested']=True
+        identity['routeEndpoints'].update(backendHost='127.0.0.1',backendPort=45679)
+        association['samples']=association['samples'][:1]
+        row=association['samples'][0]
+        row['probeId']=row['client']['probeId']=row['server']['probeId']='unit-boundary-1'
+        row['server'].update(serverPort=45679,serverBindAddress='127.0.0.1')
+        for name,data in (('run.json',identity),('transport-association.json',association),
+                          ('host-socket-boundary.json',dict(complete=True,probeId='unit-boundary-1'))):
+            (directory/name).write_text(json.dumps(data))
+        with patch('filter_emulator_capture.subprocess.run',side_effect=self.fake):
+            report=filter_capture(directory,source,capture_source='netsim-wifi')
+        self.assertTrue(report['offlineDecodeComplete']);self.assertEqual(1,len(report['requests']))
+        self.assertNotIn('10.0.2.2',self.commands[0][-1]);self.assertNotIn('45679',self.commands[0][-1])
+        self.assertFalse(report['packetRequestAssociationVerified'])
+
     def test_declared_netsim_source_is_separate_from_origin_and_packet_verification(self):
         directory,source,_,_=self.prepare();self.commands=[]
         with patch('filter_emulator_capture.subprocess.run',side_effect=self.fake):

@@ -20,10 +20,11 @@ def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump',capture_source=
     if capture_source not in CAPTURE_BOUNDARIES: raise ValueError('Known capture source required')
     identity=json.loads((directory/'run.json').read_text())
     association=json.loads((directory/'transport-association.json').read_text())
-    routes=json.loads((directory/'route-comparison.json').read_text())
+    single=identity.get('singleSocketBoundaryRequested') is True
+    routes=json.loads((directory/('host-socket-boundary.json' if single else 'route-comparison.json')).read_text())
     if identity.get('platform')!='android' or identity.get('suite')!='route' or \
             identity.get('androidObserver',{}).get('mode')!='none' or \
-            not association.get('complete') or not routes.get('complete') or len(association.get('samples',[]))!=16:
+            not association.get('complete') or not routes.get('complete') or len(association.get('samples',[]))!=(1 if single else 16):
         raise ValueError('A complete isolated Android route/observer none run is required')
     endpoint=identity['routeEndpoints'];port=endpoint['port']
     configured=str(ipaddress.IPv4Address(endpoint['configured']))
@@ -34,8 +35,16 @@ def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump',capture_source=
     requests=[]
     for row in association['samples']:
         client,server=row['client'],row['server']
-        if client.get('destinationHost') not in (configured,alias) or client.get('destinationPort')!=port or \
-                server.get('serverPort')!=port or not row['probeId'].startswith(identity['runId']+'-route-'):
+        if single:
+            backend=endpoint.get('backendPort')
+            if type(backend) is not int or not 1024<=backend<=65535 or backend in FORBIDDEN or \
+                    endpoint.get('backendHost')!='127.0.0.1' or server.get('serverBindAddress')!='127.0.0.1' or \
+                    server.get('serverPort')!=backend or client.get('destinationHost')!=configured or \
+                    row['probeId']!=identity['runId']+'-boundary-1' or routes.get('probeId')!=row['probeId'] or \
+                    client.get('probeId')!=row['probeId'] or server.get('probeId')!=row['probeId']:
+                raise ValueError('Single nonce relay identity or backend mismatch')
+        if client.get('destinationHost') not in ((configured,) if single else (configured,alias)) or client.get('destinationPort')!=port or \
+                (not single and (server.get('serverPort')!=port or not row['probeId'].startswith(identity['runId']+'-route-'))):
             raise ValueError('Request does not match this run and fixture port')
         requests.append(dict(probeId=row['probeId'],route=client['route'],guestLocalPort=client['localPort'],
             destinationHost=client['destinationHost'],destinationPort=port,serverConnectionId=client['serverConnectionId']))
@@ -45,6 +54,9 @@ def filter_capture(directory,capture,tcpdump='/usr/sbin/tcpdump',capture_source=
     # endpoints may enter shareable output; the unfiltered original stays local.
     addresses=f'(host {configured} or host {alias})'
     packet_filter=f'tcp and (((dst host {configured} or dst host {alias}) and dst port {port}) or ((src host {configured} or src host {alias}) and src port {port}))'
+    if single:
+        addresses=f'host {configured}'
+        packet_filter=f'tcp and ((dst host {configured} and dst port {port}) or (src host {configured} and src port {port}))'
     original=hashlib.sha256(capture.read_bytes()).hexdigest()
     report=dict(captureBoundary=CAPTURE_BOUNDARIES[capture_source],declaredCaptureSource=capture_source,
         captureOriginVerified=False,

@@ -1,6 +1,7 @@
 """Mac foreground runner: owns the synthetic service, test process and memory sampler until all finish."""
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -20,6 +21,8 @@ from route_control import summarize_routes
 from packet_capture import PacketCapture
 from android_observer import MODES, observe_android, audit_transport_stage
 from queue_readiness import analyze_queue_watch
+from host_socket_boundary import SocketBoundaryRelay, analyze_boundary
+from host_probe import preflight as host_probe_preflight
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -45,6 +48,10 @@ def main():
                         help='Add syscall entry/exit to the scheduling trace on the existing userdebug emulator only')
     parser.add_argument('--host-clock-boundaries',action='store_true',
                         help='Route/syscall diagnostic only: bracket fixture-host epoch reads near I/O boundaries')
+    parser.add_argument('--single-socket-boundary',action='store_true',
+                        help='Route/observer none only: ONE nonce through an explicit instrumented host relay (changed path)')
+    parser.add_argument('--socket-recording-budget-us',type=int,default=1000,
+                        help='Single-boundary local observed recording budget; not a complete overhead/error bound')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -58,6 +65,11 @@ def main():
     if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
+    if args.single_socket_boundary and (args.platform!='android' or args.suite!='route' or observer_mode!='none' or
+            args.socket_queue_watch or args.perfetto or args.packet_interface or args.host_clock_boundaries):
+        parser.error('single socket boundary requires Android legacy route/observer none; separate from UI/queue/packet flags; fixture clocks are included')
+    if args.socket_recording_budget_us<=0 or (args.socket_recording_budget_us!=1000 and not args.single_socket_boundary):
+        parser.error('positive recording budget applies only to single socket boundary')
     if args.socket_queue_watch and (args.platform!='android' or args.suite!='route' or observer_mode!='none'):
         parser.error('socket queue observation requires Android route and explicit observer none')
     if args.socket_scheduling_trace and (args.platform!='android' or args.suite!='route' or observer_mode!='none' or args.socket_queue_watch or args.perfetto):
@@ -67,7 +79,8 @@ def main():
     if args.host_clock_boundaries and not args.socket_syscalls:
         parser.error('host clock boundaries require the isolated route/syscall diagnostic')
     capture_perfetto=args.perfetto or args.socket_scheduling_trace
-    if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
+    if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in
+            (('0.0.0.0','10.0.2.2') if args.single_socket_boundary else ('127.0.0.1','0.0.0.0','10.0.2.2'))):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
     if args.packet_interface and args.suite != "transport":
         parser.error("packet capture is limited to the synthetic transport suite")
@@ -94,6 +107,11 @@ def main():
                 raise ValueError("Refusing to install an APK outside the isolated measurement package")
             subprocess.run(adb + ["install", "-r", str(apk)], check=True, stdout=subprocess.DEVNULL)
     run_id = uuid.uuid4().hex
+    if args.single_socket_boundary:
+        # Current rights only: never sudo, attach to an SDK process or change permissions.
+        preflight=host_probe_preflight()
+        preflight['runId']=run_id
+        (out/'host-probe-preflight.json').write_text(json.dumps(preflight,indent=2))
     identity = dict(platform=args.platform, suite=args.suite, fixtureTransport=args.transport_mode, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     captureBoundary="draw/submission and verified pixel upper bound; first physical present unobserved")
     identity["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
@@ -104,6 +122,7 @@ def main():
     identity['socketSchedulingTraceRequested']=args.socket_scheduling_trace
     identity['socketSyscallsRequested']=args.socket_syscalls
     identity['hostClockBoundariesRequested']=args.host_clock_boundaries
+    identity['singleSocketBoundaryRequested']=args.single_socket_boundary
     if args.socket_syscalls: identity['syscallBuildType']=syscall_build_type
     observer_counts=dict(stage=0,meminfo=0)
     observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
@@ -161,15 +180,28 @@ def main():
         fixture_options["transport"] = args.transport_mode
     if args.suite == "lifecycle":
         fixture_options["lifecycle"] = True
-    if args.suite == 'route':
+    if args.suite == 'route' and not args.single_socket_boundary:
         fixture_options['loopback_control'] = True
     if args.host_clock_boundaries: fixture_options['host_clock']=True
-    with Fixture(out / "fixture", args.host, renderer=args.renderer, **fixture_options) as fixture:
+    if args.single_socket_boundary:
+        fixture_options.update(single_boundary=True,host_clock=True)
+    with ExitStack() as scope:
+        fixture=scope.enter_context(Fixture(out / 'fixture', '127.0.0.1' if args.single_socket_boundary else args.host,
+                                           renderer=args.renderer, **fixture_options))
+        relay=None
+        measurement_port=fixture.port
+        if args.single_socket_boundary:
+            relay=scope.enter_context(SocketBoundaryRelay(args.host,fixture.port,run_id+'-boundary-1',
+                                                        args.socket_recording_budget_us*1000))
+            measurement_port=relay.port
         identity["materialSha256"] = fixture.material_sha256
         identity["serverTransferTimingsObserved"] = hasattr(fixture, "transfers")
         if args.suite == 'route':
             identity['routeEndpoints']=dict(configured=args.host,hostLoopbackAlias='10.0.2.2',
-                hostListeners=[args.host,'127.0.0.1'],port=fixture.port,productionNetworkPolicyChanged=False)
+                hostListeners=[args.host,'127.0.0.1'],port=measurement_port,productionNetworkPolicyChanged=False)
+            if relay is not None:
+                identity['routeEndpoints'].update(hostListeners=[args.host],backendHost='127.0.0.1',backendPort=fixture.port,
+                                                 path='single-synthetic-relay; not historical direct route')
         (out / "run.json").write_text(json.dumps(identity, indent=2))
         packet_capture=PacketCapture(out,args.packet_interface,args.host,fixture.port)
         def save_http_records():
@@ -205,10 +237,11 @@ def main():
                     test_class = "com.coach.android." + dict(performance="ReaderPageObservedSmoke", behavior="ReaderPageCachePathSmoke",
                         transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke")[args.suite]
                     route_args=['-e','readerRouteControl','host-loopback'] if args.suite=='route' else []
+                    if args.single_socket_boundary: route_args+=['-e','readerSocketBoundary','single-relay']
                     if args.socket_queue_watch: route_args+=['-e','readerQueueWatch','available']
                     if args.socket_scheduling_trace: route_args+=['-e','readerSocketSchedule','enabled']
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
-                        test_class, "-e", "readerPort", str(fixture.port), "-e", "readerRunId", run_id,
+                        test_class, "-e", "readerPort", str(measurement_port), "-e", "readerRunId", run_id,
                         *route_args, PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
                     # adb may exit 0 even if AndroidJUnitRunner reports a failing test.
                     captures = [("reader-observed.json", "trace.json")]
@@ -237,6 +270,8 @@ def main():
                 summary = summarize(trace, expected)
             elif args.suite in ("transport", "route"):
                 probes = json.loads((out / "transport.json").read_text())
+                if args.single_socket_boundary and probes.get('boundaryControl')!='single-relay':
+                    raise RuntimeError('Single boundary instrumentation missing; rebuild the isolated test APK')
                 summary = dict(suite="transport", samples=len(probes.get("samples", [])),
                                urlControlSamples=len(probes.get("urlConnectionControl", [])),
                                socketControlSamples=len(probes.get("socketControl", [])),
@@ -247,10 +282,19 @@ def main():
                     raise RuntimeError('Probe request/response association incomplete; inspect transport-association.json')
                 summary['requestResponseAssociationComplete']=True
                 if args.suite == 'route':
-                    summary=summarize_routes(association,args.host,fixture.port)
-                    (out/'route-comparison.json').write_text(json.dumps(summary,indent=2))
+                    if relay is None:
+                        summary=summarize_routes(association,args.host,fixture.port)
+                        (out/'route-comparison.json').write_text(json.dumps(summary,indent=2))
+                    else:
+                        if not relay.done.wait(timeout=3):
+                            raise RuntimeError('Single nonce relay did not complete; preserve host-socket-events.json')
+                        relay.close()
+                        relay_report=relay.report()
+                        (out/'host-socket-events.json').write_text(json.dumps(relay_report,indent=2))
+                        summary=analyze_boundary(association,relay_report,run_id,args.host,measurement_port,fixture.port)
+                        (out/'host-socket-boundary.json').write_text(json.dumps(summary,indent=2))
                     if not summary['complete']:
-                        raise RuntimeError('Route control incomplete; inspect route-comparison.json')
+                        raise RuntimeError('Route/boundary control incomplete; inspect diagnostic JSON')
                 summary['memorySamplerEnabled']=observer_mode!='none'
                 summary['androidObserverMode']=observer_mode
                 if args.socket_scheduling_trace:
@@ -274,6 +318,9 @@ def main():
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
         finally:
+            if relay is not None:
+                relay.close()
+                (out/'host-socket-events.json').write_text(json.dumps(relay.report(),indent=2))
             stop.set()
             if identity['memorySamplerStarted']:
                 sampler.join()

@@ -7,6 +7,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
@@ -25,6 +26,21 @@ class ReaderRemoteNotesWindowTest {
         fun frames(n: Int = 4) { repeat(n) { t += 16_000_000L; scene.render(t).close(); Thread.sleep(2) } }
         fun key(k: Key, ctrl: Boolean = false) {
             scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyDown, isCtrlPressed = ctrl)); scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyUp, isCtrlPressed = ctrl)); frames(10)
+        }
+        /** 在语义树里按 testTag 找节点（未合并树）。 */
+        fun node(tag: String): androidx.compose.ui.semantics.SemanticsNode? {
+            fun walk(n: androidx.compose.ui.semantics.SemanticsNode): androidx.compose.ui.semantics.SemanticsNode? =
+                if (n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.TestTag) == tag) n else n.children.firstNotNullOfOrNull { walk(it) }
+            return scene.semanticsOwners.firstNotNullOfOrNull { walk(it.unmergedRootSemanticsNode) }
+        }
+        /** 逐字输入：每个字符走输入框自己的 InsertTextAtCursor 语义动作（无障碍/UI 测试输入文字用的同一条路径），不是给状态赋值。 */
+        fun typeChars(text: String) {
+            for (ch in text) {
+                val n = checkNotNull(node("note-input")) { "输入框不在语义树里" }
+                val act = checkNotNull(n.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.InsertTextAtCursor)?.action) { "输入框不支持插入文字" }
+                assertTrue(act(androidx.compose.ui.text.AnnotatedString(ch.toString())), "输入 '$ch' 被拒绝")
+                frames(2)
+            }
         }
         fun wheel(dy: Float, x: Float = 700f) {
             val pos = Offset(x, 300f)
@@ -424,6 +440,25 @@ class ReaderRemoteNotesWindowTest {
             r.key(Key.Escape)
             assertEquals(ReaderPane.Related, r.session.state.focus); assertEquals(0, r.session.selectedQuestion)
             assertEquals(1, r.session.remote!!.studyQuestions.size, "同一页的题目没有被清空")
+        } finally { r.close() }
+    }
+
+    @Test fun noteTextIsTypedCharByCharEditedWithBackspaceAndSavedFromTheField() {
+        val s = service(); val r = rig(s)
+        try {
+            r.session.focusPane(ReaderPane.Body); r.frames()
+            r.key(Key.N); r.key(Key.DirectionDown); r.key(Key.Enter)
+            assertEquals("", r.session.noteText)
+            r.typeChars("hallo 批注")
+            assertEquals("hallo 批注", r.session.noteText, "文字是经输入框逐字进来的")
+            assertEquals("有未保存的修改", r.session.uiNoteStatus)
+            r.key(Key.Backspace); r.key(Key.Backspace)
+            assertEquals("hallo ", r.session.noteText, "退格走输入框的键盘编辑")
+            r.typeChars("world")
+            r.key(Key.PageDown); assertEquals(0, r.session.state.position.page, "输入时 PageDown 不翻页")
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("hallo world"), s.serverNote("a", r.session.noteDraft!!.id)!!["note"])
         } finally { r.close() }
     }
 }

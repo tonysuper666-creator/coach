@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import androidx.compose.ui.semantics.getOrNull
 import org.junit.Assume.assumeTrue
 import java.io.BufferedReader
 import java.io.File
@@ -85,6 +86,20 @@ class ReaderLiveServerTest {
         fun until(what: String, timeoutMs: Long = 20_000, cond: () -> Boolean) {
             val end = System.currentTimeMillis() + timeoutMs
             while (!cond()) { check(System.currentTimeMillis() < end) { "timeout: $what" }; frames(2); Thread.sleep(20) }
+        }
+        fun node(tag: String): androidx.compose.ui.semantics.SemanticsNode? {
+            fun walk(n: androidx.compose.ui.semantics.SemanticsNode): androidx.compose.ui.semantics.SemanticsNode? =
+                if (n.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.TestTag) == tag) n else n.children.firstNotNullOfOrNull { walk(it) }
+            return scene.semanticsOwners.firstNotNullOfOrNull { walk(it.unmergedRootSemanticsNode) }
+        }
+        /** 逐字输入：每个字符走输入框自己的 InsertTextAtCursor 语义动作（无障碍/UI 测试输入文字的同一条路径），不是给状态赋值。 */
+        fun typeChars(text: String) {
+            for (ch in text) {
+                val n = checkNotNull(node("note-input")) { "输入框不在语义树里" }
+                val act = checkNotNull(n.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.InsertTextAtCursor)?.action) { "输入框不支持插入文字" }
+                assertTrue(act(androidx.compose.ui.text.AnnotatedString(ch.toString())), "输入 '$ch' 被拒绝")
+                frames(2)
+            }
         }
         fun key(k: Key, ctrl: Boolean = false) {
             scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyDown, isCtrlPressed = ctrl)); scene.sendKeyEvent(KeyEvent(k, KeyEventType.KeyUp, isCtrlPressed = ctrl)); frames(6)
@@ -175,15 +190,34 @@ class ReaderLiveServerTest {
             assertEquals(1, reopened.state.position.page, "pdfPage 2 → 页序 1")
             // 写一条本地未确认的批注草稿，然后撤销令牌
             rig.key(Key.PageUp); rig.until("page 1") { (s.remote.page as? PageState.Ready)?.view?.pdfPage == 1 }
-            rig.key(Key.N); rig.key(Key.Enter); s.noteText = "撤销前的本地草稿"; rig.frames()
+            // 真实输入：选行 → 输入框逐字键入（InsertTextAtCursor 语义动作）→ 退格（键盘事件）→ Ctrl+回车保存 → 服务端回读
+            rig.key(Key.N); rig.key(Key.Enter); assertEquals("", s.noteText)
+            rig.typeChars("真实键入abc"); assertEquals("真实键入abc", s.noteText)
+            rig.key(Key.Backspace); assertEquals("真实键入ab", s.noteText)
+            rig.key(Key.Enter, ctrl = true)
+            rig.until("note saved") { s.remote.noteSave is NoteSaveState.Saved }
+            assertEquals("已保存", s.uiNoteStatus)
+            suspend fun serverNotes() = live.source().state("orchard-text").body!!["notes"] as JsonArray
+            assertEquals("真实键入ab", serverNotes().single().jsonObject["note"]!!.jsonPrimitive.content, "服务端回读到键入的内容")
+            // 关闭编辑区（Esc）→ 翻页再翻回 → 重开新会话：批注都还在，键盘仍可用
+            rig.key(Key.Escape); assertFalse(s.noting)
+            rig.key(Key.PageDown); rig.until("p2") { (s.remote.page as? PageState.Ready)?.view?.pdfPage == 2 }
+            rig.key(Key.PageUp); rig.until("p1 again") { (s.remote.page as? PageState.Ready)?.view?.pdfPage == 1 }
+            val reopened2 = session(live)
+            runBlocking { reopened2.remote!!.loadCatalog(); reopened2.openRemote("orchard-text") }
+            assertEquals("真实键入ab", reopened2.remote!!.notes.single().note)
+            // 再编辑同一行（沿用原批注 id/修订）：键入 X，此时撤销令牌，保存必须被拒，本地键入的草稿与页位置保留
+            rig.key(Key.N); rig.key(Key.Enter)
+            assertEquals("真实键入ab", s.noteText); rig.typeChars("X"); assertEquals("真实键入abX", s.noteText)
+            assertEquals("有未保存的修改", s.uiNoteStatus)
             live.revoke()
             rig.key(Key.Enter, ctrl = true)
             rig.until("note rejected") { s.remote.noteSave is NoteSaveState.Failed }
             assertEquals(NoteSaveState.Failed(ReaderFailure.Unauthorized), s.remote.noteSave)
-            assertEquals("撤销前的本地草稿", s.noteText); assertNotNull(s.noteDraft, "草稿还在，没有丢")
+            assertEquals("真实键入abX", s.noteText); assertNotNull(s.noteDraft, "草稿还在，没有丢")
             assertEquals("没有保存", s.uiNoteStatus)
             // 撤销后翻页：页内容拿不到、位置保存被拒，但本地的页位置照常跟着用户走
-            s.cancelNote(); rig.frames()
+            rig.key(Key.Escape); assertFalse(s.noting); rig.frames()
             s.focusPane(ReaderPane.Body); rig.frames(); rig.key(Key.PageDown)
             rig.until("page failed") { s.remote.page is PageState.Failed }
             assertEquals(PageState.Failed(ReaderFailure.Unauthorized), s.remote.page)

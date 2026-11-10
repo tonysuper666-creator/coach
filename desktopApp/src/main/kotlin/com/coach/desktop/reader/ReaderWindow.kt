@@ -735,8 +735,11 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                 Text("原句：${d.quote}", fontSize = 12.sp)
                 val inputFocus = remember(d.id) { FocusRequester() }
                 LaunchedEffect(d.id) { runCatching { inputFocus.requestFocus() } } // 选定一行后光标直接进输入框，可以马上键入
+                // 光标起点在已有文字末尾（编辑已有批注时从末尾接着写）；外部改文字（采用服务端版本/找回草稿）时同步进输入框。
+                var field by remember(d.id) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(session.noteText, androidx.compose.ui.text.TextRange(session.noteText.length))) }
+                if (field.text != session.noteText) field = androidx.compose.ui.text.input.TextFieldValue(session.noteText, androidx.compose.ui.text.TextRange(session.noteText.length))
                 androidx.compose.foundation.text.BasicTextField(
-                    value = session.noteText, onValueChange = { session.noteText = it },
+                    value = field, onValueChange = { field = it; session.noteText = it.text },
                     modifier = Modifier.testTag("note-input").focusRequester(inputFocus).fillMaxWidth().padding(vertical = 6.dp),
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
                 )

@@ -1273,6 +1273,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
     fun searchSourcePages(course: String, question: String, scope: com.coach.domain.scope.VisibleScope): List<SourcePage> {
+        val unique = matchSourcePages(course, question).filter { scope.permits(it.docId, it.pdfPage, it.learnerVisible) }
+        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
+            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
+    }
+
+    /** Every tutor-visible page of the course matching the query, best score per page, before any scope or page budget is applied. */
+    private fun matchSourcePages(course: String, question: String): List<SourcePage> {
         val terms = Regex("[\\p{IsHan}]{3,}|[A-Za-z0-9]{2,}").findAll(question.take(2000))
             .flatMap { match ->
                 val value = match.value
@@ -1288,15 +1295,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
             }
         }
-        val unique = found.filter { scope.permits(it.docId, it.pdfPage, it.learnerVisible) }
-            .groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
-        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
-            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
+        return found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
     }
 
     /** Texts of protected pages matching a query. For OUTPUT GUARDS ONLY: they must never be placed in a model request. */
     fun restrictedForGuard(course: String, question: String): List<String> =
-        searchSourcePages(course, question, com.coach.domain.scope.VisibleScope.tutorInternal()).filterNot { it.learnerVisible }.take(2).map { it.text }
+        // Independent of the public pack's page budget: public hits must never crowd a protected page out of the guard.
+        matchSourcePages(course, question).filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(8).map { it.text }
 
     /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
     /** Knowledge point ids are compared trimmed and case-folded so a cosmetic mismatch between facts and outline does not disable a course. */

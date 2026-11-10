@@ -258,6 +258,44 @@ class SourceLookupTest {
         }
     }
 
+    /** More than six public hits must not crowd the protected page out of the output guard, on all three paths (initial, lookup supplement, fallback share the guard source). */
+    @Test fun sixOrMorePublicHitsDoNotCrowdProtectedPageOutOfGuard() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute {
+                registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false)
+                for (i in 2..9) registerSourcePage("c","book","Synthetic book",i,"Adverse selection public page $i adverse selection adverse selection")
+            }
+            val (pack, guard) = h.actor.execute {
+                searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal()) to restrictedForGuard("c","adverse selection")
+            }
+            assertEquals(6,pack.size)
+            assertTrue(pack.none { it.text == secret })            // the budgeted pack really is full of public pages
+            assertEquals(listOf(secret),guard)                     // yet the guard still knows the protected text
+            // course isolation is kept
+            h.actor.execute { registerSourcePage("other","other-private","Other",1,"Adverse selection secret of another course",learnerVisible=false) }
+            assertEquals(listOf(secret),h.actor.execute { restrictedForGuard("c","adverse selection") })
+        }
+    }
+
+    /** End to end on the initial-answer path: an echoed protected sentence is not published or persisted even with a full public pack. */
+    @Test fun initialAnswerEchoOfProtectedPageIsBlockedWithFullPublicPack() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute {
+                registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false)
+                for (i in 2..9) registerSourcePage("c","book","Synthetic book",i,"Adverse selection public page $i adverse selection adverse selection")
+            }
+            h.stub.stream(1,"Intro. $secret and more.",StubTutor.terminal("complete"),StubTutor.DONE)
+            val id = h.chat.ask("t","c","Explain adverse selection")
+            val result = h.awaitEnd(id)
+            assertFalse(result.contains(secret))
+            assertFalse(h.frames.any { it.toString().contains(secret) })
+            assertFalse(h.chat.snapshot(id).toString().contains(secret))
+            assertFalse(h.stub.requestBodies.any { it.contains(secret) })
+        }
+    }
+
     @Test fun protectionAndInitialTeachingNeverStartLookupEvenWhenMarkerIsInjected() = runBlocking {
         Harness(protected=true).use { h ->
             h.stub.stream(1,"Safe answer.【需查原文:adverse selection】",StubTutor.terminal("complete"),StubTutor.DONE)

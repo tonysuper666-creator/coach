@@ -28,9 +28,22 @@ page headers remain reachable by scrolling up. The Fold8 height-fit versus
 readability tradeoff still needs the whole-product integration decision.
 
 The native renderer must provide its measured smallest body font in full-page
-units as `ReaderPageLayout.bodyFontSize`. A missing metric conservatively uses
-width-fit and does not claim a measured font-size pass. Schema-v1 Docling output
-does not provide this metric; do not fabricate it from OCR. The synthetic host
+units as `ReaderPageLayout.bodyFontSize`. Schema-v1 Docling output does not
+provide this metric; do not fabricate it from OCR. Missing, nonpositive,
+nonfinite, out-of-page or unrenderably small measurements take the same fallback:
+expanded/Flex starts with the trimmed page; compact may focus the first column.
+The full MediaBox's **longest rendered side is capped at 1200dp**, independently
+of crop width, selection, source navigation and system fontScale. A selected
+column/source is centered with 16dp margins and clipped to its region; it cannot
+escape the cap by filling the pane. This is a conservative geometry bound, not
+an inferred font size, a 16sp minimum or a 22sp readability guarantee. The plan's
+`bodySizePx` stays null until a usable native measurement arrives. The fallback
+may leave text small; real text and performance still require native validation.
+Valid native measurements immediately resume 16..22sp with system fontScale.
+All paths also bound the native renderer to a 16384px long side; metrics that
+cannot fit that allocation at the requested upper font bound remain unknown.
+Double scale arithmetic prevents tiny/huge metadata from overflowing before
+that bound is applied. No infinite scale is used. The synthetic host
 reports actual Android Paint size and baseline advance to tests independently
 of the plan. Line-capacity checks use the measured viewport/baseline advance;
 they do not assume a fixed font-to-line-height ratio or claim native reflow.
@@ -72,6 +85,14 @@ Idle/low priority, with the repository's memory settings:
 
 ```powershell
 powershell -NoProfile -File androidApp/src/test/reader-v2/check.ps1 -Offline
+```
+
+For the missing/invalid-metric regression plus the selected existing return,
+source geometry, clipping, font/window and restart checks (without rebuilding
+an APK or repeating the full previously accepted suite):
+
+```powershell
+powershell -NoProfile -File androidApp/src/test/reader-v2/check.ps1 -Offline -MissingMetrics
 ```
 
 This runs only `:androidApp:testDebugUnitTest --tests com.coach.android.reader.v2.*`

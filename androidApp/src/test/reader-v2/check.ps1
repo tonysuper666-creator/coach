@@ -1,4 +1,4 @@
-param([switch]$Offline)
+param([switch]$Offline, [switch]$MissingMetrics)
 $ErrorActionPreference = 'Stop'
 [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'Idle'
 # Same machine-wide build lanes as tools/dev/winbox.ps1; no Mac lock, GUI or corpus.
@@ -26,8 +26,21 @@ try {
     $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
     $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../..'))
     Set-Location -LiteralPath $repo
-    $gradleArgs = @(':androidApp:testDebugUnitTest', '--tests', 'com.coach.android.reader.v2.*', ':androidApp:assembleDebug',
-        '-Proborazzi.test.record=true', '--no-daemon', '--priority=low', '--max-workers=2', '--console=plain')
+    $filters = @('com.coach.android.reader.v2.*')
+    if ($MissingMetrics) {
+        $filters = @('com.coach.android.reader.v2.ReaderV2MissingMetrics*',
+            'com.coach.android.reader.v2.ReaderV2InteractionTest.marginQuestionSource*',
+            'com.coach.android.reader.v2.ReaderV2InteractionTest.wideLandscapePhoneReads*',
+            'com.coach.android.reader.v2.ReaderV2InteractionTest.tabletopOrdinaryReading*',
+            'com.coach.android.reader.v2.ReaderV2InteractionTest.resizingAndBookFlex*',
+            'com.coach.android.reader.v2.ReaderV2InteractionTest.letterboxedColumn*',
+            'com.coach.android.reader.v2.ReaderV2StateTest.sourceOriginSurvivesRestart*',
+            'com.coach.android.reader.v2.ReaderV2StateTest.currentAndroidWindowBreakpoints*')
+    }
+    $gradleArgs = @(':androidApp:testDebugUnitTest')
+    foreach ($filter in $filters) { $gradleArgs += @('--tests', $filter) }
+    if (-not $MissingMetrics) { $gradleArgs += ':androidApp:assembleDebug' }
+    $gradleArgs += @('-Proborazzi.test.record=true', '--no-daemon', '--priority=low', '--max-workers=2', '--console=plain')
     if ($Offline) { $gradleArgs += '--offline' }
     New-Item -ItemType Directory -Force build/reader-v2-check | Out-Null
     $ErrorActionPreference = 'Continue'

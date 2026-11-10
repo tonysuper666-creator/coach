@@ -32,7 +32,8 @@ object ReaderV2Fixture {
 
 @Composable
 fun ReaderV2FixtureHost(window: ReaderWindow, session: ReaderSession, onSession: (ReaderSession) -> Unit,
-    onBodySize: (Int, Float) -> Unit = { _, _ -> }, onBodyLineHeight: (Int, Float) -> Unit = { _, _ -> }) {
+    onBodySize: (Int, Float) -> Unit = { _, _ -> }, onBodyLineHeight: (Int, Float) -> Unit = { _, _ -> },
+    pages: List<ReaderPageLayout> = ReaderV2Fixture.pages) {
     val density = LocalDensity.current.density
     var bannerHeight by remember { mutableStateOf(0f) }
     Column(Modifier.fillMaxSize()) {
@@ -40,7 +41,7 @@ fun ReaderV2FixtureHost(window: ReaderWindow, session: ReaderSession, onSession:
             modifier = Modifier.fillMaxWidth().onSizeChanged { bannerHeight = it.height / density }.padding(8.dp))
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val fold = window.fold?.let { it.copy(bounds = it.bounds.copy(top = it.bounds.top - bannerHeight, bottom = it.bounds.bottom - bannerHeight)) }
-            ReaderV2Screen(ReaderWindow(maxWidth.value, maxHeight.value, fold), ReaderV2Fixture.pages,
+            ReaderV2Screen(ReaderWindow(maxWidth.value, maxHeight.value, fold), pages,
                 ReaderV2Fixture.questions, session, onSession, pageContent = { ReaderV2SyntheticPage(it, onBodySize, onBodyLineHeight) })
         }
     }

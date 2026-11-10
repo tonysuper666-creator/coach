@@ -180,7 +180,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
     val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
-    var reading by remember { mutableStateOf(only == null && (entry?.takeUnless { it == "resume" }?.let { it == "notes" } ?: (saved.str("mode") != "quiz"))) }
+    var reading by remember { mutableStateOf(only == null && when (entry) {
+        "notes" -> true
+        "quiz", "resume-quiz" -> false
+        else -> saved.str("mode") != "quiz"
+    }) }
     var sectionId by remember { mutableStateOf(saved.str("section")) }
     var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
     var itemId by remember { mutableStateOf(saved.str("item")) }
@@ -212,7 +216,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         if (mode && only != null) { onBack(); return }
         if (!mode) quizStarted = true
         reading = mode; itemId = id; sectionId = section; filter = selectedFilter
-        save("mode" to JsonPrimitive(if (mode && !quizStarted) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
+        save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
     LaunchedEffect(body != null) {
@@ -236,7 +240,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     LaunchedEffect(Unit) {
         if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
-        save("mode" to JsonPrimitive(if (reading && !quizStarted) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
+        save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
         if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
     LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }

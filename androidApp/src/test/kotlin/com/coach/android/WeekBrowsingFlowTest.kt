@@ -260,7 +260,8 @@ class WeekBrowsingFlowTest {
             assertEquals("Q2", saved.str("item"))
             assertEquals(1, saved.num("choice").toInt())
             assertEquals("Q2", (saved["result"] as JsonObject).str("itemId"))
-            assertEquals("quiz", saved.str("mode"))
+            assertEquals("notes", saved.str("mode"))
+            assertTrue(saved.flag("quizStarted"))
         }
         back()
         compose.onNodeWithContentDescription("导航：今天").performClick()

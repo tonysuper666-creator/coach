@@ -277,7 +277,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY, AppPage.SETTINGS)
                         val showNav = !task && !hideTaskChrome
                         val render: @Composable (AppEntry) -> Unit = { page ->
-                            holder.SaveableStateProvider("${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
+                            holder.SaveableStateProvider("${c.courseId}:${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
                                 when (page.page) {
                                     AppPage.HOME -> when (page.tab) {
                                         AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)
@@ -314,11 +314,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                 val reading = entry.page == AppPage.SOURCE
                                 SourceOverlay(reading,
                                     base = { render(if (reading) navigation.entries[navigation.entries.lastIndex - 1] else entry) },
-                                    overlay = { holder.SaveableStateProvider(entry.toString()) { ResourcesScreen(c, SourceJump(entry.id, entry.pdfPage), { navigation.back() }, "← ${navigation.parentLabel}") } })
+                                    overlay = { holder.SaveableStateProvider("${c.courseId}:$entry") { ResourcesScreen(c, SourceJump(entry.id, entry.pdfPage), { navigation.back() }, "← ${navigation.parentLabel}") } })
                             }
                         }
                         // One movable page and one chrome owner, including a rail/bottom-bar transition.
-                        val page = remember(c) { movableContentOf { content() } }
+                        val page = remember { movableContentOf { content() } }
                         if (layout.nav == NavStyle.BottomBar) Column(Modifier.fillMaxSize()) {
                             Box(Modifier.weight(1f).fillMaxWidth()) { page() }
                             if (showNav) AppNavBar(entry.tab, select)

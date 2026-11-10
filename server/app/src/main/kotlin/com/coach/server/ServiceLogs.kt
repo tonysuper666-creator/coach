@@ -16,9 +16,9 @@ internal class ServiceLog(private val directory: Path, private val name: String,
         val today = currentDay()
         if (day != today) {
             output?.close()
-            Files.createDirectories(directory)
-            output = Files.newOutputStream(directory.resolve("$name-$today.log"),
-                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
+            val path = privateFiles.file(directory.resolve("$name-$today.log"))
+            output = Files.newOutputStream(path,
+                java.nio.file.StandardOpenOption.APPEND, java.nio.file.LinkOption.NOFOLLOW_LINKS)
             day = today
             Files.list(directory).use { paths -> paths.forEach { path ->
                 val file = path.fileName.toString()
@@ -37,6 +37,7 @@ internal class ServiceLog(private val directory: Path, private val name: String,
 
     companion object {
         fun install(directory: Path) {
+            privateFiles.directory(directory)
             val stream = PrintStream(ServiceLog(directory, "server"), true, Charsets.UTF_8)
             System.setOut(stream)
             System.setErr(stream)

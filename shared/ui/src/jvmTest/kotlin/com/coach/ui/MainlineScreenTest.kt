@@ -454,6 +454,8 @@ class MainlineScreenTest {
                 }
                 explanation.assertIsDisplayed()
                 citation.assertIsDisplayed()
+                assertFeedbackTextReadable("记住这个")
+                assertFeedbackTextReadable("Synthetic memory for S1.")
                 assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
                 capture("outer-feedback-1972x1248")
             } catch (failure: Throwable) {
@@ -499,6 +501,7 @@ class MainlineScreenTest {
             capture("outer-long-feedback-1972x1248")
             onNodeWithText(longCorrect).assertExists()
             onNodeWithText("为什么对", substring = true).performScrollTo().assertIsDisplayed()
+            capture("outer-long-feedback-start-1972x1248")
             onNodeWithText("Synthetic apples were sold out before the season started, so they cannot be the answer.").performScrollTo().assertIsDisplayed()
             onNodeWithText("Synthetic plums ripen after the period described in the question.").performScrollTo().assertIsDisplayed()
             onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()

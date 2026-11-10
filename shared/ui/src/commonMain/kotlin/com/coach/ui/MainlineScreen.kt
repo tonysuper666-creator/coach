@@ -14,13 +14,10 @@ import androidx.compose.animation.core.tween
 import coach.design.tokens.CoachV7
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -454,7 +451,6 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val density = LocalDensity.current
         // Medium describes columns, not spare height: keep submission reachable in these windows too.
         val dockActions = m.window != DeskWindow.Inner
-        val feedbackRequester = remember { BringIntoViewRequester() }
         var feedbackSize by remember(done) { mutableStateOf(IntSize.Zero) }
         var feedbackBottom by remember(done) { mutableStateOf<Float?>(null) }
         var citationBottom by remember(done) { mutableStateOf<Float?>(null) }
@@ -471,14 +467,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     // Include the selected wrong answer's complete reason, while keeping the
                     // citation at least 40dp above the actual scroll boundary.
                     val targetBottom = maxOf(bottom + with(density) { 12.dp.toPx() }, sourceBottom + with(density) { 40.dp.toPx() })
-                    val requestedHeight = feedbackSize.height + targetBottom - bottom
-                    if (requestedHeight <= viewportHeight) {
-                        feedbackRequester.bringIntoView(Rect(0f, 0f, feedbackSize.width.toFloat(), requestedHeight))
-                    } else {
-                        // An oversized explanation remains scrollable above its citation and
-                        // the selected reason; neither tail should be stranded below the buttons.
-                        scroll.scrollTo(kotlin.math.ceil(targetBottom - viewport).toInt().coerceAtLeast(0))
-                    }
+                    // Use the same immediate correction as inline actions. A nested animated
+                    // bring-into-view can settle past the measured segment and clip its opening.
+                    // Long explanations remain scrollable above the citation and selected reason.
+                    scroll.scrollTo(kotlin.math.ceil(targetBottom - viewport).toInt().coerceAtLeast(0))
                 } else {
                     val bottom = inlineActionsBottom ?: return@LaunchedEffect
                     val viewport = viewportBottom ?: return@LaunchedEffect
@@ -527,7 +519,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 if (done != null && explanation != null) {
                     Spacer(Modifier.height(24.dp))
                     PaperCard(Modifier.railAnchor("why"), contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp)) {
-                        Column(Modifier.bringIntoViewRequester(feedbackRequester).onGloballyPositioned {
+                        Column(Modifier.onGloballyPositioned {
                             feedbackSize = it.size
                             feedbackBottom = it.positionInRoot().y + it.size.height + scroll.value
                         }) {

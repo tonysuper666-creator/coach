@@ -20,19 +20,19 @@ import com.coach.ui.theme.CoachTheme
 internal fun WeekDirectory(view: CourseView, active: Int?, onWeek: ((Int) -> Unit)?) {
     val d = LocalV7PageDetails.current ?: V7PageDetails()
     val c = CoachTheme.colors
-    Text("周目录", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.labelMedium, color = c.fgSecondary)
+    Text("各周", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.labelMedium, color = c.fgSecondary)
     Spacer(Modifier.height(12.dp))
     val entries = d.directory.ifEmpty { view.weeks.map { n ->
         val rows = view.weekKps(n)
-        V7DirectoryEntry(n, rows.firstOrNull()?.module.orEmpty(), if (n == active) "在读" else if (rows.isNotEmpty() && rows.all { it.status in setOf(KpStatus.PASSED, KpStatus.SOLID) }) "已读" else "未读")
+        V7DirectoryEntry(n, if (n in view.midtermExemptionWeeks) "期中周" else weekName(rows), if (n in view.midtermExemptionWeeks) "无新课" else "${rows.count { it.status.isLearned }}/${rows.size}")
     } }
     entries.forEach { e ->
         Row(Modifier.fillMaxWidth().then(if (e.week == active) Modifier.paperShadow("card", c.dark).clip(RoundedCornerShape(8.dp)).background(c.surface1) else Modifier)
             .then(if (onWeek != null) Modifier.clickable { onWeek(e.week) } else Modifier).padding(horizontal = 12.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("第 ${e.week} 周 · ${e.title}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
-                fontWeight = if (e.week == active) FontWeight.SemiBold else FontWeight.Normal, color = if (e.state == "未读") c.fgTertiary else c.fgPrimary, maxLines = 1)
-            Text(e.state, style = MaterialTheme.typography.labelMedium, color = if (e.state == "未读") c.fgTertiary else c.fgSecondary)
+            Text("第 ${e.week} 周" + e.title.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (e.week == active) FontWeight.SemiBold else FontWeight.Normal, color = if (e.state.startsWith("0/")) c.fgTertiary else c.fgPrimary, maxLines = 1)
+            Text(e.state, style = MaterialTheme.typography.labelMedium, color = if (e.state.startsWith("0/")) c.fgTertiary else c.fgSecondary)
         }
         Spacer(Modifier.height(2.dp))
     }
@@ -57,16 +57,16 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
             }
         }
         if (d.missing.isNotEmpty()) PaperCard(contentSpacing = 0.dp) {
-            Text("还缺这些", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
+            Text("要补的节", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
             Spacer(Modifier.height(12.dp))
             d.missing.forEach { item ->
-                Row { Text("○", Modifier.width(18.dp), style = MaterialTheme.typography.bodyMedium); Text(annotatedMarks(item), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium) }
+                Row { Text(KpStatus.NEEDS_REPAIR.symbol, Modifier.width(18.dp), style = MaterialTheme.typography.bodyMedium); Text(annotatedMarks(item), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium) }
                 Spacer(Modifier.height(8.dp))
             }
         }
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            PaperButton(onClick = onSource) { Text("回到原页") }
-            PrimaryButton(onClick = onQuiz) { Text(d.question?.let { "做这一节 ${it.count} 题" } ?: "开始练习") }
+            PaperButton(onClick = onSource) { Text("看要点") }
+            PrimaryButton(onClick = onQuiz) { Text("开始做题") }
         }
         if (d.revisit.isNotBlank()) NoteCard(d.revisitLabel, d.revisit)
     }
@@ -79,14 +79,12 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
 internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: WeekActions, onOpen: (String, Boolean) -> Unit) {
     val week = view.projection.studyScope?.week ?: return
     val points = view.weekKps(week)
-    val passed = points.count { it.status in setOf(KpStatus.PASSED, KpStatus.SOLID) }
-    val inProgress = points.count { it.status == KpStatus.IN_PROGRESS }
-    val missing = points.count { it.status == KpStatus.NEEDS_REPAIR }
+    val passed = points.count { it.status.isLearned }
     val target = view.weekTarget
     val targetLabel = "$week.${(points.indexOfFirst { it.id == target?.id } + 1).coerceAtLeast(1)}"
     val d = pageDetails(c, view, week)
     val colors = CoachTheme.colors
-    val title = points.firstOrNull()?.module?.ifBlank { null } ?: "第 $week 周"
+    val title = weekName(points).ifBlank { "第 $week 周" }
     val weeks = d.directory.map { it.week }.ifEmpty { view.weeks }
     val select = LocalDeskSelect.current
     val railAnchors = remember(week) { MarginAnchors() }
@@ -107,13 +105,13 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { view.weeks.forEach { n ->
             TextButton(onClick = { choosingWeek = false; selectWeek(n) }, enabled = canSelect) { Text(view.weekLabel(n)) }
         } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = "距考 · ${if (view.projection.examDay == null) "日期未公布" else "见学习计划"}",
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = view.examCountdownText(rememberCourseNow(c)),
         compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
         backLabel = "← 书架", onBack = { select(AppTab.RESOURCES) }, directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
         margin = {
             if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { target?.let { onOpen(it.id, true) } })
             else Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                PaperCard { Text("第 $week 周 · 已通过 $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekSummary(view, actions, ui.connected) }
+                PaperCard { Text("第 $week 周 · ${KpStatus.PASSED.label} $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekSummary(view, actions, ui.connected) }
                 target?.takeIf { it.reference.isNotBlank() }?.let { NoteCard("出处", it.reference) }
             }
         }, footer = {
@@ -126,8 +124,8 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
         val m = LocalDeskMetrics.current
         Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState())
             .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 32.dp)) {
-            PageHeader("第 $week 周 · 本周", title, deck = "这一周要会的 ${points.size} 件事", week = week,
-                meta = d.weekStats.ifBlank { "通过 $passed · 在读 $inProgress · 还缺 $missing" })
+            PageHeader("第 $week 周", title, deck = "这一周 ${points.size} 节", week = week,
+                meta = d.weekStats.ifBlank { statusSummary(points) })
             Spacer(Modifier.height(if (m.inner) 0.dp else 0.dp))
             PaperCard(contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {
                 points.forEachIndexed { index, kp ->
@@ -142,10 +140,10 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
                             if (m.window == DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Spacer(Modifier.height(2.dp)); Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
                         }
                         if (m.window != DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
-                        val state = when (kp.status) { KpStatus.PASSED, KpStatus.SOLID -> "✓ 已通过"; KpStatus.IN_PROGRESS -> "● 在读"; KpStatus.NEEDS_REPAIR -> "○ 还缺"; else -> "未读" }
+                        val state = kp.status.symbol + " " + kp.status.label
                         if (kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID)) PassedLabel(
                             Modifier.width(if (m.window == DeskWindow.Outer) 68.dp else 100.8.dp),
-                            MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.End), colors.successFg)
+                            MaterialTheme.typography.labelLarge.copy(textAlign = androidx.compose.ui.text.style.TextAlign.End), colors.successFg, kp.status.label, if (kp.status == KpStatus.SOLID) 2 else 1)
                         else Text(androidx.compose.ui.text.buildAnnotatedString {
                             append(state)
                             if (kp.status == KpStatus.IN_PROGRESS) addStyle(androidx.compose.ui.text.SpanStyle(color = colors.dangerFg), 0, 1)
@@ -156,8 +154,8 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
             }
             Spacer(Modifier.height(24.dp))
             target?.let { kp -> PaperCard(Modifier.railAnchor("week-next").clickable { onOpen(kp.id, true) }, contentPadding = PaddingValues(16.dp), contentSpacing = 8.dp) {
-                Text("下一步", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
-                Text(d.nextStep.ifBlank { "先把${splitTitle(kp.title).second}${if (view.isResume(kp)) "读完" else "开始学习"}。" }, style = MaterialTheme.typography.bodyLarge)
+                Text("接着学", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                Text(d.nextStep.ifBlank { "${if (view.isResume(kp)) "继续" else "开始"} · ${splitTitle(kp.title).second}" }, style = MaterialTheme.typography.bodyLarge)
             } }
             if (!m.inner) {
                 Spacer(Modifier.height(24.dp))

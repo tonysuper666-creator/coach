@@ -145,6 +145,9 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
         if (scene == "quiz") {
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
             compose.onNodeWithTag("mainline-week-8").performClick()
+            // Opening a week now reads its notes first; keep the real route into the same quiz.
+            compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-skip").fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("mainline-skip").performScrollTo().performClick()
             compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
             for (i in 0..2) assertFullyInsidePaper("mainline-option-$i")
             capture("quiz-unanswered")
@@ -180,7 +183,7 @@ class V7ScreenshotTest(private val device: String, private val width: Int, priva
             if (scene == "studyQuiz") compose.onNodeWithTag("study-ask").assertIsDisplayed()
         }
         if (scene == "week") {
-            assertEquals(2, compose.onAllNodesWithText("✓ 已通过").fetchSemanticsNodes().size)
+            assertEquals(2, compose.onAllNodesWithText("✓ 会了").fetchSemanticsNodes().size + compose.onAllNodesWithText("✓✓ 稳了").fetchSemanticsNodes().size)
         }
         if (scene == "quiz") {
             compose.onNodeWithText("正确").assertExists()

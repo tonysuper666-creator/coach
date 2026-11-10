@@ -25,8 +25,8 @@ class QaExamPanelExemptionTest {
                 val c = CoachController("SYN1251", sync, tutor, formatClock = { "" })
                 setContent { CoachTheme(false) { ExamPanelCard(c, view,
                     ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(7, 0.0))), { _, _ -> }, {}) } }
-                onNodeWithText("W7").assertExists()
-                onNodeWithText("大纲里还没有这周的知识点").assertDoesNotExist()
+                onNodeWithText("第 7 周").assertExists()
+                onNodeWithText("课程里还没有这周的节").assertDoesNotExist()
                 onNodeWithText("期中周", substring = true).assertExists()
             }
         } finally { tutor.close() }

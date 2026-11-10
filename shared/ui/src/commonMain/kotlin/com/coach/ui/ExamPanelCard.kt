@@ -16,7 +16,7 @@ import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 
 /**
- * 期末面板（路线页顶部）：还剩几天、11 周各自掌握到哪、今天先补哪三块。
+ * 期末面板（路线页顶部）：距期末天数、各周学到哪、今天先补哪三块。
  * 掌握度直接取账本回放的知识点状态；押题权重来自 Mac 上的私有配置，拿不到就只按未掌握程度排，并如实说明。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -25,7 +25,10 @@ internal fun ExamPanelCard(
     c: CoachController, view: CourseView, focus: ExamFocus?,
     onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit,
 ) {
-    val panel = remember(view, focus) { view.examPanel(c.nowMillis(), focus) }
+    // 跨午夜也要刷新：时钟每秒读一次，按课程时区的日历日变了才重算。
+    val now = rememberCourseNow(c)
+    val today = remember(now, view) { com.coach.domain.calendarDay(now, view.zone) }
+    val panel = remember(view, focus, today) { view.examPanel(now, focus) }
     var picking by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -56,13 +59,13 @@ internal fun ExamPanelCard(
             if (panel.focus.isEmpty()) Text(emptyFocusText(panel), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             panel.focus.forEachIndexed { i, row -> FocusBlock(c, i + 1, row, onOpen, onPractice) }
             Text(
-                if (panel.weighted) "按押题权重 × 未掌握程度排序。" else "暂无押题权重，只按未掌握程度排序。",
+                if (panel.weighted) "按各周分值和还没会的程度排序。" else "还没有各周分值，只按还没会的程度排序。",
                 style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            Text("各周掌握度", style = MaterialTheme.typography.titleMedium)
+            Text("各周进度", style = MaterialTheme.typography.titleMedium)
             panel.weeks.forEach { WeekLine(it) }
-            Text("掌握度：已通过算一半、稳固算满，和下面路线里的状态同一本账。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("进度：会了算一半，稳了算满。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 
@@ -84,12 +87,12 @@ internal fun ExamPanelCard(
 
 private const val DAY_MILLIS = 86_400_000L
 
-/** 前三块为空时说清楚为什么：只有真的各周都稳固才这么说；没掌握但不在押题范围、押题周大纲还没排，都照实讲。 */
+/** 前三块为空时说清楚为什么：只有真的各周都稳了才这么说；没会但分值为 0、有分值的周还没排课，都照实讲。 */
 internal fun emptyFocusText(panel: ExamPanel): String {
-    if (panel.allSolid) return "各周都已稳固，没有要补的。"
+    if (panel.allSolid) return "各周都稳了，没有要补的。"
     return buildList {
-        if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没掌握，但押题权重为 0，没有排进来。")
-        if (panel.unplanned.isNotEmpty()) add("押题的 ${weekSpans(panel.unplanned)} 在大纲里还没有知识点，暂时没法开讲。")
+        if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没会，但分值为 0，没有排进来。")
+        if (panel.unplanned.isNotEmpty()) add("有分值的${weekSpans(panel.unplanned)}在课程里还没有对应的节，暂时没法学。")
     }.joinToString("")
 }
 
@@ -99,13 +102,13 @@ private fun Countdown(countdown: ExamCountdown, busy: Boolean, onPick: () -> Uni
         Column(Modifier.weight(1f)) {
             Text("期末", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             when (countdown) {
-                ExamCountdown.Unset -> Text("日期未公布", style = MaterialTheme.typography.headlineSmall)
+                ExamCountdown.Unset -> Text("还没设期末日期", style = MaterialTheme.typography.headlineSmall)
                 is ExamCountdown.Days -> {
-                    Text(if (countdown.days == 0) "今天考试" else "距期末 ${countdown.days} 天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                    Text(examDateLabel(countdown.examDay), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("距期末 ${countdown.days} 天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Text(examDateLabel(countdown.examDay) + if (countdown.days == 0) " · 今天考试" else "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 is ExamCountdown.Past -> {
-                    Text("考试日已过", style = MaterialTheme.typography.headlineSmall)
+                    Text("期末已结束", style = MaterialTheme.typography.headlineSmall)
                     Text("记的是 ${examDateLabel(countdown.examDay)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -121,7 +124,7 @@ private fun FocusBlock(c: CoachController, rank: Int, row: WeekMastery, onOpen: 
     val action = row.action ?: return
     val (verb, what) = when (action) {
         is ExamAction.Teach -> (if (action.repair) "修复" else "开讲") to splitTitle(action.title).second
-        is ExamAction.Practice -> "开练" to if (action.mistakes > 0) "本周错题 ${action.mistakes} 道" else "本周练到稳固"
+        is ExamAction.Practice -> "开练" to if (action.mistakes > 0) "本周错题 ${action.mistakes} 道" else "本周做到稳了"
     }
     val go = {
         when (action) {
@@ -138,7 +141,7 @@ private fun FocusBlock(c: CoachController, rank: Int, row: WeekMastery, onOpen: 
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("第 ${row.week} 周" + row.topic.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
                 Text("$verb：$what", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer, maxLines = 2)
-                Text("掌握 ${(row.score * 100).roundToInt()}%" + if (row.needsRepair > 0) " · ${row.needsRepair} 个需修复" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                Text("进度 ${(row.score * 100).roundToInt()}%" + if (row.needsRepair > 0) " · ${KpStatus.NEEDS_REPAIR.label} ${row.needsRepair} 节" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
             }
             Text("$verb →", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
         }
@@ -148,13 +151,13 @@ private fun FocusBlock(c: CoachController, rank: Int, row: WeekMastery, onOpen: 
 @Composable
 private fun WeekLine(row: WeekMastery) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("W${row.week}", Modifier.widthIn(min = 32.dp), style = MaterialTheme.typography.labelLarge)
+        Text("第 ${row.week} 周", Modifier.widthIn(min = 48.dp), style = MaterialTheme.typography.labelLarge)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             if (row.topic.isNotBlank()) Text(row.topic, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-            if (row.exempt) Text("期中周（无新课，豁免）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            else if (row.total == 0) Text("大纲里还没有这周的知识点", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (row.exempt) Text("期中周，无新课", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else if (row.total == 0) Text("课程里还没有这周的节", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else LinearProgressIndicator(progress = { row.score.toFloat() }, Modifier.fillMaxWidth().height(6.dp), color = successColor(), trackColor = MaterialTheme.colorScheme.surfaceVariant, strokeCap = androidx.compose.ui.graphics.StrokeCap.Round, gapSize = 0.dp, drawStopIndicator = {})
         }
-        if (row.total > 0) Text("${row.passed}/${row.total} 过" + if (row.solid > 0) " · ${row.solid} 稳" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (row.total > 0) Text("${KpStatus.PASSED.label} ${row.passed}/${row.total}" + if (row.solid > 0) " · ${KpStatus.SOLID.label} ${row.solid}" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

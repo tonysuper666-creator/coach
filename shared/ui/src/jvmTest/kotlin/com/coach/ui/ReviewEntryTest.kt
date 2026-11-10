@@ -62,20 +62,20 @@ class ReviewEntryTest {
                         else -> StudyScreen(c, view.kp("K")!!, view, TutorUiState(), autoStart = startNow, onBack = { page = "review" }, reviewMode = true)
                     }
                 } } } }
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("1 个知识点到期").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("1 个知识点到期").assertIsDisplayed()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("1 节到期").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("1 节到期").assertIsDisplayed()
                 if (integrated) onNodeWithText("每日提醒 08:00").assertDoesNotExist()
-                if (!examKnown) onNodeWithText("日期未公布", substring = true).assertIsDisplayed()
+                if (!examKnown) onNodeWithText("还没设期末日期", substring = true).assertIsDisplayed()
                 capture("review-today-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("到期复习").performClick()
-                onNodeWithText("1 个知识点到期").assertIsDisplayed()
+                onNodeWithText("1 节到期").assertIsDisplayed()
                 if (integrated) {
                     onNodeWithText("每日提醒 08:00").assertIsDisplayed()
                     onNodeWithTag("open-mock").assertIsDisplayed().performClick()
                     onNodeWithText("模拟考要连接 Mac。").assertIsDisplayed()
                     onNodeWithText("← 复习").performClick()
                     onNodeWithTag("open-mock").assertIsDisplayed()
-                    onNodeWithText("1 个知识点到期").assertIsDisplayed()
+                    onNodeWithText("1 节到期").assertIsDisplayed()
                 }
                 capture("review-queue-$width${if (integrated) "-app" else ""}")
                 onNodeWithText("开始", substring = false).performClick()

@@ -31,7 +31,7 @@ class WeekCourseViewTest {
         val view = CourseView(events, project(events))
         assertEquals((1..11).toList(), view.weeks)
         assertEquals(setOf(7), view.midtermExemptionWeeks)
-        assertEquals("第 7 周 · 期中周（无新课，豁免）", view.weekLabel(7))
+        assertEquals("第 7 周 · 期中周，无新课", view.weekLabel(7))
         assertTrue(view.weekKps(7).isEmpty())
     }
     @Test fun passedOldThreadCannotTrapContinueAndScopeOverridesUnfinishedWorkElsewhere() {

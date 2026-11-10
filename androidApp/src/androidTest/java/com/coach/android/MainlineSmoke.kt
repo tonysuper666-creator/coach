@@ -121,13 +121,13 @@ class MainlineSmoke {
         val entry = waitFor("选择题主线")
         screenshot("entry")
         click(entry)
-        waitFor("知识点 3 · 有题 3 · 已掌握 0")
+        waitFor("考点 3 · 有题 3 · 会了 0")
         screenshot("weeks-before")
         click(waitFor("第 1 周 · ", contains = true))
 
         // A miss on the setup question: the reasons for every option are already on the page.
-        waitFor("铺垫题 · 第 1/3 题")
-        answer("Synthetic apples are grown there", guessed = false, outcome = "答错了。", shot = "explained")
+        waitFor("基础题 · 第 1/3 题")
+        answer("Synthetic apples are grown there", guessed = false, outcome = "答错。", shot = "explained")
         // Options are shuffled on the Mac, so the plums row may sit below the fold.
         show("为什么不选：Synthetic plums ripen after", contains = true)
         show("已排进复习：明天再看一次。")
@@ -137,19 +137,19 @@ class MainlineSmoke {
 
         // Right, but marked as a guess.
         waitFor("细节题 · 第 2/3 题")
-        answer("Synthetic pears are grown there", guessed = true, outcome = "答对了，但标了猜的：不算掌握。", shot = "guessed-top")
+        answer("Synthetic pears are grown there", guessed = true, outcome = "猜对：不算会。", shot = "guessed-top")
         show("已排进复习：明天再看一次。")
         screenshot("guessed")
         click(show("下一题"))
 
-        waitFor("桥接题 · 第 3/3 题")
-        answer("Synthetic pears are grown there", guessed = false, outcome = "答对了，算掌握。", shot = "bridge-top")
+        waitFor("综合题 · 第 3/3 题")
+        answer("Synthetic pears are grown there", guessed = false, outcome = "答对。", shot = "bridge-top")
         assertNull("a question answered without guessing is not queued", find { it.text?.toString() == "已排进复习：明天再看一次。" })
-        show("步骤批改")
+        show("模拟考")
         show("限时论述")
         screenshot("bridge")
         click(show("← 选周"))
-        waitFor("知识点 3 · 有题 3 · 已掌握 1")
+        waitFor("考点 3 · 有题 3 · 会了 1")
         screenshot("weeks-after")
     }
 }

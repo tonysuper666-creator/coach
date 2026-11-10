@@ -67,7 +67,7 @@ data class ExamPanel(
  */
 fun CourseView.examPanel(nowMillis: Long, focus: ExamFocus?): ExamPanel {
     val countdown = examDay?.let { day ->
-        val left = (day - logicalToday(nowMillis)).toInt()
+        val left = (day - com.coach.domain.calendarDay(nowMillis, zone)).toInt()
         if (left >= 0) ExamCountdown.Days(left, day) else ExamCountdown.Past(day)
     } ?: ExamCountdown.Unset
     // 押题表里有、大纲还没排到的周也列出来（total = 0），如实显示「还没有知识点」，不冒充掌握。
@@ -95,14 +95,14 @@ fun CourseView.examPanel(nowMillis: Long, focus: ExamFocus?): ExamPanel {
     return ExamPanel(countdown, rows, top, focus != null, offFocus, unplanned)
 }
 
-/** [1, 2, 3, 5] → "W1–W3、W5"：连着的周合成一段。 */
+/** [1, 2, 3, 5] → "第 1–3 周、第 5 周"：连着的周合成一段。 */
 fun weekSpans(weeks: List<Int>): String {
     val runs = mutableListOf<IntRange>()
     for (w in weeks.distinct().sorted()) {
         val last = runs.lastOrNull()
         if (last != null && w == last.last + 1) runs[runs.lastIndex] = last.first..w else runs += w..w
     }
-    return runs.joinToString("、") { if (it.first == it.last) "W${it.first}" else "W${it.first}–W${it.last}" }
+    return runs.joinToString("、") { if (it.first == it.last) "第 ${it.first} 周" else "第 ${it.first}–${it.last} 周" }
 }
 
 /** 纪元日 → 公历年月日（不依赖日期库；Hinnant 的 civil_from_days）。 */

@@ -99,7 +99,7 @@ class SourceOpenSmoke {
                     shot.recycle()
                 }
                 // Close the source with whichever button this layout has (「← 学习」over the page, 「✕ 关闭原文」beside it), then check it is gone.
-                val closeLabel = listOf("← 学习", "✕ 关闭原文").firstOrNull { label -> find(ui) { it.text?.toString() == label } != null } ?: throw AssertionError("No close button for the source page ($form)")
+                val closeLabel = listOf("← 学习", "← 回到这一节", "✕ 关闭原文").firstOrNull { label -> find(ui) { it.text?.toString() == label } != null } ?: throw AssertionError("No close button for the source page ($form)")
                 click(waitFor(ui, 5_000) { it.text?.toString() == closeLabel })
                 instrumentation.waitForIdleSync()
                 val closeEnd = SystemClock.elapsedRealtime() + 5_000

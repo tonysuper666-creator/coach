@@ -53,7 +53,7 @@ fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
             view.weeks.forEach { week ->
                 val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
                 val label = view.weekLabel(week)
-                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · $remaining 个待学") }, onClick = { expanded = false; actions.select(week) })
+                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · 还有 $remaining 节没会") }, onClick = { expanded = false; actions.select(week) })
             }
             if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) })
         }
@@ -66,7 +66,7 @@ fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
     val active = view.projection.studyScope ?: return
     if (view.weekTarget != null) return
     val passed = view.weekKps(active.week).count { it.status in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
-    Text("第 ${active.week} 周的学习队列已学完，本周 $passed / ${view.weekKps(active.week).size} 个已通过。", style = MaterialTheme.typography.titleMedium)
+    Text("第 ${active.week} 周都学完了，${com.coach.client.KpStatus.PASSED.label} $passed / ${view.weekKps(active.week).size} 节。", style = MaterialTheme.typography.titleMedium)
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { actions.onReview(active.week) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("再练这一周错题") }

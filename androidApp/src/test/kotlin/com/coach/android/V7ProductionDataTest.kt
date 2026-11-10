@@ -152,7 +152,7 @@ class V7ProductionDataTest {
 
     @Test fun innerReadingUsesLoadedSourceAndLedgerQuestion() {
         show(reading = true)
-        compose.onNodeWithText("★  1  课上强调").assertExists()
+        compose.onNodeWithText("课上强调 · 1").assertExists()
         compose.onNodeWithText("共付提高后，需求沿曲线怎样变化？").assertExists()
         compose.onNodeWithText("我的批注", substring = true).assertExists()
         compose.onNodeWithTag("v7-reading-paragraph-1").performTextInputSelection(androidx.compose.ui.text.TextRange(0, 15))
@@ -167,7 +167,7 @@ class V7ProductionDataTest {
         compose.onNodeWithText("保存").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("新增的合成批注", substring = true).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-reading-paragraph-1").performTextInputSelection(androidx.compose.ui.text.TextRange(0, 15))
-        compose.onNodeWithText("让 AI 再讲一遍").performClick()
+        compose.onNodeWithText("再讲一遍").performClick()
         compose.onNode(hasSetTextAction()).assertTextContains("请再讲一遍：", substring = true)
     }
 
@@ -194,9 +194,12 @@ class V7ProductionDataTest {
         RuntimeEnvironment.setQualifiers("w624dp-h986dp-xhdpi")
         compose.setContent { Box(Modifier.requiredSize(624.dp, 986.dp)) { CoachApp(controller, dark = false, initialTab = AppTab.REVIEW) } }
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("open-mainline").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("open-mainline").performClick()
+        // PR117 made the card a container with separate continue/read/week-picker controls.
+        compose.onNodeWithText("选其他周").assertIsDisplayed().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-week-8").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("mainline-week-8").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-skip").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("mainline-skip").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("v7-source-card").assertDoesNotExist()
         compose.onNodeWithTag("mainline-option-1").performScrollTo().performClick()

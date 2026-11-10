@@ -6,6 +6,8 @@ import kotlinx.serialization.Serializable
 @Serializable data class Course(
     val id: String, val code: String, val title: String,
     val tz: String = "Europe/London", val dayStartHour: Int = 4,
+    /** Final exam date, "YYYY-MM-DD" in [tz]; null while unpublished. Read by every countdown and the review scheduler. */
+    val examDate: String? = null,
     val instructionsMd: String = "", val examWeights: Map<String, Int> = emptyMap(),
     val examWeightGroups: List<ExamWeightGroup> = emptyList()
 )

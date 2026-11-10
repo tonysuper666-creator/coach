@@ -24,6 +24,8 @@ class ReaderImageTransportSmoke {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         require(context.packageName == "com.coach.readermeasurement")
         val port = requireNotNull(InstrumentationRegistry.getArguments().getString("readerPort")).toInt()
+        val runId=requireNotNull(InstrumentationRegistry.getArguments().getString("readerRunId"))
+        require(runId.matches(Regex("[A-Za-z0-9_-]{1,48}")))
         require(port in 1024..65535 && port !in setOf(8790,8791,18791,3790))
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         require(JSONObject(URL("$base/health").readText()).getBoolean("syntheticOnly"))
@@ -32,7 +34,8 @@ class ReaderImageTransportSmoke {
         try {
             val controls = JSONArray()
             for (page in 1..4) {
-                val connection = URL("$base/v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1").openConnection() as HttpURLConnection
+                val probe="$runId-url-$page"
+                val connection = URL("$base/v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1&readerProbe=$probe").openConnection() as HttpURLConnection
                 connection.setRequestProperty("Authorization", "Bearer synthetic-baseline-token")
                 connection.setRequestProperty("X-Coach-Device", "baseline-device")
                 connection.connectTimeout=3000; connection.readTimeout=15000
@@ -40,13 +43,17 @@ class ReaderImageTransportSmoke {
                     val start=ReaderPageTrace.nowNs()
                     assertEquals(200, connection.responseCode)
                     val headers=ReaderPageTrace.nowNs()
+                    assertEquals(probe,connection.getHeaderField("X-Coach-Reader-Probe"))
                     val bytes=connection.inputStream.use { it.readBytes() }
-                    controls.put(JSONObject().put("startNs",start).put("headersNs",headers).put("endNs",ReaderPageTrace.nowNs()).put("bytes",bytes.size))
+                    controls.put(JSONObject().put("probeId",probe).put("responseEchoVerified",true)
+                        .put("serverConnectionId",connection.getHeaderField("X-Coach-Reader-Connection").toInt())
+                        .put("serverRequestOrdinal",connection.getHeaderField("X-Coach-Reader-Ordinal").toInt())
+                        .put("startNs",start).put("headersNs",headers).put("endNs",ReaderPageTrace.nowNs()).put("bytes",bytes.size))
                 } finally { connection.disconnect() }
             }
-            val report=JSONObject(measureSyntheticReaderTransport(client.reader).toString()).put("urlConnectionControl",controls)
+            val report=JSONObject(measureSyntheticReaderTransport(client.reader,runId).toString()).put("urlConnectionControl",controls)
             val sockets=JSONArray()
-            for(page in 1..4) sockets.put(socketProbe(BuildConfig.COACH_TAIL_HOST,port,page))
+            for(page in 1..4) sockets.put(socketProbe(BuildConfig.COACH_TAIL_HOST,port,page,"$runId-socket-$page"))
             report.put("socketControl",sockets).put("probeOrder","URL4,CIO12,socket4")
             File(context.cacheDir,"reader-transport.json").writeText(report.toString())
         } finally {
@@ -55,18 +62,20 @@ class ReaderImageTransportSmoke {
         }
     }
 
-    private fun socketProbe(host: String,port: Int,page: Int): JSONObject = Socket().use { socket ->
+    private fun socketProbe(host: String,port: Int,page: Int,probe: String): JSONObject = Socket().use { socket ->
         socket.soTimeout=15_000
         val start=ReaderPageTrace.nowNs()
         socket.connect(InetSocketAddress(host,port),3000)
         val connected=ReaderPageTrace.nowNs()
-        val request="GET /v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1 HTTP/1.1\r\nHost: $host:$port\r\nAuthorization: Bearer synthetic-baseline-token\r\nX-Coach-Device: baseline-device\r\nConnection: close\r\n\r\n"
+        val request="GET /v1/courses/READER_BASELINE/reader/synthetic-baseline/pages/$page/image?version=v1&readerProbe=$probe HTTP/1.1\r\nHost: $host:$port\r\nAuthorization: Bearer synthetic-baseline-token\r\nX-Coach-Device: baseline-device\r\nConnection: close\r\n\r\n"
         socket.getOutputStream().apply { write(request.toByteArray(Charsets.US_ASCII));flush() }
         val written=ReaderPageTrace.nowNs()
-        val input=socket.getInputStream().buffered()
+        val raw=socket.getInputStream()
         val header=ByteArrayOutputStream()
-        var value=input.read()
+        val readRequested=ReaderPageTrace.nowNs()
+        var value=raw.read()
         val firstByte=ReaderPageTrace.nowNs()
+        val input=raw.buffered()
         var end=0
         while(value>=0) {
             header.write(value);end=(end shl 8) or value
@@ -77,9 +86,15 @@ class ReaderImageTransportSmoke {
         val text=header.toString("US-ASCII")
         check(text.startsWith("HTTP/1.0 200 ") || text.startsWith("HTTP/1.1 200 "))
         val expected=text.lineSequence().first { it.startsWith("Content-Length:",ignoreCase=true) }.substringAfter(':').trim().toInt()
+        fun field(name: String)=text.lineSequence().first { it.startsWith("$name:",ignoreCase=true) }.substringAfter(':').trim()
+        check(field("X-Coach-Reader-Probe")==probe)
         val bytes=input.readBytes()
         check(bytes.size==expected && bytes.size>8 && bytes[0]==0x89.toByte())
-        JSONObject().put("page",page).put("startNs",start).put("connectedNs",connected).put("requestWrittenNs",written)
+        JSONObject().put("probeId",probe).put("responseEchoVerified",true)
+            .put("serverConnectionId",field("X-Coach-Reader-Connection").toInt())
+            .put("serverRequestOrdinal",field("X-Coach-Reader-Ordinal").toInt())
+            .put("readRequestedNs",readRequested).put("firstByteReadMode","unbuffered InputStream.read; not kernel receive")
+            .put("page",page).put("startNs",start).put("connectedNs",connected).put("requestWrittenNs",written)
             .put("firstByteNs",firstByte).put("headersNs",headers).put("endNs",ReaderPageTrace.nowNs())
             .put("bytes",bytes.size).put("clientTcpNoDelayEnabled",socket.tcpNoDelay).put("freshConnection",true)
     }

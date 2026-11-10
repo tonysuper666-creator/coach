@@ -15,6 +15,8 @@ import uuid
 
 from fixture_server import Fixture
 from summarize import summarize
+from correlate_transport import correlate
+from packet_capture import PacketCapture
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -26,6 +28,7 @@ def main():
     parser.add_argument("--suite", choices=["performance", "behavior", "transport", "lifecycle"], default="performance")
     parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
                         help="Diagnostic fixture mode; keep legacy for historical comparisons")
+    parser.add_argument("--packet-interface", help="Optional Mac capture interface; only the owned synthetic transport endpoint is captured")
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -36,6 +39,8 @@ def main():
     parser.add_argument("--test-apk", type=Path)
     parser.add_argument("--perfetto", action="store_true", help="Collect Android FrameTimeline and the app's fixed trace markers")
     args = parser.parse_args()
+    if args.packet_interface and args.suite != "transport":
+        parser.error("packet capture is limited to the synthetic transport suite")
     if sys.platform != "darwin":
         parser.error("Native UI, emulator and shared UI tests stay on Mac; use tools/dev/heavy")
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", args.host):
@@ -116,11 +121,16 @@ def main():
         identity["materialSha256"] = fixture.material_sha256
         identity["serverTransferTimingsObserved"] = hasattr(fixture, "transfers")
         (out / "run.json").write_text(json.dumps(identity, indent=2))
+        packet_capture=PacketCapture(out,args.packet_interface,args.host,fixture.port)
+        def save_http_records():
+            (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
+            (out / "transfers.json").write_text(json.dumps(getattr(fixture, "transfers", []), indent=2))
         sampler = threading.Thread(target=sample)
         sampler.start()
         perfetto = None
         perfetto_log = None
         try:
+            packet_capture.start()
             if args.platform == "android" and args.perfetto:
                 remote_trace = f"/data/misc/perfetto-traces/reader-page-{time.time_ns()}.perfetto-trace"
                 perfetto_log = (out / "perfetto.log").open("wb")
@@ -158,6 +168,7 @@ def main():
                         with (out / local).open("wb") as capture:
                             subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/" + remote], stdout=capture, check=True)
             identity["commandExit"] = result.returncode
+            save_http_records()
             if args.platform == "android" and "OK (1 test)" not in (out / "test.log").read_text():
                 raise RuntimeError("Android instrumentation failed; inspect test.log")
             if result.returncode:
@@ -173,6 +184,11 @@ def main():
                                urlControlSamples=len(probes.get("urlConnectionControl", [])),
                                socketControlSamples=len(probes.get("socketControl", [])),
                                uiPerformanceVerified=False, physicalMemoryBudgetVerified=False)
+                association=correlate(probes,getattr(fixture,"transfers",[]))
+                (out/'transport-association.json').write_text(json.dumps(association,indent=2))
+                if not association['complete']:
+                    raise RuntimeError('Probe request/response association incomplete; inspect transport-association.json')
+                summary['requestResponseAssociationComplete']=True
             else:
                 cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]
                 required = {"book_a", "switch_book_b", "restore_book_a", "version_changed", "rendering_changed", "closed", "cancelled_decode", "reopened"}
@@ -184,11 +200,17 @@ def main():
             if args.platform == "desktop":
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
-            (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
-            (out / "transfers.json").write_text(json.dumps(getattr(fixture, "transfers", []), indent=2))
         finally:
             stop.set()
             sampler.join()
+            try:
+                packet_capture.stop()
+            except Exception as error:
+                process=packet_capture.process
+                if process is not None and process.poll() is None:
+                    process.kill();process.wait()
+                packet_capture.report.update(observed=False,stopError=type(error).__name__)
+            identity['packetCapture']=packet_capture.report
             if perfetto is not None:
                 try:
                     identity["perfettoExit"] = perfetto.wait(timeout=45)
@@ -202,9 +224,12 @@ def main():
                 finally:
                     perfetto_log.close()
             identity["memorySamplerErrors"] = sampling_errors
+            save_http_records()
             (out / "run.json").write_text(json.dumps(identity, indent=2))
     if sampling_errors:
         raise RuntimeError("memory sampler failed; keep the measurement incomplete")
+    if args.packet_interface and (not identity['packetCapture']['observed'] or identity['packetCapture'].get('decodeExit')!=0):
+        raise RuntimeError('Requested packet boundary capture is incomplete; inspect run.json and wire-capture.log')
     if args.perfetto and identity.get("perfettoExit") != 0:
         raise RuntimeError("FrameTimeline capture failed; keep first-presentation evidence incomplete")
     print("Collected synthetic-only trace; first-present and native/GPU memory budget remain unverified.")

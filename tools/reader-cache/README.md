@@ -353,3 +353,70 @@ from write-to-first-byte waiting; they cannot by themselves attribute a differen
 to CIO's selector. Compare matched modes and server connection IDs. Do not
 subtract host timestamps from guest clocks, combine controls with UI performance,
 or replace historical baseline samples.
+
+## Request/response boundaries after 7d80e92
+
+Both native lifecycle runs at `7d80e92` completed all eight scenarios/seven phases.
+The transport controls still measured about 501 ms from socket write to the first
+buffered read return on Android, even outside CIO. Do not attribute this solely
+to CIO or switch the production engine on that basis.
+
+New transport samples carry a generated `readerProbe` token for each run/kind/page.
+The synthetic server echoes it in `X-Coach-Reader-Probe`, together with connection
+and request ordinals. All three clients verify their own response echo. Ordinary
+reader image requests carry no token and retain their original URL/engine policy.
+The probe API is restricted to the synthetic-baseline document. A service adapter
+without echo support cannot pass this transport diagnostic; performance/behavior
+calls do not require echo support.
+
+`transport-association.json` joins each token to exactly one server row, verifies
+echo/status/length/connection and rejects missing, duplicate or incomplete records.
+It retains original records and computes intervals only within their own clock:
+
+| Client boundary | Host boundary |
+| --- | --- |
+| connect return, request write return | accept return, handler start/initialization |
+| first read invocation/return | request line read return, headers parsed |
+| full headers/body read | response header write invocation/return, body write return |
+
+Socket first-byte sampling now calls the unbuffered `InputStream.read()` before
+wrapping the remaining stream. It still observes an application read return, not
+guest kernel receipt. Response writes are queue/API boundaries, not wire delivery.
+Nonce/header instrumentation changes the diagnostic traffic; these samples must
+not replace historical performance data or be described as a speed improvement.
+
+Optional host packet observation is available only for `--suite transport`:
+
+```sh
+# Select an existing interface carrying the configured synthetic host; list with tcpdump -D.
+tools/dev/heavy --emulator python3 tools/reader-cache/run_observed.py \
+  --platform android --suite transport --transport-mode legacy \
+  --packet-interface <existing-interface> \
+  --host <existing-configured-host> --serial <isolated-emulator> \
+  --adb <adb> --aapt2 <aapt2> --apk <isolated-apk> --test-apk <isolated-test-apk> \
+  --output build/reader-observed/android-request-boundaries
+```
+
+The runner starts and joins its own tcpdump process. The filter fixes the exact
+new fixture IPv4/port in both directions; callers cannot supply a general filter.
+No sudo, BPF permission changes, production ports or services are used. Missing
+access/readiness/packets/decode produces an explicit failed requested-capture
+result while retaining the application records. With no interface requested,
+capture is marked unobserved. Windows tests mock capture and do not claim Mac
+BPF availability.
+
+The output adds `wire.pcap`, `wire-text.log` and `wire-capture.log`; `run.json`
+records the exact filter/PID, exit, packet count and host monotonic/epoch clock
+brackets. These packets contain only the owned synthetic service traffic. Match
+query tokens and response echo headers in the packet stream, then use TCP ports,
+sequence numbers and server connection ordinals. Retain retransmissions/ambiguous
+or split headers as candidates, rather than declaring one packet uniquely matched.
+Host wire timing and host application timing can locate accept/handler/write gaps;
+they do not prove guest kernel receipt or an offset between host and guest clocks.
+
+Start with one matched Android legacy run and a Mac reference when needed. Inspect
+whether the gap occurs before the request reaches the handler, during header
+write, or outside the host-observed request/response interval. Keep unresolved
+clock/scheduling/network gaps explicit before deciding to rerun performance.
+The existing first-presentation, trace-quality, real hot-update and physical/GPU
+budget gaps remain open.

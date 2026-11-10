@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import socket
+import re
 import threading
 import time
 from urllib.parse import urlsplit, parse_qs
@@ -35,6 +36,7 @@ class Fixture:
         self.transfers = []
         self.version = "v1"
         self.connection_sequence = 0
+        self.accepted = {}
         if transport not in ("legacy", "nodelay", "keepalive"):
             raise ValueError("unknown synthetic transport")
         self.lock = threading.Lock()
@@ -45,11 +47,24 @@ class Fixture:
             disable_nagle_algorithm = transport != "legacy"
 
             def setup(self):
+                self.handlerStartedNs = time.monotonic_ns()
                 super().setup()
                 with fixture.lock:
-                    fixture.connection_sequence += 1
-                    self.connection_id = fixture.connection_sequence
+                    self.connection_id,self.socketAcceptedNs = fixture.accepted.pop(id(self.connection))
                 self.connection_request = 0
+                self.acceptInitializedNs = time.monotonic_ns()
+
+            def handle_one_request(self):
+                self.requestWaitStartedNs = time.monotonic_ns()
+                self.requestLineReadNs = None
+                self.requestHeadersParsedNs = None
+                super().handle_one_request()
+
+            def parse_request(self):
+                self.requestLineReadNs = time.monotonic_ns()
+                result = super().parse_request()
+                self.requestHeadersParsedNs = time.monotonic_ns()
+                return result
 
             def log_message(self, *_):
                 pass  # no request URLs, headers, credentials, or material in logs
@@ -63,11 +78,22 @@ class Fixture:
                 row["tcpNoDelayEnabled"] = bool(row["tcpNoDelay"])
                 self.connection_request += 1
                 row.update(connectionId=self.connection_id, requestOnConnection=self.connection_request)
+                row.update(clientPort=self.client_address[1],serverPort=self.server.server_port)
+                row.update(acceptInitializedNs=self.acceptInitializedNs,
+                           socketAcceptedNs=self.socketAcceptedNs,handlerStartedNs=self.handlerStartedNs,
+                           requestWaitStartedNs=self.requestWaitStartedNs,
+                           requestLineReadNs=self.requestLineReadNs,
+                           requestHeadersParsedNs=self.requestHeadersParsedNs)
                 with fixture.lock:
                     fixture.transfers.append(row)
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
+                if row.get("probeId"):
+                    self.send_header("X-Coach-Reader-Probe", row["probeId"])
+                    self.send_header("X-Coach-Reader-Connection", str(self.connection_id))
+                    self.send_header("X-Coach-Reader-Ordinal", str(self.connection_request))
+                    row["responseHeaderWriteStartedNs"] = time.monotonic_ns()
                 self.end_headers()
                 row["headersQueuedNs"] = time.monotonic_ns()
                 try:
@@ -89,6 +115,9 @@ class Fixture:
                 if not (path == PREFIX or path.startswith(PREFIX + "/")):
                     self.send(404, {})
                 elif path.endswith("/image"):
+                    probe = parse_qs(parsed.query).get("readerProbe", [None])
+                    if len(probe) != 1 or (probe[0] is not None and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", probe[0]) is None):
+                        self.send(400, {}); return
                     try:
                         page = int(path.split("/")[-2])
                         document = path.split("/")[-4]
@@ -104,7 +133,7 @@ class Fixture:
                         self.send(409, {})
                         return
                     with fixture.lock:
-                        row=dict(page=page, document=document, version=expected_version, startedNs=time.monotonic_ns())
+                        row=dict(page=page, document=document, version=expected_version, startedNs=time.monotonic_ns(), probeId=probe[0])
                         fixture.requests.append(row)
                     self.send(200, image, "image/png", row=row)
                 elif path.endswith("/resolve"):
@@ -163,7 +192,16 @@ class Fixture:
                         status, response = 200, dict(revision=fixture.revision)
                 self.send(status, response)
 
-        self.server = http.server.ThreadingHTTPServer((bind, port), Handler)
+        class ObservedServer(http.server.ThreadingHTTPServer):
+            def get_request(self):
+                connection,address=super().get_request()
+                accepted=time.monotonic_ns()
+                with fixture.lock:
+                    fixture.connection_sequence+=1
+                    fixture.accepted[id(connection)]=(fixture.connection_sequence,accepted)
+                return connection,address
+
+        self.server = ObservedServer((bind, port), Handler)
         if self.server.server_port in FORBIDDEN:
             self.server.server_close()
             raise ValueError("production port selected")

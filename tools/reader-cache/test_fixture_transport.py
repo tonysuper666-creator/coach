@@ -8,6 +8,7 @@ from unittest.mock import patch
 import uuid
 
 from fixture_server import Fixture, PREFIX, TOKEN
+from correlate_transport import correlate
 
 
 @contextmanager
@@ -61,6 +62,31 @@ class ReaderFixtureTransportTest(unittest.TestCase):
             self.assertEqual(b'\x89PNG\r\n\x1a\n\x02',call('GET',PREFIX+'/synthetic-baseline/pages/1/image?version=v2')[1])
             self.assertEqual(b'\x89PNG\r\n\x1a\n\x03',call('GET',PREFIX+'/synthetic-other/pages/1/image?version=v1')[1])
             self.assertEqual('v2',json.loads(call('GET',PREFIX+'/synthetic-baseline/state')[1])['document']['version'])
+
+    def test_repeated_page_requests_have_distinct_echoes_and_ordered_boundaries(self):
+        clients=[]
+        with fixture(transport='keepalive') as service:
+            connection=http.client.HTTPConnection('127.0.0.1',service.port,timeout=3)
+            try:
+                for token in ('run-socket-1','run-socket-2'):
+                    connection.request('GET',PREFIX+'/synthetic-baseline/pages/1/image?version=v1&readerProbe='+token,
+                        headers={'Authorization':'Bearer '+TOKEN})
+                    response=connection.getresponse()
+                    self.assertEqual(200,response.status)
+                    self.assertEqual(token,response.getheader('X-Coach-Reader-Probe'))
+                    size=len(response.read());self.assertEqual(9,size)
+                    clients.append(dict(probeId=token,responseEchoVerified=True,bytes=size,
+                        serverConnectionId=int(response.getheader('X-Coach-Reader-Connection')),
+                        serverRequestOrdinal=int(response.getheader('X-Coach-Reader-Ordinal'))))
+            finally: connection.close()
+        self.assertEqual(['run-socket-1','run-socket-2'],[r['probeId'] for r in service.requests])
+        for row in service.requests:
+            points=[row[k] for k in ('socketAcceptedNs','handlerStartedNs','acceptInitializedNs','requestWaitStartedNs','requestLineReadNs',
+                'requestHeadersParsedNs','handlerNs','responseHeaderWriteStartedNs','headersQueuedNs','bodyQueuedNs')]
+            self.assertEqual(sorted(points),points)
+        association=correlate({'urlConnectionControl':clients},service.transfers)
+        self.assertTrue(association['complete'])
+        self.assertEqual(2,len(association['samples']))
 
 
 if __name__=='__main__': unittest.main()

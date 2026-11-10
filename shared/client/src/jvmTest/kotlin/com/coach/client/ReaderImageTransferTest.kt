@@ -100,4 +100,33 @@ class ReaderImageTransferTest {
             }
         } finally { releaseBodies.countDown();client.close();server.stop(0);executor.shutdownNow() }
     }
+
+    private suspend fun probeEcho(echo: String): Pair<ByteArray?,List<String>> {
+        val server=HttpServer.create(InetSocketAddress("127.0.0.1",0),0).apply {
+            createContext("/v1/courses/fake/reader/synthetic-baseline/pages/1/image") { exchange ->
+                try {
+                    check(exchange.requestURI.rawQuery=="version=v1&readerProbe=probe-1")
+                    exchange.responseHeaders.set("X-Coach-Reader-Probe",echo)
+                    exchange.sendResponseHeaders(200,1);exchange.responseBody.write(byteArrayOf(7))
+                } finally { exchange.close() }
+            };start()
+        }
+        val client=CourseHttp("http://127.0.0.1:${server.address.port}","fake-device","synthetic-token","fake")
+        val stages=mutableListOf<String>()
+        try { return client.reader.probeSyntheticImage(1,"probe-1") { stages+=it } to stages }
+        finally { client.close();server.stop(0) }
+    }
+
+    @Test fun syntheticProbeRequiresItsOwnResponseEcho() = runBlocking {
+        val (bytes,stages)=probeEcho("probe-1")
+        assertContentEquals(byteArrayOf(7),bytes)
+        assertTrue("http_probe_verified" in stages)
+    }
+
+    @Test fun anotherRequestsEchoCannotEstablishProbeSuccess() = runBlocking {
+        val (bytes,stages)=probeEcho("some-other-request")
+        assertNull(bytes)
+        assertTrue("http_probe_mismatch" in stages)
+        assertFalse("http_probe_verified" in stages)
+    }
 }

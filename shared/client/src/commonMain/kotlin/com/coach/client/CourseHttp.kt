@@ -12,6 +12,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
+import io.ktor.http.Url
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
@@ -171,9 +172,18 @@ class CourseHttp(baseUrl: String, private val deviceId: String, private val toke
         imageTransfer = { path, stage ->
             try {
                 stage("http_call_started")
+                val url = readerUrl(path)
+                val probe = Url(url).parameters["readerProbe"]
                 // Scoped execution separates headers from body completion and avoids retaining a saved response copy.
-                http.prepareGet(readerUrl(path)).execute { response ->
+                http.prepareGet(url).execute { response ->
                     stage("http_headers_received")
+                    if (probe != null) {
+                        if (response.headers["X-Coach-Reader-Probe"] != probe) {
+                            stage("http_probe_mismatch")
+                            return@execute null
+                        }
+                        stage("http_probe_verified")
+                    }
                     if (!response.status.isSuccess()) null else {
                         val bytes = response.bodyAsBytes()
                         stage("http_body_received")

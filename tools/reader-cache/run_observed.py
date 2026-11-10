@@ -146,7 +146,7 @@ def main():
                 raise RuntimeError("test command failed; inspect test.log")
             trace = json.loads((out / "trace.json").read_text())
             identity["measurementPid"] = trace["process"]["pid"]
-            expected = {"input_next": 1, "input_citation": 1} if args.suite == "behavior" else None
+            expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else None
             (out / "summary.json").write_text(json.dumps(summarize(trace, expected), indent=2))
             if args.platform == "desktop":
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"

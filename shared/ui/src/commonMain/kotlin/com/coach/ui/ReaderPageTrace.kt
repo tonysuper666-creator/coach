@@ -3,6 +3,7 @@ package com.coach.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.ImageBitmap
 import com.coach.client.ReaderRasterIdentity
+import com.coach.client.ReaderRasterLease
 import kotlin.time.TimeSource
 import kotlinx.serialization.json.*
 
@@ -203,5 +204,7 @@ internal expect fun readerTraceMarker(kind: String, action: Long, image: Long)
 @Composable
 internal expect fun readerFrameSubmitted(): (ReaderDecodeObservation, Long) -> Unit
 
-internal data class ReaderLoadedImage(val bitmap: ImageBitmap, val sourcePage: Int, val sourceSession: Int,
+internal data class ReaderLoadedImage(val raster: ReaderRasterLease<ImageBitmap>, val sourcePage: Int, val sourceSession: Int,
                                      val observation: ReaderDecodeObservation?, val identity: ReaderRasterIdentity, val readyNs: Long)
+
+internal expect fun releaseReaderImage(bitmap: ImageBitmap, drawn: Boolean): String

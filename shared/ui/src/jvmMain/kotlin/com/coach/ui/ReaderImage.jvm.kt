@@ -22,3 +22,9 @@ internal actual fun decodeReaderImage(bytes: ByteArray, observation: ReaderDecod
     }
     return image
 }
+
+internal actual fun releaseReaderImage(bitmap: ImageBitmap, drawn: Boolean): String {
+    // Already recorded SkImages retain their own pixel references. This releases our SkBitmap handle.
+    bitmap.asSkiaBitmap().close()
+    return "release_skia_handle"
+}

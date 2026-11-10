@@ -5,7 +5,10 @@ At that revision, `PdfPageImage` requests and decodes on every page change.
 The original AWT baseline is preserved at PR141 head `5f7062c`. The measured
 Poppler baseline is `27f07f8` plus the four named `waitUntil` argument fixes from
 the Mac evidence package. Current code implements the three-page decoded window;
-its native candidate measurements and memory/presentation acceptance are pending.
+the first candidate (`880f99c`) had 40/40 desktop but only 2/40 Android ready
+turns. Its Android real-service cached citation took 1598.1 ms to draw commands.
+That candidate did not meet acceptance. The revised scheduling/metadata/lifetime
+paths below require new measurements; memory/presentation acceptance is pending.
 PR131's isolated Reader2 layout and PR134's desktop window remain separate work.
 
 ## Mac desktop baseline
@@ -163,8 +166,15 @@ retry. Stale saved positions hold speculation until explicit navigation.
 native presentation/decode profile. Nested question-source dialogs reuse ready
 rasters and restore their underlying reader; inactive viewers do not compete
 for loading. The last close cancels the scope and clears cache ownership. Native
-decodes across closing/reopening scopes share a serial gate. No displayed bitmap
-is recycled while a renderer may still reference it. Consequently, the three
+decodes across closing/reopening scopes share a serial gate. Image requests and
+publication use an independent worker dispatcher, rather than the pausable
+composition context. Native decode cancellation retains its result until the
+controller can publish or retire it. Composition acquires a counted raster use,
+so cache eviction waits for every composed use before releasing our Skia handle
+or recycling an unused Android bitmap. A drawn Android bitmap remains under
+renderer/GC ownership; `release_deferred_renderer` explicitly records that gap.
+No displayed Android bitmap is recycled while a renderer may still reference it.
+Consequently, the three
 managed slots do not establish the native/GPU peak budget; use the existing
 liveness/process evidence and keep that acceptance gate open.
 
@@ -172,7 +182,7 @@ Portable window behavior tests (no corpus or UI test compilation):
 
 ```sh
 tools/dev/heavy ./gradlew :shared:client:jvmTest \
-  --tests com.coach.client.ReaderPageWindowTest
+  --tests com.coach.client.ReaderPageWindowTest --tests com.coach.client.ReaderRasterLeaseTest
 ```
 
 Repeat the `run_observed.py` performance commands above using fresh candidate
@@ -192,9 +202,22 @@ tools/dev/heavy --local python3 tools/reader-cache/run_observed.py \
 
 The behavior suite uses the production catalog/book view, turns to a prefetched
 page, opens an already cached source page, closes it and checks the original page
-returns without another image request/decode. It asserts trace hit evidence and
-target pixels through the real reader/HTTP/platform-decoder path. Its two timed
+returns without another image request/decode, then turns again and checks that
+the newer progress revision saved by the source is shared with the underlying
+book. Existing pixel/reuse assertions remain. It asserts trace hit evidence and
+target pixels through the real reader/HTTP/platform-decoder path. Its three timed
 actions are reported separately from the 42-sample performance suite.
+
+While a book remains open, visible source links resolve their targets on a worker.
+Only a target matching the active document/version can reuse that book's validated
+state. No extra page is decoded by this metadata warming; closing the last viewer
+removes its scope. Cold links resolve/catalog in parallel and still load validated
+state online. Source/state timing events distinguish this path from bitmap lookup.
+The same reader/account scope shares only confirmed progress revisions; it does
+not retry or overwrite an external conflict. Metadata readiness before input and
+bitmap readiness before input must be identified separately in native reports.
+The performance suite still makes immediate turns without a prefetch-readiness
+wait, preserving comparison with the previous baseline/candidate.
 
 The candidate performance hosts retain `before-close.json` and `closed.json` in
 the same live process and hold each lifecycle phase for 600 ms **after** its

@@ -51,13 +51,16 @@ class ReaderPageCachePathTest {
                 click("cache-citation"); pixels(1)
                 assertEquals(1, count("request_started", 1), "citation must reuse the existing raster")
                 assertEquals(1, count("lookup_hit", 1))
+                assertEquals(1, count("state_reused", 1))
                 val sourceBack = hasTestTag("private-document-back") and hasAnyAncestor(hasTestTag("private-source-dialog"))
                 waitUntil(timeoutMillis = 15_000) { onAllNodes(sourceBack).fetchSemanticsNodes().singleOrNull()?.let { !it.config.contains(SemanticsProperties.Disabled) } == true }
                 onNode(sourceBack).performMouseInput { click() }
                 pixels(2)
                 assertEquals(1, count("request_started", 2), "closing the source restores the parent's existing raster")
+                // Closing must remain possible after another turn; a stale revision leaves a pending conflict.
+                click("private-next"); pixels(3)
                 click("private-document-back")
-                waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isEmpty() }
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isEmpty() && onAllNodesWithTag("private-page-3").fetchSemanticsNodes().isEmpty() }
             }
             assertEquals(0, ReaderPageTrace.snapshot().getValue("compositionOwners").jsonPrimitive.int)
             assertTrue(ReaderPageTrace.snapshot().getValue("complete").jsonPrimitive.boolean)

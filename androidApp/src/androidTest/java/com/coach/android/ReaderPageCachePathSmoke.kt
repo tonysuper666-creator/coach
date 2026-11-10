@@ -57,13 +57,16 @@ class ReaderPageCachePathSmoke {
             assertEquals(1, count("request_started", 2)); assertEquals(1, count("prefetch_decode_ready", 2)); assertEquals(1, count("lookup_hit", 2))
             click("cache-citation"); pixels(1)
             assertEquals(1, count("request_started", 1)); assertEquals(1, count("lookup_hit", 1))
+            assertEquals(1, count("state_reused", 1))
             val sourceBack = hasTestTag("private-document-back") and hasAnyAncestor(hasTestTag("private-source-dialog"))
             compose.waitUntil(timeoutMillis = 15_000) { compose.onAllNodes(sourceBack).fetchSemanticsNodes().singleOrNull()?.let { !it.config.contains(SemanticsProperties.Disabled) } == true }
             compose.onNode(sourceBack).performTouchInput { click() }
             pixels(2)
             assertEquals(1, count("request_started", 2))
+            // The source saved page 1. A subsequent parent turn must use that confirmed revision.
+            click("private-next"); pixels(3)
             click("private-document-back")
-            compose.waitUntil(timeoutMillis = 15_000) { compose.onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isEmpty() }
+            compose.waitUntil(timeoutMillis = 15_000) { compose.onAllNodesWithTag("private-page-2").fetchSemanticsNodes().isEmpty() && compose.onAllNodesWithTag("private-page-3").fetchSemanticsNodes().isEmpty() }
             assertEquals(0, JSONObject(ReaderPageTrace.snapshot().toString()).getInt("compositionOwners"))
         } finally {
             File(context.cacheDir, "reader-observed.json").writeText(ReaderPageTrace.snapshot().toString())

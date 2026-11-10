@@ -33,6 +33,35 @@ internal fun assertPrivatePath(path: Path, directory: Boolean) {
 }
 
 class PrivateFilePermissionTest {
+    @Test fun boundActivitySocketIsPrivateAndRemovedOnClose() {
+        val posix = FileSystems.getDefault().supportedFileAttributeViews().contains("posix")
+        // macOS limits UNIX socket paths to 104 bytes; resolve its /tmp symlink before protection.
+        val root = if (posix) Files.createTempDirectory(Path.of("/tmp").toRealPath(), "cps-")
+            else Files.createTempDirectory("coach-private-socket-")
+        val parent = root.resolve("control")
+        val socket = parent.resolve("control.sock")
+        try {
+            ActivityCoverage(root.resolve("logs")).use { coverage ->
+                try {
+                    // Real bind and secureSocket(), including macOS's socket-specific chmod behavior.
+                    coverage.startControl(socket)
+                } catch (error: Exception) {
+                    // Windows may lack UNIX support or exceed its socket path limit in a long checkout.
+                    if (posix || (error !is UnsupportedOperationException && error !is java.net.SocketException)) throw error
+                    assertPrivatePath(parent, true)
+                    assertFalse(Files.exists(socket), "Unavailable control must not leave an endpoint")
+                    println("PRIVATE SOCKET: Windows bind unavailable; parent ACL verified")
+                    return@use
+                }
+                assertTrue(Files.exists(socket))
+                assertPrivatePath(parent, true)
+                assertPrivatePath(socket, false)
+                println("PRIVATE SOCKET: real bind; private permissions verified")
+            }
+            assertFalse(Files.exists(socket), "Closing activity control must remove its socket")
+        } finally { assertTrue(root.toFile().deleteRecursively(), "Private socket fixture cleanup failed") }
+    }
+
     @Test fun installedServerProtectsFreshAndExistingSecretsBeforeServing() = withTemp { root ->
         val binary = Path.of(System.getProperty("coach.serverBinary"))
         val windows = System.getProperty("os.name").startsWith("Windows")

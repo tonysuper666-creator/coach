@@ -111,7 +111,8 @@ private fun initialPermissions(parent: Path, directory: Boolean): Array<FileAttr
 private fun setPrivatePermissions(path: Path, directory: Boolean) {
     val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
     if (posix != null) {
-        posix.setPermissions(PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------"))
+        // protect() rejects symlinks first. Use chmod: macOS lchmod cannot protect UNIX sockets.
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------"))
         return
     }
     val acl = Files.getFileAttributeView(path, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)

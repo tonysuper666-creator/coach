@@ -27,19 +27,23 @@ def fixture(**kwargs):
 
 class ReaderFixtureTransportTest(unittest.TestCase):
     def test_route_listeners_share_payload_identity_and_both_join_on_exit(self):
-        with fixture(bind='127.0.0.2',loopback_control=True) as service:
-            for index,host in enumerate(('127.0.0.2','127.0.0.1','127.0.0.1','127.0.0.2')):
-                connection=http.client.HTTPConnection(host,service.port,timeout=3)
+        with fixture(loopback_control=True,loopback_ephemeral=True) as service:
+            ports=[server.server_port for server in service.servers]
+            self.assertEqual(2,len(set(ports)))
+            order=[ports[0],ports[1],ports[1],ports[0]]
+            for index,port in enumerate(order):
+                connection=http.client.HTTPConnection('127.0.0.1',port,timeout=3)
                 try:
                     token=f'route-unit-{index}'
                     connection.request('GET',PREFIX+'/synthetic-baseline/pages/1/image?version=v1&readerProbe='+token,
-                        headers={'Authorization':'Bearer '+TOKEN,'Host':f'127.0.0.2:{service.port}'})
+                        headers={'Authorization':'Bearer '+TOKEN,'Host':f'127.0.0.1:{service.port}'})
                     response=connection.getresponse()
                     self.assertEqual(200,response.status)
                     self.assertEqual(token,response.getheader('X-Coach-Reader-Probe'))
                     self.assertEqual(b'\x89PNG\r\n\x1a\n\x01',response.read())
                 finally: connection.close()
-        self.assertEqual(['127.0.0.2','127.0.0.1','127.0.0.1','127.0.0.2'],[r['serverBindAddress'] for r in service.requests])
+        self.assertEqual(['127.0.0.1']*4,[r['serverBindAddress'] for r in service.requests])
+        self.assertEqual(order,[r['serverPort'] for r in service.requests])
         self.assertEqual(4,len({r['connectionId'] for r in service.requests}))
         for row in service.requests:
             self.assertEqual(hashlib.sha256(service.images[1]).hexdigest(),row['bodySha256'])

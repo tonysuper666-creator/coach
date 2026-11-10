@@ -21,10 +21,12 @@ FORBIDDEN = {8790, 8791, 18791, 3790}
 
 
 class Fixture:
-    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False):
+    def __init__(self, state: Path, bind="127.0.0.1", port=0, renderer="pdftoppm", transport="legacy", lifecycle=False, loopback_control=False, loopback_ephemeral=False):
         if port in FORBIDDEN:
             raise ValueError("production port is forbidden")
-        if loopback_control and (transport != "legacy" or str(ipaddress.IPv4Address(bind)) in ("0.0.0.0", "127.0.0.1")):
+        if loopback_ephemeral and (not loopback_control or bind != '127.0.0.1'):
+            raise ValueError('ephemeral listener control is limited to dual loopback fixtures')
+        if loopback_control and (transport != "legacy" or str(ipaddress.IPv4Address(bind)) == '0.0.0.0' or (bind == '127.0.0.1' and not loopback_ephemeral)):
             raise ValueError("route control needs a distinct exact configured IPv4 and legacy transport")
         state.mkdir(parents=True, exist_ok=False)
         library = state / "library"
@@ -218,7 +220,10 @@ class Fixture:
         if loopback_control:
             try:
                 # Same fixture, Handler, port and payloads; never bind all interfaces.
-                control = ObservedServer(("127.0.0.1", self.port), Handler)
+                control = ObservedServer(("127.0.0.1", 0 if loopback_ephemeral else self.port), Handler)
+                if control.server_port in FORBIDDEN:
+                    control.server_close()
+                    raise ValueError('production control port selected')
             except Exception:
                 self.server.server_close()
                 raise

@@ -479,3 +479,46 @@ UI performance, or change production transport based on this experiment alone.
 Collect this single route run before deciding on another performance run.
 Windows tests verify listener cleanup and reject broken associations with
 invented unit payloads; actual Android alias access still requires the Mac run.
+
+## Observer control after 9ffe099
+
+The native `9ffe099` route run completed 16 unique associations with matching
+payloads. Both destinations still had about 500 ms median write-to-read-return
+latency, while host accept-to-header-write medians were about 1.2 ms. This route
+change did not remove the gap. It does not identify a shared network component.
+
+The dual-listener unit test used an unconfigured `127.0.0.2` address that Darwin
+rejects. It now uses two distinct ephemeral ports on configured `127.0.0.1` via
+`loopback_ephemeral=True`, retaining real requests, two distinct listeners,
+hash/echo/connection checks and joined thread/socket cleanup. The native route
+experiment still uses its two exact configured/loopback addresses at the same
+port; it does not enable this unit-fixture option. No address aliases, test
+skips or system changes are needed.
+
+The next minimal shared-path hypothesis is observer interference. Every previous
+Android run also issued repeated `run-as` stage reads and `dumpsys meminfo` calls
+from the memory sampler. Their effect is unmeasured. Add
+`--no-transport-memory-sampler` only to an Android `transport` or `route` run to
+omit that thread entirely. The default remains enabled. UI performance/behavior
+and lifecycle suites reject the flag so it cannot remove required memory evidence.
+`run.json` explicitly records `memorySamplerEnabled`, `memorySamplerStarted`
+and `memorySamplerJoined`; an off run has no sampler memory file and provides
+no memory evidence. Setup, instrumentation and post-test extraction still use adb.
+
+Use **one isolated AVD session** for three sequential foreground invocations with
+fresh output directories, the same APK hashes, PDF, renderer, geometry and route
+suite. Change only the observer flag: **A1 on → B off → A2 on**. Do not request
+Perfetto or packet capture in any group. For example, repeat the preceding route
+command, adding `--no-transport-memory-sampler` only for B. Each invocation must
+still pass all 16 identities and both eight-sample routes. Record PID, individual
+samples, first-block transients, sampler flags and memory-file presence. Preserve
+every group; do not compare B only to a historical A with a different environment.
+
+This reversal tests the combined repeated stage/memory observer, not an individual
+adb command or scheduler mechanism. A reproducible change would justify narrowing
+that observer further; no change would leave other common-path hypotheses open.
+Keep host and guest intervals separate. These are transport controls with no
+decode/draw and cannot replace the fixed UI baseline or establish 100 ms,
+first presentation or a three-image physical/native/GPU budget. Collect this
+small control before deciding on a performance rerun. Production code and native
+test workload are unchanged in this revision.

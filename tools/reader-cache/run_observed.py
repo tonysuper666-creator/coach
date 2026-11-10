@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
                         help="Diagnostic fixture mode; keep legacy for historical comparisons")
     parser.add_argument("--packet-interface", help="Optional Mac capture interface; only the owned synthetic transport endpoint is captured")
+    parser.add_argument('--no-transport-memory-sampler',action='store_true',
+                        help='Android transport/route diagnostic only: omit repeated run-as/dumpsys sampling')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -40,6 +42,8 @@ def main():
     parser.add_argument("--test-apk", type=Path)
     parser.add_argument("--perfetto", action="store_true", help="Collect Android FrameTimeline and the app's fixed trace markers")
     args = parser.parse_args()
+    if args.no_transport_memory_sampler and (args.platform != 'android' or args.suite not in ('transport','route')):
+        parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
     if args.packet_interface and args.suite != "transport":
@@ -66,6 +70,9 @@ def main():
     identity = dict(platform=args.platform, suite=args.suite, fixtureTransport=args.transport_mode, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     captureBoundary="draw/submission and verified pixel upper bound; first physical present unobserved")
     identity["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
+    identity['memorySamplerEnabled']=not args.no_transport_memory_sampler
+    identity['memorySamplerStarted']=False
+    identity['memorySamplerJoined']=False
     if args.platform == "android":
         identity["apkSha256"] = hashlib.sha256(args.apk.read_bytes()).hexdigest()
         identity["testApkSha256"] = hashlib.sha256(args.test_apk.read_bytes()).hexdigest()
@@ -133,11 +140,13 @@ def main():
         def save_http_records():
             (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
             (out / "transfers.json").write_text(json.dumps(getattr(fixture, "transfers", []), indent=2))
-        sampler = threading.Thread(target=sample)
-        sampler.start()
+        sampler = None if args.no_transport_memory_sampler else threading.Thread(target=sample)
         perfetto = None
         perfetto_log = None
         try:
+            if sampler is not None:
+                sampler.start()
+                identity['memorySamplerStarted']=True
             packet_capture.start()
             if args.platform == "android" and args.perfetto:
                 remote_trace = f"/data/misc/perfetto-traces/reader-page-{time.time_ns()}.perfetto-trace"
@@ -203,6 +212,7 @@ def main():
                     (out/'route-comparison.json').write_text(json.dumps(summary,indent=2))
                     if not summary['complete']:
                         raise RuntimeError('Route control incomplete; inspect route-comparison.json')
+                summary['memorySamplerEnabled']=not args.no_transport_memory_sampler
             else:
                 cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]
                 required = {"book_a", "switch_book_b", "restore_book_a", "version_changed", "rendering_changed", "closed", "cancelled_decode", "reopened"}
@@ -216,7 +226,9 @@ def main():
                 shutil.copy2(xml, out / "test.xml")
         finally:
             stop.set()
-            sampler.join()
+            if identity['memorySamplerStarted']:
+                sampler.join()
+                identity['memorySamplerJoined']=True
             try:
                 packet_capture.stop()
             except Exception as error:

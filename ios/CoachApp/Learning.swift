@@ -316,7 +316,10 @@ struct LearningView: View {
                         }
                         Button("提交答案") {
                             if let choice = selections[item.id] { Task { await model.submit(item: item, choice: choice) } }
-                        }.buttonStyle(.borderedProminent).disabled(model.busy || model.pending != nil || selections[item.id] == nil)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .foregroundStyle(Appearance.paper)
+                        .disabled(model.busy || model.pending != nil || selections[item.id] == nil)
                     }.modifier(V7Card())
                 }
             }

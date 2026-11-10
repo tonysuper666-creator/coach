@@ -77,6 +77,7 @@ fun Desk(
     footer: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
+    val managed = com.coach.ui.LocalAppManagedNavigation.current
     var localFocus by remember { mutableStateOf(false) }
     val focused = focus || (onFocus == null && localFocus)
     val colors = CoachTheme.colors
@@ -94,8 +95,12 @@ fun Desk(
     val page = remember { movableContentOf { contentNow() } }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    com.coach.ui.AppBackHandler(drawerState.isOpen, priority = 400) { scope.launch { drawerState.close() } }
+    com.coach.ui.TaskChrome(focused || !showNavigation)
+    com.coach.ui.AppBackHandler(focused && onBack == null, priority = 100) { if (onFocus != null) onFocus() else localFocus = false }
     var marginCollapsed by rememberSaveable { mutableStateOf(false) }
     var marginSheet by remember { mutableStateOf(false) }
+    com.coach.ui.AppBackHandler(marginSheet, priority = 300) { marginSheet = false }
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(Modifier.width(300.dp)) {
@@ -105,11 +110,12 @@ fun Desk(
         }) {
     BoxWithConstraints(modifier.fillMaxSize().background(if (focused) colors.surface1 else colors.bgCanvas).testTag("v7-desk")) {
         val logicalWindow = LocalDeskWindow.current
-        val window = deskWindow(maxWidth.value, logicalWindow?.heightDp ?: maxHeight.value)
+        val window = if (managed && logicalWindow != null && com.coach.ui.adaptive.LayoutRules.navigation(logicalWindow).nav == com.coach.ui.adaptive.NavStyle.BottomBar) DeskWindow.Outer
+            else deskWindow(maxWidth.value, logicalWindow?.heightDp ?: maxHeight.value)
         val windowWidth = maxWidth
         val sheetHeight = maxHeight * .7f
         val inner = window == DeskWindow.Inner || window == DeskWindow.Medium
-        val threeColumns = window == DeskWindow.Inner
+        val threeColumns = window == DeskWindow.Inner && !managed
         val landscape = window == DeskWindow.OuterLandscape
         val metrics = DeskMetrics(window,
             if (inner) 24.dp else 16.dp,
@@ -119,7 +125,9 @@ fun Desk(
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxWidth().height(if (inner) 48.dp else 72.dp).padding(horizontal = 16.dp)) {
                     Row(Modifier.align(if (inner) Alignment.CenterStart else Alignment.TopStart).height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box {
+                        val home = LocalDeskSelect.current
+                        if (managed) Text("Coach", Modifier.clickable { home(AppTab.TODAY) }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
+                        else Box {
                             var menu by remember { mutableStateOf(false) }
                             val select = LocalDeskSelect.current
                             Text("Coach", Modifier.clickable { menu = true }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
@@ -182,7 +190,7 @@ fun Desk(
                 }
                 if (footer != null && (inner || compactFooter)) Row(Modifier.fillMaxWidth().background(colors.bgCanvas).height(40.dp).padding(horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, content = footer)
-                if (!inner && !focused && showNavigation) LocalDeskNavigation.current?.invoke(false)
+                if (!managed && !inner && !focused && showNavigation) LocalDeskNavigation.current?.invoke(false)
             }
         }
         if (marginSheet && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {

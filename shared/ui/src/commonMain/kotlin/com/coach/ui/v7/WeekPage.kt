@@ -107,12 +107,18 @@ internal fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, ac
         } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = view.examCountdownText(rememberCourseNow(c)),
         compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
-        backLabel = "← 书架", onBack = { select(AppTab.RESOURCES) }, directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
+        backLabel = "← 资料", onBack = if (LocalAppManagedNavigation.current) null else ({ select(AppTab.RESOURCES) }), directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
         margin = {
+            Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
             if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { target?.let { onOpen(it.id, true) } })
             else Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
                 PaperCard { Text("第 $week 周 · ${KpStatus.PASSED.label} $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekSummary(view, actions, ui.connected) }
                 target?.takeIf { it.reference.isNotBlank() }?.let { NoteCard("出处", it.reference) }
+            }
+            if (d.shelf.isNotEmpty()) PaperCard {
+                Text("资料", style = MaterialTheme.typography.labelMedium)
+                d.shelf.forEach { title -> TextButton(onClick = { select(AppTab.RESOURCES) }) { Text(title) } }
+            }
             }
         }, footer = {
             val previous = weeks.lastOrNull { it < week }

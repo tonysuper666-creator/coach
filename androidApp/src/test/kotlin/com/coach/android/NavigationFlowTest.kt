@@ -183,7 +183,8 @@ class NavigationFlowTest {
         compose.onNodeWithTag("essay-entry").performClick()
         compose.onNodeWithTag("essay-text").assertTextContains("saved words")
             .performTextInputSelection(androidx.compose.ui.text.TextRange("saved words".length))
-        compose.onNodeWithTag("essay-text").performTextInput(" and more").assertTextContains("saved words and more")
+        compose.onNodeWithTag("essay-text").performTextInput(" and more")
+        compose.onNodeWithTag("essay-text").assertTextContains("saved words and more")
         compose.onNodeWithTag("essay-countdown").assertTextEquals("1:00")
         back()
         compose.runOnIdle { controller = restoredController(); shown = controller }

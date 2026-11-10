@@ -51,7 +51,7 @@ class ReaderStudyTest {
         val pack = json("id" to "mainline-W01", "kind" to "pack", "course" to "C1", "minutes" to 10, "sections" to JsonArray(listOf(json(
             "title" to "Week 1", "instructions" to "x", "choose" to null, "items" to JsonArray(items)))))
         Files.writeString(root.resolve("W01.json"), pack.toString())
-        val facts = factSources.mapIndexed { i, src -> """{"fact_id":"F$i","fact":"Point $i.","type":"detail","source":"$src","kp":"kp-orchard"}""" }
+        val facts = factSources.mapIndexed { i, src -> json("fact_id" to "F$i", "fact" to "Point $i.", "type" to "detail", "source" to src, "kp" to "kp-orchard").toString() }
         Files.writeString(root.resolve("W01-facts.md"), (listOf("```jsonl") + facts + listOf("```")).joinToString(10.toChar().toString()))
         return dir.resolve("papers")
     }
@@ -59,6 +59,93 @@ class ReaderStudyTest {
     private val outline = listOf(
         OutlineNode("Chapter A", 10, listOf(OutlineNode("Section A1", 10), OutlineNode("Section A2", 14))),
         OutlineNode("Chapter B", 20))
+
+    private fun withCitationStudy(sources: List<String>, block: (Mainline, LedgerStore, ReaderLibrary) -> Unit) {
+        val dir = Files.createTempDirectory("reader-citations")
+        try {
+            val papers = packDir(dir, sources, sources)
+            val reader = Files.createDirectories(dir.resolve("reader"))
+            val pdf = byteArrayOf(1) // Catalog/resolve only: no rendering or private material.
+            Files.write(reader.resolve("synthetic.pdf"), pdf)
+            val chapters = JsonArray(listOf(
+                json("title" to "Chapter A", "pdfPage" to 1),
+                json("title" to "Chapter B", "pdfPage" to 35, "sections" to JsonArray(listOf(
+                    json("title" to "Section B1", "pdfPage" to 35), json("title" to "Section B2", "pdfPage" to 38)))),
+                json("title" to "Chapter C", "pdfPage" to 45)))
+            val doc = json("id" to "book", "course" to "C1", "title" to "Invented", "file" to "synthetic.pdf",
+                "sha256" to ReaderLibrary.digest(pdf), "pages" to 50, "printedPageOffset" to 31, "kind" to "textbook", "outline" to chapters)
+            Files.writeString(reader.resolve("catalog.json"), json("schema" to 1, "documents" to JsonArray(listOf(doc))).toString())
+            val store = LedgerStore(Files.createDirectories(dir.resolve("db"))) { 1_800_000_000_000 }
+            block(Mainline(MockLibrary(papers)), store, ReaderLibrary(reader))
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
+    private fun ReaderLibrary.locator(): (String) -> Pair<String, Int>? = { source ->
+        runCatching { resolve("C1", source) }.getOrNull()?.let { it.str("documentId") to it.num("pdfPage").toInt() }
+    }
+
+    private fun ids(value: JsonObject, key: String) = value.getValue(key).jsonArray.map { it.jsonObject.str("id") }
+
+    private val punctuatedCitations = listOf("。", "．", ".", "，", ",", "、").map { punctuation ->
+        " \tW1 课件 p.26； 教材 p.8$punctuation \t "
+    } + listOf(
+        "教材 p.8",
+        " ;；\n。；教材 p.8.\r\n，; ",
+        "教材 p.8。;\n教材 p.8,",
+        "教材 p.8\nW1 课件 p.26")
+
+    @Test fun pageStudyResolvesCompositeCitationsWithSentencePunctuation() = withCitationStudy(punctuatedCitations) { mainline, store, reader ->
+        val study = mainline.pageStudy(store, "C1", "book", 39, reader.locator())
+        assertEquals(punctuatedCitations.indices.map { "Q$it" }, ids(study, "questions"))
+        assertEquals(punctuatedCitations.indices.map { "F$it" }, ids(study, "facts"))
+        assertEquals(0L, study.num("unlocated"), "trailing punctuation must not hide registered textbook pages")
+        val adjacent = mainline.pageStudy(store, "C1", "book", 38, reader.locator())
+        assertTrue(ids(adjacent, "questions").isEmpty() && ids(adjacent, "facts").isEmpty())
+    }
+
+    @Test fun documentMapResolvesCompositeCitationsIntoTheirRegisteredChapterAndSection() = withCitationStudy(punctuatedCitations) { mainline, store, reader ->
+        val doc = reader.document("C1", "book")
+        val map = mainline.documentMap(store, "C1", doc.id, doc.pages, doc.outline, reader.locator())
+        val chapters = map.getValue("chapters").jsonArray.map { it.jsonObject }
+        val sections = chapters[1].getValue("sections").jsonArray.map { it.jsonObject }
+        assertEquals("Chapter B", chapters[1].str("title"))
+        assertEquals("Section B2", sections[1].str("title"))
+        assertEquals(punctuatedCitations.indices.map { "Q$it" }, ids(sections[1], "questions"))
+        assertEquals(punctuatedCitations.indices.map { "F$it" }, ids(sections[1], "facts"))
+        for (key in listOf("questions", "facts")) {
+            assertTrue(sections[1].getValue(key).jsonArray.all { it.jsonObject.num("pdfPage") == 39L })
+            assertTrue((chapters + sections.take(1)).all { ids(it, key).isEmpty() })
+        }
+        assertEquals(0L, map.num("unlocated"))
+        assertEquals(0L, map.num("ambiguous"), "duplicate references to the same page are not ambiguous")
+        assertEquals(0L, map.num("outsideOutline"))
+    }
+
+    private val unplaceableAndAmbiguous = listOf("W1 课件 p.26。", "", " ;；\r\n。；，.、; ", "教材 p.8；教材 p.9。")
+
+    @Test fun pageStudyNeverGuessesUnregisteredOrEmptyCitationsOntoAPage() = withCitationStudy(unplaceableAndAmbiguous) { mainline, store, reader ->
+        for (page in listOf(39, 40)) {
+            val study = mainline.pageStudy(store, "C1", "book", page, reader.locator())
+            assertEquals(listOf("Q3"), ids(study, "questions"), "both registered pages remain visible on page $page")
+            assertEquals(listOf("F3"), ids(study, "facts"))
+            assertEquals(6L, study.num("unlocated"), "only the unregistered, blank and punctuation-only sources are unlocated")
+        }
+        for (page in listOf(8, 26)) {
+            val study = mainline.pageStudy(store, "C1", "book", page, reader.locator())
+            assertTrue(ids(study, "questions").isEmpty() && ids(study, "facts").isEmpty(), "never guess printed/slide page $page")
+        }
+    }
+
+    @Test fun documentMapKeepsUnregisteredCitationsUnlocatedAndMultiplePagesAmbiguous() = withCitationStudy(unplaceableAndAmbiguous) { mainline, store, reader ->
+        val doc = reader.document("C1", "book")
+        val map = mainline.documentMap(store, "C1", doc.id, doc.pages, doc.outline, reader.locator())
+        assertEquals(6L, map.num("unlocated"))
+        assertEquals(2L, map.num("ambiguous"), "sentence punctuation must not conceal a second registered page")
+        for (chapter in map.getValue("chapters").jsonArray.map { it.jsonObject }) {
+            val buckets = listOf(chapter) + chapter.getValue("sections").jsonArray.map { it.jsonObject }
+            assertTrue(buckets.all { ids(it, "questions").isEmpty() && ids(it, "facts").isEmpty() })
+        }
+    }
 
     @Test fun mapPlacesPointsAndQuestionsByRegisteredPageAndReportsWhatItCannotPlace() {
         val dir = Files.createTempDirectory("reader-map")

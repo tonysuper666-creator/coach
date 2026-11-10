@@ -150,6 +150,10 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             "mastered" to status.count { it.value == "mastered" }, "keysPending" to week.items.count { !it.verified })
     }
 
+    /** Same citation splitting as the reader client's citationParts; the dot inside p.N remains intact. */
+    private fun refs(source: String): List<String> =
+        source.split(Regex("[;；\n]")).map { it.trim().trimEnd('。', '．', '.', '，', ',', '、').trimEnd() }.filter { it.isNotEmpty() }
+
     /**
      * Facts and questions whose registered source lands on one PDF page. A source that is blank, unregistered or ambiguous is counted
      * as `unlocated` for the whole course and never guessed onto a page, so the reader can say the index is incomplete.
@@ -158,7 +162,6 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val events = store.events(course)
         val (weeks, _) = weeks(courseNames(events, course))
         val history = ChoiceHistory(events)
-        fun refs(source: String) = source.split(Regex("[;；\n]")).map { it.trim() }.filter { it.isNotEmpty() }
         fun onPage(source: String) = refs(source).any { locate(it) == documentId to page }
         val questions = mutableListOf<JsonObject>(); val facts = mutableListOf<JsonObject>(); var unlocated = 0
         for (w in weeks) {
@@ -192,7 +195,6 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val (weeks, _) = weeks(courseNames(events, course))
         val history = ChoiceHistory(events)
         var unlocated = 0; var ambiguous = 0; var outside = 0
-        fun refs(source: String) = source.split(Regex("[;；\n]")).map { it.trim() }.filter { it.isNotEmpty() }
         /** null when it must not be placed; the counters say why. */
         fun place(source: String): Int? {
             val resolved = refs(source).mapNotNull(locate)

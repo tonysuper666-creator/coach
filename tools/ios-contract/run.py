@@ -11,24 +11,126 @@ import socket
 import subprocess
 import tempfile
 import time
+import ctypes
+from ctypes import wintypes
 
 from websocket_probe import Closed, WebSocket
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
-BINARY = ROOT / "server/app/build/install/app/bin/app"
 COURSE = "contract-course"
 BASE = f"/v1/courses/{COURSE}"
+READER = f"{BASE}/reader"
 FORBIDDEN = {8790, 8791, 18791, 3790}
+TEXT_ID = "orchard-text"
+READ_ID = "orchard-read"
+NOTE_TEXT = "合成锚定批注"
 SOURCES = [
     "server/app/src/main/kotlin/com/coach/server/Main.kt",
     "server/app/src/main/kotlin/com/coach/server/LedgerRoutes.kt",
     "server/app/src/main/kotlin/com/coach/server/Mainline.kt",
     "server/app/src/main/kotlin/com/coach/server/JournalService.kt",
+    "server/app/src/main/kotlin/com/coach/server/ReaderRoutes.kt",
+    "server/app/src/main/kotlin/com/coach/server/ReaderLibrary.kt",
     "server/store/src/main/kotlin/com/coach/store/LedgerStore.kt",
     "shared/protocol/src/commonMain/kotlin/com/coach/protocol/LedgerProtocol.kt",
     "shared/client/src/commonMain/kotlin/com/coach/client/HttpLedgerTransport.kt",
+    "shared/client/src/commonMain/kotlin/com/coach/client/ReaderHttp.kt",
 ]
+
+
+def server_binary():
+    directory = ROOT / "server/app/build/install/app/bin"
+    return directory / ("app.bat" if os.name == "nt" else "app")
+
+
+def invented_pdf(pages=2, label="Synthetic pears"):
+    """Minimal PDF matching the server's invented fixture. Poppler extracts its text."""
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", "",
+               "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for index in range(pages):
+        page_id = len(objects) + 1
+        kids.append(page_id)
+        stream = f"BT /F1 18 Tf 30 300 Td ({label} PDF {index + 1}) Tj ET"
+        objects.append("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] "
+                       f"/Resources << /Font << /F1 3 0 R >> >> /Contents {page_id + 1} 0 R >>")
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(f'{kid} 0 R' for kid in kids)}] /Count {pages} >>"
+    pdf = "%PDF-1.4\n"
+    offsets = [0]
+    for index, obj in enumerate(objects):
+        offsets.append(len(pdf))
+        pdf += f"{index + 1} 0 obj\n{obj}\nendobj\n"
+    xref = len(pdf)
+    pdf += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
+    pdf += "".join(f"{offset:010d} 00000 n \n" for offset in offsets[1:])
+    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    return pdf.encode("ascii")
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def poppler_dir():
+    found = shutil.which("pdftotext")
+    if found:
+        return str(Path(found).parent)
+    if os.name == "nt":
+        root = Path(r"D:\agent\tools\poppler")
+        matches = sorted(root.glob("**/pdftotext.exe")) if root.is_dir() else []
+        if matches:
+            return str(matches[-1].parent)
+    return None
+
+
+def build_server():
+    """Mac keeps tools/dev/heavy. Windows takes the same two-slot queue, then low-priority gradlew.bat."""
+    if os.name != "nt":
+        return subprocess.run([str(ROOT / "tools/dev/heavy"), "./gradlew", ":server:app:installDist",
+                               "--max-workers=2", "--console=plain"], cwd=ROOT).returncode
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.ReleaseMutex.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00000040)  # IDLE_PRIORITY_CLASS
+    owned = None
+    deadline = time.monotonic() + int(os.environ.get("COACH_WINBOX_QUEUE_SECONDS", "900"))
+    try:
+        while owned is None:
+            for index in (0, 1):
+                handle = kernel.CreateMutexW(None, False, f"Global\\CoachHeavySlot{index}")
+                if not handle:
+                    continue
+                result = kernel.WaitForSingleObject(handle, 0)
+                if result in (0, 0x80):
+                    owned = handle
+                    break
+                kernel.CloseHandle(handle)
+            if owned is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise ContractFailure("winbox gradle slot was not free before the queue timeout")
+            print("WAITING winbox gradle slot", flush=True)
+            time.sleep(2)
+        env = os.environ.copy()
+        gradle_home = Path(r"D:\agent\gradle-home")
+        if gradle_home.is_dir():
+            env["GRADLE_USER_HOME"] = str(gradle_home)
+        command = [str(ROOT / "gradlew.bat"), "--priority=low", "--max-workers=2", "--console=plain",
+                   "--no-daemon", "--no-configuration-cache", "--build-cache", ":server:app:installDist"]
+        return subprocess.run(command, cwd=ROOT, env=env).returncode
+    finally:
+        if owned is not None:
+            kernel.ReleaseMutex(owned)
+            kernel.CloseHandle(owned)
 
 
 class ContractFailure(Exception):
@@ -66,19 +168,50 @@ class Server:
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(("COACH_", "BRIDGE_")) and
                     k not in {"JAVA_OPTS", "APP_OPTS", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS"}}
+        home = (directory / "home").resolve().as_posix()
+        self.library = directory / "reader"
         self.env.update(
-            JAVA_OPTS=f"-Duser.home={directory / 'home'} -Xmx512m",
-            COACH_DATA_DIR=str(directory / "data"),
-            COACH_TOKEN_FILE=str(directory / "data/device-token"), COACH_DEVICE_ID="contract-admin",
-            COACH_GENERATED_DIR=str(directory / "generated"), COACH_MOCK_DIR=str(directory / "mock"),
-            COACH_PACKS_DIR=str(directory / "packs"), COACH_LOG_DIR=str(directory / "logs"),
-            COACH_STATE_DIR=str(directory / "state"), COACH_ACTIVITY_SOCKET=str(directory / "activity.sock"),
+            JAVA_OPTS=f"-Duser.home={home} -Xmx512m",
+            COACH_DATA_DIR=(directory / "data").resolve().as_posix(),
+            COACH_TOKEN_FILE=(directory / "data/device-token").resolve().as_posix(),
+            COACH_DEVICE_ID="contract-admin",
+            COACH_GENERATED_DIR=(directory / "generated").resolve().as_posix(),
+            COACH_MOCK_DIR=(directory / "mock").resolve().as_posix(),
+            COACH_PACKS_DIR=(directory / "packs").resolve().as_posix(),
+            COACH_LOG_DIR=(directory / "logs").resolve().as_posix(),
+            COACH_STATE_DIR=(directory / "state").resolve().as_posix(),
+            COACH_ACTIVITY_SOCKET=(directory / "activity.sock").resolve().as_posix(),
+            COACH_READER_LIBRARY=self.library.resolve().as_posix(),
             COACH_TAIL_HOST="", COACH_PORT=str(self.port), COACH_TRAFFIC="test",
             COACH_BRIDGE_URL="http://127.0.0.1:1", COACH_SOURCE_LOOKUP="false")
-        for name in ("home", "data", "generated", "packs", "logs", "state", "mock/mcq-mainline"):
+        poppler = poppler_dir()
+        if poppler:
+            self.env["PATH"] = poppler + os.pathsep + self.env.get("PATH", "")
+        for name in ("home", "data", "generated", "packs", "logs", "state", "mock/mcq-mainline", "reader"):
             (directory / name).mkdir(parents=True, exist_ok=True)
         for name in ("W01.json", "W01-facts.md"):
             shutil.copyfile(HERE / "fixtures" / name, directory / "mock/mcq-mainline" / name)
+        self.text_pdf = invented_pdf()
+        self.read_pdf = invented_pdf(label="Synthetic reading")
+        self.write_catalog()
+
+    def write_catalog(self):
+        def entry(doc_id, pdf, filename, kind, course=COURSE, offset=0):
+            item = dict(id=doc_id, course=course, title="Invented " + kind, file=filename,
+                        sha256=sha256(pdf), pages=2, kind=kind)
+            if kind == "textbook":
+                item["printedPageOffset"] = offset
+            return item
+        (self.library / "text.pdf").write_bytes(self.text_pdf)
+        (self.library / "read.pdf").write_bytes(self.read_pdf)
+        other = invented_pdf(label="Other course")
+        (self.library / "other.pdf").write_bytes(other)
+        catalog = dict(schema=1, documents=[
+            entry(TEXT_ID, self.text_pdf, "text.pdf", "textbook"),
+            entry(READ_ID, self.read_pdf, "read.pdf", "reading"),
+            entry("other-course-text", other, "other.pdf", "textbook", course="other-course"),
+        ])
+        (self.library / "catalog.json").write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
 
     def request(self, path, credential=None, method="GET", body=None, expected=200):
         headers = {}
@@ -107,12 +240,23 @@ class Server:
             connection.close()
 
     def start(self):
+        # Windows app.bat expands every jar into one command and exceeds the 8191-character limit
+        # under a long checkout path. Java's own classpath wildcard stays one argument. macOS keeps app.
+        if os.name == "nt":
+            java_home = self.env.get("JAVA_HOME") or os.environ.get("JAVA_HOME")
+            java = str(Path(java_home) / "bin/java.exe") if java_home else "java.exe"
+            home = (self.directory / "home").resolve().as_posix()
+            lib = ROOT / "server/app/build/install/app/lib"
+            command = [java, f"-Duser.home={home}", "-Xmx512m", "-cp", str(lib / "*"), "com.coach.server.MainKt"]
+        else:
+            command = [str(server_binary())]
         with (self.directory / "server.log").open("ab") as log:
-            self.process = subprocess.Popen([str(BINARY)], cwd=ROOT, env=self.env,
+            self.process = subprocess.Popen(command, cwd=ROOT, env=self.env,
                                             stdout=log, stderr=subprocess.STDOUT)
-        deadline = time.monotonic() + 40
+        deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            require(self.process.poll() is None, "isolated server exited before readiness")
+            if self.process.poll() is not None:
+                raise ContractFailure("isolated server exited before readiness: " + self.startup_excerpt())
             try:
                 self.request("/v1/hello", expected=401)
                 token = (self.directory / "data/device-token").read_text().strip()
@@ -120,18 +264,39 @@ class Server:
                 return
             except OSError:
                 time.sleep(0.1)
-        raise ContractFailure("isolated server readiness timed out")
+        raise ContractFailure("isolated server readiness timed out: " + self.startup_excerpt())
+
+    def startup_excerpt(self):
+        log = self.directory / "server.log"
+        if not log.exists():
+            return "no server log"
+        lines = []
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            lowered = line.lower()
+            if any(word in lowered for word in ("token", "bearer", "password", "secret", "authorization")):
+                continue
+            text = line.strip()
+            if text:
+                lines.append(text[:180])
+        return " | ".join(lines[-4:]) or "no server log"
 
     def stop(self):
-        if self.process is not None:
-            if self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=12)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait(timeout=5)
-            self.process = None
+        process = self.process
+        if process is None:
+            return
+        self.process = None
+        if process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    process.kill()
+                process.wait(timeout=5)
 
     def pair(self, name):
         code = self.request("/v1/pairing-code", self.admin, "POST")
@@ -314,6 +479,152 @@ class Suite:
                 ws.until(lambda m: any(e["seq"] == self.offline_seq for e in m.get("events", [])))
         self.check("service outage, persisted restart, retry receipts and WS catch-up", restart)
 
+        def reader():
+            self.report["missing"] = [item for item in self.report["missing"]
+                                      if item.get("capability") != "reader and anchored annotations"]
+            require(poppler_dir(), "local pdftotext is absent; page text and anchored notes were not sent")
+            s.request(READER, expected=401)
+            catalog = s.request(READER, self.phone)
+            require(s.last_headers.get("cache-control") == "no-store", "reader catalog was cacheable")
+            documents = {item["id"]: item for item in catalog["documents"]}
+            require(set(documents) == {TEXT_ID, READ_ID}, "reader catalog mixed courses or dropped a document")
+            require(catalog.get("privateAi") == "disabled_no_local_inference", "reader catalog changed private-ai flag")
+            require(documents[TEXT_ID]["kind"] == "textbook" and documents[READ_ID]["kind"] == "reading",
+                    "reader catalog kinds changed")
+            text_version = documents[TEXT_ID]["version"]
+            read_version = documents[READ_ID]["version"]
+            require(text_version != read_version, "two synthetic documents hashed to one version")
+            page = s.request(f"{READER}/{TEXT_ID}/pages/1", self.phone)
+            require(page["documentId"] == TEXT_ID and page["version"] == text_version and page["pdfPage"] == 1,
+                    "reader page identity changed")
+            text = page.get("text")
+            require(isinstance(text, str) and len(text) >= 1 and isinstance(page.get("textSha256"), str)
+                    and len(page["textSha256"]) == 64, "reader page text was not returned")
+            end = min(15, len(text))
+            quote = text[:end]
+            study = s.request(f"{READER}/{TEXT_ID}/pages/1/study", self.other)
+            question_ids = {item["id"] for item in study["questions"]}
+            fact_ids = {item["id"] for item in study["facts"]}
+            require(question_ids == {"orchard-1", "orchard-2"} and fact_ids == {"F1"},
+                    "study page did not return the synthetic questions and fact")
+            require(any(item["id"] == self.answer["itemId"] and item["status"] == "mastered" for item in study["questions"]),
+                    "study page lost the mastered synthetic answer")
+            other_page = s.request(f"{READER}/{TEXT_ID}/pages/2/study", self.phone)
+            require(other_page["questions"] == [] and other_page["facts"] == [], "study results leaked onto another page")
+            other_doc = s.request(f"{READER}/{READ_ID}/pages/1/study", self.phone)
+            require(other_doc["questions"] == [] and other_doc["documentId"] == READ_ID,
+                    "study results leaked onto another document")
+            s.request(f"{READER}/missing-doc/state", self.phone, expected=404)
+
+            def state(doc_id, credential):
+                body = s.request(f"{READER}/{doc_id}/state", credential)
+                require(body["document"]["id"] == doc_id, "reader state returned another document")
+                return body
+
+            require(state(TEXT_ID, self.phone)["progress"] is None and state(TEXT_ID, self.phone)["notes"] == [],
+                    "fresh reader state was not empty")
+            progress = dict(version=text_version, pdfPage=1, baseRevision=0, mutationId="progress-one")
+            saved = s.request(f"{READER}/{TEXT_ID}/progress", self.phone, "POST", progress)
+            require(saved.get("replayed") is False and isinstance(saved.get("revision"), int), "progress write was not committed")
+            seen = state(TEXT_ID, self.other)
+            require(seen["progress"]["pdfPage"] == 1 and seen["progress"]["version"] == text_version
+                    and seen["progress"]["stale"] is False, "second client lost reading progress")
+            s.request(f"{READER}/{TEXT_ID}/progress", self.other, "POST",
+                      dict(progress, mutationId="progress-stale"), expected=409)
+            require(state(TEXT_ID, self.phone)["progress"]["revision"] == saved["revision"],
+                    "stale progress write replaced the saved page")
+            note = dict(id="anchor-one", version=text_version, pdfPage=1, textSha256=page["textSha256"],
+                        start=0, end=end, quote=quote, note=NOTE_TEXT, deleted=False,
+                        baseRevision=0, mutationId="anchor-one")
+            anchored = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note)
+            require(anchored.get("replayed") is False, "anchored note was not committed")
+            replay = s.request(f"{READER}/{TEXT_ID}/notes", self.other, "POST", note)
+            require(replay.get("replayed") is True and replay.get("revision") == anchored["revision"],
+                    "anchored note retry was not idempotent")
+            s.request(f"{READER}/{TEXT_ID}/notes", self.other, "POST",
+                      dict(note, note="different synthetic body", mutationId="anchor-stale"), expected=409)
+
+            def anchored_note(body):
+                notes = [item for item in body["notes"] if item.get("id") == "anchor-one"]
+                require(len(notes) == 1, "anchored note was dropped or duplicated")
+                item = notes[0]
+                require(item["quote"] == quote and item["pdfPage"] == 1 and item["version"] == text_version,
+                        "anchored note moved to another page or version")
+                return item
+
+            kept = anchored_note(state(TEXT_ID, self.other))
+            require(kept["revision"] == anchored["revision"] and kept["note"] == NOTE_TEXT and kept["stale"] is False,
+                    "409 replaced the anchored note")
+            require(state(READ_ID, self.other)["notes"] == [] and state(READ_ID, self.other)["progress"] is None,
+                    "textbook annotation leaked into the other document")
+            read_page = s.request(f"{READER}/{READ_ID}/pages/1", self.phone)
+            read_text = read_page["text"]
+            read_end = min(15, len(read_text))
+            read_note = dict(id="anchor-read", version=read_version, pdfPage=1, textSha256=read_page["textSha256"],
+                             start=0, end=read_end, quote=read_text[:read_end], note="reading-margin",
+                             deleted=False, baseRevision=0, mutationId="anchor-read")
+            read_saved = s.request(f"{READER}/{READ_ID}/notes", self.other, "POST", read_note)
+            require(read_saved.get("replayed") is False, "second document note was not committed")
+
+            cursor = s.request("/v1/hello", self.other)["lastSeq"]
+            moved = dict(version=text_version, pdfPage=2, baseRevision=saved["revision"], mutationId="progress-reconnect")
+            with WebSocket(s.port, self.phone) as ws:
+                ws.until(lambda message: message.get("epoch") == self.hello["epoch"] and "lastSeq" in message)
+            resumed = s.request(f"{READER}/{TEXT_ID}/progress", self.phone, "POST", moved)
+            require(resumed.get("replayed") is False, "progress write after disconnect was not committed")
+            with WebSocket(s.port, self.phone) as ws:
+                ws.send(dict(t="hello", epoch=self.hello["epoch"], ledgerAfter={COURSE: cursor}))
+                ws.until(lambda message: any(event.get("seq") == resumed["revision"] and event.get("type") == "reader_progress_saved"
+                                             for event in message.get("events", [])))
+            before = state(TEXT_ID, self.other)
+            read_before = state(READ_ID, self.phone)
+            s.stop()
+            try:
+                s.request(f"{READER}/{TEXT_ID}/state", self.other)
+            except OSError:
+                pass
+            else:
+                raise ContractFailure("stopped reader unexpectedly reachable")
+            s.start()
+            after = state(TEXT_ID, self.phone)
+            require(after["progress"]["pdfPage"] == 2 and after["progress"]["revision"] == before["progress"]["revision"],
+                    "restart lost reading progress")
+            require(anchored_note(after)["note"] == NOTE_TEXT and anchored_note(state(READ_ID, self.other))["note"] == "reading-margin",
+                    "restart lost an anchored note or mixed the documents")
+            require(read_before["notes"][0]["revision"] == state(READ_ID, self.phone)["notes"][0]["revision"],
+                    "restart changed the other document")
+
+            s.stop()
+            s.text_pdf = invented_pdf(label="Synthetic pears revised")
+            s.write_catalog()
+            s.start()
+            revised = state(TEXT_ID, self.other)
+            retained = anchored_note(revised)
+            require(retained["stale"] is True and retained["note"] == NOTE_TEXT and retained["version"] == text_version,
+                    "new document version dropped or rewrote the old anchored note")
+            require(revised["progress"]["stale"] is True and revised["progress"]["pdfPage"] == 2,
+                    "new document version dropped the old reading progress")
+            require(state(READ_ID, self.phone)["notes"][0]["stale"] is False, "version change marked another document stale")
+            s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note, expected=409)
+            require(anchored_note(state(TEXT_ID, self.other))["revision"] == retained["revision"]
+                    and anchored_note(state(TEXT_ID, self.phone))["note"] == NOTE_TEXT,
+                    "rejected old version replaced the retained note")
+            fresh = s.request(f"{READER}/{TEXT_ID}/pages/1", self.other)
+            require(fresh["version"] != text_version, "restart kept the old document version")
+            fresh_end = min(15, len(fresh["text"]))
+            second = dict(id="anchor-two", version=fresh["version"], pdfPage=1, textSha256=fresh["textSha256"],
+                          start=0, end=fresh_end, quote=fresh["text"][:fresh_end], note="second-version-margin",
+                          deleted=False, baseRevision=0, mutationId="anchor-two")
+            created = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", second)
+            require(created.get("replayed") is False, "note on the new version was not committed")
+            final = state(TEXT_ID, self.other)
+            require(anchored_note(final)["stale"] is True and any(item["id"] == "anchor-two" and item["stale"] is False
+                                                                 for item in final["notes"]),
+                    "new version note replaced or hid the retained annotation")
+            require(state(READ_ID, self.phone)["notes"][0]["id"] == "anchor-read", "new version leaked into the other document")
+        if self.report["scope"] == "full" and not self.inject_failure:
+            self.check("reader catalog, page, study, anchored notes, conflict, reconnect and restart", reader)
+
         def revoke():
             with WebSocket(s.port, self.phone) as ws:
                 ws.until(lambda m: "lastSeq" in m)
@@ -347,28 +658,33 @@ def main():
                              for p in (HERE / "run.py", HERE / "websocket_probe.py")},
                   negativeControl=args.inject_failure, checks=[],
                   missing=[dict(capability="reader and anchored annotations",
-                                status="unverified", owner="TON-1400",
-                                reason="No verified merged reader/annotation adapter in this suite; TON-1412 remains incomplete.")],
-                  unverified=["Swift codecs/UI", "real Android UI", "physical iPhone/Tailscale", "candidate PR117/118"])
+                                status="unverified", owner="TON-1412",
+                                reason="Full scope has not finished the merged reader/annotation checks.")],
+                  unverified=["Swift codecs/UI", "real Android UI", "physical iPhone/Tailscale", "TestFlight"])
     server = None
     code = 1
     try:
-        # Always rebuild the actual checkout through the repository's resource gate.
-        result = subprocess.run([str(ROOT / "tools/dev/heavy"), "./gradlew", ":server:app:installDist",
-                                 "--max-workers=2", "--console=plain"], cwd=ROOT)
-        report["buildExitCode"] = result.returncode
-        require(result.returncode == 0, "installDist failed")
+        # Always rebuild the actual checkout. Unix keeps heavy; Windows uses the existing slot queue.
+        result_code = build_server()
+        report["buildExitCode"] = result_code
+        require(result_code == 0, "installDist failed")
+        binary = server_binary()
         report["serverArtifacts"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                                     for p in sorted((BINARY.parent.parent / "lib").glob("*.jar"))}
+                                     for p in sorted((binary.parent.parent / "lib").glob("*.jar"))}
         # Short, private path avoids macOS Unix-domain socket path limits.
-        with tempfile.TemporaryDirectory(prefix="icc-", dir="/tmp") as temp:
+        temp_parent = "/tmp" if os.name != "nt" else None
+        with tempfile.TemporaryDirectory(prefix="icc-", dir=temp_parent) as temp:
             server = Server(Path(temp))
             try:
                 Suite(server, report, args.inject_failure).run()
             finally:
                 server.stop()
-        code = 2 if args.scope == "full" else 0
-        report["status"] = "incomplete" if code else "current-contracts-passed"
+        if report["missing"] and args.scope == "full":
+            code = 2
+            report["status"] = "incomplete"
+        else:
+            code = 0
+            report["status"] = "current-contracts-passed" if args.scope == "current" else "reader-contracts-passed"
     except Exception as error:
         report["status"] = "failed"
         report["error"] = str(error) if isinstance(error, ContractFailure) else type(error).__name__
@@ -378,10 +694,14 @@ def main():
     finally:
         if server:
             server.stop()
+        report["counts"] = dict(passed=sum(item["status"] == "passed" for item in report["checks"]),
+                                failed=sum(item["status"] == "failed" for item in report["checks"]),
+                                missing=len(report["missing"]))
         report["exitCode"] = code
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"RESULT {report['status']} exit={code}; reader/annotations remain unverified", flush=True)
+    print(f"RESULT {report['status']} exit={code} passed={report['counts']['passed']} "
+          f"failed={report['counts']['failed']} missing={report['counts']['missing']}", flush=True)
     return code
 
 

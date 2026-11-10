@@ -15,15 +15,24 @@ python3 tools/ios-contract/run.py --report tools/ios-contract/.evidence/full.jso
 python3 tools/ios-contract/run.py --scope current --inject-failure --report tools/ios-contract/.evidence/negative.json
 ```
 
-Every invocation builds via `tools/dev/heavy ./gradlew :server:app:installDist
---max-workers=2 --console=plain`. There is no attach-to-server option, external URL,
-production token input, or stale binary shortcut. Gradle may download dependencies.
+On macOS the build command remains `tools/dev/heavy ./gradlew :server:app:installDist
+--max-workers=2 --console=plain`, and the server is still `server/app/build/install/app/bin/app`.
+On Windows the same file waits for an existing `Global\CoachHeavySlot0` or
+`Global\CoachHeavySlot1` mutex, then runs `gradlew.bat` at idle priority with
+`--priority=low --max-workers=2`. It starts the installed `com.coach.server.MainKt`
+with Java's `lib\*` classpath because `app.bat` expands every jar and overflows
+the Windows command-line limit. It does not call the Unix `heavy` script and does
+not start a second queue. There is no
+attach-to-server option, external URL, production token input, or stale binary
+shortcut. Gradle may download dependencies. Page text uses `pdftotext` from
+`PATH`, or an already installed Poppler under `D:\agent\tools\poppler` on Windows.
+The probe does not download Poppler.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Explicit `--scope current`: all supported-contract checks passed. Does **not** accept TON-1412 or the iOS feature. |
-| 1 | Build/request/assertion failed. The runner stops at the first failed check; remaining checks were not run. |
-| 2 | Default `full`: supported checks passed, but required reader/anchored annotation evidence is missing. |
+| 0 | `--scope current`: the original supported checks passed. Default `full`: those checks plus the merged reader/anchored-note checks passed. Exit 0 does **not** accept Swift, Android UI, a physical device, or TestFlight. |
+| 1 | Build/request/assertion failed, including the deliberate invalid-token control. The runner stops at the first failed check; remaining checks were not run. |
+| 2 | Default `full` finished the older checks, but the reader/anchored-note check did not run. |
 | 130 | Interrupted; cleanup still runs. |
 
 `--inject-failure` is a deliberate negative control. It sends an invalid token to the
@@ -90,18 +99,23 @@ they do not execute Android UI or Swift code. Physical iPhone/Tailscale connecti
 Swift codecs and UI recovery require TON-1411's separate evidence. Phone Tailscale
 installation is confirmed by the owner; this loopback probe does not measure it.
 
-## Required next stage — not yet accepted
+## Reader and anchored notes
 
-At the baseline, main contains no reader endpoints. PR118 reader progress is a candidate
-and PR117 is also unmerged; neither was tested here. Anchored annotations are still a
-server dependency under TON-1400. Default full validation therefore intentionally exits
-2; no route guessed from a proposal is counted as supported.
+These checks run only for default `full` scope, against the merged routes in
+`ReaderRoutes.kt` and the client paths in `ReaderHttp.kt`. They use an invented
+two-page PDF and `catalog.json` in the temporary library. The synthetic pack's
+source is the registered citation `教材 p.1`, so `/study` has to return those
+questions; a ledger `save_note` is not treated as a reader annotation.
 
-After the reader/annotation implementation lands on main, extend this directory's
-adapter and source inventory from the **merged** code, create synthetic reading content,
-then verify read position, anchored highlight/comment mutation, revision conflict,
-second-client readback, process restart and reconnect with real requests. Only remove
-the missing capability when those assertions actually run. Rerun all three commands
-above and attach fresh reports identifying the merged source HEAD. Do not change the
-default to current, convert missing to skip/pass, or claim full validation from current's
-exit 0. Candidate-head evidence, if later collected, must remain separately labeled.
+| Contract | Real request and assertion |
+| --- | --- |
+| Catalog | `GET /v1/courses/{course}/reader` lists only that course's documents and `privateAi=disabled_no_local_inference`. |
+| Page | `GET .../reader/{document}/pages/{page}` returns that document, version, and Poppler text. Missing document is 404. No credential is 401. |
+| Study | `GET .../pages/{page}/study` returns the synthetic questions and fact only on the cited page of the textbook. Another page and the other document stay empty. |
+| Progress | `POST .../progress` with `{version,pdfPage,baseRevision,mutationId}`. The second client reads the same page. A stale `baseRevision` is 409 and the saved page remains. |
+| Anchored note | `POST .../notes` with `{id,version,pdfPage,textSha256,start,end,quote,note,deleted,baseRevision,mutationId}`. The quote is the page text slice. The same mutation replays. A stale revision is 409 and the original note remains. The other document does not gain it. |
+| Reconnect | Close the socket, write progress, reconnect with `ledgerAfter`, and observe `reader_progress_saved` for that revision. |
+| Restart | Stop the owned process, observe connection failure, start it on the same temporary data, and read both documents back. |
+| Version | Replace only the textbook bytes and catalog hash, restart, and require the old note and progress to stay present with `stale=true`. Posting the old version is 409 and does not rewrite the note. A new note id on the new version is separate. The other document stays current. |
+
+`save_note` on `/v1/commands` remains the older ledger-note check. It does not satisfy this table.

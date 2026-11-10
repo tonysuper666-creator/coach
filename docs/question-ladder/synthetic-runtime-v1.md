@@ -40,11 +40,33 @@ or establish mastery. Superseded versions remain in the history but are not
 offered as exercises. Real essay text is
 not present or authorized here. MCQ keys are likewise omitted from projection.
 
-PR133 describes candidates and proposed identity relations; PR150 at
-`08e74726` reads approved candidates only against original mainline records and
-uses prerequisite **KP** IDs. Capability IDs, aliases, essay text/rubrics and a
-complete applicable KP denominator are not supported by that interface. This
-reference does not claim the two are integrated. Production requires an agreed
+PR133 describes candidates and proposed identity relations. At the frozen
+PR150 commit `08e74726`, the following differences require an explicit adapter
+and independent validation:
+
+* PR150 reads the weekly item's `learning` with `contract_version: 1.0.0` and
+  `runtime_approval`, checking the candidate against the original item. It does
+  not consume this synthetic pack, its identity contract, or screening ledger.
+* PR150 selects from seven `kind` values: `try_first`, `introduction`,
+  `concept`, `detail`, `application`, `bridge`, and `exam_prototype`. Synthetic
+  `teaching_kind` is a free string, and `capability` is not a client KP ID.
+* PR150 interprets `prerequisite_kp_ids` as KP IDs, not question references or
+  capability IDs, and does not resolve these aliases. Its missing prerequisites
+  become an empty list; the synthetic contract treats null as unknown and does
+  not offer the exercise. Do not map unknown into an empty prerequisite list.
+* Synthetic `reveal` returns essay text and rubric after synthetic submission.
+  PR150 passes `learning.essay` through in its submission response, but its
+  question metadata and UI do not consume a demonstrated full-answer endpoint.
+  The two essay shapes are not interchangeable.
+* Synthetic `applicable_kps: null` yields an unknown denominator. PR150's
+  summary uses outline `weekKps`, not an independently established complete
+  applicable-KP denominator. A missing, null or nonnumeric PR150 star falls
+  back to weight 1 and cannot subsequently be distinguished from a verified
+  one-star value; do not report that fallback as verified classification.
+
+The comparison above is a source inspection of the frozen PR150 head, not a
+UI run or proof of integration. This reference does not claim the two are
+integrated. Production requires an agreed
 adapter, independently verified immutable input hashes, actual answer and
 isolation evidence, explicit release approval, and an authorized real pool;
 none is supplied by the synthetic fixture. The fixture cannot prove mastery,

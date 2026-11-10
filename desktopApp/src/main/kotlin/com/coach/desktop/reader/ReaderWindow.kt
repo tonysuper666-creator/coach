@@ -154,8 +154,15 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 切到另一本书：旧书页、题目、作答不带过去。失败时保持无书状态，失败原因在 remote.failure。 */
     suspend fun openRemote(documentId: String) {
         val r = remote ?: return
-        val start = r.open(documentId) ?: return
-        attachDocument(r.current ?: return, start)
+        val start = r.open(documentId)
+        val doc = r.current
+        if (start == null || doc == null) {
+            // 失败：不留旧书的页数和位置。
+            state = state.copy(pageCount = 0, position = ReaderPosition(0), provenanceStack = emptyList(), flashAnchor = null)
+            answers.clear(); selectedQuestion = 0
+            return
+        }
+        attachDocument(doc, start)
     }
 
     /** 用户选择“用另一台的位置”。 */
@@ -420,6 +427,7 @@ private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
                     if (s.versionChanged) "资料版本变了，本机位置未保存，已保留在本机" else "另一台设备已保存了新的位置，本机位置没有覆盖",
                     color = Color(0xFFA33B2D), fontSize = 13.sp,
                 )
+                if (s.refreshFailed) Text("连不上服务，稍后重试", Modifier.testTag("conflict-refresh-failed"), color = Color(0xFF8A6D1F), fontSize = 12.sp)
                 if (!s.versionChanged) {
                     val scope = rememberCoroutineScope()
                     Text("保留本机位置", Modifier.testTag("keep-local").clickable { scope.launch { remote.keepLocalAfterConflict() } }.padding(top = 4.dp), color = Accent, fontSize = 13.sp)

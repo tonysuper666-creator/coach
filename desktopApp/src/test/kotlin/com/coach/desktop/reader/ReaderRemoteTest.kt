@@ -241,4 +241,20 @@ class ReaderRemoteTest {
         assertEquals(SaveState.Clean, r.save)
         assertEquals(2, s.docs.getValue("a").progressPage); assertNull(s.docs.getValue("b").progressPage)
     }
+
+    @Test fun keepLocalWithUnreachableStateRetriesThenFailsVisiblyWithoutOverwriting() = runBlocking<Unit> {
+        val (s, r) = ready()
+        r.open("a")
+        s.otherDeviceSaves("a", 7)
+        s.stateStatus = null
+        r.saveProgress(5)
+        assertEquals(SaveState.Conflict(5, null, false), r.save)
+        val saves = s.saveCalls.size
+        r.keepLocalAfterConflict()
+        assertEquals(SaveState.Conflict(5, null, false, refreshFailed = true), r.save, "仍失败要有可见提示，不静默")
+        assertEquals(saves, s.saveCalls.size); assertEquals(7, s.docs.getValue("a").progressPage)
+        s.stateStatus = 200
+        r.keepLocalAfterConflict()
+        assertEquals(SaveState.Saved(5), r.save); assertEquals(5, s.docs.getValue("a").progressPage)
+    }
 }

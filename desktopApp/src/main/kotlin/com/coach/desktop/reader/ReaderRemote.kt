@@ -97,7 +97,7 @@ sealed interface SaveState {
     data class Offline(val pdfPage: Int) : SaveState
     data class Failed(val failure: ReaderFailure) : SaveState
     /** 409：本机草稿页保留，不覆盖；remote 为另一台设备的进度（可能为空），versionChanged 表示资料版本也变了。 */
-    data class Conflict(val localPage: Int, val remote: ServerProgress?, val versionChanged: Boolean) : SaveState
+    data class Conflict(val localPage: Int, val remote: ServerProgress?, val versionChanged: Boolean, val refreshFailed: Boolean = false) : SaveState
 }
 
 private fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
@@ -242,7 +242,15 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
     suspend fun keepLocalAfterConflict() {
         val c = save as? SaveState.Conflict ?: return
         if (c.versionChanged) return
-        c.remote?.let { revision = it.revision } ?: return
+        var remote = c.remote
+        if (remote == null) {
+            // 409 后拉取远端进度失败过：先重试一次；仍失败就明确提示，不静默空转，也不盲目覆盖。
+            current?.let { refreshConflict(it, c.localPage) }
+            val again = save as? SaveState.Conflict ?: return
+            remote = again.remote
+            if (remote == null) { save = again.copy(refreshFailed = true); return }
+        }
+        revision = remote.revision
         saveProgress(c.localPage)
     }
 

@@ -122,5 +122,18 @@ class ReaderRemoteWindowTest {
         } finally { r.close() }
     }
 
+    @Test fun failedBookSwitchLeavesNoOldPageCount() {
+        val s = service()
+        val r = rig(s, 1440)
+        try {
+            runBlocking { r.session.remote!!.loadCatalog(); r.session.openRemote("a") }
+            r.frames(10); assertEquals(10, r.session.state.pageCount)
+            s.stateStatus = 409
+            runBlocking { r.session.openRemote("b") }
+            r.frames(6)
+            assertNull(r.session.remote!!.current); assertEquals(0, r.session.state.pageCount)
+        } finally { r.close() }
+    }
+
     private fun session(r: Rig) = r.session
 }

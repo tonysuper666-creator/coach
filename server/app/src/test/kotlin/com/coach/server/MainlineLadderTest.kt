@@ -101,6 +101,15 @@ class MainlineLadderTest {
                 assertTrue(replay.flag("dontKnow")); assertFalse(replay.flag("independentCorrect"))
                 assertEquals(before, store.events("SYNTHETIC"))
                 assertFailsWith<MockError> { mainline.answer(store, "SYNTHETIC", 1, JsonObject(wire + ("submissionId" to JsonPrimitive("new-submit")))) }
+                learning = approved(JsonObject(candidate() + ("essay" to json("model_answer_id" to "SYN-E1", "rubric_point_ids" to listOf("SYN-R1")))))
+                write()
+                val identity = MainlineEssayIdentity("fruit1", result.str("attemptId"), "SYN-E1", listOf("SYN-R1"))
+                assertEquals(io.ktor.http.HttpStatusCode.NotImplemented, assertFailsWith<MockError> { mainline.essay(store, "SYNTHETIC", 1, identity) }.status)
+                learning = approved(JsonObject(candidate() + ("essay" to json("model_answer_id" to "SYN-E2", "rubric_point_ids" to listOf("SYN-R2")))))
+                write()
+                assertEquals(result["essay"], mainline.answer(store, "SYNTHETIC", 1, wire)["essay"])
+                assertEquals(io.ktor.http.HttpStatusCode.Conflict, assertFailsWith<MockError> { mainline.essay(store, "SYNTHETIC", 1, identity) }.status)
+                assertEquals(before, store.events("SYNTHETIC"))
             }
         } finally { dir.toFile().deleteRecursively() }
     }

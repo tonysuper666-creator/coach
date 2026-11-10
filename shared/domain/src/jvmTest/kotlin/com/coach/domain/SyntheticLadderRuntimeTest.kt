@@ -25,9 +25,9 @@ class SyntheticLadderRuntimeTest {
         assertTrue(runtime.missing(essay, setOf("SYN-add")).isEmpty()) // No previous-answer requirement.
         assertFailsWith<IllegalArgumentException> { runtime.reveal(essay.ref, emptySet(), true) }
         assertFailsWith<IllegalArgumentException> { runtime.reveal(essay.ref, setOf("SYN-add"), false) }
-        val revealed = runtime.reveal(essay.ref, setOf("SYN-add"), true)
-        assertEquals("Two objects form a pair.", revealed.str("model_answer"))
-        assertEquals(2, revealed["rubric"]!!.jsonArray.size)
+        assertFailsWith<IllegalArgumentException> { runtime.reveal(essay.ref, setOf("SYN-add"), true) }
+        val revealed = runtime.reveal(selected.id, emptySet(), true)
+        assertEquals(1L, revealed.num("answer"))
         assertFalse(revealed.flag("mastery_evidence"))
         assertFalse(runtime.context(emptySet()).productionAuthorized)
         assertFalse(runtime.context(emptySet()).scopeVerified)

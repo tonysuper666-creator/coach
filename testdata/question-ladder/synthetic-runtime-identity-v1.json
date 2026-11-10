@@ -1,0 +1,129 @@
+{
+  "schema": "synthetic-runtime-contract-v1",
+  "synthetic": true,
+  "course_id": "SYN-COURSE-A",
+  "applicable_kps": [
+    "SYN-K1",
+    "SYN-K2",
+    "SYN-K3",
+    "SYN-K4"
+  ],
+  "applicable_capabilities": [
+    {
+      "kp": "SYN-K1",
+      "capability": "SYN-add"
+    },
+    {
+      "kp": "SYN-K2",
+      "capability": "SYN-explain"
+    },
+    {
+      "kp": "SYN-K2",
+      "capability": "SYN-extra"
+    },
+    {
+      "kp": "SYN-K3",
+      "capability": "SYN-review"
+    },
+    {
+      "kp": "SYN-K4",
+      "capability": "SYN-missing"
+    }
+  ],
+  "candidate_inventory_complete": true,
+  "prerequisite_aliases": [
+    {
+      "from": "SYN-Q1@v1",
+      "to": "SYN-Q1@v2"
+    }
+  ],
+  "questions": [
+    {
+      "required_capabilities": [],
+      "prerequisite_refs": [],
+      "options": [
+        "1",
+        "2"
+      ],
+      "answer": 1,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q1",
+      "version": "v1",
+      "ref": "SYN-Q1@v1",
+      "kp": "SYN-K1",
+      "capability": "SYN-add",
+      "format": "mcq",
+      "stem": "What is one plus one?"
+    },
+    {
+      "required_capabilities": [],
+      "prerequisite_refs": [],
+      "options": [
+        "1",
+        "2"
+      ],
+      "answer": 1,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q1",
+      "version": "v2",
+      "ref": "SYN-Q1@v2",
+      "kp": "SYN-K1",
+      "capability": "SYN-add",
+      "format": "mcq",
+      "stem": "How many objects are one and one?"
+    },
+    {
+      "required_capabilities": [
+        "SYN-add"
+      ],
+      "prerequisite_refs": [
+        "SYN-Q1@v1"
+      ],
+      "options": null,
+      "answer": null,
+      "model_answer": "Two objects form a pair.",
+      "rubric": [
+        "States the number.",
+        "Explains the grouping."
+      ],
+      "teaching_kind": "concept",
+      "id": "SYN-Q2",
+      "version": "v1",
+      "ref": "SYN-Q2@v1",
+      "kp": "SYN-K2",
+      "capability": "SYN-explain",
+      "format": "essay",
+      "stem": "Explain how one object and another make a pair.",
+      "essay_identity": {
+        "model_answer_id": "SYN-ANSWER-2",
+        "rubric_point_ids": [
+          "SYN-RUBRIC-2A",
+          "SYN-RUBRIC-2B"
+        ],
+        "linked_question_refs": [
+          "SYN-Q1@v1"
+        ]
+      }
+    },
+    {
+      "required_capabilities": null,
+      "prerequisite_refs": null,
+      "options": null,
+      "answer": null,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q3",
+      "version": "v1",
+      "ref": "SYN-Q3@v1",
+      "kp": "SYN-K3",
+      "capability": "SYN-review",
+      "format": "essay",
+      "stem": "Explain another grouping."
+    }
+  ]
+}

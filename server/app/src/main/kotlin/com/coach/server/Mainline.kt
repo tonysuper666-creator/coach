@@ -91,8 +91,15 @@ private class ChoiceHistory(events: List<Event>) {
 class Mainline(private val library: MockLibrary, private val clock: () -> Long = System::currentTimeMillis,
     private val random: java.util.Random = java.security.SecureRandom(),
     private val syntheticRuntime: SyntheticLadderRuntime? = null,
-    private val syntheticCapabilities: Set<String> = emptySet()) {
+    private val syntheticCapabilities: Set<String> = emptySet(),
+    private val syntheticRuntimeProvider: ((String) -> SyntheticLadderRuntime?)? = null) {
     private val dir: Path? get() = library.directory?.resolve("mcq-mainline")
+    private val syntheticReceipts = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, SyntheticMainlineReceipt>()
+    private fun syntheticFor(course: String, week: Int): SyntheticLadderRuntime? {
+        if (week != 1) return null
+        val runtime = if (syntheticRuntimeProvider != null) syntheticRuntimeProvider.invoke(course) else syntheticRuntime
+        return runtime?.takeIf { course == (it.courseId ?: "SYNTHETIC") }
+    }
 
     /** Packs are labelled with the course code, the ledger with its own id; the code is the first word of the course name. */
     private fun courseNames(events: List<Event>, course: String): Set<String> {
@@ -247,6 +254,13 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
     internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
+        syntheticFor(course, number)?.let { runtime ->
+            val q = runtime.questions.singleOrNull { it.ref == input.str("itemId") && runtime.ladder(it).eligible }
+                ?: throw MockError(HttpStatusCode.Conflict, "题目身份已改变，请返回后重试。")
+            val question = input.str("question").trim()
+            if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
+            return "当前题：${q.stem}\n学习提问：$question"
+        }
         val week = find(courseNames(store.events(course), course), number)
         if (input.str("itemId").isNotBlank()) {
             val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") && it.eligibleForLearning(courseNames(store.events(course), course), number,
@@ -277,8 +291,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     /** Questions in setup → detail → bridge order, without keys or explanations. */
     fun week(store: LedgerStore, course: String, number: Int, shuffled: Boolean = false, learning: Boolean = false): JsonObject {
-        if (course == "SYNTHETIC" && number == 1 && syntheticRuntime != null)
-            return syntheticRuntime.mainlineWeek(syntheticCapabilities)
+        syntheticFor(course, number)?.let { return it.mainlineWeek(syntheticCapabilities) }
         val events = store.events(course)
         val kpIds = weekPoints(events).map { it.id }.toSet().takeIf { it.isNotEmpty() }
         val names = courseNames(events, course)
@@ -306,8 +319,15 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
      * that sends none showed the pack order.
      */
     fun answer(store: LedgerStore, course: String, number: Int, input: JsonObject): JsonObject = store.tutorTransaction {
-        if (course == "SYNTHETIC" && number == 1 && syntheticRuntime != null)
-            return@tutorTransaction syntheticRuntime.mainlineAnswer(input, syntheticCapabilities)
+        syntheticFor(course, number)?.let { runtime ->
+            val response = runtime.mainlineAnswer(input, syntheticCapabilities)
+            val essay = runtime.linkedEssay(input.str("itemId"))
+            val key = course to response.str("attemptId")
+            val source = runtime.questions.single { it.ref == input.str("itemId") }
+            val receipt = syntheticReceipts.putIfAbsent(key, SyntheticMainlineReceipt(source, essay?.ref, essay?.essayDigest(), response))
+            if (receipt != null && receipt.itemId != input.str("itemId")) throw MockError(HttpStatusCode.Conflict, "这次提交已用于另一道题。")
+            return@tutorTransaction receipt?.response ?: response
+        }
         val events = events(course)
         val week = find(courseNames(events, course), number)
         val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这道题")
@@ -384,18 +404,64 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val book = (status == "missed" || status == "guessed") && kp != null && weekMistakes(after, unit.week ?: number).any { it.payload.str("questionId") == qid }
         val index = week.items.indexOf(item)
         val parts = if (input.flag("learning")) item.ladderExplanation() else explanationParts(unit.explanation)
+        val frozen = after.first { it.type == "question_posed" && it.payload.str("attemptId") == attempt }.payload
         val reasons = (parts["options"] as JsonObject).mapNotNull { (i, why) -> i.toIntOrNull()?.takeIf { it in order.indices }?.let { "${order.indexOf(it)}" to why } }.toMap()
         json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed, "dontKnow" to dontKnow,
             "independentCorrect" to (picked == unit.answer && !guessed && !dontKnow && !tryFirst && !assisted && item.verified), "tryFirst" to tryFirst,
             "remember" to item.learning?.str("remember"), "tryFirstRefs" to item.learning?.get("try_first_refs"),
-            "calculation" to item.learning?.get("calculation"), "essay" to item.learning?.get("essay"),
+            "calculation" to frozen["calculation"], "essay" to frozen["essay"],
             "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
             "source" to item.source, "anchor" to item.anchor.take(300), "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
             "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history), "notes" to notes(week, history))
     }
+
+    fun essay(store: LedgerStore, course: String, week: Int, identity: MainlineEssayIdentity): MainlineEssayDocument {
+        if (!identity.valid) throw MockError(HttpStatusCode.BadRequest, "论述关联资料待核。")
+        val receipt = syntheticReceipts[course to identity.attemptId]
+        val runtime = syntheticFor(course, week)
+        if (receipt != null) {
+            if (runtime == null) throw MockError(HttpStatusCode.Forbidden, "这份示范的读取权限已撤销。")
+            val expected = (receipt.response["essay"] as? JsonObject)?.let {
+                MainlineEssayIdentity(receipt.itemId, identity.attemptId, it.str("model_answer_id"), it.strings("rubric_point_ids"))
+            }
+            if (identity != expected || receipt.essayRef == null) throw MockError(HttpStatusCode.Conflict, "示范资料身份与当前提交不一致。")
+            if (runtime.questions.singleOrNull { it.ref == identity.itemId } != receipt.question || runtime.resolve(identity.itemId) != identity.itemId)
+                throw MockError(HttpStatusCode.Conflict, "关联题身份或版本已改变。")
+            val q = runCatching { runtime.readEssay(course, receipt.essayRef, syntheticCapabilities, submitted = true) }.getOrNull()
+                ?: throw MockError(HttpStatusCode.ServiceUnavailable, "示范全文与评分点仍待接通。")
+            val linked = runtime.linkedEssay(identity.itemId)
+            if (linked?.ref != receipt.essayRef || q.essayDigest() != receipt.resourceDigest)
+                throw MockError(HttpStatusCode.Conflict, "示范资料版本已改变，请返回题目后重试。")
+            val resource = q.essayIdentity!!
+            val ids = resource.rubricPointIds
+            if (resource.modelAnswerId != identity.modelAnswerId || ids != identity.rubricPointIds)
+                throw MockError(HttpStatusCode.Conflict, "示范资料身份已改变。")
+            return MainlineEssayDocument(course, identity, q.version, q.modelAnswer!!,
+                ids.zip(q.rubric!!).map { (id, text) -> MainlineRubricPoint(id, text) }, syntheticOnly = true)
+        }
+        if (runtime != null) throw MockError(HttpStatusCode.Conflict, "请先提交当前题目，再读取示范。")
+        val events = store.events(course)
+        val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == identity.attemptId }?.payload
+            ?: throw MockError(HttpStatusCode.Conflict, "找不到当前课程的提交记录。")
+        val metadata = posed["essay"] as? JsonObject
+        if (!posed.flag("mainline") || posed.num("mainlineWeek") != week.toLong() || posed.str("mainlineItem") != identity.itemId ||
+            events.none { it.type == "answer_submitted" && it.payload.str("attemptId") == identity.attemptId } || metadata == null ||
+            metadata.str("model_answer_id") != identity.modelAnswerId || metadata.strings("rubric_point_ids") != identity.rubricPointIds)
+            throw MockError(HttpStatusCode.Conflict, "示范资料身份与原提交不一致。")
+        val current = find(courseNames(events, course), week).items.singleOrNull { it.unit.itemId == identity.itemId }
+            ?: throw MockError(HttpStatusCode.Forbidden, "这份示范的关联题已撤回。")
+        if (!current.eligibleForLearning(courseNames(events, course), week, weekPoints(events).map { it.id }.toSet()))
+            throw MockError(HttpStatusCode.Forbidden, "这份示范尚未通过当前内容核验。")
+        val currentHash = (current.learning?.get("runtime_approval") as? JsonObject)?.str("candidate_sha256")
+        if (posed.str("candidateHash").isBlank() || posed.str("candidateHash") != currentHash)
+            throw MockError(HttpStatusCode.Conflict, "关联题版本已改变，请返回题目后重试。")
+        // The producer has supplied no authorized production text/reader contract yet.
+        throw MockError(HttpStatusCode.NotImplemented, "全文读取尚未接通，示范全文与评分点仍待核。")
+    }
 }
 
 fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline, reader: ReaderExplanation? = null) {
+    mainlineEssayRoutes(actor, mainline)
     suspend fun ApplicationCall.answer(course: String, block: LedgerStore.(JsonObject) -> JsonObject) {
         try {
             val text = if (request.httpMethod == HttpMethod.Post) receiveText() else ""

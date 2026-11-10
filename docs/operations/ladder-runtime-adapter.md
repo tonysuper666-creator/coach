@@ -3,6 +3,10 @@ PR133 `ca7a33407e22c7f33f9db2b3d2a73e18ed2a2832`. This is a synthetic adapter;
 it does not import PR133's production candidates or grant their release approval.
 The existing candidate `1.0.0` / `runtime_approval` path retains its approval checks.
 
+The optional course/resource/scope extension is now consumed at producer head
+`3e08d0e93722122c9121c92915deb982b26e35cf`. Actual reader/authentication, state,
+scope behavior and new checks are documented in `mainline-essay-reader.md`.
+
 `testdata/question-ladder/synthetic-runtime-v1.json` is that revision's
 `generate_runtime_fixture.py` output, encoded as UTF-8 with LF line endings. SHA-256:
 `2e77e068d75b9650e40d97f79658a07ee7adad470a4eb528ca605269f03cdad8`.
@@ -16,7 +20,7 @@ No question text or assets from a real course are used.
 | `prerequisite_refs`, `prerequisite_aliases` | Retain recorded refs and separately resolve ordering refs. They do not require prior answers. Aliases must preserve question/KP/capability/format and advance canonical versions. |
 | `applicable_kps` | Declared synthetic scope, including null. Never proof of a complete real curriculum scope. |
 | `format=mcq` | Adapt stem/options without key; acknowledgement reveals a reference key, with no ledger grading or mastery writes. |
-| `format=essay`, `model_answer`, `rubric` | Parser/reveal preserves the producer's post-submission contract. The MCQ mainline does not implement an essay exercise and explicitly reports it unsupported. No MCQ-to-essay link is inferred. |
+| `format=essay`, `model_answer`, `rubric` | Linked full text uses the course-bound reader. Unscoped essay reveal is rejected; a standalone essay exercise remains unsupported. No MCQ-to-essay link is inferred. |
 
 For the synthetic MCQ adapter only, section grouping uses `kp`, variant grouping
 uses the unversioned `id`, difficulty and scheduling weight have neutral defaults.
@@ -31,7 +35,8 @@ val mainline = Mainline(library, syntheticRuntime = runtime,
     syntheticCapabilities = explicitlyKnownSyntheticCapabilities)
 ```
 
-Only course `SYNTHETIC`, week 1 uses that injection. The application's default
+Base packs without `course_id` use `SYNTHETIC`; extended packs use their exact
+course ID. Synthetic week 1 uses that injection. The application's default
 `Mainline(library)` never enables it. This permits the actual weekly response,
 CourseHttp, selector and mainline UI to exercise the contract without exposing an
 unapproved pool in production.
@@ -51,12 +56,13 @@ contract permits out-of-outline KP prerequisites remains unconfirmed; those
 candidates stay withheld until a verified identity catalog/contract is supplied.
 Synthetic v1 confirmation does not establish that production catalog's completeness.
 
-After submission the actual UI consumes the candidate's `essay.model_answer_id`
-and `essay.rubric_point_ids`. It shows the pending full-text endpoint explicitly,
-without exposing IDs as prose or substituting the old EssayBank. The producer's
-standalone essay body is not silently reinterpreted as this association.
+After submission the actual UI consumes `essay.model_answer_id` and
+`essay.rubric_point_ids`. A linked synthetic essay can now be read through the
+actual paired service. Production assets stay pending, without exposing IDs as
+prose or substituting EssayBank. The producer's standalone essay body is not
+silently reinterpreted as an association.
 
-Unresolved producer requirements for the original author: an approved
+Unresolved production requirements: an approved
 MCQ-to-essay association/full-text reader contract, and a versioned, evidenced
 complete applicable-KP manifest. Until those are agreed and supplied, the UI
 keeps the endpoint and complete denominator pending. Neither `weekKps` nor the

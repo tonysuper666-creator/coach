@@ -333,12 +333,14 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
         position(false, id, selectedFilter = selectedFilter)
     }
+    val showingCheckpoint = body != null && !reading && learning && (recapVisible || ladderSession.complete ||
+        (item == null && (runtime.declaredKpTotal != null || runtime.declaredCapabilityTotal != null)))
     val goUp: () -> Unit = { if (!reading && !directEntry) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
     TaskChrome(!reading || readerState.flag("focus"))
     AppBackHandler(reading && readerState.flag("focus"), priority = 100) { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
     LaunchedEffect(reading, readerState.flag("focus")) { c.readerFocus = reading && readerState.flag("focus") }
-    if ((reading && !readerState.flag("focus")) || (!reading && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", if (reading) "← 选择题主线" else "← 第 $number 周", goUp)
+    if ((reading && !readerState.flag("focus")) || (!reading && !showingCheckpoint && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", if (reading) "← 选择题主线" else "← 第 $number 周", goUp)
     if (reading && readerState.flag("focus")) Header("第 $number 周", "退出专心读") { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
     if (body == null) {
         CenterMessage(error ?: "正在读取…")
@@ -366,21 +368,22 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             emphasis = { facts -> ClassEmphasis(emphasis, facts) })
         return
     }
-    if (learning && (recapVisible || ladderSession.complete)) {
+    if (showingCheckpoint) {
         val points = if (targetKpId == null) view.weekKps(number) else view.weekKps(number).filter { it.id == targetKpId }
         val nextKp = view.weekKps(number).let { rows -> rows.getOrNull(rows.indexOfFirst { it.id == targetKpId } + 1) }?.takeIf { it.id != targetKpId }
-        LadderCheckpoint(ladderSession, points, ladderStep.blockedKps.isNotEmpty() || points.any { it.id !in previouslyLearned }, recapVisible, onContinue = {
+        LadderCheckpoint(ladderSession, points, item == null || ladderStep.blockedKps.isNotEmpty() || points.any { it.id !in previouslyLearned }, recapVisible, onContinue = {
             saveSession(QuestionLadder.closeRecap(ladderSession)); recapVisible = false; save("recapVisible" to JsonPrimitive(false))
             val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id
             if (next == null) saveSession(ladderSession.copy(complete = true))
             else { chosen = null; result = null; asked = false; save("choice" to JsonNull, "result" to JsonNull, "asked" to JsonPrimitive(false)); position(false, next); scope.launch { scroll.scrollTo(0) } }
         }, onNotes = { position(true) }, onNext = if (nextKp != null && onNextSection != null) ({ onNextSection(nextKp.id) }) else null, onBack = onBack,
-            scopeMessage = runtime.scopeMessage)
+            scopeMessage = runtime.scopeMessage, scopePoints = runtime.scopePoints)
         return
     }
     if (item == null) {
         if (only != null) { CenterMessage("本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
         Text(if (learning) "这一节的题仍在核对，进度已保留。" else "这一节暂无对应题目。")
+        if (learning) Text(runtime.scopeMessage, Modifier.testTag("ladder-scope-status"))
         TextButton(onClick = { position(true) }) { Text("返回本周要点") }
         TextButton(onClick = { startQuiz() }) { Text("做本周全部题") }
         return
@@ -389,6 +392,21 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val options = item.strings("options")
     val letters = optionLetters(options.size)
     val done = result
+    val essayIdentity = done?.let { com.coach.client.LadderEssayState.fromAnswer(it)?.identity(it) }
+    val essayKey = essayIdentity?.let { "${it.itemId}:${it.attemptId}:${it.modelAnswerId}:${it.rubricPointIds.joinToString(",")}" }
+    val essayState = (readerState["essayReader"] as? JsonObject)?.takeIf { it.str("key") == essayKey }
+    var essayOpen by remember(essayKey) { mutableStateOf(essayState?.flag("open") == true) }
+    fun saveEssay(open: Boolean, offset: Int = essayState?.num("scroll")?.toInt() ?: 0) {
+        saveReader { JsonObject(it + ("essayReader" to json("key" to essayKey, "open" to open, "scroll" to offset))) }
+    }
+    AppBackHandler(essayOpen, priority = 300) { essayOpen = false; saveEssay(false) }
+    if (essayOpen && essayIdentity != null) {
+        Surface(Modifier.fillMaxSize()) {
+            MainlineEssayReader(http, number, essayIdentity, essayState?.num("scroll")?.toInt() ?: 0,
+                saveScroll = { saveEssay(true, it) }, onClose = { essayOpen = false; saveEssay(false) })
+        }
+        return
+    }
     val explanation = done?.get("explanation") as? JsonObject
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
@@ -588,7 +606,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 if (done != null) {
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
-                    LadderEssayFeedback(done)
+                    LadderEssayFeedback(done) { revealFeedback = false; essayOpen = true; saveEssay(true) }
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
                     if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
                         PrivateSourceReferences(http.reader, source, done.str("anchor"))

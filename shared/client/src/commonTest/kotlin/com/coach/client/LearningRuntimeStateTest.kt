@@ -11,7 +11,16 @@ class LearningRuntimeStateTest {
         val synthetic = LearningRuntimeState(LadderRuntimeContext(applicableKpIds = listOf("SYN-K1"), scopeVerified = true, syntheticOnly = true))
         assertNull(synthetic.completeDenominator)
         assertTrue("待核" in synthetic.scopeMessage)
-        assertEquals(2, LearningRuntimeState(LadderRuntimeContext(applicableKpIds = listOf("K1", "K2"), scopeVerified = true)).completeDenominator)
+        assertNull(LearningRuntimeState(LadderRuntimeContext(applicableKpIds = listOf("K1", "K2"), scopeVerified = true)).completeDenominator)
+        val declared = LadderRuntimeContext(applicableKpIds = listOf("K1", "K2"), scopeVerified = true,
+            scopeKnown = true, scopeVersion = "v1", scopeEvidence = listOf("SYN-only-scope-receipt"),
+            scopePoints = listOf(LadderScopePoint("K1", "Pairing", listOf("C"), "candidate_present_unverified"),
+                LadderScopePoint("K2", "Grouping", listOf("C"), "candidate_missing")))
+        assertEquals(2, LearningRuntimeState(declared).completeDenominator)
+        assertEquals(2, LearningRuntimeState(declared).declaredCapabilityTotal) // Pairs, not globally deduplicated capability IDs.
+        assertNull(LearningRuntimeState(declared.copy(syntheticOnly = true)).completeDenominator)
+        assertEquals(2, LearningRuntimeState(declared.copy(syntheticOnly = true)).declaredKpTotal)
+        assertNull(LearningRuntimeState(declared.copy(scopePoints = declared.scopePoints!!.dropLast(1))).declaredKpTotal)
         assertNull(LearningRuntimeState.fromWeek(json("runtime" to json("scopeVerified" to "yes"))).completeDenominator)
     }
 

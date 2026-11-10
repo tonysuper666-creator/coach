@@ -4,6 +4,12 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
 @Serializable
+data class LadderScopePoint(val id: String, val title: String, val capabilityIds: List<String>?, val availability: String = "unknown",
+    val capabilityAvailability: Map<String, String>? = null)
+@Serializable
+data class LadderScopeCapability(val kpId: String, val capabilityId: String, val availability: String = "unknown")
+
+@Serializable
 data class LadderRuntimeContext(
     val contractVersion: String? = null,
     val syntheticOnly: Boolean = false,
@@ -12,18 +18,27 @@ data class LadderRuntimeContext(
     val scopeVerified: Boolean = false,
     val knownCapabilities: Set<String>? = null,
     val unsupported: List<String> = emptyList(),
+    val scopeVersion: String? = null,
+    val scopeEvidence: List<String> = emptyList(),
+    val scopeKnown: Boolean = false,
+    val scopePoints: List<LadderScopePoint>? = null,
+    val capabilityScope: List<LadderScopeCapability>? = null,
 )
 
 data class SyntheticLadderQuestion(
     val id: String, val version: String, val ref: String, val kp: String, val capability: String,
     val format: String, val kind: String, val stem: String, val options: List<String>?, val answer: Int?,
     val requiredCapabilities: List<String>?, val prerequisiteRefs: List<String>?,
-    val modelAnswer: String?, val rubric: List<String>?,
+    val modelAnswer: String?, val rubric: List<String>?, val essayIdentity: SyntheticEssayIdentity? = null,
 )
+data class SyntheticEssayIdentity(val modelAnswerId: String, val rubricPointIds: List<String>, val linkedQuestionRefs: List<String>)
+data class SyntheticApplicableCapability(val kp: String, val capability: String)
 
 /** PR133 ca7a3340's public synthetic contract. Never grants production approval or mastery. */
 class SyntheticLadderRuntime private constructor(
-    val questions: List<SyntheticLadderQuestion>, val applicableKps: List<String>?, val aliases: Map<String, String>
+    val questions: List<SyntheticLadderQuestion>, val applicableKps: List<String>?, val aliases: Map<String, String>,
+    val courseId: String? = null, val applicableCapabilities: List<SyntheticApplicableCapability>? = null,
+    val candidateInventoryComplete: Boolean? = null,
 ) {
     fun resolve(ref: String): String {
         var current = ref
@@ -51,23 +66,54 @@ class SyntheticLadderRuntime private constructor(
         resolvedPrerequisiteRefs = q.prerequisiteRefs?.map(::resolve), syntheticOnly = true,
     )
 
-    fun context(knownCapabilities: Set<String>) = LadderRuntimeContext(
+    fun linkedEssay(ref: String): SyntheticLadderQuestion? = questions.filter { q ->
+        q.ref !in aliases && q.essayIdentity?.linkedQuestionRefs?.any { resolve(it) == ref } == true
+    }.singleOrNull()
+
+    private fun gap(rows: List<SyntheticLadderQuestion>): String = if (rows.isNotEmpty()) "candidate_present_unverified"
+        else if (candidateInventoryComplete == true) "candidate_missing" else "unknown"
+
+    fun context(knownCapabilities: Set<String>): LadderRuntimeContext {
+        val active = questions.filter { it.ref !in aliases }
+        return LadderRuntimeContext(
         contractVersion = SCHEMA, syntheticOnly = true, productionAuthorized = false,
         applicableKpIds = applicableKps, scopeVerified = false, knownCapabilities = knownCapabilities,
+        scopeKnown = applicableKps != null && courseId != null, scopeVersion = if (courseId != null) SCHEMA else null,
+        scopePoints = if (courseId == null) null else applicableKps?.map { kp ->
+            val capabilities = applicableCapabilities?.filter { it.kp == kp }?.map { it.capability }
+            LadderScopePoint(kp, "", capabilities, gap(active.filter { it.kp == kp }),
+                capabilities?.associateWith { capability -> gap(active.filter { it.kp == kp && it.capability == capability }) })
+        },
+        capabilityScope = if (courseId == null) null else applicableCapabilities?.map { pair ->
+            LadderScopeCapability(pair.kp, pair.capability, gap(active.filter { it.kp == pair.kp && it.capability == pair.capability }))
+        },
         unsupported = buildList {
             if (questions.any { it.format == "essay" }) add("essay_exercise_format")
             if (questions.any { it.kind !in KINDS }) add("teaching_kind")
             add("production_sources_and_release")
         })
+    }
+
+    fun readEssay(course: String, ref: String, knownCapabilities: Set<String>, submitted: Boolean): SyntheticLadderQuestion {
+        require(courseId != null && courseId == course) { "essay_course_mismatch" }
+        val q = questions.singleOrNull { it.ref == ref && it.format == "essay" } ?: error("unknown_essay_identity")
+        require(q.essayIdentity != null) { "essay_resource_identity_unknown" }
+        readyQuestion(ref, knownCapabilities, submitted)
+        return q
+    }
 
     /** Acknowledgement is deliberately not a grade or a claim of independent learning evidence. */
-    fun reveal(ref: String, knownCapabilities: Set<String>, submitted: Boolean): JsonObject {
+    private fun readyQuestion(ref: String, knownCapabilities: Set<String>, submitted: Boolean): SyntheticLadderQuestion {
         require(submitted) { "synthetic_submission_required" }
         val q = questions.singleOrNull { it.ref == ref } ?: error("unknown_question_version")
         require(missing(q, knownCapabilities).isEmpty()) { "synthetic_question_not_ready" }
-        return if (q.format == "essay") json("ref" to ref, "synthetic_only" to true, "mastery_evidence" to false,
-            "model_answer" to q.modelAnswer, "rubric" to q.rubric)
-        else json("ref" to ref, "synthetic_only" to true, "mastery_evidence" to false, "answer" to q.answer)
+        return q
+    }
+
+    fun reveal(ref: String, knownCapabilities: Set<String>, submitted: Boolean): JsonObject {
+        val q = readyQuestion(ref, knownCapabilities, submitted)
+        require(q.format == "mcq") { "essay_requires_course_bound_reader" }
+        return json("ref" to ref, "synthetic_only" to true, "mastery_evidence" to false, "answer" to q.answer)
     }
 
     companion object {
@@ -91,6 +137,24 @@ class SyntheticLadderRuntime private constructor(
                 return value.content
             }
             val scope = strings(raw["applicable_kps"], "applicable_kps")
+            val course = when (val value = raw["course_id"]) {
+                null, JsonNull -> null
+                else -> (value as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }?.content ?: error("invalid_course_id")
+            }
+            val capabilities = when (val value = raw["applicable_capabilities"]) {
+                null, JsonNull -> null
+                else -> (value as? JsonArray ?: error("invalid_applicable_capabilities")).map { entry ->
+                    val pair = entry as? JsonObject ?: error("invalid_applicable_capability")
+                    require(pair.keys == setOf("kp", "capability")) { "invalid_applicable_capability" }
+                    SyntheticApplicableCapability(required(pair, "kp"), required(pair, "capability"))
+                }.also { pairs ->
+                    require(pairs.distinct().size == pairs.size && (scope == null || pairs.all { it.kp in scope })) { "invalid_applicable_capability_scope" }
+                }
+            }
+            val inventory = when (val value = raw["candidate_inventory_complete"]) {
+                null, JsonNull -> null
+                else -> (value as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull ?: error("invalid_candidate_inventory_complete")
+            }
             val rows = raw["questions"] as? JsonArray ?: error("questions_required")
             val questions = rows.map { value ->
                 val q = value as? JsonObject ?: error("invalid_question")
@@ -98,6 +162,7 @@ class SyntheticLadderRuntime private constructor(
                 require(ref == "$id@$version") { "question_ref_mismatch" }
                 val kp = required(q, "kp"); val capability = required(q, "capability")
                 require(scope == null || kp in scope) { "question_kp_outside_scope" }
+                require(capabilities == null || SyntheticApplicableCapability(kp, capability) in capabilities) { "question_capability_outside_scope" }
                 val format = required(q, "format")
                 require(format in setOf("mcq", "essay")) { "unsupported_format" }
                 val options = strings(q["options"], "options")
@@ -113,11 +178,23 @@ class SyntheticLadderRuntime private constructor(
                 } else require(options == null && q["answer"] in listOf(null, JsonNull)) { "essay_mcq_payload" }
                 val requiredCapabilities = strings(q["required_capabilities"], "required_capabilities")
                 require(requiredCapabilities == null || capability !in requiredCapabilities) { "self_capability" }
+                val identity = when (val value = q["essay_identity"]) {
+                    null, JsonNull -> null
+                    else -> {
+                        val identity = value as? JsonObject ?: error("invalid_essay_identity")
+                        require(format == "essay" && identity.keys == setOf("model_answer_id", "rubric_point_ids", "linked_question_refs")) { "invalid_essay_identity" }
+                        val points = strings(identity["rubric_point_ids"], "rubric_point_ids") ?: error("rubric_point_ids_unknown")
+                        require(points.isNotEmpty() && (rubric == null || points.size == rubric.size)) { "rubric_identity_text_mismatch" }
+                        SyntheticEssayIdentity(required(identity, "model_answer_id"), points,
+                            strings(identity["linked_question_refs"], "linked_question_refs") ?: error("linked_question_refs_unknown"))
+                    }
+                }
                 SyntheticLadderQuestion(id, version, ref, kp, capability, format, required(q, "teaching_kind"),
-                    required(q, "stem"), options, answer, requiredCapabilities, strings(q["prerequisite_refs"], "prerequisite_refs"), model, rubric)
+                    required(q, "stem"), options, answer, requiredCapabilities, strings(q["prerequisite_refs"], "prerequisite_refs"), model, rubric, identity)
             }
             val index = questions.associateBy { it.ref }
             require(index.size == questions.size) { "duplicate_question_version" }
+            require(questions.all { q -> q.essayIdentity?.linkedQuestionRefs.orEmpty().all { index[it]?.format == "mcq" } }) { "invalid_linked_question_ref" }
             val aliases = linkedMapOf<String, String>()
             val aliasRows = raw["prerequisite_aliases"] as? JsonArray ?: error("aliases_required")
             for (value in aliasRows) {
@@ -132,7 +209,7 @@ class SyntheticLadderRuntime private constructor(
                 require(left != null && right != null && right > left) { "alias_not_newer" }
                 aliases[from] = to
             }
-            val runtime = SyntheticLadderRuntime(questions, scope, aliases)
+            val runtime = SyntheticLadderRuntime(questions, scope, aliases, course, capabilities, inventory)
             val visiting = mutableSetOf<String>(); val done = mutableSetOf<String>()
             fun visit(ref: String) {
                 if (ref in done) return

@@ -89,7 +89,9 @@ private class ChoiceHistory(events: List<Event>) {
 
 /** Weekly choice mainline: packs and fact lists live under `mcq-mainline/` in the private generated directory, never in the repository. */
 class Mainline(private val library: MockLibrary, private val clock: () -> Long = System::currentTimeMillis,
-    private val random: java.util.Random = java.security.SecureRandom()) {
+    private val random: java.util.Random = java.security.SecureRandom(),
+    private val syntheticRuntime: SyntheticLadderRuntime? = null,
+    private val syntheticCapabilities: Set<String> = emptySet()) {
     private val dir: Path? get() = library.directory?.resolve("mcq-mainline")
 
     /** Packs are labelled with the course code, the ledger with its own id; the code is the first word of the course name. */
@@ -247,7 +249,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
         val week = find(courseNames(store.events(course), course), number)
         if (input.str("itemId").isNotBlank()) {
-            val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") && it.eligibleForLearning(courseNames(store.events(course), course), number) }
+            val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") && it.eligibleForLearning(courseNames(store.events(course), course), number,
+                weekPoints(store.events(course)).map { it.id }.toSet().takeIf { it.isNotEmpty() }) }
                 ?: throw MockError(HttpStatusCode.Conflict, "题目已更新或尚未通过核验，请刷新后再问。")
             val question = input.str("question").trim()
             if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
@@ -274,20 +277,26 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     /** Questions in setup → detail → bridge order, without keys or explanations. */
     fun week(store: LedgerStore, course: String, number: Int, shuffled: Boolean = false, learning: Boolean = false): JsonObject {
+        if (course == "SYNTHETIC" && number == 1 && syntheticRuntime != null)
+            return syntheticRuntime.mainlineWeek(syntheticCapabilities)
         val events = store.events(course)
+        val kpIds = weekPoints(events).map { it.id }.toSet().takeIf { it.isNotEmpty() }
         val names = courseNames(events, course)
         val week = find(names, number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
             "notes" to notes(week, history), "notesError" to week.notesError, "emphasis" to JsonArray(week.emphasis),
-            "learning" to learning, "withheld" to if (learning) week.items.count { !it.eligibleForLearning(names, number) } else 0,
-            "items" to JsonArray(week.items.filter { !learning || it.eligibleForLearning(names, number) }.map { item ->
+            "learning" to learning, "runtime" to LedgerJson.encodeToJsonElement(LadderRuntimeContext()),
+            "withheldReasons" to JsonObject(week.items.flatMap { it.ladder(kpIds)?.contractIssues.orEmpty() }
+                .groupingBy { it }.eachCount().mapValues { JsonPrimitive(it.value) }),
+            "withheld" to if (learning) week.items.count { !it.eligibleForLearning(names, number, kpIds) } else 0,
+            "items" to JsonArray(week.items.filter { !learning || it.eligibleForLearning(names, number, kpIds) }.map { item ->
                 val layout = round(events, item)
                 val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()
                 json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem, "factIds" to item.factIds,
                     "options" to order.map { item.unit.options[it] }, "layout" to if (shuffled) layout else null,
                     "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" },
-                    "ladder" to item.ladder()?.let { LedgerJson.encodeToJsonElement(it) })
+                    "ladder" to item.ladder(kpIds)?.let { LedgerJson.encodeToJsonElement(it) })
             }))
     }
 
@@ -297,6 +306,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
      * that sends none showed the pack order.
      */
     fun answer(store: LedgerStore, course: String, number: Int, input: JsonObject): JsonObject = store.tutorTransaction {
+        if (course == "SYNTHETIC" && number == 1 && syntheticRuntime != null)
+            return@tutorTransaction syntheticRuntime.mainlineAnswer(input, syntheticCapabilities)
         val events = events(course)
         val week = find(courseNames(events, course), number)
         val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这道题")
@@ -312,7 +323,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val qid = "mock-" + fingerprint.take(24)
         val letters = optionLetters(options.size)
         val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == attempt }
-        if (posed == null && input.flag("learning") && !item.eligibleForLearning(courseNames(events, course), number))
+        if (posed == null && input.flag("learning") && !item.eligibleForLearning(courseNames(events, course), number,
+                weekPoints(events).map { it.id }.toSet().takeIf { it.isNotEmpty() }))
             throw MockError(HttpStatusCode.Conflict, "这道题尚未通过内容核验，请刷新题路。原作答仍保留。")
         val tryFirst = if (posed != null) posed.payload.flag("tryFirst") else input.flag("learning") && item.ladder()?.kind == "try_first"
         val assisted = posed?.payload?.flag("assisted") ?: input.flag("assisted")

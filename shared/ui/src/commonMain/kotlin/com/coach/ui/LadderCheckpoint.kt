@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
 import com.coach.client.KpRow
+import com.coach.client.LadderEssayState
 import com.coach.domain.*
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -17,16 +18,26 @@ import kotlinx.serialization.json.*
 import kotlin.random.Random
 
 @Composable
+internal fun LadderEssayFeedback(answer: JsonObject?) {
+    LadderEssayState.fromAnswer(answer)?.let { essay ->
+        Text(essay.message, Modifier.testTag("ladder-essay-status"), style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
 internal fun LadderCheckpoint(session: LadderSession, points: List<KpRow>, gap: Boolean, recap: Boolean,
-                              onContinue: () -> Unit, onNotes: () -> Unit, onNext: (() -> Unit)?, onBack: () -> Unit) {
+                              onContinue: () -> Unit, onNotes: () -> Unit, onNext: (() -> Unit)?, onBack: () -> Unit,
+                              scopeMessage: String = "全部适用知识点清单待核，暂不计算完整覆盖率。") {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("ladder-checkpoint"),
         verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(if (recap) "刚学会的" else "本节脉络", style = MaterialTheme.typography.headlineSmall)
         val memories = if (recap) QuestionLadder.recap(session) else session.responses.filterNot { it.tryFirst }.map { it.remember }.filter { it.isNotBlank() }.distinct()
         memories.forEach { Text(it, style = MaterialTheme.typography.bodyLarge) }
         if (!recap) {
+            Text(scopeMessage, Modifier.testTag("ladder-scope-status"))
             if (gap) Text("这一节已核对的题暂时不够，进度已保留。还没会的地方会继续补题。")
             Text("这轮做了 ${session.responses.size} 题。看过讲解和答对是两回事，学习状态按真实作答保留。")
+            if (points.isNotEmpty()) Text("本周大纲记录（不代表全部适用知识点）")
             points.forEach { point -> Text("${splitTitle(point.title).second} · ${point.status.label}") }
             if (session.responses.any { !it.independentCorrect && !it.tryFirst }) Text("答错、不会和猜对的原题保留在学习记录，后续复习会接着练。")
         }

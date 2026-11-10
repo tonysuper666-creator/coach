@@ -4,12 +4,12 @@ import com.coach.domain.*
 import com.coach.store.sha256
 import kotlinx.serialization.json.*
 
-internal fun MainlineItem.eligibleForLearning(names: Set<String>, week: Int): Boolean =
-    ladder()?.eligible == true && unit.week == week && learning?.num("week") == week.toLong() &&
+internal fun MainlineItem.eligibleForLearning(names: Set<String>, week: Int, kpIds: Set<String>? = null): Boolean =
+    ladder(kpIds)?.eligible == true && unit.week == week && learning?.num("week") == week.toLong() &&
         names.any { it.equals(learning?.str("course_id"), ignoreCase = true) }
 
 /** The immutable candidate is attached to its existing pack item; it is not another question pool. */
-internal fun MainlineItem.ladder(): LadderQuestion? {
+internal fun MainlineItem.ladder(kpIds: Set<String>? = null): LadderQuestion? {
     val data = learning ?: return null
     val approvals = data["runtime_approval"] as? JsonObject ?: return null
     val candidate = JsonObject(data - "runtime_approval")
@@ -18,7 +18,8 @@ internal fun MainlineItem.ladder(): LadderQuestion? {
     val explanation = data["explanation"] as? JsonObject
     val wrong = (explanation?.get("wrong") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
     val sources = (data["sources"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-    val eligible = verified && data.str("key_state") == "VERIFIED" &&
+    val prerequisites = LadderPrerequisites.read(data["prerequisite_kp_ids"], kpIds)
+    val eligible = prerequisites.known && verified && data.str("key_state") == "VERIFIED" &&
         data.str("contract_version") == "1.0.0" && data.str("id") == unit.itemId && data.str("kp_id") == unit.kp &&
         data.str("stem") == unit.stem && data.strings("options") == unit.options && data.num("answer", -1).toInt() == unit.answer &&
         data.str("section_id").isNotBlank() && data.str("variant_group_id").isNotBlank() && data.str("remember").isNotBlank() &&
@@ -29,14 +30,17 @@ internal fun MainlineItem.ladder(): LadderQuestion? {
         approvals.str("screening_decision") == "keep" && approvals.str("isolation_state") == "CLEARED" && approvals.str("release_state") == "APPROVED" &&
         listOf("independent_key_evidence", "utility_review_evidence", "originality_review_evidence").all { approvals.str(it).isNotBlank() } &&
         approvals.str("candidate_sha256") == sha256(canonicalJson(candidate).encodeToByteArray())
-    val star = priority?.num("star")?.toInt()?.takeIf { it in 1..3 && priority.str("star_source").isNotBlank() } ?: 1
-    val weight = star + (if (priority?.str("lecture_emphasis") == "verified" && priority.str("lecture_emphasis_source").isNotBlank()) 1 else 0) +
+    val star = LadderStar.read(priority)
+    val weight = (star.value ?: 1) + (if (priority?.str("lecture_emphasis") == "verified" && priority.str("lecture_emphasis_source").isNotBlank()) 1 else 0) +
         (if (priority?.str("weakness_signal") == "verified" && priority.str("weakness_source").isNotBlank()) 1 else 0)
     return LadderQuestion(unit.itemId, data.str("kp_id"), data.str("section_id"), data.str("kind"), data.num("difficulty").toInt(),
-        data.str("variant_group_id"), fingerprint, data.strings("prerequisite_kp_ids"), weight, eligible,
+        data.str("variant_group_id"), fingerprint, prerequisites.ids, weight, eligible,
         (data["calculation"] as? JsonObject)?.str("chain_id").orEmpty(),
         (data["calculation"] as? JsonObject)?.num("step")?.toInt() ?: 0,
-        (data["calculation"] as? JsonObject)?.str("complete_example_id").orEmpty())
+        (data["calculation"] as? JsonObject)?.str("complete_example_id").orEmpty(),
+        capabilityId = data.str("capability_id").takeIf { it.isNotBlank() },
+        prerequisitesKnown = prerequisites.known, priorityStar = star.value, priorityStarState = star.state,
+        contractIssues = prerequisites.issues)
 }
 
 internal fun MainlineItem.ladderExplanation(): JsonObject {

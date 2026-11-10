@@ -211,12 +211,16 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             (q["ladder"] as? JsonObject)?.str("kpId") == targetKpId || (q["ladder"] as? JsonObject)?.str("kind") == "try_first" }
     }
     val learning = body?.flag("learning") == true
+    val runtime = com.coach.client.LearningRuntimeState.fromWeek(body)
     val ladderQuestions = filtered.mapNotNull { q -> (q["ladder"] as? JsonObject)?.let { raw -> runCatching { LedgerJson.decodeFromJsonElement<LadderQuestion>(raw) }.getOrNull() } }
     val previouslyLearned = view.kps.filter { it.status in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }.map { it.id }.toSet()
-    val ladderStep = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned)
-    val index = filtered.indexOfFirst { it.str("id") == itemId }.takeIf { it >= 0 }
-        ?: (if (learning) filtered.indexOfFirst { it.str("id") == ladderStep.question?.id }.takeIf { it >= 0 } else null)
-        ?: filtered.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0)
+    val capabilities = runtime.context.knownCapabilities.orEmpty()
+    val ladderStep = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities)
+    val index = filtered.indexOfFirst { it.str("id") == itemId }.takeIf {
+        it >= 0 && (!learning || result != null || pending != null || itemId == ladderStep.question?.id)
+    }
+        ?: (if (learning) filtered.indexOfFirst { it.str("id") == ladderStep.question?.id }
+            else filtered.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0))
     val item = filtered.getOrNull(index)
     val displayedNumber = if (learning) ladderSession.responses.size + if (result == null) 1 else 0 else index + 1
     val scroll = rememberScrollState(saved.num("quizScroll").toInt())
@@ -240,7 +244,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
             val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
             if (match == null && learning && !reading) {
-                val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned).question?.id.orEmpty()
+                val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id.orEmpty()
                 if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
                 if (filter != targetKpId) saveSession(ladderSession.copy(complete = false))
                 position(false, next, selectedFilter = targetKpId)
@@ -252,7 +256,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     val candidates = items.filter { q -> q.strings("factIds").any { it in match.strings("fact_ids") } }
                     val next = if (learning) {
                         val scoped = ladderQuestions.filter { it.kpId == targetKpId || it.sectionId == match.str("section_id") || it.kind == "try_first" }
-                        val selected = QuestionLadder.next(scoped, ladderSession, previouslyLearned).question?.id
+                        val selected = QuestionLadder.next(scoped, ladderSession, previouslyLearned, capabilities).question?.id
                         items.firstOrNull { it.str("id") == selected }
                     } else candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
                     val id = next?.str("id").orEmpty()
@@ -317,8 +321,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         if (pending != null) { position(false); return }
         val facts = sections.firstOrNull { it.str("section_id") == selectedFilter }?.strings("fact_ids").orEmpty()
         val candidates = if (selectedFilter.isBlank()) items else items.filter { q -> q.strings("factIds").any { it in facts } }
-        val next = candidates.firstOrNull { it.str("id") == itemId }
-            ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+        val selected = if (learning) QuestionLadder.next(ladderQuestions.filter { q -> candidates.any { it.str("id") == q.id } },
+            ladderSession, previouslyLearned, capabilities).question?.id else null
+        val next = if (learning) candidates.firstOrNull { it.str("id") == selected }
+            else candidates.firstOrNull { it.str("id") == itemId } ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
         val id = next?.str("id").orEmpty()
         if (id != itemId) {
             chosen = null; result = null
@@ -365,10 +371,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val nextKp = view.weekKps(number).let { rows -> rows.getOrNull(rows.indexOfFirst { it.id == targetKpId } + 1) }?.takeIf { it.id != targetKpId }
         LadderCheckpoint(ladderSession, points, ladderStep.blockedKps.isNotEmpty() || points.any { it.id !in previouslyLearned }, recapVisible, onContinue = {
             saveSession(QuestionLadder.closeRecap(ladderSession)); recapVisible = false; save("recapVisible" to JsonPrimitive(false))
-            val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned).question?.id
+            val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id
             if (next == null) saveSession(ladderSession.copy(complete = true))
             else { chosen = null; result = null; asked = false; save("choice" to JsonNull, "result" to JsonNull, "asked" to JsonPrimitive(false)); position(false, next); scope.launch { scroll.scrollTo(0) } }
-        }, onNotes = { position(true) }, onNext = if (nextKp != null && onNextSection != null) ({ onNextSection(nextKp.id) }) else null, onBack = onBack)
+        }, onNotes = { position(true) }, onNext = if (nextKp != null && onNextSection != null) ({ onNextSection(nextKp.id) }) else null, onBack = onBack,
+            scopeMessage = runtime.scopeMessage)
         return
     }
     if (item == null) {
@@ -511,6 +518,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("mainline-ask")) { Text("问一句") }
                 }
                 if ((item["ladder"] as? JsonObject)?.str("kind") == "try_first") Text("先试试 · 还没学过，错了正常，不计会没会。")
+                if (runtime.context.syntheticOnly) Text(runtime.scopeMessage, Modifier.testTag("ladder-synthetic-status"))
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(if (d.sectionLabel.isBlank()) "第 $displayedNumber 题" else "${d.sectionLabel} ${d.sectionTitle} · 第 $displayedNumber 题",
                         modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -580,6 +588,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 if (done != null) {
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
+                    LadderEssayFeedback(done)
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
                     if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
                         PrivateSourceReferences(http.reader, source, done.str("anchor"))
@@ -648,7 +657,7 @@ private fun Labeled(label: String, text: String) {
 private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
     val due = (r["dueDay"] as? JsonPrimitive)?.longOrNull
     val when_ = due?.let { when (val d = it - today) { 0L -> "今天"; 1L -> "明天"; else -> if (d < 0) "今天" else "$d 天后" } }
-    val head = when (r.str("status")) {
+    val head = if (r.flag("syntheticOnly")) "合成示例：已查看参考答案，不计掌握。" else when (r.str("status")) {
         "missed" -> if (r.flag("dontKnow")) "已看讲解，不算答对。" else "答错。"
         "mastered" -> "答对。"
         "guessed" -> "猜对：不算会。"
@@ -656,6 +665,7 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
         else -> "答错。"
     }
     val queued = when {
+        r.flag("syntheticOnly") -> null
         r.str("kpId").isBlank() -> if (r.str("status") == "mastered") null else "这道题没对上大纲里的知识点，没能排进复习。"
         r.str("status") == "mastered" -> null
         when_ != null -> "已排进复习：${when_}再看一次。"

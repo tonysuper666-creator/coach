@@ -35,6 +35,7 @@ kotlin {
         implementation(libs.navigationevent)
     }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
+    sourceSets.jvmTest { resources.srcDir(rootProject.file("testdata")) }
     sourceSets.androidMain.dependencies { implementation("androidx.activity:activity-compose:1.12.0") }
     sourceSets.jvmTest.dependencies {
         implementation(project(":server:app"))

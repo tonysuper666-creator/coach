@@ -50,11 +50,24 @@ class MainlineLadderTest {
         assertFalse(item(edited).ladder()!!.eligible)
     }
 
+    @Test fun signedCandidateRetainsCapabilityUnknownStarAndRejectsQuestionIdsAsKpPrerequisites() {
+        fun candidateWith(vararg fields: Pair<String, JsonElement>) = approved(JsonObject(candidate() + fields))
+        val wrong = item(candidateWith("prerequisite_kp_ids" to JsonArray(listOf(JsonPrimitive("fruit1"))))).ladder(setOf("fruit"))!!
+        assertFalse(wrong.eligible)
+        assertEquals(listOf("prerequisite_id_is_not_a_kp"), wrong.contractIssues)
+        val valid = item(candidateWith("capability_id" to JsonPrimitive("SYN-count"),
+            "prerequisite_kp_ids" to JsonArray(listOf(JsonPrimitive("fruit"))), "priority" to json("star" to "unknown"))).ladder(setOf("fruit"))!!
+        assertTrue(valid.eligible); assertEquals("SYN-count", valid.capabilityId)
+        assertNull(valid.priorityStar); assertEquals("unknown", valid.priorityStarState); assertEquals(1, valid.priority)
+        val one = item(candidateWith("priority" to json("star" to 1, "star_source" to "SYN-source"))).ladder()!!
+        assertEquals(1, one.priorityStar); assertEquals("verified", one.priorityStarState); assertEquals(1, one.priority)
+    }
+
     @Test fun runtimeFeedWithholdsRemovedContentButOriginalRecordsAndDontKnowRetriesSurvive() {
         val dir = Files.createTempDirectory("synthetic-ladder")
         try {
             val root = Files.createDirectories(dir.resolve("papers/mcq-mainline"))
-            var learning = approved(candidate())
+            var learning = approved(JsonObject(candidate() + ("essay" to json("model_answer_id" to "SYN-E1", "rubric_point_ids" to listOf("SYN-R1")))))
             fun write() {
                 val raw = json("id" to "fruit1", "type" to "mcq", "kp" to "fruit", "kp_week" to 1, "marks" to 1,
                     "tier" to "detail", "key_state" to "VERIFIED", "stem" to candidate().str("stem"), "options" to listOf("One", "Two", "Three"),
@@ -76,6 +89,7 @@ class MainlineLadderTest {
                 assertEquals(-1, result.num("choice").toInt())
                 assertTrue(result.flag("dontKnow")); assertFalse(result.flag("independentCorrect"))
                 assertEquals("Count every pear once.", result.str("remember"))
+                assertEquals("SYN-E1", result["essay"]!!.jsonObject.str("model_answer_id"))
                 val answer = store.events("SYNTHETIC").single { it.type == "answer_submitted" }
                 assertEquals("", answer.payload.str("answer")); assertTrue(answer.payload.flag("dontKnow"))
                 val before = store.events("SYNTHETIC")

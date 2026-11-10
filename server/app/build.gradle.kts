@@ -19,6 +19,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }
 application { mainClass = "com.coach.server.MainKt" }
+sourceSets.test { resources.srcDir(rootProject.file("testdata")) }
 tasks.test {
     // Resolve after Kotlin has finished wiring test dependencies, including for opt-in replay tasks.
     doFirst { systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath) }

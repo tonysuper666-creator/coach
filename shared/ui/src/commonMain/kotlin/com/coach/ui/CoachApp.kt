@@ -228,12 +228,19 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         if (target.legacy || target.week == null) { openStudy(target.kp.id, true); return }
         val saved = c.sync.mainlineState(c.courseId)
         c.sync.saveMainlineState(c.courseId, JsonObject(saved + mapOf("week" to JsonPrimitive(target.week), "targetKp" to JsonPrimitive(target.kp.id),
-            "entry" to JsonPrimitive(if (target.resume) "resume" else if (target.reading) "notes" else "quiz"))))
+            "entry" to JsonPrimitive(target.entry))))
         navigation.push(AppEntry(AppPage.MAINLINE, id = "continue", week = target.week, label = "第 ${target.week} 周"))
     }
     val openKp: (String, Boolean) -> Unit = { id, start ->
         val current = view
-        if (start && current != null) c.learningTarget(current)?.let { weekActions.start(current, it) }
+        if (start && current != null) {
+            val common = c.learningTarget(current)?.takeIf { it.kp.id == id }
+            val explicit = current.kp(id)?.let { kp ->
+                val week = current.weeks.firstOrNull { n -> current.weekKps(n).any { it.id == id } }
+                LearningTarget(kp, week, false, legacy = week == null)
+            }
+            (common ?: explicit)?.let { weekActions.start(current, it) }
+        }
         else openStudy(id, false)
     }
     val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }
@@ -302,7 +309,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                             onOpenMock = { navigation.push(AppEntry(AppPage.MOCK, label = "模拟考")) }, onOpenEssay = openEssay,
                                             onOpenMainline = { week, direct ->
                                                 val decision = current.let { c.learningTarget(it) }
-                                                if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else if (decision?.resume == true) "resume" else "quiz"))))
+                                                if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
                                                 navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
                                             }, reminderSettings = { TextButton(onClick = { navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }) { Text("设置") } }) else CenterMessage("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }

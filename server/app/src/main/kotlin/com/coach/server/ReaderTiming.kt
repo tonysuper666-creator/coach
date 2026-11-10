@@ -79,7 +79,7 @@ internal class ReaderBodyProgress {
                         val f = stack.last()
                         if (keyString) { f.key = key.toString(); f.phase = 1 } else f.phase = 3
                     }
-                    c < ' ' -> invalid = true
+                    // Match the final JSON parser; decoded() excludes controls from body progress.
                     else -> decoded(c)
                 }
                 continue

@@ -17,18 +17,17 @@ class QaExamPanelExemptionTest {
             ))
         val view = CourseView(listOf(outline), project(listOf(outline)))
         assertEquals(setOf(7), view.midtermExemptionWeeks)
-        val field = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }
-        val sync = (field.get(null) as sun.misc.Unsafe).allocateInstance(SyncEngine::class.java) as SyncEngine
+        val ledger = SyntheticLocalLedger("SYN1251")
         val tutor = TutorClient("http://127.0.0.1:18959", "qa", "synthetic", TutorModel({ 1_800_000_000_000L }))
         try {
             runComposeUiTest {
-                val c = CoachController("SYN1251", sync, tutor, formatClock = { "" })
+                val c = CoachController("SYN1251", ledger.sync, tutor, formatClock = { "" })
                 setContent { CoachTheme(false) { ExamPanelCard(c, view,
                     ExamFocus(listOf(WeekFocus(1, 1.0), WeekFocus(7, 0.0))), { _, _ -> }, {}) } }
                 onNodeWithText("第 7 周").assertExists()
                 onNodeWithText("课程里还没有这周的节").assertDoesNotExist()
                 onNodeWithText("期中周", substring = true).assertExists()
             }
-        } finally { tutor.close() }
+        } finally { tutor.close(); ledger.close() }
     }
 }

@@ -40,6 +40,15 @@ if (-not (Get-Command jpackage -ErrorAction SilentlyContinue)) {
     throw 'jpackage not found: put a JDK 21 on PATH or set JAVA_HOME.'
 }
 
+# Read the same release configuration as Android and Compose. Publishing records
+# v<version> tags; fetching them prevents an older checkout from emitting an old MSI.
+$versionLines = @(Get-Content -LiteralPath (Join-Path $root 'gradle.properties') |
+    Where-Object { $_ -match '^coach\.release\.version=' })
+if ($versionLines.Count -ne 1) { throw 'Expected one coach.release.version in gradle.properties' }
+$releaseVersion = $versionLines[0].Split('=', 2)[1].Trim()
+& git -C $root fetch --tags origin
+if ($LASTEXITCODE -ne 0) { throw 'Cannot sync published release tags; no package built.' }
+
 if ($WixZip) {
     $cache = Join-Path $env:USERPROFILE '.gradle\compose-jb'
     $target = Join-Path $cache 'wix311.zip'
@@ -54,7 +63,8 @@ $previousPriority = (Get-Process -Id $PID).PriorityClass
 Push-Location $root
 try {
     (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
-    & (Join-Path $root 'gradlew.bat') --console=plain ":desktopApp:$Task"
+    & (Join-Path $root 'gradlew.bat') --console=plain --priority=low --max-workers=2 `
+        '-Pcoach.release=true' :desktopApp:verifyReleaseVersion ":desktopApp:$Task"
     $code = $LASTEXITCODE
 } finally {
     Pop-Location
@@ -63,7 +73,7 @@ try {
 if ($code -ne 0) { throw "Gradle exited with code $code (task :desktopApp:$Task)" }
 
 $msiDir = Join-Path $root 'desktopApp\build\compose\binaries\main\msi'
-$installers = @(Get-ChildItem -Path $msiDir -Filter '*.msi' -ErrorAction SilentlyContinue)
+$installers = @(Get-ChildItem -LiteralPath (Join-Path $msiDir "Coach-$releaseVersion.msi") -ErrorAction SilentlyContinue)
 if ($installers.Count -eq 0) { throw "No MSI produced under $msiDir" }
 
 foreach ($installer in $installers) {

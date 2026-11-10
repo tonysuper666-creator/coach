@@ -122,7 +122,7 @@ internal fun WeeklyReader(
                     TextButton(onClick = { onQuiz("", null) }, modifier = Modifier.testTag("mainline-skip")) { Text("跳过要点，直接做题") }
                     if (section != null) TextButton(onClick = { onQuiz(section.str("section_id"), null) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
                 }
-                Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 20.dp, vertical = 12.dp),
+                Column(Modifier.fillMaxSize().testTag("mainline-reading-scroll").verticalScroll(scroll).padding(horizontal = 20.dp, vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         if (!focus) {

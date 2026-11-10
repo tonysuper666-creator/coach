@@ -20,7 +20,10 @@ if pathlib.Path(sys.argv[0]).name == 'xcodebuild':
 if args[:4] == ['simctl', 'list', 'devices', 'available']:
     print(json.dumps({'devices': {'fixture': [{'udid': 'fixture-device', 'state': (p/'state').read_text()}]}}))
 elif args[:2] == ['simctl', 'boot']:
-    (p/'state').write_text('Booted')
+    (p/'state').write_text('Booting' if scenario == 'duo_not_booted' else 'Booted')
+elif args[:2] == ['simctl', 'io']:
+    if scenario == 'duo_screenshot_fail': sys.exit(42)
+    pathlib.Path(args[-1]).write_bytes(b'fixture screenshot')
 elif args[:2] == ['simctl', 'bootstatus']:
     if scenario == 'boot_timeout': time.sleep(30)
     if scenario == 'boot_exit': sys.exit(47)
@@ -32,7 +35,7 @@ elif args[:2] == ['simctl', 'shutdown']:
 '''
 
 class RunnerTests(unittest.TestCase):
-    def exercise(self, scenario, expected, initial='Shutdown'):
+    def exercise(self, scenario, expected, initial='Shutdown', duo=False):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             for name in ('xcrun', 'xcodebuild'):
@@ -43,6 +46,8 @@ class RunnerTests(unittest.TestCase):
             env = dict(os.environ, PATH=str(base)+os.pathsep+os.environ['PATH'],
                        FIXTURE_DIR=temp, SCENARIO=scenario, READER_UI_LOG_DIR=str(base/'logs'),
                        READER_UI_TIMEOUT_SECONDS='1' if scenario.endswith('timeout') else '10')
+            if duo: env['READER_UI_DUO_READY'] = '1'
+            if duo: env['READER_UI_DUO_BOOT_WAIT_SECONDS'] = '0.3'
             result = subprocess.run(['bash', str(RUNNER), 'fixture-device'], env=env, capture_output=True, text=True, timeout=18)
             self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
             calls = (base/'calls').read_text()
@@ -66,6 +71,15 @@ class RunnerTests(unittest.TestCase):
         self.exercise('test_timeout', 124)
     def test_boot_timeout(self):
         self.assertNotIn('xcodebuild ', self.exercise('boot_timeout', 124))
+    def test_duo_ready_uses_primary_screenshot_not_bootstatus(self):
+        calls = self.exercise('success', 0, duo=True)
+        self.assertIn('screenshot --display=1', calls)
+        self.assertNotIn('bootstatus', calls)
+        self.assertIn('xcodebuild ', calls)
+    def test_duo_requires_booted_state(self):
+        self.assertNotIn('xcodebuild ', self.exercise('duo_not_booted', 1, duo=True))
+    def test_duo_screenshot_failure_propagates(self):
+        self.assertNotIn('xcodebuild ', self.exercise('duo_screenshot_fail', 42, duo=True))
 
 if __name__ == '__main__':
     unittest.main()

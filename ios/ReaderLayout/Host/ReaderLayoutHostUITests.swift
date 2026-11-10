@@ -1,6 +1,45 @@
 import XCTest
 
 final class ReaderLayoutHostUITests: XCTestCase {
+    func testSystemRotationKeepsReadingState() {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments += ["-systemDiagnostics"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["systemGeometry"].waitForExistence(timeout: 10))
+        app.buttons["下一页"].tap()
+        app.switches["标记这一段"].tap()
+        app.textFields["写下笔记"].tap()
+        app.textFields["写下笔记"].typeText("sample\n")
+        app.buttons["打开抽屉"].tap()
+        showInDrawer(app.buttons["查看出处"], in: app)
+        app.buttons["查看出处"].tap()
+        systemCapture(app, name: "system-portrait")
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.frame.width > app.frame.height
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 10), .completed, "Window must actually rotate")
+        showInDrawer(app.buttons["返回题目"], in: app)
+        systemCapture(app, name: "system-landscape")
+        app.buttons["返回题目"].tap()
+        app.buttons["收起"].tap()
+        scrollTo(app.textFields["写下笔记"], in: app)
+        XCTAssertTrue(app.staticTexts["第 2 页"].exists)
+        XCTAssertEqual(app.textFields["写下笔记"].value as? String, "sample")
+        XCTAssertEqual(app.switches["标记这一段"].value as? String, "1")
+    }
+
+    private func systemCapture(_ app: XCUIApplication, name: String) {
+        capture(app, name: name)
+        let diagnostic = XCTAttachment(string: "appFrame=\(app.frame)\n\(app.staticTexts["systemGeometry"].label)")
+        diagnostic.name = "\(name)-geometry"
+        diagnostic.lifetime = .keepAlways
+        add(diagnostic)
+    }
+
     func testChangesKeepReadingState() {
         let app = XCUIApplication()
         app.launch()

@@ -67,14 +67,48 @@ private struct HostView: View {
 
     private var host: some View {
         GeometryReader { proxy in
+            let division = systemDivision(proxy)
             let geometry = ReaderGeometry(width: proxy.size.width, height: proxy.size.height,
                                           hinge: closed ? .closed : systemHinge,
-                                          division: .none, surface: .unknown,
+                                          division: division, surface: .unknown,
                                           compactWidth: proxy.size.width < 600)
             let pose = ReaderPoseResolver.resolve(geometry, manual: manual)
             let layout = FlatReaderLayout.resolve(content: content, width: proxy.size.width,
                                                   height: proxy.size.height)
-            VStack(alignment: .leading, spacing: 0) {
+            Group {
+                if #available(iOS 27.1, *), division != .none {
+                    ArrangementView {
+                        reader(proxy: proxy, pose: pose, layout: layout)
+                    } secondary: {
+                        if drawer {
+                            drawerContent(width: proxy.size.width)
+                        } else {
+                            Text("第二栏示例").frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding()
+                        }
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        reader(proxy: proxy, pose: pose, layout: layout)
+                        if drawer {
+                            drawerContent(width: proxy.size.width)
+                                .frame(height: proxy.size.height * (dynamicTypeSize.isAccessibilitySize ? 0.6 : 0.4))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func systemDivision(_ proxy: GeometryProxy) -> ReaderGeometry.Division {
+        if #available(iOS 27.1, *),
+           let region = proxy.reservedRegions(kind: .division).first(where: { $0.isActive && !$0.frame.isEmpty }) {
+            return region.frame.height >= region.frame.width ? .vertical : .horizontal
+        }
+        return .none
+    }
+
+    private func reader(proxy: GeometryProxy, pose: ReaderPose, layout: FlatReaderLayout) -> some View {
               ScrollView {
                VStack(alignment: .leading, spacing: 12) {
                 Text("阅读布局示例").font(.title2.bold())
@@ -94,7 +128,11 @@ private struct HostView: View {
                 }.buttonStyle(.bordered)
                 Text("\(poseLabel(pose)) · \(layoutLabel(layout))")
                     .font(.subheadline)
-                Text("布局示例，手选形态为模拟输入，未接入折痕避让").font(.caption).foregroundStyle(.secondary)
+                Text(manual != nil ? "手选形态（模拟输入）" : (closed ? "模拟合上" : "系统输入"))
+                    .font(.caption).foregroundStyle(.secondary)
+                if ProcessInfo.processInfo.arguments.contains("-systemDiagnostics") {
+                    Text(systemDiagnostics(proxy)).font(.caption2).accessibilityIdentifier("systemGeometry")
+                }
                 ReaderCanvas(pose: pose, layout: layout, page: $page, selection: $selection,
                              draft: $draft, drawer: $drawer)
                     // Exercise an actual child view teardown on pose changes.
@@ -102,9 +140,20 @@ private struct HostView: View {
                }.padding()
                 .frame(maxWidth: .infinity, alignment: .topLeading)
               }.frame(maxHeight: .infinity).clipped().accessibilityIdentifier("readerScroll")
-                if drawer {
+    }
+
+    private func systemDiagnostics(_ proxy: GeometryProxy) -> String {
+        if #available(iOS 27.1, *) {
+            let divisions = proxy.reservedRegions(kind: .division).map { "\($0.frame) active=\($0.isActive) margins=\($0.margins)" }
+            let occlusions = proxy.reservedRegions(kind: .occlusion).map { "\($0.frame) active=\($0.isActive) margins=\($0.margins)" }
+            return "window=\(proxy.size) hinge=\(systemHinge) division=\(divisions) occlusion=\(occlusions)"
+        }
+        return "window=\(proxy.size) hinge=\(systemHinge) reserved=unavailable"
+    }
+
+    private func drawerContent(width: CGFloat) -> some View {
                     VStack(alignment: .leading, spacing: 0) {
-                        let headerLayout = proxy.size.width < 340 || dynamicTypeSize.isAccessibilitySize
+                        let headerLayout = width < 340 || dynamicTypeSize.isAccessibilitySize
                             ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout(alignment: .top))
                         headerLayout {
                             Text("内容抽屉示例").font(.headline)
@@ -125,13 +174,8 @@ private struct HostView: View {
                           }.padding().frame(maxWidth: .infinity, alignment: .topLeading)
                         }.accessibilityIdentifier("sampleDrawer")
                     }
-                    .frame(height: proxy.size.height * (dynamicTypeSize.isAccessibilitySize ? 0.6 : 0.4))
                     .clipped()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
     }
 
     private func layoutLabel(_ layout: FlatReaderLayout) -> String {

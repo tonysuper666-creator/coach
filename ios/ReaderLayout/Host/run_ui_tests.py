@@ -22,8 +22,11 @@ def main():
         timeout = float(os.environ.get("READER_UI_TIMEOUT_SECONDS", "600"))
         if not 0 < timeout <= 3600:
             raise ValueError
+        duo_boot_wait = float(os.environ.get("READER_UI_DUO_BOOT_WAIT_SECONDS", "30"))
+        if not 0 <= duo_boot_wait <= 300:
+            raise ValueError
     except ValueError:
-        print("READER_UI_TIMEOUT_SECONDS must be > 0 and <= 3600", file=sys.stderr)
+        print("Invalid UI timeout or Duo boot wait", file=sys.stderr)
         return 64
     deadline = time.monotonic() + timeout
     directory = Path(os.environ.get("READER_UI_LOG_DIR", ROOT / "ios/ReaderLayout/.derivedData/ui-test-runs"))
@@ -106,20 +109,34 @@ def main():
                     raise ChildFailure(code, "simctl boot failed")
             elif initial != "Booted":
                 raise ChildFailure(1, f"unexpected initial simulator state: {initial}")
-            before = log.tell()
-            code = run("bootstatus", ["xcrun", "simctl", "bootstatus", device, "-b"])
-            if code:
-                raise ChildFailure(code, "simctl bootstatus failed")
-            with log_path.open(encoding="utf-8") as reader:
-                reader.seek(before)
-                boot_output = reader.read()
-            if re.search(r"\b(failed|failure|error)\b", boot_output, re.IGNORECASE):
-                raise ChildFailure(1, "bootstatus reported failure despite exit 0")
-            terminal = re.findall(r"Status=(\d+),\s*isTerminal=YES", boot_output)
-            if any(value != "4294967295" for value in terminal):
-                raise ChildFailure(1, f"abnormal terminal boot status: {terminal}")
-            if state() != "Booted":
-                raise ChildFailure(1, "simulator is not Booted after bootstatus")
+            if os.environ.get("READER_UI_DUO_READY") == "1":
+                # This Duo runtime reports migration failure even on successful boots.
+                # Capture the primary display with Booted state. A successful
+                # screenshot can still show the boot logo; inspect it separately.
+                boot_deadline = min(deadline, time.monotonic() + duo_boot_wait)
+                while state() != "Booted":
+                    if time.monotonic() >= boot_deadline:
+                        raise ChildFailure(1, "Duo simulator is not Booted")
+                    time.sleep(min(0.5, max(0, boot_deadline - time.monotonic())))
+                code = run("primary-display", ["xcrun", "simctl", "io", device,
+                    "screenshot", "--display=1", str(directory / "primary-boot.png")])
+                if code:
+                    raise ChildFailure(code, "Duo primary display screenshot failed")
+            else:
+                before = log.tell()
+                code = run("bootstatus", ["xcrun", "simctl", "bootstatus", device, "-b"])
+                if code:
+                    raise ChildFailure(code, "simctl bootstatus failed")
+                with log_path.open(encoding="utf-8") as reader:
+                    reader.seek(before)
+                    boot_output = reader.read()
+                if re.search(r"\b(failed|failure|error)\b", boot_output, re.IGNORECASE):
+                    raise ChildFailure(1, "bootstatus reported failure despite exit 0")
+                terminal = re.findall(r"Status=(\d+),\s*isTerminal=YES", boot_output)
+                if any(value != "4294967295" for value in terminal):
+                    raise ChildFailure(1, f"abnormal terminal boot status: {terminal}")
+                if state() != "Booted":
+                    raise ChildFailure(1, "simulator is not Booted after bootstatus")
             code = run("xcodebuild", ["xcodebuild", "-quiet", "-project", "ios/ReaderLayout/Host/ReaderLayoutHost.xcodeproj",
                 "-scheme", "ReaderLayoutHost", "-destination", f"platform=iOS Simulator,id={device}",
                 "-derivedDataPath", "ios/ReaderLayout/.derivedData", "-resultBundlePath", str(result_path),

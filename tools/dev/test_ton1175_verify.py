@@ -378,6 +378,34 @@ class IdleTest(unittest.TestCase):
         with self.assertRaisesRegex(verify.GateError, 'non-health'):
             self.run_idle()
 
+    def test_rehearsal_idle_hook_accepts_strict_zero_reads_without_managed_bridge(self):
+        from tools.dev import rehearse_ton1175_launchd as rehearsal
+        self.measured.update(socketReads=0, reads=[])
+        self.info.pop('runDir')
+        self.installation.write_text(json.dumps(self.info))
+        self.proof['installationSha256'] = verify.file_hash(self.installation)
+        self.proof.pop('bridgeIdentitySha256')
+        self.evidence.write_text(json.dumps(self.proof))
+        (self.root / 'rehearsal.json').write_text(json.dumps(dict(
+            case='normal', java='fixture-java', jcmd='forbidden-jcmd')))
+        with mock.patch.object(rehearsal, 'Adapter'):
+            rehearsal.hook('idle', self.root, [self.evidence, self.installation])
+        self.assertEqual(self.kernel_lock.call_count, 2)
+        self.assertTrue(all(call.args[0][0] in ('/bin/ps', 'fixture-java')
+                            for call in self.captured.call_args_list))
+
+    def test_positive_reads_still_require_observed_bridge_binding(self):
+        self.proof.pop('bridgeIdentitySha256')
+        with self.assertRaises(KeyError):
+            self.run_idle()
+
+    def test_new_lifetime_handles_fork_boundary_but_rejects_five_seconds(self):
+        self.measured['jvmStart'] = idle_fixtures.stamp(self.start - 1998.93)
+        self.run_idle()
+        self.measured['jvmStart'] = idle_fixtures.stamp(self.start - 1995)
+        with self.assertRaisesRegex(verify.GateError, 'different JVM lifetime'):
+            self.run_idle()
+
     def test_short_stale_future_window_still_rejected(self):
         for start, end in ((self.start, self.start + 899), (self.start - 131, self.start + 769),
                            (self.start, self.now + 1)):
@@ -511,7 +539,7 @@ public class MainKt {
    r.enable("jdk.JVMInformation").withPeriod(Duration.ofMillis(20));
    r.enable("jdk.CPULoad").withPeriod(Duration.ofMillis(20));
    r.enable("jdk.ActiveSetting");r.enable("jdk.DataLoss");
-   r.enable("jdk.SocketRead").withThreshold(Duration.ZERO);
+   r.enable("jdk.SocketRead").withThreshold(Duration.ZERO).withStackTrace();
    r.start();Thread.sleep(1500);Instant start=Instant.now();
    Thread.sleep(150);Instant quietEnd=Instant.now();
    try(ServerSocket server=new ServerSocket(0,1,InetAddress.getLoopbackAddress());

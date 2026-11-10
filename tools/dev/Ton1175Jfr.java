@@ -8,6 +8,8 @@ import jdk.jfr.consumer.RecordingFile;
 
 /** Closed-schema inspection of the recording itself, never a caller's count flag. */
 class Ton1175Jfr {
+    static class MissingSocketStackSetting extends RuntimeException {}
+
     static void need(boolean condition) {
         if (!condition) throw new IllegalArgumentException("JFR evidence rejected");
     }
@@ -98,13 +100,20 @@ class Ton1175Jfr {
                 need(active.containsKey(id) && "true".equals(active.get(id).get("enabled")));
             }
             need("0 ns".equals(active.get(socketId).get("threshold")));
+            boolean socketStacksCovered = "true".equals(active.get(socketId).get("stackTrace"));
             for (RecordedEvent setting : settings) {
                 if (setting.getStartTime().isAfter(start) && !setting.getStartTime().isAfter(end)) {
                     String name = setting.getString("name"), value = setting.getString("value");
                     need(!name.equals("enabled") || value.equals("true"));
                     need(setting.getLong("id") != socketId || !name.equals("threshold") || value.equals("0 ns"));
+                    if (setting.getLong("id") == socketId && name.equals("stackTrace") && !value.equals("true")) {
+                        socketStacksCovered = false;
+                    }
                 }
             }
+            // Zero positive reads retain the original strict idle path. Any
+            // read needing classification requires stacks throughout the window.
+            if (reads > 0 && !socketStacksCovered) throw new MissingSocketStackSetting();
             heartbeats.sort(Comparator.naturalOrder());
             need(!heartbeats.isEmpty() && !heartbeats.get(0).isAfter(start)
                     && !heartbeats.get(heartbeats.size()-1).isBefore(end));
@@ -119,6 +128,9 @@ class Ton1175Jfr {
             // complete-window policy may exempt proven managed health polls.
             System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStart\":\"%s\",\"socketReads\":%d,\"reads\":[%s]}%n",
                     pid, jvmStart, reads, String.join(",", socketReads));
+        } catch (MissingSocketStackSetting error) {
+            System.err.println("JFR evidence rejected: SocketRead stackTrace setting missing or disabled");
+            System.exit(1);
         } catch (Exception error) {
             // Static source location is useful to reviewers without disclosing
             // recording values or arbitrary exception messages.

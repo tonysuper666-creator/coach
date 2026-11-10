@@ -92,14 +92,19 @@ Private idle evidence retains the prototype fields `windowStart`, `windowEnd`,
 - `bridgeIdentitySha256`: SHA-256 of the NUL-joined byte values `bridge PID`,
   `guard PID`, stripped bridge ps stdout, stripped guard ps stdout. Both ps calls
   use the same `LC_ALL=C TZ=UTC` and `lstart=/command=` format. Capture this at
-  observation time. The PIDs come from the installed `runDir/bridge.json`.
+  observation time. The PIDs come from the installed `runDir/bridge.json`. This
+  binding is required only when positive reads need a health-poll exemption.
 
 The verifier requires at least 900 seconds, an end no more than 120 seconds old,
 the same live installed server command, its exclusive whole-file write lock on
 `dataDir/server.lock`, and unchanged installation/recording before and after
 inspection. JFR's JVM PID, main class and start time must match the kernel process
-start from `ps lstart` (UTC, C locale, original one-second tolerance). Host sleep
-does not change that start time; a reused PID alone cannot satisfy it.
+start from `ps lstart` (UTC, C locale): `0 <= jvmStart - lstart < 5` seconds.
+`lstart` truncates the fork time to seconds and JFR reports VM initialization
+later. The bounded one-sided interval accounts for both effects and rejects a
+VM predating the process. Host sleep does not change that start time. The full
+start/command hash is still fixed before and after verification; PID alone is
+never sufficient.
 On macOS the verifier reads the native `F_GETLK` result for the lock inode and
 requires the exact JVM PID, write-lock type and whole-file range. This is a
 read-only kernel query: Darwin `lsof` can report a blank lock field even for a
@@ -116,11 +121,32 @@ bridge health responses: the JFR address must be exactly `127.0.0.1`, remote por
 8791 (the installed ChildServices invariant), and a non-truncated recorded stack
 must contain `com.coach.server.ChildServices$supervise$1.invokeSuspend`. Enable
 `jdk.SocketRead` stack traces when collecting; missing stacks cannot earn an
-exclusion. A caller's zero count or whitelist is never consumed.
+exclusion. When the window has positive reads, the inspector requires the
+`stackTrace=true` setting at window start and no disabling inside the window.
+It explicitly rejects missing coverage as
+`JFR evidence rejected: SocketRead stackTrace setting missing or disabled`,
+before attempting health classification. A caller's zero count or whitelist
+is never consumed.
 
-The verifier additionally binds the observed bridge/guard identities to the
+For the next cutover, collect a **new** recording using the checked-in
+`tools/dev/ton1175-idle.jfc` (including `SocketRead` enabled, zero threshold and
+stackTrace true), for example with the authorized collector's existing
+`jcmd PID JFR.start name=ton1175 settings=/absolute/path/tools/dev/ton1175-idle.jfc`.
+The launchd rehearsal copies this same configuration and captures its JVM ps
+identity with `LC_ALL=C TZ=UTC`. Earlier positive-read recordings made without
+stacks, including TON-1441's old recording, cannot prove the new exemption;
+do not retrofit settings or remove reads from them. Real managed-health stacks
+must also be checked for truncation in that new recording before a cutover.
+
+If the inspector proves **zero** positive reads, the original strict idle path
+requires no health polls, runDir or bridge identity. All JFR coverage/settings,
+900-second, freshness, JVM lifetime/identity, lock and file-hash checks still
+apply. The unmanaged launchd rehearsal uses this path; its random bridge URL
+does not grant any read exemption.
+
+For a health exemption the verifier additionally binds the observed bridge/guard identities to the
 installed scripts, their kernel parent chain back to this JVM, and the exact
-loopback listener owner before and after inspection. Both children must predate
+loopback listener owner twice during verification. Both children must predate
 the window. `runDir/bridge.json` must remain healthy, belong to this JVM and be
 at most 15 seconds old. The managed port cannot be changed through idle evidence.
 Missing bridge evidence or a foreign listener fails closed.
@@ -130,12 +156,19 @@ second. Every exchange must have the same total bytes, with poll starts 10 secon
 apart (one-second jitter) and a poll within 11 seconds of each window boundary.
 Other endpoints/callers, concurrent reads, varying sizes, extra/missing polls or
 reads crossing a boundary reject the window. Neither freshness nor the 900-second
-minimum is reduced. Old evidence needs the new bridge binding and recorded stacks.
+minimum is reduced. Positive-read evidence needs the new bridge binding and recorded stacks.
 
 Run `python3 -m unittest tools.dev.test_ton1460_idle -v` for portable offline policy
-and real JFR fixtures (JDK required). On macOS also run the unchanged original suite
+and real JFR fixtures (JDK required). On macOS also run the original suite
 plus new orchestration cases with `python3 -m pytest tools/dev/test_ton1175_verify.py`.
 The short JFR fixture exercises the parser; it never qualifies as production idle.
+The existing raw-socket fixture now enables stack traces without changing any
+assertions. To reproduce the unmanaged rehearsal hook alone with synthetic
+process/recording boundaries, run on macOS:
+`python3 -m unittest tools.dev.test_ton1175_verify.IdleTest.test_rehearsal_idle_hook_accepts_strict_zero_reads_without_managed_bridge -v`.
+This calls the actual `hook('idle')` and `idle()`; it is an offline fixture, not
+a replacement for the full launchd observation. The original MathJax test needs
+the existing `tools/mathsvc` dependencies (`npm ci` there in a clean checkout).
 
 `logVerifier` receives `IDLE_JSON LOG...` before stopping. For protocol v1,
 `accessLogs` in the switch configuration must list **all activity journal files

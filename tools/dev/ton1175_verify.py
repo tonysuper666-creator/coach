@@ -240,19 +240,19 @@ def idle(evidence, installation, java, jcmd, lsof):
         return binding
 
     before = live_identity()
-    bridge_before = live_bridge()
     inspector = Path(__file__).with_name('Ton1175Jfr.java')
     measured = json.loads(captured([java, str(inspector), str(recording), p['windowStart'],
                                     p['windowEnd'], pid]))
     require(measured['pid'] == int(pid), 'JFR process mismatch')
     try:
-        idle_checks.health_reads(measured, start, end)
+        polls = idle_checks.health_reads(measured, start, end)
         idle_checks.lifetime(before, measured['jvmStart'])
     except idle_checks.EvidenceError as error:
         raise GateError(str(error)) from error
     # jcmd remains an accepted CLI argument for existing controllers, but is
     # never consulted for lifetime: macOS uptime excludes host sleep.
-    require(live_identity() == before and live_bridge() == bridge_before
+    bridge_before = live_bridge() if polls else None
+    require(live_identity() == before and (not polls or live_bridge() == bridge_before)
             and file_hash(installation) == p['installationSha256']
             and file_hash(recording) == p['recordingSha256'], 'identity changed during verification')
 

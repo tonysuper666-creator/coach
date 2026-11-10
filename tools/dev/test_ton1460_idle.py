@@ -63,12 +63,18 @@ class HealthReadsTest(unittest.TestCase):
 
     def test_missing_poll_or_beginning_or_tail_coverage_rejected(self):
         original = self.rows
-        for rows in ([], original[:40] + original[42:], original[4:], original[:-4]):
+        for rows in (original[:40] + original[42:], original[4:], original[:-4]):
             with self.subTest(size=len(rows)):
                 self.rows = rows
                 with self.assertRaises(ValueError):
                     self.check()
         self.rows = original
+
+    def test_zero_positive_reads_preserve_strict_idle_without_health_exemptions(self):
+        self.rows = []
+        self.assertEqual(self.check(), 0)
+        with self.assertRaisesRegex(ValueError, 'coverage incomplete'):
+            idle.health_reads(dict(socketReads=1, reads=[]), self.start, self.end)
 
     def test_fast_slow_or_extra_poll_rejected(self):
         original = copy.deepcopy(self.rows)
@@ -116,10 +122,15 @@ class LifetimeTest(unittest.TestCase):
         self.assertGreater(abs(now - old_uptime - jvm_start), 10000)
         idle.lifetime(process(started), stamp(jvm_start))
 
-    def test_same_pid_different_lifetime_rejected_at_original_tolerance(self):
-        for offset in (-11313, -1, 1, 11313):
+    def test_same_pid_different_lifetime_or_vm_predating_fork_rejected(self):
+        for offset in (-11313, -1, -0.001, 5, 11313):
             with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, 'different JVM lifetime'):
                 idle.lifetime(process(1794260000), stamp(1794260000 + offset))
+
+    def test_fork_near_second_boundary_and_vm_initialization_delay(self):
+        fork = 1794260000 + 0.95
+        idle.lifetime(process(fork), stamp(fork + 0.12))
+        idle.lifetime(process(fork), stamp(1794260004.999))
 
     def test_missing_kernel_start_or_timezone_rejected(self):
         with self.assertRaises(ValueError):
@@ -227,16 +238,19 @@ public class Ton1460Fixture {
 import jdk.jfr.*;import java.time.*;import java.nio.file.*;import java.net.*;
 public class MainKt {
  public static void main(String[] args)throws Exception {
-  try(Recording r=new Recording()) {
+  try(Recording r=new Recording(Configuration.create(Path.of(System.getenv("GATE_JFR_CONFIG"))))) {
    String mode=System.getenv().getOrDefault("GATE_JFR_MODE","normal");
    r.enable("jdk.JVMInformation").withPeriod(Duration.ofMillis(20));
-   if(!mode.equals("missingHeartbeat")) r.enable("jdk.CPULoad").withPeriod(Duration.ofMillis(20));
+   if(mode.equals("missingHeartbeat")) r.disable("jdk.CPULoad");
+   else r.enable("jdk.CPULoad").withPeriod(Duration.ofMillis(20));
    r.enable("jdk.ActiveSetting");r.enable("jdk.DataLoss");
-   r.enable("jdk.SocketRead").withThreshold(Duration.ZERO);
+   if(mode.equals("missingStack") || mode.equals("lateStack")) r.enable("jdk.SocketRead").withoutStackTrace();
    r.start();Thread.sleep(1500);Instant start=Instant.now();
    Thread.sleep(150);Instant quiet=Instant.now();
    if(mode.equals("threshold")) r.enable("jdk.SocketRead").withThreshold(Duration.ofMillis(1));
    if(mode.equals("disabled")) r.disable("jdk.SocketRead");
+   if(mode.equals("disabledStack")) r.enable("jdk.SocketRead").withoutStackTrace();
+   if(mode.equals("lateStack")) r.enable("jdk.SocketRead").withStackTrace();
    try(ServerSocket s=new ServerSocket(0,1,InetAddress.getLoopbackAddress());
        Socket c=new Socket(InetAddress.getLoopbackAddress(),s.getLocalPort());Socket a=s.accept()) {
     c.getOutputStream().write(1);a.getInputStream().read();
@@ -253,8 +267,10 @@ public class MainKt {
             raise AssertionError(result.stderr)
 
     def run_java(self, *args, **kwargs):
+        env = dict(kwargs.pop('env', os.environ),
+                   GATE_JFR_CONFIG=str(Path(__file__).with_name('ton1175-idle.jfc')))
         return subprocess.run([self.java, '-cp', str(self.root), *map(str, args)],
-                              capture_output=True, text=True, timeout=60, **kwargs)
+                              capture_output=True, text=True, timeout=60, env=env, **kwargs)
 
     def test_real_jfr_fields_bind_ipv4_port_and_actual_call_stack(self):
         result = self.run_java('Ton1460Fixture', self.root / 'synthetic.jfr')
@@ -296,6 +312,22 @@ public class MainKt {
                 rejected = self.run_java('Ton1175Jfr', path, proof['start'], proof['busy'], proof['pid'])
                 self.assertEqual(rejected.returncode, 1, rejected.stdout)
                 self.assertIn('JFR evidence rejected', rejected.stderr)
+
+    def test_missing_initial_late_or_disabled_stack_setting_has_explicit_rejection(self):
+        for mode in ('missingStack', 'lateStack', 'disabledStack'):
+            path = self.root / (mode + '.jfr')
+            fixture = self.run_java('com.coach.server.MainKt',
+                env=dict(os.environ, GATE_JFR_OUTPUT=str(path), GATE_JFR_MODE=mode))
+            self.assertEqual(fixture.returncode, 0, fixture.stderr)
+            proof = json.loads(fixture.stdout)
+            with self.subTest(mode=mode):
+                rejected = self.run_java('Ton1175Jfr', path, proof['start'], proof['busy'], proof['pid'])
+                self.assertEqual(rejected.returncode, 1)
+                self.assertIn('SocketRead stackTrace setting missing or disabled', rejected.stderr)
+                self.assertEqual(rejected.stdout, '')
+        # The old strict empty window has no positive read needing a stack.
+        quiet = self.run_java('Ton1175Jfr', path, proof['start'], proof['quiet'], proof['pid'])
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
 
 
 if __name__ == '__main__':

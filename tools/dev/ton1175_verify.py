@@ -23,8 +23,10 @@ from urllib.parse import urlsplit
 
 try:
     from .ton1175_switch import GateError, atomic, digest, file_hash, get_time, load, require, tree_hash
+    from . import ton1175_idle as idle_checks
 except ImportError:
     from ton1175_switch import GateError, atomic, digest, file_hash, get_time, load, require, tree_hash
+    import ton1175_idle as idle_checks
 
 
 def release_links(release):
@@ -192,7 +194,8 @@ def idle(evidence, installation, java, jcmd, lsof):
     require(file_hash(recording) == p['recordingSha256'], 'JFR recording changed')
 
     def live_identity():
-        ps = captured(['/bin/ps', '-p', pid, '-o', 'lstart=', '-o', 'command=']).strip()
+        ps = captured(['/bin/ps', '-p', pid, '-o', 'lstart=', '-o', 'command='],
+                      env=dict(os.environ, LC_ALL='C', TZ='UTC')).strip()
         require(digest(ps) == p['processIdentitySha256'], 'recorded JVM process identity changed')
         require(str(Path(info['root']) / 'app/lib').encode() in ps
                 and b'com.coach.server.MainKt' in ps, 'live JVM is not the installed server')
@@ -212,19 +215,45 @@ def idle(evidence, installation, java, jcmd, lsof):
             require(owners == [pid], 'recorded JVM does not exclusively own server lock')
         return ps
 
+    def live_bridge():
+        state = load(Path(info['runDir']) / 'bridge.json')
+        def identity(child):
+            require(type(child) is int and child > 0, 'invalid managed child PID')
+            ps = captured(['/bin/ps', '-p', str(child), '-o', 'lstart=', '-o', 'command='],
+                          env=dict(os.environ, LC_ALL='C', TZ='UTC')).strip()
+            parent = int(captured(['/bin/ps', '-p', str(child), '-o', 'ppid=']).strip())
+            return ps, parent
+        bridge, bridge_parent = identity(state['pid'])
+        guard, guard_parent = identity(state['guardPid'])
+        try:
+            binding = idle_checks.bridge_identity(state, int(pid), bridge, guard, bridge_parent,
+                guard_parent, info['root'], info['runDir'], start, time.time())
+        except idle_checks.EvidenceError as error:
+            raise GateError(str(error)) from error
+        require(digest(binding) == p['bridgeIdentitySha256'], 'recorded bridge identity changed')
+        listener = captured([lsof, '-nP', '-a', '-iTCP@127.0.0.1:' + str(idle_checks.BRIDGE_PORT),
+                             '-sTCP:LISTEN', '-Fpn']).decode().splitlines()
+        require([line for line in listener if line.startswith('p')] == ['p' + str(state['pid'])]
+                and [line for line in listener if line.startswith('n')]
+                    == ['n127.0.0.1:' + str(idle_checks.BRIDGE_PORT)],
+                'managed bridge does not exclusively own health listener')
+        return binding
+
     before = live_identity()
+    bridge_before = live_bridge()
     inspector = Path(__file__).with_name('Ton1175Jfr.java')
     measured = json.loads(captured([java, str(inspector), str(recording), p['windowStart'],
                                     p['windowEnd'], pid]))
-    require(measured['pid'] == int(pid) and measured['socketReads'] == 0,
-            'JFR contains socket activity')
-    # Uptime binds the live PID to the recorded JVM start, not just a PID which
-    # might have been reused since the recording. No jcmd output is disclosed.
-    uptime = captured([jcmd, pid, 'VM.uptime']).decode()
-    match = re.search(r'(?m)^([0-9]+(?:\.[0-9]+)?) s\s*$', uptime)
-    require(match is not None and abs(time.time()-float(match[1])-get_time(measured['jvmStart'])) < 1,
-            'recording belongs to a different JVM lifetime')
-    require(live_identity() == before and file_hash(installation) == p['installationSha256']
+    require(measured['pid'] == int(pid), 'JFR process mismatch')
+    try:
+        idle_checks.health_reads(measured, start, end)
+        idle_checks.lifetime(before, measured['jvmStart'])
+    except idle_checks.EvidenceError as error:
+        raise GateError(str(error)) from error
+    # jcmd remains an accepted CLI argument for existing controllers, but is
+    # never consulted for lifetime: macOS uptime excludes host sleep.
+    require(live_identity() == before and live_bridge() == bridge_before
+            and file_hash(installation) == p['installationSha256']
             and file_hash(recording) == p['recordingSha256'], 'identity changed during verification')
 
 

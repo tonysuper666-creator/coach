@@ -79,7 +79,8 @@ Pin and review the verifier and controller code as trusted gate executables too.
 
 `idleVerifier` can be configured as `["python3", ".../ton1175_verify.py", "idle",
 "--java", JAVA, "--jcmd", JCMD, "--lsof", LSOF]`; the transaction appends
-`IDLE_JSON INSTALLATION`. Use JDK 17's `java` and `jcmd` for the observed JVM.
+`IDLE_JSON INSTALLATION`. Use JDK 17's `java` for the observed JVM. `--jcmd` is
+retained for controller compatibility but is no longer executed for lifetime binding.
 Private idle evidence retains the prototype fields `windowStart`, `windowEnd`,
 `verifiedAtEpoch`, `sourceHead`, `pid`, `recording`, `clientSocketReads: 0`,
 `latestClientRead: null`, and adds:
@@ -87,13 +88,18 @@ Private idle evidence retains the prototype fields `windowStart`, `windowEnd`,
 - `installationSha256`: exact installation record hash;
 - `recordingSha256`: exact immutable recording hash;
 - `processIdentitySha256`: SHA-256 of stripped stdout from
-  `/bin/ps -p PID -o lstart= -o command=` at observation time.
+  `env LC_ALL=C TZ=UTC /bin/ps -p PID -o lstart= -o command=` at observation time;
+- `bridgeIdentitySha256`: SHA-256 of the NUL-joined byte values `bridge PID`,
+  `guard PID`, stripped bridge ps stdout, stripped guard ps stdout. Both ps calls
+  use the same `LC_ALL=C TZ=UTC` and `lstart=/command=` format. Capture this at
+  observation time. The PIDs come from the installed `runDir/bridge.json`.
 
 The verifier requires at least 900 seconds, an end no more than 120 seconds old,
 the same live installed server command, its exclusive whole-file write lock on
 `dataDir/server.lock`, and unchanged installation/recording before and after
-inspection. JFR's JVM PID, main class and start time must match the live lifetime
-measured by `jcmd VM.uptime`; a reused PID alone cannot satisfy it.
+inspection. JFR's JVM PID, main class and start time must match the kernel process
+start from `ps lstart` (UTC, C locale, original one-second tolerance). Host sleep
+does not change that start time; a reused PID alone cannot satisfy it.
 On macOS the verifier reads the native `F_GETLK` result for the lock inode and
 requires the exact JVM PID, write-lock type and whole-file range. This is a
 read-only kernel query: Darwin `lsof` can report a blank lock field even for a
@@ -104,11 +110,32 @@ fail closed. Other platforms retain the `lsof` whole-file lock check.
 requires enabled `SocketRead`, `ActiveSetting`, `DataLoss`, `CPULoad` and
 `JVMInformation` evidence, zero socket threshold, no disabling during the window,
 no data loss, and CPU heartbeat coverage bracketing the window with at most
-two-second gaps. Every positive socket read overlapping the window counts,
-including hello/bridge traffic; there are no asserted JSON exclusions. Missing
-events/settings/coverage fail closed. Old recordings made without these enabled
-events cannot be used. The unit fixture is deliberately short; it verifies the
-real parser and proves the Python entrypoint rejects it as a production idle proof.
+two-second gaps. Every positive socket read overlapping the window is retained,
+including Unix/control reads. The only exclusion is a complete sequence of managed
+bridge health responses: the JFR address must be exactly `127.0.0.1`, remote port
+8791 (the installed ChildServices invariant), and a non-truncated recorded stack
+must contain `com.coach.server.ChildServices$supervise$1.invokeSuspend`. Enable
+`jdk.SocketRead` stack traces when collecting; missing stacks cannot earn an
+exclusion. A caller's zero count or whitelist is never consumed.
+
+The verifier additionally binds the observed bridge/guard identities to the
+installed scripts, their kernel parent chain back to this JVM, and the exact
+loopback listener owner before and after inspection. Both children must predate
+the window. `runDir/bridge.json` must remain healthy, belong to this JVM and be
+at most 15 seconds old. The managed port cannot be changed through idle evidence.
+Missing bridge evidence or a foreign listener fails closed.
+
+TCP fragments from one thread are grouped into exchanges lasting at most one
+second. Every exchange must have the same total bytes, with poll starts 10 seconds
+apart (one-second jitter) and a poll within 11 seconds of each window boundary.
+Other endpoints/callers, concurrent reads, varying sizes, extra/missing polls or
+reads crossing a boundary reject the window. Neither freshness nor the 900-second
+minimum is reduced. Old evidence needs the new bridge binding and recorded stacks.
+
+Run `python3 -m unittest tools.dev.test_ton1460_idle -v` for portable offline policy
+and real JFR fixtures (JDK required). On macOS also run the unchanged original suite
+plus new orchestration cases with `python3 -m pytest tools/dev/test_ton1175_verify.py`.
+The short JFR fixture exercises the parser; it never qualifies as production idle.
 
 `logVerifier` receives `IDLE_JSON LOG...` before stopping. For protocol v1,
 `accessLogs` in the switch configuration must list **all activity journal files

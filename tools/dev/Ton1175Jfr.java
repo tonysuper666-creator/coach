@@ -12,6 +12,21 @@ class Ton1175Jfr {
         if (!condition) throw new IllegalArgumentException("JFR evidence rejected");
     }
 
+    static String socketRead(RecordedEvent event) {
+        boolean peer = "127.0.0.1".equals(event.getString("address")) && event.getInt("port") == 8791;
+        // This installed call site performs only /health?scope=process reads.
+        // Loopback alone, a caller's flag or a thread name is not an identity.
+        var stack = event.getStackTrace();
+        boolean origin = stack != null && !stack.isTruncated() && stack.getFrames().stream().anyMatch(frame ->
+                frame.getMethod().getType().getName().equals("com.coach.server.ChildServices$supervise$1")
+                && frame.getMethod().getName().equals("invokeSuspend"));
+        var thread = event.getThread();
+        return String.format(Locale.ROOT,
+                "{\"start\":\"%s\",\"end\":\"%s\",\"bytes\":%d,\"thread\":%d,\"bridgePeer\":%b,\"healthOrigin\":%b}",
+                event.getStartTime(), event.getEndTime(), event.getLong("bytesRead"),
+                thread == null ? 0 : thread.getJavaThreadId(), peer, origin);
+    }
+
     public static void main(String[] args) throws Exception {
         try {
             Path path = Path.of(args[0]);
@@ -33,6 +48,7 @@ class Ton1175Jfr {
             List<RecordedEvent> settings = new ArrayList<>();
             Instant jvmStart = null;
             long reads = 0;
+            List<String> socketReads = new ArrayList<>();
             boolean identity = false;
             try (RecordingFile file = new RecordingFile(path)) {
                 while (file.hasMoreEvents()) {
@@ -57,7 +73,10 @@ class Ton1175Jfr {
                             break;
                         case "jdk.SocketRead":
                             if (event.getLong("bytesRead") > 0 && !event.getEndTime().isBefore(start)
-                                    && !event.getStartTime().isAfter(end)) reads++;
+                                    && !event.getStartTime().isAfter(end)) {
+                                reads++;
+                                socketReads.add(socketRead(event));
+                            }
                             break;
                         default:
                             break;
@@ -96,10 +115,10 @@ class Ton1175Jfr {
                 }
                 previous = beat;
             }
-            // Count every socket read, including health checks: conservative
-            // rejection is preferable to guessing that a peer was internal.
-            System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStart\":\"%s\",\"socketReads\":%d}%n",
-                    pid, jvmStart, reads);
+            // Keep the raw count and every positive read. Only the verifier's
+            // complete-window policy may exempt proven managed health polls.
+            System.out.printf(Locale.ROOT, "{\"pid\":%d,\"jvmStart\":\"%s\",\"socketReads\":%d,\"reads\":[%s]}%n",
+                    pid, jvmStart, reads, String.join(",", socketReads));
         } catch (Exception error) {
             // Static source location is useful to reviewers without disclosing
             // recording values or arbitrary exception messages.

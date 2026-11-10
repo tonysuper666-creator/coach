@@ -103,9 +103,17 @@ private struct HostView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
               }.frame(maxHeight: .infinity).clipped().accessibilityIdentifier("readerScroll")
                 if drawer {
-                    ScrollView {
-                      VStack(alignment: .leading, spacing: 8) {
-                        HStack { Text("内容抽屉示例").font(.headline); Spacer(); Button("收起") { drawer = false } }
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .top) {
+                            Text("内容抽屉示例").font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .layoutPriority(1)
+                                .accessibilityIdentifier("sampleDrawerTitle")
+                            Spacer(minLength: 8)
+                            Button("收起") { drawer = false }
+                        }.padding([.horizontal, .top])
+                        ScrollView {
+                          VStack(alignment: .leading, spacing: 8) {
                         if showingSource {
                             Text("出处示例：这是一句自造的示例文字。")
                             Button("返回题目") { showingSource = false }
@@ -113,12 +121,12 @@ private struct HostView: View {
                             Text("题目示例：这段话讲了什么？")
                             Button("查看出处") { showingSource = true }
                         }
-                      }.padding().frame(maxWidth: .infinity, alignment: .topLeading)
+                          }.padding().frame(maxWidth: .infinity, alignment: .topLeading)
+                        }.accessibilityIdentifier("sampleDrawer")
                     }
-                    .frame(height: proxy.size.height * 0.4)
+                    .frame(height: proxy.size.height * (dynamicTypeSize.isAccessibilitySize ? 0.6 : 0.4))
                     .clipped()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                    .accessibilityIdentifier("sampleDrawer")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

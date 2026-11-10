@@ -79,7 +79,7 @@ final class ReaderLayoutHostUITests: XCTestCase {
         XCTAssertTrue(app.buttons["返回题目"].exists)
         app.buttons["返回题目"].tap()
         showInDrawer(app.buttons["查看出处"], in: app)
-        showInDrawer(app.buttons["收起"], in: app)
+        assertVisible(app.buttons["收起"], in: app)
         app.buttons["收起"].tap()
         scrollTo(app.buttons["poseMenu"], in: app)
         app.buttons["poseMenu"].tap()
@@ -110,13 +110,15 @@ final class ReaderLayoutHostUITests: XCTestCase {
         app.scrollViews["sampleDrawer"].swipeUp()
         showInDrawer(app.staticTexts["题目示例：这段话讲了什么？"], in: app)
         showInDrawer(app.buttons["查看出处"], in: app)
+        assertDrawerTitle(in: app)
         capture(app, name: "narrow-large-question")
         app.buttons["查看出处"].tap()
         app.scrollViews["sampleDrawer"].swipeUp()
         showInDrawer(app.buttons["返回题目"], in: app)
+        assertDrawerTitle(in: app)
         capture(app, name: "narrow-large-source")
         app.buttons["返回题目"].tap()
-        showInDrawer(app.buttons["收起"], in: app)
+        assertVisible(app.buttons["收起"], in: app)
         app.buttons["收起"].tap()
         XCTAssertTrue(app.staticTexts["第 2 页"].exists)
         scrollTo(app.textFields["写下笔记"], in: app)
@@ -140,9 +142,10 @@ final class ReaderLayoutHostUITests: XCTestCase {
         app.buttons["切换测试字号"].tap()
         app.scrollViews["sampleDrawer"].swipeUp()
         showInDrawer(app.buttons["返回题目"], in: app)
+        assertDrawerTitle(in: app)
         capture(app, name: "resized-large-source")
         app.buttons["返回题目"].tap()
-        showInDrawer(app.buttons["收起"], in: app)
+        assertVisible(app.buttons["收起"], in: app)
         app.buttons["收起"].tap()
         scrollTo(app.textFields["写下笔记"], in: app)
         XCTAssertEqual(app.textFields["写下笔记"].value as? String, "sample")
@@ -172,6 +175,13 @@ final class ReaderLayoutHostUITests: XCTestCase {
         for _ in 0..<4 where !drawer.frame.contains(element.frame) { drawer.swipeDown() }
         assertVisible(element, in: app)
         XCTAssertTrue(drawer.frame.contains(element.frame), "Element is clipped by drawer: \(element.frame)")
+    }
+
+    private func assertDrawerTitle(in app: XCUIApplication) {
+        let title = app.staticTexts["sampleDrawerTitle"]
+        assertVisible(title, in: app)
+        XCTAssertLessThanOrEqual(title.frame.maxY, app.scrollViews["sampleDrawer"].frame.minY + 1,
+                                 "The complete title should remain above the scrolling content")
     }
 
     private func showInReader(_ element: XCUIElement, in app: XCUIApplication) {

@@ -537,23 +537,27 @@ class Suite:
             note = dict(id="anchor-one", version=text_version, pdfPage=1, textSha256=page["textSha256"],
                         start=0, end=end, quote=quote, note=NOTE_TEXT, deleted=False,
                         baseRevision=0, mutationId="anchor-one")
-            anchored = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note)
+            # ReaderRoutes keys idempotency by course, device and mutation. The same original
+            # bytes must replay on that device. Another device still on baseRevision 0 conflicts.
+            note_bytes = json.dumps(note, ensure_ascii=False).encode()
+            anchored = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note_bytes)
             require(anchored.get("replayed") is False, "anchored note was not committed")
-            replay = s.request(f"{READER}/{TEXT_ID}/notes", self.other, "POST", note)
+            replay = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note_bytes)
             require(replay.get("replayed") is True and replay.get("revision") == anchored["revision"],
                     "anchored note retry was not idempotent")
             s.request(f"{READER}/{TEXT_ID}/notes", self.other, "POST",
                       dict(note, note="different synthetic body", mutationId="anchor-stale"), expected=409)
 
-            def anchored_note(body):
-                notes = [item for item in body["notes"] if item.get("id") == "anchor-one"]
+            def find_note(body, note_id, expected_quote, expected_version):
+                notes = [item for item in body["notes"] if item.get("id") == note_id]
                 require(len(notes) == 1, "anchored note was dropped or duplicated")
                 item = notes[0]
-                require(item["quote"] == quote and item["pdfPage"] == 1 and item["version"] == text_version,
+                require(item["quote"] == expected_quote and item["pdfPage"] == 1
+                        and item["version"] == expected_version,
                         "anchored note moved to another page or version")
                 return item
 
-            kept = anchored_note(state(TEXT_ID, self.other))
+            kept = find_note(state(TEXT_ID, self.other), "anchor-one", quote, text_version)
             require(kept["revision"] == anchored["revision"] and kept["note"] == NOTE_TEXT and kept["stale"] is False,
                     "409 replaced the anchored note")
             require(state(READ_ID, self.other)["notes"] == [] and state(READ_ID, self.other)["progress"] is None,
@@ -561,8 +565,9 @@ class Suite:
             read_page = s.request(f"{READER}/{READ_ID}/pages/1", self.phone)
             read_text = read_page["text"]
             read_end = min(15, len(read_text))
+            read_quote = read_text[:read_end]
             read_note = dict(id="anchor-read", version=read_version, pdfPage=1, textSha256=read_page["textSha256"],
-                             start=0, end=read_end, quote=read_text[:read_end], note="reading-margin",
+                             start=0, end=read_end, quote=read_quote, note="reading-margin",
                              deleted=False, baseRevision=0, mutationId="anchor-read")
             read_saved = s.request(f"{READER}/{READ_ID}/notes", self.other, "POST", read_note)
             require(read_saved.get("replayed") is False, "second document note was not committed")
@@ -590,9 +595,11 @@ class Suite:
             after = state(TEXT_ID, self.phone)
             require(after["progress"]["pdfPage"] == 2 and after["progress"]["revision"] == before["progress"]["revision"],
                     "restart lost reading progress")
-            require(anchored_note(after)["note"] == NOTE_TEXT and anchored_note(state(READ_ID, self.other))["note"] == "reading-margin",
+            require(find_note(after, "anchor-one", quote, text_version)["note"] == NOTE_TEXT
+                    and find_note(state(READ_ID, self.other), "anchor-read", read_quote, read_version)["note"] == "reading-margin",
                     "restart lost an anchored note or mixed the documents")
-            require(read_before["notes"][0]["revision"] == state(READ_ID, self.phone)["notes"][0]["revision"],
+            require(find_note(read_before, "anchor-read", read_quote, read_version)["revision"]
+                    == find_note(state(READ_ID, self.phone), "anchor-read", read_quote, read_version)["revision"],
                     "restart changed the other document")
 
             s.stop()
@@ -600,15 +607,16 @@ class Suite:
             s.write_catalog()
             s.start()
             revised = state(TEXT_ID, self.other)
-            retained = anchored_note(revised)
+            retained = find_note(revised, "anchor-one", quote, text_version)
             require(retained["stale"] is True and retained["note"] == NOTE_TEXT and retained["version"] == text_version,
                     "new document version dropped or rewrote the old anchored note")
             require(revised["progress"]["stale"] is True and revised["progress"]["pdfPage"] == 2,
                     "new document version dropped the old reading progress")
-            require(state(READ_ID, self.phone)["notes"][0]["stale"] is False, "version change marked another document stale")
+            require(find_note(state(READ_ID, self.phone), "anchor-read", read_quote, read_version)["stale"] is False,
+                    "version change marked another document stale")
             s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", note, expected=409)
-            require(anchored_note(state(TEXT_ID, self.other))["revision"] == retained["revision"]
-                    and anchored_note(state(TEXT_ID, self.phone))["note"] == NOTE_TEXT,
+            require(find_note(state(TEXT_ID, self.other), "anchor-one", quote, text_version)["revision"] == retained["revision"]
+                    and find_note(state(TEXT_ID, self.phone), "anchor-one", quote, text_version)["note"] == NOTE_TEXT,
                     "rejected old version replaced the retained note")
             fresh = s.request(f"{READER}/{TEXT_ID}/pages/1", self.other)
             require(fresh["version"] != text_version, "restart kept the old document version")
@@ -619,10 +627,13 @@ class Suite:
             created = s.request(f"{READER}/{TEXT_ID}/notes", self.phone, "POST", second)
             require(created.get("replayed") is False, "note on the new version was not committed")
             final = state(TEXT_ID, self.other)
-            require(anchored_note(final)["stale"] is True and any(item["id"] == "anchor-two" and item["stale"] is False
-                                                                 for item in final["notes"]),
+            fresh_note = find_note(final, "anchor-two", fresh["text"][:fresh_end], fresh["version"])
+            require(find_note(final, "anchor-one", quote, text_version)["stale"] is True and fresh_note["stale"] is False,
                     "new version note replaced or hid the retained annotation")
-            require(state(READ_ID, self.phone)["notes"][0]["id"] == "anchor-read", "new version leaked into the other document")
+            read_final = state(READ_ID, self.phone)
+            require(len(read_final["notes"]) == 1
+                    and find_note(read_final, "anchor-read", read_quote, read_version)["stale"] is False,
+                    "new version leaked into the other document")
         if self.report["scope"] == "full" and not self.inject_failure:
             self.check("reader catalog, page, study, anchored notes, conflict, reconnect and restart", reader)
 

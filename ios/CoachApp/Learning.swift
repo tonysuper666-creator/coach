@@ -20,22 +20,35 @@ struct SelectionSignature: Equatable { let id: String; let stem: String; let opt
 struct AnswerReceipt: Decodable { let itemId: String; let attemptId: String; let choice: Int; let status: String; let keyState: String }
 struct PendingAnswer: Codable {
     let course: String; let week: Int; let itemId: String; let choice: Int; let layout: Int?; let submissionId: String; let server: String; let deviceId: String
+    var itemStem: String? = nil; var optionTexts: [String]? = nil
 }
-struct PendingAnswerStore {
-    private var query: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "coach.ton1411.pending-answer", kSecAttrAccount as String: "pending"]
+struct ConfirmedAnswer: Codable {
+    let course: String; let week: Int; let itemId: String; let server: String; let deviceId: String
+    let stem: String; let options: [String]; let choiceText: String; let status: String; let keyState: String
+
+    func matches(item: PracticeItem, course: String, week: Int, server: String, deviceId: String) -> Bool {
+        self.course == course && self.week == week && itemId == item.id && self.server == server &&
+        self.deviceId == deviceId && stem == item.stem && options.sorted() == item.options.sorted() &&
+        item.options.filter { $0 == choiceText }.count == 1
     }
-    func load() throws -> PendingAnswer? {
+}
+struct KeychainRecord<Value: Codable> {
+    let service: String
+    var account: String = "record"
+    private var query: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+    func load() throws -> Value? {
         var q = query; q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw KeychainError(status) }
         guard let data = item as? Data else { throw ConnectionError.invalidResponse }
-        return try JSONDecoder().decode(PendingAnswer.self, from: data)
+        return try JSONDecoder().decode(Value.self, from: data)
     }
-    func save(_ pending: PendingAnswer) throws {
-        let data = try JSONEncoder().encode(pending)
+    func save(_ value: Value) throws {
+        let data = try JSONEncoder().encode(value)
         let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecSuccess { return }
         guard status == errSecItemNotFound else { throw KeychainError(status) }
@@ -48,6 +61,13 @@ struct PendingAnswerStore {
         guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status) }
     }
 }
+// Keep the original account name so pending submissions from older builds survive upgrades.
+struct PendingAnswerStore {
+    private let record = KeychainRecord<PendingAnswer>(service: "coach.ton1411.pending-answer", account: "pending")
+    func load() throws -> PendingAnswer? { try record.load() }
+    func save(_ value: PendingAnswer) throws { try record.save(value) }
+    func delete() throws { try record.delete() }
+}
 private struct AnswerBody: Encodable { let itemId: String; let choice: Int; let layout: Int?; let submissionId: String }
 
 @MainActor
@@ -57,6 +77,7 @@ final class LearningModel: ObservableObject {
     @Published var week: PracticeWeek?
     @Published var selectedWeek: Int?
     @Published var receipt: AnswerReceipt?
+    @Published private(set) var confirmedAnswer: ConfirmedAnswer?
     @Published var pending: PendingAnswer?
     @Published var message: String?
     @Published var busy = false
@@ -68,6 +89,7 @@ final class LearningModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private let connection: ConnectionModel
     private let pendingStore = PendingAnswerStore()
+    private let confirmedStore = KeychainRecord<ConfirmedAnswer>(service: "coach.ton1411.confirmed-answer")
     private var storageAvailable = true
     private let session: URLSession
 
@@ -80,6 +102,7 @@ final class LearningModel: ObservableObject {
         session = URLSession(configuration: config, delegate: LearningNoRedirects(), delegateQueue: nil)
         do {
             pending = try pendingStore.load()
+            confirmedAnswer = try confirmedStore.load()
             if let pending { course = pending.course }
         } catch {
             storageAvailable = false
@@ -194,7 +217,7 @@ final class LearningModel: ObservableObject {
 
     func submit(item: PracticeItem, choice: Int) async {
         guard !busy, storageAvailable, pending == nil, let selectedWeek, let (server, credential) = connection.learningCredentials, item.options.indices.contains(choice) else { return }
-        let value = PendingAnswer(course: course, week: selectedWeek, itemId: item.id, choice: choice, layout: item.layout, submissionId: UUID().uuidString, server: server.url.absoluteString, deviceId: credential.deviceId)
+        let value = PendingAnswer(course: course, week: selectedWeek, itemId: item.id, choice: choice, layout: item.layout, submissionId: UUID().uuidString, server: server.url.absoluteString, deviceId: credential.deviceId, itemStem: item.stem, optionTexts: item.options)
         do {
             try pendingStore.save(value)
             pending = value
@@ -220,9 +243,25 @@ final class LearningModel: ObservableObject {
             let body = try JSONEncoder().encode(AnswerBody(itemId: value.itemId, choice: value.choice, layout: value.layout, submissionId: value.submissionId))
             let result = try await request(AnswerReceipt.self, path: ["v1", "courses", value.course, "mainline", String(value.week), "answer"], body: body)
             guard result.itemId == value.itemId, result.choice == value.choice, !result.attemptId.isEmpty else { throw ConnectionError.invalidResponse }
+            if let stem = value.itemStem, let options = value.optionTexts, options.indices.contains(value.choice) {
+                let confirmed = ConfirmedAnswer(course: value.course, week: value.week, itemId: value.itemId, server: value.server, deviceId: value.deviceId, stem: stem, options: options, choiceText: options[value.choice], status: result.status, keyState: result.keyState)
+                // Store the confirmed result before deleting the retry record. If storage
+                // fails, the same submission ID remains available for a safe retry.
+                try confirmedStore.save(confirmed)
+                confirmedAnswer = confirmed
+            }
             try pendingStore.delete()
             pending = nil; receipt = result
+        } catch is KeychainError {
+            message = "已收到服务器回复，但无法保存本机记录；请解锁设备后重试同一次提交。"
         } catch { fail(error) }
+    }
+
+    func confirmedAnswer(for item: PracticeItem) -> ConfirmedAnswer? {
+        guard let saved = confirmedAnswer, let number = selectedWeek,
+              let (server, credential) = connection.learningCredentials,
+              saved.matches(item: item, course: course, week: number, server: server.url.absoluteString, deviceId: credential.deviceId) else { return nil }
+        return saved
     }
 }
 
@@ -257,6 +296,10 @@ struct LearningView: View {
                     VStack(alignment: .leading, spacing: CoachV7.Space.s3) {
                         Text(item.stem).font(.system(.headline, design: .serif))
                         Text("状态：\(item.status)").font(.caption).foregroundStyle(Appearance.secondary)
+                        if let saved = model.confirmedAnswer(for: item) {
+                            Text("本机上次选择：\(saved.choiceText)").accessibilityIdentifier("lastConfirmedChoice")
+                            Text("本机上次确认：\(saved.status) · \(saved.keyState)").accessibilityIdentifier("lastConfirmedReceipt")
+                        }
                         ForEach(item.options.indices, id: \.self) { index in
                             Button { selections[item.id] = index } label: {
                                 Label(item.options[index], systemImage: selections[item.id] == index ? "largecircle.fill.circle" : "circle")

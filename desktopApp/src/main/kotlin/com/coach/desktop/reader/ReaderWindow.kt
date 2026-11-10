@@ -22,6 +22,7 @@ import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.launch
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed as ptrCtrl
 import androidx.compose.ui.input.pointer.isMetaPressed as ptrMeta
@@ -156,6 +157,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         try { r.saveNote(toSave) } finally { noteSaving = false }
         val st = r.noteSave
         if (st is NoteSaveState.Saved && st.id == d.id && noteDraft?.id == d.id) {
+            noteStash = null // 保存成功后不再挂着旧草稿的“找回”入口
             noteBaseline = toSave.note // 只把“实际发出去的文字”记为已保存；保存期间继续输入的内容仍算未保存
             noteDraft = toSave.copy(baseRevision = st.revision)
         }
@@ -211,6 +213,9 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
 
     /** 本次组合里原句高亮的状态文字（无引文时为 null），供测试读取。 */
     var uiHighlight: String? = null
+
+    /** 本次组合里正文的滚动位置（远端正文），供测试读取：滚轮翻页后应停在起始行。 */
+    var uiBodyScroll: Int = -1
 
     /** 当前窗口实际显示的栏：焦点在被收拢的栏时，该栏单独占满窗口，正文状态原样保留。 */
     fun shownPanes(): List<ReaderPane> = if (state.focus in state.layout.visible) state.layout.visible else listOf(state.focus)
@@ -435,7 +440,7 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                             .onFocusChanged { if (it.isFocused) session.focusPane(pane) }
                             .clickable { requesters.getValue(pane).requestFocus() }
                             .then(
-                                if (pane == ReaderPane.Body) Modifier.onPointerEvent(PointerEventType.Scroll) { ev ->
+                                if (pane == ReaderPane.Body) Modifier.onPointerEvent(PointerEventType.Scroll, PointerEventPass.Initial) { ev ->
                                     val c = ev.changes.first()
                                     session.onWheel(c.scrollDelta.y, ev.keyboardModifiers.ptrCtrl || ev.keyboardModifiers.ptrMeta)
                                     c.consume()
@@ -560,7 +565,10 @@ private fun RelatedPane(session: ReaderSession) {
 @Composable
 private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
     val state = session.state
-    Column(Modifier.verticalScroll(rememberScrollState())) {
+    // 滚轮只翻页：在 Initial 阶段先 consume，不让子级 verticalScroll 同时滚动；换页/换书时滚动位置也归零。
+    val scroll = remember(remote.current?.id, state.position.page) { androidx.compose.foundation.ScrollState(0) }
+    SideEffect { session.uiBodyScroll = scroll.value }
+    Column(Modifier.verticalScroll(scroll)) {
         when (val p = remote.page) {
             PageState.Idle -> Text(if (remote.current == null) "请先在书架里选一本" else "", Modifier.testTag("remote-idle"), fontSize = 14.sp)
             is PageState.Loading -> Text("正在加载 PDF 第${p.pdfPage}页", Modifier.testTag("remote-loading"), fontSize = 13.sp, color = Color(0xFF666666))

@@ -293,4 +293,28 @@ class ReaderRemoteNotesWindowTest {
             assertTrue(r.session.remote!!.notes.isEmpty()); assertNull(r.session.uiNoteStatus); assertFalse(r.session.noteSaving)
         } finally { r.close() }
     }
+
+    @Test fun wheelOnALongPageTurnsThePageAndLeavesTheBodyAtItsFirstLine() {
+        val s = service(); s.bodyText = { _, p -> (0 until 60).joinToString("\n") { "Line $it of page $p" } }
+        val r = rig(s)
+        try {
+            r.wheel(1f); r.wheel(1f); r.wheel(1f)
+            assertEquals(3, r.session.state.position.page)
+            assertEquals(0, r.session.uiBodyScroll, "滚轮只翻页，不再叠加滚动；新页从第一行开始")
+            r.shot("wheel-long-page")
+        } finally { r.close() }
+    }
+
+    @Test fun savingAfterAdoptingTheServerVersionClearsTheRestoreDraftEntry() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("v1"); r.key(Key.Enter, ctrl = true)
+            val id = r.session.noteDraft!!.id
+            s.otherDeviceEditsNote("a", id, "对方改的")
+            r.session.noteText = "我改的"; r.key(Key.Enter, ctrl = true)
+            r.session.adoptServerVersion(); assertNotNull(r.session.noteStash)
+            r.session.noteText = "采用后又改"; r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus); assertNull(r.session.noteStash)
+        } finally { r.close() }
+    }
 }

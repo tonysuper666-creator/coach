@@ -111,7 +111,23 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         noteDraft = null; noteLine = 0
     }
 
-    fun cancelNote() { noteLine = -1; noteDraft = null; noteText = "" }
+    /** 服务端已确认保存的文字；新建且从未保存成功为 null。 */
+    private var noteBaseline by mutableStateOf<String?>(null)
+    private var noteAttempt by mutableStateOf<String?>(null)
+    var noteSaving by mutableStateOf(false)
+        private set
+    /** 采用服务端版本时被换下的本地草稿，可以找回。 */
+    var noteStash by mutableStateOf<String?>(null)
+        private set
+    /** 本次组合里批注保存状态文字（无草稿为 null），供测试读取。 */
+    var uiNoteStatus: String? = null
+
+    fun noteStatus(): NoteStatus? {
+        val d = noteDraft ?: return null; val r = remote ?: return null
+        return NoteStatusRules.of(d.id, noteText, noteBaseline, noteAttempt, noteSaving, r.noteSave)
+    }
+
+    fun cancelNote() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null }
 
     private fun confirmLine() {
         val r = remote ?: return; val v = currentView() ?: return
@@ -122,17 +138,62 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         noteDraft = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
             range.first, end, v.text.substring(range.first, end), existing?.note.orEmpty(), existing?.revision ?: 0L)
         noteText = existing?.note.orEmpty(); noteLine = -1
+        noteBaseline = existing?.note; noteAttempt = null; noteStash = null
     }
 
     /** Ctrl+回车 / 按钮：交给窗口的协程去保存；离线后再按一次即原样重试。 */
-    fun requestNoteSave() { if (noteDraft != null) noteSaveTick++ }
+    fun requestNoteSave() {
+        val d = noteDraft ?: return
+        if (noteSaving) return // 正在保存：不叠加第二次，等回执后再按
+        if ((remote?.noteSave as? NoteSaveState.Conflict)?.id == d.id) { message = "这条批注有冲突，先选一种处理方式"; return }
+        noteSaveTick++
+    }
 
     suspend fun commitNote() {
         val r = remote ?: return; val d = noteDraft ?: return
         val toSave = d.copy(note = noteText)
-        r.saveNote(toSave)
-        val s = r.noteSave
-        if (s is NoteSaveState.Saved && s.id == d.id && noteDraft?.id == d.id) noteDraft = toSave.copy(baseRevision = s.revision)
+        noteSaving = true; noteAttempt = toSave.note
+        try { r.saveNote(toSave) } finally { noteSaving = false }
+        val st = r.noteSave
+        if (st is NoteSaveState.Saved && st.id == d.id && noteDraft?.id == d.id) {
+            noteBaseline = toSave.note // 只把“实际发出去的文字”记为已保存；保存期间继续输入的内容仍算未保存
+            noteDraft = toSave.copy(baseRevision = st.revision)
+        }
+    }
+
+    // ---- 409 之后的显式处理：都只在用户点击时发生，不自动重试 ----
+    /** 采用服务端版本：本地草稿放进“可找回”，编辑区换成服务端文字，基线换成服务端 revision。 */
+    fun adoptServerVersion() {
+        val r = remote ?: return; val d = noteDraft ?: return
+        val server = r.adoptServerNote() ?: return
+        noteStash = noteText
+        noteDraft = d.copy(note = server.note, baseRevision = server.revision)
+        noteText = server.note; noteBaseline = server.note; noteAttempt = null
+    }
+
+    fun restoreStashedDraft() { noteStash?.let { noteText = it; noteStash = null } }
+
+    /** 用我的版本覆盖：只用刚读到的服务端 revision，且只提交这一次。 */
+    suspend fun overwriteWithMine() {
+        val r = remote ?: return; val d = noteDraft ?: return
+        val toSave = d.copy(note = noteText)
+        noteSaving = true; noteAttempt = toSave.note
+        try {
+            if (r.overwriteWithMine(toSave)) {
+                val st = r.noteSave as NoteSaveState.Saved
+                noteBaseline = toSave.note; noteDraft = toSave.copy(baseRevision = st.revision); noteStash = null
+            }
+        } finally { noteSaving = false }
+    }
+
+    suspend fun retryConflictRefresh() { remote?.retryNoteConflictRefresh() }
+
+    /** 另存为新批注：新 id、baseRevision 0；原批注与服务端版本都不动。 */
+    fun saveAsNewNote() {
+        val d = noteDraft ?: return
+        noteDraft = d.copy(id = java.util.UUID.randomUUID().toString(), baseRevision = 0L)
+        noteBaseline = null; noteAttempt = null; noteStash = null
+        noteSaveTick++
     }
 
     /** 题目的“这句在哪考过”：study 题目自带登记原句；没有就明说，不猜。 */
@@ -607,6 +668,7 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
             }
         }
         val d = session.noteDraft
+        if (d == null) SideEffect { session.uiNoteStatus = null }
         if (d != null) {
             Column(Modifier.testTag("note-editor").padding(top = 8.dp).border(BorderStroke(1.dp, Accent)).padding(8.dp)) {
                 Text("原句：${d.quote}", fontSize = 12.sp)
@@ -616,13 +678,20 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
                 )
                 Text("Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))
-                when (val s = remote.noteSave) {
-                    is NoteSaveState.Saved -> Text("已保存", Modifier.testTag("note-saved"), fontSize = 12.sp, color = Color(0xFF2F6B3A))
-                    is NoteSaveState.Offline -> Text("连不上服务，再按 Ctrl+回车重试（内容原样保留）", Modifier.testTag("note-offline"), fontSize = 12.sp, color = Color(0xFF8A6D1F))
-                    is NoteSaveState.Conflict -> Text("另一台设备改过这条批注，或资料已变；你的草稿保留在这里，没有覆盖对方", Modifier.testTag("note-conflict"), fontSize = 12.sp, color = Color(0xFFA33B2D))
-                    is NoteSaveState.Failed -> Text("没有保存：${s.failure.text}", Modifier.testTag("note-failed"), fontSize = 12.sp, color = Color(0xFFA33B2D))
-                    NoteSaveState.Idle -> {}
-                }
+                val status = session.noteStatus()
+                SideEffect { session.uiNoteStatus = status?.text }
+                if (status != null) Text(
+                    status.text, Modifier.testTag("note-status"), fontSize = 12.sp,
+                    color = when (status) {
+                        NoteStatus.Saved -> Color(0xFF2F6B3A)
+                        NoteStatus.Dirty, NoteStatus.Offline, NoteStatus.Saving, NoteStatus.NotSaved -> Color(0xFF8A6D1F)
+                        else -> Color(0xFFA33B2D)
+                    },
+                )
+                (remote.noteSave as? NoteSaveState.Failed)?.let { if (status == NoteStatus.Failed) Text(it.failure.text, fontSize = 12.sp, color = Color(0xFFA33B2D)) }
+                val conflict = remote.noteSave as? NoteSaveState.Conflict
+                if (status == NoteStatus.Conflict && conflict != null) ConflictPanel(session, conflict)
+                if (session.noteStash != null) Text("找回我的草稿", Modifier.testTag("note-restore-stash").clickable { session.restoreStashedDraft() }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)
             }
         }
     }
@@ -652,5 +721,25 @@ private fun RemoteStudy(session: ReaderSession, remote: ReaderRemote) {
             }
         }
         session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun ConflictPanel(session: ReaderSession, c: NoteSaveState.Conflict) {
+    val scope = rememberCoroutineScope()
+    Column(Modifier.testTag("note-conflict-panel").padding(top = 6.dp)) {
+        when {
+            c.refreshFailed -> Text("连不上服务，看不到服务端版本，不能覆盖", Modifier.testTag("note-conflict-refresh-failed"), fontSize = 12.sp, color = Color(0xFF8A6D1F))
+            c.versionChanged -> Text("资料版本变了，不能覆盖；可另存为新批注", Modifier.testTag("note-conflict-version"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+            c.server == null -> Text("服务端看不到这条批注（可能已删除），不能覆盖；可另存为新批注", Modifier.testTag("note-conflict-missing"), fontSize = 12.sp, color = Color(0xFFA33B2D))
+            else -> Text("服务端版本（修订 ${c.server.revision}）：${c.server.note}", Modifier.testTag("note-conflict-server"), fontSize = 12.sp)
+        }
+        val trusted = !c.refreshFailed && !c.versionChanged && c.server != null
+        if (trusted) {
+            Text("采用服务端版本", Modifier.testTag("note-adopt-server").clickable { session.adoptServerVersion() }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)
+            Text("用我的版本覆盖", Modifier.testTag("note-overwrite-mine").clickable { scope.launch { session.overwriteWithMine() } }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)
+        }
+        if (c.refreshFailed) Text("重新获取服务端版本", Modifier.testTag("note-conflict-refresh").clickable { scope.launch { session.retryConflictRefresh() } }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)
+        Text("另存为新批注", Modifier.testTag("note-save-as-new").clickable { session.saveAsNewNote() }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)
     }
 }

@@ -137,7 +137,8 @@ class ReaderRemoteNotesWindowTest {
             val id = r.session.noteDraft!!.id
             s.otherDeviceEditsNote("a", id, "对方改的")
             r.session.noteText = "我改的"; r.key(Key.Enter, ctrl = true)
-            assertEquals(NoteSaveState.Conflict(id), r.session.remote!!.noteSave)
+            assertEquals(id, (r.session.remote!!.noteSave as NoteSaveState.Conflict).id)
+            assertEquals("这条批注有冲突，草稿保留在本机，没有覆盖对方", r.session.uiNoteStatus)
             assertEquals("我改的", r.session.noteText); assertNotNull(r.session.noteDraft)
             assertEquals(JsonPrimitive("对方改的"), s.serverNote("a", id)!!["note"])
             val calls = s.noteCalls.size
@@ -184,6 +185,112 @@ class ReaderRemoteNotesWindowTest {
             r.key(Key.N); r.key(Key.Enter); r.session.noteText = "大字窄窗批注"; r.frames()
             r.shot("notes-editor-700-d2-f1.5")
             assertNotNull(r.session.noteDraft)
+        } finally { r.close() }
+    }
+
+    private fun Rig.startNote(text: String) {
+        session.focusPane(ReaderPane.Body); frames()
+        key(Key.N); key(Key.Enter); session.noteText = text; frames()
+    }
+
+    @Test fun editingAfterASaveShowsUnsavedChangesNotTheGreenSavedBadge() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("v1"); assertEquals("有未保存的修改", r.session.uiNoteStatus)
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            val rev1 = (r.session.remote!!.noteSave as NoteSaveState.Saved).revision
+            r.session.noteText = "v2"; r.frames()
+            assertEquals("有未保存的修改", r.session.uiNoteStatus, "保存第一版后改第二版：不再显示已保存")
+            r.shot("notes-status-dirty")
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("v2"), s.serverNote("a", r.session.noteDraft!!.id)!!["note"])
+            assertEquals(JsonPrimitive(rev1), s.noteCalls[1]["baseRevision"])
+        } finally { r.close() }
+    }
+
+    @Test fun typingWhileASaveIsInFlightStaysUnsavedAndTheSecondPressDoesNotStack() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("v1")
+            val hold = kotlinx.coroutines.CompletableDeferred<Unit>() to kotlinx.coroutines.CompletableDeferred<Unit>()
+            s.noteHold = hold
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("正在保存…", r.session.uiNoteStatus)
+            r.session.noteText = "v2-during"; r.frames()
+            r.key(Key.Enter, ctrl = true)
+            assertEquals(1, s.noteCalls.size, "保存进行中不叠加第二次")
+            s.noteHold = null; hold.second.complete(Unit); r.frames(12)
+            assertEquals("有未保存的修改", r.session.uiNoteStatus, "回执只确认 v1，保存期间输入的内容仍算未保存")
+            assertEquals(JsonPrimitive("v1"), s.serverNote("a", r.session.noteDraft!!.id)!!["note"])
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("v2-during"), s.serverNote("a", r.session.noteDraft!!.id)!!["note"])
+        } finally { r.close() }
+    }
+
+    @Test fun offlineStatusFollowsTheTextAndRetrySendsTheCurrentContent() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("离线稿"); s.noteStatus = null; r.key(Key.Enter, ctrl = true)
+            assertEquals("连不上服务，内容原样保留，再按 Ctrl+回车重试", r.session.uiNoteStatus)
+            r.session.noteText = "离线稿改"; r.frames()
+            assertEquals("有未保存的修改", r.session.uiNoteStatus)
+            s.noteStatus = 200; r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("离线稿改"), s.serverNote("a", r.session.noteDraft!!.id)!!["note"])
+        } finally { r.close() }
+    }
+
+    @Test fun conflictRecoveryAdoptRestoreAndExplicitOverwrite() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("v1"); r.key(Key.Enter, ctrl = true)
+            val id = r.session.noteDraft!!.id
+            s.otherDeviceEditsNote("a", id, "对方改的")
+            r.session.noteText = "我改的"; r.key(Key.Enter, ctrl = true)
+            assertEquals("这条批注有冲突，草稿保留在本机，没有覆盖对方", r.session.uiNoteStatus)
+            r.key(Key.Enter, ctrl = true) // 冲突时再按保存：不发请求
+            assertEquals(2, s.noteCalls.size); assertEquals("这条批注有冲突，先选一种处理方式", r.session.message)
+            r.shot("notes-conflict-panel")
+            r.session.adoptServerVersion(); r.frames()
+            assertEquals("对方改的", r.session.noteText); assertEquals("我改的", r.session.noteStash)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            r.session.restoreStashedDraft(); r.frames()
+            assertEquals("我改的", r.session.noteText); assertEquals("有未保存的修改", r.session.uiNoteStatus)
+            r.key(Key.Enter, ctrl = true)
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("我改的"), s.serverNote("a", id)!!["note"])
+            // 再来一次冲突，这次用“用我的版本覆盖”
+            s.otherDeviceEditsNote("a", id, "对方第二次"); r.session.noteText = "我第二次"; r.key(Key.Enter, ctrl = true)
+            runBlocking { r.session.overwriteWithMine() }; r.frames()
+            assertEquals("已保存", r.session.uiNoteStatus)
+            assertEquals(JsonPrimitive("我第二次"), s.serverNote("a", id)!!["note"])
+        } finally { r.close() }
+    }
+
+    @Test fun anOldReceiptNeverMakesANewDraftLookSavedOrWritesTheWrongObject() {
+        val s = service(); val r = rig(s)
+        try {
+            r.startNote("第一行的批注")
+            val hold = kotlinx.coroutines.CompletableDeferred<Unit>() to kotlinx.coroutines.CompletableDeferred<Unit>()
+            s.noteHold = hold
+            r.key(Key.Enter, ctrl = true)
+            val oldId = r.session.noteDraft!!.id
+            r.session.cancelNote(); r.frames()
+            r.key(Key.N); r.key(Key.DirectionDown); r.key(Key.Enter)
+            assertNotEquals(oldId, r.session.noteDraft!!.id)
+            s.noteHold = null; hold.second.complete(Unit); r.frames(12)
+            assertEquals("尚未保存", r.session.uiNoteStatus, "旧批注的回执不能让新草稿显示已保存")
+            assertEquals(oldId, r.session.remote!!.notes.single().id, "回执写进的是旧批注自己")
+            // 切书后迟到的回执：丢弃
+            r.session.cancelNote(); r.frames()
+            r.startNote("A 书"); val h2 = kotlinx.coroutines.CompletableDeferred<Unit>() to kotlinx.coroutines.CompletableDeferred<Unit>()
+            s.noteHold = h2; r.key(Key.Enter, ctrl = true)
+            runBlocking { r.session.openRemote("b") }; r.frames(8)
+            s.noteHold = null; h2.second.complete(Unit); r.frames(12)
+            assertTrue(r.session.remote!!.notes.isEmpty()); assertNull(r.session.uiNoteStatus); assertFalse(r.session.noteSaving)
         } finally { r.close() }
     }
 }

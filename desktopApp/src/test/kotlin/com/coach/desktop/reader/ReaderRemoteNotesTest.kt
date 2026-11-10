@@ -102,7 +102,7 @@ class ReaderRemoteNotesTest {
         s.otherDeviceEditsNote("a", "n1", "对方改的")
         val mine = r.draft(1, "我的改动", base = rev)
         r.saveNote(mine)
-        assertEquals(NoteSaveState.Conflict("n1"), r.noteSave)
+        assertEquals("n1", (r.noteSave as NoteSaveState.Conflict).id)
         assertEquals(JsonPrimitive("对方改的"), s.serverNote("a", "n1")!!["note"], "服务端不被盲目覆盖")
         assertEquals("v1", r.notes.single().note, "本地列表也不把冲突草稿当成已保存")
         assertEquals(2, s.noteCalls.size, "冲突后不自动重试")
@@ -125,8 +125,8 @@ class ReaderRemoteNotesTest {
         val s = service(); val r = opened(s)
         s.docs.getValue("a").version = "va2"
         r.saveNote(r.draft(0, "x"))
-        assertEquals(NoteSaveState.Conflict("n1"), r.noteSave)
-        assertTrue(s.docs.getValue("a").let { s.serverNote("a", "n1") } == null)
+        assertTrue((r.noteSave as NoteSaveState.Conflict).versionChanged)
+        assertNull(s.serverNote("a", "n1"))
     }
 
     @Test fun unresolvedProgressConflictIsNotRewrittenOnEveryPage() = runBlocking<Unit> {
@@ -134,11 +134,98 @@ class ReaderRemoteNotesTest {
         s.otherDeviceSaves("a", 7)
         r.saveProgressAuto(2)
         assertIs<SaveState.Conflict>(r.save)
-        val calls = s.saveCalls.size; val states = 0
+        val calls = s.saveCalls.size
         r.saveProgressAuto(3); r.saveProgressAuto(4); r.saveProgressAuto(5)
         assertEquals(calls, s.saveCalls.size, "冲突未解决时翻页不再写同一冲突")
         assertEquals(5, (r.save as SaveState.Conflict).localPage, "草稿页跟着当前页")
         assertEquals(7, s.docs.getValue("a").progressPage)
-        assertEquals(0, states)
+    }
+
+    private suspend fun conflicted(s: FakeReaderService): Pair<ReaderRemote, NoteDraft> {
+        val r = opened(s)
+        r.saveNote(r.draft(1, "v1"))
+        val rev = (r.noteSave as NoteSaveState.Saved).revision
+        s.otherDeviceEditsNote("a", "n1", "对方改的")
+        val mine = r.draft(1, "我的改动", base = rev)
+        r.saveNote(mine)
+        return r to mine
+    }
+
+    @Test fun conflictReadsTheServerVersionAndOnlyAnExplicitOverwriteUsesItsRevision() = runBlocking<Unit> {
+        val s = service(); val (r, mine) = conflicted(s)
+        val c = r.noteSave as NoteSaveState.Conflict
+        assertEquals("对方改的", c.server?.note); assertEquals(s.serverRevision("a", "n1"), c.server?.revision)
+        assertEquals(2, s.noteCalls.size, "只发过 v1 和那次冲突的保存，没有自动重试")
+        assertTrue(r.overwriteWithMine(mine))
+        assertEquals(3, s.noteCalls.size)
+        assertEquals(JsonPrimitive(c.server!!.revision), s.noteCalls[2]["baseRevision"], "覆盖用的是刚读到的服务端修订")
+        assertEquals(JsonPrimitive("我的改动"), s.serverNote("a", "n1")!!["note"])
+    }
+
+    @Test fun overwriteIsRefusedWithoutATrustedRevisionAndWorksAfterARefresh() = runBlocking<Unit> {
+        val s = service(); s.stateStatus = 200
+        val r = opened(s); r.saveNote(r.draft(1, "v1"))
+        val rev = (r.noteSave as NoteSaveState.Saved).revision
+        s.otherDeviceEditsNote("a", "n1", "对方改的")
+        s.stateStatus = null
+        val mine = r.draft(1, "我的改动", base = rev); r.saveNote(mine)
+        assertTrue((r.noteSave as NoteSaveState.Conflict).refreshFailed)
+        val calls = s.noteCalls.size
+        assertFalse(r.overwriteWithMine(mine)); assertNull(r.adoptServerNote())
+        assertEquals(calls, s.noteCalls.size, "没有可信修订时不提交")
+        s.stateStatus = 200; r.retryNoteConflictRefresh()
+        assertEquals("对方改的", (r.noteSave as NoteSaveState.Conflict).server?.note)
+        assertTrue(r.overwriteWithMine(mine)); assertEquals(JsonPrimitive("我的改动"), s.serverNote("a", "n1")!!["note"])
+    }
+
+    @Test fun versionChangedAndDeletedConflictsCannotBeOverwrittenButCanBeSavedAsNew() = runBlocking<Unit> {
+        val s = service(); val (r, mine) = conflicted(s)
+        s.otherDeviceDeletesNote("a", "n1")
+        r.saveNote(mine)
+        val gone = r.noteSave as NoteSaveState.Conflict
+        assertNull(gone.server, "已删除的批注 state 不返回，没有可信修订")
+        val calls = s.noteCalls.size
+        assertFalse(r.overwriteWithMine(mine)); assertEquals(calls, s.noteCalls.size)
+        r.saveNote(mine.copy(id = "n2", baseRevision = 0L))
+        assertIs<NoteSaveState.Saved>(r.noteSave); assertNotNull(s.serverNote("a", "n2"))
+        val s2 = service(); val (r2, mine2) = conflicted(s2)
+        s2.docs.getValue("a").version = "va2"; r2.saveNote(mine2)
+        assertTrue((r2.noteSave as NoteSaveState.Conflict).versionChanged)
+        val c2 = s2.noteCalls.size
+        assertFalse(r2.overwriteWithMine(mine2)); assertEquals(c2, s2.noteCalls.size)
+    }
+
+    @Test fun anotherEditBeforeOverwriteReturnsToConflictInsteadOfLooping() = runBlocking<Unit> {
+        val s = service(); val (r, mine) = conflicted(s)
+        s.otherDeviceEditsNote("a", "n1", "对方又改了")
+        val calls = s.noteCalls.size
+        assertFalse(r.overwriteWithMine(mine))
+        assertEquals(calls + 1, s.noteCalls.size, "只提交这一次")
+        val c = r.noteSave as NoteSaveState.Conflict
+        assertEquals("对方又改了", c.server?.note)
+        assertEquals(JsonPrimitive("对方又改了"), s.serverNote("a", "n1")!!["note"])
+    }
+
+    @Test fun adoptingTheServerVersionReplacesTheLocalListAndClearsTheConflict() = runBlocking<Unit> {
+        val s = service(); val (r, _) = conflicted(s)
+        val adopted = r.adoptServerNote()!!
+        assertEquals("对方改的", adopted.note); assertEquals(NoteSaveState.Idle, r.noteSave)
+        assertEquals("对方改的", r.notes.single().note)
+    }
+
+    @Test fun statusFollowsTheActualDraftContent() {
+        val saved = NoteSaveState.Saved("n1", 5)
+        fun st(text: String, baseline: String?, attempt: String?, saving: Boolean = false, save: NoteSaveState = saved, id: String = "n1") =
+            NoteStatusRules.of(id, text, baseline, attempt, saving, save)
+        assertEquals(NoteStatus.Saved, st("v1", "v1", "v1"))
+        assertEquals(NoteStatus.Dirty, st("v2", "v1", "v1"), "保存第一版后改第二版不得仍显示已保存")
+        assertEquals(NoteStatus.Saving, st("v2", "v1", "v1", saving = true))
+        assertEquals(NoteStatus.Dirty, st("v2", "v1", "v2", save = NoteSaveState.Idle))
+        assertEquals(NoteStatus.Offline, st("v2", "v1", "v2", save = NoteSaveState.Offline("n1")))
+        assertEquals(NoteStatus.Dirty, st("v3", "v1", "v2", save = NoteSaveState.Offline("n1")), "离线后又改了字：以未保存的修改为准")
+        assertEquals(NoteStatus.NotSaved, st("", null, null, save = saved, id = "n2"), "别的批注的旧回执不能让新草稿显示已保存")
+        assertEquals(NoteStatus.Dirty, st("abc", null, null, save = saved, id = "n2"))
+        assertEquals(NoteStatus.Conflict, st("v2", "v1", "v2", save = NoteSaveState.Conflict("n1")))
+        assertEquals(NoteStatus.Dirty, st("v2", "v1", "v2", save = NoteSaveState.Conflict("other")))
     }
 }

@@ -121,7 +121,14 @@ class FakeReaderService(vararg docs: Triple<String, String, Int>) : ReaderSource
         val store = notes.getValue(doc); val n = store.getValue(id); noteSeq += 1
         store[id] = JsonObject(n + ("note" to kotlinx.serialization.json.JsonPrimitive(text)) + ("revision" to kotlinx.serialization.json.JsonPrimitive(noteSeq)))
     }
-    fun serverNote(doc: String, id: String): JsonObject? = notes[doc]?.get(id)
+    fun serverNote(doc: String, id: String): JsonObject? = notes[doc]?.get(id)?.takeIf { (it["deleted"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "true" }
+
+    /** 另一台设备删除了这条批注：state 不再返回，但服务端仍记着它的最新修订（与 ReaderLedger 一致）。 */
+    fun otherDeviceDeletesNote(doc: String, id: String) {
+        val store = notes.getValue(doc); val n = store.getValue(id); noteSeq += 1
+        store[id] = JsonObject(n + ("deleted" to kotlinx.serialization.json.JsonPrimitive(true)) + ("revision" to kotlinx.serialization.json.JsonPrimitive(noteSeq)))
+    }
+    fun serverRevision(doc: String, id: String): Long = (notes[doc]?.get(id)?.get("revision") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLong() ?: 0L
 
     override suspend fun study(document: String, pdfPage: Int): ReaderReply {
         val d = docs[document] ?: return ReaderReply(404, null)
@@ -141,7 +148,7 @@ class FakeReaderService(vararg docs: Triple<String, String, Int>) : ReaderSource
             put("progress", d.progressPage?.let { p ->
                 buildJsonObject { put("documentId", d.id); put("version", d.version); put("pdfPage", p); put("revision", d.revision); put("stale", staleProgress) }
             } ?: JsonNull)
-            put("notes", JsonArray((notes[d.id]?.values ?: emptyList<JsonObject>()).map { n -> JsonObject(n + ("stale" to kotlinx.serialization.json.JsonPrimitive((n["version"] as kotlinx.serialization.json.JsonPrimitive).content != d.version))) }))
+            put("notes", JsonArray((notes[d.id]?.values ?: emptyList<JsonObject>()).filter { (it["deleted"] as? kotlinx.serialization.json.JsonPrimitive)?.content != "true" }.map { n -> JsonObject(n + ("stale" to kotlinx.serialization.json.JsonPrimitive((n["version"] as kotlinx.serialization.json.JsonPrimitive).content != d.version))) }))
         })
     }
 

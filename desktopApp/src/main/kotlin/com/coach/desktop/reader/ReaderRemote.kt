@@ -163,7 +163,8 @@ sealed interface NoteSaveState {
     /** 传输失败：草稿与同一 mutationId 保留，可原样重试。 */
     data class Offline(val id: String) : NoteSaveState
     /** 409：草稿保留在本机，不自动覆盖。 */
-    data class Conflict(val id: String) : NoteSaveState
+    /** server 为 409 后重新读到的服务端版本（读不到为 null）；refreshFailed 表示读取失败；versionChanged 表示资料版本也变了。 */
+    data class Conflict(val id: String, val server: NoteInfo? = null, val refreshFailed: Boolean = false, val versionChanged: Boolean = false) : NoteSaveState
     data class Failed(val failure: ReaderFailure) : NoteSaveState
 }
 
@@ -334,9 +335,45 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
                 }
             }
             r.status == null -> noteSave = NoteSaveState.Offline(d.id)
-            r.status == 409 -> { pendingNote = null; noteSave = NoteSaveState.Conflict(d.id) }
+            r.status == 409 -> { pendingNote = null; noteSave = NoteSaveState.Conflict(d.id); refreshNoteConflict(doc, d.id) }
             else -> { pendingNote = null; noteSave = NoteSaveState.Failed(failureOf(r, d.pdfPage)) }
         }
+    }
+
+    private suspend fun refreshNoteConflict(doc: ReaderDocInfo, id: String) {
+        val r = source.state(doc.id)
+        if (current?.id != doc.id) return
+        val cur = noteSave as? NoteSaveState.Conflict ?: return
+        val body = r.body
+        if (!r.ok || body == null) { noteSave = cur.copy(refreshFailed = true); return }
+        val versionChanged = (body["document"] as? JsonObject)?.str("version") != doc.version
+        noteSave = cur.copy(server = parseNotes(body["notes"]).firstOrNull { it.id == id }, refreshFailed = false, versionChanged = versionChanged)
+    }
+
+    /** 用户点“重新获取服务端版本”。 */
+    suspend fun retryNoteConflictRefresh() {
+        val c = noteSave as? NoteSaveState.Conflict ?: return
+        current?.let { refreshNoteConflict(it, c.id) }
+    }
+
+    /** 用户选择“采用服务端版本”：本地批注列表换成服务端那条，返回它；没有可信的服务端版本则返回 null。 */
+    fun adoptServerNote(): NoteInfo? {
+        val c = noteSave as? NoteSaveState.Conflict ?: return null
+        val server = c.server?.takeIf { !c.versionChanged && it.version == current?.version } ?: return null
+        notes = notes.filterNot { it.id == server.id } + server
+        noteSave = NoteSaveState.Idle
+        return server
+    }
+
+    /**
+     * 用户明确选择“用我的版本覆盖”：只有刚读到的、可信的最新 revision 才作为 baseRevision；读不到、版本变了、
+     * 服务端已看不到这条批注（已删除时 state 不返回）时一律不提交。只提交这一次，409 再来仍回到冲突状态，不循环。
+     */
+    suspend fun overwriteWithMine(d: NoteDraft): Boolean {
+        val c = noteSave as? NoteSaveState.Conflict ?: return false
+        val server = c.server?.takeIf { !c.versionChanged && it.id == d.id && it.version == current?.version } ?: return false
+        saveNote(d.copy(baseRevision = server.revision))
+        return noteSave is NoteSaveState.Saved
     }
 
     /** 批注定位是否仍有效：同版本、同页、文字哈希一致且引文与偏移处文字相同；否则位置待重新确认。 */

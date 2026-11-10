@@ -123,8 +123,8 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
         val m = LocalDeskMetrics.current
         Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState())
             .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 32.dp)) {
-            // Only the three-column Desk has a status bar; keep the same date visible in compact windows.
-            if (m.window != DeskWindow.Inner) {
+            // Use Desk's actual status placement, including windows inside app navigation.
+            if (!m.statusInBar) {
                 Text(examCountdown, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                 Spacer(Modifier.height(12.dp))
             }

@@ -77,7 +77,6 @@ internal fun WeeklyReader(
     var action by remember { mutableStateOf<JsonObject?>(null) }
     var answer by remember { mutableStateOf<JsonObject?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
-    var page by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val formatted = section?.str("body")?.let { it.contains('\n') || it.any { ch -> ch in "*$`#[]_\\" } } == true
     var selectOriginal by remember(section?.str("section_id"), section?.str("body")) { mutableStateOf(false) }
     fun set(key: String, value: JsonElement) = updateState { JsonObject(it + (key to value)) }
@@ -249,11 +248,8 @@ internal fun WeeklyReader(
                 when {
                     answer != null -> {
                         Text(answer!!.str("text").ifBlank { "这一段对不上课件或教材，暂时没法确认。" })
-                        for (p in (answer!!["sources"] as? JsonArray).orEmpty().map { it.jsonObject }) {
-                            TextButton(onClick = { page = p.str("docId") to p.num("pdfPage").toInt() }) {
-                                Text("【${p.str("anchor")}】${p.str("docId")} · PDF 第 ${p.num("pdfPage")} 页")
-                            }
-                        }
+                        ReaderCitationCards(answer!!["sources"] as? JsonArray ?: JsonArray(emptyList()),
+                            loadPage = { doc, page -> http.page(doc, page)?.text })
                     }
                     failure != null -> {
                         Text(failure!!)
@@ -263,11 +259,6 @@ internal fun WeeklyReader(
                 }
             }
         }, confirmButton = { TextButton(onClick = { action = null }) { Text(if (answer == null && failure == null) "取消，返回阅读" else "返回阅读") } })
-        page?.let { key ->
-            val source by produceState<com.coach.client.SourcePage?>(null, key) { value = http.page(key.first, key.second) }
-            AlertDialog(onDismissRequest = { page = null }, title = { Text("${key.first} · PDF 第 ${key.second} 页") },
-                text = { Text(source?.text ?: "暂时取不到原文页。", Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) },
-                confirmButton = { TextButton(onClick = { page = null }) { Text("返回追问") } })
-        }
+
     }
 }

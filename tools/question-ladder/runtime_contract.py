@@ -22,6 +22,21 @@ def validate(pack):
     scope = pack['applicable_kps']
     if scope is not None and (not isinstance(scope, list) or len(set(scope)) != len(scope) or not all(isinstance(k, str) and k for k in scope)):
         raise ValueError('invalid applicable KP denominator')
+    course = pack.get('course_id')
+    if course is not None and (not isinstance(course, str) or not course.strip()):
+        raise ValueError('invalid course identity')
+    capabilities = pack.get('applicable_capabilities')
+    if capabilities is not None:
+        if not isinstance(capabilities, list) or any(not isinstance(c, dict) or set(c) != {'kp', 'capability'} or any(not isinstance(c[k], str) or not c[k] for k in ('kp', 'capability')) for c in capabilities):
+            raise ValueError('invalid applicable capability denominator')
+        pairs = [(c['kp'], c['capability']) for c in capabilities]
+        if len(set(pairs)) != len(pairs) or (scope is not None and any(kp not in scope for kp, _ in pairs)):
+            raise ValueError('duplicate capability or KP outside scope')
+    else:
+        pairs = None
+    inventory = pack.get('candidate_inventory_complete')
+    if inventory is not None and type(inventory) is not bool:
+        raise ValueError('invalid candidate inventory status')
     questions = pack['questions']
     index = {q['ref']: q for q in questions}
     if len(index) != len(questions):
@@ -50,6 +65,8 @@ def validate(pack):
             raise ValueError('ref must bind id and version')
         if scope is not None and q['kp'] not in scope:
             raise ValueError('question KP outside applicable denominator')
+        if pairs is not None and (q['kp'], q['capability']) not in pairs:
+            raise ValueError('question capability outside applicable denominator')
         if q['format'] not in ('mcq', 'essay'):
             raise ValueError('unknown format')
         if q['required_capabilities'] is not None and (not isinstance(q['required_capabilities'], list) or any(not isinstance(c, str) or not c for c in q['required_capabilities']) or q['capability'] in q['required_capabilities']):
@@ -71,6 +88,18 @@ def validate(pack):
                 raise ValueError('invalid essay answer')
             if q['rubric'] is not None and (not isinstance(q['rubric'], list) or not q['rubric'] or any(not isinstance(p, str) or not p.strip() for p in q['rubric'])):
                 raise ValueError('invalid essay rubric')
+        identity = q.get('essay_identity')
+        if identity is not None:
+            if q['format'] != 'essay' or not isinstance(identity, dict) or set(identity) != {'model_answer_id', 'rubric_point_ids', 'linked_question_refs'}:
+                raise ValueError('invalid essay identity')
+            answer_id = identity['model_answer_id']
+            points, links = identity['rubric_point_ids'], identity['linked_question_refs']
+            if not isinstance(answer_id, str) or not answer_id.strip() or not isinstance(points, list) or not points or any(not isinstance(p, str) or not p.strip() for p in points) or len(points) != len(set(points)):
+                raise ValueError('invalid essay resource identities')
+            if q['rubric'] is not None and len(points) != len(q['rubric']):
+                raise ValueError('rubric identities and texts differ in length')
+            if not isinstance(links, list) or len(links) != len(set(links)) or any(not isinstance(r, str) or r not in index or index[r]['format'] != 'mcq' for r in links):
+                raise ValueError('invalid linked question references')
     visiting, done = set(), set()
     def visit(ref):
         if ref in visiting:
@@ -111,11 +140,24 @@ def consume(pack, known_capabilities=()):
                         'exercise': ({'stem': q['stem'], 'options': q['options']} if ready else None),
                         'unmet_capabilities': unmet, 'missing': missing})
     scope = pack['applicable_kps']
+    capabilities = pack.get('applicable_capabilities')
+    active = [q for q in pack['questions'] if q['ref'] not in aliases]
+    def gap(rows):
+        refs = [q['ref'] for q in rows]
+        return {'candidate_refs': refs, 'status': ('candidate_present_unverified' if refs else
+                'candidate_missing' if pack.get('candidate_inventory_complete') is True else 'unknown')}
     return {'synthetic_only': True, 'production_authorized': False,
+            'course_id': pack.get('course_id'),
             'denominator': None if scope is None else len(scope),
-            'applicable_kps': scope, 'questions': records,
+            'applicable_kps': scope,
+            'capability_denominator': None if capabilities is None else len(capabilities),
+            'applicable_capabilities': capabilities,
+            'candidate_inventory_complete': pack.get('candidate_inventory_complete'),
+            'kp_gaps': None if scope is None else [dict(kp=kp, **gap([q for q in active if q['kp'] == kp])) for kp in scope],
+            'capability_gaps': None if capabilities is None else [dict(item, **gap([q for q in active if q['kp'] == item['kp'] and q['capability'] == item['capability']])) for item in capabilities],
+            'questions': records,
             'history_policy': 'aliases resolve prerequisite references only; historical attempts remain unchanged',
-            'pr150_adapter': 'unsupported: capability IDs are not prerequisite KP IDs; no runtime integration'}
+            'pr150_adapter': 'base v1 synthetic adapter exists; identity and scope extension unsupported; no production integration'}
 
 
 def reveal(pack, ref, known_capabilities, submitted):
@@ -136,12 +178,34 @@ def reveal(pack, ref, known_capabilities, submitted):
     return result
 
 
+def read_essay(pack, course_id, ref, known_capabilities, submitted):
+    """Synthetic identity and submission gate, not an authentication service."""
+    index, _ = validate(pack)
+    if not course_id or pack.get('course_id') is None or course_id != pack['course_id']:
+        raise ValueError('course identity unknown or mismatch')
+    if ref not in index or index[ref]['format'] != 'essay':
+        raise ValueError('unknown essay identity')
+    if index[ref].get('essay_identity') is None:
+        raise ValueError('essay resource identity unknown')
+    result = reveal(pack, ref, known_capabilities, submitted)
+    q = index[ref]
+    identity = q['essay_identity']
+    _, aliases = validate(pack)
+    return dict(result, course_id=course_id, question_id=q['id'], version=q['version'],
+                kp=q['kp'], capability=q['capability'], access='synthetic_post_submission_only',
+                model_answer_id=identity['model_answer_id'], rubric_point_ids=identity['rubric_point_ids'],
+                recorded_linked_question_refs=identity['linked_question_refs'],
+                resolved_linked_question_refs=[resolve(r, aliases) for r in identity['linked_question_refs']],
+                production_authorized=False)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['validate', 'consume', 'reveal'])
+    parser.add_argument('action', choices=['validate', 'consume', 'reveal', 'read-essay'])
     parser.add_argument('input', type=Path)
     parser.add_argument('--known-capability', action='append', default=[])
     parser.add_argument('--ref')
+    parser.add_argument('--course-id')
     parser.add_argument('--synthetic-submitted', action='store_true')
     args = parser.parse_args()
     pack = json.loads(args.input.read_text(encoding='utf-8'))
@@ -150,8 +214,10 @@ def main():
         print('PASS: synthetic contract valid')
     elif args.action == 'consume':
         print(json.dumps(consume(pack, args.known_capability), ensure_ascii=False, indent=2))
-    else:
+    elif args.action == 'reveal':
         print(json.dumps(reveal(pack, args.ref, args.known_capability, args.synthetic_submitted), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(read_essay(pack, args.course_id, args.ref, args.known_capability, args.synthetic_submitted), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

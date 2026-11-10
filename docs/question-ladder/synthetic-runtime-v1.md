@@ -9,6 +9,7 @@ python3 tools/question-ladder/generate_runtime_fixture.py /tmp/syn-ladder.json
 python3 tools/question-ladder/runtime_contract.py validate /tmp/syn-ladder.json
 python3 tools/question-ladder/runtime_contract.py consume /tmp/syn-ladder.json --known-capability SYN-add
 python3 tools/question-ladder/runtime_contract.py reveal /tmp/syn-ladder.json --ref SYN-Q2@v1 --known-capability SYN-add --synthetic-submitted
+python3 tools/question-ladder/runtime_contract.py read-essay /tmp/syn-ladder.json --course-id SYN-COURSE-A --ref SYN-Q2@v1 --known-capability SYN-add --synthetic-submitted
 python3 -m unittest discover -s tools/question-ladder -p test_runtime_contract.py
 ```
 
@@ -40,33 +41,68 @@ or establish mastery. Superseded versions remain in the history but are not
 offered as exercises. Real essay text is
 not present or authorized here. MCQ keys are likewise omitted from projection.
 
-PR133 describes candidates and proposed identity relations. At the frozen
-PR150 commit `08e74726`, the following differences require an explicit adapter
-and independent validation:
+## Optional synthetic identity and scope extension
 
-* PR150 reads the weekly item's `learning` with `contract_version: 1.0.0` and
-  `runtime_approval`, checking the candidate against the original item. It does
-  not consume this synthetic pack, its identity contract, or screening ledger.
+Existing v1 packs and the `generate`, `validate`, `consume`, and `reveal`
+entry points remain supported. The generator accepts an optional second argument
+for `course_id`; exercise refs are unique within a pack, so readers must use
+the pair `(course_id, question ref)` rather than treating refs as global.
+`read-essay` requires that exact course, an essay ref, known resource identity,
+synthetic readiness and the submission acknowledgement. The response binds
+course, question ID, version, KP and capability to `model_answer_id`, ordered
+`rubric_point_ids` and their corresponding full texts. `essay_identity` also
+contains `linked_question_refs` for associated MCQs. The response retains those
+recorded refs and separately supplies alias-resolved refs; aliases never rewrite
+history. Missing course, identity, answer or rubric, a wrong course/version,
+MCQ ref or absent acknowledgement cannot produce the essay. The old `reveal`
+remains a compatibility demonstration, not a course-scoped reader.
+
+The acknowledgement and supplied course are **synthetic inputs, not identity
+authentication or an authorization mechanism**. A production service must
+authenticate and authorize the caller and submission server-side, separately
+validate association and resource versions, and enforce release and privacy
+rules. Do not serve the raw pack to learners: it contains keys and essay texts.
+Only `consume` is the answer-free projection. No real essay text or permission
+is granted by this extension.
+
+`applicable_capabilities` is either null or a complete declared list of
+`{kp, capability}` pairs, separate from `applicable_kps`; null yields a null
+capability denominator and null gap list. The list is a producer assertion,
+not proof of a complete curriculum. Each KP/capability gap includes active
+candidate refs and one of `candidate_present_unverified`, `candidate_missing`,
+or `unknown`. A missing candidate is asserted only when the separate
+`candidate_inventory_complete` is true; false/null means unknown. Superseded
+refs are excluded from gap counts but retained in historical records. None of
+these states claims learner mastery, semantic coverage or release approval.
+Scope and inventory assertions must be verified independently for real data.
+
+PR133 describes candidates and proposed identity relations. PR150 commit
+`c1386062b0b77f7953dac8ec87bbcf7093c50346` has an explicitly injected
+synthetic v1 adapter for the older PR133 fixture. It does not read the optional
+identity/scope extension above. Its synthetic essay exercise and a full-text
+reader remain unsupported. The existing production candidate path is separate:
+
+* PR150's production path reads the weekly item's `learning` with
+  `contract_version: 1.0.0` and `runtime_approval`; its opt-in synthetic path
+  separately reads base v1. Neither path consumes this identity/scope extension
+  or the screening ledger.
 * PR150 selects from seven `kind` values: `try_first`, `introduction`,
   `concept`, `detail`, `application`, `bridge`, and `exam_prototype`. Synthetic
   `teaching_kind` is a free string, and `capability` is not a client KP ID.
-* PR150 interprets `prerequisite_kp_ids` as KP IDs, not question references or
-  capability IDs, and does not resolve these aliases. Its missing prerequisites
-  become an empty list; the synthetic contract treats null as unknown and does
-  not offer the exercise. Do not map unknown into an empty prerequisite list.
-* Synthetic `reveal` returns essay text and rubric after synthetic submission.
-  PR150 passes `learning.essay` through in its submission response, but its
-  question metadata and UI do not consume a demonstrated full-answer endpoint.
-  The two essay shapes are not interchangeable.
-* Synthetic `applicable_kps: null` yields an unknown denominator. PR150's
-  summary uses outline `weekKps`, not an independently established complete
-  applicable-KP denominator. A missing, null or nonnumeric PR150 star falls
-  back to weight 1 and cannot subsequently be distinguished from a verified
-  one-star value; do not report that fallback as verified classification.
+* Production `prerequisite_kp_ids` are KP IDs, never question refs or capability
+  IDs. At this commit a nonempty list is checked against the outline KP catalog;
+  a missing catalog or out-of-catalog ID leaves the prerequisite unknown and
+  withheld. The producer candidate contract does not settle whether a future
+  authorized catalog can include out-of-outline KPs: that policy is unknown.
+  Do not map unknown to an empty list.
+* Production `learning.essay` holds answer/rubric IDs; a full-text reader is
+  pending. The synthetic essay resource is not an approved production mapping.
+* Outline `weekKps` is not an independently verified full denominator. PR150
+  retains missing/null/unknown/unverified star state while weight 1 is only a
+  scheduling fallback, not a verified one-star classification.
 
 The comparison above is a source inspection of the frozen PR150 head, not a
-UI run or proof of integration. This reference does not claim the two are
-integrated. Production requires an agreed
+new UI run or proof that this extension is integrated. Production requires an agreed
 adapter, independently verified immutable input hashes, actual answer and
 isolation evidence, explicit release approval, and an authorized real pool;
 none is supplied by the synthetic fixture. The fixture cannot prove mastery,

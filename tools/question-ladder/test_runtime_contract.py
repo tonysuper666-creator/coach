@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from runtime_contract import consume, reveal, validate
+from runtime_contract import consume, read_essay, reveal, validate
 
 HERE = Path(__file__).parent
 
@@ -91,5 +91,63 @@ class ContractTest(unittest.TestCase):
         with self.assertRaises(ValueError): validate(p)
         p=copy.deepcopy(self.pack); p['questions'][2]['model_answer']=None
         self.assertFalse(consume(p)['questions'][2]['ready_for_synthetic_exercise'])
+
+    def test_course_scoped_essay_identity_and_access(self):
+        other = copy.deepcopy(self.pack)
+        other['course_id'] = 'SYN-COURSE-B'
+        other['questions'][2]['model_answer'] = 'A different synthetic answer.'
+        for pack, course, expected in [(self.pack, 'SYN-COURSE-A', 'Two objects form a pair.'),
+                                       (other, 'SYN-COURSE-B', 'A different synthetic answer.')]:
+            result = read_essay(pack, course, 'SYN-Q2@v1', ['SYN-add'], True)
+            self.assertEqual(result['model_answer'], expected)
+            self.assertEqual((result['question_id'], result['version'], result['course_id']), ('SYN-Q2', 'v1', course))
+            self.assertEqual(result['model_answer_id'], 'SYN-ANSWER-2')
+            self.assertEqual(result['rubric_point_ids'], ['SYN-RUBRIC-2A', 'SYN-RUBRIC-2B'])
+            self.assertEqual(result['recorded_linked_question_refs'], ['SYN-Q1@v1'])
+            self.assertEqual(result['resolved_linked_question_refs'], ['SYN-Q1@v2'])
+            self.assertFalse(result['production_authorized'])
+        for course, ref, submitted in [('SYN-COURSE-B', 'SYN-Q2@v1', True),
+                                       (None, 'SYN-Q2@v1', True),
+                                       ('SYN-COURSE-A', 'SYN-Q2@v2', True),
+                                       ('SYN-COURSE-A', 'SYN-Q1@v2', True),
+                                       ('SYN-COURSE-A', 'SYN-Q2@v1', False),
+                                       ('SYN-COURSE-A', 'SYN-Q3@v1', True)]:
+            with self.subTest(course=course, ref=ref, submitted=submitted), self.assertRaises(ValueError):
+                read_essay(self.pack, course, ref, ['SYN-add'], submitted)
+        legacy = copy.deepcopy(self.pack); del legacy['course_id']
+        with self.assertRaises(ValueError): read_essay(legacy, 'SYN-COURSE-A', 'SYN-Q2@v1', ['SYN-add'], True)
+        missing = copy.deepcopy(self.pack); del missing['questions'][2]['essay_identity']
+        with self.assertRaises(ValueError): read_essay(missing, 'SYN-COURSE-A', 'SYN-Q2@v1', ['SYN-add'], True)
+
+    def test_essay_identity_rejects_mismatched_points_and_links(self):
+        for mode in ('rubric', 'dangling', 'essay-link'):
+            p = copy.deepcopy(self.pack)
+            identity = p['questions'][2]['essay_identity']
+            if mode == 'rubric': identity['rubric_point_ids'].pop()
+            if mode == 'dangling': identity['linked_question_refs'] = ['SYN-missing@v1']
+            if mode == 'essay-link': identity['linked_question_refs'] = ['SYN-Q3@v1']
+            with self.subTest(mode=mode), self.assertRaises(ValueError): validate(p)
+
+    def test_scope_and_missing_candidates_do_not_imply_mastery(self):
+        out = consume(self.pack)
+        self.assertEqual((out['denominator'], out['capability_denominator']), (4, 5))
+        self.assertEqual(out['kp_gaps'][3]['status'], 'candidate_missing')
+        self.assertEqual(out['capability_gaps'][2]['status'], 'candidate_missing')
+        self.assertEqual(out['capability_gaps'][0]['candidate_refs'], ['SYN-Q1@v2'])
+        self.assertEqual(out['capability_gaps'][3]['status'], 'candidate_present_unverified')
+        p = copy.deepcopy(self.pack); p['candidate_inventory_complete'] = None
+        self.assertEqual(consume(p)['kp_gaps'][3]['status'], 'unknown')
+        p['applicable_kps'] = None; p['applicable_capabilities'] = None
+        out = consume(p)
+        self.assertIsNone(out['denominator']); self.assertIsNone(out['capability_denominator'])
+        self.assertIsNone(out['kp_gaps']); self.assertIsNone(out['capability_gaps'])
+
+    def test_capability_scope_rejects_duplicate_outside_and_omitted(self):
+        for mode in ('duplicate', 'outside', 'omitted'):
+            p = copy.deepcopy(self.pack)
+            if mode == 'duplicate': p['applicable_capabilities'].append(p['applicable_capabilities'][0])
+            if mode == 'outside': p['applicable_capabilities'][0]['kp'] = 'SYN-other'
+            if mode == 'omitted': p['applicable_capabilities'].pop(0)
+            with self.subTest(mode=mode), self.assertRaises(ValueError): validate(p)
 
 if __name__ == '__main__': unittest.main()

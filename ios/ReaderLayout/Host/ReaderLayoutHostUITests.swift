@@ -179,9 +179,19 @@ final class ReaderLayoutHostUITests: XCTestCase {
 
     private func assertDrawerTitle(in app: XCUIApplication) {
         let title = app.staticTexts["sampleDrawerTitle"]
+        let close = app.buttons["收起"]
+        let drawer = app.scrollViews["sampleDrawer"]
         assertVisible(title, in: app)
-        XCTAssertLessThanOrEqual(title.frame.maxY, app.scrollViews["sampleDrawer"].frame.minY + 1,
+        assertVisible(close, in: app)
+        XCTAssertGreaterThanOrEqual(title.frame.minX, drawer.frame.minX - 1)
+        XCTAssertLessThanOrEqual(title.frame.maxX, drawer.frame.maxX + 1)
+        XCTAssertGreaterThanOrEqual(close.frame.minX, drawer.frame.minX - 1)
+        XCTAssertLessThanOrEqual(close.frame.maxX, drawer.frame.maxX + 1,
+                                 "Close button must fit within the drawer width")
+        XCTAssertLessThanOrEqual(title.frame.maxY, drawer.frame.minY + 1,
                                  "The complete title should remain above the scrolling content")
+        XCTAssertLessThanOrEqual(close.frame.maxY, drawer.frame.minY + 1,
+                                 "Close button must remain above the scrolling content")
     }
 
     private func showInReader(_ element: XCUIElement, in app: XCUIApplication) {

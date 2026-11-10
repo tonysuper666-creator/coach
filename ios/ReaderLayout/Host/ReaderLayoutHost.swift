@@ -104,12 +104,13 @@ private struct HostView: View {
               }.frame(maxHeight: .infinity).clipped().accessibilityIdentifier("readerScroll")
                 if drawer {
                     VStack(alignment: .leading, spacing: 0) {
-                        HStack(alignment: .top) {
+                        let headerLayout = proxy.size.width < 340 || dynamicTypeSize.isAccessibilitySize
+                            ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout(alignment: .top))
+                        headerLayout {
                             Text("内容抽屉示例").font(.headline)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .layoutPriority(1)
                                 .accessibilityIdentifier("sampleDrawerTitle")
-                            Spacer(minLength: 8)
                             Button("收起") { drawer = false }
                         }.padding([.horizontal, .top])
                         ScrollView {

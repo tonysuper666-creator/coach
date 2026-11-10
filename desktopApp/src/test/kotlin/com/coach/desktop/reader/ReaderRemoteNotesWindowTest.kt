@@ -375,6 +375,7 @@ class ReaderRemoteNotesWindowTest {
         try {
             r.startNote("看这句"); r.key(Key.Enter, ctrl = true)
             assertEquals("已在页上标出原句", r.session.uiHighlight, "刚保存的批注立刻标出")
+            r.shot("notes-saved-highlight") // 此刻页上有高亮
             val id = r.session.noteDraft!!.id
             r.session.cancelNote(); r.session.highlightNoteId = null; r.frames()
             assertNull(r.session.uiHighlight)
@@ -383,8 +384,7 @@ class ReaderRemoteNotesWindowTest {
             runBlocking { r.session.remote!!.show(1) }; r.frames()
             r.session.highlightNoteId = id; r.frames()
             assertEquals("这一页没有文字层，无法标出原句", r.session.uiHighlight)
-            s.boxesPatch = { it }; s.bodyText = { _, _ -> "Alpha beta gamma\nDelta epsilon zeta\nEta theta iota" }
-            r.shot("notes-saved-highlight")
+            r.shot("notes-unlocatable-not-drawn") // 无法确认：只有说明，页上不画
         } finally { r.close() }
     }
 

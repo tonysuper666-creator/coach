@@ -24,7 +24,7 @@ import kotlinx.serialization.json.longOrNull
  *
  * 适配边界：
  *  - ReaderHttp 的构造函数是 internal，桌面只能从 CourseHttp.reader 拿到实例；这里用 [ReaderSource] 注入，
- *    真实接线 = ReaderHttpSource(courseHttp.reader)，测试 = 自造服务响应。适配器本身未单测（需要 MockEngine，build 配置不在本卡）。
+ *    真实接线 = ReaderHttpSource(courseHttp.reader)，测试 = 自造服务响应。适配器经真实 CourseHttp 传输打到本机回环小服务做过契约测试（ReaderHttpSourceTest）。
  *  - 服务端 pdfPage 从 1 起；桌面 ReaderState 页序从 0 起，只在 [PdfPages] 里转换，不把屏幕页码当书页码（printedPage 单独显示）。
  *  - 缺页数/缺 id/缺版本的目录项丢弃；页响应的 documentId/pdfPage/version 与请求不符一律失败，不猜。
  *  - 未做（待做）：boxes 高亮、批注 saveNote、map 章节树、exportMarkdown；图片只加载与显示，不做缩放对齐。

@@ -454,6 +454,8 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
         SideEffect { session.renderedPanes = shown }
         val requesters = remember { ReaderPane.entries.associateWith { FocusRequester() } }
         LaunchedEffect(state.focus, shown) { runCatching { requesters.getValue(state.focus).requestFocus() } }
+        // 批注编辑区消失（保存后按 Esc / 放弃）时，焦点回到所在栏，键盘不会因为输入框被移除而失效。
+        LaunchedEffect(session.noting) { if (!session.noting) runCatching { requesters.getValue(session.state.focus).requestFocus() } }
 
         Column(
             Modifier.fillMaxSize().testTag("reader-root").onPreviewKeyEvent { e ->
@@ -731,9 +733,11 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
         if (d != null) {
             Column(Modifier.testTag("note-editor").padding(top = 8.dp).border(BorderStroke(1.dp, Accent)).padding(8.dp)) {
                 Text("原句：${d.quote}", fontSize = 12.sp)
+                val inputFocus = remember(d.id) { FocusRequester() }
+                LaunchedEffect(d.id) { runCatching { inputFocus.requestFocus() } } // 选定一行后光标直接进输入框，可以马上键入
                 androidx.compose.foundation.text.BasicTextField(
                     value = session.noteText, onValueChange = { session.noteText = it },
-                    modifier = Modifier.testTag("note-input").fillMaxWidth().padding(vertical = 6.dp),
+                    modifier = Modifier.testTag("note-input").focusRequester(inputFocus).fillMaxWidth().padding(vertical = 6.dp),
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
                 )
                 Text("Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))

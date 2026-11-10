@@ -1,12 +1,11 @@
 package com.coach.ui
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.coach.client.*
@@ -16,8 +15,7 @@ import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 
 /**
- * 期末面板（路线页顶部）：还剩几天、11 周各自掌握到哪、今天先补哪三块。
- * 掌握度直接取账本回放的知识点状态；押题权重来自 Mac 上的私有配置，拿不到就只按未掌握程度排，并如实说明。
+ * 期末面板：共用接着学决策、课程日期、各周进度，以及课程内容/分值的真实缺项。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -25,7 +23,10 @@ internal fun ExamPanelCard(
     c: CoachController, view: CourseView, focus: ExamFocus?,
     onOpen: (kpId: String, startNow: Boolean) -> Unit, onPractice: (week: Int) -> Unit,
 ) {
-    val panel = remember(view, focus) { view.examPanel(c.nowMillis(), focus) }
+    // 跨午夜也要刷新：时钟每秒读一次，按课程时区的日历日变了才重算。
+    val now = rememberCourseNow(c)
+    val today = remember(now, view) { com.coach.domain.calendarDay(now, view.zone) }
+    val panel = remember(view, focus, today) { view.examPanel(now, focus) }
     var picking by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -52,17 +53,17 @@ internal fun ExamPanelCard(
             Countdown(panel.countdown, busy) { picking = true }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
 
-            Text("今天先补这三块", style = MaterialTheme.typography.titleMedium)
-            if (panel.focus.isEmpty()) Text(emptyFocusText(panel), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            panel.focus.forEachIndexed { i, row -> FocusBlock(c, i + 1, row, onOpen, onPractice) }
-            Text(
-                if (panel.weighted) "按押题权重 × 未掌握程度排序。" else "暂无押题权重，只按未掌握程度排序。",
-                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val target = c.learningTarget(view)
+            Text("接着学", style = MaterialTheme.typography.titleMedium)
+            if (target == null) Text("今天的都做完了。")
+            else TextButton(onClick = { onOpen(target.kp.id, true) }, modifier = Modifier.testTag("exam-continue")) { Text(splitTitle(target.kp.title).second) }
+            if (panel.offFocus.isNotEmpty() || panel.unplanned.isNotEmpty()) {
+                Text(emptyFocusText(panel), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
 
-            Text("各周掌握度", style = MaterialTheme.typography.titleMedium)
+            Text("各周进度", style = MaterialTheme.typography.titleMedium)
             panel.weeks.forEach { WeekLine(it) }
-            Text("掌握度：已通过算一半、稳固算满，和下面路线里的状态同一本账。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("进度：会了算一半，稳了算满。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 
@@ -84,12 +85,12 @@ internal fun ExamPanelCard(
 
 private const val DAY_MILLIS = 86_400_000L
 
-/** 前三块为空时说清楚为什么：只有真的各周都稳固才这么说；没掌握但不在押题范围、押题周大纲还没排，都照实讲。 */
+/** 课程内容和分值的缺项独立显示，不因合并推荐入口而被隐藏。 */
 internal fun emptyFocusText(panel: ExamPanel): String {
-    if (panel.allSolid) return "各周都已稳固，没有要补的。"
+    if (panel.allSolid) return "各周都稳了，没有要补的。"
     return buildList {
-        if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没掌握，但押题权重为 0，没有排进来。")
-        if (panel.unplanned.isNotEmpty()) add("押题的 ${weekSpans(panel.unplanned)} 在大纲里还没有知识点，暂时没法开讲。")
+        if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没会，期末分值为 0。")
+        if (panel.unplanned.isNotEmpty()) add("有分值的${weekSpans(panel.unplanned)}在课程里还没有对应的节，暂时没法学。")
     }.joinToString("")
 }
 
@@ -99,13 +100,13 @@ private fun Countdown(countdown: ExamCountdown, busy: Boolean, onPick: () -> Uni
         Column(Modifier.weight(1f)) {
             Text("期末", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             when (countdown) {
-                ExamCountdown.Unset -> Text("日期未公布", style = MaterialTheme.typography.headlineSmall)
+                ExamCountdown.Unset -> Text("还没设期末日期", style = MaterialTheme.typography.headlineSmall)
                 is ExamCountdown.Days -> {
-                    Text(if (countdown.days == 0) "今天考试" else "距期末 ${countdown.days} 天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                    Text(examDateLabel(countdown.examDay), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("距期末 ${countdown.days} 天", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                    Text(examDateLabel(countdown.examDay) + if (countdown.days == 0) " · 今天考试" else "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 is ExamCountdown.Past -> {
-                    Text("考试日已过", style = MaterialTheme.typography.headlineSmall)
+                    Text("期末已结束", style = MaterialTheme.typography.headlineSmall)
                     Text("记的是 ${examDateLabel(countdown.examDay)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -117,44 +118,15 @@ private fun Countdown(countdown: ExamCountdown, busy: Boolean, onPick: () -> Uni
 }
 
 @Composable
-private fun FocusBlock(c: CoachController, rank: Int, row: WeekMastery, onOpen: (String, Boolean) -> Unit, onPractice: (Int) -> Unit) {
-    val action = row.action ?: return
-    val (verb, what) = when (action) {
-        is ExamAction.Teach -> (if (action.repair) "修复" else "开讲") to splitTitle(action.title).second
-        is ExamAction.Practice -> "开练" to if (action.mistakes > 0) "本周错题 ${action.mistakes} 道" else "本周练到稳固"
-    }
-    val go = {
-        when (action) {
-            is ExamAction.Teach -> { c.startRequests[action.kpId] = false; onOpen(action.kpId, true) }
-            is ExamAction.Practice -> if (action.mistakes > 0) onPractice(action.week) else { c.startRequests[action.kpId] = true; onOpen(action.kpId, true) }
-        }
-    }
-    Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer, shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button, onClickLabel = "$verb 第 ${row.week} 周", onClick = go),
-    ) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("$rank", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("第 ${row.week} 周" + row.topic.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                Text("$verb：$what", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSecondaryContainer, maxLines = 2)
-                Text("掌握 ${(row.score * 100).roundToInt()}%" + if (row.needsRepair > 0) " · ${row.needsRepair} 个需修复" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSecondaryContainer)
-            }
-            Text("$verb →", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
-        }
-    }
-}
-
-@Composable
 private fun WeekLine(row: WeekMastery) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("W${row.week}", Modifier.widthIn(min = 32.dp), style = MaterialTheme.typography.labelLarge)
+        Text("第 ${row.week} 周", Modifier.widthIn(min = 48.dp), style = MaterialTheme.typography.labelLarge)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             if (row.topic.isNotBlank()) Text(row.topic, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-            if (row.exempt) Text("期中周（无新课，豁免）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            else if (row.total == 0) Text("大纲里还没有这周的知识点", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (row.exempt) Text("期中周，无新课", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else if (row.total == 0) Text("课程里还没有这周的节", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             else LinearProgressIndicator(progress = { row.score.toFloat() }, Modifier.fillMaxWidth().height(6.dp), color = successColor(), trackColor = MaterialTheme.colorScheme.surfaceVariant, strokeCap = androidx.compose.ui.graphics.StrokeCap.Round, gapSize = 0.dp, drawStopIndicator = {})
         }
-        if (row.total > 0) Text("${row.passed}/${row.total} 过" + if (row.solid > 0) " · ${row.solid} 稳" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (row.total > 0) Text("${KpStatus.PASSED.label} ${row.passed}/${row.total}" + if (row.solid > 0) " · ${KpStatus.SOLID.label} ${row.solid}" else "", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

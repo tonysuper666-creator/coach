@@ -26,7 +26,7 @@ internal fun LearnerBubble(text: String) {
 @Composable
 internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!message.done || message.fallback) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             // The model name matters only when someone other than the usual tutor answered (rate-limit fallback); otherwise it is internal detail.
             Text("导师" + if (message.fallback && message.model.isNotBlank()) " · ${message.model}" else "", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             if (message.fallback) StatusChip("兜底", MaterialTheme.colorScheme.tertiary)
@@ -47,34 +47,48 @@ internal fun TutorBubble(message: TutorMessage, math: MathAssets, onStop: () -> 
 private fun Notice(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
 
 private fun reasonText(reason: String?) = when (reason) {
-    "rate_limited" -> "Claude 暂时限流，正在换模型回答"
-    "exam_protection" -> "11 月 2 日考前保护时段，15:00 GMT 后恢复"
+    "rate_limited" -> "Claude 这会儿忙，正在换一个模型接着答"
+    "exam_protection" -> "考前保护时段，这段时间先不答"
     "first_token_timeout" -> "25 秒没有出字"
     "stall" -> "30 秒没有新内容"
     "total_timeout" -> "超过 180 秒"
     "suspended" -> "Mac 休眠过"
     "cancelled" -> "已取消"
     "client_gone" -> "连接断开"
-    "cli_exit", "timeout", "max_output_tokens" -> reason
+    "cli_exit" -> "回答意外中断"
+    "timeout" -> "等待回答超时"
+    "max_output_tokens" -> "这次回答达到长度上限"
     null, "" -> "原因未知"
-    else -> reason
+    else -> "暂时没法确认原因"
 }
 
 /** 增量 Markdown：同一条消息只追加新增的字符；snapshot 整体替换（key 变化）时重建。 */
 @Composable
 internal fun Markdown(text: String, done: Boolean, key: String, math: MathAssets, modifier: Modifier = Modifier) {
-    val engine = remember(key) { IncrementalMarkdown() }
-    val blocks = remember(key, text, done) { engine.update(text, done) }
+    val hasFootnotes = done && com.coach.ui.v7.footnotes(text).isNotEmpty()
+    val engine = remember(key, hasFootnotes) { IncrementalMarkdown() }
+    val blocks = remember(key, text, done, hasFootnotes) { engine.update(if (done) com.coach.ui.v7.withoutFootnoteDefinitions(text) else text, done) }
     LaunchedEffectMath(blocks, math)
     // The renderer reports every formula it has to draw as source because no SVG is cached yet: fetch exactly those (same key it looked up).
     val scope = rememberCoroutineScope()
+    val notes = remember(text) { com.coach.ui.v7.footnotes(text) }
+    val inlineNotes = !com.coach.ui.v7.LocalDeskMetrics.current.inner && !com.coach.ui.v7.LocalReadingFocus.current
+    CompositionLocalProvider(com.coach.ui.v7.LocalFootnotePrefix provides "$key:") {
     ProvideMarkdownMeasurer {
-        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((coach.design.tokens.CoachV7.Size.body.value * coach.design.tokens.V7Reading.paragraphEm).dp)) {
             blocks.forEach { block ->
                 key(block.key) { MarkdownContent(block, math.assets, modifier = Modifier.fillMaxWidth(), failed = math.failed.keys, onFailure = { missing -> if (block.sealed) scope.launch { math.request(missing) } }) }
+                if (inlineNotes) notes.filter { block.source.contains("[^${it.id}]") }.forEach { note ->
+                    com.coach.ui.v7.PaperCard(Modifier.fillMaxWidth()) {
+                        Text("${note.number}  ${note.label}", style = MaterialTheme.typography.labelMedium)
+                        Text(note.text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
     }
+}
+
 }
 
 @Composable

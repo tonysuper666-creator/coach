@@ -338,7 +338,7 @@ private fun GradeBlock(d: AttemptDetail) {
         val g = d.grade
         if (g == null) { Text("还没有批改。", style = MaterialTheme.typography.bodyMedium); return }
         if (d.isChoice) {
-            Text("服务端按选项精确比对，不经过模型。", style = MaterialTheme.typography.bodyMedium)
+            Text("选择题按选项对答案。", style = MaterialTheme.typography.bodyMedium)
             if (g.feedback.isNotBlank()) Text(g.feedback, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return
         }
@@ -353,7 +353,7 @@ private fun GradeBlock(d: AttemptDetail) {
 }
 
 private fun formatLabel(format: String) = when (format) { "SINGLE_CHOICE" -> "选择题"; "SHORT_ANSWER" -> "简答"; "ESSAY" -> "论述"; "CALCULATION" -> "计算"; else -> format }
-private fun statusLabel(status: String) = when (status) { "AI_UNREVIEWED" -> "AI 草稿"; "EXACT" -> "精确判分"; "VERIFIED" -> "已核验"; else -> status }
+private fun statusLabel(status: String) = when (status) { "AI_UNREVIEWED" -> "待复核"; "EXACT" -> "精确判分"; "VERIFIED" -> "已核验"; else -> status }
 private fun percent(g: GradeView) = "${g.score * 100 / g.max}%"
 private fun trimZero(x: Double) = if (x == x.toLong().toDouble()) x.toLong().toString() else x.toString()
 

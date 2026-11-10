@@ -138,7 +138,7 @@ private fun MathText(text: String, assets: Map<String, MathAsset>, model: Boolea
         // Still streaming: structure and emphasis are shown, formulas stay as written until the block seals (no half-typed LaTeX flicker).
         // A sealed paragraph without formulas keeps this same Text and its measured layout. It needs neither width subcomposition nor baseline probes.
         val plain = if (live) text else remember(tokens) { tokens.joinToString("") { it.text.orEmpty() } }
-        Text(remember(plain) { renderMarkdownText(plain) }, modifier.fillMaxWidth(), style = style)
+        com.coach.ui.v7.ReadingText(remember(plain) { renderMarkdownText(plain) }, modifier.fillMaxWidth(), style = style)
         return
     }
     val density = androidx.compose.ui.platform.LocalDensity.current

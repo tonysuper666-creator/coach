@@ -1,0 +1,693 @@
+{
+  "id": "V7",
+  "name": "案头 · 定稿",
+  "tag": "V6 案头打底：宋体标题、周页大号周数、正文上标对页边、专心读即白描",
+  "unit": "CSS px = dp/sp = pt（Fold8 尺寸为示意估算，S1 实测后校准）",
+  "fonts": {
+    "body": {
+      "label": "Literata + 思源宋体 400",
+      "chain": [
+        {
+          "key": "Literata",
+          "file": "Literataopsz-wght.ttf",
+          "res": "literata",
+          "name": "Literata",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/googlefonts/literata",
+          "version": "Version 3.103;gftools[0.9.29]"
+        },
+        {
+          "key": "NotoSerifSC",
+          "file": "NotoSerifSCwght.ttf",
+          "res": "noto_serif_sc",
+          "name": "思源宋体 / Noto Serif SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notoserifsc（与 Adobe Source Han Serif 同一设计）",
+          "version": "Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0"
+        }
+      ]
+    },
+    "ui": {
+      "label": "IBM Plex Sans + 思源黑体",
+      "chain": [
+        {
+          "key": "PlexSans",
+          "file": "IBMPlexSanswdth-wght.ttf",
+          "res": "ibm_plex_sans",
+          "name": "IBM Plex Sans",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/IBM/plex",
+          "version": "Version 3.201"
+        },
+        {
+          "key": "NotoSansSC",
+          "file": "NotoSansSCwght.ttf",
+          "res": "noto_sans_sc",
+          "name": "思源黑体 / Noto Sans SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notosanssc",
+          "version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603"
+        }
+      ]
+    },
+    "cap": {
+      "label": "思源黑体 500",
+      "chain": [
+        {
+          "key": "PlexSans",
+          "file": "IBMPlexSanswdth-wght.ttf",
+          "res": "ibm_plex_sans",
+          "name": "IBM Plex Sans",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/IBM/plex",
+          "version": "Version 3.201"
+        },
+        {
+          "key": "NotoSansSC",
+          "file": "NotoSansSCwght.ttf",
+          "res": "noto_sans_sc",
+          "name": "思源黑体 / Noto Sans SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notosanssc",
+          "version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603"
+        }
+      ]
+    },
+    "title": {
+      "label": "思源宋体 600 + Literata，30px（取 V2/V4：标题和正文同一家）",
+      "chain": [
+        {
+          "key": "Literata",
+          "file": "Literataopsz-wght.ttf",
+          "res": "literata",
+          "name": "Literata",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/googlefonts/literata",
+          "version": "Version 3.103;gftools[0.9.29]"
+        },
+        {
+          "key": "NotoSerifSC",
+          "file": "NotoSerifSCwght.ttf",
+          "res": "noto_serif_sc",
+          "name": "思源宋体 / Noto Serif SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notoserifsc（与 Adobe Source Han Serif 同一设计）",
+          "version": "Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0"
+        }
+      ]
+    },
+    "deck": {
+      "label": "思源宋体 400 + Literata",
+      "chain": [
+        {
+          "key": "Literata",
+          "file": "Literataopsz-wght.ttf",
+          "res": "literata",
+          "name": "Literata",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/googlefonts/literata",
+          "version": "Version 3.103;gftools[0.9.29]"
+        },
+        {
+          "key": "NotoSerifSC",
+          "file": "NotoSerifSCwght.ttf",
+          "res": "noto_serif_sc",
+          "name": "思源宋体 / Noto Serif SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notoserifsc（与 Adobe Source Han Serif 同一设计）",
+          "version": "Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0"
+        }
+      ]
+    },
+    "note": {
+      "label": "霞鹜文楷（自己的批注）",
+      "chain": [
+        {
+          "key": "PlexSans",
+          "file": "IBMPlexSanswdth-wght.ttf",
+          "res": "ibm_plex_sans",
+          "name": "IBM Plex Sans",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/IBM/plex",
+          "version": "Version 3.201"
+        },
+        {
+          "key": "WenKai",
+          "file": "LXGWWenKai-Regular.ttf",
+          "res": "lxgw_wenkai",
+          "name": "霞鹜文楷 LXGW WenKai",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/lxgw/LxgwWenKai v1.530",
+          "version": "Version 1.530; October 18, 2026"
+        }
+      ]
+    },
+    "num": {
+      "label": "IBM Plex Mono（时间戳、页码）",
+      "chain": [
+        {
+          "key": "PlexMono",
+          "file": "ibmplexmono_IBMPlexMono-Regular.ttf",
+          "res": "ibm_plex_mono",
+          "name": "IBM Plex Mono",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/IBM/plex",
+          "version": "Version 2.3"
+        },
+        {
+          "key": "NotoSansSC",
+          "file": "NotoSansSCwght.ttf",
+          "res": "noto_sans_sc",
+          "name": "思源黑体 / Noto Sans SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notosanssc",
+          "version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603"
+        }
+      ]
+    },
+    "mono": {
+      "label": "IBM Plex Mono",
+      "chain": [
+        {
+          "key": "PlexMono",
+          "file": "ibmplexmono_IBMPlexMono-Regular.ttf",
+          "res": "ibm_plex_mono",
+          "name": "IBM Plex Mono",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/IBM/plex",
+          "version": "Version 2.3"
+        },
+        {
+          "key": "NotoSansSC",
+          "file": "NotoSansSCwght.ttf",
+          "res": "noto_sans_sc",
+          "name": "思源黑体 / Noto Sans SC",
+          "license": "SIL OFL 1.1",
+          "src": "github.com/google/fonts · ofl/notosanssc",
+          "version": "Version 2.004-H2;hotconv 1.0.118;makeotfexe 2.5.65603"
+        }
+      ]
+    }
+  },
+  "fontFiles": [
+    {
+      "key": "Literata",
+      "file": "Literataopsz-wght.ttf",
+      "bytes": 955132,
+      "subsetBytes": null,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/googlefonts/literata"
+    },
+    {
+      "key": "NotoSerifSC",
+      "file": "NotoSerifSCwght.ttf",
+      "bytes": 25125512,
+      "subsetBytes": 2903716,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/google/fonts · ofl/notoserifsc（与 Adobe Source Han Serif 同一设计）"
+    },
+    {
+      "key": "PlexSans",
+      "file": "IBMPlexSanswdth-wght.ttf",
+      "bytes": 537244,
+      "subsetBytes": null,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/IBM/plex"
+    },
+    {
+      "key": "NotoSansSC",
+      "file": "NotoSansSCwght.ttf",
+      "bytes": 17772300,
+      "subsetBytes": 2087948,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/google/fonts · ofl/notosanssc"
+    },
+    {
+      "key": "WenKai",
+      "file": "LXGWWenKai-Regular.ttf",
+      "bytes": 25928940,
+      "subsetBytes": 1879832,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/lxgw/LxgwWenKai v1.530"
+    },
+    {
+      "key": "PlexMono",
+      "file": "ibmplexmono_IBMPlexMono-Regular.ttf",
+      "bytes": 135580,
+      "subsetBytes": null,
+      "license": "SIL OFL 1.1",
+      "src": "github.com/IBM/plex"
+    }
+  ],
+  "size": {
+    "inner": {
+      "size": {
+        "body": 18,
+        "ui": 13.5,
+        "cap": 12,
+        "note": 15,
+        "handnote": 16,
+        "title": 30,
+        "deck": 18,
+        "stem": 19,
+        "opt": 17,
+        "row": 17
+      },
+      "layout": {
+        "bar-h": 52,
+        "foot-h": 52,
+        "w-toc": 200,
+        "w-rail": 324,
+        "nav-w": 0,
+        "colw": 594,
+        "main-pt": 52,
+        "main-px": 64,
+        "pad": 28,
+        "opt-h": 48,
+        "btn-h": 36
+      }
+    },
+    "outerL": {
+      "size": {
+        "body": 18,
+        "ui": 13.5,
+        "cap": 12,
+        "note": 15,
+        "handnote": 16,
+        "title": 28,
+        "deck": 18,
+        "stem": 19,
+        "opt": 17,
+        "row": 17
+      },
+      "layout": {
+        "bar-h": 48,
+        "foot-h": 0,
+        "w-toc": 0,
+        "w-rail": 0,
+        "nav-w": 80,
+        "colw": 594,
+        "main-pt": 28,
+        "main-px": 40,
+        "pad": 20,
+        "opt-h": 48,
+        "btn-h": 44
+      }
+    },
+    "outer": {
+      "size": {
+        "body": 18,
+        "ui": 13.5,
+        "cap": 12,
+        "note": 15,
+        "handnote": 16,
+        "title": 28,
+        "deck": 18,
+        "stem": 19,
+        "opt": 17,
+        "row": 17
+      },
+      "layout": {
+        "bar-h": 52,
+        "foot-h": 68,
+        "w-toc": 0,
+        "w-rail": 0,
+        "nav-w": 0,
+        "colw": 594,
+        "main-pt": 24,
+        "main-px": 24,
+        "pad": 20,
+        "opt-h": 56,
+        "btn-h": 44
+      }
+    },
+    "duo": {
+      "size": {
+        "body": 16,
+        "ui": 12,
+        "cap": 10.5,
+        "note": 13.5,
+        "handnote": 14,
+        "title": 26.5,
+        "deck": 16,
+        "stem": 17,
+        "opt": 15,
+        "row": 15
+      },
+      "layout": {
+        "bar-h": 40,
+        "foot-h": 0,
+        "w-toc": 0,
+        "w-rail": 0,
+        "nav-w": 0,
+        "colw": 529,
+        "main-pt": 0,
+        "main-px": 0,
+        "pad": 20,
+        "opt-h": 44,
+        "btn-h": 36
+      }
+    }
+  },
+  "lineHeight": {
+    "body": 1.85,
+    "title": 1.3
+  },
+  "weight": {
+    "light": {
+      "body": 400,
+      "ui": 400,
+      "ui-strong": 600,
+      "cap": 500,
+      "title": 600,
+      "deck": 400,
+      "h3": 600,
+      "stem": 500,
+      "row-now": 600
+    },
+    "dark": {
+      "body": 370
+    }
+  },
+  "tracking": {
+    "cap": ".02em",
+    "title": ".01em"
+  },
+  "numerals": {
+    "body": "lining-nums proportional-nums",
+    "ui": "lining-nums tabular-nums"
+  },
+  "space": {
+    "s1": 4,
+    "s2": 8,
+    "s3": 12,
+    "s4": 16,
+    "s5": 20,
+    "s6": 24,
+    "s7": 32,
+    "s8": 48
+  },
+  "radius": {
+    "s": 6,
+    "m": 10,
+    "btn": 8,
+    "sheet": 14
+  },
+  "paragraph": ".85em",
+  "measure": "33em",
+  "hairline": "1px",
+  "color": {
+    "light": {
+      "toc-bg": {
+        "hex": "#E8E2D6",
+        "argb": "FFE8E2D6",
+        "a": 1
+      },
+      "rail-bg": {
+        "hex": "#E8E2D6",
+        "argb": "FFE8E2D6",
+        "a": 1
+      },
+      "pg-paper": {
+        "hex": "#FFFFFF",
+        "argb": "FFFFFFFF",
+        "a": 1
+      },
+      "pg-txt": {
+        "hex": "#E3DCCF",
+        "argb": "FFE3DCCF",
+        "a": 1
+      },
+      "menu-bg": {
+        "hex": "#FFFFFF",
+        "argb": "FFFFFFFF",
+        "a": 1
+      },
+      "menu-ink": {
+        "hex": "#24211C",
+        "argb": "FF24211C",
+        "a": 1
+      },
+      "menu-sep": {
+        "hex": "#E3DCCF",
+        "argb": "FFE3DCCF",
+        "a": 1
+      },
+      "opt-bg": {
+        "hex": "#FFFFFF",
+        "argb": "FFFFFFFF",
+        "a": 1
+      },
+      "pine-wash": {
+        "hex": "#2F6A4B",
+        "argb": "1A2F6A4B",
+        "a": 0.1
+      },
+      "zhu-wash": {
+        "hex": "#A63E2C",
+        "argb": "14A63E2C",
+        "a": 0.08
+      },
+      "btn-bg": {
+        "hex": "#FFFFFF",
+        "argb": "FFFFFFFF",
+        "a": 1
+      },
+      "btn-pri-bg": {
+        "hex": "#24211C",
+        "argb": "FF24211C",
+        "a": 1
+      },
+      "btn-pri-ink": {
+        "hex": "#FCFAF6",
+        "argb": "FFFCFAF6",
+        "a": 1
+      },
+      "hinge-bg": {
+        "hex": "#D6CFC1",
+        "argb": "FFD6CFC1",
+        "a": 1
+      },
+      "note-ink": {
+        "hex": "#665F55",
+        "argb": "FF665F55",
+        "a": 1
+      },
+      "hl-solid": {
+        "hex": "#EED596",
+        "argb": "FFEED596",
+        "a": 1
+      },
+      "sel-bg": {
+        "hex": "#A63E2C",
+        "argb": "17A63E2C",
+        "a": 0.09
+      },
+      "desk": {
+        "hex": "#E8E2D6",
+        "argb": "FFE8E2D6",
+        "a": 1
+      },
+      "sheet": {
+        "hex": "#FCFAF6",
+        "argb": "FFFCFAF6",
+        "a": 1
+      },
+      "card": {
+        "hex": "#FBF8F2",
+        "argb": "FFFBF8F2",
+        "a": 1
+      },
+      "ink": {
+        "hex": "#24211C",
+        "argb": "FF24211C",
+        "a": 1
+      },
+      "sub": {
+        "hex": "#665F55",
+        "argb": "FF665F55",
+        "a": 1
+      },
+      "faint": {
+        "hex": "#857D71",
+        "argb": "FF857D71",
+        "a": 1
+      },
+      "line": {
+        "hex": "#E3DCCF",
+        "argb": "FFE3DCCF",
+        "a": 1
+      },
+      "zhu": {
+        "hex": "#A63E2C",
+        "argb": "FFA63E2C",
+        "a": 1
+      },
+      "pine": {
+        "hex": "#2F6A4B",
+        "argb": "FF2F6A4B",
+        "a": 1
+      },
+      "hl": {
+        "hex": "#F0D282",
+        "argb": "8CF0D282",
+        "a": 0.55
+      }
+    },
+    "dark": {
+      "toc-bg": {
+        "hex": "#0E0D0B",
+        "argb": "FF0E0D0B",
+        "a": 1
+      },
+      "rail-bg": {
+        "hex": "#0E0D0B",
+        "argb": "FF0E0D0B",
+        "a": 1
+      },
+      "pg-paper": {
+        "hex": "#24211D",
+        "argb": "FF24211D",
+        "a": 1
+      },
+      "pg-txt": {
+        "hex": "#34302A",
+        "argb": "FF34302A",
+        "a": 1
+      },
+      "menu-bg": {
+        "hex": "#2A2722",
+        "argb": "FF2A2722",
+        "a": 1
+      },
+      "menu-ink": {
+        "hex": "#E6E0D5",
+        "argb": "FFE6E0D5",
+        "a": 1
+      },
+      "menu-sep": {
+        "hex": "#34302A",
+        "argb": "FF34302A",
+        "a": 1
+      },
+      "opt-bg": {
+        "hex": "#23201C",
+        "argb": "FF23201C",
+        "a": 1
+      },
+      "pine-wash": {
+        "hex": "#7FB394",
+        "argb": "267FB394",
+        "a": 0.15
+      },
+      "zhu-wash": {
+        "hex": "#E07A68",
+        "argb": "21E07A68",
+        "a": 0.13
+      },
+      "btn-bg": {
+        "hex": "#2A2722",
+        "argb": "FF2A2722",
+        "a": 1
+      },
+      "btn-pri-bg": {
+        "hex": "#E6E0D5",
+        "argb": "FFE6E0D5",
+        "a": 1
+      },
+      "btn-pri-ink": {
+        "hex": "#1B1916",
+        "argb": "FF1B1916",
+        "a": 1
+      },
+      "hinge-bg": {
+        "hex": "#000000",
+        "argb": "FF000000",
+        "a": 1
+      },
+      "note-ink": {
+        "hex": "#A0978A",
+        "argb": "FFA0978A",
+        "a": 1
+      },
+      "hl-solid": {
+        "hex": "#6A5730",
+        "argb": "FF6A5730",
+        "a": 1
+      },
+      "sel-bg": {
+        "hex": "#E07A68",
+        "argb": "29E07A68",
+        "a": 0.16
+      },
+      "desk": {
+        "hex": "#0E0D0B",
+        "argb": "FF0E0D0B",
+        "a": 1
+      },
+      "sheet": {
+        "hex": "#1B1916",
+        "argb": "FF1B1916",
+        "a": 1
+      },
+      "card": {
+        "hex": "#23201C",
+        "argb": "FF23201C",
+        "a": 1
+      },
+      "ink": {
+        "hex": "#E6E0D5",
+        "argb": "FFE6E0D5",
+        "a": 1
+      },
+      "sub": {
+        "hex": "#A0978A",
+        "argb": "FFA0978A",
+        "a": 1
+      },
+      "faint": {
+        "hex": "#8F8A80",
+        "argb": "FF8F8A80",
+        "a": 1
+      },
+      "line": {
+        "hex": "#34302A",
+        "argb": "FF34302A",
+        "a": 1
+      },
+      "zhu": {
+        "hex": "#E07A68",
+        "argb": "FFE07A68",
+        "a": 1
+      },
+      "pine": {
+        "hex": "#7FB394",
+        "argb": "FF7FB394",
+        "a": 1
+      },
+      "hl": {
+        "hex": "#C8A050",
+        "argb": "42C8A050",
+        "a": 0.26
+      }
+    }
+  },
+  "grain": {
+    "light": 0,
+    "dark": 0
+  },
+  "motion": {
+    "page": "300ms 纸张上滑 8px + 淡入，轻微回弹",
+    "expand": "260ms 卡片展开",
+    "easing": [
+      0.34,
+      1.2,
+      0.64,
+      1
+    ],
+    "note": "像 Things：打开一项时它“变成一张纸”",
+    "pageMs": 300,
+    "expandMs": 260,
+    "reduceMotion": "系统“减弱动态效果”打开时：全部改成 0ms 或纯淡入"
+  }
+}

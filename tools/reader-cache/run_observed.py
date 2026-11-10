@@ -18,6 +18,7 @@ from summarize import summarize
 from correlate_transport import correlate
 from route_control import summarize_routes
 from packet_capture import PacketCapture
+from android_observer import MODES, observe_android
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -30,8 +31,11 @@ def main():
     parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
                         help="Diagnostic fixture mode; keep legacy for historical comparisons")
     parser.add_argument("--packet-interface", help="Optional Mac capture interface; only the owned synthetic transport endpoint is captured")
-    parser.add_argument('--no-transport-memory-sampler',action='store_true',
+    observers=parser.add_mutually_exclusive_group()
+    observers.add_argument('--no-transport-memory-sampler',action='store_true',
                         help='Android transport/route diagnostic only: omit repeated run-as/dumpsys sampling')
+    observers.add_argument('--transport-observer',choices=MODES,
+                        help='Android transport/route only: select repeated stage reads, meminfo, both (default), or neither')
     parser.add_argument("--output", type=Path, required=True, help="New directory in this checkout")
     parser.add_argument("--host", default="127.0.0.1", help="For Android: the existing configured coach.tailHost IPv4")
     parser.add_argument("--renderer", default="pdftoppm")
@@ -42,8 +46,9 @@ def main():
     parser.add_argument("--test-apk", type=Path)
     parser.add_argument("--perfetto", action="store_true", help="Collect Android FrameTimeline and the app's fixed trace markers")
     args = parser.parse_args()
-    if args.no_transport_memory_sampler and (args.platform != 'android' or args.suite not in ('transport','route')):
+    if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
+    observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
     if args.suite == 'route' and (args.platform != 'android' or args.transport_mode != 'legacy' or args.host in ('127.0.0.1','0.0.0.0','10.0.2.2')):
         parser.error('route control requires Android, legacy transport and a distinct exact configured host IPv4')
     if args.packet_interface and args.suite != "transport":
@@ -70,9 +75,15 @@ def main():
     identity = dict(platform=args.platform, suite=args.suite, fixtureTransport=args.transport_mode, runId=run_id, sourceSha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     captureBoundary="draw/submission and verified pixel upper bound; first physical present unobserved")
     identity["sourceDirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())
-    identity['memorySamplerEnabled']=not args.no_transport_memory_sampler
+    identity['memorySamplerEnabled']=observer_mode!='none'
     identity['memorySamplerStarted']=False
     identity['memorySamplerJoined']=False
+    observer_counts=dict(stage=0,meminfo=0)
+    observer_file='stage-samples.jsonl' if args.platform=='android' and observer_mode=='stage' else 'memory.jsonl'
+    if args.platform=='android':
+        identity['androidObserver']=dict(mode=observer_mode,stageEnabled=observer_mode in ('both','stage'),
+            meminfoEnabled=observer_mode in ('both','meminfo'),commandCounts=observer_counts,
+            samplesFile=observer_file if observer_mode!='none' else None,waitAfterCycleSeconds=.2)
     if args.platform == "android":
         identity["apkSha256"] = hashlib.sha256(args.apk.read_bytes()).hexdigest()
         identity["testApkSha256"] = hashlib.sha256(args.test_apk.read_bytes()).hexdigest()
@@ -82,7 +93,7 @@ def main():
 
     def sample():
         try:
-            with (out / "memory.jsonl").open("w") as log:
+            with (out / observer_file).open("w") as log:
                 while not stop.is_set():
                     row = dict(hostMonotonicNs=time.monotonic_ns(), stage="test_process_running")
                     if args.platform == "desktop":
@@ -104,18 +115,13 @@ def main():
                             result = subprocess.run(["ps", "-o", "pid=,rss=", "-p", str(pid)], capture_output=True, text=True)
                             row.update(pid=pid, rssKiB=result.stdout.strip(), exit=result.returncode)
                     else:
-                        stage_result = subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/reader-stage.json"], capture_output=True, text=True)
-                        if stage_result.returncode == 0:
-                            try:
-                                stage = json.loads(stage_result.stdout)
-                                if stage.get("runId") == run_id:
-                                    row["stage"] = stage["stage"]
-                            except (ValueError, KeyError):
-                                pass
-                        result = subprocess.run(adb + ["shell", "dumpsys", "meminfo", "-s", PACKAGE], capture_output=True, text=True)
-                        row.update(meminfo=result.stdout, exit=result.returncode)
+                        row=observe_android(adb,PACKAGE,run_id,observer_mode)
+                        for kind,span in row['operations'].items():
+                            observer_counts[kind]+=1
+                            if 'error' in span: sampling_errors.append(span['error'])
                     log.write(json.dumps(row) + "\n")
                     log.flush()
+                    if sampling_errors: break
                     stop.wait(.2)
         except Exception as error:
             sampling_errors.append(type(error).__name__)
@@ -140,7 +146,7 @@ def main():
         def save_http_records():
             (out / "requests.json").write_text(json.dumps(fixture.requests, indent=2))
             (out / "transfers.json").write_text(json.dumps(getattr(fixture, "transfers", []), indent=2))
-        sampler = None if args.no_transport_memory_sampler else threading.Thread(target=sample)
+        sampler = None if observer_mode=='none' else threading.Thread(target=sample)
         perfetto = None
         perfetto_log = None
         try:
@@ -212,7 +218,8 @@ def main():
                     (out/'route-comparison.json').write_text(json.dumps(summary,indent=2))
                     if not summary['complete']:
                         raise RuntimeError('Route control incomplete; inspect route-comparison.json')
-                summary['memorySamplerEnabled']=not args.no_transport_memory_sampler
+                summary['memorySamplerEnabled']=observer_mode!='none'
+                summary['androidObserverMode']=observer_mode
             else:
                 cases = json.loads((out / "lifecycle-cases.json").read_text())["cases"]
                 required = {"book_a", "switch_book_b", "restore_book_a", "version_changed", "rendering_changed", "closed", "cancelled_decode", "reopened"}

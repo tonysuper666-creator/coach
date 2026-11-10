@@ -522,3 +522,62 @@ decode/draw and cannot replace the fixed UI baseline or establish 100 ms,
 first presentation or a three-image physical/native/GPU budget. Collect this
 small control before deciding on a performance rerun. Production code and native
 test workload are unchanged in this revision.
+
+## Separating observer operations after 411bc51
+
+At `411bc51`, Mac Python passed all 23 checks. In one AVD, the on/off/on route
+experiment completed 16 associations per group. The two route medians fell from
+about 501 ms with the combined observer to 126/219 ms with it off, then returned
+to about 501 ms. The off group still had substantial waiting. This single
+reversal supports an observer effect; it does not isolate a command or explain
+all waiting. Keep its samples separate from the UI baseline.
+
+`--transport-observer` now independently selects the repeated Android operations:
+
+| Mode | Stage file read | dumpsys meminfo | Observer output |
+| --- | --- | --- | --- |
+| `both` (default) | yes | yes | `memory.jsonl` |
+| `stage` | yes | no | `stage-samples.jsonl`; no memory data |
+| `meminfo` | no | yes | `memory.jsonl`; stage is unobserved |
+| `none` | no | no | no observer file or thread |
+
+The old `--no-transport-memory-sampler` remains an alias for `none`; specifying
+both flags is an error. All overrides, including explicit `both`, are limited
+to Android transport/route diagnostics. UI performance/behavior, lifecycle and
+desktop suites retain their default complete observation. The native test,
+route/payload/echo/connection assertions and production transport are unchanged.
+
+`run.json.androidObserver` records the mode, stage/meminfo selections, actual
+command counts, output filename and 0.2-second wait **after each cycle**. Every
+observer row records each selected command's host invocation/return timestamps
+and exit status, including failed/missing stage reads. A stale/malformed stage
+cannot invent a matching run or phase. Command exceptions retain their failed
+span and fail the runner after joined cleanup. Different modes can finish cycles
+at different rates, so retain their actual counts and timings; they are not
+equal-frequency interventions. Setup/instrumentation/post-test adb remains.
+
+For compatibility the older `memorySamplerEnabled/Started/Joined` fields describe
+the observer thread, so stage-only also reports three true values. They do not
+prove memory sampling. Use `androidObserver.meminfoEnabled` and actual meminfo
+rows to distinguish memory data. Stage-only and none supply no memory evidence;
+meminfo-only has no phase correlation. No diagnostic mode proves a physical/GPU
+budget.
+
+In one isolated AVD session, collect the smallest four-condition comparison
+with a repeated reference: **both → stage → none → meminfo → both**. Use five
+fresh output directories, the same APK hashes, PDF/Poppler, geometry and route
+legacy workload; add only `--transport-observer <mode>` to the preceding command.
+No Perfetto or packet capture. Each group must retain all 16 token/payload/
+listener associations, both eight-sample routes, transient values, PID, command
+counts, command statuses/timings and joined cleanup. The two `both` references
+help detect drift; this is one ordered pass, not counterbalanced replication of
+the observer modes. Do not pool groups or attribute causality to an individual
+command from one order alone.
+
+Compare each route's write-to-read interval across conditions and inspect which
+operations actually ran. A stage-only or meminfo-only pattern can narrow the
+next hypothesis; an interaction can require both operations. Even none may leave
+waiting elsewhere. Host command/server intervals share a clock, but do not
+subtract host and guest timestamps or claim kernel receipt. Decide on any UI
+performance rerun only after this control; the fixed baseline, presentation,
+trace-quality, real-hot-update and native/GPU gaps remain open.

@@ -12,20 +12,37 @@ import test_route_control
 
 class RouteRunnerTest(unittest.TestCase):
     def test_socket_only_native_report_needs_no_cio_samples_and_uses_route_argument(self):
-        self.run_case(False)
+        self.run_case(False,execute_cycle=True)
 
     def test_disabled_sampler_starts_no_thread_and_is_explicitly_recorded(self):
         self.run_case(True)
 
+    def test_partial_observers_have_separate_commands_files_and_metadata(self):
+        for mode in ('stage','meminfo','none'):
+            with self.subTest(mode=mode): self.run_case(False,mode,execute_cycle=True)
+
+    def test_observer_exception_keeps_failed_span_and_fails_runner(self):
+        self.run_case(False,execute_cycle=True,fail_stage=True)
+
     def test_sampler_cannot_be_disabled_for_memory_or_ui_acceptance(self):
         for suite in ('performance','behavior','lifecycle'):
-            args=['run_observed.py','--platform','android','--suite',suite,'--no-transport-memory-sampler','--output','unused']
-            with self.subTest(suite=suite),patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.Fixture') as service:
-                with self.assertRaises(SystemExit) as raised: run_observed.main()
-                self.assertEqual(2,raised.exception.code)
-                service.assert_not_called()
+            for selection in (['--no-transport-memory-sampler'], *[['--transport-observer',mode] for mode in ('both','stage','meminfo','none')]):
+                args=['run_observed.py','--platform','android','--suite',suite,'--output','unused',*selection]
+                with self.subTest(suite=suite,selection=selection),patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.Fixture') as service:
+                    with self.assertRaises(SystemExit) as raised: run_observed.main()
+                    self.assertEqual(2,raised.exception.code)
+                    service.assert_not_called()
 
-    def run_case(self,disabled):
+    def test_conflicting_old_and_new_observer_flags_are_rejected(self):
+        args=['run_observed.py','--platform','android','--suite','route','--output','unused',
+            '--transport-observer','stage','--no-transport-memory-sampler']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False):
+        selected=mode or ('none' if disabled else 'both')
+        enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
         root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
         root.mkdir(parents=True)
@@ -44,9 +61,18 @@ class RouteRunnerTest(unittest.TestCase):
             def __exit__(self,*_): pass
 
         class NoSampler:
-            def __init__(self,**_): sampler_events.append('constructed')
-            def start(self): sampler_events.append('started')
+            def __init__(self,**kwargs):
+                sampler_events.append('constructed');self.target=kwargs['target']
+            def start(self):
+                sampler_events.append('started')
+                if execute_cycle: self.target()
             def join(self): sampler_events.append('joined')
+
+        class OneCycleStop:
+            def __init__(self): self.stopped=False
+            def is_set(self): return self.stopped
+            def set(self): self.stopped=True
+            def wait(self,*_): self.stopped=True
 
         def check_output(command,**_):
             if 'getprop' in command: return '1'
@@ -59,6 +85,11 @@ class RouteRunnerTest(unittest.TestCase):
 
         def run(command,**kwargs):
             commands.append(command)
+            if command[-1]=='cache/reader-stage.json':
+                if fail_stage: raise OSError('unit observer failure')
+                return SimpleNamespace(returncode=0,stdout=json.dumps(dict(runId='unit-run',stage='unit-stage')))
+            if 'dumpsys' in command:
+                return SimpleNamespace(returncode=0,stdout='unit meminfo')
             if 'instrument' in command:
                 kwargs['stdout'].write('OK (1 test)')
             elif 'exec-out' in command:
@@ -71,10 +102,15 @@ class RouteRunnerTest(unittest.TestCase):
         args=['run_observed.py','--platform','android','--suite','route','--host','127.0.0.2',
             '--serial','emulator-5554','--aapt2','aapt-unit','--apk',str(apk),'--test-apk',str(test_apk),'--output',str(out)]
         if disabled: args.append('--no-transport-memory-sampler')
+        if mode is not None: args.extend(['--transport-observer',mode])
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
                 patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
+                patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
                 patch('run_observed.subprocess.check_output',check_output),patch('run_observed.subprocess.run',run):
-            run_observed.main()
+            if fail_stage:
+                with self.assertRaisesRegex(RuntimeError,'memory sampler failed'): run_observed.main()
+            else:
+                run_observed.main()
         self.assertTrue(json.loads((out/'route-comparison.json').read_text())['complete'])
         self.assertEqual('route',json.loads((out/'summary.json').read_text())['suite'])
         instrument=next(command for command in commands if 'instrument' in command)
@@ -82,9 +118,23 @@ class RouteRunnerTest(unittest.TestCase):
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
         for key in ('memorySamplerEnabled','memorySamplerStarted','memorySamplerJoined'):
-            self.assertIs(not disabled,identity[key])
-        self.assertEqual([] if disabled else ['constructed','started','joined'],sampler_events)
-        self.assertFalse(any('dumpsys' in command for command in commands))
+            self.assertIs(enabled,identity[key])
+        self.assertEqual(['constructed','started','joined'] if enabled else [],sampler_events)
+        observer=identity['androidObserver']
+        self.assertEqual(selected,observer['mode'])
+        stage_count=int(execute_cycle and selected in ('both','stage'))
+        meminfo_count=int(execute_cycle and selected in ('both','meminfo') and not fail_stage)
+        self.assertEqual(dict(stage=stage_count,meminfo=meminfo_count),observer['commandCounts'])
+        self.assertEqual(stage_count,sum(command[-1]=='cache/reader-stage.json' for command in commands))
+        self.assertEqual(meminfo_count,sum('dumpsys' in command for command in commands))
+        if enabled and execute_cycle:
+            samples=out/observer['samplesFile']
+            row=json.loads(samples.read_text().strip())
+            self.assertEqual(selected,row['observerMode'])
+            self.assertEqual(bool(meminfo_count),'meminfo' in row)
+            if fail_stage: self.assertEqual('OSError',row['operations']['stage']['error'])
+        self.assertEqual(['OSError'] if fail_stage else [],identity['memorySamplerErrors'])
+        if selected in ('stage','none'): self.assertFalse((out/'memory.jsonl').exists())
 
 
 if __name__=='__main__': unittest.main()

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Foreground reminder acceptance. Invoke via tools/dev/heavy --emulator.
 
-Runs against an explicit private synthetic data directory (e.g. prepare-train-fixture.py
-output), never the installed Coach tree or a production backup. Seeds one synthetic due
-review for the APK's course, then owns an isolated server and a read-only AVD instance.
+Runs against an explicit private synthetic data directory, never the installed Coach tree or a production backup. Seeds two synthetic due
+reviews for the APK's course (one title contains the other, so each due item must own its row), then owns an isolated server and a read-only AVD instance.
 Never connects to production ports or invokes AI. The copied data, credentials and
 server log live in a temporary directory that is deleted afterwards; only content-free
 reminder evidence is written to --out. Build the suffixed APKs (-Pcoach.course must
@@ -38,7 +37,10 @@ parser.add_argument("--private-data-dir", required=True, type=Path, help="synthe
 parser.add_argument("--application-id", required=True, help="isolated TON-specific APK package")
 parser.add_argument("--course", default="ton1291-synthetic-review", help="course compiled into the APK (-Pcoach.course)")
 parser.add_argument("--out", required=True, type=Path, help="new directory for content-free evidence")
+parser.add_argument("--display", help="optional WIDTHxHEIGHT@DENSITY override for a narrow-window pass, e.g. 945x1840@420; "
+                    "the AVD's own geometry is restored before the emulator exits")
 cli = parser.parse_args()
+assert cli.display is None or re.fullmatch(r"[0-9]{3,4}x[0-9]{3,4}@[0-9]{3}", cli.display), "--display WIDTHxHEIGHT@DENSITY"
 assert re.fullmatch(r"com\.coach\.android\.ton[0-9]+", cli.application_id), "Use an isolated TON-specific APK package"
 PACKAGE = cli.application_id
 OUT = cli.out.resolve()
@@ -104,20 +106,21 @@ def save_reminder_log():
 
 
 def seed_due_review(db, course):
-    """One synthetic objective that the exam-compressed schedule makes due today (as check-review-copy.py)."""
-    kp = course + "-kp"
+    """Synthetic objectives that the exam-compressed schedule makes due today (as check-review-copy.py).
+
+    The second title contains the first, so a page that shows only one of them cannot pass by substring match."""
+    kps = [(course + "-kp", "Synthetic review objective"), (course + "-kp2", "Synthetic review objective extension")]
     now = int(time.time() * 1000)
     local = datetime.datetime.fromtimestamp(now / 1000, ZoneInfo("Europe/London"))
     date = local.date() - datetime.timedelta(days=int(local.hour < 4))
     day = (date - datetime.date(1970, 1, 1)).days
     assert db.execute("select count(*) from events where course_id=?", (course,)).fetchone()[0] == 0, "Fixture ID collision"
     seq = db.execute("select coalesce(max(seq),0) from events").fetchone()[0]
-    facts = [
-        ("outline_revised", {"course": {"tz": "Europe/London"}, "ops": [{"kpId": kp, "title": "Synthetic review objective", "conceptIds": ["synthetic"]}]}),
-        ("legacy_passed", {"kpId": kp}),
-        ("legacy_schedule", {"kpId": kp, "dueDay": day + 12, "interval": 15}),
-        ("exam_set", {"examDay": day + 7}),
-    ]
+    facts = [("outline_revised", {"course": {"tz": "Europe/London"},
+                                  "ops": [{"kpId": kp, "title": title, "conceptIds": ["synthetic"]} for kp, title in kps]})]
+    for kp, _ in kps:
+        facts += [("legacy_passed", {"kpId": kp}), ("legacy_schedule", {"kpId": kp, "dueDay": day + 12, "interval": 15})]
+    facts.append(("exam_set", {"examDay": day + 7}))
     for i, (kind, payload) in enumerate(facts, 1):
         event = dict(seq=seq + i, id=f"{course}-r{i}", courseId=course, type=kind, schema=1, recordedAt=now, occurredAt=now,
                      deviceId="desktop", actor="SYSTEM", effectIndex=0, idemKey=f"{course}-r{i}", payload=payload)
@@ -160,7 +163,8 @@ env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(private / "test-token"
            COACH_BRIDGE_URL="http://127.0.0.1:1", COACH_TRAFFIC="test", COACH_SOURCE_LOOKUP="false")
 if SERIAL in run([ADB, "devices"]).stdout.decode():
     raise RuntimeError("Emulator serial already owned; refusing to reuse it")
-server = emulator = None
+server = emulator = original_display = None
+passed = False
 try:
     with (private / "server-private.log").open("w") as log:
         server = subprocess.Popen([BINARY], env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -193,6 +197,16 @@ try:
     adb("shell", "settings", "put", "system", "screen_off_timeout", "600000")
     adb("shell", "input", "keyevent", "KEYCODE_MENU")
     display = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+    original_display = [re.search(r"Override size: (\S+)", display[0]), re.search(r"Override density: (\S+)", display[1])]
+    if cli.display:
+        size, density = cli.display.split("@")
+        adb("shell", "wm", "size", size)
+        adb("shell", "wm", "density", density)
+        display = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+        # wm prints no override line when the requested density equals the physical one.
+        effective = re.findall(r"density: (\d+)", display[1])[-1]
+        assert f"Override size: {size}" in display[0] and effective == density, display
+    display.append("dalvik.vm.heapgrowthlimit=" + adb("shell", "getprop", "dalvik.vm.heapgrowthlimit").strip())
     for apk in ["androidApp/build/outputs/apk/debug/androidApp-debug.apk",
                 "androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk"]:
         adb("install", "-r", ROOT / apk)
@@ -256,15 +270,38 @@ try:
         phases=["permission denial", "two-minute alarm", "process death", "notification tap", "timezone change", "reboot", "disable", "zero due"],
         exitCode=0), indent=2) + "\n")
     print(f"PASS fixture=synthetic seededEvents={seeded} port={port} aiCallsAdded=0 exit=0", flush=True)
+    passed = True
 finally:
     # Preserve only content-free reminder diagnostics on failures as well. The private
     # server log and copied ledger remain local and must never be attached to the issue.
     if emulator is not None and emulator.poll() is None:
         try:
             save_reminder_log()
+            if not passed:
+                # What the synthetic screen showed when a phase failed; the accessibility dump with
+                # bounds is in reminder-log.txt. The foldable AVD reports several displays, so
+                # screencap prefixes a text warning to the PNG on stdout; keep only the image.
+                shot = run([ADB, "-s", SERIAL, "exec-out", "screencap", "-p"]).stdout
+                (OUT / "failure.png").write_bytes(shot[max(shot.find(b"\x89PNG"), 0):])
+                # In-app screenshots the instrumentation took before it failed (synthetic UI only).
+                for name in ("notification.png", "review.png", "permission-denied.png", "timeout.png"):
+                    image = subprocess.run([str(ADB), "-s", SERIAL, "exec-out", "run-as", PACKAGE, "cat", "cache/" + name],
+                                           capture_output=True, timeout=30).stdout
+                    if image.startswith(b"\x89PNG"):
+                        (OUT / name).write_bytes(image)
         except (subprocess.SubprocessError, OSError):
             pass
     uninstall_failed = False
+    if cli.display and emulator is not None and emulator.poll() is None and original_display is not None:
+        # Hand the AVD back in its own geometry even though -read-only discards the session.
+        try:
+            size, density = original_display
+            run([ADB, "-s", SERIAL, "shell", "wm", "size", size.group(1) if size else "reset"])
+            run([ADB, "-s", SERIAL, "shell", "wm", "density", density.group(1) if density else "reset"])
+            restored = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+            print(json.dumps(dict(displayRestored=restored)), flush=True)
+        except (subprocess.SubprocessError, OSError):
+            print(json.dumps(dict(displayRestored=False)), flush=True)
     if emulator is not None and emulator.poll() is None:
         # The isolated APKs must not survive the smoke, including assertion failures.
         for package in (PACKAGE + ".test", PACKAGE):

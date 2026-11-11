@@ -32,30 +32,26 @@ import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** Real SQLite, HTTP and tutor WebSocket; all material is synthetic. Window 933x704dp, density=1, fontScale=1. */
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w1280dp-h960dp-mdpi")
-@GraphicsMode(GraphicsMode.Mode.NATIVE)
-class WeekBrowsingFlowTest {
+abstract class WeekFlowFixture {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private lateinit var driver: AndroidSqliteDriver
-    private lateinit var tutor: TutorClient
+    protected lateinit var tutor: TutorClient
     private lateinit var server: MockWebServer
-    private lateinit var controller: CoachController
+    protected lateinit var controller: CoachController
     private lateinit var http: CourseHttp
     private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val ledger = CopyOnWriteArrayList<Event>()
-    private val commands = CopyOnWriteArrayList<String>()
-    private val frames = CopyOnWriteArrayList<String>()
-    private val requests = CopyOnWriteArrayList<String>()
+    protected val ledger = CopyOnWriteArrayList<Event>()
+    protected val commands = CopyOnWriteArrayList<String>()
+    protected val frames = CopyOnWriteArrayList<String>()
+    protected val requests = CopyOnWriteArrayList<String>()
     private val now = 1_794_268_800_000L
-    private fun add(type: String, payload: JsonObject, thread: String? = null) = Event(ledger.size + 1L, "e${ledger.size}", "SYNTHETIC", type,
+    protected fun add(type: String, payload: JsonObject, thread: String? = null) = Event(ledger.size + 1L, "e${ledger.size}", "SYNTHETIC", type,
         recordedAt = now, occurredAt = now, deviceId = "test", actor = "SYSTEM", threadId = thread, payload = payload).also(ledger::add)
-    private val body = json("week" to 3, "items" to JsonArray(listOf("Q1", "Q2").map { id ->
+    protected val body = json("week" to 3, "items" to JsonArray(listOf("Q1", "Q2").map { id ->
         json("id" to id, "tier" to "setup", "stem" to "Invented question $id", "factIds" to listOf(if (id == "Q1") "F1" else "F2"), "options" to listOf("Invented A", "Invented B"), "status" to "new", "keyState" to "VERIFIED")
     }), "notes" to JsonArray(listOf(json("section_id" to "S1", "title" to "Invented section one", "body" to "Invented paragraph one.", "fact_ids" to listOf("F1")),
         json("section_id" to "S2", "title" to "Invented section two", "body" to (1..30).joinToString("\n\n") { "Invented paragraph $it describes a made up course." }, "fact_ids" to listOf("F2")))))
-
-    private fun course(scoped: Boolean = false, online: Boolean = false, empty: Boolean = false, complete: Boolean = false, sameWeekSection: Boolean = false) {
+    protected fun course(scoped: Boolean = false, online: Boolean = false, empty: Boolean = false, complete: Boolean = false, sameWeekSection: Boolean = false) {
         val points = if (empty) emptyList() else buildList {
             add(json("id" to "K3", "title" to "【W3】Invented section", "conceptIds" to listOf("F1")))
             add(json("id" to "K4", "title" to "【W4】Invented later section"))
@@ -115,19 +111,26 @@ class WeekBrowsingFlowTest {
         compose.activityRule.scenario.close()
         background.cancel(); tutor.close(); http.close(); server.shutdown(); driver.close()
     }
-    private fun show(tab: AppTab = AppTab.TODAY) {
+    protected fun show(tab: AppTab = AppTab.TODAY) {
         compose.setContent { CompositionLocalProvider(LocalDensity provides Density(1f, 1f)) {
             Box(Modifier.requiredSize(933.dp, 704.dp)) { CoachApp(controller, initialTab = tab, dark = false) }
         } }
     }
-    private fun waitTag(tag: String) = compose.waitUntil(10_000) { compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
-    private fun back() { compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }; compose.waitForIdle() }
-    private fun capture(name: String) {
+    protected fun waitTag(tag: String) = compose.waitUntil(10_000) { compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+    protected fun back() { compose.runOnIdle { compose.activity.onBackPressedDispatcher.onBackPressed() }; compose.waitForIdle() }
+    protected fun capture(name: String) {
         if (System.getProperty("roborazzi.test.record").toBoolean()) {
             val out = File(System.getProperty("coach.v7.output"), "ton1446").apply { mkdirs() }
             compose.onRoot().captureRoboImage(File(out, "$name.png").absolutePath)
         }
     }
+}
+
+// Each behavior group gets a fresh worker through forkEvery = 1, releasing native font buffers.
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], qualifiers = "w1280dp-h960dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class WeekBrowsingFlowTest : WeekFlowFixture() {
     private fun browse(online: Boolean) {
         course(scoped = true, online = online)
         val before = ledger.toList()
@@ -177,6 +180,34 @@ class WeekBrowsingFlowTest {
             assertTrue(frames.none { it.contains("tutor.") })
         }
     }
+    @Test fun browsingAQuestionCatalogWeekKeepsThePausedSessionForToday() {
+        course(scoped = true)
+        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
+        controller.sync.saveMainlineState("SYNTHETIC", json("kind" to "mainline", "week" to 3), "learning")
+        controller.sync.saveMainlineState("SYNTHETIC", json("body" to body, "mode" to "quiz", "item" to "Q2", "choice" to 1), "week:3")
+        val before = ledger.toList()
+        val session = controller.sync.mainlineState("SYNTHETIC", "week:3")
+        show(AppTab.REVIEW)
+        compose.onNodeWithText("选其他周").performClick()
+        waitTag("mainline-week-4")
+        compose.onNodeWithTag("mainline-week-4").performClick()
+        compose.onNodeWithTag("week-section-K4").assertExists()
+        assertEquals(session, controller.sync.mainlineState("SYNTHETIC", "week:3"))
+        assertEquals(before, ledger.toList())
+        assertTrue(commands.isEmpty())
+        compose.onNodeWithContentDescription("导航：今天").performClick()
+        waitTag("today-continue")
+        compose.onNodeWithTag("today-continue").performClick()
+        waitTag("mainline-option-1")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
+    }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], qualifiers = "w1280dp-h960dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class WeekTodayFlowTest : WeekFlowFixture() {
     private fun today(scoped: Boolean) {
         course(scoped = scoped, online = true)
         show()
@@ -195,30 +226,23 @@ class WeekBrowsingFlowTest {
     }
     @Test fun todayWithoutScopeEntersTheFirstQuestionInOneClick() = today(false)
     @Test fun todayWithScopeHasTheSameEntryAndNoExtraScopeWrite() = today(true)
-    @Test fun examPanelSkipsPassedSectionsAndStartsTheSharedTarget() {
-        course(complete = true, sameWeekSection = true)
-        show(AppTab.ROUTE)
-        waitTag("exam-continue")
-        compose.onAllNodesWithTag("exam-continue").assertCountEquals(1)
-        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
-        waitTag("mainline-option-0")
-        compose.onNodeWithText("Invented question Q2").assertExists()
-        assertTrue(commands.isEmpty())
+    @Test fun fullyCompletedCourseDoesNotRecommendAnOldQuestion() {
+        course(complete = true); show()
+        compose.onNodeWithText("今天的都做完了。", substring = true).assertExists()
+        compose.onNodeWithTag("today-continue").assertDoesNotExist()
+        compose.onNodeWithText("到期复习").assertExists()
     }
-    @Test fun examPanelResumesTheSamePausedQuestionAndFeedbackAsToday() {
-        course(scoped = true, sameWeekSection = true)
-        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
-        controller.sync.saveMainlineState("SYNTHETIC", json("body" to body, "mode" to "quiz", "item" to "Q2", "choice" to 1,
-            "result" to json("itemId" to "Q2", "answer" to 0, "choice" to 1, "status" to "missed", "explanation" to json("correct" to "Invented original feedback"))), "week:3")
-        show(AppTab.ROUTE)
-        waitTag("exam-continue")
-        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
-        waitTag("mainline-option-1")
-        compose.onNodeWithText("Invented question Q2").assertExists()
-        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
-        compose.onNodeWithText("Invented original feedback").assertExists()
-        assertTrue(requests.none { it.contains("/answer") })
+    @Test fun missingOfflineContentIsAnHonestEmptyState() {
+        course(empty = true); show()
+        compose.onNodeWithText("还没有同步到课程内容，且 Mac 未连接。").assertExists()
+        compose.onNodeWithTag("today-continue").assertDoesNotExist()
     }
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], qualifiers = "w1280dp-h960dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class WeekResumeFlowTest : WeekFlowFixture() {
     @Test fun pausedQuestionRestoresItsExactChoiceAndFeedbackFromToday() {
         course(scoped = true)
         controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
@@ -304,12 +328,6 @@ class WeekBrowsingFlowTest {
         capture("restored-reading")
         assertTrue(commands.isEmpty())
     }
-    @Test fun fullyCompletedCourseDoesNotRecommendAnOldQuestion() {
-        course(complete = true); show()
-        compose.onNodeWithText("今天的都做完了。", substring = true).assertExists()
-        compose.onNodeWithTag("today-continue").assertDoesNotExist()
-        compose.onNodeWithText("到期复习").assertExists()
-    }
     @Test fun oldTutorPendingQuestionWinsOverTheOtherWeekAndKeepsItsChoice() {
         course(online = true)
         add("study_scope_set", json("week" to 4, "kpIds" to listOf("K4")))
@@ -330,10 +348,35 @@ class WeekBrowsingFlowTest {
         assertEquals(1, commands.count { it == "set_study_scope" })
         assertTrue(frames.none { it.contains("tutor.next") || it.contains("tutor.test") })
     }
-    @Test fun missingOfflineContentIsAnHonestEmptyState() {
-        course(empty = true); show()
-        compose.onNodeWithText("还没有同步到课程内容，且 Mac 未连接。").assertExists()
-        compose.onNodeWithTag("today-continue").assertDoesNotExist()
+}
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], qualifiers = "w1280dp-h960dp-mdpi")
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class WeekSectionStartFlowTest : WeekFlowFixture() {
+    @Test fun examPanelSkipsPassedSectionsAndStartsTheSharedTarget() {
+        course(complete = true, sameWeekSection = true)
+        show(AppTab.ROUTE)
+        waitTag("exam-continue")
+        compose.onAllNodesWithTag("exam-continue").assertCountEquals(1)
+        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
+        waitTag("mainline-option-0")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        assertTrue(commands.isEmpty())
+    }
+    @Test fun examPanelResumesTheSamePausedQuestionAndFeedbackAsToday() {
+        course(scoped = true, sameWeekSection = true)
+        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
+        controller.sync.saveMainlineState("SYNTHETIC", json("body" to body, "mode" to "quiz", "item" to "Q2", "choice" to 1,
+            "result" to json("itemId" to "Q2", "answer" to 0, "choice" to 1, "status" to "missed", "explanation" to json("correct" to "Invented original feedback"))), "week:3")
+        show(AppTab.ROUTE)
+        waitTag("exam-continue")
+        compose.onNodeWithTag("exam-continue").assertTextEquals("Invented second section").performClick()
+        waitTag("mainline-option-1")
+        compose.onNodeWithText("Invented question Q2").assertExists()
+        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
+        compose.onNodeWithText("Invented original feedback").assertExists()
+        assertTrue(requests.none { it.contains("/answer") })
     }
     @Test fun explicitSectionStartUsesThatSectionsFirstQuestion() {
         course(online = true, sameWeekSection = true)
@@ -343,27 +386,5 @@ class WeekBrowsingFlowTest {
         waitTag("mainline-option-0")
         compose.onNodeWithText("Invented question Q2").assertExists()
         assertEquals(1, commands.count { it == "set_study_scope" })
-    }
-    @Test fun browsingAQuestionCatalogWeekKeepsThePausedSessionForToday() {
-        course(scoped = true)
-        controller.sync.saveMainlineState("SYNTHETIC", json("week" to 3))
-        controller.sync.saveMainlineState("SYNTHETIC", json("kind" to "mainline", "week" to 3), "learning")
-        controller.sync.saveMainlineState("SYNTHETIC", json("body" to body, "mode" to "quiz", "item" to "Q2", "choice" to 1), "week:3")
-        val before = ledger.toList()
-        val session = controller.sync.mainlineState("SYNTHETIC", "week:3")
-        show(AppTab.REVIEW)
-        compose.onNodeWithText("选其他周").performClick()
-        waitTag("mainline-week-4")
-        compose.onNodeWithTag("mainline-week-4").performClick()
-        compose.onNodeWithTag("week-section-K4").assertExists()
-        assertEquals(session, controller.sync.mainlineState("SYNTHETIC", "week:3"))
-        assertEquals(before, ledger.toList())
-        assertTrue(commands.isEmpty())
-        compose.onNodeWithContentDescription("导航：今天").performClick()
-        waitTag("today-continue")
-        compose.onNodeWithTag("today-continue").performClick()
-        waitTag("mainline-option-1")
-        compose.onNodeWithText("Invented question Q2").assertExists()
-        compose.onNodeWithTag("mainline-option-1").assertIsSelected()
     }
 }

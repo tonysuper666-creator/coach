@@ -14,7 +14,7 @@ import kotlin.test.*
 import org.junit.Test
 
 class OutlineAdditionTest {
-    private fun isolated(block: (Path) -> Unit) {
+    internal fun isolated(block: (Path) -> Unit) {
         val root = Files.createTempDirectory("outline-addition-").toRealPath()
         try { block(root) } finally { root.toFile().deleteRecursively() }
     }
@@ -28,7 +28,7 @@ class OutlineAdditionTest {
             } }
         }
     }
-    private fun seed(dir: Path, legacy: Boolean = false) {
+    internal fun seed(dir: Path, legacy: Boolean = false) {
         LedgerStore(dir).use { store ->
             store.seedContent(ContentSeed(CourseContent(
                 Course("C", "SYNTH", "Synthetic", examWeights = mapOf("old" to 100)),
@@ -43,7 +43,7 @@ class OutlineAdditionTest {
             sql(dir, "DELETE FROM course_modules")
         }
     }
-    private fun payload(pointChange: Map<String, JsonElement> = emptyMap()): JsonObject {
+    internal fun payload(pointChange: Map<String, JsonElement> = emptyMap()): JsonObject {
         val anchor = json("docId" to "book", "pdfPage" to 2, "bookPage" to 1)
         val point = json("id" to "new", "moduleId" to "new-module", "ordinal" to 1,
             "title" to "【W8·Synthetic】New", "week" to 8, "examFormats" to listOf("SINGLE_CHOICE"),
@@ -137,15 +137,21 @@ class OutlineAdditionTest {
     @Test fun `CLI shares server lock and installs only once`() = isolated { root ->
         val dir = root.resolve("database"); seed(dir, legacy = true)
         val input = root.resolve("input.json"); input.writeText(payload().toString())
-        val args = arrayOf("add-outline", "--input", input.toString(), "--database", dir.toString())
+        val preflightArgs = arrayOf("add-outline", "--input", input.toString(), "--database", dir.toString(), "--preflight")
+        val expect = root.resolve("expect.json")
+        fun apply(label: String) {
+            expect.writeText(canonical(offlineData(dir) { outlinePreflight(dir, input.readBytes()) }))
+            main(arrayOf("add-outline", "--input", input.toString(), "--database", dir.toString(),
+                "--expect", expect.toString(), "--backup", root.resolve(label).toString()))
+        }
         val before = state(dir)
         FileChannel.open(dir.resolve("server.lock"), CREATE, WRITE).use { channel -> channel.lock().use {
-            assertFailsWith<IllegalStateException> { main(args) }
+            assertFailsWith<IllegalStateException> { main(preflightArgs) }
             assertEquals(before, state(dir))
         } }
-        main(args)
+        apply("backup-first")
         val installed = state(dir)
-        main(args)
+        apply("backup-repeat")
         assertEquals(installed, state(dir))
         assertEquals(before.getValue("events").size + 1, installed.getValue("events").size)
     }

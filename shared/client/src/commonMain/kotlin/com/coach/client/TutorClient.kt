@@ -160,7 +160,9 @@ class TutorClient(
                             val text = join(parts, size).decodeToString(throwOnInvalidSequence = true)
                             synchronized(lifecycle) { if (!closed) {
                                 val hello = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
-                                if (hello?.containsKey("epoch") == true) {
+                                // Ledger frames also carry epoch, but only the untyped Hello
+                                // negotiates capabilities. A catch-up hint must not revoke them.
+                                if (hello?.containsKey("epoch") == true && !hello.containsKey("t")) {
                                     agentRunsSupported = hello["agentRunsSupported"] == JsonPrimitive(true)
                                     evidenceCapability.complete(agentRunsSupported)
                                 }

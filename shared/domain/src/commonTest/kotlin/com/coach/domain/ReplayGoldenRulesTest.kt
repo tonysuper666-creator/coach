@@ -31,9 +31,10 @@ class ReplayGoldenRulesTest {
         assertTrue(project(events()).mastery.getValue("kp").passed)
     }
 
-    @Test fun examCompressionUsesFloorOfDaysMinusOneAndAtLeastOne() {
-        for((offset, expected) in listOf(1,1,1,1,2,2,3,3,4,4,5,5).withIndex()) {
-            val days=offset+1
+    @Test fun examCompressionUsesTheCapOnlyInTheFinalSevenDays() {
+        // DESIGN §1/§2.4 and TON-1291: compression applies only on days 7..0.
+        // Keep the old 8..12-day cases, asserting the normal schedule outside that window.
+        for(days in -1..12) {
             val e = events()
             var at = e.last().occurredAt
             fun add(type: String, p: kotlinx.serialization.json.JsonObject) {
@@ -46,11 +47,17 @@ class ReplayGoldenRulesTest {
                 add("review_completed",json("kpId" to "kp","result" to "PASS"))
             }
             val day = logicalDay(at,"Europe/London")
-            assertTrue(project(e).review.getValue("kp").intervalDays > expected)
+            val normal = project(e).review.getValue("kp")
             add("exam_set",json("examDay" to day+days))
             val review = project(e).review.getValue("kp")
-            assertEquals(expected,review.intervalDays,"days="+days)
-            assertTrue(review.dueDay <= day+expected)
+            if (days in 0..7) {
+                val expected = ((days - 1) / 2).coerceAtLeast(1)
+                assertTrue(normal.intervalDays > expected)
+                assertEquals(expected,review.intervalDays,"days="+days)
+                assertTrue(review.dueDay <= day+expected)
+            } else {
+                assertEquals(normal,review,"normal schedule must remain intact at days="+days)
+            }
         }
     }
 }

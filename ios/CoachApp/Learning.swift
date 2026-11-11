@@ -394,8 +394,8 @@ private struct ReaderPending: Codable {
     let server: String; let deviceId: String; let course: String; let document: String
     let operation: String; let body: Data
 }
-private struct ReaderProgressBody: Encodable { let version: String; let pdfPage: Int; let baseRevision: Int; let mutationId: String }
-private struct ReaderNoteBody: Encodable {
+private struct ReaderProgressBody: Codable { let version: String; let pdfPage: Int; let baseRevision: Int; let mutationId: String }
+private struct ReaderNoteBody: Codable {
     let id: String; let version: String; let pdfPage: Int; let textSha256: String
     let start: Int; let end: Int; let quote: String; let note: String; let deleted: Bool
     let baseRevision: Int; let mutationId: String
@@ -453,6 +453,26 @@ private final class ReaderModel: ObservableObject {
     private func sameIdentity(_ value: ReaderPending) -> Bool {
         guard let (address, credential) = connection.learningCredentials else { return false }
         return value.server == address.url.absoluteString && value.deviceId == credential.deviceId && value.course == course
+    }
+    var pendingDescription: String? {
+        guard let pending else { return nil }
+        if pending.operation == "notes", let note = try? JSONDecoder().decode(ReaderNoteBody.self, from: pending.body) {
+            return "待确认批注：\(note.note)"
+        }
+        if pending.operation == "progress", let progress = try? JSONDecoder().decode(ReaderProgressBody.self, from: pending.body) {
+            return "待确认页位：第 \(progress.pdfPage) 页"
+        }
+        return "待确认记录无法预览；请恢复原连接重试。"
+    }
+    func discardPending() {
+        guard !busy, pending != nil else { return }
+        do {
+            try store.delete()
+            pending = nil
+            message = "已放弃本机待确认记录；请检查原连接上的保存状态。"
+        } catch {
+            message = "无法移除本机待确认记录，原内容仍保留。"
+        }
     }
     func loadCatalog() async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -584,6 +604,7 @@ private struct ReaderTextSelection: UIViewRepresentable {
 private struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: ReaderModel
+    @State private var showDiscard = false
     init(connection: ConnectionModel, course: String) { _model = StateObject(wrappedValue: ReaderModel(connection: connection, course: course)) }
     var body: some View {
         ScrollView {
@@ -593,7 +614,12 @@ private struct ReaderView: View {
                 if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("readerMessage") }
                 if model.pending != nil {
                     Text("有未确认的阅读记录，本机已保留。")
+                    if let description = model.pendingDescription {
+                        Text(description).accessibilityIdentifier("readerPendingDescription")
+                    }
                     Button("重试原次保存") { Task { await model.retry() } }.disabled(model.busy)
+                    Button("放弃这条待确认记录", role: .destructive) { showDiscard = true }
+                        .disabled(model.busy).accessibilityIdentifier("discardReaderPending")
                 }
                 ForEach(model.documents) { document in
                     Button(document.title) { Task { await model.open(document) } }.disabled(model.busy)
@@ -624,5 +650,11 @@ private struct ReaderView: View {
             }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
             .foregroundStyle(Appearance.ink).task { await model.loadCatalog() }
+            .alert("放弃这条待确认记录？", isPresented: $showDiscard) {
+                Button("放弃记录", role: .destructive) { model.discardPending() }
+                Button("取消", role: .cancel) { }
+            } message: {
+                Text("只移除本机待确认内容，无法撤销。Mac 上可能已经保存，请先检查原连接。")
+            }
     }
 }

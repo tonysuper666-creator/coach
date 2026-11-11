@@ -58,12 +58,16 @@ class MistakeReviewSmoke {
             step("launch activity")
             context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            var before = emptySet<String>()
             if (!resume) {
             step("request initial questions")
             click(waitText("出题",15_000,enabled=true))
             waitText("第 1 / 3 题",15_000)
             focus("kp:$kp","initial")
             val first = group("kp:$kp")
+            // The copy keeps the course's history, so the tab counts older mistakes too: assert against a ledger baseline.
+            before = mistakes().map { it.attemptId }.toSet()
+            samples.put("baselineWrongCount",before.size)
             step("answer initial questions")
             answer(first, wrong = 2)
             scrollTo("提交本组答案").let(::click)
@@ -73,15 +77,23 @@ class MistakeReviewSmoke {
             backToToday()
             } else backToToday(15_000)
             val first = group("kp:$kp")
+            val newWrong = (0 until 2).map { first.getJSONObject(it).getJSONObject("payload").getString("attemptId") }.toSet()
+            val listed = mistakes()
+            val listedIds = listed.map { it.attemptId }.toSet()
+            if (!resume) {
+                assertEquals(samples.getInt("baselineWrongCount")+2,listed.size)
+                assertEquals(newWrong,listedIds-before)
+            } else assertEquals(samples.getInt("wrongCount"),listed.size)
+            assertTrue(listedIds.containsAll(newWrong))
             val reviewButton = waitText("到期复习")
             step("open mistake list")
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
-            waitText("错题 2")
-            waitText(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
+            waitText("错题 ${listed.size}")
+            scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
             settleAndCapture("wrong-list",reviewMark)
             step("mistake list captured")
-            samples.put("wrongCount",2)
+            samples.put("wrongCount",listed.size)
             if (args.getString("coachPhase") == "prepare") {
                 samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
                 return
@@ -107,8 +119,9 @@ class MistakeReviewSmoke {
             answer(retry,wrong=0)
             val clearMark=SystemClock.elapsedRealtimeNanos()
             click(scrollTo("提交本组答案"))
-            waitText("错题 0")
-            waitText("错题都已掌握，继续保持。")
+            val cleared = waitCleared(newWrong)
+            // The empty-state line only shows once the whole course list is empty, which history can prevent.
+            if (cleared.isEmpty()) waitText("错题都已掌握，继续保持。")
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
             focus("review:$course:$kp","cleared")
@@ -137,13 +150,14 @@ class MistakeReviewSmoke {
         // The prepare run ended on the mistake list; a cold restart restores that page from the saved
         // navigation stack (TON-1445) rather than landing on Today, so no tap is needed to get back to it.
         step("restored offline mistake list")
-        waitText("错题 2",15_000)
+        val wrongCount=samples.getInt("wrongCount") // written by the prepare run from the ledger
+        waitText("错题 $wrongCount",15_000)
         assertNull("restart must restore the review page, not Today's 到期复习 card",find("到期复习"))
         waitText("离线可回看错题；连接 Mac 后可再练。")
         scrollTo("正确答案：",substring=true)
         settleAndCapture("offline",SystemClock.elapsedRealtimeNanos())
         step("offline mistake list captured")
-        samples.put("offlineWrongCount",2)
+        samples.put("offlineWrongCount",wrongCount)
         java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
     }
 
@@ -166,6 +180,25 @@ class MistakeReviewSmoke {
         }
         fail("events paging exceeded 50 pages")
         return all
+    }
+    private val ledgerJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
+    /** The course's mistakes recomputed from the server ledger with the same rules the app uses for its tab. */
+    private fun mistakes(): List<com.coach.client.Mistake> {
+        val all=events()
+        val list=(0 until all.length()).map { ledgerJson.decodeFromString(com.coach.domain.Event.serializer(),all.getJSONObject(it).toString()) }
+        return com.coach.client.mistakeReview(list).items
+    }
+    /** After the retry is graded: neither new mistake remains in the ledger and the tab shows the recomputed count. */
+    private fun waitCleared(newWrong: Set<String>,timeout: Long=10_000): List<com.coach.client.Mistake> {
+        val end=SystemClock.elapsedRealtime()+timeout
+        var last: List<com.coach.client.Mistake> = emptyList()
+        while(SystemClock.elapsedRealtime()<end) {
+            last=mistakes()
+            if(last.none { it.attemptId in newWrong } && find("错题 ${last.size}")!=null) return last
+            Thread.sleep(100) // each probe re-reads the whole ledger
+        }
+        val left=last.count { it.attemptId in newWrong }
+        throw AssertionError("Visible text missing: 错题 ${last.size} (new mistakes still listed: $left)")
     }
     private fun group(thread: String): JSONArray {
         val all=events();val cards=JSONArray()

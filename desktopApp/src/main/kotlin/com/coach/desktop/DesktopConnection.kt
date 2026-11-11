@@ -5,8 +5,6 @@ import com.coach.client.validateCoachBaseUrl
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.Properties
 
 internal fun desktopServerUrl(address: String): String {
@@ -29,6 +27,7 @@ internal class DesktopConnectionSettings(
     private val configFile = home.resolve("Coach/config/local.properties")
     val clientDirectory: Path = environment("COACH_CLIENT_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
         ?: home.resolve("Coach/client")
+    private val localConnection = DesktopCredentials(clientDirectory)
 
     private fun properties() = Properties().apply {
         if (Files.exists(configFile)) Files.newInputStream(configFile).use { load(it) }
@@ -36,6 +35,7 @@ internal class DesktopConnectionSettings(
 
     fun serverUrl(): String? {
         environment("COACH_URL")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }
+        localConnection.savedAddress()?.let { return it }
         val config = properties()
         config.getProperty("coach.desktopUrl")?.takeIf(String::isNotBlank)?.let { return desktopServerUrl(it) }
         if (mac) return desktopServerUrl("http://127.0.0.1:${config.getProperty("coach.port", "18791").trim()}")
@@ -47,15 +47,9 @@ internal class DesktopConnectionSettings(
     }
 
     fun saveAddress(url: String) {
-        // An explicit development override never edits the user's connection configuration.
+        // Shared local.properties is read-only: other tools read its original UTF-8 lines.
         if (!environment("COACH_URL").isNullOrBlank()) return
-        val config = properties().apply { setProperty("coach.desktopUrl", desktopServerUrl(url)) }
-        Files.createDirectories(configFile.parent)
-        val temporary = Files.createTempFile(configFile.parent, ".desktop-address-", ".tmp")
-        try {
-            Files.newOutputStream(temporary).use { config.store(it, "Coach local configuration") }
-            Files.move(temporary, configFile, ATOMIC_MOVE, REPLACE_EXISTING)
-        } finally { Files.deleteIfExists(temporary) }
+        localConnection.saveAddress(url)
     }
 
     /** Only the same-Mac loopback client may bootstrap from the server's native desktop identity. */

@@ -1,6 +1,8 @@
 package com.coach.desktop
 
 import com.coach.client.PairedCredentials
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.channels.Channels
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -17,17 +19,29 @@ import java.util.UUID
 internal class DesktopCredentials(clientDirectory: Path) {
     private val directory = clientDirectory.resolve("pairing").toAbsolutePath().normalize()
     internal val file: Path = directory.resolve("credentials.properties")
+    private val addressFile = directory.resolve("server-url")
+
+    private fun <T> readPrivate(path: Path, read: (InputStream) -> T): T? {
+        checkParents(directory)
+        if (!Files.exists(path, NOFOLLOW_LINKS)) return null
+        protect(directory, true)
+        protect(path, false)
+        return Files.newByteChannel(path, setOf(READ, NOFOLLOW_LINKS)).use { channel ->
+            Channels.newInputStream(channel).use(read)
+        }
+    }
+
+    @Synchronized fun savedAddress(): String? = readPrivate(addressFile) {
+        desktopServerUrl(it.bufferedReader(Charsets.UTF_8).readText())
+    }
+
+    @Synchronized fun saveAddress(serverUrl: String) {
+        val address = desktopServerUrl(serverUrl).toByteArray(Charsets.UTF_8)
+        writePrivate(addressFile) { it.write(address) }
+    }
 
     @Synchronized fun load(serverUrl: String): PairedCredentials? {
-        checkParents(directory)
-        if (!Files.exists(file, NOFOLLOW_LINKS)) return null
-        protect(directory, true)
-        protect(file, false)
-        val values = Properties().apply {
-            Files.newByteChannel(file, setOf(READ, NOFOLLOW_LINKS)).use { channel ->
-                Channels.newInputStream(channel).use { load(it) }
-            }
-        }
+        val values = readPrivate(file) { input -> Properties().apply { load(input) } } ?: return null
         if (values.getProperty("server") != desktopServerUrl(serverUrl)) return null
         val device = values.getProperty("deviceId").orEmpty()
         val token = values.getProperty("token").orEmpty()
@@ -41,25 +55,30 @@ internal class DesktopCredentials(clientDirectory: Path) {
         check(credentials.deviceId.matches(Regex("[A-Za-z0-9_-]{1,128}")) && credentials.token.matches(Regex("[A-Za-z0-9_-]{43}"))) {
             "Invalid Coach pairing"
         }
+        val url = desktopServerUrl(serverUrl)
+        writePrivate(file) { output ->
+            Properties().apply {
+                setProperty("server", url)
+                setProperty("deviceId", credentials.deviceId)
+                setProperty("token", credentials.token)
+            }.store(output, "Coach pairing; private to this user")
+        }
+    }
+
+    private fun writePrivate(path: Path, write: (OutputStream) -> Unit) {
         checkParents(directory)
         Files.createDirectories(directory)
         protect(directory, true)
-        if (Files.exists(file, NOFOLLOW_LINKS)) protect(file, false)
+        if (Files.exists(path, NOFOLLOW_LINKS)) protect(path, false)
         val temporary = directory.resolve(".credentials-${UUID.randomUUID()}")
         try {
             Files.createFile(temporary)
             // Empty until the native privacy boundary has been set AND read back.
             protect(temporary, false)
             Files.newByteChannel(temporary, setOf(WRITE, NOFOLLOW_LINKS)).use { channel ->
-                Channels.newOutputStream(channel).use { output ->
-                    Properties().apply {
-                        setProperty("server", desktopServerUrl(serverUrl))
-                        setProperty("deviceId", credentials.deviceId)
-                        setProperty("token", credentials.token)
-                    }.store(output, "Coach pairing; private to this user")
-                }
+                Channels.newOutputStream(channel).use(write)
             }
-            Files.move(temporary, file, ATOMIC_MOVE, REPLACE_EXISTING)
+            Files.move(temporary, path, ATOMIC_MOVE, REPLACE_EXISTING)
         } finally { Files.deleteIfExists(temporary) }
     }
 

@@ -91,7 +91,9 @@ object DesktopPairingSmoke {
         try {
             val config = clientHome.resolve("Coach/config/local.properties")
             Files.createDirectories(config.parent)
-            Files.writeString(config, "coach.tailHost=127.0.0.1\ncoach.port=$port\ncoach.course=synthetic\n")
+            val originalConfig = "# 本机教材配置，保留此注释\r\ncoach.textbookDir=/书/教材\r\n" +
+                "coach.referenceUrl=http://textbook.example:8080\r\ncoach.tailHost=127.0.0.1\r\ncoach.port=$port\r\ncoach.course=synthetic\r\n"
+            Files.writeString(config, originalConfig)
             val settings = DesktopConnectionSettings(clientHome, { null }, mac = false)
             var pairing = DesktopPairing(settings)
             check(pairing.load() == null && settings.serverUrl() == url)
@@ -107,6 +109,13 @@ object DesktopPairingSmoke {
             val firstCode = code()
             val identity = pairing.pair(checkNotNull(settings.serverUrl()), firstCode, "Synthetic Windows computer")
             check(identity.credentials.deviceId != admin.deviceId && identity.credentials.token != admin.token)
+            check(originalConfig.toByteArray(Charsets.UTF_8).contentEquals(Files.readAllBytes(config)))
+            val configLines = Files.readAllLines(config, Charsets.UTF_8)
+            check(configLines.first() == "# 本机教材配置，保留此注释")
+            val configValues = configLines.filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+            check(configValues["coach.textbookDir"] == "/书/教材")
+            check(configValues["coach.referenceUrl"] == "http://textbook.example:8080")
+            passed("shared-utf8-values-comments-and-line-endings-unchanged-after-real-pairing")
             val other = PairingClient(url)
             try {
                 check(runCatching { other.pair(firstCode, "reused-code") }.isFailure)
@@ -160,11 +169,13 @@ object DesktopPairingSmoke {
             check(request("GET", "/v1/hello", identity.credentials).statusCode() == 401)
             withTimeout(10_000) { pairing.awaitRevocation(offline) }
             check(pairing.load() == null && !Files.exists(store.file))
+            check(DesktopConnectionSettings(clientHome, { null }, false).serverUrl() == url)
             check(Files.exists(tokenFile))
             passed("real-revocation-401-returns-to-pairing-without-touching-native-token")
             val repaired = pairing.pair(url, code(), "Repaired synthetic computer")
             check(repaired.credentials.deviceId != identity.credentials.deviceId)
             check(pairing.stillAuthorized(repaired))
+            check(originalConfig.toByteArray(Charsets.UTF_8).contentEquals(Files.readAllBytes(config)))
             passed("normal-repairing-obtains-a-new-independent-identity")
             val receipt = checks.joinToString("\n", prefix = "Desktop pairing smoke: ${checks.size} passed\n", postfix = "\nidentitySha256=$hash\n")
             val report = root.resolve("desktopApp/build/reports/pairing-smoke.txt")

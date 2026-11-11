@@ -28,6 +28,27 @@ class DesktopConnectionTest {
         assertEquals("100.64.0.2", configValues.getProperty("coach.tailHost"))
     }
 
+    @Test fun selectedAddressLeavesUtf8SharedConfigurationUnchanged() {
+        for (mac in listOf(false, true)) {
+            val home = home()
+            val config = home.resolve("Coach/config/local.properties")
+            Files.createDirectories(config.parent)
+            val original = "# 本机教材配置，保留此注释\r\ncoach.textbookDir=/书/教材\r\n" +
+                "coach.referenceUrl=http://textbook.example:8080\r\ncoach.tailHost=100.64.0.2\r\ncoach.port=19876\r\n"
+            Files.writeString(config, original)
+            val settings = DesktopConnectionSettings(home, { null }, mac)
+            settings.saveAddress("https://selected-mac.example:444")
+            assertContentEquals(original.toByteArray(Charsets.UTF_8), Files.readAllBytes(config))
+            val lines = Files.readAllLines(config, Charsets.UTF_8)
+            assertEquals("# 本机教材配置，保留此注释", lines.first())
+            val values = lines.filter { '=' in it }.associate { it.substringBefore('=') to it.substringAfter('=') }
+            assertEquals("/书/教材", values["coach.textbookDir"])
+            assertEquals("http://textbook.example:8080", values["coach.referenceUrl"])
+            val reopened = DesktopConnectionSettings(home, { null }, mac)
+            assertEquals("https://selected-mac.example:444", reopened.serverUrl())
+        }
+    }
+
     @Test fun missingWindowsConfigurationReturnsToConnectionAndNeverUsesAServerToken() {
         val home = home()
         val token = home.resolve("Coach/data/device-token")
@@ -37,6 +58,9 @@ class DesktopConnectionTest {
         assertNull(settings.serverUrl())
         assertNull(settings.nativeCredentials("http://127.0.0.1:18791"))
         assertNull(DesktopPairing(settings).load())
+        settings.saveAddress("http://selected-mac.example:18791")
+        assertFalse(Files.exists(home.resolve("Coach/config/local.properties")))
+        assertEquals("http://selected-mac.example:18791", DesktopConnectionSettings(home, { null }, false).serverUrl())
     }
 
     @Test fun nativeMacKeepsItsLoopbackIdentityEvenWithTailHostConfigured() {
@@ -73,6 +97,7 @@ class DesktopConnectionTest {
     @Test fun credentialsArePrivateAddressBoundAndSurviveReopening() {
         val directory = home().resolve("client")
         val store = DesktopCredentials(directory)
+        store.saveAddress("http://mac.example:18791")
         store.save("http://mac.example:18791/", paired)
         val reopened = DesktopCredentials(directory)
         assertEquals(paired.deviceId, assertNotNull(reopened.load("http://MAC.example:18791")).deviceId)
@@ -88,6 +113,7 @@ class DesktopConnectionTest {
         }
         store.clear()
         assertNull(reopened.load("http://mac.example:18791"))
+        assertEquals("http://mac.example:18791", reopened.savedAddress())
     }
 
     @Test fun invalidCredentialPathFailsWithoutOverwritingIt() {

@@ -203,7 +203,9 @@ try:
         adb("shell", "wm", "size", size)
         adb("shell", "wm", "density", density)
         display = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
-        assert f"Override size: {size}" in display[0] and f"Override density: {density}" in display[1], display
+        # wm prints no override line when the requested density equals the physical one.
+        effective = re.findall(r"density: (\d+)", display[1])[-1]
+        assert f"Override size: {size}" in display[0] and effective == density, display
     display.append("dalvik.vm.heapgrowthlimit=" + adb("shell", "getprop", "dalvik.vm.heapgrowthlimit").strip())
     for apk in ["androidApp/build/outputs/apk/debug/androidApp-debug.apk",
                 "androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk"]:

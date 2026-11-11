@@ -21,13 +21,13 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** One measured ready-hit next-page action; opening page one is explicit warmup. */
+/** Cache-off comparison: one cold next-page action; opening page one is explicit warmup. */
 @OptIn(ExperimentalTestApi::class)
 @RunWith(AndroidJUnit4::class)
 class ReaderFirstPresentSmoke {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    @Test fun onePrefetchedPageWithClockedFirstHardwareDraw() {
+    @Test fun oneUncachedPageWithClockedFirstHardwareDraw() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         ReaderMeasurementPackage.requireIsolated(context.packageName)
         val args = InstrumentationRegistry.getArguments()
@@ -39,7 +39,7 @@ class ReaderFirstPresentSmoke {
         val client = CourseHttp(base,"baseline-device","synthetic-baseline-token","READER_BASELINE")
         val showReader = mutableStateOf(true)
         var testFailure: Throwable? = null
-        ReaderPageTrace.start()
+        ReaderPageTrace.start(neighbourCacheEnabled=false)
         fun events() = JSONObject(ReaderPageTrace.snapshot().toString()).getJSONArray("events").let { array ->
             (0 until array.length()).map { array.getJSONObject(it) }
         }
@@ -62,7 +62,7 @@ class ReaderFirstPresentSmoke {
                 if (showReader.value) CoachTheme(false) { Surface { ReaderMeasurementSurface(client.reader) } }
             }
             click("baseline-source"); pixels(1)
-            compose.waitUntil(timeoutMillis=15_000) { events().any { it.getString("kind")=="prefetch_decode_ready" && it.getInt("page")==2 } }
+            assertTrue(events().none { it.getInt("page")==2 && it.getString("kind") in setOf("request_started","decode_started","prefetch_decode_started","cache_published") })
             click("private-next"); pixels(2)
             compose.waitUntil(timeoutMillis=15_000) {
                 val input=events().single { it.getString("kind")=="input_next" }
@@ -71,7 +71,9 @@ class ReaderFirstPresentSmoke {
             val recorded = events()
             val input = recorded.single { it.getString("kind")=="input_next" }
             val draw = recorded.first { it.getString("kind")=="target_window_draw_commands" && it.getLong("action")==input.getLong("action") }
-            assertTrue(recorded.any { it.getString("kind")=="lookup_hit" && it.getLong("action")==input.getLong("action") })
+            assertEquals("lookup_miss",recorded.single { it.getString("kind").startsWith("lookup_") && it.getLong("action")==input.getLong("action") }.getString("kind"))
+            assertTrue(recorded.none { it.getString("kind").startsWith("prefetch_") })
+            assertEquals(1,recorded.count { it.getString("kind")=="request_started" && it.getInt("page")==2 && it.getLong("ordinal")>input.getLong("ordinal") })
             for (event in listOf(input,draw)) {
                 assertTrue(event.getBoolean("traceMarkerWritten"))
                 assertTrue(event.getLong("elapsedRealtimeNanos")<=event.getLong("markerBeforeElapsedRealtimeNanos"))

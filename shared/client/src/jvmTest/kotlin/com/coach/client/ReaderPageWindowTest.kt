@@ -13,11 +13,12 @@ class ReaderPageWindowTest {
         val result = CompletableDeferred<Raster?>()
         fun finish(): Raster = Raster("${key.identity}:${key.page}").also { result.complete(it) }
     }
-    private class Driver(context: CoroutineContext, val ignoreCancellationOn: Set<Int> = emptySet(), overlap: Boolean = false) {
+    private class Driver(context: CoroutineContext, val ignoreCancellationOn: Set<Int> = emptySet(), overlap: Boolean = false,
+                         retainNeighbours: Boolean = true) {
         val started = Channel<Call>(Channel.UNLIMITED)
         val all = mutableListOf<Call>()
         val discarded = mutableListOf<Raster>()
-        val window: ReaderPageWindow<Raster> = ReaderPageWindow(context, prefetchBeforeDraw = overlap, load = { key, prefetch ->
+        val window: ReaderPageWindow<Raster> = ReaderPageWindow(context, prefetchBeforeDraw = overlap, retainNeighbours = retainNeighbours, load = { key, prefetch ->
             val call = Call(key, prefetch).also { all += it }
             started.send(call)
             val value = if (key.page in ignoreCancellationOn) withContext(NonCancellable) { call.result.await() } else call.result.await()
@@ -64,6 +65,27 @@ class ReaderPageWindowTest {
             assertNull(view.image(4))
             assertEquals(3, window.stats().peakOwnedSlots)
         }
+    }
+
+    @Test fun cacheOffDoesNotPrefetchOrRetainPreviousPageAndReturningLoadsAgain() = runBlocking {
+        val driver = Driver(coroutineContext, overlap = true, retainNeighbours = false)
+        try { with(driver) {
+            val view = window.open(identity, 1, 24)
+            val first = next(1, false).finish(); ready(view, 1); view.presented(1); yield()
+            assertTrue(started.tryReceive().isFailure)
+            assertNull(view.image(2)); assertFalse(view.pending(2))
+            view.show(2)
+            assertNull(view.image(1)); assertTrue(first in discarded)
+            next(2, false).finish(); ready(view, 2); view.presented(2); yield()
+            assertTrue(started.tryReceive().isFailure)
+            view.show(1)
+            assertNull(view.image(1)); assertNull(view.image(2))
+            val reloaded = next(1, false).finish(); ready(view, 1)
+            assertNotSame(first, reloaded)
+            assertEquals(listOf(1,2,1),all.map { it.key.page })
+            assertTrue(all.none { it.prefetch })
+            assertEquals(1,window.stats().peakOwnedSlots)
+        } } finally { driver.stop() }
     }
 
     @Test fun rapidJumpCancelsSpeculationAndLateResponseCannotReplaceNewestTarget() = runBlocking {

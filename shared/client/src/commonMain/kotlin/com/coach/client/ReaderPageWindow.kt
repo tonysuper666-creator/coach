@@ -22,6 +22,7 @@ class ReaderPageWindow<T : Any>(
     private val discard: (ReaderRasterKey, T) -> Unit = { _, _ -> },
     private val publish: (ReaderRasterKey, T) -> T = { _, value -> value },
     private val prefetchBeforeDraw: Boolean = false,
+    private val retainNeighbours: Boolean = true,
     private val onDrained: () -> Unit = {},
 ) {
     private val lock = Any()
@@ -115,7 +116,8 @@ class ReaderPageWindow<T : Any>(
     }
 
     private fun desired(viewer: Viewer): List<ReaderRasterKey> =
-        listOf(viewer.page, viewer.page + viewer.direction, viewer.page - viewer.direction)
+        (if (retainNeighbours) listOf(viewer.page, viewer.page + viewer.direction, viewer.page - viewer.direction)
+         else visible(viewer))
             .filter { it in 1..viewer.pages }.distinct().map { ReaderRasterKey(viewer.identity, it) }
 
     private fun visible(viewer: Viewer): List<Int> =

@@ -18,6 +18,9 @@ object ReaderPageTrace {
     private val clock = TimeSource.Monotonic.markNow()
     @kotlin.concurrent.Volatile var enabled = false
         private set
+    /** Explicit synthetic measurement control; ordinary readers always retain their neighbours. */
+    @kotlin.concurrent.Volatile internal var neighbourCacheEnabled = true
+        private set
     private var epoch = 0
     private var sequence = 0L
     private var eventOrdinal = 0L
@@ -48,7 +51,8 @@ object ReaderPageTrace {
     { val image get() = observation.image }
 
     /** Start before composing a measurement surface. Default production execution does no observation. */
-    fun start() = synchronized(lock) {
+    fun start(neighbourCacheEnabled: Boolean = true) = synchronized(lock) {
+        this.neighbourCacheEnabled = neighbourCacheEnabled
         decodePause?.resume(); decodePause = null
         epoch++; sequence = 0; eventOrdinal = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
         decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
@@ -57,7 +61,7 @@ object ReaderPageTrace {
         events.clear(); allocations.clear(); owners.clear(); draws.clear(); lookups.clear(); inputTimes.clear(); enabled = true
     }
 
-    fun stop() = synchronized(lock) { enabled = false; decodePause?.resume(); decodePause = null }
+    fun stop() = synchronized(lock) { enabled = false; neighbourCacheEnabled = true; decodePause?.resume(); decodePause = null }
     fun nowNs(): Long = clock.elapsedNow().inWholeNanoseconds
 
     internal fun session(): Int = if (!enabled) 0 else synchronized(lock) { ++sessionSequence }
@@ -195,8 +199,8 @@ object ReaderPageTrace {
         buildJsonObject {
             put("schema", 1)
             put("clock", "process-local monotonic nanoseconds")
-            put("mode", "three_page_window")
-            put("managedWindowLimitIncludingLoad", 3)
+            put("mode", if (neighbourCacheEnabled) "three_page_window" else "visible_pages_only")
+            put("managedWindowLimitIncludingLoad", if (neighbourCacheEnabled) 3 else 2) // visible spread can contain two pages
             put("inputPoint", "production click handler; excludes dispatch before the handler")
             put("drawPoint", "target bitmap draw commands recorded; not physical presentation")
             put("firstPresentLatencyVerified", false)

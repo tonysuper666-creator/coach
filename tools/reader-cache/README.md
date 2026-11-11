@@ -1364,8 +1364,14 @@ assertions, native receipts and normal save/reset/restore/cleanup discipline.
 
 ### First hardware draw and matched-input contract
 
-`first-present` is a new Android-only, one-action path. Page-one opening and
-prefetch are warmup; only the ready-hit next-page input for page two is selected.
+`first-present` is an Android-only, one-action path. The stored `f614ba2c`
+candidate opened page one and awaited page-two prefetch before its selected hit.
+The current entry is its **cache-off comparison arm**: it opens/draws page one,
+then selects the same next-page input for page two without any neighbour loading
+or retention. It asserts no page-two request before input, exactly one visible
+page-two request after input, `lookup_miss`, and no prefetch events. It uses a
+visible-pages-only window, rather than merely omitting the prefetch wait. Normal
+reader execution and other measurement entries retain their default cache.
 It does not repeat the 20-page performance, behavior or lifecycle suites.
 
 Selected input/hardware-draw events now carry device `elapsedRealtimeNanos`, a
@@ -1435,6 +1441,28 @@ independently accepted native comparison. `matchedBaselineObserved`,
 `firstPresentLatencyVerified`, physical/GPU budget flags remain false in this
 tool slice. Synthetic positive/negative cases do not promote native flags, and
 old artifacts are never backfilled with the new clock or input tuple.
+
+The cache-off entry uses the same test class, runner invocation, five-tuple,
+clock markers, capture configuration and display endpoint. Its snapshot reports
+`mode=visible_pages_only`; the generic logical upper bound is two visible pages
+for a spread, while this single-page action owns one slot. These are not physical
+memory guarantees. On the cold path, the actual cache decision is observed in
+the handler before it initiates the visible request, so its miss is not confused
+with a subsequent composition joining that request. No wait/hit is relabelled.
+Only `ReaderFirstPresentSmoke` calls `ReaderPageTrace.start(neighbourCacheEnabled=false)`.
+The choice is frozen in each window; stopping measurement restores the default.
+
+For the next Mac session collect this off arm once, in the same owned guest and
+original geometry with default UI sampling; do not repeat the stored hit action.
+After the two new offline queries, compare the original hit directory against
+the new miss directory with `first_present.py HIT --baseline MISS --output NEW`.
+Distinct source/run/capture identities are required. The original hit receipt
+is n=1 at 144.764083ms, not a <=100ms pass. Main was merged to resolve the reader
+declaration conflict before adding this entry; preserve both source histories.
+Matching the input contract does not isolate the effect of cache policy from
+all source changes or establish a causal/full baseline acceptance. Formal
+first-present/baseline/physical/GPU flags remain false. No old run or endpoint is
+rewritten to make this comparison pass.
 
 The initial `0061a12e` one-action native attempt failed during cleanup because
 its ComposeTestRule received a second `setContent` call. It produced no accepted

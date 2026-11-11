@@ -25,6 +25,7 @@ private val emptyReaderRevision = MutableStateFlow(0L)
 internal data class ReaderDocumentSnapshot(val document: PrivateDocument, val state: JsonObject)
 
 private class ReaderImageResource(reader: ReaderHttp, session: Int) {
+    val neighbourCacheEnabled = ReaderPageTrace.neighbourCacheEnabled
     var users = 0
     val viewers = mutableStateListOf<ReaderImageViewer>()
     val states = mutableStateMapOf<PrivateDocument, JsonObject>()
@@ -35,6 +36,7 @@ private class ReaderImageResource(reader: ReaderHttp, session: Int) {
     }
     // In particular, never inherit the pausable composition dispatcher or its test frame clock.
     val window: ReaderPageWindow<ReaderLoadedImage> = ReaderPageWindow(Dispatchers.Default, prefetchBeforeDraw = true,
+        retainNeighbours = neighbourCacheEnabled,
         onDrained = { ReaderPageTrace.mark("window_drained", session, 0, 0) }, load = { key, prefetch ->
         val action = if (prefetch) 0L else this.action
         val request = ReaderPageTrace.request(session, key.page, action)
@@ -124,6 +126,12 @@ internal class ReaderImageViewer(private val reader: ReaderHttp, val identity: R
         this.action = action
         this.allowPrefetch = allowPrefetch
         if (viewer?.foreground == true) resource?.action = action
+        if (viewer?.foreground == true && resource?.neighbourCacheEnabled == false) {
+            // Observe the real lookup before show() starts the visible request.
+            // A cold miss must not become a coalesced-wait merely because the
+            // next composition runs after this handler has already started I/O.
+            ReaderPageTrace.lookup(session, page, action, image(page), pending(page))
+        }
         if (visible == null) viewer?.show(page, allowPrefetch = allowPrefetch) else viewer?.show(page, visible, allowPrefetch)
     }
     fun image(page: Int): ReaderLoadedImage? = viewer?.image(page)?.takeIf { it.identity == identity && it.sourcePage == page }

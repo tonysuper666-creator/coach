@@ -297,7 +297,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val window = WindowSpec(maxWidth.value, (maxHeight + keyboard).value)
                         val layout = LayoutRules.navigation(window)
                         val current = view
-                        val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY, AppPage.SETTINGS)
+                        val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY)
                         val showNav = !task && !hideTaskChrome
                         val render: @Composable (AppEntry) -> Unit = { page ->
                             holder.SaveableStateProvider("${c.courseId}:${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
@@ -311,7 +311,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                                 val decision = current.let { c.learningTarget(it) }
                                                 if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
                                                 navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
-                                            }, reminderSettings = { TextButton(onClick = { navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }) { Text("设置") } }) else CenterMessage("正在加载课程…")
+                                            }, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                                     }
@@ -327,11 +327,6 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                     AppPage.MOCK -> if (current != null) MockScreen(c, current, { navigation.back() }, page.id.ifEmpty { null }, weekActions.onReview, backLabel = "← ${navigation.parentLabel}")
                                     AppPage.ESSAY -> if (current != null) EssayScreen(c, current, { navigation.back() }, backLabel = "暂离 · ${navigation.parentLabel}")
                                     AppPage.WEEK_REVIEW -> if (current != null) WeekMistakesScreen(c, current, page.week!!, "← ${navigation.parentLabel}") { navigation.back() }
-                                    AppPage.SETTINGS -> Column {
-                                        TextButton(onClick = { navigation.back() }) { Text("← ${navigation.parentLabel}") }
-                                        Text("设置", style = MaterialTheme.typography.titleLarge)
-                                        settings()
-                                    }
                                     AppPage.SOURCE -> Unit
                                 }
                             }

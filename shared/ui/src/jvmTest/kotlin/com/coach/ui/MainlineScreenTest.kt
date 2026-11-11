@@ -134,7 +134,7 @@ class MainlineScreenTest {
                     MainlineScreen(c, view, onBack = {}, onOpenSteps = { steps = true }, onOpenEssay = {}, onReviewWeek = {})
                 } } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("考点 3 · 有题 3 · 会了 0").assertIsDisplayed()
+                onNodeWithText("考点 3 · 有题 3 · 相关题均答对 0").assertIsDisplayed()
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
@@ -206,7 +206,7 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-submit").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("答对。").performScrollTo().assertIsDisplayed()
-                onNodeWithText("考点 3 · 有题 3 · 会了 1").assertExists()
+                onNodeWithText("考点 3 · 有题 3 · 相关题均答对 1").assertExists()
                 onNodeWithTag("mainline-essay").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-steps").performClick()
                 assertTrue(steps, "the bridge question opens step grading")

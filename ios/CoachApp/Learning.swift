@@ -590,6 +590,7 @@ private struct ReaderView: View {
             VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
                 Button("返回课程和练习") { dismiss() }.accessibilityIdentifier("readerBack")
                 Text("课程资料").font(.title2.bold())
+                if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("readerMessage") }
                 if model.pending != nil {
                     Text("有未确认的阅读记录，本机已保留。")
                     Button("重试原次保存") { Task { await model.retry() } }.disabled(model.busy)
@@ -620,7 +621,6 @@ private struct ReaderView: View {
                     Button(model.editing == nil ? "保存选中文字的批注" : "保存批注修改") { Task { await model.saveNote() } }
                         .disabled(model.busy || model.pending != nil).accessibilityIdentifier("saveReaderNote")
                 }
-                if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("readerMessage") }
             }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
             .foregroundStyle(Appearance.ink).task { await model.loadCatalog() }

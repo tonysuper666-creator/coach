@@ -1361,3 +1361,77 @@ relationship; it opens no UI or fixture. If it fails, retain the log and clean u
 without running the three measurement suites. A passing preflight is only an
 entry check, after which performance/behavior/lifecycle still need their existing
 assertions, native receipts and normal save/reset/restore/cleanup discipline.
+
+### First hardware draw and matched-input contract
+
+`first-present` is a new Android-only, one-action path. Page-one opening and
+prefetch are warmup; only the ready-hit next-page input for page two is selected.
+It does not repeat the 20-page performance, behavior or lifecycle suites.
+
+Selected input/hardware-draw events now carry device `elapsedRealtimeNanos`, a
+unique event ordinal, and elapsed-time readings bracketing their original trace
+marker. A nested `ReaderClock/ordinal/elapsed` marker binds the JSON reading to
+that exact native slice. Original ReaderPage names and process-local stage
+timestamps remain; desktop has no fabricated Android clock.
+
+The new capture explicitly requests BOOTTIME and an initial process-name scan.
+Android's [elapsed clock](https://developer.android.com/reference/android/os/SystemClock#elapsedRealtimeNanos())
+includes sleep; Perfetto's [primary trace clock](https://perfetto.dev/docs/reference/trace-config-proto)
+is declared in the trace configuration. The checker still requires each trace
+marker timestamp to fall within its own device-clock bracket, not a conversion
+from the final snapshot's clock pair. Missing clock witnesses close the sample.
+
+```sh
+python3 tools/reader-cache/run_observed.py --platform android --suite first-present --perfetto \
+  --package com.coach.readermeasurement.ton1463 --host "$EXISTING_CONFIGURED_IPV4" \
+  --serial "$OWNED_EMULATOR_SERIAL" --adb "$ADB" --aapt2 "$EXISTING_MAC_AAPT2" \
+  --apk "$DELIVERY/apks/androidApp-debug.apk" \
+  --test-apk "$DELIVERY/apks/androidApp-debug-androidTest.apk" \
+  --output build/reader-observed/qa-first-present
+python3 tools/reader-cache/export_first_present.py build/reader-observed/qa-first-present \
+  --trace-processor "$EXISTING_CACHED_V59_1_BINARY"
+```
+
+Run the capture only inside the existing foreground heavy emulator slot and
+owned-guest geometry save/reset/restore discipline. Default memory sampling stays
+enabled. The runner records context before/after: AVD/model/ABI, SDK/build hash,
+material SHA, effective size/density/font scale and raster/renderer binary hash.
+Any context change fails the run. No host settings, physical devices or SDK
+changes are needed; uninstall both card packages afterward.
+
+Export is an offline step using only the previously verified v59.1 native binary
+(SHA256 `8488edbefadfc4be152cda1d42d9bfcede8b47638295eb85eb3bad8cd148fdf4`).
+It runs exactly the new association SQL and a stats query, preserves raw outputs
+and nonzero exits, refuses overwrites, records query/trace/CSV hashes and never
+uses a downloading wrapper. Windows tests exercise its failure behavior with a
+fake process; actual Trace Processor execution stays unverified until Mac runs
+this new export. The SQL relational fixture substitutes an explicit ancestor
+table for Perfetto's ancestor TVF; it is not a real Trace Processor run.
+
+`first_present.sql` exports invalid/unfinished/ambiguous rows with LEFT JOINs.
+The checker selects the first recorded hardware draw in the input's window,
+requires the exact clock child, action/image, PID, layer, app token and ended
+SurfaceFlinger display token/present type. A missing/dropped first draw cannot
+be replaced by a later redraw. Handler-to-display-end time is recomputed from
+the validated device input clock and display endpoint; prefilled milliseconds
+are rejected. Parser errors/data loss remain failures, other quality rows remain
+visible. A complete association is still not independent proof of the first
+physical scanout or a 20-page <=100 ms acceptance.
+
+An optional comparison arm is a separate captured directory:
+
+```sh
+python3 tools/reader-cache/first_present.py CANDIDATE --baseline BASELINE \
+  --output comparison.json
+```
+
+Matching requires device/SDK/material/rendering/action tuples, package, capture
+configuration and sampler provenance to agree, with distinct run/source/capture
+identities. Missing, changed or reused arms keep `matchedTupleContract=false`;
+an explicitly invalid comparison exits nonzero. A missing optional arm leaves a
+valid single sample unpaired. `matchedTupleContract` verifies comparability only;
+it does not establish the original pre-cache baseline implementation or an
+independently accepted native comparison. `matchedBaselineObserved`,
+`firstPresentLatencyVerified`, physical/GPU budget flags remain false in this
+tool slice. Synthetic positive/negative cases do not promote native flags, and
+old artifacts are never backfilled with the new clock or input tuple.

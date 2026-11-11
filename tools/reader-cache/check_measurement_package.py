@@ -37,7 +37,7 @@ def main():
     kotlin=ROOT/'androidApp/build/intermediates/built_in_kotlinc/debugAndroidTest/compileDebugAndroidTestKotlin/classes'
     bindings={}
     for name in ('ReaderPageObservedSmoke','ReaderPageCachePathSmoke','ReaderPageLifetimeSmoke',
-                 'ReaderImageTransportSmoke','ReaderMeasurementPackageSmoke'):
+                 'ReaderImageTransportSmoke','ReaderMeasurementPackageSmoke','ReaderFirstPresentSmoke'):
         class_name='com.coach.android.'+name
         if name=='ReaderImageTransportSmoke':class_name+='$separatesHeadersBodyAndSyntheticServerTime$1'
         disassembled=subprocess.run([binary('javap'),'-J-Xmx128m','-classpath',str(kotlin),'-c','-p',class_name],capture_output=True,text=True)

@@ -23,6 +23,7 @@ from android_observer import MODES, observe_android, audit_transport_stage
 from queue_readiness import analyze_queue_watch
 from host_socket_boundary import SocketBoundaryRelay, analyze_boundary
 from host_probe import preflight as host_probe_preflight
+from present_context import capture_context
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = "com.coach.readermeasurement"
@@ -31,7 +32,7 @@ PACKAGE = "com.coach.readermeasurement"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=["desktop", "android"], required=True)
-    parser.add_argument("--suite", choices=["performance", "behavior", "transport", "route", "lifecycle"], default="performance")
+    parser.add_argument("--suite", choices=["performance", "behavior", "transport", "route", "lifecycle", "first-present"], default="performance")
     parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
                         help="Diagnostic fixture mode; keep legacy for historical comparisons")
     parser.add_argument("--packet-interface", help="Optional Mac capture interface; only the owned synthetic transport endpoint is captured")
@@ -65,6 +66,8 @@ def main():
     parser.add_argument("--perfetto", action="store_true", help="Collect Android FrameTimeline and the app's fixed trace markers")
     args = parser.parse_args()
     package = args.package
+    if args.suite=='first-present' and (args.platform!='android' or not args.perfetto):
+        parser.error('first-present is one Android action with its required clocked FrameTimeline capture')
     if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
@@ -100,6 +103,7 @@ def main():
         adb = [args.adb, "-s", args.serial]
         if subprocess.check_output(adb + ["shell", "getprop", "ro.kernel.qemu"], text=True).strip() != "1":
             raise ValueError("Only an emulator is permitted")
+        context_before=capture_context(adb) if args.suite=='first-present' else None
         if args.socket_syscalls:
             syscall_build_type=subprocess.check_output(adb+['shell','getprop','ro.build.type'],text=True).strip()
             if syscall_build_type!='userdebug':
@@ -199,6 +203,13 @@ def main():
                                                         args.socket_recording_budget_us*1000))
             measurement_port=relay.port
         identity["materialSha256"] = fixture.material_sha256
+        if args.suite=='first-present':
+            renderer=Path(shutil.which(args.renderer) or args.renderer)
+            identity['contextBefore']=context_before
+            identity['selectedActions']=[dict(kind='input_next',page=2)]
+            identity['measurementContract']=dict(context_before,material=fixture.material_sha256,clock='BOOTTIME',origin='android_capture')
+            identity['measurementContract']['rendering']=dict(context_before['rendering'],raster='Poppler144dpi/PNG/native-default/fill-width',
+                rendererSha256=hashlib.sha256(renderer.read_bytes()).hexdigest())
         identity["serverTransferTimingsObserved"] = hasattr(fixture, "transfers")
         if args.suite == 'route':
             identity['routeEndpoints']=dict(configured=args.host,hostLoopbackAlias='10.0.2.2',
@@ -225,10 +236,13 @@ def main():
                 perfetto = subprocess.Popen(adb + ["shell", "perfetto", "--txt", "-c", "-", "-o", remote_trace],
                                             stdin=subprocess.PIPE, stdout=perfetto_log, stderr=subprocess.STDOUT)
                 config_name=('socket-syscalls.pbtxt' if args.socket_syscalls else 'socket-scheduling.pbtxt') if args.socket_scheduling_trace else 'frametimeline.pbtxt'
+                if args.suite=='first-present':config_name='first-present.pbtxt'
                 identity['perfettoConfig']=config_name
                 config = Path(__file__).with_name(config_name).read_bytes()
                 # Keep the app marker filter aligned with the verified APK namespace.
-                perfetto.stdin.write(config.replace(PACKAGE.encode(), package.encode()))
+                config=config.replace(PACKAGE.encode(), package.encode())
+                identity['perfettoConfigSha256']=hashlib.sha256(config).hexdigest()
+                perfetto.stdin.write(config)
                 perfetto.stdin.close()
             env = dict(os.environ, COACH_READER_FIXTURE_HOST=args.host, COACH_READER_FIXTURE_PORT=str(fixture.port),
                        COACH_READER_OBSERVED_OUTPUT=str(out), COACH_READER_RUN_ID=run_id)
@@ -241,7 +255,8 @@ def main():
                                              "--rerun-tasks"], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
                 else:
                     test_class = "com.coach.android." + dict(performance="ReaderPageObservedSmoke", behavior="ReaderPageCachePathSmoke",
-                        transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke")[args.suite]
+                        transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke",
+                        **{'first-present':'ReaderFirstPresentSmoke'})[args.suite]
                     route_args=['-e','readerRouteControl','host-loopback'] if args.suite=='route' else []
                     if args.single_socket_boundary: route_args+=['-e','readerSocketBoundary','single-relay']
                     if args.socket_queue_watch: route_args+=['-e','readerQueueWatch','available']
@@ -271,8 +286,8 @@ def main():
                 raise RuntimeError("test command failed; inspect test.log")
             trace = json.loads((out / "trace.json").read_text())
             identity["measurementPid"] = trace["process"]["pid"]
-            if args.suite in ("performance", "behavior"):
-                expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else None
+            if args.suite in ("performance", "behavior", "first-present"):
+                expected = {"input_next": 2, "input_citation": 1} if args.suite == "behavior" else {"input_next":1,"input_citation":1} if args.suite=='first-present' else None
                 summary = summarize(trace, expected)
             elif args.suite in ("transport", "route"):
                 probes = json.loads((out / "transport.json").read_text())
@@ -353,6 +368,9 @@ def main():
                 finally:
                     perfetto_log.close()
             identity["memorySamplerErrors"] = sampling_errors
+            if args.suite=='first-present':
+                identity['contextAfter']=capture_context(adb)
+                if identity['contextAfter']!=identity['contextBefore']:sampling_errors.append('measurement_context_changed')
             save_http_records()
             (out / "run.json").write_text(json.dumps(identity, indent=2))
     if sampling_errors:

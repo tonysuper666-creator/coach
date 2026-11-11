@@ -24,7 +24,8 @@ internal actual fun readerProcessMemory(): JsonObject = buildJsonObject {
     })
 }
 
-internal actual fun readerTraceMarker(kind: String, action: Long, image: Long) = Unit
+internal actual fun readerElapsedRealtimeNanos(): Long? = null
+internal actual fun readerTraceMarker(kind: String, action: Long, image: Long, ordinal: Long, elapsed: Long?): ReaderEventClock? = null
 
 // The desktop host still has no confirmed window-presentation endpoint.
 internal actual fun readerWindowDraw(canvas: Canvas): Boolean = false

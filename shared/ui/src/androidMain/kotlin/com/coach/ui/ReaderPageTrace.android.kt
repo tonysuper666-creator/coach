@@ -33,11 +33,19 @@ internal actual fun readerProcessMemory(): JsonObject = buildJsonObject {
     })
 }
 
-internal actual fun readerTraceMarker(kind: String, action: Long, image: Long) {
-    if (Trace.isEnabled()) {
+internal actual fun readerElapsedRealtimeNanos(): Long? = SystemClock.elapsedRealtimeNanos()
+
+internal actual fun readerTraceMarker(kind: String, action: Long, image: Long, ordinal: Long, elapsed: Long?): ReaderEventClock? {
+    val before = if (elapsed != null) SystemClock.elapsedRealtimeNanos() else 0L
+    val written = Trace.isEnabled()
+    if (written) {
         Trace.beginSection("ReaderPage/$kind/$action/$image")
+        // Keep the original marker name. A unique child binds this exact draw/input to
+        // its device clock sample, including repeated draws of the same action/image.
+        if (elapsed != null) { Trace.beginSection("ReaderClock/$ordinal/$elapsed"); Trace.endSection() }
         Trace.endSection()
     }
+    return elapsed?.let { ReaderEventClock(it, before, SystemClock.elapsedRealtimeNanos(), written) }
 }
 
 internal actual fun readerWindowDraw(canvas: Canvas): Boolean = canvas.nativeCanvas.isHardwareAccelerated

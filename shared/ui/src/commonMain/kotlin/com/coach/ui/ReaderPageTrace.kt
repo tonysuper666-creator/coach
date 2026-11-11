@@ -20,6 +20,7 @@ object ReaderPageTrace {
         private set
     private var epoch = 0
     private var sequence = 0L
+    private var eventOrdinal = 0L
     private var sessionSequence = 0
     private var dropped = 0
     private var allocationOverflow = false
@@ -49,7 +50,7 @@ object ReaderPageTrace {
     /** Start before composing a measurement surface. Default production execution does no observation. */
     fun start() = synchronized(lock) {
         decodePause?.resume(); decodePause = null
-        epoch++; sequence = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
+        epoch++; sequence = 0; eventOrdinal = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
         decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
         peakDecodedSnapshot = null; peakBytesSnapshot = null
         leaseOwnership.clear(); releases.clear(); published.clear(); retired.clear(); observedImages.clear()
@@ -223,6 +224,8 @@ object ReaderPageTrace {
     }
 
     private fun record(kind: String, session: Int, page: Int, action: Long, image: Long = 0, timestamp: Long = nowNs()) {
+        val elapsed = if (kind.startsWith("input_") || kind == "target_window_draw_commands") readerElapsedRealtimeNanos() else null
+        val ordinal = ++eventOrdinal
         val alive = allocations.filter { it.weak.alive() }
         val decoded = alive.count { it.storage == "decoded" }
         val bytes = alive.sumOf { it.bytes }
@@ -231,14 +234,21 @@ object ReaderPageTrace {
         if (decoded > peakDecoded) { peakDecoded = decoded; peakDecodedSnapshot = peakReceipt(kind, timestamp, alive) }
         if (bytes > peakReachableBytes) { peakReachableBytes = bytes; peakBytesSnapshot = peakReceipt(kind, timestamp, alive) }
         if (events.size >= LIMIT) { events.removeFirst(); dropped++ }
+        val eventClock = readerTraceMarker(kind, action, image, ordinal, elapsed)
         events.addLast(buildJsonObject {
             put("kind", kind); put("ns", timestamp); put("session", session); put("page", page)
+            put("ordinal", ordinal)
+            if (eventClock != null) {
+                put("elapsedRealtimeNanos", eventClock.elapsed)
+                put("markerBeforeElapsedRealtimeNanos", eventClock.before)
+                put("markerAfterElapsedRealtimeNanos", eventClock.after)
+                put("traceMarkerWritten", eventClock.written)
+            }
             put("action", action); put("image", image)
             put("decodeInFlight", decoding); put("compositionOwners", owners.values.sum())
             put("weakLiveDecodedBackings", decoded); put("weakLiveScratchBackings", alive.count { it.storage == "scratch" })
             put("weakReachableBackingBytes", bytes)
         })
-        readerTraceMarker(kind, action, image)
     }
 
     private fun backingReceipt(allocation: Allocation): JsonObject = buildJsonObject {
@@ -276,7 +286,9 @@ class ReaderDecodePause internal constructor() {
 internal fun interface ReaderBitmapWeakReference { fun alive(): Boolean }
 internal expect fun readerWeakBitmap(value: Any): ReaderBitmapWeakReference
 internal expect fun readerProcessMemory(): JsonObject
-internal expect fun readerTraceMarker(kind: String, action: Long, image: Long)
+internal data class ReaderEventClock(val elapsed: Long, val before: Long, val after: Long, val written: Boolean)
+internal expect fun readerElapsedRealtimeNanos(): Long?
+internal expect fun readerTraceMarker(kind: String, action: Long, image: Long, ordinal: Long, elapsed: Long?): ReaderEventClock?
 internal expect fun readerWindowDraw(canvas: Canvas): Boolean
 
 /** Android additionally observes swap-chain submission. JVM deliberately reports no presentation callback. */

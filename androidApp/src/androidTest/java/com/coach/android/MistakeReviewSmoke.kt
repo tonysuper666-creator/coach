@@ -90,8 +90,8 @@ class MistakeReviewSmoke {
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
             waitText("错题 ${listed.size}")
-            // The list is a plain column in items order, so its first entry is on screen without scrolling.
-            waitText(listed.first().card.stem)
+            // Stems render as Markdown, so wait for a plain label every card carries; the list is not lazy.
+            waitText("当时的答案：",substring=true)
             settleAndCapture("wrong-list",reviewMark)
             step("mistake list captured")
             scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")) // after the timed window
@@ -286,10 +286,10 @@ class MistakeReviewSmoke {
         }
         throw AssertionError("Visible text missing: ← 今天")
     }
-    private fun waitText(text: String,timeout: Long=10_000,enabled: Boolean=false): AccessibilityNodeInfo {
+    private fun waitText(text: String,timeout: Long=10_000,enabled: Boolean=false,substring: Boolean=false): AccessibilityNodeInfo {
         val end=SystemClock.elapsedRealtime()+timeout
         while(SystemClock.elapsedRealtime()<end) {
-            find(text)?.let { node ->
+            find(text,substring)?.let { node ->
                 var button: AccessibilityNodeInfo?=node
                 while(button!=null && !button.isClickable) button=button.parent
                 if(!enabled || button?.isEnabled==true) return node

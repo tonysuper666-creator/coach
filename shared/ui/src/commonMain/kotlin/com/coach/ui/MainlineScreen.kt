@@ -167,16 +167,6 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var error by remember { mutableStateOf<String?>(null) }
     var retryable by remember { mutableStateOf(true) }
     var retry by remember { mutableStateOf(0) }
-    LaunchedEffect(retry) {
-        if (body == null) do {
-            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
-            error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
-            retryable = r.retryable
-            if (r.body != null) { body = r.body; save("body" to r.body!!); break }
-            if (!r.retryable) break
-            delay(1500)
-        } while (true)
-    }
     val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
     val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
@@ -195,6 +185,32 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
     // Reading is a separate view of the material, not a replacement for a paused answer.
     var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
+    val connection by c.sync.connection.collectAsState()
+    // Keep the last usable snapshot visible while reconnecting or explicitly rereading.
+    // Changing either key cancels an older fetch before it can publish a late response.
+    LaunchedEffect(retry, connection) {
+        do {
+            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
+            error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
+            retryable = r.retryable
+            if (r.body != null) {
+                val incoming = r.body!!
+                val oldItem = (body?.get("items") as? JsonArray).orEmpty()
+                    .firstOrNull { (it as? JsonObject)?.str("id") == itemId }
+                val incomingItems = (incoming["items"] as? JsonArray)
+                val merged = if (quizStarted && oldItem != null && incomingItems != null) {
+                    val hasItem = incomingItems.any { (it as? JsonObject)?.str("id") == itemId }
+                    val kept = incomingItems.map { if ((it as? JsonObject)?.str("id") == itemId) oldItem else it }
+                    JsonObject(incoming + ("items" to JsonArray(if (hasItem) kept else kept + oldItem)))
+                } else incoming
+                body = merged
+                save("body" to merged)
+                break
+            }
+            if (!r.retryable) break
+            delay(1500)
+        } while (true)
+    }
     val busy = pending != null
     val now = rememberCourseNow(c)
     val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
@@ -230,7 +246,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     position(true, section = match.str("section_id"))
                 } else {
                     val candidates = items.filter { q -> q.strings("factIds").any { it in match.strings("fact_ids") } }
-                    val next = candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+                    val next = candidates.firstOrNull { quizStarted && it.str("id") == itemId }
+                        ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
                     val id = next?.str("id").orEmpty()
                     if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull); scroll.scrollTo(0) }
                     position(false, id, match.str("section_id"), match.str("section_id"))
@@ -259,11 +276,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             if (b != null) {
                 result = b; pending = null; error = null
                 SubmissionTrace.mark(traceId, "ui.resultAssigned")
-                val updatedItems = JsonArray(items.map { q ->
+                val currentItems = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }
+                val updatedItems = JsonArray(currentItems.map { q ->
                     if (q.str("id") == b.str("itemId")) JsonObject(q + ("status" to JsonPrimitive(b.str("status")))) else q
                 })
                 body = JsonObject(body.orEmpty() + listOfNotNull("items" to updatedItems,
-                    b["coverage"]?.let { "coverage" to it }, b["notes"]?.let { "notes" to it }))
+                    b["coverage"]?.let { "coverage" to it }))
                 save("result" to b, "pending" to JsonNull, "body" to body!!)
                 revealFeedback = true
                 SubmissionTrace.mark(traceId, "ui.persisted")
@@ -323,11 +341,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     scope.launch { scroll.scrollTo(0) }
                 }
             }, onRefresh = {
-                if (pending == null) {
-                body = null; result = null; chosen = null
-                save("body" to JsonNull, "result" to JsonNull, "choice" to JsonNull)
-                retry++
-                }
+                if (pending == null) retry++
             }, onFocus = { focused -> saveReader { JsonObject(it + ("focus" to JsonPrimitive(focused))) } },
             emphasis = { facts -> ClassEmphasis(emphasis, facts) })
         return

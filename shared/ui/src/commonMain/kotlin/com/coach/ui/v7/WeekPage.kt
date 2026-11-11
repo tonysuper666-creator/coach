@@ -57,7 +57,7 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
             }
         }
         if (d.missing.isNotEmpty()) PaperCard(contentSpacing = 0.dp) {
-            Text("要补的节", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
+            Text("${com.coach.client.KpStatus.NEEDS_REPAIR.label}的节", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
             Spacer(Modifier.height(12.dp))
             d.missing.forEach { item ->
                 Row { Text(KpStatus.NEEDS_REPAIR.symbol, Modifier.width(18.dp), style = MaterialTheme.typography.bodyMedium); Text(annotatedMarks(item), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium) }

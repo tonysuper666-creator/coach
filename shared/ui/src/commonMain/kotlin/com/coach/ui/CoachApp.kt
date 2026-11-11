@@ -220,7 +220,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val select: (AppTab) -> Unit = navigation::select
     fun openStudy(id: String, start: Boolean, review: Boolean = false) {
         c.tutor.telemetry?.record("tap", "open_kp")
-        val label = view?.kp(id)?.title?.let { splitTitle(it).second } ?: id
+        val label = view?.kp(id)?.title?.let { splitTitle(it).second } ?: "未命名的一节"
         val destination = AppEntry(AppPage.STUDY, id = id, autoStart = start, review = review, label = label)
         if (entry.page == AppPage.STUDY) navigation.replace(destination) else navigation.push(destination)
     }

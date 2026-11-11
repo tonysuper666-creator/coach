@@ -148,7 +148,7 @@ private fun EssayRow(c: CoachController, d: AttemptDetail, selected: Boolean, on
 
 @Composable
 private fun ChangeRow(c: CoachController, view: CourseView, change: MasteryChange, selected: Boolean, onClick: () -> Unit) {
-    val title = view.kp(change.kpId)?.title?.let { splitTitle(it).second } ?: change.kpId
+    val title = view.kp(change.kpId)?.title?.let { splitTitle(it).second } ?: "未命名的一节"
     val good = change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID
     Surface(
         onClick = onClick, tonalElevation = if (selected) 6.dp else 1.dp, shape = MaterialTheme.shapes.medium,
@@ -193,7 +193,7 @@ private fun RecordDetail(c: CoachController, view: CourseView, data: RecordsView
 private fun ChangeDetail(c: CoachController, view: CourseView, data: RecordsView, change: MasteryChange, onOpenKp: (String) -> Unit) {
     val kp = view.kp(change.kpId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text(kp?.title?.let { splitTitle(it).second } ?: change.kpId, style = MaterialTheme.typography.titleLarge)
+        Text(kp?.title?.let { splitTitle(it).second } ?: "未命名的一节", style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(change.kind.label, if (change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID) successColor() else MaterialTheme.colorScheme.error)
             Text(c.formatClock(change.at), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

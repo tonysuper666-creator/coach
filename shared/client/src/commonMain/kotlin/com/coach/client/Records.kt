@@ -15,7 +15,7 @@ import kotlinx.serialization.json.longOrNull
 
 /** 记录页的一行：某个知识点的掌握发生了什么变化，以及支撑它的作答。 */
 enum class ChangeKind(val label: String) {
-    PASSED("会了"), SOLID("稳了"), PASS_REVOKED("不再算会了"), SOLID_LOST("不再稳了"), NEEDS_REPAIR("要补"),
+    PASSED(KpStatus.PASSED.label), SOLID(KpStatus.SOLID.label), PASS_REVOKED("不再算${KpStatus.PASSED.label}"), SOLID_LOST("不再${KpStatus.SOLID.label}"), NEEDS_REPAIR(KpStatus.NEEDS_REPAIR.label),
 }
 
 data class MasteryChange(
@@ -133,16 +133,16 @@ class RecordsView(private val events: List<Event>) {
             fun add(kind: ChangeKind, reason: String, attempts: List<String>) { out += MasteryChange(cause.seq, cause.occurredAt, kp, kind, reason, attempts, cause.type) }
             if (!was.passed && now.passed) add(ChangeKind.PASSED, passedReason(now, cause), now.support.ifEmpty { now.window })
             if (was.passed && !now.passed) add(ChangeKind.PASS_REVOKED, revokedReason(now.revokedReason, cause), was.support.ifEmpty { was.window })
-            if (!was.solid && now.solid) add(ChangeKind.SOLID, "会了之后，在 ${now.solidProgress.days} 个不同的日子答对 ${now.solidProgress.count} 次（其中简答 ${now.solidProgress.constructed} 次），平均得分率 ${"%.2f".format(now.solidProgress.average)}。", now.solidLatch)
-            if (was.solid && !now.solid) add(ChangeKind.SOLID_LOST, "最近一次简答/论述/限时题没答对，不再算「稳了」，直到重新答对。", was.solidLatch)
-            if (!was.needsRepair && now.needsRepair) add(ChangeKind.NEEDS_REPAIR, "会了之后又答错一道：仍算会了，标成「要补」，明天进复习。", now.window.takeLast(1))
+            if (!was.solid && now.solid) add(ChangeKind.SOLID, "${KpStatus.PASSED.label}之后，在 ${now.solidProgress.days} 个不同的日子答对 ${now.solidProgress.count} 次（其中简答 ${now.solidProgress.constructed} 次），平均得分率 ${"%.2f".format(now.solidProgress.average)}。", now.solidLatch)
+            if (was.solid && !now.solid) add(ChangeKind.SOLID_LOST, "最近一次简答/论述/限时题没答对，不再算「${KpStatus.SOLID.label}」，直到重新答对。", was.solidLatch)
+            if (!was.needsRepair && now.needsRepair) add(ChangeKind.NEEDS_REPAIR, "${KpStatus.PASSED.label}之后又答错一道：仍算${KpStatus.PASSED.label}，标成「${KpStatus.NEEDS_REPAIR.label}」，明天进复习。", now.window.takeLast(1))
         }
         return out
     }
 
     private fun passedReason(m: Mastery, cause: Event) = when (m.passedBy) {
-        "LEGACY" -> "从旧系统迁移来的「会了」（迁移，时间近似），不依赖新的作答。显示的时间并非实际通过时间。"
-        "LEARNER" -> "你手动标成了「会了」。"
+        "LEGACY" -> "从旧系统迁移来的「${KpStatus.PASSED.label}」（迁移，时间近似），不依赖新的作答。显示的时间并非实际通过时间。"
+        "LEARNER" -> "你手动标成了「${KpStatus.PASSED.label}」。"
         else -> "最近 3 道不同的题都答对了，没有猜的。"
     }
 
@@ -156,7 +156,7 @@ class RecordsView(private val events: List<Event>) {
             else -> "支撑证据失效"
         }
         val why = parts.getOrNull(1)?.takeIf { it.isNotBlank() && it != "evidence_invalid" }?.let { "（$it）" }.orEmpty()
-        return "$what$why，支撑「会了」的答对题不足 3 道，不再算会了。之后重新答对 3 道不同的题即可。"
+        return "$what$why，支撑「${KpStatus.PASSED.label}」的答对题不足 3 道，不再算${KpStatus.PASSED.label}。之后重新答对 3 道不同的题即可。"
     }
 
     private fun gradeView(p: JsonObject) = GradeView(

@@ -34,7 +34,7 @@ internal fun pageStudy(body: JsonObject?): PageStudy? {
 }
 
 private fun statusLabel(status: String) = when (status) {
-    "mastered" -> "已掌握"; "missed" -> "做错过"; "guessed" -> "猜对过"; "pending" -> "答案键待核对"; else -> "未做"
+    "mastered" -> "答对过（非猜）"; "missed" -> "做错过"; "guessed" -> "猜对过"; "pending" -> "答案键待核对"; else -> "未做"
 }
 
 /** "本页考点 n 个 · 已掌握 m · 题 k 道": the index of this page only, loaded per page and never from another course. */
@@ -66,7 +66,7 @@ internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int,
                 val s = r.value
                 Text(
                     if (s.facts.isEmpty() && s.questions.isEmpty()) "本页没有登记的考点或题。"
-                    else "本页考点 ${s.facts.size} 个 · 已掌握 ${s.factsMastered} · 题 ${s.questions.size} 道（已掌握 ${s.questionsMastered}）",
+                    else "本页考点 ${s.facts.size} 个 · 相关题均答对 ${s.factsMastered} · 题 ${s.questions.size} 道（答对 ${s.questionsMastered}）",
                     style = MaterialTheme.typography.labelMedium, modifier = Modifier.testTag("private-study-summary"))
                 if (s.unlocated > 0) Text("另有 ${s.unlocated} 条考点或题缺少可定位的出处，未列入任何页。", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("private-study-unlocated"))
@@ -76,11 +76,11 @@ internal fun PageStudyPanel(reader: ReaderHttp, documentId: String, page: Int,
                         OutlinedButton(onClick = { practicing = week to qs.map { it.id }.toSet() }, modifier = Modifier.heightIn(min = 48.dp).testTag("private-study-practice-$week")) { Text("去做这几题（第 $week 周 ${qs.size} 题）") }
                     if (open) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         for (f in s.facts) {
-                            Text("• ${f.text}" + if (f.mastered) "（已掌握）" else "", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-fact-${f.id}"))
+                            Text("• ${f.text}" + if (f.mastered) "（相关题均答对）" else "", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-fact-${f.id}"))
                             AnchorEntry("fact-${f.id}", f.anchor, onShowAnchor)
                         }
                         for (q in s.questions) {
-                            Text("题 W${q.week} ${q.id}：${q.stem}（${statusLabel(q.status)}）", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-question-${q.id}"))
+                            Text("第 ${q.week} 周 · 题：${q.stem}（${statusLabel(q.status)}）", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("private-study-question-${q.id}"))
                             AnchorEntry("question-${q.id}", q.anchor, onShowAnchor)
                         }
                     }

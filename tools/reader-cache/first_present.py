@@ -97,10 +97,31 @@ def clock_row(event,rows,pid):
     return matching
 
 
+def same_build_opposite_controls(run,samples,other,other_samples):
+    """A source SHA may repeat only for independently captured opposite controls."""
+    mode=run.get('firstPresentCacheMode')
+    opposite={'on':'off','off':'on'}
+    if mode not in opposite or other.get('firstPresentCacheMode')!=opposite[mode]:return False
+    for field in ('apkSha256','testApkSha256'):
+        value=run.get(field)
+        if not isinstance(value,str) or not re.fullmatch('[0-9a-f]{64}',value) or other.get(field)!=value:return False
+    for field in ('rawTraceSha256','framesCsvSha256'):
+        left,right=run.get(field),other.get(field)
+        if not all(isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) for value in (left,right)) or left==right:return False
+    left={json.dumps(row['selector'],sort_keys=True):row['cacheLookup'] for row in samples}
+    right={json.dumps(row['selector'],sort_keys=True):row['cacheLookup'] for row in other_samples}
+    return bool(left) and left.keys()==right.keys() and all({left[key],right[key]}=={'lookup_hit','lookup_miss'} for key in left)
+
+
 def analyze(run,trace,rows,baseline=None):
     errors=validate_contract(run)
     samples=[]
     events=trace.get('events',[])
+    cache_mode=run.get('firstPresentCacheMode')
+    if cache_mode is not None:
+        if cache_mode not in ('on','off'):errors.append('invalid_first_present_cache_mode')
+        elif trace.get('firstPresentCacheMode')!=cache_mode or trace.get('mode')!=('three_page_window' if cache_mode=='on' else 'visible_pages_only'):
+            errors.append('cache_mode_trace_mismatch')
     if trace.get('complete') is not True or trace.get('droppedEvents',0):errors.append('incomplete_events')
     ordinals=[e.get('ordinal') for e in events]
     if not all(integer(value) for value in ordinals) or len(set(ordinals))!=len(ordinals) or ordinals!=sorted(ordinals):
@@ -127,6 +148,8 @@ def analyze(run,trace,rows,baseline=None):
             if len(lookups)!=1 or (lookups[0].get('image')!=draw['image'] and
                     (lookups[0]['kind']=='lookup_hit' or lookups[0].get('image')!=0)):
                 raise ValueError('missing_or_wrong_lookup_image')
+            if cache_mode in ('on','off') and lookups[0]['kind']!=('lookup_hit' if cache_mode=='on' else 'lookup_miss'):
+                raise ValueError('lookup_cache_mode_mismatch')
             clock_row(start,rows,run['measurementPid'])
             matched=clock_row(draw,rows,run['measurementPid'])
             if len(matched)!=1:raise ValueError('ambiguous_first_frame_join')
@@ -158,7 +181,9 @@ def analyze(run,trace,rows,baseline=None):
     elif not baseline.get('complete') or not baseline.get('samples'):pair_errors.append('incomplete_baseline_arm')
     else:
         other=baseline['run']
-        if other['sourceSha']==run['sourceSha'] or other['runId']==run['runId']:pair_errors.append('same_arm_reused')
+        if other['runId']==run['runId'] or (other['sourceSha']==run['sourceSha'] and
+                not same_build_opposite_controls(run,samples,other,baseline['samples'])):
+            pair_errors.append('same_arm_reused')
         if run['measurementContract'].get('origin')=='android_capture' and (
                 other.get('rawTraceSha256')==run.get('rawTraceSha256') or other.get('framesCsvSha256')==run.get('framesCsvSha256')):
             pair_errors.append('same_capture_reused')

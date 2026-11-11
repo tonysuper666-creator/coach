@@ -33,6 +33,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=["desktop", "android"], required=True)
     parser.add_argument("--suite", choices=["performance", "behavior", "transport", "route", "lifecycle", "first-present"], default="performance")
+    parser.add_argument('--first-present-cache',choices=('on','off'),
+                        help='First-present only: choose the cache control in the same signed test build (default off)')
     parser.add_argument("--transport-mode", choices=["legacy", "nodelay", "keepalive"], default="legacy",
                         help="Diagnostic fixture mode; keep legacy for historical comparisons")
     parser.add_argument("--packet-interface", help="Optional Mac capture interface; only the owned synthetic transport endpoint is captured")
@@ -68,6 +70,8 @@ def main():
     package = args.package
     if args.suite=='first-present' and (args.platform!='android' or not args.perfetto):
         parser.error('first-present is one Android action with its required clocked FrameTimeline capture')
+    if args.first_present_cache is not None and args.suite!='first-present':
+        parser.error('first-present cache control applies only to the one-action first-present suite')
     if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
@@ -142,7 +146,8 @@ def main():
         identity["apkSha256"] = hashlib.sha256(args.apk.read_bytes()).hexdigest()
         identity["testApkSha256"] = hashlib.sha256(args.test_apk.read_bytes()).hexdigest()
     if args.suite=='first-present':
-        identity.update(measurementPid=None,measurementPidSource=None,instrumentationPassed=False)
+        identity.update(measurementPid=None,measurementPidSource=None,instrumentationPassed=False,
+                        firstPresentCacheMode=args.first_present_cache or 'off')
     (out / "run.json").write_text(json.dumps(identity, indent=2))
     stop = threading.Event()
     sampling_errors = []
@@ -260,6 +265,7 @@ def main():
                         transport="ReaderImageTransportSmoke", route="ReaderImageTransportSmoke", lifecycle="ReaderPageLifetimeSmoke",
                         **{'first-present':'ReaderFirstPresentSmoke'})[args.suite]
                     route_args=['-e','readerRouteControl','host-loopback'] if args.suite=='route' else []
+                    if args.suite=='first-present':route_args+=['-e','readerNeighbourCache',identity['firstPresentCacheMode']]
                     if args.single_socket_boundary: route_args+=['-e','readerSocketBoundary','single-relay']
                     if args.socket_queue_watch: route_args+=['-e','readerQueueWatch','available']
                     if args.socket_scheduling_trace: route_args+=['-e','readerSocketSchedule','enabled']

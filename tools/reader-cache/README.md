@@ -1364,14 +1364,16 @@ assertions, native receipts and normal save/reset/restore/cleanup discipline.
 
 ### First hardware draw and matched-input contract
 
-`first-present` is an Android-only, one-action path. The stored `f614ba2c`
-candidate opened page one and awaited page-two prefetch before its selected hit.
-The current entry is its **cache-off comparison arm**: it opens/draws page one,
-then selects the same next-page input for page two without any neighbour loading
-or retention. It asserts no page-two request before input, exactly one visible
-page-two request after input, `lookup_miss`, and no prefetch events. It uses a
-visible-pages-only window, rather than merely omitting the prefetch wait. Normal
-reader execution and other measurement entries retain their default cache.
+`first-present` is an Android-only, one-action path. One signed build now runs
+either control with `--first-present-cache on` or `--first-present-cache off`
+(default off). The runner passes exactly one `readerNeighbourCache=on/off`
+instrumentation argument to the same class and records `firstPresentCacheMode`.
+On opens/draws page one and waits for page-two prefetch, then requires a selected
+`lookup_hit` with no repeated page-two request. Off opens/draws page one without
+neighbour loading/retention, then requires no page-two request before input,
+exactly one visible page-two request after input, `lookup_miss`, and no prefetch
+events. Both select only `input_next` page2. Normal reader execution and other
+measurement entries retain their default cache.
 It does not repeat the 20-page performance, behavior or lifecycle suites.
 
 Selected input/hardware-draw events now carry device `elapsedRealtimeNanos`, a
@@ -1389,6 +1391,7 @@ from the final snapshot's clock pair. Missing clock witnesses close the sample.
 
 ```sh
 python3 tools/reader-cache/run_observed.py --platform android --suite first-present --perfetto \
+  --first-present-cache on \
   --package com.coach.readermeasurement.ton1463 --host "$EXISTING_CONFIGURED_IPV4" \
   --serial "$OWNED_EMULATOR_SERIAL" --adb "$ADB" --aapt2 "$EXISTING_MAC_AAPT2" \
   --apk "$DELIVERY/apks/androidApp-debug.apk" \
@@ -1432,8 +1435,14 @@ python3 tools/reader-cache/first_present.py CANDIDATE --baseline BASELINE \
 ```
 
 Matching requires device/SDK/material/rendering/action tuples, package, capture
-configuration and sampler provenance to agree, with distinct run/source/capture
-identities. Missing, changed or reused arms keep `matchedTupleContract=false`;
+configuration and sampler provenance to agree, with distinct run/capture
+identities. Different-source legacy arms retain their original limited scope.
+The same source SHA is accepted only for explicit opposite on/off controls,
+matching app/test APK hashes, different raw-trace AND CSV hashes, and opposite
+`lookup_hit`/`lookup_miss` results for every selected action. A declared control
+must match the trace's captured control/mode and observed lookup. Duplicate runs,
+same-mode/same-lookup samples, waits and missing build/capture hashes never unlock
+the same-source exception. Missing, changed or reused arms keep `matchedTupleContract=false`;
 an explicitly invalid comparison exits nonzero. A missing optional arm leaves a
 valid single sample unpaired. `matchedTupleContract` verifies comparability only;
 it does not establish the original pre-cache baseline implementation or an
@@ -1449,20 +1458,20 @@ for a spread, while this single-page action owns one slot. These are not physica
 memory guarantees. On the cold path, the actual cache decision is observed in
 the handler before it initiates the visible request, so its miss is not confused
 with a subsequent composition joining that request. No wait/hit is relabelled.
-Only `ReaderFirstPresentSmoke` calls `ReaderPageTrace.start(neighbourCacheEnabled=false)`.
+Only `ReaderFirstPresentSmoke` selects the explicit on/off measurement control.
 The choice is frozen in each window; stopping measurement restores the default.
 
-For the next Mac session collect this off arm once, in the same owned guest and
-original geometry with default UI sampling; do not repeat the stored hit action.
-After the two new offline queries, compare the original hit directory against
-the new miss directory with `first_present.py HIT --baseline MISS --output NEW`.
-Distinct source/run/capture identities are required. The original hit receipt
-is n=1 at 144.764083ms, not a <=100ms pass. Main was merged to resolve the reader
-declaration conflict before adding this entry; preserve both source histories.
-Matching the input contract does not isolate the effect of cache policy from
-all source changes or establish a causal/full baseline acceptance. Formal
-first-present/baseline/physical/GPU flags remain false. No old run or endpoint is
-rewritten to make this comparison pass.
+After independent review, the next Mac session may collect exactly one on and
+one off action from the SAME clean source and signed APK pair, same owned guest,
+original geometry and default UI sampler. Use separate new output directories
+and the two existing offline queries per arm, then
+`first_present.py ON --baseline OFF --output NEW`. Do not reuse historical traces
+or another build as either new arm. The old f614 hit144.764083ms and 7e0 off
+145.551334ms remain n=1 each from different builds; their 0.79ms difference is
+not a causal cache result. Main was merged between those historical builds.
+Source/API/tuple matching alone also does not prove stable system load or a
+distribution. Formal first-present/baseline/physical/GPU flags remain false.
+No old run or endpoint is rewritten to make this comparison pass.
 
 The initial `0061a12e` one-action native attempt failed during cleanup because
 its ComposeTestRule received a second `setContent` call. It produced no accepted

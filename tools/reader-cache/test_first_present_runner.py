@@ -13,7 +13,7 @@ from test_first_present import fixture
 
 
 class FirstPresentRunnerTest(unittest.TestCase):
-    def drive(self,changed=False,failed=False,stale=False,missing=False):
+    def drive(self,changed=False,failed=False,stale=False,missing=False,cache_mode=None):
         root=run_observed.ROOT/'build/first-present-runner-test'/uuid.uuid4().hex
         root.mkdir(parents=True)
         app=root/'app.apk';app.write_bytes(b'isolated fake apk')
@@ -49,6 +49,8 @@ class FirstPresentRunnerTest(unittest.TestCase):
             commands.append(command)
             if 'instrument' in command:
                 trace.update(runId='stale' if stale else command[command.index('readerRunId')+1],applicationPackage=run['applicationPackage'])
+                selected_mode=command[command.index('readerNeighbourCache')+1]
+                trace.update(firstPresentCacheMode=selected_mode,mode='three_page_window' if selected_mode=='on' else 'visible_pages_only')
                 kwargs['stdout'].write('FAILURES!!!\nTests run: 1, Failures: 1' if failed else 'OK (1 test)')
             elif 'exec-out' in command:
                 kwargs['stdout'].write(b'' if missing else json.dumps(trace).encode())
@@ -58,6 +60,7 @@ class FirstPresentRunnerTest(unittest.TestCase):
         args=['runner','--platform','android','--suite','first-present','--perfetto',
               '--package',run['applicationPackage'],'--host','127.0.0.1','--serial','emulator-unit','--aapt2','aapt-unit',
               '--apk',str(app),'--test-apk',str(test),'--output',str(root/'out')]
+        if cache_mode is not None:args+=['--first-present-cache',cache_mode]
         with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'),patch('run_observed.Fixture',Service), \
              patch('run_observed.threading.Thread',Sampler),patch('run_observed.subprocess.Popen',Perfetto), \
              patch('run_observed.subprocess.check_output',check_output),patch('run_observed.subprocess.run',execute), \
@@ -82,6 +85,9 @@ class FirstPresentRunnerTest(unittest.TestCase):
         self.assertEqual(1,len(native))
         self.assertIn('com.coach.android.ReaderFirstPresentSmoke',native[0])
         self.assertEqual(run['applicationPackage']+'.test/androidx.test.runner.AndroidJUnitRunner',native[0][-1])
+        self.assertEqual(1,native[0].count('readerNeighbourCache'))
+        self.assertEqual(cache_mode or 'off',native[0][native[0].index('readerNeighbourCache')+1])
+        self.assertEqual(cache_mode or 'off',identity['firstPresentCacheMode'])
         self.assertIs(identity['memorySamplerStarted'],True)
         self.assertIs(identity['memorySamplerJoined'],True)
         self.assertEqual(not failed,identity['instrumentationPassed'])
@@ -114,6 +120,23 @@ class FirstPresentRunnerTest(unittest.TestCase):
         self.assertIsNone(identity['measurementPid'])
         self.assertTrue(identity['measurementPidError'])
         self.assertEqual(0,identity['perfettoExit'])
+
+    def test_on_control_uses_same_one_test_and_the_explicit_instrumentation_argument(self):
+        identity=self.drive(cache_mode='on')
+        self.assertEqual('on',identity['firstPresentCacheMode'])
+
+    def test_explicit_off_control_uses_the_same_entry_and_capture_contract(self):
+        identity=self.drive(cache_mode='off')
+        self.assertEqual('off',identity['firstPresentCacheMode'])
+
+    def test_control_is_rejected_for_other_suites_or_invalid_values_before_execution(self):
+        for suite,mode in (('behavior','on'),('first-present','invalid')):
+            with self.subTest(suite=suite,mode=mode):
+                args=['runner','--platform','android','--suite',suite,'--perfetto',
+                      '--first-present-cache',mode,'--output','unused']
+                with patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.subprocess.run') as native:
+                    with self.assertRaises(SystemExit) as raised:run_observed.main()
+                    self.assertEqual(2,raised.exception.code);native.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

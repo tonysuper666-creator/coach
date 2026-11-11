@@ -21,16 +21,19 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Cache-off comparison: one cold next-page action; opening page one is explicit warmup. */
+/** Same build, one action per invocation: on=ready hit, off=cold miss. */
 @OptIn(ExperimentalTestApi::class)
 @RunWith(AndroidJUnit4::class)
 class ReaderFirstPresentSmoke {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
-    @Test fun oneUncachedPageWithClockedFirstHardwareDraw() {
+    @Test fun onePageWithClockedFirstHardwareDraw() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         ReaderMeasurementPackage.requireIsolated(context.packageName)
         val args = InstrumentationRegistry.getArguments()
+        val cacheMode = requireNotNull(args.getString("readerNeighbourCache"))
+        require(cacheMode in setOf("on","off"))
+        val cacheEnabled = cacheMode == "on"
         val runId = requireNotNull(args.getString("readerRunId"))
         val port = requireNotNull(args.getString("readerPort")).toInt()
         require(port in 1024..65535 && port !in setOf(8790,8791,18791,3790))
@@ -39,7 +42,7 @@ class ReaderFirstPresentSmoke {
         val client = CourseHttp(base,"baseline-device","synthetic-baseline-token","READER_BASELINE")
         val showReader = mutableStateOf(true)
         var testFailure: Throwable? = null
-        ReaderPageTrace.start(neighbourCacheEnabled=false)
+        ReaderPageTrace.start(neighbourCacheEnabled=cacheEnabled)
         fun events() = JSONObject(ReaderPageTrace.snapshot().toString()).getJSONArray("events").let { array ->
             (0 until array.length()).map { array.getJSONObject(it) }
         }
@@ -62,7 +65,11 @@ class ReaderFirstPresentSmoke {
                 if (showReader.value) CoachTheme(false) { Surface { ReaderMeasurementSurface(client.reader) } }
             }
             click("baseline-source"); pixels(1)
-            assertTrue(events().none { it.getInt("page")==2 && it.getString("kind") in setOf("request_started","decode_started","prefetch_decode_started","cache_published") })
+            if (cacheEnabled) {
+                compose.waitUntil(timeoutMillis=15_000) { events().any { it.getString("kind")=="prefetch_decode_ready" && it.getInt("page")==2 } }
+            } else {
+                assertTrue(events().none { it.getInt("page")==2 && it.getString("kind") in setOf("request_started","decode_started","prefetch_decode_started","cache_published") })
+            }
             click("private-next"); pixels(2)
             compose.waitUntil(timeoutMillis=15_000) {
                 val input=events().single { it.getString("kind")=="input_next" }
@@ -71,9 +78,13 @@ class ReaderFirstPresentSmoke {
             val recorded = events()
             val input = recorded.single { it.getString("kind")=="input_next" }
             val draw = recorded.first { it.getString("kind")=="target_window_draw_commands" && it.getLong("action")==input.getLong("action") }
-            assertEquals("lookup_miss",recorded.single { it.getString("kind").startsWith("lookup_") && it.getLong("action")==input.getLong("action") }.getString("kind"))
-            assertTrue(recorded.none { it.getString("kind").startsWith("prefetch_") })
-            assertEquals(1,recorded.count { it.getString("kind")=="request_started" && it.getInt("page")==2 && it.getLong("ordinal")>input.getLong("ordinal") })
+            assertEquals(if (cacheEnabled) "lookup_hit" else "lookup_miss",recorded.single { it.getString("kind").startsWith("lookup_") && it.getLong("action")==input.getLong("action") }.getString("kind"))
+            if (cacheEnabled) {
+                assertTrue(recorded.any { it.getString("kind")=="prefetch_decode_ready" && it.getInt("page")==2 && it.getLong("ordinal")<input.getLong("ordinal") })
+            } else {
+                assertTrue(recorded.none { it.getString("kind").startsWith("prefetch_") })
+            }
+            assertEquals(if (cacheEnabled) 0 else 1,recorded.count { it.getString("kind")=="request_started" && it.getInt("page")==2 && it.getLong("ordinal")>input.getLong("ordinal") })
             for (event in listOf(input,draw)) {
                 assertTrue(event.getBoolean("traceMarkerWritten"))
                 assertTrue(event.getLong("elapsedRealtimeNanos")<=event.getLong("markerBeforeElapsedRealtimeNanos"))
@@ -99,7 +110,8 @@ class ReaderFirstPresentSmoke {
                 try {
                     File(context.cacheDir,"reader-observed.json").writeText(
                         JSONObject(ReaderPageTrace.snapshot().toString())
-                            .put("runId",runId).put("applicationPackage",context.packageName).toString()
+                            .put("runId",runId).put("applicationPackage",context.packageName)
+                            .put("firstPresentCacheMode",cacheMode).toString()
                     )
                 } finally {
                     ReaderPageTrace.stop(); client.close()

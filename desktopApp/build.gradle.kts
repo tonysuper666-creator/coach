@@ -76,6 +76,12 @@ dependencies {
     implementation(libs.coroutines.swing)
     implementation(libs.material3)
     testImplementation(kotlin("test"))
+    testImplementation(project(":server:app"))
+    testImplementation(project(":server:core"))
+    testImplementation(project(":server:ai"))
+    testImplementation(libs.ktor.netty)
+    @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+    testImplementation(compose.uiTest)
 }
 val localConfig = Properties().apply {
     val file = File(System.getProperty("user.home"), "Coach/config/local.properties")

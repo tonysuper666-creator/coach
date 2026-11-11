@@ -609,7 +609,6 @@ private struct ReaderView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
-                Button("返回课程和练习") { dismiss() }.accessibilityIdentifier("readerBack")
                 Text("课程资料").font(.title2.bold())
                 if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("readerMessage") }
                 if model.pending != nil {
@@ -649,6 +648,15 @@ private struct ReaderView: View {
                 }
             }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Button("返回课程和练习") { dismiss() }
+                    .accessibilityIdentifier("readerBack")
+                    .frame(maxWidth: 600, alignment: .leading)
+                    .padding(.horizontal, CoachV7.Space.s6)
+                    .padding(.vertical, CoachV7.Space.s4)
+                    .frame(maxWidth: .infinity)
+                    .background(Appearance.paper)
+            }
             .foregroundStyle(Appearance.ink)
             .toolbar(.hidden, for: .navigationBar)
             .task { await model.loadCatalog() }

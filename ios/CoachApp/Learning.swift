@@ -263,6 +263,18 @@ final class LearningModel: ObservableObject {
               saved.matches(item: item, course: course, week: number, server: server.url.absoluteString, deviceId: credential.deviceId) else { return nil }
         return saved
     }
+
+    func pendingChoice(for item: PracticeItem) -> Int? {
+        guard let saved = pending, let number = selectedWeek,
+              let (server, credential) = connection.learningCredentials,
+              saved.course == course, saved.week == number, saved.itemId == item.id,
+              saved.server == server.url.absoluteString, saved.deviceId == credential.deviceId,
+              saved.itemStem == item.stem, let options = saved.optionTexts,
+              options.indices.contains(saved.choice), options.sorted() == item.options.sorted() else { return nil }
+        let selected = options[saved.choice]
+        guard item.options.filter({ $0 == selected }).count == 1 else { return nil }
+        return item.options.firstIndex(of: selected)
+    }
 }
 
 struct LearningView: View {
@@ -311,9 +323,12 @@ struct LearningView: View {
                             Text("本机上次选择：\(saved.choiceText)").accessibilityIdentifier("lastConfirmedChoice")
                             Text("本机上次确认：\(saved.status) · \(saved.keyState)").accessibilityIdentifier("lastConfirmedReceipt")
                         }
+                        if let pendingChoice = model.pendingChoice(for: item) {
+                            Text("待确认选择：\(item.options[pendingChoice])").accessibilityIdentifier("pendingChoice")
+                        }
                         ForEach(item.options.indices, id: \.self) { index in
                             Button { selections[item.id] = index } label: {
-                                Label(item.options[index], systemImage: selections[item.id] == index ? "largecircle.fill.circle" : "circle")
+                                Label(item.options[index], systemImage: (model.pendingChoice(for: item) ?? selections[item.id]) == index ? "largecircle.fill.circle" : "circle")
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(CoachV7.Space.s4)
                                     .background(Appearance.option, in: RoundedRectangle(cornerRadius: CoachV7.Radius.m))

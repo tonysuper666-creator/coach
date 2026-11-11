@@ -1,6 +1,5 @@
 package com.coach.android
 
-import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.res.Configuration
@@ -36,7 +35,7 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class V7FontLoadingTest {
     @get:Rule val compose = createComposeRule()
-    private val app get() = RuntimeEnvironment.getApplication<Application>()
+    private val app get() = RuntimeEnvironment.getApplication()
 
     @Suppress("DEPRECATION")
     private fun context(night: Boolean = false, redirectReading: Boolean = false): Context {

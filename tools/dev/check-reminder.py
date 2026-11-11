@@ -37,7 +37,10 @@ parser.add_argument("--private-data-dir", required=True, type=Path, help="synthe
 parser.add_argument("--application-id", required=True, help="isolated TON-specific APK package")
 parser.add_argument("--course", default="ton1291-synthetic-review", help="course compiled into the APK (-Pcoach.course)")
 parser.add_argument("--out", required=True, type=Path, help="new directory for content-free evidence")
+parser.add_argument("--display", help="optional WIDTHxHEIGHT@DENSITY override for a narrow-window pass, e.g. 945x1840@420; "
+                    "the AVD's own geometry is restored before the emulator exits")
 cli = parser.parse_args()
+assert cli.display is None or re.fullmatch(r"[0-9]{3,4}x[0-9]{3,4}@[0-9]{3}", cli.display), "--display WIDTHxHEIGHT@DENSITY"
 assert re.fullmatch(r"com\.coach\.android\.ton[0-9]+", cli.application_id), "Use an isolated TON-specific APK package"
 PACKAGE = cli.application_id
 OUT = cli.out.resolve()
@@ -160,7 +163,7 @@ env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(private / "test-token"
            COACH_BRIDGE_URL="http://127.0.0.1:1", COACH_TRAFFIC="test", COACH_SOURCE_LOOKUP="false")
 if SERIAL in run([ADB, "devices"]).stdout.decode():
     raise RuntimeError("Emulator serial already owned; refusing to reuse it")
-server = emulator = None
+server = emulator = original_display = None
 passed = False
 try:
     with (private / "server-private.log").open("w") as log:
@@ -194,6 +197,14 @@ try:
     adb("shell", "settings", "put", "system", "screen_off_timeout", "600000")
     adb("shell", "input", "keyevent", "KEYCODE_MENU")
     display = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+    original_display = [re.search(r"Override size: (\S+)", display[0]), re.search(r"Override density: (\S+)", display[1])]
+    if cli.display:
+        size, density = cli.display.split("@")
+        adb("shell", "wm", "size", size)
+        adb("shell", "wm", "density", density)
+        display = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+        assert f"Override size: {size}" in display[0] and f"Override density: {density}" in display[1], display
+    display.append("dalvik.vm.heapgrowthlimit=" + adb("shell", "getprop", "dalvik.vm.heapgrowthlimit").strip())
     for apk in ["androidApp/build/outputs/apk/debug/androidApp-debug.apk",
                 "androidApp/build/outputs/apk/androidTest/debug/androidApp-debug-androidTest.apk"]:
         adb("install", "-r", ROOT / apk)
@@ -279,6 +290,16 @@ finally:
         except (subprocess.SubprocessError, OSError):
             pass
     uninstall_failed = False
+    if cli.display and emulator is not None and emulator.poll() is None and original_display is not None:
+        # Hand the AVD back in its own geometry even though -read-only discards the session.
+        try:
+            size, density = original_display
+            run([ADB, "-s", SERIAL, "shell", "wm", "size", size.group(1) if size else "reset"])
+            run([ADB, "-s", SERIAL, "shell", "wm", "density", density.group(1) if density else "reset"])
+            restored = [adb("shell", "wm", "size").strip(), adb("shell", "wm", "density").strip()]
+            print(json.dumps(dict(displayRestored=restored)), flush=True)
+        except (subprocess.SubprocessError, OSError):
+            print(json.dumps(dict(displayRestored=False)), flush=True)
     if emulator is not None and emulator.poll() is None:
         # The isolated APKs must not survive the smoke, including assertion failures.
         for package in (PACKAGE + ".test", PACKAGE):

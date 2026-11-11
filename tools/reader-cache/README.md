@@ -1222,3 +1222,47 @@ witness. First review a bounded offline extraction/linkage contract for the
 already stopped, host-local capture; do not bypass the current filter gate,
 transfer the raw radio file, guess a translated port or launch another emulator.
 500 ms causation, clock alignment and original acceptance gaps remain open.
+
+### Android test dispatcher and temporary emulator geometry
+
+The product-suite run at `3e03628f` used a Pixel Fold AVD with physical
+2208x1840/420dpi but leftover overrides of 1972x1248/320dpi. Those results do not
+meet the original geometry contract. The behavior failure was a missing Looper
+while creating LazyColumn's Android prefetch scheduler. Its stack passes through
+the test frame clock and applying-continuation interceptor on a Default worker.
+It does not establish a production-reader failure.
+
+The three Android reader product suites now use the existing Compose 1.12.1
+`androidx.compose.ui.test.junit4.v2.createAndroidComposeRule` entry. Installed
+bytecode confirms this selects the standard composition dispatcher rather than
+v1's unconfined dispatcher. No Compose/dependency upgrade, reader scheduling
+change, Looper preparation on a worker, or assertion removal is involved. See
+the official [v2 migration guide](https://developer.android.com/develop/ui/compose/testing/migrate-v2).
+This is a test-driver fix candidate; the unchanged behavior test must pass
+natively before the exception is considered resolved. New timings also reflect
+a different test driver, so do not pool them with v1 measurements.
+
+For a new native run, the existing geometry contract authorizes only a temporary
+change inside the **owned emulator guest**, while holding the existing emulator
+slot. Confirm its explicit serial, qemu identity and AVD ownership; save size,
+density, font scale and posture first. On that serial only, `wm size reset` and
+`wm density reset` remove the guest overrides. Verify 2208x1840/420dpi with no
+override, fontScale 1.0 and the required open posture before measuring. A mismatch
+means stop and report the condition, not collect another nonconforming result.
+
+In a `finally` path, restore the saved guest overrides (1972x1248/320 for the
+reported session, if still current), verify restoration, then clean up the owned
+emulator and isolated packages. Do not reset a physical device, another guest,
+or host Windows/macOS settings. Keep both configuration receipts. Old results
+and their false flags are not relabeled as conforming measurements.
+
+Trace Processor is not required during capture. The prior Mac engineering
+receipts used `.agent_context/trace_processor` with a cached v59.1 binary. Prefer
+that already-used native cache for offline SQL; inspect the wrapper's pinned
+version, checksum and cache path **before** invoking it, since a wrapper may
+download on first use. A missing cache must be reported, without an automatic
+download or version switch. Keep parsing separate from the emulator slot. Use
+the existing `window_frames.sql` with the run's measurement PID, retain quality
+and all dropped/ambiguous candidates, and keep wrong-geometry traces excluded
+from contractual latency/physical-memory acceptance. No route/radio work is
+required for this product verification.

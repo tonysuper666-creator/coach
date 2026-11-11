@@ -5,7 +5,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.coach.client.CourseHttp
@@ -23,6 +23,8 @@ import org.junit.runner.RunWith
 @OptIn(ExperimentalTestApi::class)
 @RunWith(AndroidJUnit4::class)
 class ReaderPageCachePathSmoke {
+    // v1's unconfined composition can resume on the HTTP completion worker,
+    // where LazyColumn's Android prefetch scheduler has no Looper.
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     @Test fun readerPrefetchAndQuestionSourceReuseDecodedRaster() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

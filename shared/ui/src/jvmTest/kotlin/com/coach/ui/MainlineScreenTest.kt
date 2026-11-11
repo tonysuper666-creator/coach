@@ -417,6 +417,67 @@ class MainlineScreenTest {
         }
     }
 
+    /** A clipped last row must not leave half its glyphs next to the fixed actions. */
+    private fun ComposeUiTest.assertNoPartialBottomLine(text: String): Int? {
+        val interaction = onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("mainline-scroll-viewport")))[0]
+        val node = interaction.fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val layout = layouts.single()
+        val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
+        val pixels = onRoot().captureToImage().toAwtImage()
+        var clippedLine: Int? = null
+        for (line in 0 until layout.lineCount) {
+            val top = node.positionInRoot.y + layout.getLineTop(line)
+            val bottom = node.positionInRoot.y + layout.getLineBottom(line)
+            if (top >= viewport.top && top < viewport.bottom && bottom > viewport.bottom + 1f) {
+                clippedLine = line
+                val left = kotlin.math.ceil(node.positionInRoot.x + layout.getLineLeft(line)).toInt()
+                val right = kotlin.math.floor(node.positionInRoot.x + layout.getLineRight(line)).toInt()
+                val start = kotlin.math.ceil(top).toInt()
+                val end = kotlin.math.floor(viewport.bottom).toInt()
+                if (left < right && start < end) {
+                    val darkest = (start until end).minOf { y -> (left until right).minOf { x ->
+                        val rgb = pixels.getRGB(x, y)
+                        (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+                    } }
+                    assertTrue(darkest > 160, "partial bottom line ${line + 1} painted clipped glyphs (darkest=$darkest)")
+                }
+            }
+        }
+        return clippedLine
+    }
+
+    private fun ComposeUiTest.revealAndReadFeedbackLine(text: String, lineIndex: Int? = null) {
+        val interaction = onNodeWithText(text)
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val layout = layouts.single()
+        assertEquals(text, layout.layoutInput.text.text, "The full explanation must remain in the document")
+        val line = lineIndex ?: (layout.lineCount - 1)
+        val viewport = onNodeWithTag("mainline-scroll-viewport")
+        val edge = viewport.fetchSemanticsNode().boundsInRoot.bottom
+        val bottom = interaction.fetchSemanticsNode().positionInRoot.y + layout.getLineBottom(line)
+        viewport.performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, bottom - edge + 16f) }
+        waitForIdle()
+        val origin = interaction.fetchSemanticsNode().positionInRoot
+        val bounds = viewport.fetchSemanticsNode().boundsInRoot
+        val top = origin.y + layout.getLineTop(line)
+        val end = origin.y + layout.getLineBottom(line)
+        assertTrue(top >= bounds.top && end <= bounds.bottom, "the complete requested line must scroll above the actions")
+        val pixels = onRoot().captureToImage().toAwtImage()
+        val darkest = (kotlin.math.ceil(top).toInt() until kotlin.math.floor(end).toInt()).minOf { y ->
+            (kotlin.math.ceil(origin.x + layout.getLineLeft(line)).toInt() until
+                kotlin.math.floor(origin.x + layout.getLineRight(line)).toInt()).minOf { x ->
+                val rgb = pixels.getRGB(x, y)
+                (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+            }
+        }
+        assertTrue(darkest <= 96, "the requested explanation line must have solid body ink, not be faded or hidden")
+        val actions = onNodeWithTag("mainline-actions").fetchSemanticsNode().boundsInRoot
+        assertTrue(actions.top >= bounds.bottom, "the actions must not overlap the feedback viewport")
+    }
+
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
     @Test fun desktopWalksOneWeekWithExplanationsOnTheSamePage() = walk(1000, 800)
     // 1972×1248 pixels at Android density 320 is 986×624 dp, before system insets.
@@ -460,6 +521,7 @@ class MainlineScreenTest {
                 assertFeedbackTextReadable("记住这个")
                 assertFeedbackTextReadable("Synthetic memory for S1.")
                 assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
+                assertNoPartialBottomLine("背景")
                 capture("outer-feedback-1972x1248")
             } catch (failure: Throwable) {
                 capture("outer-feedback-1972x1248-failure")
@@ -480,6 +542,7 @@ class MainlineScreenTest {
             assertEquals(beforeNotes, scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(),
                 "returning to a completed answer must preserve the reader's scroll")
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("outer-feedback-restored-1972x1248")
         }
     }
     @Test fun longExplanationKeepsCitationAboveFadeAndFullFeedbackScrollable() = FakeMac(today, includeNotes = true, setupEmphasis = true, correct = longCorrect).use { mac ->
@@ -504,12 +567,23 @@ class MainlineScreenTest {
             capture("outer-long-feedback-1972x1248")
             onNodeWithText(longCorrect).assertExists()
             onNodeWithText("为什么对", substring = true).performScrollTo().assertIsDisplayed()
+            val clippedLine = assertNotNull(assertNoPartialBottomLine(longCorrect), "exercise a paragraph crossing the viewport edge")
             capture("outer-long-feedback-start-1972x1248")
+            revealAndReadFeedbackLine(longCorrect, clippedLine)
+            assertNoPartialBottomLine(longCorrect)
+            capture("outer-long-feedback-continued-line-1972x1248")
+            revealAndReadFeedbackLine(longCorrect)
+            capture("outer-long-feedback-last-line-1972x1248")
             onNodeWithText("Synthetic apples were sold out before the season started, so they cannot be the answer.").performScrollTo().assertIsDisplayed()
             onNodeWithText("Synthetic plums ripen after the period described in the question.").performScrollTo().assertIsDisplayed()
             onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
             assertFeedbackTextReadable("The synthetic orchard story sets up the supply example used later in the week.")
             capture("outer-long-feedback-details-1972x1248")
+            onNodeWithText("Synthetic figs are imported, not grown in the orchard.").performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("Synthetic figs are imported, not grown in the orchard.")
+            onNodeWithTag("private-citation").performScrollTo().assertIsDisplayed()
+            onNodeWithText("回到要点").assertIsDisplayed()
+            onNodeWithTag("mainline-next").assertIsDisplayed()
             val before = scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
             onNodeWithText("回到要点").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
@@ -518,6 +592,7 @@ class MainlineScreenTest {
             waitForIdle()
             assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("outer-long-feedback-restored-1972x1248")
         }
     }
 
@@ -568,6 +643,7 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("inner-answer-restored-2448x1848")
         }
     }
     @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)

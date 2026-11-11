@@ -456,7 +456,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         if (done == null) TextButton(onClick = { submit(false, true) }, enabled = !busy, modifier = Modifier.testTag("mainline-dont-know")) { Text("不会，直接看讲解") }
         }
     }
-    CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
+    val feedbackClipping = remember { LessonFeedbackClipping() }
+    CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d,
+        LocalLessonFeedbackClipping provides feedbackClipping) {
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, showNavigation = false, onBack = goUp, backLabel = if (only != null) "暂离 · 阅读" else if (directEntry) "暂离 · $parentLabel" else "暂离 · 第 $number 周",
         directory = { WeekDirectory(view, number, onBrowseWeek) },
         margin = {
@@ -532,7 +534,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val pageHeight = maxHeight - m.topPadding - 24.dp - bottomInset
             Column(Modifier.widthIn(max = CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().align(Alignment.TopCenter)
                 .padding(bottom = bottomInset).testTag("mainline-scroll-viewport")
-                .onGloballyPositioned { coordinates.viewport = it; captureGeometry() }.verticalScroll(scroll)
+                .onGloballyPositioned { coordinates.viewport = it; captureGeometry() }
+                .then(if (dockActions) with(feedbackClipping) { Modifier.viewport(scroll, coordinates) } else Modifier)
+                .verticalScroll(scroll)
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 Row {
@@ -572,15 +576,15 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                                 captureGeometry()
                             }) {
                                 done.str("remember").takeIf { it.isNotBlank() }?.let { Labeled("记住这个", it); Spacer(Modifier.height(12.dp)) }
-                                if (done.flag("dontKnow")) Text("这次先看讲解，算学习，不算答对。")
+                                if (done.flag("dontKnow")) FeedbackText("这次先看讲解，算学习，不算答对。")
                                 (done["tryFirstRefs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { ref ->
                                     val primers = items.filter { (it["ladder"] as? JsonObject)?.str("kind") == "try_first" }.take(4)
                                     val position = primers.indexOfFirst { it.str("id") == ref.str("question_id") }
-                                    if (position >= 0) Text("开头『先试试』的第${position + 1}题说的就是这个。")
+                                    if (position >= 0) FeedbackText("开头『先试试』的第${position + 1}题说的就是这个。")
                                 }
-                                Text("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
+                                FeedbackText("为什么是 ${answer?.let { letters.getOrNull(it) }.orEmpty()}（为什么对）", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
                                 Spacer(Modifier.height(8.dp))
-                                Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
+                                FeedbackText(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
                                 Spacer(Modifier.height(16.dp))
                                 val source = explanation.str("source").ifBlank { done.str("source") }
                                 if (source.isNotBlank() || sourceKp?.sourceReferences?.structured == true) {
@@ -590,9 +594,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             val wrong = displayedChoice?.takeIf { it != answer }
                             if (wrong != null) {
                                 Spacer(Modifier.height(16.dp))
-                                Text("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
+                                FeedbackText("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
                                 Spacer(Modifier.height(8.dp))
-                                Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
+                                FeedbackText((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                                 Spacer(Modifier.height(16.dp))
                             }
                         }
@@ -633,7 +637,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                 }
             }
-            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            if (dockActions) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().testTag("mainline-actions")
                 .onSizeChanged { coordinates.actionHeight = it.height; actionHeight = with(density) { it.height.toDp() } }
                 .onGloballyPositioned { coordinates.actions = it; captureGeometry() }
                 .verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
@@ -668,8 +672,8 @@ private fun ClassEmphasis(all: List<JsonObject>, factIds: List<String>) {
 @Composable
 private fun Labeled(label: String, text: String) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-        Text(text, style = MaterialTheme.typography.bodyMedium)
+        FeedbackText(label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        FeedbackText(text, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -695,9 +699,9 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
     val week = (r["mistakeWeek"] as? JsonPrimitive)?.intOrNull
     Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("mainline-outcome")) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(head, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold,
+            FeedbackText(head, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold,
                 color = if (r.str("status") == "missed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-            queued?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+            queued?.let { FeedbackText(it, style = MaterialTheme.typography.bodyMedium) }
             if (week != null) TextButton(onClick = { onReviewWeek(week) }, contentPadding = PaddingValues(0.dp)) { Text("已进第 $week 周错题本 ›") }
         }
     }

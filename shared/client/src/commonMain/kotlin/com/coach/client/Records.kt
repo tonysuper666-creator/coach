@@ -52,11 +52,13 @@ data class AttemptDetail(
     val voided: Boolean, val hinted: Boolean,
     /** 限时练习超过时限（含宽限）才交卷：照常批改，不计入掌握。 */
     val overtime: Boolean = false,
+    /** 主线作答时答案尚未核对；之后核对也不追溯计分。 */
+    val pendingKey: Boolean = false,
 ) {
     val isChoice: Boolean get() = format == "SINGLE_CHOICE"
     /** 复核之后以复核后的批改为准；还没复核的构答草稿不计分。 */
-    val effectiveGrade: GradeView? get() = review?.revised ?: grade
-    val counted: Boolean get() = grade != null && (grade.status == "EXACT" || grade.status == "VERIFIED" || review != null)
+    val effectiveGrade: GradeView? get() = if (pendingKey) null else review?.revised ?: grade
+    val counted: Boolean get() = !pendingKey && grade != null && (grade.status == "EXACT" || grade.status == "VERIFIED" || review != null)
 }
 
 /** 评分标准（冻结题）：只在提交后由 Mac 返回。 */
@@ -123,6 +125,7 @@ class RecordsView(private val events: List<Event>) {
             draft, review,
             es.any { it.type == "attempt_voided" }, es.any { it.type == "hint_revealed" },
             submitted?.payload?.flag("overtime") == true,
+            pendingKey = p.flag("mainline") && p.s("keyState") != "VERIFIED",
         )
     }
 

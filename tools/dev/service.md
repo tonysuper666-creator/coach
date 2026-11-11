@@ -7,12 +7,12 @@
 先配置 `~/Coach/config/local.properties` 中的 `coach.tailHost` 为本机 Tailscale IPv4。需要 JDK 17、Python 3、Node 22、已登录的订阅 CLI；不需要管理员权限。不修改 DeepTutor、8790、Tailscale 配置或账户。
 
 ```sh
-tools/dev/heavy ./gradlew :server:app:installDist --max-workers=2
+tools/dev/heavy ./gradlew :server:app:installDist
 python3 tools/dev/coach-service.py install
 python3 "$HOME/Coach/service/control.py" status
 ```
 
-2026-10-31 08:00 GMT 前按今晚调度例外：构建前 `pgrep -f GradleWrapperMain | wc -l`，全机少于两个重构建才开工，直接运行 Gradle `--max-workers=6`，不用 `nice`。此后恢复重任务规范。
+所有构建经仓库当前版本的 `tools/dev/heavy` 全机锁，遵守当前负载守护调度；不额外限制 Gradle workers。
 
 安装器将构建产物、桥源码和 mathsvc 拷贝到 `~/Coach/service/releases/时间戳/`，在副本中建立独立 venv 和安装 Node 锁定依赖，才加载 LaunchAgent。临时 worktree 消失不会影响服务。安装失败时恢复上一个安装；历史 release 保留，供回滚。重新安装新 head 时先构建再执行同一 install 命令；安装不会覆盖数据。`installation.json` 记录当前 release；plist 保存实际运行环境。登录自启动由 LaunchAgent 管理，不能以手动 bootstrap 实测代替注销/重登录证据。
 
@@ -52,9 +52,9 @@ Android 复验先构建 debug 与 androidTest APK，再启动并清理自己拥�
 
 日志为 `~/Coach/logs/{server,bridge,mathsvc}-YYYY-MM-DD.log`，跨日第一次写入时换文件，各自保留当天和此前 13 日。桥请求元数据也进入轮转流，不记提示词或答案。JVM 初始化前的错误在 `bootstrap.log`；不分享含真实地址或账号的原始日志。检查健康不等于订阅可调用，CLI 登录状态另查完整桥 `/health`。
 
-夜间备份与唤醒逻辑沿用账本实现；本卡还需在允许时段完成真休眠、JVM 单调钟实测、重启 Tailscale 后重绑。2026-11-02 15:00 GMT 前不做真休眠和 Tailscale 重启。
+夜间备份与唤醒逻辑沿用账本实现。李政于 2026-11-11 取消本卡的真休眠、睡眠消息收尾和睡醒手机重连验收，不再约睡眠窗口。Root 的短睡眠与 JVM 双钟观察保留在 DESIGN §4.7，不能当作消息收尾或手机重连通过。剩余验收为真实登录后 30 秒内可用、子进程 60 秒内恢复、夜间备份与回档、Tailscale 重启重绑。2026-11-11 的实测与未验证边界见 `docs/verification/ton1094-20261111.md`。
 
-旧备份恢复的客户端保留策略见 DESIGN §4.3：自动备份成功后才按 UTC 日期差清理，保留 14 日 + 此前 8 周；正常每日成功备份下，命令首次被当前 epoch 备份覆盖后保留至少 70 日单调钟观测时间足以覆盖旧快照。未确认、不在备份水位内、REJECTED 的命令均不按时间清理；REJECTED 不重放。每条已覆盖记录单独保存保守年龄，各实例从读到该条覆盖之后建立单调钟锚点，年龄候选以数据库原子最大值合并，多实例不叠加；覆盖前离线、构造后等首次同步和迟到实例补时都不能计入该条年龄。覆盖代次阻止旧锚点跨重放复用。墙钟跳变不参与计龄，没有存活锚点观测的停机时间不计龄，可能保留更久；epoch 改变先重放，再开始新窗口。schema 3→5 为旧记录保守补一个完整窗口，草稿 schema 4 的不可信共享钟年龄同样清零，不会找回升级前已删除的命令。备份失败、长期关机或墙钟回拨可能让清理滞后，残留超龄或手动历史备份没有完整恢复保证；此项独立隔离演练不替代真休眠、登录和 Tailscale 门禁，也不代表真实客户端已经发布。
+旧备份恢复的客户端保留策略见 DESIGN §4.3：自动备份成功后才按 UTC 日期差清理，保留 14 日 + 此前 8 周；正常每日成功备份下，命令首次被当前 epoch 备份覆盖后保留至少 70 日单调钟观测时间足以覆盖旧快照。未确认、不在备份水位内、REJECTED 的命令均不按时间清理；REJECTED 不重放。每条已覆盖记录单独保存保守年龄，各实例从读到该条覆盖之后建立单调钟锚点，年龄候选以数据库原子最大值合并，多实例不叠加；覆盖前离线、构造后等首次同步和迟到实例补时都不能计入该条年龄。覆盖代次阻止旧锚点跨重放复用。墙钟跳变不参与计龄，没有存活锚点观测的停机时间不计龄，可能保留更久；epoch 改变先重放，再开始新窗口。schema 3→5 为旧记录保守补一个完整窗口，草稿 schema 4 的不可信共享钟年龄同样清零，不会找回升级前已删除的命令。备份失败、长期关机或墙钟回拨可能让清理滞后，残留超龄或手动历史备份没有完整恢复保证；此项独立隔离演练不替代登录和 Tailscale 门禁，也不代表真实客户端已经发布。
 
 不触碰常驻服务的恢复与迁移回归（临时 SQLite、回环随机 HTTP 端口；不运行会故障注入生产的 `check-service.py`）：
 

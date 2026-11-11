@@ -104,13 +104,31 @@ class MistakeReviewSmoke {
             // History lists older mistakes first, so the first 再练一组 on the page may belong to another kp: use the new mistake's own card.
             // The cards have no accessibility node of their own, so walk the container in find's order: a card is
             // title, stem, its three labels, then its button, and the next card's button only follows that card's title.
-            val stem = scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
+            val stemText = first.getJSONObject(0).getJSONObject("payload").getString("stem")
+            var stem = scrollTo(stemText)
+            // Off-screen nodes are left out of the tree or ordered by fake bounds, so lift the stem into the page's upper half
+            // first: the card's labels and button must be on screen to follow it.
+            fun pageRect() = scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+            fun centerY(n: AccessibilityNodeInfo) = android.graphics.Rect().also(n::getBoundsInScreen).centerY()
+            var page = pageRect()
+            var drags = 0
+            while (page != null && centerY(stem) > page.centerY()) {
+                if (drags == 4) throw AssertionError("stem still in the lower half after 4 drags: centerY=${centerY(stem)} page=${page.top}-${page.bottom}")
+                scroll(true);drags++
+                stem = find(stemText,anyVisibility=true) ?: throw AssertionError("stem lost after drag $drags")
+                page = pageRect()
+            }
             val nodes = preorder(mistakeCard(stem))
             val stemAt = nodes.indexOf(stem)
-            assertTrue("stem not in the list container",stemAt>=0)
-            val buttonAt = (stemAt+1 until nodes.size).firstOrNull { hit(nodes[it],"再练一组",false) } ?: throw AssertionError("No 再练一组 after the new mistake's stem")
+            val labels = listOf("当时的答案：","正确答案：","判分依据：")
+            // Numbers only, never text: where the stem, every 再练一组 and each label sit in the walk.
+            fun layoutNote() = "stemAt=$stemAt nodes=${nodes.size} buttons=${nodes.indices.filter { hit(nodes[it],"再练一组",false) }} " +
+                labels.mapIndexed { i,l -> "label$i=${nodes.indices.filter { hit(nodes[it],l,true) }}" }.joinToString(" ") +
+                " stemClass=${stem.className} stemY=${centerY(stem)} page=${page?.top}-${page?.bottom} drags=$drags"
+            assertTrue("stem not in the list container: ${layoutNote()}",stemAt>=0)
+            val buttonAt = (stemAt+1 until nodes.size).firstOrNull { hit(nodes[it],"再练一组",false) } ?: throw AssertionError("No 再练一组 after the new mistake's stem: ${layoutNote()}")
             // Both entries and their original answers remain in the replica, even without a new request.
-            for (label in listOf("当时的答案：","正确答案：","判分依据：")) assertTrue("card label missing between stem and button: $label",(stemAt+1 until buttonAt).any { hit(nodes[it],label,true) })
+            for ((i,label) in labels.withIndex()) assertTrue("card label$i missing between stem and button: ${layoutNote()}",(stemAt+1 until buttonAt).any { hit(nodes[it],label,true) })
             val retryButton = nodes[buttonAt]
             if (!retryButton.isVisibleToUser) { retryButton.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id);instrumentation.waitForIdleSync() }
             // The app reuses the kp's latest REVIEW thread (CourseView.reviewThreadId); history may already hold one.

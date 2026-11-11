@@ -186,7 +186,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val view by produceState<CourseView?>(null, c, revision) {
         value = withContext(Dispatchers.Default) {
             val events = c.sync.localEvents(c.courseId)
-            if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
+            if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId), c.tutor.agentRunId)
         }
     }
     val navigation = androidx.compose.runtime.saveable.rememberSaveable(c.courseId, saver = AppNavigation.saver) {

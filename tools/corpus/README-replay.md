@@ -46,6 +46,25 @@ tools/dev/heavy python3 -m unittest discover -s tools/corpus -p 'test_prepare_re
 
 ## Coach 副本与总验回放
 
+### OPPO 代跑隔离（TON-1101）
+
+先合入并部署支持 `hello.agentRunsSupported=true` 的服务端，再安装对应 debug 客户端。代跑使用已有配对身份，通过 Activity extra `agentRunId` 显式启用：
+
+```sh
+adb -s <OPPO序列号> shell am force-stop com.coach.android
+adb -s <OPPO序列号> shell am start -n com.coach.android/.CoachActivity --es agentRunId oppo-w8-<UTC>
+```
+
+run ID 仅允许 1–80 个字母、数字、下划线或连字符；release 包拒绝该 extra。客户端使用独立 `coach-agent-<run>.db`，禁止离线下载；旧服务端能力未确认时，账本上传和导师 socket 均不发送代跑操作。每次重新启动代跑都须携带同一 run ID；恢复普通使用时强停后启动 Activity，不带该 extra，不清除配对身份。
+
+代跑线程使用 `agent-run/<run>/<thread>` 命名空间，与真人 KP / review 绑定并存。消息存储的 `mode`、历史与导出，以及事件 payload 均标 `agent 代跑，非真人`；异步判分继承原题 provenance。原始账本和同步序号照常保留，默认投影、薄弱点和复习排程排除这些事实及同 attempt 的晚到判分；代跑导师只在自己的线程内纳入本轮事实以继续上课。投影版本升级使旧缓存重算。
+
+HTTP 事件分页、快照及 socket 账本把代跑事实封装为 `agent_run_fact`，原始类型保存在 `agentEventType`；新客户端解封后过滤，旧客户端按未知事实回退到服务端干净投影，避免在另一端重新计入代跑成绩。数据库及原始备份仍保留完整事实。
+
+回滚限制：一旦已存代跑事件，不能直接退回缺少过滤的旧服务端，否则旧投影会计入这些事实。须保留等效过滤，或恢复代跑前备份；恢复备份会丢失备份之后的数据。此 PR 不执行部署或回滚。
+
+合并及部署后才执行 W8：讲解一段、输入一两句、做三题。随后只从生产只读连接 `VACUUM INTO`，在私有副本中按 run ID 采样。报告分别写「agent 代跑，非真人」与「真人会话未覆盖」，不得把代跑归为真人覆盖，也不得把旧 qa_ 课程算入。此准备改动本身没有执行 OPPO 课程或生产回放。
+
 Coach 生产库先从只读连接执行 VACUUM INTO，之后仅打开副本。下面的命令不会启动、重启或写入生产服务。目标文件必须不存在：
 
 ~~~sh

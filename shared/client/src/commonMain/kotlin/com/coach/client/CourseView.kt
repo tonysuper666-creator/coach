@@ -70,16 +70,18 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 }
 
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
-class CourseView(val events: List<Event>, val projection: Projection) {
+class CourseView(events: List<Event>, val projection: Projection, private val agentRun: String? = null) {
+    val events: List<Event> = com.coach.domain.learnerEvidence(events, agentRun)
+    private fun lessonThread(thread: String) = agentRun?.let { com.coach.domain.agentThreadId(it, thread) } ?: thread
 
     /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
-    fun tutorThreadId(kpId: String): String = events.lastOrNull {
+    fun tutorThreadId(kpId: String): String = lessonThread(events.lastOrNull {
         it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }?.threadId ?: "kp:$kpId"
+    }?.threadId ?: "kp:$kpId")
 
-    fun reviewThreadId(kpId: String): String = events.filter {
+    fun reviewThreadId(kpId: String): String = lessonThread(events.filter {
         it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"
+    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId")
 
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()

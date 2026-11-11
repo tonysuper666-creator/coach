@@ -89,7 +89,7 @@ class MistakeReviewSmoke {
             step("open mistake list")
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
-            waitText("错题 ${listed.size}")
+            click(waitText("错题 ${listed.size}")) // with due reviews the page opens on 到期; the list is only composed on 错题
             // Stems render as Markdown, so wait for a plain label every card carries; the list is not lazy.
             waitText("当时的答案：",substring=true)
             settleAndCapture("wrong-list",reviewMark)
@@ -157,7 +157,7 @@ class MistakeReviewSmoke {
         // navigation stack (TON-1445) rather than landing on Today, so no tap is needed to get back to it.
         step("restored offline mistake list")
         val wrongCount=samples.getInt("wrongCount") // written by the prepare run from the ledger
-        waitText("错题 $wrongCount",15_000)
+        click(waitText("错题 $wrongCount",15_000)) // the tab is not saved: a cold start opens on 到期 again
         assertNull("restart must restore the review page, not Today's 到期复习 card",find("到期复习"))
         waitText("离线可回看错题；连接 Mac 后可再练。")
         scrollTo("正确答案：",substring=true)

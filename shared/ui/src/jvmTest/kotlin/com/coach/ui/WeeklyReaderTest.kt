@@ -17,7 +17,7 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class WeeklyReaderTest {
     private val section = json("section_id" to "S1", "body" to "Synthetic pears grow in an orchard.",
-        "title" to "【W3·slides】Synthetic section", "content_version" to "v1", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic slide 4"))
+        "title" to "【W3·slides】Synthetic section", "content_version" to "v1", "fact_ids" to listOf("F1", "F2"), "sources" to listOf("Synthetic slide 4"))
     private val mark = json("id" to "m1", "section" to "S1", "version" to "v1", "original" to section.str("body"),
         "start" to 0, "end" to 9, "quote" to "Synthetic", "note" to "My synthetic note")
     @Test fun staleAnchorsNeverMatchAndGuessesNeverMasterMapNodes() {
@@ -71,7 +71,7 @@ class WeeklyReaderTest {
             runComposeUiTest {
                 setContent {
                     var state by remember { mutableStateOf(http.readerState(engine, 1)) }
-                    WeeklyReader(c, 1, listOf(section), section, listOf(json("id" to "secret-question-id", "factIds" to listOf("F1"), "status" to "guessed")),
+                    WeeklyReader(c, 1, listOf(section), section, listOf(json("id" to "secret-question-id", "factIds" to listOf("F1"), "stem" to "Synthetic question with a stem longer than forty characters", "status" to "guessed"), json("id" to "other-question-id", "factIds" to listOf("F2"))),
                         (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
                         { transform -> state = transform(state); persisted = state; http.saveReaderState(engine, 1, state) }, {}, { sectionId, questionId -> selectedQuestion = sectionId to questionId }, {},
                         { state = JsonObject(state + ("focus" to JsonPrimitive(it))); persisted = state; http.saveReaderState(engine, 1, state) }, {})
@@ -99,8 +99,10 @@ class WeeklyReaderTest {
                 onNodeWithText("要点：Synthetic section").assertDoesNotExist()
                 onNodeWithText("本周脉络：节 → 考点 → 题").performScrollTo().performClick()
                 onNodeWithText("要点：Synthetic section").assertIsDisplayed()
-                onNodeWithText("○ 考点 · Synthetic section").assertIsDisplayed()
-                onNodeWithText("这一题 · 猜对，待练").performScrollTo().performClick()
+                onNodeWithText("○ 考点 1 · Synthetic section").assertIsDisplayed()
+                onNodeWithText("○ 考点 2 · Synthetic section").assertIsDisplayed()
+                onNodeWithText("这一题 · 待练").performScrollTo().assertIsDisplayed()
+                onNodeWithText("题：Synthetic question with a stem longer th · 猜对，待练").performScrollTo().performClick()
                 assertEquals("S1" to "secret-question-id", selectedQuestion)
                 onNodeWithText("secret-question-id", substring = true).assertDoesNotExist()
                 onNodeWithText("收起本周脉络").performClick()

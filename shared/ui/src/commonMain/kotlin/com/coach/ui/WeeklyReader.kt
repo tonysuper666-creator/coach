@@ -213,16 +213,17 @@ internal fun WeeklyReader(
                             }
                             if (map) for (s in sections) {
                                 TextButton(onClick = { onSection(s.str("section_id")) }) { Text("要点：" + com.coach.client.displayTitle(s.str("title"))) }
-                                for (fact in s.strings("fact_ids")) {
+                                for ((index, fact) in s.strings("fact_ids").withIndex()) {
                                     val mastered = factMastered(fact, items)
                                     TextButton(onClick = { onSection(s.str("section_id")) }) {
-                                        Text((if (mastered) "✓ 相关题均答对 · " else "○ 考点 · ") + com.coach.client.displayTitle(s.str("title")),
+                                        Text((if (mastered) "✓ 考点 ${index + 1} · 相关题均答对 · " else "○ 考点 ${index + 1} · ") + com.coach.client.displayTitle(s.str("title")),
                                             color = if (mastered) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     emphasis(listOf(fact))
                                     for (q in items.filter { fact in it.strings("factIds") })
                                         TextButton(onClick = { onQuiz(s.str("section_id"), q.str("id")) }, modifier = Modifier.padding(start = 16.dp)) {
-                                            Text("这一题 · " + when (q.str("status")) {
+                                            val stem = q.str("stem").trim()
+                                            Text((if (stem.isEmpty()) "这一题" else "题：${stem.take(40)}") + " · " + when (q.str("status")) {
                                                 "mastered" -> "答对过（非猜）"; "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
                                             })
                                         }

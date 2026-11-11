@@ -87,8 +87,8 @@ class V7FontLoadingTest {
                     assertTrue("Latin must remain readable at $weight", paint.hasGlyph("A"))
                     assertTrue("CJK must remain readable at $weight", paint.hasGlyph("学"))
                     val glyphs = TextRunShaper.shapeTextRun("A学", 0, 2, 0, 2, 0f, 0f, false, paint)
-                    assertTrue(glyphs.glyphCount > 0)
-                    for (index in 0 until glyphs.glyphCount) {
+                    assertTrue(glyphs.glyphCount() > 0)
+                    for (index in 0 until glyphs.glyphCount()) {
                         assertEquals("The selected Latin/CJK font must retain its weight", weight, glyphs.getFont(index).style.weight)
                     }
                 }

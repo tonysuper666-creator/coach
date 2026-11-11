@@ -4,6 +4,10 @@ CREATE TABLE sync_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 
 allEvents:
 SELECT event_json FROM replica WHERE course_id=? ORDER BY seq;
+eventsAfter:
+SELECT event_json FROM replica WHERE course_id=? AND seq>? ORDER BY seq;
+countEvents:
+SELECT count(*) FROM replica WHERE course_id=?;
 putEvent:
 INSERT OR IGNORE INTO replica VALUES(?,?,?);
 clearReplica:

@@ -148,10 +148,11 @@ private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifie
                         modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
                 }
             } else {
+                SideEffect { com.coach.client.PoolTrace.mark(thread, "retry_composed") }
                 group.cards.forEach { card -> key(card.attemptId) {
                     Box(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth()) {
                         QuizCardView(group.cards.indexOf(card) + 1, group.cards.size, card, group.submitted,
-                            chosen[card.attemptId], c.math) { chosen[card.attemptId] = it }
+                            chosen[card.attemptId], c.math, onFirstDraw = { com.coach.client.PoolTrace.mark(thread, "retry_first_draw") }) { chosen[card.attemptId] = it }
                     }
                 } }
                 Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {

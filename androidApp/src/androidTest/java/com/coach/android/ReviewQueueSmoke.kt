@@ -81,7 +81,11 @@ class ReviewQueueSmoke {
         screenshot("queue")
         if (!after) {
             click(waitFor("开始"))
-            waitFor("到期复习")
+            // With a question group pending, the study page swaps its "到期复习" page header for the KP's quiz
+            // heading (StudyScreen pending branch). Review-mode practice is proven by its "暂离 · 复习" back label
+            // (normal study reads "暂离 · 今天"), the synthetic KP heading and the group's own questions.
+            waitFor("暂离 · 复习")
+            waitFor("Synthetic review objective")
             waitFor("Synthetic review question", contains = true)
             // The group opens at question 1, also when a tall window has nothing above it.
             waitFor("第 1 / 3 题", visible = true)

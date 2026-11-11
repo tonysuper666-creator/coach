@@ -13,7 +13,7 @@ from test_first_present import fixture
 
 
 class FirstPresentRunnerTest(unittest.TestCase):
-    def drive(self,changed=False):
+    def drive(self,changed=False,failed=False,stale=False,missing=False):
         root=run_observed.ROOT/'build/first-present-runner-test'/uuid.uuid4().hex
         root.mkdir(parents=True)
         app=root/'app.apk';app.write_bytes(b'isolated fake apk')
@@ -47,8 +47,11 @@ class FirstPresentRunnerTest(unittest.TestCase):
             raise AssertionError(command)
         def execute(command,**kwargs):
             commands.append(command)
-            if 'instrument' in command:kwargs['stdout'].write('OK (1 test)')
-            elif 'exec-out' in command:kwargs['stdout'].write(json.dumps(trace).encode())
+            if 'instrument' in command:
+                trace.update(runId='stale' if stale else command[command.index('readerRunId')+1],applicationPackage=run['applicationPackage'])
+                kwargs['stdout'].write('FAILURES!!!\nTests run: 1, Failures: 1' if failed else 'OK (1 test)')
+            elif 'exec-out' in command:
+                kwargs['stdout'].write(b'' if missing else json.dumps(trace).encode())
             elif 'pull' in command:Path(command[-1]).write_bytes(b'not a real trace; runner unit only')
             elif 'install' not in command:raise AssertionError(command)
             return SimpleNamespace(returncode=0)
@@ -61,10 +64,13 @@ class FirstPresentRunnerTest(unittest.TestCase):
              patch('run_observed.shutil.which',return_value=str(renderer)), \
              patch('run_observed.capture_context',side_effect=[copy.deepcopy(context),after]), \
              patch('run_observed.summarize',return_value=dict(complete=True)) as summary:
-            if changed:
+            if failed:
+                with self.assertRaisesRegex(RuntimeError,'Android instrumentation failed'):run_observed.main()
+            elif changed:
                 with self.assertRaisesRegex(RuntimeError,'memory sampler failed'):run_observed.main()
             else:run_observed.main()
-            summary.assert_called_once_with(trace,dict(input_next=1,input_citation=1))
+            if failed:summary.assert_not_called()
+            else:summary.assert_called_once_with(trace,dict(input_next=1,input_citation=1))
         identity=json.loads((root/'out/run.json').read_text())
         self.assertEqual('first-present.pbtxt',identity['perfettoConfig'])
         self.assertEqual(config_bytes(run['applicationPackage']),captures[0].stdin.config)
@@ -78,6 +84,7 @@ class FirstPresentRunnerTest(unittest.TestCase):
         self.assertEqual(run['applicationPackage']+'.test/androidx.test.runner.AndroidJUnitRunner',native[0][-1])
         self.assertIs(identity['memorySamplerStarted'],True)
         self.assertIs(identity['memorySamplerJoined'],True)
+        self.assertEqual(not failed,identity['instrumentationPassed'])
         return identity
 
     def test_one_action_path_binds_context_config_and_the_correct_instrumentation(self):
@@ -88,6 +95,25 @@ class FirstPresentRunnerTest(unittest.TestCase):
     def test_changed_context_fails_after_preserving_capture_and_run_receipt(self):
         identity=self.drive(changed=True)
         self.assertIn('measurement_context_changed',identity['memorySamplerErrors'])
+
+    def test_adb_zero_with_failed_test_keeps_run_bound_pid_but_no_summary(self):
+        identity=self.drive(failed=True)
+        self.assertEqual(0,identity['commandExit'])
+        self.assertEqual(42,identity['measurementPid'])
+        self.assertEqual('run_bound_trace_snapshot',identity['measurementPidSource'])
+        self.assertFalse(identity['instrumentationPassed'])
+        self.assertEqual(0,identity['perfettoExit'])
+
+    def test_stale_failed_snapshot_pid_is_never_reused(self):
+        identity=self.drive(failed=True,stale=True)
+        self.assertIsNone(identity['measurementPid'])
+        self.assertEqual('snapshot_run_or_package_mismatch',identity['measurementPidError'])
+
+    def test_missing_failed_snapshot_preserves_missing_pid_and_cleanup_receipts(self):
+        identity=self.drive(failed=True,missing=True)
+        self.assertIsNone(identity['measurementPid'])
+        self.assertTrue(identity['measurementPidError'])
+        self.assertEqual(0,identity['perfettoExit'])
 
 
 if __name__=='__main__':unittest.main()

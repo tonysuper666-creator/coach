@@ -67,5 +67,40 @@ class ExportFirstPresentTest(unittest.TestCase):
                 command.assert_not_called()
             self.assertEqual('previous evidence',(root/'first-present.csv').read_text())
 
+    def test_missing_pid_reports_exact_preflight_gap_without_querying(self):
+        for pid in (None,False,0):
+            with self.subTest(pid=pid),tempfile.TemporaryDirectory() as name:
+                root=Path(name);binary=root/'cached';binary.write_bytes(b'unit binary')
+                run,_,_=fixture()
+                if pid is None:run.pop('measurementPid')
+                else:run['measurementPid']=pid
+                (root/'run.json').write_text(json.dumps(run))
+                raw=root/'frames.perfetto-trace';raw.write_bytes(b'failed capture retained')
+                with patch('export_first_present.TP_SHA256',digest(binary.read_bytes())),patch('export_first_present.subprocess.run') as query:
+                    report=exporter.export(root,binary)
+                    query.assert_not_called()
+                self.assertFalse(report['complete'])
+                self.assertIn('missing_measurement_pid' if pid is None else 'invalid_measurement_pid',report['errors'])
+                self.assertEqual(0,report['queriesExecuted'])
+                self.assertEqual(report,json.loads((root/'first-present-report.json').read_text()))
+                self.assertEqual(b'failed capture retained',raw.read_bytes())
+                self.assertFalse((root/'first-present.csv').exists())
+
+    def test_failed_native_test_cannot_be_accepted_even_when_pid_was_preserved(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);binary=root/'cached';binary.write_bytes(b'unit binary')
+            run,_,_=fixture();run['measurementContract']['origin']='android_capture'
+            run.update(commandExit=0,instrumentationPassed=False)
+            (root/'run.json').write_text(json.dumps(run))
+            with patch('export_first_present.TP_SHA256',digest(binary.read_bytes())),patch('export_first_present.subprocess.run') as query:
+                report=exporter.export(root,binary)
+                query.assert_not_called()
+                with self.assertRaisesRegex(ValueError,'refusing_to_overwrite'):exporter.export(root,binary)
+            self.assertEqual(42,report['measurementPid'])
+            self.assertEqual(['native_test_failed_or_missing_pass_receipt'],report['errors'])
+            self.assertEqual(0,report['queriesExecuted'])
+            for key in ('firstPresentLatencyVerified','matchedTupleContract','matchedBaselineObserved','physicalMemoryBudgetVerified','gpuReleaseVerified'):
+                self.assertFalse(report[key])
+
 
 if __name__=='__main__':unittest.main()

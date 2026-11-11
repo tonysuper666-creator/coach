@@ -1435,3 +1435,16 @@ independently accepted native comparison. `matchedBaselineObserved`,
 `firstPresentLatencyVerified`, physical/GPU budget flags remain false in this
 tool slice. Synthetic positive/negative cases do not promote native flags, and
 old artifacts are never backfilled with the new clock or input tuple.
+
+The initial `0061a12e` one-action native attempt failed during cleanup because
+its ComposeTestRule received a second `setContent` call. It produced no accepted
+sample. The entry now sets content once, removes the reader through a UI-thread
+state switch, and retains the original owner/inflight/window-drain assertions.
+Cleanup failures are suppressed onto a primary test failure rather than hiding
+it. Failed-run snapshots carry the exact runId/package: the runner records their
+PID before exiting and rejects stale snapshots. An unavailable PID stays null
+with an explicit reason. ADB exit zero never substitutes for a passing native
+test. Export preflight writes a closed failure report for a missing/invalid PID
+or absent native pass receipt, runs no queries, and preserves the raw evidence.
+This regression repair still needs the one new native action on Mac; Windows
+compilation, synthetic runner tests and the host JVM guard are not native proof.

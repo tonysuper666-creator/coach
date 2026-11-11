@@ -141,6 +141,8 @@ def main():
         identity["applicationPackage"] = package
         identity["apkSha256"] = hashlib.sha256(args.apk.read_bytes()).hexdigest()
         identity["testApkSha256"] = hashlib.sha256(args.test_apk.read_bytes()).hexdigest()
+    if args.suite=='first-present':
+        identity.update(measurementPid=None,measurementPidSource=None,instrumentationPassed=False)
     (out / "run.json").write_text(json.dumps(identity, indent=2))
     stop = threading.Event()
     sampling_errors = []
@@ -264,6 +266,7 @@ def main():
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                         test_class, "-e", "readerPort", str(measurement_port), "-e", "readerRunId", run_id,
                         *route_args, package + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
+                    identity["commandExit"] = result.returncode
                     # adb may exit 0 even if AndroidJUnitRunner reports a failing test.
                     captures = [("reader-observed.json", "trace.json")]
                     if args.suite == "performance":
@@ -339,6 +342,21 @@ def main():
                 xml = ROOT / f"shared/ui/build/test-results/jvmTest/TEST-{test_class}.xml"
                 shutil.copy2(xml, out / "test.xml")
         finally:
+            if args.suite=='first-present':
+                text=(out/'test.log').read_text() if (out/'test.log').exists() else ''
+                identity['instrumentationPassed']=identity.get('commandExit')==0 and 'OK (1 test)' in text and 'FAILURES!!!' not in text
+                # Even a failed test can write a snapshot. Keep its PID only
+                # when the snapshot belongs to this run and target package.
+                try:
+                    captured=json.loads((out/'trace.json').read_text())
+                    if not isinstance(captured,dict) or captured.get('runId')!=run_id or captured.get('applicationPackage')!=package:
+                        raise ValueError('snapshot_run_or_package_mismatch')
+                    process=captured.get('process')
+                    pid=process.get('pid') if isinstance(process,dict) else None
+                    if type(pid) is not int or pid<=0:raise ValueError('invalid_snapshot_pid')
+                    identity.update(measurementPid=pid,measurementPidSource='run_bound_trace_snapshot')
+                except (OSError,ValueError,TypeError) as error:
+                    identity.update(measurementPid=None,measurementPidSource=None,measurementPidError=str(error))
             if relay is not None:
                 relay.close()
                 (out/'host-socket-events.json').write_text(json.dumps(relay.report(),indent=2))
@@ -375,6 +393,8 @@ def main():
             (out / "run.json").write_text(json.dumps(identity, indent=2))
     if sampling_errors:
         raise RuntimeError("memory sampler failed; keep the measurement incomplete")
+    if args.suite=='first-present' and identity['measurementPid'] is None:
+        raise RuntimeError('Current first-present snapshot identity missing; inspect measurementPidError')
     if args.platform=='android' and args.suite in ('transport','route'):
         requested=observer_mode in ('both','stage')
         rows=[json.loads(line) for line in (out/observer_file).read_text().splitlines()] if requested else []

@@ -2,6 +2,7 @@ package com.coach.android
 
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
@@ -29,11 +30,15 @@ class ReaderFirstPresentSmoke {
     @Test fun onePrefetchedPageWithClockedFirstHardwareDraw() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         ReaderMeasurementPackage.requireIsolated(context.packageName)
-        val port = requireNotNull(InstrumentationRegistry.getArguments().getString("readerPort")).toInt()
+        val args = InstrumentationRegistry.getArguments()
+        val runId = requireNotNull(args.getString("readerRunId"))
+        val port = requireNotNull(args.getString("readerPort")).toInt()
         require(port in 1024..65535 && port !in setOf(8790,8791,18791,3790))
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
         require(JSONObject(URL("$base/health").readText()).getBoolean("syntheticOnly"))
         val client = CourseHttp(base,"baseline-device","synthetic-baseline-token","READER_BASELINE")
+        val showReader = mutableStateOf(true)
+        var testFailure: Throwable? = null
         ReaderPageTrace.start()
         fun events() = JSONObject(ReaderPageTrace.snapshot().toString()).getJSONArray("events").let { array ->
             (0 until array.length()).map { array.getJSONObject(it) }
@@ -53,7 +58,9 @@ class ReaderFirstPresentSmoke {
             ReaderPageTrace.pixelsObserved(page)
         }
         try {
-            compose.setContent { CoachTheme(false) { Surface { ReaderMeasurementSurface(client.reader) } } }
+            compose.setContent {
+                if (showReader.value) CoachTheme(false) { Surface { ReaderMeasurementSurface(client.reader) } }
+            }
             click("baseline-source"); pixels(1)
             compose.waitUntil(timeoutMillis=15_000) { events().any { it.getString("kind")=="prefetch_decode_ready" && it.getInt("page")==2 } }
             click("private-next"); pixels(2)
@@ -70,17 +77,31 @@ class ReaderFirstPresentSmoke {
                 assertTrue(event.getLong("elapsedRealtimeNanos")<=event.getLong("markerBeforeElapsedRealtimeNanos"))
                 assertTrue(event.getLong("markerBeforeElapsedRealtimeNanos")<=event.getLong("markerAfterElapsedRealtimeNanos"))
             }
+        } catch (error: Throwable) {
+            testFailure = error
+            throw error
         } finally {
             try {
-                compose.setContent { }
+                // ComposeTestRule permits one setContent call. Remove the existing
+                // reader on the UI thread so its normal disposal still runs.
+                compose.runOnIdle { showReader.value = false }
                 compose.waitUntil(timeoutMillis=15_000) {
                     val snapshot=JSONObject(ReaderPageTrace.snapshot().toString())
                     snapshot.getInt("compositionOwners")==0 && snapshot.getInt("decodeInFlight")==0 &&
                         events().count { it.getString("kind")=="window_opened" }==events().count { it.getString("kind")=="window_drained" }
                 }
+            } catch (error: Throwable) {
+                val original = testFailure
+                if (original == null) throw error else original.addSuppressed(error)
             } finally {
-                File(context.cacheDir,"reader-observed.json").writeText(ReaderPageTrace.snapshot().toString())
-                ReaderPageTrace.stop(); client.close()
+                try {
+                    File(context.cacheDir,"reader-observed.json").writeText(
+                        JSONObject(ReaderPageTrace.snapshot().toString())
+                            .put("runId",runId).put("applicationPackage",context.packageName).toString()
+                    )
+                } finally {
+                    ReaderPageTrace.stop(); client.close()
+                }
             }
         }
     }

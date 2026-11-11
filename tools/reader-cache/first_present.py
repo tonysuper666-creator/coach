@@ -62,7 +62,8 @@ def validate_contract(run):
         if run.get('sourceDirty') is not False:errors.append('dirty_native_source')
         for field in ('apkSha256','testApkSha256'):
             if not re.fullmatch('[0-9a-f]{64}',run.get(field,'')):errors.append('missing_'+field)
-        if run.get('commandExit')!=0 or run.get('perfettoExit')!=0 or run.get('memorySamplerErrors'):errors.append('native_capture_incomplete')
+        if run.get('commandExit')!=0 or run.get('perfettoExit')!=0 or run.get('memorySamplerErrors') or run.get('instrumentationPassed') is not True:
+            errors.append('native_capture_incomplete')
         for name in ('rawTraceSha256','framesCsvSha256'):
             if not re.fullmatch('[0-9a-f]{64}',run.get(name,'')) or run.get(name)!=run.get('_'+name):errors.append('missing_or_changed_'+name)
         query=Path(__file__).with_name('first_present.sql').read_text().replace('{{PID}}',str(run.get('measurementPid')))

@@ -13,8 +13,22 @@ def export(directory,binary):
     if not binary.is_file() or digest(binary.read_bytes())!=TP_SHA256:raise ValueError('missing_or_wrong_cached_trace_processor')
     identity_path=directory/'run.json'
     run=json.loads(identity_path.read_text())
-    pid=run['measurementPid']
-    if type(pid) is not int or pid<=0:raise ValueError('invalid_measurement_pid')
+    report_path=directory/'first-present-report.json'
+    if report_path.exists():raise ValueError('refusing_to_overwrite_existing_export')
+    pid=run.get('measurementPid')
+    errors=[]
+    if pid is None:errors.append('missing_measurement_pid')
+    elif type(pid) is not int or pid<=0:errors.append('invalid_measurement_pid')
+    if run.get('measurementContract',{}).get('origin')=='android_capture' and (
+            run.get('commandExit')!=0 or run.get('instrumentationPassed') is not True):
+        errors.append('native_test_failed_or_missing_pass_receipt')
+    if errors:
+        report=dict(complete=False,errors=errors,phase='export_preflight',queriesExecuted=0,
+                    measurementPid=pid,measurementPidError=run.get('measurementPidError'),samples=[],
+                    firstPresentLatencyVerified=False,matchedTupleContract=False,matchedBaselineObserved=False,
+                    physicalMemoryBudgetVerified=False,gpuReleaseVerified=False)
+        report_path.write_text(json.dumps(report,indent=2)+'\n')
+        return report
     raw=directory/'frames.perfetto-trace'
     sql=Path(__file__).with_name('first_present.sql').read_text().replace('{{PID}}',str(pid))
     queries={'first-present':sql,'first-present-quality':'SELECT name,value,severity,source,idx FROM stats WHERE value>0;'}
@@ -35,7 +49,7 @@ def export(directory,binary):
                frameQuerySha256=digest(sql.encode()),traceProcessorBinarySha256=TP_SHA256,traceQualityIssues=quality)
     identity_path.write_text(json.dumps(run,indent=2)+'\n')
     report=analyze(*load(directory))
-    (directory/'first-present-report.json').write_text(json.dumps(report,indent=2)+'\n')
+    report_path.write_text(json.dumps(report,indent=2)+'\n')
     return report
 
 

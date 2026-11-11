@@ -161,6 +161,22 @@ class FirstPresentTest(unittest.TestCase):
         self.assertTrue(report['complete'],report['errors'])
         self.assertEqual('lookup_miss',report['samples'][0]['cacheLookup'])
 
+    def test_direct_analysis_also_requires_a_native_test_pass_receipt(self):
+        import first_present
+        run,trace,rows=fixture()
+        run['measurementContract']['origin']='android_capture'
+        run.update(sourceDirty=False,commandExit=0,perfettoExit=0,instrumentationPassed=True,
+                   apkSha256='1'*64,testApkSha256='2'*64,
+                   rawTraceSha256='3'*64,_rawTraceSha256='3'*64,
+                   framesCsvSha256='4'*64,_framesCsvSha256='4'*64,
+                   frameQuerySha256=digest(Path(first_present.__file__).with_name('first_present.sql').read_text().replace('{{PID}}','42').encode()),
+                   traceProcessorBinarySha256=first_present.TP_SHA256,traceQualityIssues=[])
+        self.assertTrue(analyze(run,trace,rows)['complete'])
+        run['instrumentationPassed']=False
+        report=analyze(run,trace,rows)
+        self.assertFalse(report['complete'])
+        self.assertIn('native_capture_incomplete',report['errors'])
+
     def test_one_action_runner_refuses_missing_capture_or_another_platform(self):
         for platform,capture in (('desktop',True),('android',False)):
             args=['run_observed.py','--platform',platform,'--suite','first-present','--output','unused']

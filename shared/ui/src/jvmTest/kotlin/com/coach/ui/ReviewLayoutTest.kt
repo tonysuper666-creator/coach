@@ -22,7 +22,7 @@ import kotlin.test.*
 class ReviewLayoutTest {
     private val now = 1_794_052_800_000L
 
-    private fun queue(name: String, width: Float, height: Float, count: Int) {
+    private fun queue(name: String, width: Float, height: Float, count: Int, offline: Boolean = false) {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val db = ClientDatabase(driver)
@@ -49,6 +49,17 @@ class ReviewLayoutTest {
         val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
         val c = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
             tutor, formatClock = { "12:00" }, nowMillis = { now })
+        // Match the original Fold evidence, including the extra empty-mainline notice.
+        c.sync.saveMainlineState("C", json("body" to json("weeks" to JsonArray(emptyList()))), "home")
+        if (offline) {
+            db.ledgerQueries.putMeta("epoch", "synthetic-epoch")
+            db.ledgerQueries.putOfflinePack("pack", "C", now + 86_400_000, "synthetic-epoch")
+            val posed = Event(1, "offline-question", "C", "question_posed", recordedAt = now, occurredAt = now,
+                deviceId = "synthetic", actor = "SYSTEM", payload = json("attemptId" to "offline", "groupId" to "group",
+                    "stem" to "Synthetic offline choice", "letterMap" to json("one" to "A", "two" to "B"),
+                    "options" to JsonArray(listOf(json("optionId" to "one", "text" to "First synthetic answer"), json("optionId" to "two", "text" to "Second synthetic answer")))))
+            db.ledgerQueries.putOfflineItem("offline", "pack", "group", 0, LedgerJson.encodeToString(Event.serializer(), posed))
+        }
         val view = CourseView(events, project(events))
         val opened = mutableListOf<Pair<String, Boolean>>()
         val mainline = mutableListOf<Pair<Int?, Boolean>>()
@@ -67,27 +78,38 @@ class ReviewLayoutTest {
                 } } }
                 onNodeWithText("每日提醒 08:00").assertIsDisplayed()
                 capture("$name-top")
-                if (count > 0) onNodeWithText("$count 节到期").performScrollTo().assertIsDisplayed()
-                onNodeWithText("离线练习").performScrollTo().assertIsDisplayed()
-                onNodeWithText("复习 3 题").assertIsNotEnabled()
-                onNodeWithText("存到本机").performScrollTo().assertIsDisplayed().performClick()
-                waitUntil(timeoutMillis = 10_000) {
-                    onAllNodesWithText("Mac 未连接，下载未完成；已有题仍可练习。").fetchSemanticsNodes().isNotEmpty()
+                if (count > 0) {
+                    onNodeWithText("$count 节到期").reveal()
+                    onNodeWithText("Synthetic review objective 0").reveal()
                 }
-                onNodeWithText("选其他周").performScrollTo().assertIsDisplayed().performClick()
+                onNodeWithText("离线练习").reveal()
+                if (offline) {
+                    onNodeWithText("复习 1 题").reveal().performClick()
+                    onNodeWithTag("study-option-offline-A").reveal().performClick().assertIsSelected()
+                } else {
+                    onNodeWithText("复习 3 题").assertIsNotEnabled()
+                    onNodeWithText("存到本机").reveal().performClick()
+                    waitUntil(timeoutMillis = 10_000) {
+                        onAllNodesWithText("Mac 未连接，下载未完成；已有题仍可练习。").fetchSemanticsNodes().isNotEmpty()
+                    }
+                }
+                onNodeWithText("选其他周").reveal().performClick()
                 assertEquals(listOf<Pair<Int?, Boolean>>(null to false), mainline)
-                onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed().performClick()
+                onNodeWithTag("open-mock").reveal().performClick()
                 assertEquals(1, mocks)
-                onNodeWithTag("essay-entry").performScrollTo().assertIsDisplayed().performClick()
+                onNodeWithTag("essay-entry").reveal().performClick()
                 assertEquals(1, essays)
                 if (count == 0) {
-                    onNodeWithText("今天没有到期的复习。").performScrollTo().assertIsDisplayed()
+                    onNodeWithText("今天没有到期的复习。").reveal()
                     onNodeWithText("开始", substring = false).assertDoesNotExist()
                 } else {
-                    onNodeWithText("$count 节到期").performScrollTo().assertIsDisplayed()
+                    onNodeWithText("$count 节到期").reveal()
                     view.dueReviews(now).forEach { due ->
                         val id = due.kp.id
                         onNodeWithTag("review-$id").performScrollTo().assertIsDisplayed()
+                        val bounds = onNodeWithTag("review-$id").fetchSemanticsNode().boundsInRoot
+                        assertTrue(bounds.top >= onNodeWithText("每日提醒 08:00").fetchSemanticsNode().boundsInRoot.bottom)
+                        assertTrue(bounds.bottom <= height && bounds.left >= 0 && bounds.right <= width, "The complete due row must fit in the viewport: $bounds")
                         onNodeWithText(due.kp.title).assertIsDisplayed()
                         val row = hasAnyAncestor(hasTestTag("review-$id"))
                         val label = if (due.overdueDays == 0) "今天到期" else "逾期 ${due.overdueDays} 天"
@@ -101,12 +123,23 @@ class ReviewLayoutTest {
                 onNodeWithText("每日提醒 08:00").assertIsDisplayed().performClick()
                 assertEquals(1, reminders)
                 capture("$name-due")
-                onNodeWithText("Mac 未连接，下载未完成；已有题仍可练习。").performScrollTo().assertIsDisplayed()
-                onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed()
+                if (offline) {
+                    onNodeWithText("离线练习").reveal()
+                    onNodeWithTag("study-option-offline-A").reveal().assertIsSelected()
+                    onNodeWithText("提交本组答案").reveal().assertIsEnabled()
+                } else {
+                    onNodeWithText("Mac 未连接，下载未完成；已有题仍可练习。").reveal()
+                }
+                onNodeWithTag("open-mock").reveal()
                 onNodeWithText("← 今天").assertIsDisplayed().performClick()
                 assertEquals(1, backs)
             }
         } finally { tutor.close(); driver.close() }
+    }
+
+    private fun SemanticsNodeInteraction.reveal(): SemanticsNodeInteraction {
+        if (!isDisplayed()) performScrollTo()
+        return assertIsDisplayed()
     }
 
     private fun ComposeUiTest.capture(name: String) {
@@ -119,4 +152,5 @@ class ReviewLayoutTest {
     @Test fun narrowKeepsAllEntriesAndDueStartReachable() = queue("review-narrow", 840f, 1280f, 1)
     @Test fun foldCanReachAndStartEveryDueRow() = queue("review-fold-many", 1812f, 1128f, 24)
     @Test fun shortEmptyQueueKeepsAllEntriesAndEmptyNoticeReachable() = queue("review-empty", 840f, 760f, 0)
+    @Test fun scrollingPastDueRowsKeepsOfflineAnswers() = queue("review-offline", 1812f, 1128f, 24, offline = true)
 }

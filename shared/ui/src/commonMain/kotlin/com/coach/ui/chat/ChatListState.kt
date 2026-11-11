@@ -63,20 +63,16 @@ class ChatListState(val list: LazyListState = LazyListState(), val anchor: ChatA
         followNewest = false
         anchor.pinned = false
         snapshotFlow { restoring }.first { !it }
-        if (requestedKey == key) {
-            // A restore or tail scroll can replace requestScrollToItem before measurement.
-            // Give the cheap request two frames, then actively recover a missing row.
-            repeat(2) {
-                if (list.layoutInfo.visibleItemsInfo.none { it.key == key }) withFrameNanos { }
-            }
-        }
-        if (requestedKey != key || list.layoutInfo.visibleItemsInfo.none { it.key == key }) {
-            list.scrollToItem(index, 0)
-        }
-        val size = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.size }.filterNotNull().first()
+        // Establish the bottom-aligned baseline even if the pre-measure request already made
+        // this row visible. Restoring the window may have left it at a different offset;
+        // applying the full top-alignment distance there would scroll the stem off screen.
+        list.scrollToItem(index, 0)
+        val itemInfo = snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key } }.filterNotNull().first()
         val info = list.layoutInfo
-        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - size
-        if (room <= 0) list.scrollToItem(index, -room) else list.scrollBy(-room.toFloat())
+        val room = info.viewportSize.height - info.beforeContentPadding - info.afterContentPadding - itemInfo.size
+        // scrollToItem may clamp at the oldest row, which is already partly/top aligned.
+        // Move only the remaining distance, not the whole viewport's free space again.
+        list.scrollBy((itemInfo.offset - room).toFloat())
         // A clamped no-op emits no scroll update; settle the tail flag explicitly (04e9695).
         anchor.pinned = list.firstVisibleItemIndex == 0 && list.firstVisibleItemScrollOffset == 0
         true

@@ -8,7 +8,6 @@ import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
 import java.nio.channels.FileChannel
 import java.nio.file.*
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
@@ -73,20 +72,23 @@ class ActivityCoverage internal constructor(
             sealed?.let { put("seal", it) }
         }.toString().toByteArray(Charsets.UTF_8)
         try {
-            Files.createDirectories(directory)
-            Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"))
+            privateFiles.directory(directory)
             val path = directory.resolve("activity-$lifetime-${day()}.log")
             val bytes = row + byteArrayOf(10)
             if (persist != null) persist.invoke(path, bytes) else {
-                FileChannel.open(path, setOf(StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND),
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))).use { channel ->
+                privateFiles.file(path)
+                FileChannel.open(path, StandardOpenOption.WRITE, StandardOpenOption.APPEND, LinkOption.NOFOLLOW_LINKS).use { channel ->
                     val buffer = ByteBuffer.wrap(bytes)
                     while (buffer.hasRemaining()) channel.write(buffer)
                     channel.force(true)
                 }
-                FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
+                // Windows cannot open a directory as a FileChannel; retain POSIX directory fsync.
+                if (Files.getFileStore(directory).supportsFileAttributeView("posix"))
+                    FileChannel.open(directory, StandardOpenOption.READ).use { it.force(true) }
             }
             tail = MessageDigest.getInstance("SHA-256").digest(row).joinToString("") { "%02x".format(it) }
+        } catch (error: PrivateFilePermissionException) { throw error
+        } catch (error: UnsupportedOperationException) { throw error
         } catch (_: Exception) { failures++ } // sticky; never turn a write failure into an idle proof
     }
 
@@ -116,14 +118,19 @@ class ActivityCoverage internal constructor(
     /** Local filesystem permissions are the authority; no learner HTTP token/control endpoint. */
     fun startControl(path: Path) {
         check(listener == null)
-        Files.createDirectories(path.toAbsolutePath().parent)
-        Files.setPosixFilePermissions(path.toAbsolutePath().parent, PosixFilePermissions.fromString("rwx------"))
+        privateFiles.directory(path.toAbsolutePath().parent)
         // Never unlink a possibly-live owner's socket. A stale path requires explicit diagnosis.
         val server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)
+        var bound = false
         try {
             server.bind(UnixDomainSocketAddress.of(path))
-            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
-        } catch (e: Exception) { server.close(); throw e }
+            bound = true
+            privateFiles.secureSocket(path)
+        } catch (e: Exception) {
+            server.close()
+            if (bound) try { Files.deleteIfExists(path) } catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+            throw e
+        }
         listener = server; socketPath = path
         worker = Thread({
             while (server.isOpen) {

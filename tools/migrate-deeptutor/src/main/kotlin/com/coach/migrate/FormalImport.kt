@@ -22,7 +22,8 @@ internal fun <T> offlineData(data:Path,block:()->T):T {
     require(data.resolve("coach.sqlite").isRegularFile(LinkOption.NOFOLLOW_LINKS)) { "Expected an existing real Coach database" }
     require(!data.resolve("server.lock").isSymbolicLink()) { "server.lock cannot be a symbolic link" }
     return FileChannel.open(data.resolve("server.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE).use { channel ->
-        val lock=channel.tryLock() ?: error("Coach server is running; stop local.coach.server first")
+        val lock=try { channel.tryLock() } catch (_:java.nio.channels.OverlappingFileLockException) { null }
+        check(lock!=null) { "Coach server is running; stop local.coach.server first" }
         lock.use { block() }
     }
 }
@@ -46,12 +47,12 @@ internal fun copyBlobs(source:Path,target:Path) {
     } }
 }
 
-private fun integrity(db:Connection) {
+internal fun integrity(db:Connection) {
     check(db.query("PRAGMA integrity_check").map { it.values.single().jsonPrimitive.content }==listOf("ok")) { "Database integrity_check failed" }
     check(db.query("PRAGMA foreign_key_check").isEmpty()) { "Database foreign_key_check failed" }
 }
 
-private fun validateBlobs(db:Connection,data:Path) {
+internal fun validateBlobs(db:Connection,data:Path) {
     for(row in db.query("SELECT sha256,size,path FROM blobs")) {
         val name=row.str("path");require(Path.of(name).fileName.toString()==name && name !in setOf(".",".."))
         val file=data.resolve("blobs").resolve(name)
@@ -109,7 +110,7 @@ internal fun scoringIsolation(db:Connection,plan:JsonObject):JsonObject {
     }
 }
 
-private fun freshDirectory(dir:Path) {
+internal fun freshDirectory(dir:Path) {
     Files.createDirectories(dir.parent)
     Files.createDirectory(dir) // CREATE_NEW semantics; an existing backup is never replaced.
     privateDir(dir)
@@ -188,22 +189,27 @@ internal fun rollbackConfirmed(data:Path,backup:Path):JsonObject = offlineData(d
             require(exact==receipt.str("expected_after_exact_sha256")) { "Target changed after import; refusing to discard subsequent activity" }
         }
     }
-    // There are no other Coach connections while holding server.lock. Checkpoint/close before replacing main.
-    DriverManager.getConnection("jdbc:sqlite:$source").use { db ->
-        val checkpoint=db.query("PRAGMA wal_checkpoint(TRUNCATE)").single()
-        require(checkpoint.values.first().jsonPrimitive.int==0) { "Database still has a writer or reader" }
-    }
-    val staged=data.resolve(".ton1095-rollback.sqlite")
-    require(!staged.exists()) { "Staged rollback already exists" }
-    Files.copy(saved,staged)
-    Files.deleteIfExists(data.resolve("coach.sqlite-wal"));Files.deleteIfExists(data.resolve("coach.sqlite-shm"))
-    Files.move(staged,source,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
+    replaceOfflineDatabase(data,saved,".ton1095-rollback.sqlite")
     check(fileHash(source)==manifest.str("database_sha256"))
     openReadOnly(source).use { db -> integrity(db);check(sha(exactState(db,course))==manifest.str("before_exact_sha256")) }
     buildJsonObject {
         put("database_byte_identical",true);put("state_byte_identical",true);put("blobs_byte_identical",true)
         put("database_sha256",manifest.getValue("database_sha256"));put("state_sha256",manifest.getValue("before_state_sha256"))
     }
+}
+
+/** Caller must continuously own server.lock, close all stores and validate its rollback guard first. */
+internal fun replaceOfflineDatabase(data:Path,saved:Path,stagedName:String) {
+    val source=data.resolve("coach.sqlite")
+    DriverManager.getConnection("jdbc:sqlite:$source").use { db ->
+        val checkpoint=db.query("PRAGMA wal_checkpoint(TRUNCATE)").single()
+        require(checkpoint.values.first().jsonPrimitive.int==0) { "Database still has a writer or reader" }
+    }
+    val staged=data.resolve(stagedName)
+    require(!staged.exists()) { "Staged rollback already exists" }
+    Files.copy(saved,staged)
+    Files.deleteIfExists(data.resolve("coach.sqlite-wal"));Files.deleteIfExists(data.resolve("coach.sqlite-shm"))
+    Files.move(staged,source,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
 }
 
 fun formalImportCommand(command:String,args:List<String>) {

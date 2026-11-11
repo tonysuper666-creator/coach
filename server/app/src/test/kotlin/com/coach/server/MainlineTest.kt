@@ -39,6 +39,96 @@ Synthetic facts.
 """.trimIndent()
 
 class MainlineTest {
+    @Test fun readerRejectsForgedQuotesOffsetsAndObsoleteVersions() {
+        val dir = Files.createTempDirectory("mainline-selection")
+        try {
+            val library = library(dir.resolve("papers"))
+            val text = "Synthetic pears and plums."
+            Files.writeString(dir.resolve("papers/mcq-mainline/W01-notes.json"), json(
+                "schema_version" to 1, "week" to 1, "sections" to JsonArray(listOf(json("section_id" to "S1", "title" to "Synthetic",
+                    "body" to text, "fact_ids" to listOf("F1", "F2", "F3"), "sources" to listOf("Synthetic lecture 1"))))).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                val valid = json("sectionId" to "S1", "version" to notesVersion(text), "start" to 0, "end" to 9, "quote" to "Synthetic")
+                assertEquals("Synthetic", mainline.selection(store, "C1", 1, valid))
+                for ((field, value) in listOf("quote" to JsonPrimitive("Forged"), "start" to JsonPrimitive(-1),
+                    "end" to JsonPrimitive(9999), "version" to JsonPrimitive("old"), "sectionId" to JsonPrimitive("UNKNOWN")))
+                    assertFailsWith<MockError> { mainline.selection(store, "C1", 1, JsonObject(valid + (field to value))) }
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+    @Test fun optionalClassEmphasisDeduplicatesLongRecordingsAndWithholdsPendingMetadata() {
+        val dir = Files.createTempDirectory("mainline-emphasis")
+        try {
+            val library = library(dir.resolve("papers"))
+            val file = dir.resolve("papers/mcq-mainline/W01-emphasis.json")
+            val mark = json("fact_id" to "F1", "recording_kind" to "lecture", "recording_id" to "L1",
+                "timestamp" to "121:03", "summary" to "Synthetic pears were emphasized.", "reviewed" to true,
+                "answer" to 3)
+            fun write(marks: List<JsonObject>, week: Int = 1) = Files.writeString(file,
+                json("schema_version" to 1, "week" to week, "marks" to JsonArray(marks)).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                fun body() = mainline.week(store, "C1", 1)
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                write(listOf(mark, mark, JsonObject(mark + ("recording_kind" to JsonPrimitive("tutorial")))))
+                val published = body()["emphasis"]!!.jsonArray
+                assertEquals(2, published.size)
+                assertEquals("02:01:03", published.first().jsonObject.str("timestamp"))
+                assertFalse("answer" in published.first().jsonObject)
+                for (bad in listOf(JsonObject(mark + ("reviewed" to JsonPrimitive(false))),
+                    JsonObject(mark + ("fact_id" to JsonPrimitive("UNKNOWN"))),
+                    JsonObject(mark + ("timestamp" to JsonPrimitive("01:99"))),
+                    JsonObject(mark + ("timestamp" to JsonPrimitive(""))))) {
+                    write(listOf(bad))
+                    assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                    assertEquals(4, body()["items"]!!.jsonArray.size)
+                    assertEquals(0L, body()["coverage"]!!.jsonObject.num("factsMastered"))
+                }
+                write(listOf(mark), 2)
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+                write(listOf(mark, JsonObject(mark + ("summary" to JsonPrimitive("Conflicting")))))
+                assertEquals(0, body()["emphasis"]!!.jsonArray.size)
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun notesCoverFactsFilterQuestionsAndNeverMasterGuessesOrUnverifiedKeys() {
+        val dir = Files.createTempDirectory("mainline-notes")
+        try {
+            val library = library(dir.resolve("papers"))
+            val notesFile = dir.resolve("papers/mcq-mainline/W01-notes.json")
+            fun section(id: String, facts: List<String>) = json("section_id" to id, "title" to "Synthetic $id", "body" to "Pears grow here.",
+                "fact_ids" to facts, "sources" to listOf("Synthetic lecture 1"))
+            val sections = listOf(section("orchard", listOf("F1")), section("late-plums", listOf("F2")), section("imports", listOf("F3")))
+            fun write(ss: List<JsonObject>) = Files.writeString(notesFile, json("schema_version" to 1, "week" to 1, "sections" to JsonArray(ss)).toString())
+            LedgerStore(dir.resolve("db")).use { store ->
+                val mainline = Mainline(library)
+                assertTrue(mainline.week(store, "C1", 1).str("notesError").isNotBlank())
+                write(sections)
+                fun notes() = mainline.week(store, "C1", 1)["notes"]!!.jsonArray.map { it.jsonObject }
+                assertEquals(3, notes().size)
+                assertEquals(listOf("F1"), mainline.week(store,"C1",1)["items"]!!.jsonArray.first().jsonObject.strings("factIds"))
+                fun answer(id: String, guessed: Boolean, submission: String) = mainline.answer(store,"C1",1,
+                    json("itemId" to id,"choice" to 1,"guessed" to guessed,"submissionId" to submission))
+                answer("S1", true, "guess")
+                assertFalse(notes()[0].flag("mastered"))
+                answer("S1", false, "known")
+                assertTrue(notes()[0].flag("mastered"))
+                answer("D1", false, "detail")
+                answer("D2", false, "unverified")
+                assertFalse(notes()[1].flag("mastered"), "Every question linked to each fact must be verified and mastered")
+                write(sections.dropLast(1))
+                assertTrue(notes().isEmpty())
+                assertEquals(4, mainline.week(store,"C1",1)["items"]!!.jsonArray.size, "Bad notes leave all legacy questions available")
+                write(listOf(section("unknown", listOf("NOT-A-FACT"))))
+                assertTrue(notes().isEmpty())
+                write(sections.map { JsonObject(it + ("sources" to JsonArray(listOf(JsonPrimitive("Wrong source"))))) })
+                assertTrue(notes().isEmpty())
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun submissionCannotBeReusedForAnotherItemAcrossHttpAndRestart() = runBlocking<Unit> {
         for (shuffled in listOf(false, true)) {
             val dir = Files.createTempDirectory("mainline-retry-binding")

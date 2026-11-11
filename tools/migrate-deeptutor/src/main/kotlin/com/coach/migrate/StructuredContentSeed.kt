@@ -98,8 +98,11 @@ fun contentSeed(snapshot: Path, weights: Path = snapshot.resolve("exam-weights.m
     val allocations = points.associate { k -> k.id to groups.sumOf { it.allocations[k.id] ?: 0 } }
     // Source instructions contain historical progress and DeepTutor navigation. Do not carry them over.
     return ContentSeed(CourseContent(Course(course.str("id"), "ECNM10119", course.str("name"),
-        examWeights=allocations, examWeightGroups=groups), modules, points), books.map { it.document })
+        examDate=ECNM10119_FINAL_EXAM_DATE, examWeights=allocations, examWeightGroups=groups), modules, points), books.map { it.document })
 }
+
+/** Final exam of ECNM10119 (midterm already sat; the final is fixed for 2026-12-15). Carried in the course content so every client reads one date. */
+const val ECNM10119_FINAL_EXAM_DATE = "2026-12-15"
 
 /** Resolve the published ECNM10119 hints explicitly; ambiguous or new rows stop before writing. */
 fun examWeightGroups(markdown: String, modules: List<Module>, points: List<KnowledgePoint>): List<ExamWeightGroup> {

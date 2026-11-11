@@ -3,8 +3,6 @@ package com.coach.server
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.SecureRandom
 
 /** Only the managed production service may identify its calls as learner traffic. */
@@ -28,18 +26,8 @@ internal fun configureBridgeTraffic(env: Map<String,String>, managed: Boolean) {
     }
     val home = Path.of(env["COACH_BRIDGE_HOME"] ?: Path.of(System.getProperty("user.home"),"Coach/bridge").toString())
     val key = Path.of(env["COACH_BRIDGE_PRODUCTION_KEY_FILE"] ?: home.resolve("state/production-key").toString())
-    Files.createDirectories(key.parent)
-    if (!Files.exists(key)) {
-        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val text = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
-        val mode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
-        try {
-            Files.newByteChannel(key,setOf(StandardOpenOption.CREATE_NEW,StandardOpenOption.WRITE),mode).use { channel ->
-                val buffer=java.nio.ByteBuffer.wrap(text.toByteArray())
-                while(buffer.hasRemaining()) channel.write(buffer)
-            }
-        } catch (_: java.nio.file.FileAlreadyExistsException) { /* bridge and server may start together */ }
-    }
+    val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+    val text = bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
+    privateFiles.writeNew(key, text.toByteArray())
     require(Files.readString(key).trim().matches(Regex("[a-f0-9]{64}"))) { "Invalid local production bridge credential" }
-    Files.setPosixFilePermissions(key,PosixFilePermissions.fromString("rw-------"))
 }

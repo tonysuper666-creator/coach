@@ -1,11 +1,16 @@
 package com.coach.domain
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
+import com.coach.domain.reader.ClaimSourceAnchor
 
 /** Course content contains no learner position, answers, mastery or review state. */
 @Serializable data class Course(
     val id: String, val code: String, val title: String,
     val tz: String = "Europe/London", val dayStartHour: Int = 4,
+    /** Final exam date, "YYYY-MM-DD" in [tz]; null while unpublished. Read by every countdown and the review scheduler. */
+    val examDate: String? = null,
     val instructionsMd: String = "", val examWeights: Map<String, Int> = emptyMap(),
     val examWeightGroups: List<ExamWeightGroup> = emptyList()
 )
@@ -18,12 +23,16 @@ import kotlinx.serialization.Serializable
     val docId: String, val pdfPage: Int, val bookPage: Int? = null,
     val quote: String? = null, val basis: String = "CHAPTER_RANGE"
 )
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable data class KnowledgePoint(
     val id: String, val moduleId: String, val order: Int, val title: String,
     val kind: String? = null, val examFormats: Set<Format> = emptySet(),
     val prerequisites: List<String> = emptyList(), val anchors: List<SourceAnchor> = emptyList(),
     val retired: Boolean = false, val legacyId: String? = null,
-    val conceptIds: Set<String> = emptySet()
+    val conceptIds: Set<String> = emptySet(),
+    /** null = old wire format; an explicit empty list clears claim-level links without falling back. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val sourceAnchors: List<ClaimSourceAnchor>? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val sourceAnchor: SourceAnchor? = null,
 )
 @Serializable data class CourseContent(
     val course: Course, val modules: List<Module>, val knowledgePoints: List<KnowledgePoint>

@@ -1,7 +1,8 @@
 package com.coach.ui.input
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.ui.draw.shadow
+import coach.design.tokens.CoachV7
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -80,7 +81,7 @@ fun ComposerField(
         onValueChange(TextFieldValue())
         return true
     }
-    Row(modifier.fillMaxWidth().background(colors.surface1, RoundedCornerShape(24.dp)).border(1.dp, colors.borderStrong, RoundedCornerShape(24.dp)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+    Row(modifier.fillMaxWidth().shadow(2.dp, RoundedCornerShape(CoachV7.Radius.m)).background(colors.surface2, RoundedCornerShape(CoachV7.Radius.m)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Box(Modifier.weight(1f).padding(vertical = 12.dp)) {
             if (value.text.isEmpty() && placeholder.isNotEmpty()) Text(placeholder, color = colors.fgSecondary, style = MaterialTheme.typography.bodyLarge)
             BasicTextField(

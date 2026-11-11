@@ -90,9 +90,11 @@ class MistakeReviewSmoke {
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
             waitText("错题 ${listed.size}")
-            scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
+            // The list is a plain column in items order, so its first entry is on screen without scrolling.
+            waitText(listed.first().card.stem)
             settleAndCapture("wrong-list",reviewMark)
             step("mistake list captured")
+            scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")) // after the timed window
             samples.put("wrongCount",listed.size)
             if (args.getString("coachPhase") == "prepare") {
                 samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
@@ -122,6 +124,10 @@ class MistakeReviewSmoke {
             val cleared = waitCleared(newWrong)
             // The empty-state line only shows once the whole course list is empty, which history can prevent.
             if (cleared.isEmpty()) waitText("错题都已掌握，继续保持。")
+            else {
+                waitText("连续答对 3 道，这个知识点的错题已移出。")
+                assertNull(find("错题都已掌握，继续保持。"))
+            }
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
             focus("review:$course:$kp","cleared")
@@ -181,11 +187,10 @@ class MistakeReviewSmoke {
         fail("events paging exceeded 50 pages")
         return all
     }
-    private val ledgerJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true }
     /** The course's mistakes recomputed from the server ledger with the same rules the app uses for its tab. */
     private fun mistakes(): List<com.coach.client.Mistake> {
         val all=events()
-        val list=(0 until all.length()).map { ledgerJson.decodeFromString(com.coach.domain.Event.serializer(),all.getJSONObject(it).toString()) }
+        val list=(0 until all.length()).map { com.coach.domain.LedgerJson.decodeFromString(com.coach.domain.Event.serializer(),all.getJSONObject(it).toString()) }
         return com.coach.client.mistakeReview(list).items
     }
     /** After the retry is graded: neither new mistake remains in the ledger and the tab shows the recomputed count. */

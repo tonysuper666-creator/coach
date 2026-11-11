@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Foreground reminder acceptance. Invoke via tools/dev/heavy --emulator.
 
-Runs against an explicit private synthetic data directory, never the installed Coach tree or a production backup. Seeds one synthetic due
-review for the APK's course, then owns an isolated server and a read-only AVD instance.
+Runs against an explicit private synthetic data directory, never the installed Coach tree or a production backup. Seeds two synthetic due
+reviews for the APK's course (one title contains the other, so each due item must own its row), then owns an isolated server and a read-only AVD instance.
 Never connects to production ports or invokes AI. The copied data, credentials and
 server log live in a temporary directory that is deleted afterwards; only content-free
 reminder evidence is written to --out. Build the suffixed APKs (-Pcoach.course must
@@ -103,20 +103,21 @@ def save_reminder_log():
 
 
 def seed_due_review(db, course):
-    """One synthetic objective that the exam-compressed schedule makes due today (as check-review-copy.py)."""
-    kp = course + "-kp"
+    """Synthetic objectives that the exam-compressed schedule makes due today (as check-review-copy.py).
+
+    The second title contains the first, so a page that shows only one of them cannot pass by substring match."""
+    kps = [(course + "-kp", "Synthetic review objective"), (course + "-kp2", "Synthetic review objective extension")]
     now = int(time.time() * 1000)
     local = datetime.datetime.fromtimestamp(now / 1000, ZoneInfo("Europe/London"))
     date = local.date() - datetime.timedelta(days=int(local.hour < 4))
     day = (date - datetime.date(1970, 1, 1)).days
     assert db.execute("select count(*) from events where course_id=?", (course,)).fetchone()[0] == 0, "Fixture ID collision"
     seq = db.execute("select coalesce(max(seq),0) from events").fetchone()[0]
-    facts = [
-        ("outline_revised", {"course": {"tz": "Europe/London"}, "ops": [{"kpId": kp, "title": "Synthetic review objective", "conceptIds": ["synthetic"]}]}),
-        ("legacy_passed", {"kpId": kp}),
-        ("legacy_schedule", {"kpId": kp, "dueDay": day + 12, "interval": 15}),
-        ("exam_set", {"examDay": day + 7}),
-    ]
+    facts = [("outline_revised", {"course": {"tz": "Europe/London"},
+                                  "ops": [{"kpId": kp, "title": title, "conceptIds": ["synthetic"]} for kp, title in kps]})]
+    for kp, _ in kps:
+        facts += [("legacy_passed", {"kpId": kp}), ("legacy_schedule", {"kpId": kp, "dueDay": day + 12, "interval": 15})]
+    facts.append(("exam_set", {"examDay": day + 7}))
     for i, (kind, payload) in enumerate(facts, 1):
         event = dict(seq=seq + i, id=f"{course}-r{i}", courseId=course, type=kind, schema=1, recordedAt=now, occurredAt=now,
                      deviceId="desktop", actor="SYSTEM", effectIndex=0, idemKey=f"{course}-r{i}", payload=payload)

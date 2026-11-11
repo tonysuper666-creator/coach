@@ -97,6 +97,7 @@ class ReminderSmoke {
                 android.util.Log.i("CoachReminderTest", "scheduledAt=${prefs.getLong("nextAt", -1)} expected=${prefs.getInt("expectedCount", -1)}")
             }
             "tap" -> {
+                assertMatcherRejectsSharedRows()
                 val due = dueReviews(sync = false)
                 val count = due.size
                 val notification = manager.activeNotifications.single { it.id == ReviewReminder.NOTIFICATION }
@@ -113,14 +114,13 @@ class ReminderSmoke {
                 // The page's own due list must show, to the user, the same due set the notification counted:
                 // its count header and one row per due item (title, due label, Start), scrolled into view if needed.
                 reveal { it.text?.toString() == "$count 节到期" }
-                val rows = due.map { item ->
-                    val label = (if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天"
-                    val title = displayTitle(item.kp.title)
-                    reveal { row -> children(row).any { it.text?.toString() == label && shown(it) } &&
-                        children(row).any { child -> child.text?.toString()?.let { it.isNotBlank() && title.contains(it) } == true && shown(child) } &&
-                        find(row) { it.text?.toString() == "开始" && shown(it) } != null }
-                }
-                assertEquals(count, rows.size)
+                // Each due item must own a distinct row whose title and label equal it exactly: a contained title
+                // ("Topic" in "Topic extension") or a shared row must not stand in for a missing item.
+                val rows = mutableListOf<AccessibilityNodeInfo>()
+                due.map { item ->
+                    DueRowSpec(displayTitle(item.kp.title), (if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天")
+                }.forEach { spec -> rows += reveal { row -> row !in rows && rowShows(spec, rowTexts(row)) } }
+                assertEquals(count, rows.toSet().size)
                 screenshot("review.png")
                 assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
                 android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count visibleDueRows=${rows.size} tap=REVIEW")
@@ -209,6 +209,18 @@ class ReminderSmoke {
         throw AssertionError("Accessibility target did not appear")
     }
     private fun waitText(text: String) = waitNode { it.text?.toString() == text }
+    private fun rowTexts(row: AccessibilityNodeInfo) = RowTexts(children(row).filter { shown(it) }.mapNotNull { it.text?.toString() },
+        find(row) { it.text?.toString() == "开始" && shown(it) } != null)
+    /** The QA counterexample (TON-1494): two due items whose titles contain one another, but only one row on the page. */
+    private fun assertMatcherRejectsSharedRows() {
+        val topic = DueRowSpec("Topic", "今天到期"); val extension = DueRowSpec("Topic extension", "今天到期")
+        val topicRow = RowTexts(listOf("Topic", "今天到期"), true); val extensionRow = RowTexts(listOf("Topic extension", "今天到期"), true)
+        assertNull("A contained title must not match the missing item's row", claimDueRows(listOf(topic, extension), listOf(topicRow)))
+        assertNull("Two due items must not share one row", claimDueRows(listOf(topic, topic), listOf(topicRow)))
+        assertNull("A row without Start is not a due row", claimDueRows(listOf(topic), listOf(topicRow.copy(start = false))))
+        assertEquals(listOf(1, 0), claimDueRows(listOf(topic, extension), listOf(extensionRow, topicRow)))
+        android.util.Log.i("CoachReminderTest", "rowMatcher=exact distinctRows=true containedTitleCounterexample=rejected")
+    }
     private fun children(node: AccessibilityNodeInfo) = (0 until node.childCount).mapNotNull { node.getChild(it) }
     private fun shown(node: AccessibilityNodeInfo) =
         node.isVisibleToUser && android.graphics.Rect().also { node.getBoundsInScreen(it) }.let { it.width() > 0 && it.height() > 0 }
@@ -232,4 +244,15 @@ class ReminderSmoke {
         while (!target.isClickable) target = target.parent ?: error("No clickable ancestor")
         assertTrue(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
     }
+}
+
+/** What one due item must show in its own row on the Review page: the exact title line, the exact due label, and Start. */
+internal data class DueRowSpec(val title: String, val label: String)
+internal data class RowTexts(val texts: List<String>, val start: Boolean)
+internal fun rowShows(spec: DueRowSpec, row: RowTexts) = row.start && spec.title in row.texts && spec.label in row.texts
+/** Gives each due item a different row (indices in [rows]), or null when any item has no row of its own. */
+internal fun claimDueRows(specs: List<DueRowSpec>, rows: List<RowTexts>): List<Int>? {
+    val claimed = mutableListOf<Int>()
+    for (spec in specs) claimed += rows.indices.firstOrNull { it !in claimed && rowShows(spec, rows[it]) } ?: return null
+    return claimed
 }

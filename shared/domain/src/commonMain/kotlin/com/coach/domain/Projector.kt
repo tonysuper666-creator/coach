@@ -16,6 +16,8 @@ private data class Attempt(val posed: Event, var submitted: Event? = null, var g
     val id get() = posed.payload.str("attemptId")
     val kps get() = posed.payload.strings("kpIds")
     val question get() = posed.payload.str("questionId")
+    // Use the frozen key at answer time; later verification must not backdate evidence.
+    val pendingKey get() = posed.payload.flag("mainline") && posed.payload.str("keyState", "UNREVIEWED") != "VERIFIED"
     val seq get() = submitted?.seq ?: Long.MAX_VALUE
     val ratio get() = grade?.let { it.num("score").toDouble() / it.num("max", 1).coerceAtLeast(1) } ?: 0.0
     /** A right answer the learner marked as a guess is not evidence that the point is known. */
@@ -98,7 +100,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
         a.posed.payload.num("policyVersion", 1) == 1L && a.posed.payload.str("format") in knownFormats && a.posed.payload.str("origin") != "LEGACY" &&
-        keys[a.question] == "VERIFIED" && graded(a)
+        keys[a.question] == "VERIFIED" && !a.pendingKey && graded(a)
     fun solidContext(a: Attempt): Boolean {
         val purpose = a.posed.payload.str("purpose")
         val mc = a.posed.payload.str("format") == "SINGLE_CHOICE"
@@ -202,7 +204,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     fun refreshAttempt(a: Attempt, e: Event) {
         for (kp in a.kps) refresh(kp, e, a)
         revisitAfter(a, e)
-        val correct = graded(a) && !a.voided && a.pass
+        val correct = graded(a) && !a.voided && !a.pendingKey && a.pass
         if (a.submitted != null && correct != a.correctCounted) {
             updateJournal(a.day) { it.copy(correct = it.correct + if (correct) 1 else -1) }
             a.correctCounted = correct

@@ -232,12 +232,14 @@ internal fun AttemptCard(math: MathAssets, canAskMac: Boolean, loadRubric: suspe
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("第 $number / $total 次作答 · ${formatLabel(d.format)}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                if (grade != null) {
+                if (d.pendingKey) {
+                    StatusChip("答案待核对，不计分", MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (grade != null) {
                     val full = grade.score >= grade.max
                     StatusChip(if (d.isChoice) (if (full) "答对" else "答错") else "得分 ${percent(grade)}", if (d.counted && (if (d.isChoice) full else grade.score * 10 >= grade.max * 8)) successColor() else MaterialTheme.colorScheme.error)
                 }
             }
-            if (!d.counted && d.grade != null) Text("这次批改还在复核，复核通过前不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
+            if (!d.pendingKey && !d.counted && d.grade != null) Text("这次批改还在复核，复核通过前不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
             if (d.voided) Text("这次作答已作废。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (d.hinted) Text("答题前看过提示，这次不进已通过窗口。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
             if (d.overtime) Text("超过时限才交卷：照常批改，不算限时成绩。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
@@ -338,7 +340,7 @@ private fun GradeBlock(d: AttemptDetail) {
         val g = d.grade
         if (g == null) { Text("还没有批改。", style = MaterialTheme.typography.bodyMedium); return }
         if (d.isChoice) {
-            Text("选择题按选项对答案。", style = MaterialTheme.typography.bodyMedium)
+            if (!d.pendingKey) Text("选择题按选项对答案。", style = MaterialTheme.typography.bodyMedium)
             if (g.feedback.isNotBlank()) Text(g.feedback, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return
         }

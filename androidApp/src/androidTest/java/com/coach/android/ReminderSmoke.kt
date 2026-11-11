@@ -224,6 +224,7 @@ class ReminderSmoke {
             Thread.sleep(if (scrolled) 300 else 50)
         }
         dumpNode(instrumentation.uiAutomation.rootInActiveWindow, "timeout")
+        screenshot("timeout.png")
         throw AssertionError("Due list content did not become visible")
     }
     private fun click(node: AccessibilityNodeInfo) {

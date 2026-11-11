@@ -265,8 +265,16 @@ finally:
             save_reminder_log()
             if not passed:
                 # What the synthetic screen showed when a phase failed; the accessibility dump with
-                # bounds is in reminder-log.txt.
-                (OUT / "failure.png").write_bytes(run([ADB, "-s", SERIAL, "exec-out", "screencap", "-p"]).stdout)
+                # bounds is in reminder-log.txt. The foldable AVD reports several displays, so
+                # screencap prefixes a text warning to the PNG on stdout; keep only the image.
+                shot = run([ADB, "-s", SERIAL, "exec-out", "screencap", "-p"]).stdout
+                (OUT / "failure.png").write_bytes(shot[max(shot.find(b"\x89PNG"), 0):])
+                # In-app screenshots the instrumentation took before it failed (synthetic UI only).
+                for name in ("notification.png", "review.png", "permission-denied.png", "timeout.png"):
+                    image = subprocess.run([str(ADB), "-s", SERIAL, "exec-out", "run-as", PACKAGE, "cat", "cache/" + name],
+                                           capture_output=True, timeout=30).stdout
+                    if image.startswith(b"\x89PNG"):
+                        (OUT / name).write_bytes(image)
         except (subprocess.SubprocessError, OSError):
             pass
     uninstall_failed = False

@@ -172,10 +172,12 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val course=call.parameters["course"]!!
             val after=call.request.queryParameters["after"]?.toLongOrNull() ?: 0
             val limit=call.request.queryParameters["limit"]?.toIntOrNull() ?: 500
-            call.respondText(LedgerJson.encodeToString(actor.execute { page(course,after,limit) }),ContentType.Application.Json)
+            val page = actor.execute { page(course,after,limit) }
+            call.respondText(LedgerJson.encodeToString(page.copy(events=page.events.map(::agentEvidenceForWire))),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/snapshot") {
-            call.respondText(LedgerJson.encodeToString(actor.execute { snapshot(call.parameters["course"]!!) }),ContentType.Application.Json)
+            val snapshot = actor.execute { snapshot(call.parameters["course"]!!) }
+            call.respondText(LedgerJson.encodeToString(snapshot.copy(events=snapshot.events.map(::agentEvidenceForWire))),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/today") {
             call.respondText(LedgerJson.encodeToString(actor.execute { todayProgress(call.parameters["course"]!!) }),ContentType.Application.Json)
@@ -287,7 +289,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                             return true
                         }
                         for(event in es) {
-                            val text=LedgerJson.encodeToString(event)
+                            val text=LedgerJson.encodeToString(agentEvidenceForWire(event))
                             val size=text.toByteArray(Charsets.UTF_8).size
                             if(bytes+size+(if(encoded.isEmpty()) 0 else 1) > LEDGER_FRAME_BYTES && !flush()) return
                             if(envelopeBytes+size > LEDGER_FRAME_BYTES) {

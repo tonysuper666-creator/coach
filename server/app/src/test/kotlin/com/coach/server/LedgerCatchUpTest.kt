@@ -56,6 +56,13 @@ class LedgerCatchUpTest {
             assertEquals(200, response.statusCode())
             return LedgerJson.decodeFromString(response.body())
         }
+        fun snapshot(): Snapshot {
+            val request = HttpRequest.newBuilder(URI("$baseUrl/v1/courses/c/snapshot"))
+                .header("X-Coach-Device", "desktop").header("Authorization", "Bearer $token").build()
+            val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, response.statusCode())
+            return LedgerJson.decodeFromString(response.body())
+        }
         override fun close() {
             server.stop(0, 500)
             runBlocking { actor.close() }
@@ -102,6 +109,27 @@ class LedgerCatchUpTest {
             return events to sizes
         }
         override fun close() { socket.abort() }
+    }
+
+    @Test fun agentFactsAreOpaqueToLegacyClientsOverHttpSnapshotAndSocket() {
+        Harness().use { h ->
+            val normal = h.seed(1).single()
+            val agent = runBlocking { h.actor.execute {
+                append("c","kp_opened",json("kpId" to "kp"),thread=agentThreadId("oppo","kp"))
+            } }
+            val expected = listOf(normal,agentEvidenceForWire(agent))
+            assertEquals("agent_run_fact",expected.last().type)
+            assertNull(Upcasters().upcast(expected.last()))
+            assertEquals("kp_opened",agent.type,"Raw facts remain auditable")
+            assertEquals(expected,h.page(0).events)
+            val snapshot = h.snapshot()
+            assertEquals(expected,snapshot.events)
+            assertTrue(snapshot.projection.startedKpIds.isEmpty())
+            Ws(h).use { ws ->
+                ws.hello()
+                assertEquals(expected,ws.events(2).first)
+            }
+        }
     }
 
     @Test fun largeLedgerIsBoundedAndReconnectStartsAtClientCursor() {

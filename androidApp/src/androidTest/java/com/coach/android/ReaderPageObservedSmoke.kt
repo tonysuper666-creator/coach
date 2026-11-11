@@ -29,7 +29,7 @@ class ReaderPageObservedSmoke {
     @Test fun twentyForwardReverseAndCitationWithLifetimeCheckpoints() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        require(context.packageName == "com.coach.readermeasurement") { "Use the isolated measurement applicationId" }
+        ReaderMeasurementPackage.requireIsolated(context.packageName)
         val args = InstrumentationRegistry.getArguments()
         val port = requireNotNull(args.getString("readerPort")).toInt()
         require(port in 1024..65535 && port !in setOf(8790, 8791, 18791, 3790))

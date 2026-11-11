@@ -27,7 +27,7 @@ class ReaderPageLifetimeSmoke {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     @Test fun bookVersionProfileAndCloseDuringDecode() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        require(context.packageName == "com.coach.readermeasurement")
+        ReaderMeasurementPackage.requireIsolated(context.packageName)
         val args = InstrumentationRegistry.getArguments()
         val port = requireNotNull(args.getString("readerPort")).toInt()
         require(port in 1024..65535 && port !in setOf(8790,8791,18791,3790))

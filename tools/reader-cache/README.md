@@ -1318,3 +1318,46 @@ explicit identity. Legacy measurement packages remain selectable for old
 artifacts, never silently translated or used with a mismatched test APK. Retain
 the existing geometry save/reset/restore and default UI memory sampling; remove
 both TON-1463 packages after the owned session.
+
+### Package-gate delivery regression
+
+The first `51789326` TON-1463 APK pair installed successfully, but all three
+product suites stopped at a test-only equality check for the legacy package.
+Those failed attempts produced no meaningful measurements. The runner's APK
+allowlist alone was not an end-to-end package contract.
+
+All four Android reader entries (including transport) now call the same
+test-only `ReaderMeasurementPackage.requireIsolated` gate. It accepts exactly
+`com.coach.readermeasurement` and `com.coach.readermeasurement.ton1463`; production,
+prefix matches and the `.test` instrumentation package are rejected. Other
+fixture/port/behavior assertions are unchanged.
+
+After rebuilding both APKs, Windows can execute the **actual guard class from
+the Android build**, check both allowed identities and eight rejection cases,
+and inspect all compiled entry bindings:
+
+```sh
+python tools/reader-cache/check_measurement_package.py --java-home "$JAVA_HOME" \
+  --output build/reader-package-gate
+```
+
+This host check does not run Android instrumentation, obtain an Android Context,
+or prove a native UI entry. `nativeEntryReachedVerified` stays false. The check
+never recompiles or substitutes the gate: its classpath starts with the Android
+build's class directory; only the small JVM test harness is compiled separately.
+
+On the owned Mac emulator, validate/install the same signed pair, then run the
+small delivery preflight before any UI measurement/capture:
+
+```sh
+"$ADB" -s "$OWNED_EMULATOR_SERIAL" shell am instrument -w \
+  -e class com.coach.android.ReaderMeasurementPackageSmoke \
+  com.coach.readermeasurement.ton1463.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Require `OK (1 test)` and no test failure, not just the ADB exit code. This test
+checks the installed target's shared gate and the instrumentation/target package
+relationship; it opens no UI or fixture. If it fails, retain the log and clean up
+without running the three measurement suites. A passing preflight is only an
+entry check, after which performance/behavior/lifecycle still need their existing
+assertions, native receipts and normal save/reset/restore/cleanup discipline.

@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
 class ReaderImageTransportSmoke {
     @Test fun separatesHeadersBodyAndSyntheticServerTime() = runBlocking(Dispatchers.Default) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        require(context.packageName == "com.coach.readermeasurement")
+        ReaderMeasurementPackage.requireIsolated(context.packageName)
         val port = requireNotNull(InstrumentationRegistry.getArguments().getString("readerPort")).toInt()
         val runId=requireNotNull(InstrumentationRegistry.getArguments().getString("readerRunId"))
         require(runId.matches(Regex("[A-Za-z0-9_-]{1,48}")))

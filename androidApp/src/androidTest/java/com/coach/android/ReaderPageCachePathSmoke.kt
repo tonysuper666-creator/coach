@@ -28,7 +28,7 @@ class ReaderPageCachePathSmoke {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     @Test fun readerPrefetchAndQuestionSourceReuseDecodedRaster() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        require(context.packageName == "com.coach.readermeasurement")
+        ReaderMeasurementPackage.requireIsolated(context.packageName)
         val port = requireNotNull(InstrumentationRegistry.getArguments().getString("readerPort")).toInt()
         require(port in 1024..65535 && port !in setOf(8790, 8791, 18791, 3790))
         val base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"

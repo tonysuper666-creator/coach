@@ -313,6 +313,11 @@ struct LearningView: View {
             ForEach(model.weeks) { week in
                 Button(week.title) { Task { await model.openWeek(week.week) } }.disabled(model.busy).accessibilityIdentifier("week-\(week.week)")
             }
+            if !model.weeks.isEmpty {
+                NavigationLink("打开本课程资料") {
+                    ReaderView(connection: connection, course: model.course)
+                }.accessibilityIdentifier("openReader")
+            }
             if let week = model.week {
                 Text(week.title).font(Appearance.serif(.title2, size: 22, weight: .semibold, dynamicTypeSize: dynamicTypeSize))
                 ForEach(week.items) { item in
@@ -371,5 +376,253 @@ struct LearningView: View {
         } message: {
             Text("答案可能已经记录在 Mac 上。清除只影响本机，之后请重新打开课程检查状态。")
         }
+    }
+}
+
+// Reader uses the existing paired transport and the server's versioned ledger.
+private struct ReaderCatalog: Decodable { let documents: [ReaderDocument] }
+private struct ReaderDocument: Codable, Identifiable { let id: String; let title: String; let version: String; let pages: Int }
+private struct ReaderProgress: Decodable { let version: String; let pdfPage: Int; let revision: Int; let stale: Bool }
+private struct ReaderNote: Decodable, Identifiable {
+    let id: String; let version: String; let pdfPage: Int; let textSha256: String
+    let start: Int; let end: Int; let quote: String; let note: String; let revision: Int; let stale: Bool
+}
+private struct ReaderState: Decodable { let document: ReaderDocument; let progress: ReaderProgress?; let notes: [ReaderNote] }
+private struct ReaderPage: Decodable { let documentId: String; let version: String; let pdfPage: Int; let text: String; let textSha256: String }
+private struct ReaderReceipt: Decodable { let revision: Int; let replayed: Bool }
+private struct ReaderPending: Codable {
+    let server: String; let deviceId: String; let course: String; let document: String
+    let operation: String; let body: Data
+}
+private struct ReaderProgressBody: Encodable { let version: String; let pdfPage: Int; let baseRevision: Int; let mutationId: String }
+private struct ReaderNoteBody: Encodable {
+    let id: String; let version: String; let pdfPage: Int; let textSha256: String
+    let start: Int; let end: Int; let quote: String; let note: String; let deleted: Bool
+    let baseRevision: Int; let mutationId: String
+}
+
+@MainActor
+private final class ReaderModel: ObservableObject {
+    @Published var documents: [ReaderDocument] = []
+    @Published var state: ReaderState?
+    @Published var page: ReaderPage?
+    @Published var pageImage: UIImage?
+    @Published var selectedRange = NSRange(location: 0, length: 0)
+    @Published var draft = ""
+    @Published var editing: ReaderNote?
+    @Published var pending: ReaderPending?
+    @Published var busy = false
+    @Published var message: String?
+    private let connection: ConnectionModel
+    private let course: String
+    private let store = KeychainRecord<ReaderPending>(service: "coach.ton1411.reader-pending")
+    private let session: URLSession
+    private var storageAvailable = true
+
+    init(connection: ConnectionModel, course: String) {
+        self.connection = connection; self.course = course
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 10; config.urlCache = nil; config.httpCookieStorage = nil
+        session = URLSession(configuration: config, delegate: LearningNoRedirects(), delegateQueue: nil)
+        do { pending = try store.load() }
+        catch { storageAvailable = false; message = "无法读取本机待确认的阅读记录，请解锁设备。" }
+    }
+
+    private func request<T: Decodable>(_ type: T.Type, _ path: [String], body: Data? = nil) async throws -> T {
+        guard let (address, credential) = connection.learningCredentials else { throw ConnectionError.unauthorized }
+        var url = address.url
+        for part in ["v1", "courses", course, "reader"] + path { url.appendPathComponent(part) }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        req.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        if let body { req.httpMethod = "POST"; req.httpBody = body; req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw ConnectionError.invalidResponse }
+        if http.statusCode == 401 { throw ConnectionError.unauthorized }
+        guard (200...299).contains(http.statusCode) else { throw ConnectionError.httpStatus(http.statusCode) }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+    private func report(_ error: Error) {
+        if case ConnectionError.unauthorized = error {
+            message = "设备身份已失效；本机待确认内容仍保留。"
+            connection.markRevoked()
+        } else if case ConnectionError.httpStatus(409) = error {
+            message = "资料版本或服务器记录已改变；本机待确认内容仍保留，请核对后处理。"
+        } else { message = "无法从 Mac 确认阅读记录；本机待确认内容仍保留。" }
+    }
+    private func sameIdentity(_ value: ReaderPending) -> Bool {
+        guard let (address, credential) = connection.learningCredentials else { return false }
+        return value.server == address.url.absoluteString && value.deviceId == credential.deviceId && value.course == course
+    }
+    func loadCatalog() async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        do { documents = try await request(ReaderCatalog.self, []).documents }
+        catch { report(error) }
+    }
+    func open(_ document: ReaderDocument) async {
+        guard !busy else { return }; busy = true; defer { busy = false }
+        state = nil; page = nil; pageImage = nil
+        do {
+            let latest = try await request(ReaderState.self, [document.id, "state"])
+            guard latest.document.version == document.version else { throw ConnectionError.httpStatus(409) }
+            state = latest
+            let target = latest.progress.flatMap { !$0.stale && $0.version == document.version ? $0.pdfPage : nil } ?? 1
+            try await loadPage(document: document, number: target)
+            if let pending, sameIdentity(pending), pending.document == document.id { message = "有未确认的阅读记录，可重试原次保存。" }
+        } catch { report(error) }
+    }
+    private func loadPage(document: ReaderDocument, number: Int) async throws {
+        let result = try await request(ReaderPage.self, [document.id, "pages", String(number)])
+        guard result.documentId == document.id, result.version == document.version, result.pdfPage == number else { throw ConnectionError.httpStatus(409) }
+        guard let (address, credential) = connection.learningCredentials else { throw ConnectionError.unauthorized }
+        var imageURL = address.url
+        for part in ["v1", "courses", course, "reader", document.id, "pages", String(number), "image"] { imageURL.appendPathComponent(part) }
+        var components = URLComponents(url: imageURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "version", value: document.version)]
+        guard let url = components.url else { throw ConnectionError.invalidAddress }
+        var imageRequest = URLRequest(url: url)
+        imageRequest.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+        imageRequest.setValue(credential.deviceId, forHTTPHeaderField: "X-Coach-Device")
+        let (imageData, response) = try await session.data(for: imageRequest)
+        guard let http = response as? HTTPURLResponse else { throw ConnectionError.invalidResponse }
+        if http.statusCode == 401 { throw ConnectionError.unauthorized }
+        guard (200...299).contains(http.statusCode) else { throw ConnectionError.httpStatus(http.statusCode) }
+        guard let image = UIImage(data: imageData) else { throw ConnectionError.invalidResponse }
+        page = result; pageImage = image; selectedRange = NSRange(location: 0, length: 0); editing = nil; draft = ""
+    }
+    func turn(_ number: Int) async {
+        guard !busy, pending == nil, let state, (1...state.document.pages).contains(number), storageAvailable else { return }
+        busy = true; defer { busy = false }
+        do {
+            let body = ReaderProgressBody(version: state.document.version, pdfPage: number,
+                baseRevision: state.progress?.revision ?? 0, mutationId: UUID().uuidString)
+            let bytes = try JSONEncoder().encode(body)
+            try prepare(document: state.document.id, operation: "progress", body: bytes)
+            try await sendPending()
+            let latest = try await request(ReaderState.self, [state.document.id, "state"])
+            guard latest.document.version == state.document.version else { throw ConnectionError.httpStatus(409) }
+            self.state = latest
+            try await loadPage(document: latest.document, number: number)
+        } catch { report(error) }
+    }
+    private func prepare(document: String, operation: String, body: Data) throws {
+        guard pending == nil, storageAvailable, let (address, credential) = connection.learningCredentials else { throw ConnectionError.invalidResponse }
+        let value = ReaderPending(server: address.url.absoluteString, deviceId: credential.deviceId, course: course,
+                                  document: document, operation: operation, body: body)
+        try store.save(value); pending = value
+    }
+    private func sendPending() async throws {
+        guard let value = pending, sameIdentity(value) else { throw ConnectionError.invalidResponse }
+        _ = try await request(ReaderReceipt.self, [value.document, value.operation], body: value.body)
+        try store.delete(); pending = nil
+    }
+    func retry() async {
+        guard !busy, let value = pending, sameIdentity(value) else { message = "待确认记录属于另一连接或课程，请恢复原连接。"; return }
+        busy = true; defer { busy = false }
+        do {
+            try await sendPending()
+            let latest = try await request(ReaderState.self, [value.document, "state"])
+            state = latest
+            let number = latest.progress.flatMap { !$0.stale ? $0.pdfPage : nil } ?? 1
+            try await loadPage(document: latest.document, number: number)
+            message = "服务器已确认阅读记录。"
+        } catch { report(error) }
+    }
+    func saveNote() async {
+        guard !busy, pending == nil, storageAvailable, let state, let page else { return }
+        let range = selectedRange
+        let note = editing
+        guard note != nil || (range.location != NSNotFound && range.location <= (page.text as NSString).length && range.length <= (page.text as NSString).length - range.location) else {
+            message = "请先选择本页文字。"; return
+        }
+        let start = note?.start ?? range.location, end = note?.end ?? (range.location + range.length)
+        let text = page.text as NSString
+        guard note != nil || (range.length > 0 && range.length <= 4000 && start >= 0 && end <= text.length),
+              draft.utf16.count <= 8000 else { message = "请先选择本页文字，批注不超过 8000 字符。"; return }
+        let body = ReaderNoteBody(id: note?.id ?? UUID().uuidString, version: note?.version ?? page.version,
+            pdfPage: note?.pdfPage ?? page.pdfPage, textSha256: note?.textSha256 ?? page.textSha256,
+            start: start, end: end, quote: note?.quote ?? text.substring(with: range), note: draft,
+            deleted: false, baseRevision: note?.revision ?? 0, mutationId: UUID().uuidString)
+        busy = true; defer { busy = false }
+        do {
+            try prepare(document: state.document.id, operation: "notes", body: JSONEncoder().encode(body))
+            try await sendPending()
+            let latest = try await request(ReaderState.self, [state.document.id, "state"])
+            guard latest.document.version == state.document.version else { throw ConnectionError.httpStatus(409) }
+            guard latest.notes.contains(where: { $0.id == body.id && $0.note == body.note && !$0.stale }) else { throw ConnectionError.invalidResponse }
+            self.state = latest; draft = ""; editing = nil; selectedRange = NSRange(location: 0, length: 0)
+            message = "已从 Mac 回读批注。"
+        } catch { report(error) }
+    }
+}
+
+private struct ReaderTextSelection: UIViewRepresentable {
+    let text: String
+    @Binding var selectedRange: NSRange
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView(); view.isEditable = false; view.isScrollEnabled = false
+        view.backgroundColor = .clear; view.adjustsFontForContentSizeCategory = true
+        view.font = .preferredFont(forTextStyle: .body); view.delegate = context.coordinator
+        view.accessibilityIdentifier = "readerPageText"; return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        context.coordinator.parent = self
+        if view.text != text { view.text = text; view.selectedRange = NSRange(location: 0, length: 0) }
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        guard let width = proposal.width else { return nil }
+        return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+    }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: ReaderTextSelection
+        init(_ parent: ReaderTextSelection) { self.parent = parent }
+        func textViewDidChangeSelection(_ textView: UITextView) { parent.selectedRange = textView.selectedRange }
+    }
+}
+
+private struct ReaderView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var model: ReaderModel
+    init(connection: ConnectionModel, course: String) { _model = StateObject(wrappedValue: ReaderModel(connection: connection, course: course)) }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CoachV7.Space.s4) {
+                Button("返回课程和练习") { dismiss() }.accessibilityIdentifier("readerBack")
+                Text("课程资料").font(.title2.bold())
+                if model.pending != nil {
+                    Text("有未确认的阅读记录，本机已保留。")
+                    Button("重试原次保存") { Task { await model.retry() } }.disabled(model.busy)
+                }
+                ForEach(model.documents) { document in
+                    Button(document.title) { Task { await model.open(document) } }.disabled(model.busy)
+                        .accessibilityIdentifier("readerDocument-\(document.id)")
+                }
+                if let state = model.state, let page = model.page {
+                    Text("\(state.document.title) · 第 \(page.pdfPage) / \(state.document.pages) 页").accessibilityIdentifier("readerPage")
+                    HStack {
+                        Button("上一页") { Task { await model.turn(page.pdfPage - 1) } }.disabled(model.busy || model.pending != nil || page.pdfPage <= 1)
+                        Button("下一页") { Task { await model.turn(page.pdfPage + 1) } }.disabled(model.busy || model.pending != nil || page.pdfPage >= state.document.pages)
+                    }
+                    if let image = model.pageImage { Image(uiImage: image).resizable().scaledToFit().accessibilityLabel("PDF 页面图像") }
+                    Text("选择提取文字添加批注；文字位置不代表 PDF 上的标记。") .font(.caption)
+                    ReaderTextSelection(text: page.text, selectedRange: $model.selectedRange)
+                    ForEach(state.notes) { note in
+                        VStack(alignment: .leading) {
+                            Text("第 \(note.pdfPage) 页\(note.stale ? " · 旧版本" : "")：\(note.quote)")
+                            Text(note.note)
+                            if !note.stale && note.version == page.version && note.pdfPage == page.pdfPage {
+                                Button("编辑批注") { model.editing = note; model.draft = note.note }
+                            }
+                        }.modifier(V7Card())
+                    }
+                    TextField("写下批注", text: $model.draft, axis: .vertical).textFieldStyle(.roundedBorder).disabled(model.pending != nil).accessibilityIdentifier("readerNoteDraft")
+                    Button(model.editing == nil ? "保存选中文字的批注" : "保存批注修改") { Task { await model.saveNote() } }
+                        .disabled(model.busy || model.pending != nil).accessibilityIdentifier("saveReaderNote")
+                }
+                if let message = model.message { Text(message).foregroundStyle(Appearance.accent).accessibilityIdentifier("readerMessage") }
+            }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
+            .foregroundStyle(Appearance.ink).task { await model.loadCatalog() }
     }
 }

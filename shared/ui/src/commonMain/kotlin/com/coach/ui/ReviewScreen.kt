@@ -1,6 +1,8 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,6 +32,8 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     var tab by remember(c.courseId) { mutableStateOf(if (due.isNotEmpty()) 1 else 0) }
+    // 离线练习不再是单独一页：两页顶部都在（顺序同 TON-1495），选到一半的答案由这里持有，换页、滚走都不丢。
+    val offline = remember(c.courseId) { OfflineDraft() }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
@@ -37,25 +41,28 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             reminderSettings()
         }
         HorizontalDivider()
-        Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
-        ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
         PrimaryTabRow(selectedTabIndex = tab) {
-            listOf("错题 ${view.mistakes.items.size}", "到期 ${due.size}", "离线练习").forEachIndexed { index, label ->
+            listOf("错题 ${view.mistakes.items.size}", "到期 ${due.size}").forEachIndexed { index, label ->
                 Tab(selected = tab == index, onClick = { tab = index }, text = { Text(label) })
             }
         }
-        if (due.isEmpty() && tab != 1) {
-            Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+        // 提醒、页签固定；说明、入口、列表和离线练习在同一个滚动里，短窗口也能滚到每一行（TON-1495）。
+        val top: @Composable () -> Unit = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
+                OfflinePractice(c, offline)
+                ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
+                if (due.isEmpty() && tab == 0) Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
         }
-        when (tab) {
-            0 -> MistakesPane(c, view)
-            2 -> OfflinePractice(c)
-            else -> {
-                if (due.isEmpty()) {
-                    CenterMessage("今天没有到期的复习。")
-                } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item { Text("${due.size} 节到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    items(due, key = { it.kp.id }) { item ->
+        if (tab == 0) MistakesPane(c, view, Modifier.weight(1f), top)
+        else Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            top()
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (due.isEmpty()) Text("今天没有到期的复习。")
+                else {
+                    Text("${due.size} 节到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    due.forEach { item -> key(item.kp.id) {
                         val (tag, main) = splitTitle(item.kp.title)
                         Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("review-${item.kp.id}")) {
                             Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -67,15 +74,23 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                                 Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
                             }
                         }
-                    }
+                    } }
                 }
             }
         }
     }
 }
 
+/** 离线练习进行中的状态，提到复习页这一层持有。 */
+private class OfflineDraft {
+    var active by mutableStateOf<String?>(null)
+    var chosen by mutableStateOf<Map<String, String>>(emptyMap())
+    var error by mutableStateOf<String?>(null)
+    var downloading by mutableStateOf(false)
+}
+
 @Composable
-private fun MistakesPane(c: CoachController, view: CourseView) {
+private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifier, top: @Composable () -> Unit) {
     val ui by c.tutor.model.state.collectAsState()
     var activeKp by remember { mutableStateOf<String?>(null) }
     var priorGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -98,16 +113,18 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
             c.tutor.model.onFailure(target, "Mac 未连接，连上后可再练；错题已保存在本机。")
         }
     }
-    LaunchedEffect(activeKp, group?.groupId) { listState.scrollToItem(0) }
+    // 再练时滚到错题区开头（第 0 项是说明和入口），返回时回到页顶。
+    LaunchedEffect(activeKp, group?.groupId) { listState.scrollToItem(if (activeKp != null) 1 else 0) }
     LaunchedEffect(group, view.mistakes) {
         if (group?.cards?.all { it.grade != null } == true && view.mistakes.items.none { it.kpId == activeKp }) {
             activeKp = null; notice = "连续答对 3 道，这个知识点的错题已移出。"
         }
     }
-    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+    LazyColumn(modifier.fillMaxWidth(), state = listState, contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
+        item(key = "top") { top() }
         item {
-            Column(Modifier.widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("同一知识点连续答对 3 道新题后，自动移出。", style = MaterialTheme.typography.bodyMedium)
                 if (!ui.connected) Text("离线可回看错题；连接 Mac 后可再练。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
@@ -116,20 +133,20 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
         }
         if (activeKp != null) {
             if (group == null) item {
-                Column(Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth()) {
                     Text(tv?.error ?: "正在取出同一知识点的 3 道新题…")
                     if (tv?.error != null) Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
                         modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
                 }
             } else {
                 items(group.cards, key = { it.attemptId }) { card ->
-                    Box(Modifier.widthIn(max = 680.dp).fillMaxWidth()) {
+                    Box(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth()) {
                         QuizCardView(group.cards.indexOf(card) + 1, group.cards.size, card, group.submitted,
                             chosen[card.attemptId], c.math) { chosen[card.attemptId] = it }
                     }
                 }
                 item {
-                    Column(Modifier.widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         tv?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         if (!group.submitted) Button(onClick = {
                             if (!c.tutor.answer(thread, c.courseId, group.groupId,
@@ -146,10 +163,12 @@ private fun MistakesPane(c: CoachController, view: CourseView) {
                 }
             }
         } else if (view.mistakes.items.isEmpty()) {
-            item { Text(view.mistakes.emptyText, Modifier.padding(vertical = 32.dp)) }
+            item { Text(view.mistakes.emptyText, Modifier.padding(horizontal = 16.dp, vertical = 32.dp)) }
         } else {
             items(view.mistakes.items, key = { "${it.kpId}:${it.attemptId}" }) { mistake ->
-                MistakeCard(mistake, mistakeTitle(view, mistake.kpId), c.math, ui.connected) { retry(mistake.kpId) }
+                Box(Modifier.padding(horizontal = 16.dp)) {
+                    MistakeCard(mistake, mistakeTitle(view, mistake.kpId), c.math, ui.connected) { retry(mistake.kpId) }
+                }
             }
         }
     }
@@ -269,16 +288,16 @@ private fun RowScope.EssayEntry(c: CoachController, wide: Boolean, onOpen: () ->
 
 /** Independent from the learning thread: a downloaded review never changes Continue. */
 @Composable
-private fun OfflinePractice(c: CoachController) {
+private fun OfflinePractice(c: CoachController, draft: OfflineDraft) {
     val revision by c.sync.revision.collectAsState()
     val scope = rememberCoroutineScope()
     var tick by remember { mutableStateOf(c.nowMillis()) }
     LaunchedEffect(c) { while (true) { tick = c.nowMillis(); delay(1000) } }
     val groups = remember(revision,tick) { c.sync.offlineGroups(c.courseId,tick) }
-    var active by remember { mutableStateOf<String?>(null) }
-    var chosen by remember { mutableStateOf<Map<String,String>>(emptyMap()) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var downloading by remember { mutableStateOf(false) }
+    var active by draft::active
+    var chosen by draft::chosen
+    var error by draft::error
+    var downloading by draft::downloading
     val group = groups.firstOrNull { it.groupId == active }
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("离线练习", style = MaterialTheme.typography.titleMedium)

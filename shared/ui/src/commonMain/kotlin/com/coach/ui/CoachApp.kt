@@ -311,7 +311,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                                 val decision = current.let { c.learningTarget(it) }
                                                 if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
                                                 navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
-                                            }, reminderSettings = { TextButton(onClick = { navigation.push(AppEntry(AppPage.SETTINGS, label = "设置")) }) { Text("设置") } }) else CenterMessage("正在加载课程…")
+                                            }, reminderSettings = settings) else CenterMessage("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                                     }

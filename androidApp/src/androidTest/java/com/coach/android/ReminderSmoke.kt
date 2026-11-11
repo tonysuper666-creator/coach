@@ -20,7 +20,7 @@ import java.time.ZonedDateTime
 import java.time.ZoneId
 import java.util.UUID
 
-/** Host runner owns the production-backup copy, isolated server and emulator lifecycle. */
+/** Host runner (tools/dev/check-reminder.py) owns the synthetic private copy, isolated server and emulator lifecycle. */
 @RunWith(AndroidJUnit4::class)
 class ReminderSmoke {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()

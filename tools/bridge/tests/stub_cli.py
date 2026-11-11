@@ -7,6 +7,7 @@
   kill9             吐 2 段后 kill -9 自己（中途 CLI 死掉）
   hang              一个字都不吐就挂住（首字超时）
   hang_after        吐 2 段后挂住（出字后卡住）
+  leak              脱离进程组派生一个不回收的孙进程再挂住（取消回归的负例）
   refuse            安全拦截（is_error + "can't respond to this message"）
   maxtok            max_output_tokens 截断（is_error + terminal_reason=api_error + api_error=max_output_tokens）
   rate              正常出字，但先发一条 rate_limit_event（utilization 0.95）
@@ -18,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -63,6 +65,13 @@ def claude(m: str) -> int:
                   "terminal_reason": "api_error", "api_error": "rate_limit_error"})
             return 1
         if m == "hang":
+            time.sleep(300)
+            return 0
+        if m == "leak":
+            # 负例：孙进程自己开一个会话，桥的 killpg（杀进程组）打不到它，取消后必然有残留。
+            subprocess.Popen([sys.argv[0], "__leak_hold__"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
             time.sleep(300)
             return 0
         delay = 1.2 if m == "slow" else 0.05
@@ -141,6 +150,14 @@ def codex(args: list[str], m: str) -> int:
 def main() -> int:
     name = os.path.basename(sys.argv[0])
     args = sys.argv[1:]
+    if args[:1] == ["__leak_hold__"]:
+        try:                                    # 负例的残留进程：登记 pid 供测试清理
+            with open(os.path.join(STUB_DIR, "leak.pid"), "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+        time.sleep(300)
+        return 0
     m = mode()
     if name == "claude":
         if args[:2] == ["auth", "status"]:

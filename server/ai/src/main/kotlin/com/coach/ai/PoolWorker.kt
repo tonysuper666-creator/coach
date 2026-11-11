@@ -1,10 +1,14 @@
 package com.coach.ai
 
 import com.coach.core.LedgerActor
+import com.coach.core.RestrictedSourceGuard
 import com.coach.domain.*
 import com.coach.store.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
@@ -19,34 +23,57 @@ class PoolWorker(
     data class Step(val jobId: String, val kind: String, val state: String, val inserted: Int = 0)
 
     suspend fun runOne(course: String? = null, kp: String? = null): Step? {
-        val claimed = actor.execute {
-            supplyJobs(course,kp).firstNotNullOfOrNull { job -> claimJob(job.id)?.let { job to it } }
-        } ?: return null
-        val (job, token) = claimed
+        // The actor commits a claim even when this caller is cancelled while waiting; keep the token either way.
+        var claimed: Pair<SupplyJob,Fence>? = null
+        try {
+            withContext(NonCancellable) {
+                claimed = actor.execute { supplyJobs(course,kp).firstNotNullOfOrNull { job -> claimJob(job.id)?.let { job to it } } }
+            }
+            val (job, token) = claimed ?: return null
+            return work(job, token)
+        } catch (e: CancellationException) {
+            // Shutdown is not a verdict on the source; the next worker should pick the job up again.
+            claimed?.let { release(it.second) }
+            throw e
+        }
+    }
+
+    private suspend fun work(job: SupplyJob, token: Fence): Step {
         val input = job.subject
         val background = input.flag("background")
         val type = requestType ?: if (background) "background" else "foreground"
         if (job.kind in setOf("gen_constructed","review_constructed")) return try { runConstructed(job,token,type) }
+        catch(e: CancellationException) { throw e }
         catch(e: Exception) { actor.execute { failSupply(token,"MALFORMED") }; throw e }
         val pool = QuestionPool(client)
         if (job.kind == "gen_mcq") {
             val avoid = actor.execute { poolStems(input.str("course"),input.str("kp")) }
+            val reference = actor.execute { searchSourcePages(input.str("course"),input.str("objective")) }
+                .filterNot { it.learnerVisible }.take(2).map { it.text }
+            val overlap = RestrictedSourceGuard(reference,listOf(input.str("excerpt")))
             val generated = try {
                 withContext(Dispatchers.IO) {
                     beforeCall(BridgeClient.CLAUDE)
                     pool.generateFor(input.str("kp"),input.str("objective"),input.str("excerpt"),3,
-                        avoid=avoid,background=background)
+                        avoid=avoid,background=background,retryMalformed=input.flag("retryMalformed"),
+                        internalReference=reference.joinToString("\n\n"))
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
                 throw e
             }
             actor.execute { recordAiCall(generated.call.toJson(),type) }
             if (generated.questions.size != 3) {
-                val accepted = actor.execute { failSupply(token,generated.failureReason ?: "MALFORMED") }
-                return Step(job.id,job.kind,if(accepted) "failed" else "stale")
+                return failureStep(job,token,generated.failureReason ?: "MALFORMED")
             }
-            var questions = generated.questions
+            var questions = generated.questions.filter { q ->
+                listOf(q.stem,q.explanation).plus(q.options.map { it.text }).none(overlap::overlaps) &&
+                    (QuestionGate.quotedVerbatim(q,input.str("excerpt")) ||
+                        reference.none { QuestionGate.quotedVerbatim(q,it) })
+            }
+            if (questions.isEmpty()) return failureStep(job,token,"MALFORMED")
             if (questions.any { !QuestionGate.quotedVerbatim(it,input.str("excerpt")) }) {
                 // Repair quotations before review; the response cannot replace questions, options or keys.
                 val repair = try { withContext(Dispatchers.IO) {
@@ -55,7 +82,9 @@ class PoolWorker(
                         "Return ONLY [{\"id\":0,\"source_quote\":\"exact contiguous supporting source text\"}, ...] for every candidate. Copy at least eight words verbatim, including HTML/LaTeX/Markdown; do not render symbols, paraphrase or join fragments. Do not change any question or key.\nSource:\n"+
                         input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
                         false,background=background,maxTokens=2500))
-                } } catch (e: Exception) {
+                } } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     actor.execute { failSupply(token,"MALFORMED") }
                     throw e
                 }
@@ -67,8 +96,7 @@ class PoolWorker(
                         .associate { row -> row.num("id").toInt() to row.str("source_quote") }
                 }.getOrNull() }
                 if (quotes == null || questions.indices.any { !QuestionGate.sourceQuoteVerbatim(quotes[it].orEmpty(),input.str("excerpt")) }) {
-                    val failed=actor.execute { failSupply(token,"MALFORMED") }
-                    return Step(job.id,job.kind,if(failed) "failed" else "stale")
+                    return failureStep(job,token,"MALFORMED")
                 }
                 questions=questions.mapIndexed { i,q -> q.copy(sourceQuote=quotes.getValue(i)) }
             }
@@ -83,6 +111,8 @@ class PoolWorker(
                 pool.reviewGroup(listOf(QuestionPool.ReviewEntry(input.str("kp"),input.str("excerpt"),questions,0)),
                     background=background)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             actor.execute { failSupply(token,"MALFORMED") }
             throw e
@@ -97,12 +127,22 @@ class PoolWorker(
             else VerifiedPoolQuestion(q.stem,q.options,q.correctOptionId,q.explanation,q.sourceQuote,generator,reviewer)
         }
         if (accepted.isEmpty()) {
-            val committed=actor.execute { failSupply(token,review.failureReason ?: "MALFORMED") }
-            return Step(job.id,job.kind,if(committed) "failed" else "stale")
+            return failureStep(job,token,review.failureReason ?: "MALFORMED")
         }
         val inserted=actor.execute { storeVerifiedBatch(token,job,accepted) }
         val state=actor.execute { jobState(job.id)?.first ?: "stale" }
         return Step(job.id,job.kind,state,inserted)
+    }
+
+    private suspend fun failureStep(job: SupplyJob, token: Fence, reason: String): Step {
+        if(reason=="MALFORMED" && actor.execute { retryMalformedSupply(token,job) })
+            return Step(job.id,job.kind,"retrying")
+        val failed=actor.execute { jobState(job.id)?.first=="failed" || failSupply(token,reason) }
+        return Step(job.id,job.kind,if(failed) "failed" else "stale")
+    }
+
+    private suspend fun release(token: Fence) {
+        withContext(NonCancellable) { withTimeoutOrNull(5_000) { actor.execute { releaseJob(token) } } }
     }
 
     private suspend fun runConstructed(job: SupplyJob, token: Fence, type: String): Step {
@@ -124,7 +164,8 @@ class PoolWorker(
             kotlin.math.abs(q.rubric.sumOf { it.points }-10.0) < 0.00001 &&
             (q.numericFinal==null || (q.rubric.count { it.id==q.numericFinal.str("rubricItemId") }==1 &&
                 com.coach.domain.grade.NumericValue.parse(q.numericFinal.str("expected"))!=null &&
-                listOf("relTolerance","absTolerance").all { field -> q.numericFinal[field]?.jsonPrimitive?.doubleOrNull?.let { it.isFinite() && it>=0 } ?: (field !in q.numericFinal) }))
+                listOf("relTolerance","absTolerance").all { field -> q.numericFinal[field]?.jsonPrimitive?.doubleOrNull?.let { it.isFinite() && it>=0 } ?: (field !in q.numericFinal) } &&
+                runCatching { analyticalNumericKey(q.numericFinal) }.isSuccess))
         fun valid(q: ConstructedQuestion): Boolean = validShape(q) &&
             q.rubric.all { QuestionGate.sourceQuoteVerbatim(it.basis,input.str("excerpt")) }
         val initial=(response as? BridgeResult.Success)?.let { runCatching { TaskParsing.constructed(it.text) }.getOrNull() }
@@ -156,7 +197,11 @@ class PoolWorker(
                 return Step(job.id,job.kind,if(ok) "completed" else "stale",if(ok) 1 else 0)
             }
         }
-        val reason=if(result is BridgeResult.Failure && (result.reason.contains("timeout",true) || result.terminal?.reason?.contains("timeout",true)==true)) "TIMEOUT" else "MALFORMED"
+        val reason = when {
+            result is BridgeResult.Failure && (result.reason.contains("timeout",true) || result.terminal?.reason?.contains("timeout",true)==true) -> "TIMEOUT"
+            result is BridgeResult.Failure && (result.reason == "cli_exit" || result.terminal?.reason == "cli_exit") -> "CLI_ERROR"
+            else -> "MALFORMED"
+        }
         val failed=actor.execute { failSupply(token,reason) }
         return Step(job.id,job.kind,if(failed) "failed" else "stale")
     }

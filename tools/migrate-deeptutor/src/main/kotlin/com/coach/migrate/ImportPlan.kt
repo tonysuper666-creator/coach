@@ -2,7 +2,7 @@ package com.coach.migrate
 
 import kotlinx.serialization.json.*
 
-/** Data only: this module deliberately has no Coach database connection or import switch. */
+/** Reviewable data contract shared by the dry-run planner and the isolated database writer. */
 fun proposalInput(mapping:JsonObject):JsonObject = buildJsonObject {
     put("knowledge_points",JsonArray(mapping.array("knowledge_points").map { v ->
         val k=v.jsonObject
@@ -34,7 +34,7 @@ fun validateProposal(mapping:JsonObject, proposal:JsonObject) {
     require(questions.map { it.str("id") }.toSet()==questionIds && questions.size==questionIds.size) { "Proposal must cover every question exactly once" }
     fun ids(item:JsonObject,key:String)=item.array(key).map { it.jsonPrimitive.content }
     questions.forEach { q ->
-        require(ids(q,"kp_ids").all { it in kpIds } && q.str("reason").isNotBlank()) { "Question needs supported KP IDs and a reason" }
+        require(ids(q,"kp_ids").distinct()==ids(q,"kp_ids") && ids(q,"kp_ids").all { it in kpIds } && q.str("reason").isNotBlank()) { "Question needs unique supported KP IDs and a reason" }
         require(ids(q,"kp_ids").isNotEmpty() || (q.str("status")=="unresolved" && q.str("warning").isNotBlank())) { "Unmapped question must explicitly preserve the unresolved reason" }
     }
     val concepts=proposal.array("concepts").map { it.jsonObject }
@@ -53,6 +53,19 @@ fun validateProposal(mapping:JsonObject, proposal:JsonObject) {
         visiting.remove(id);visited.add(id)
     }
     kpIds.forEach(::visit)
+}
+
+/** An old review is evidence only for its exact input. Changed banks stay wholly quarantined.
+ * Keep strict validateProposal unchanged; never rewrite hashes to make a stale review pass.
+ */
+fun incrementalPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject,reviewedMapping:JsonObject):JsonObject {
+    validateProposal(reviewedMapping,proposal)
+    val current=sha(canonical(proposalInput(mapping)))
+    if(current==proposal.str("input_hash")) return importPlan(mapping,seed,proposal)
+    return JsonObject(importPlan(mapping,seed,null)+mapOf("proposal_review" to buildJsonObject {
+        put("status","stale_quarantined");put("reviewed_input_hash",proposal.str("input_hash"));put("current_input_hash",current)
+        put("archived_proposal",proposal);put("reason","Question or KP content changed; no prior review or confirmation transfers to this version")
+    }))
 }
 
 fun validateSeed(mapping:JsonObject, seed:JsonObject) {
@@ -76,9 +89,12 @@ fun plannedRecord(source:JsonObject,kind:String,payload:JsonObject):JsonObject =
     put("payload",payload);put("payload_hash",sha(canonical(payload)))
 }
 
-fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObject {
+fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):JsonObject {
     validateSeed(mapping,seed)
     if(proposal!=null) validateProposal(mapping,proposal)
+    if(confirmation!=null) validateConfirmation(mapping,requireNotNull(proposal) { "Confirmation needs a reviewed proposal" },confirmation)
+    val associations=if(confirmation!=null) requireNotNull(proposal).array("questions").map { it.jsonObject }.associateBy { it.str("id") } else emptyMap()
+    val samples=if(confirmation!=null) shortAnswerSamples(mapping).map { it.jsonObject }.associateBy { it.str("id") } else emptyMap()
     val courseId=seed.obj("course").str("id")
     val records=mutableListOf<JsonObject>()
     fun add(section:String,kind:String=section,transform:(JsonObject)->JsonObject={ it.obj("source_record") }) {
@@ -86,13 +102,24 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
     }
     add("questions","legacy_question") { row -> buildJsonObject {
         put("question",row.obj("question"));put("keyState","UNREVIEWED")
-        put("kp_ids",JsonArray(emptyList()));put("association_confirmed",false)
+        val raw=row.obj("source_record")
+        if(isChoice(raw)) put("legacy_explanation_archive",legacyChoiceArchive(raw))
+        val ids=JsonArray(associations[row.str("id")]?.array("kp_ids") ?: emptyList())
+        put("kp_ids",ids);put("association_confirmed",ids.isNotEmpty())
+        if(confirmation!=null) {
+            put("confirmation",buildJsonObject {
+                for(key in listOf("decision_ref","input_hash","proposal_hash")) put(key,confirmation.getValue(key))
+                put("decision_hash",sha(canonical(confirmation)))
+            })
+            samples[row.str("id")]?.let { put("accepted_short_answer_material",it) }
+        }
     } }
     add("legacy_attempts","legacy_attempt") { row ->
         val raw=row.obj("source_record");val q=parseText(raw.str("question_json")).jsonObject
         val result=parseText(raw.str("result_json")) as? JsonObject ?: JsonObject(emptyMap())
         buildJsonObject {
             put("origin","LEGACY");put("window_eligible",false);put("question",mapChoiceQuestion(q))
+            if(isChoice(q)) put("legacy_explanation_archive",legacyChoiceArchive(q))
             put("kp_id",q.str("knowledge_point_id"));put("reset",row.getValue("reset"))
             put("reset_reason",row.str("reset_reason"));put("created_at",raw["created_at"] ?: JsonNull)
             put("answer",if(isChoice(q)) choiceAnswer(q,raw.str("user_answer")) else JsonPrimitive(raw.str("user_answer")))
@@ -123,10 +150,11 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
     require(records.map { it.str("id") }.toSet().size==records.size) { "Duplicate source identity in import plan" }
     return buildJsonObject {
         put("schema_version",1);put("dry_run",true);put("course_id",courseId)
+        put("history_time",mapping.obj("history_time"))
         put("input_hash",sha(canonical(proposalInput(mapping))));put("seed_hash",sha(canonical(seed)))
         put("content_action","reference_existing_only");put("exam_weights_action","reuse_existing_event")
-        put("exam_weights",seed.obj("exam_weights"));put("formal_import_not_before","2026-11-03")
-        put("human_confirmation","pending");put("proposals",proposal ?: JsonNull)
+        put("exam_weights",seed.obj("exam_weights"))
+        put("human_confirmation",confirmation ?: JsonPrimitive("pending"));put("proposals",proposal ?: JsonNull)
         put("unknown_types",JsonArray(mapping.array("knowledge_points").map { it.jsonObject }.filter { it["original_type_available"]==JsonPrimitive(false) }))
         put("records",JsonArray(records.sortedBy { it.str("id") }))
         put("counts",buildJsonObject {
@@ -134,7 +162,7 @@ fun importPlan(mapping:JsonObject,seed:JsonObject,proposal:JsonObject?):JsonObje
             put("question_proposals",proposal?.array("questions")?.count { it.jsonObject.array("kp_ids").isNotEmpty() } ?: 0)
             put("questions_without_proposals",mapping.array("questions").size-(proposal?.array("questions")?.count { it.jsonObject.array("kp_ids").isNotEmpty() } ?: 0))
             put("unresolved_historical_choice_answers",records.count { it.str("kind")=="legacy_attempt" && it.obj("payload")["answer_unresolved"]==JsonPrimitive(true) })
-            put("confirmed_question_associations",0);put("content_inserts",0)
+            put("confirmed_question_associations",associations.values.count { it.array("kp_ids").isNotEmpty() });put("content_inserts",0)
         })
         put("archive_only",buildJsonObject {
             for(key in listOf("legacy_attempt_groups","excluded_path_archives")) put(key,mapping.getValue(key))
@@ -160,8 +188,12 @@ fun simulatePlan(plan:JsonObject,prior:JsonObject=JsonObject(emptyMap())):Simula
     return Simulation(JsonObject(state.toSortedMap()),inserted,revised,unchanged)
 }
 
-fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildString {
-    append("# 学习记录搬家确认草稿\n\n这份清单只供核对；11 月 3 日之后再请你确认。尚未导入学习记录。旧作答永远只作历史展示，不计入新学习成绩。\n\n")
+fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):String = buildString {
+    if(confirmation!=null) {
+        append(confirmationReceipt(mapping,requireNotNull(proposal),confirmation))
+        append("\n---\n\n以下保留当时确认清单的历史原稿；其中待确认措辞为历史记录，当前状态以以上回执及 import-plan.json 为准。\n\n")
+    }
+    append("# 学习记录搬家确认草稿\n\n这份清单只供核对；隔离副本预演通过后再合并请你确认。正式库尚未导入学习记录。旧作答永远只作历史展示，不计入新学习成绩。\n\n")
     if(proposal==null) { append("题目归属、概念与建议先学的内容尚未完成异厂复核。\n");return@buildString }
     validateProposal(mapping,proposal)
     val kps=mapping.array("knowledge_points").map { it.jsonObject }.associateBy { it.str("id") }
@@ -173,6 +205,7 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val q=v.jsonObject;val raw=qs.getValue(q.str("id")).obj("source_record")
         val names=q.array("kp_ids").map { kps.getValue(it.jsonPrimitive.content).str("name") }
         append("${n+1}. ${raw.str("question").replace('\n',' ')}\n   放到：${names.joinToString("；").ifBlank { "暂无对应知识点，待核对" }}。理由：${q.str("reason")}\n")
+        append("   来源：${q.str("id")}；内容哈希 ${qs.getValue(q.str("id")).str("content_hash")}；建议 KP ID：${q.array("kp_ids").joinToString()}。依据为上述已异厂复核提议，尚未本人确认。\n")
         if(q.str("warning").isNotBlank()) append("   待核对：${q.str("warning")}\n")
     }
     append("\n## 概念与建议先学的内容\n\n")
@@ -180,21 +213,49 @@ fun confirmationSheet(mapping:JsonObject,proposal:JsonObject?):String = buildStr
         val k=v.jsonObject
         val names=k.array("prerequisite_ids").map { kps.getValue(it.jsonPrimitive.content).str("name") }
         append("- ${kps.getValue(k.str("id")).str("name")}\n  概念：${k.array("concept_ids").joinToString("、") { concepts.getValue(it.jsonPrimitive.content) }}；建议先学：${names.joinToString("；").ifBlank { "无" }}\n")
+        append("  来源 KP ${k.str("id")}；conceptIds=${k.array("concept_ids").joinToString()}；前置 IDs=${k.array("prerequisite_ids").joinToString()}；依据：${k.str("reason").ifBlank { "已异厂复核的模型提议；仅为学习顺序建议" }}。\n")
     }
-    append("\n## 简答评分标准抽查\n\n11 月 3 日之后合并询问：归属和学习顺序有没有需要调整的？以下 10 道简答的评分标准是否合理？\n\n")
+    append("\n## 无法自动识别的历史回答\n\n下列回答保留原文，不推断大小写或替你选择；字母仅用于对照当时选项。\n\n")
+    mapping.array("legacy_attempts").forEach { v ->
+        val raw=v.jsonObject.obj("source_record");val q=parseText(raw.str("question_json")).jsonObject
+        if(isChoice(q) && choiceAnswer(q,raw.str("user_answer"))==JsonNull) {
+            append("- ${q.str("question").ifBlank { q.str("prompt") }}\n  原回答：${raw.str("user_answer")}\n")
+            append("  来源：${v.jsonObject.str("id")}；建议值：保持未解析（answer=null），不自动把 B/c 改成选项 ID。依据：原回答不能通过严格答案映射，需对照原选项。\n")
+            choiceEntries(q).forEach { (letter,text) -> append("  $letter：$text\n") }
+        }
+    }
+    append("\n## 简答评分标准抽查\n\n预演通过后合并询问：归属和学习顺序有没有需要调整的？以下 10 道简答的评分标准是否合理？\n\n")
     val short=qs.values.filter { it.obj("source_record").str("question_type")=="short_answer" }
     val sample=if(short.size<=10) short else (0..9).map { short[it*(short.size-1)/9] }
     sample.forEachIndexed { n,row ->
         val raw=row.obj("source_record")
-        append("${n+1}. ${raw.str("question")}\n\n")
+        append("${n+1}. ${raw.str("question")}\n\n来源：${row.str("id")}；内容哈希 ${row.str("content_hash")}。\n\n")
         val rubric=raw["rubric"] ?: raw["grading_rubric"] ?: raw["marking_criteria"] ?: raw["explanation"]
         val rubricText=when(rubric) { is JsonPrimitive -> rubric.contentOrNull;null -> null;else -> canonical(rubric) }
-        append("源采分点（尚待本人抽查）：${rubricText ?: "源题没有独立评分标准，待生成并异厂复核"}\n\n")
+        append("建议采分点（沿用源 rubric/grading_rubric/marking_criteria，缺失则以源 explanation 作待核对草案，未生成分值、未认证评分键）：${rubricText ?: "源题没有独立评分标准，待生成并异厂复核"}\n\n依据：以上源字段原文，暂不推断满分或分配权重；本人抽查后再激活。\n\n")
     }
+    append("\n## 五个选项及字母依赖解析的统一核对\n\n建议：五个选项原样保留，以稳定 optionId 表示答案；解析和原始字母映射原样归档。展示须经盲审或使用原字母映射，状态仍为 UNREVIEWED。\n\n")
+    qs.values.filter { isChoice(it.obj("source_record")) }.forEach { row ->
+        val raw=row.obj("source_record");val mapped=mapChoiceQuestion(raw)
+        if(choiceEntries(raw).size==5 || Regex("[A-E]").containsMatchIn(raw.str("explanation"))) {
+            append("- 来源：${row.str("id")}；选项数 ${choiceEntries(raw).size}；源哈希 ${row.str("content_hash")}\n")
+            append("  题干：${raw.str("question").ifBlank { raw.str("prompt") }}\n")
+            choiceEntries(raw).forEach { (letter,text) -> append("  $letter：$text\n") }
+            append("  原解析：${raw.str("explanation")}\n  建议：原文归档，待盲审或按原字母映射展示。\n  建议正确 optionId：${mapped["correctOptionId"] ?: JsonNull}；状态：未复核，不进入题池或成绩。\n\n")
+        }
+    }
+    append("\n## 历史已通过时间的近似说明\n\n建议：保留 legacy_passed，solid=false；发生时间优先用同 KP 的 last_review_at。这是最近复习时间的近似，不能当作真实首次通过时刻；缺失时依次取 evidence.created_at、mastery updated_at、快照时间。依据为源时间证据，绝不用导入当天填充。\n\n")
+    val schedules=mapping.array("legacy_schedule").map { it.jsonObject }.associateBy { it.str("kp_id") }
+    mapping.array("legacy_passed").forEach { value ->
+        val row=value.jsonObject;val kp=row.str("id").substringAfterLast(':')
+        append("- 来源：${row.str("id")}；建议时间来源：${schedules[kp]?.obj("source_record")?.get("last_review_at") ?: "缺失，按以上确定顺序回落"}；历史时间为近似值。\n")
+    }
+    append("\n本文仅准备一次确认材料，尚未发出确认请求；正式增量源快照若改变题目或 KP 内容，必须重新提议并异厂复核，再替换本文对应项。\n")
 }
 
-fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?):String = buildString {
-    append("# 学习记录搬家：确认草稿\n\n11 月 3 日之后再确认，目前没有导入学习记录。\n\n")
+fun confirmationSummary(mapping:JsonObject,proposal:JsonObject?,confirmation:JsonObject?=null):String = buildString {
+    if(confirmation!=null) { append(confirmationReceipt(mapping,requireNotNull(proposal),confirmation));return@buildString }
+    append("# 学习记录搬家：确认草稿\n\n隔离副本预演通过后再确认，正式库目前没有导入学习记录。\n\n")
     val counts=mapping.obj("counts")
     append("保留 ${counts.str("passed")} 个已通过、${counts.str("attempts")} 条旧作答、${counts.str("schedules")} 条复习、${counts.str("notes")} 条笔记。旧作答只展示，不计入新成绩；${counts.str("original_types_missing")} 项缺失的原类型保留未知。\n\n")
     if(proposal==null) { append("模型提议和异厂复核尚未齐全。\n");return@buildString }

@@ -8,6 +8,10 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.core.view.WindowCompat
 import com.coach.client.PairedCredentials
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +43,7 @@ import java.util.UUID
 
 class CoachActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var usageReporter: com.coach.client.UsageReporter? = null
     private var transport: HttpLedgerTransport? = null
     private var tutor: TutorClient? = null
     private var jank: JankStats? = null
@@ -50,7 +55,10 @@ class CoachActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // `--es coachUrl http://<tailHost>:<port>` 仅用于在不同端口起隔离服务端做验收；默认走配置里的地址。
-        val serverUrl=coachServerUrl(intent.getStringExtra("coachUrl"))
+        val requestedUrl = intent.getStringExtra("coachUrl")
+        val serverUrl = coachServerUrl(requestedUrl, packageName)
+        val reminder = ReviewReminder(applicationContext).also { it.configure(serverUrl) }
+        Log.i("CoachUrl", "package=$packageName extra=${requestedUrl ?: "<empty>"} resolved=$serverUrl")
         val store=KeystoreCredentials(this,serverUrl)
         setContent {
             val dark = isSystemInDarkTheme()
@@ -61,11 +69,13 @@ class CoachActivity : ComponentActivity() {
                 }
             }
             CoachTheme(dark) {
-                PairingGate(store,serverUrl) { credentials ->
-                    if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
-                    else {
-                        val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
-                        CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"))
+                Box(Modifier.semantics { testTagsAsResourceId = true }) {
+                    PairingGate(store,serverUrl) { credentials ->
+                        if(BuildConfig.COACH_COURSE.isBlank()) CoachNotice("课程还没有装好，请稍后重开。")
+                        else {
+                            val controller=remember(credentials.deviceId) { createController(serverUrl,credentials) }
+                            CoachApp(controller, initialKp = intent.getStringExtra("openKp"), initialAutoStart = intent.getBooleanExtra("autoStart", false), initialDraft = intent.getStringExtra("draft"), initialTab = runCatching { com.coach.ui.AppTab.valueOf(intent.getStringExtra("tab").orEmpty()) }.getOrDefault(com.coach.ui.AppTab.TODAY), settings = { ReminderSettings(reminder) })
+                        }
                     }
                 }
             }
@@ -77,10 +87,13 @@ class CoachActivity : ComponentActivity() {
 
     private fun createController(serverUrl: String, credentials: PairedCredentials): CoachController {
         val db = ClientDatabase(AndroidSqliteDriver(ClientDatabase.Schema, this, "coach-client.db"))
+        val reporter = com.coach.client.UsageReporter(serverUrl, credentials.deviceId, credentials.token)
+        usageReporter = reporter
+        val telemetry = com.coach.client.UsageTelemetry(db, System::currentTimeMillis, reporter::send)
         val http = HttpLedgerTransport(serverUrl, credentials.deviceId, credentials.token)
         val sync = SyncEngine(db, credentials.deviceId, http, listOf(BuildConfig.COACH_COURSE), { UUID.randomUUID().toString() }, ::sha256Hex)
         // 首字样本进 logcat（tag CoachTtft），总验收按它算 p50。
-        val model = TutorModel(System::currentTimeMillis) { s ->
+        val model = TutorModel(System::currentTimeMillis, telemetry) { s ->
             Log.i("CoachTtft", """{"thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""")
         }
         // Content-free end/snapshot hashes let acceptance compare reconnect output with the ledger.
@@ -96,9 +109,9 @@ class CoachActivity : ComponentActivity() {
                 }
             }
         }
-        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源。
+        // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源，只多一层去抖（断线持续 0.7 秒才出现，见 steadyConnected）。
         scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
-        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model)
+        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model, telemetry)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)
         math = mathHttp
         transport = http
@@ -111,6 +124,9 @@ class CoachActivity : ComponentActivity() {
             courseId = BuildConfig.COACH_COURSE, sync = sync, tutor = client,
             formatClock = { clock.format(Date(it)) },
             math = com.coach.ui.MathAssets(mathHttp),
+            course = com.coach.client.CourseHttp(serverUrl, credentials.deviceId, credentials.token, BuildConfig.COACH_COURSE),
+            // `--ei essayLimitSec 120`: a short timed essay, to watch the auto hand-in without waiting 25 minutes.
+            essayLimitSec = intent.getIntExtra("essayLimitSec", com.coach.domain.Essay.TIME_LIMIT_SEC).coerceIn(60, 3600),
         )
         return controller
     }
@@ -138,6 +154,11 @@ class CoachActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        tutor?.telemetry?.record("open")
+    }
+
     override fun onPause() {
         reportJank()
         super.onPause()
@@ -154,6 +175,7 @@ class CoachActivity : ComponentActivity() {
 
     override fun onDestroy() {
         jank?.isTrackingEnabled = false
+        usageReporter?.close()
         tutor?.close()
         math?.close()
         transport?.close()
@@ -165,12 +187,21 @@ class CoachActivity : ComponentActivity() {
 }
 
 /** The acceptance override only selects another port on the configured Mac. */
-internal fun coachServerUrl(requested: String?): String {
+internal fun coachServerUrl(requested: String?, packageName: String = "com.coach.android"): String {
     val configured = "http://${BuildConfig.COACH_TAIL_HOST}:${BuildConfig.COACH_PORT}"
-    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
-    return requested.takeIf { candidate -> runCatching {
+    val accepted = if (BuildConfig.DEBUG) requested?.takeIf { candidate -> runCatching {
         val uri = java.net.URI(candidate)
         uri.scheme == "http" && uri.host == BuildConfig.COACH_TAIL_HOST && uri.port in 1..65535 &&
             uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null && uri.rawPath.orEmpty() in setOf("", "/")
-    }.getOrDefault(false) } ?: configured
+    }.getOrDefault(false) } else null
+    // A card package must not fall back to the production port when the extra is missing or rejected.
+    if (packageName != "com.coach.android") {
+        val port = accepted?.let { java.net.URI(it).port }
+        if (accepted == null || port == 18791 || port == 8791 || port == 8790) {
+            error("Refusing production default for $packageName; coachUrl=${requested ?: "<empty>"}")
+        }
+        return accepted
+    }
+    if (!BuildConfig.DEBUG || requested.isNullOrBlank()) return configured
+    return accepted ?: configured
 }

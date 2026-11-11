@@ -1,15 +1,16 @@
 package com.coach.ui
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.testTag
 import com.coach.client.*
 
 /** 选项点按区最小高度（dp）。验收按 ≥56dp 量。 */
@@ -43,14 +44,18 @@ internal fun QuizGroupFooter(group: QuizGroup, kp: KpRow, c: CoachController, vi
 }
 
 @Composable
-internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolean, selected: String?, math: MathAssets, onSelect: (String) -> Unit) {
-    Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boolean, selected: String?, math: MathAssets, onFirstDraw: () -> Unit = {}, onSelect: (String) -> Unit) {
+    var headerVisible by remember(card.attemptId) { mutableStateOf(false) }
+    val trace=if(PoolTrace.enabled && number==1) Modifier.onGloballyPositioned {
+        val bounds=it.boundsInWindow();headerVisible=bounds.width>0 && bounds.height>0
+    }.drawWithContent { drawContent();if(headerVisible) onFirstDraw() } else Modifier
+    Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(if (com.coach.ui.v7.LocalDeskMetrics.current.inner) 14.dp else 0.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("第 $number / $total 题", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text("第 $number / $total 题", modifier=trace, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (card.untaught) StatusChip("这点还没讲过", MaterialTheme.colorScheme.tertiary)
             }
-            Markdown(card.stem, true, "q:${card.attemptId}", math)
+            Box(Modifier.testTag("study-stem-${card.attemptId}")) { QuizText(card.stem, "q:${card.attemptId}", math, MaterialTheme.typography.titleMedium) }
             val shown = card.answer ?: selected
             if (card.options.isEmpty()) {
                 OutlinedTextField(value = shown.orEmpty(), onValueChange = onSelect, readOnly = locked,
@@ -60,29 +65,15 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             card.options.forEach { (letter, text) ->
                 val isMine = shown == letter
                 val cardGrade = card.grade
-                // After a wrong answer the right option is marked the same way a right answer is (green frame and ✓), so nobody has to hunt for it.
+                // After a wrong answer, the right option uses the same green wash and check mark as a correct selection.
                 val isRight = cardGrade != null && !cardGrade.correct && correctLetterOf(cardGrade.feedback) == letter
-                val wrongPick = cardGrade != null && !cardGrade.correct && isMine
-                val border = when {
-                    cardGrade != null && isMine -> if (cardGrade.correct) successColor() else MaterialTheme.colorScheme.error
-                    isRight -> successColor()
-                    isMine -> MaterialTheme.colorScheme.primary
-                    else -> MaterialTheme.colorScheme.outlineVariant
+                val optionVerdict = when {
+                    isRight -> true
+                    isMine && cardGrade != null -> cardGrade.correct
+                    else -> null
                 }
-                Surface(
-                    shape = MaterialTheme.shapes.small,
-                    border = BorderStroke(if (isMine || isRight) 2.dp else 1.dp, border),
-                    color = when {
-                        wrongPick -> MaterialTheme.colorScheme.errorContainer
-                        isMine -> MaterialTheme.colorScheme.primaryContainer
-                        else -> MaterialTheme.colorScheme.surface
-                    },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = OPTION_MIN_HEIGHT).selectable(selected = isMine, enabled = !locked, role = Role.RadioButton) { onSelect(letter) },
-                ) {
-                    Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(if ((isMine && card.grade == null) || isRight || (isMine && card.grade?.correct == true)) "✓ $letter" else if (wrongPick) "✗ $letter" else letter, style = MaterialTheme.typography.titleMedium)
-                        Box(Modifier.weight(1f)) { Markdown(text, true, "o:${card.attemptId}:$letter", math) }
-                    }
+                com.coach.ui.v7.AnswerOption(letter, isMine, optionVerdict, !locked, modifier = Modifier.testTag("study-option-${card.attemptId}-$letter"), onClick = { onSelect(letter) }) {
+                    QuizText(text, "o:${card.attemptId}:$letter", math)
                 }
             }
             card.grade?.let { grade ->
@@ -94,6 +85,23 @@ internal fun QuizCardView(number: Int, total: Int, card: QuizCard, locked: Boole
             }
         }
     }
+}
+
+private val QUIZ_ORDERED_PREFIX = Regex("^\\d+[.)]\\s")
+
+/** Plain question paragraphs need no Markdown parser or formula effects on their first frame. */
+@Composable
+internal fun QuizText(text: String, key: String, math: MathAssets, style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.bodyLarge) {
+    // Deliberately conservative: any potential Markdown, math, URL, entity or indentation
+    // goes through the existing renderer. Keep its exact body style and full-width layout.
+    val plain = remember(text) {
+        text.isNotEmpty() && !text.first().isWhitespace() && text.any { it.isLetterOrDigit() } &&
+            !text.startsWith("- ") && !QUIZ_ORDERED_PREFIX.containsMatchIn(text) &&
+            !text.contains("www.", ignoreCase = true) &&
+            text.all { it.isLetterOrDigit() || it in " ，。；：？！、（）“”‘’％%,;=/.'?!-()" }
+    }
+    if (plain) Text(text, Modifier.fillMaxWidth(), style = style)
+    else MaterialTheme(typography = MaterialTheme.typography.copy(bodyLarge = style)) { Markdown(text, true, key, math) }
 }
 
 /** The server's stock wrong-answer sentence ("回答错误，正确答案是 B。", from `choiceFeedback`) names the right letter; the card uses it to mark that option. */

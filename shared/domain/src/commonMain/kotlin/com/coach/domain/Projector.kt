@@ -18,7 +18,9 @@ private data class Attempt(val posed: Event, var submitted: Event? = null, var g
     val question get() = posed.payload.str("questionId")
     val seq get() = submitted?.seq ?: Long.MAX_VALUE
     val ratio get() = grade?.let { it.num("score").toDouble() / it.num("max", 1).coerceAtLeast(1) } ?: 0.0
-    val pass get() = ratio >= 0.8
+    /** A right answer the learner marked as a guess is not evidence that the point is known. */
+    val guessed get() = submitted?.payload?.flag("guessed") == true
+    val pass get() = ratio >= 0.8 && !guessed
 }
 
 /** Ordered ledger fold. Arrival order is irrelevant: seq is authoritative, including late reviews.
@@ -28,12 +30,13 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val events = input.distinctBy { it.id }.sortedWith(compareBy<Event> { it.seq }.thenBy { it.id })
     require(events.map { it.courseId }.distinct().size <= 1) { "Project one course at a time" }
     require(events.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
-    val effectiveZone = zone ?: events.lastOrNull { it.type == "course_configured" && it.schema == 1 }?.payload?.str("timeZone") ?: "Europe/London"
+    val effectiveZone = zone ?: courseTimeZone(events)
     val quickThreads = events.filter { it.type == "quick_ask_opened" }.mapNotNull { it.threadId }.toSet()
     val kpTitles = mutableMapOf<String,String>()
     val quickAsks = mutableMapOf<Long, QuickAskThread>()
     val taughtConceptIds = sortedSetOf<String>()
     val explainedKpIds = sortedSetOf<String>()
+    val startedKpIds = sortedSetOf<String>()
     val attempts = mutableMapOf<String, Attempt>()
     val byQuestion = mutableMapOf<String, MutableList<Attempt>>()
     val keys = mutableMapOf<String, String>()
@@ -47,17 +50,20 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val solidSums = mutableMapOf<String, Double>()
     val solidConstructed = mutableMapOf<String, Int>()
     val review = mutableMapOf<String, Review>()
+    val revisit = mutableMapOf<String, Long>()
     val journal = mutableMapOf<Long, Journal>()
     val firstReview = mutableMapOf<Pair<String,Long>, String>()
     val outline = mutableListOf<Kp>()
+    val activeKpIds = linkedSetOf<String>()
     val overrides = mutableMapOf<String, String>()
     val legacy = mutableSetOf<String>()
     val pending = mutableMapOf<String, Attempt>()
     val orphans = mutableListOf<String>()
     val unsupported = mutableSetOf<String>()
     val weights = mutableMapOf<String, Int>()
+    var weightsScope = ""
     var current: String? = null
-    var examDay: Long? = null
+    var studyScope: StudyScope? = null
     var previousTime: Long? = null
     var previousDay: Long? = null
     val seenIdem = mutableSetOf<String>()
@@ -69,25 +75,25 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         journal[day] = block(journal[day] ?: Journal())
         if (processingType != "journal_summarized") journalLatest[day] = processingSeq
     }
-    fun cap(day: Long, interval: Int): Int {
-        val days = examDay?.minus(day) ?: return interval
-        return if (days > 0) interval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1)) else interval
-    }
-    fun due(day: Long, interval: Int): Long {
-        val exam=examDay
-        return if(exam!=null && exam>day) minOf(day+interval,exam-1) else day+interval
-    }
+    fun due(day: Long, interval: Int): Long = day + interval
     fun schedule(kp: String, day: Long, result: String) {
         val old = review[kp] ?: return
         if (old.lastReviewDay == day) return
         val interval = when(result) { "PASS" -> floor(old.intervalDays * old.ease).toInt().coerceAtLeast(1); "NEEDS_WORK" -> (old.intervalDays / 2).coerceAtLeast(1); else -> 1 }
         val ease = round((when(result) { "PASS" -> (old.ease + .1).coerceAtMost(3.0); "NEEDS_WORK" -> (old.ease - .15).coerceAtLeast(1.3); else -> (old.ease - .2).coerceAtLeast(1.3) }) * 1000) / 1000
-        val n = cap(day, interval)
+        val n = interval
         review[kp] = old.copy(dueDay = due(day,n), intervalDays = n, ease = ease,
-            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day)
+            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day, snoozedUntilDay = null)
         updateJournal(day) { j -> when(result) { "PASS" -> j.copy(reviewPass = j.reviewPass + 1); "NEEDS_WORK" -> j.copy(reviewNeedsWork = j.reviewNeedsWork + 1); else -> j.copy(reviewFail = j.reviewFail + 1) } }
         mastery[kp] = (mastery[kp] ?: Mastery()).copy(needsRepair = result != "PASS")
     }
+    /** A mainline choice whose key nobody has checked never counts as a mistake; it is still looked at again. */
+    fun unverifiedMainline(a: Attempt) = a.posed.payload.flag("mainline") && keys[a.question] != "VERIFIED"
+    fun reviewPass(a: Attempt) = a.pass && !unverifiedMainline(a)
+    // Key validity becomes known at the change event (DESIGN §2.2), never backdated to the answer.
+    // Existing earlier deadlines still win; only a newly requested look-again uses this effective day.
+    fun lookAgainDay(a: Attempt, event: Event) = if (event.type == "question_key_changed")
+        maxOf(a.day, logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)) else a.day
     fun graded(a: Attempt): Boolean = a.grade != null && !a.uncertain &&
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
@@ -98,7 +104,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         val mc = a.posed.payload.str("format") == "SINGLE_CHOICE"
         return !a.assisted && purpose in strictPurposes &&
             (!mc || purpose in timedPurposes) &&
-            !(a.submitted!!.payload.flag("offline") && purpose in timedPurposes)
+            !((a.submitted!!.payload.flag("offline") || a.submitted!!.payload.flag("overtime")) && purpose in timedPurposes)
     }
     fun refresh(kp: String, event: Event, changed: Attempt? = null) {
         val old = mastery[kp] ?: Mastery()
@@ -156,31 +162,46 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         mastery[kp] = Mastery(passed, passedBy,
             if (!old.passed && passed) event.seq else if (passed) old.passedAtSeq else null,
             solid, old.formerlySolid || (old.solid && !solid),
-            old.needsRepair || (changed != null && changed.submitted != null && graded(changed) && !changed.pass && old.passed),
+            old.needsRepair || (changed != null && changed.submitted != null && graded(changed) && !changed.pass && old.passed && !unverifiedMainline(changed)),
             tail.map { it.id }, support, progress, revokedSeq, reason, solidLatch)
         val day = logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)
         if (!old.passed && passed) {
-            val n = cap(day, if (solid) 3 else 1)
+            val n = if (solid) 3 else 1
             review.putIfAbsent(kp, Review(due(day,n), n))
             updateJournal(day) { it.copy(newlyPassed = (it.newlyPassed + kp).distinct()) }
         }
         if (!old.solid && solid) {
             updateJournal(day) { it.copy(newlySolid = (it.newlySolid + kp).distinct()) }
-            val n = cap(day, 3)
+            val n = 3
             review[kp]?.let { review[kp] = it.copy(dueDay = due(day,n), intervalDays = n) }
         }
         if (!passed) review.remove(kp)
         if (changed != null && graded(changed) && !changed.voided && passed) {
             val isReview = changed.posed.payload.flag("review")
-            if (isReview && firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
+            // An unchecked mainline key only asks for another look; it cannot pass or fail a spaced review.
+            if (!isReview || unverifiedMainline(changed)) {
+                if (!reviewPass(changed)) review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(lookAgainDay(changed, event),1))) }
+            } else if (firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
                 schedule(kp, changed.day, if (changed.pass) "PASS" else if (changed.ratio >= .5) "NEEDS_WORK" else "FAIL")
-            } else if (!isReview && !changed.pass) {
-                review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(changed.day,1))) }
             }
+        }
+    }
+    /** A missed or guessed mainline choice on a point not yet passed is looked at again the next day, alongside spaced review;
+     * the first graded answer on that point from the due day on settles it. Passed points use the review entry instead.
+     * An answer against an unchecked key is no evidence either way, so it always asks for another look and never settles one. */
+    fun revisitAfter(a: Attempt, event: Event) {
+        if (a.submitted == null || a.voided || !graded(a)) return
+        val pass = reviewPass(a)
+        for (kp in a.kps) {
+            if (mastery[kp]?.passed == true) { revisit.remove(kp); continue }
+            val dueDay = revisit[kp]
+            if (dueDay != null && a.day >= dueDay) { if (a.scheduled.add("revisit:$kp")) { if (pass) revisit.remove(kp) else revisit[kp] = a.day + 1 } }
+            else if (!pass && a.posed.payload.flag("mainline") && a.scheduled.add("mark:$kp")) revisit[kp] = minOf(dueDay ?: Long.MAX_VALUE, lookAgainDay(a, event) + 1)
         }
     }
     fun refreshAttempt(a: Attempt, e: Event) {
         for (kp in a.kps) refresh(kp, e, a)
+        revisitAfter(a, e)
         val correct = graded(a) && !a.voided && a.pass
         if (a.submitted != null && correct != a.correctCounted) {
             updateJournal(a.day) { it.copy(correct = it.correct + if (correct) 1 else -1) }
@@ -195,7 +216,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         for(kp in a.kps) firstQuestion.add("$kp:${a.question}")
         fingerprintTimes.getOrPut(a.posed.payload.str("fingerprint")) { mutableListOf() }.add(a.answerTime)
     }
-    for (raw in events) {
+    for (raw in effectiveHistoryEvents(events)) {
         if (!seenIdem.add(raw.idemKey)) continue
         val e = upcasters.upcast(raw)
         if (e == null) { unsupported.add(raw.type); continue }
@@ -213,16 +234,38 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         }
         if (e.type != "journal_summarized") journalLatest[day] = e.seq
         when (e.type) {
+            "study_scope_set" -> studyScope = if (p.num("week") > 0) StudyScope(e.id, p.num("week").toInt(), p.strings("kpIds")) else null
+            "study_scope_advanced" -> studyScope?.let { scope ->
+                val index = scope.kpIds.indexOf(p.str("kpId"))
+                if (scope.id == p.str("scopeId") && index >= scope.cursor) studyScope = scope.copy(cursor = index + 1)
+            }
             "quick_ask_opened" -> quickAsks[p.num("day")] = QuickAskThread(requireNotNull(e.threadId), e.courseId, p.num("day"), p.str("kpId").ifBlank { null })
             "outline_revised" -> {
+                (p["knowledgePoints"] as? JsonArray)?.let { points ->
+                    activeKpIds.clear()
+                    for (v in points) {
+                        val point = v as? JsonObject ?: continue
+                        val id = point.str("id", point.str("kpId"))
+                        if (id.isNotBlank()) {
+                            activeKpIds.add(id)
+                            point.str("title", point.str("name")).takeIf { it.isNotBlank() }?.let { kpTitles[id] = it }
+                        }
+                    }
+                }
                 for (v in (p["ops"] as? JsonArray).orEmpty()) {
                     val o = v.jsonObject; val id = o.str("kpId", o.str("id"))
+                    when (o.str("op", "add")) {
+                        "add" -> if (id.isNotBlank()) activeKpIds.add(id)
+                        "retire", "remove", "delete" -> activeKpIds.remove(id)
+                    }
                     o.str("title").takeIf { it.isNotBlank() }?.let { kpTitles[id] = it }
                     val i = outline.indexOfFirst { it.id == id }
                     when(o.str("op", "add")) {
                         "add", "setPrereq", "retire" -> {
                             val old = outline.getOrNull(i) ?: Kp(id)
-                            val value = old.copy(prereqs = if (o.containsKey("prereqs")) o.strings("prereqs") else old.prereqs, retired = old.retired || o.str("op") == "retire")
+                            // add 表示该点回到活动大纲：重新加入的点复活；setPrereq/move 不改退休状态。
+                            val retired = when (o.str("op", "add")) { "add" -> false; "retire" -> true; else -> old.retired }
+                            val value = old.copy(prereqs = if (o.containsKey("prereqs")) o.strings("prereqs") else old.prereqs, retired = retired)
                             if (i < 0) outline.add(value) else outline[i] = value
                         }
                         "move" -> if (i >= 0) { val kp = outline.removeAt(i); outline.add(o.num("index").toInt().coerceIn(0,outline.size), kp) }
@@ -231,6 +274,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                 }
             }
             "kp_opened" -> {
+                p.str("kpId").takeIf { it.isNotBlank() }?.let(startedKpIds::add)
                 p.str("title").takeIf { it.isNotBlank() }?.let { kpTitles[p.str("kpId")] = it }
                 if (p.str("via") !in setOf("REVIEW", "QUICK")) current = p.str("kpId")
                 updateJournal(day) { it.copy(opened = (it.opened + p.str("kpId")).distinct()) }
@@ -238,9 +282,11 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             "explanation_delivered" -> {
                 taughtConceptIds.addAll(p.strings("conceptIds"))
                 explainedKpIds.add(p.str("kpId"))
+                p.str("kpId").takeIf { it.isNotBlank() }?.let(startedKpIds::add)
                 updateJournal(day) { it.copy(delivered = (it.delivered + p.str("kpId")).distinct()) }
             }
             "question_posed", "legacy_attempt" -> {
+                startedKpIds.addAll(p.strings("kpIds").filter { it.isNotBlank() })
                 if(p.num("policyVersion",1) != 1L) unsupported.add("policy:${p.num("policyVersion")}")
                 val a = Attempt(if (e.type == "legacy_attempt") e.copy(payload = JsonObject(p + ("origin" to JsonPrimitive("LEGACY")))) else e)
                 attempts[a.id] = a; byQuestion.getOrPut(a.question) { mutableListOf() }.add(a)
@@ -299,13 +345,15 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             "review_completed" -> {
                 val kp = p.str("kpId")
                 if (mastery[kp]?.passed == true) schedule(kp, day, p.str("result"))
+                else if (revisit.containsKey(kp)) { if (p.str("result") == "PASS") revisit.remove(kp) else revisit[kp] = day + 1 }
             }
-            "review_snoozed" -> review[p.str("kpId")]?.let { val due = p.num("untilDay"); review[p.str("kpId")] = it.copy(dueDay = due(day,cap(day,(due-day).toInt().coerceAtLeast(1)))) }
-            "exam_set" -> {
-                examDay = if (p.containsKey("examDay")) p.num("examDay") else logicalDay(p.num("examAt"),effectiveZone)
-                for ((kp,r) in review.toMap()) { val n = cap(day,(r.dueDay-day).toInt().coerceAtLeast(1)); review[kp] = r.copy(dueDay = minOf(r.dueDay,due(day,n)), intervalDays = cap(day,r.intervalDays)) }
+            "review_snoozed" -> {
+                val until = maxOf(day + 1, p.num("untilDay"))
+                review[p.str("kpId")]?.let { review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until) }
+                if (revisit.containsKey(p.str("kpId"))) revisit[p.str("kpId")] = until
             }
-            "exam_weights_set" -> { weights.clear(); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
+            // exam_set only changes the overlay; normal intervals must survive postponement/removal.
+            "exam_weights_set" -> { weights.clear(); weightsScope = p.str("scope"); for ((kp,v) in (p["weights"] as? JsonObject).orEmpty()) { require(v.jsonPrimitive.int >= 0); weights[kp] = v.jsonPrimitive.int } }
             "note_saved" -> updateJournal(day) { it.copy(notes = it.notes + 1) }
             "journal_edited" -> updateJournal(p.num("day",day)) { it.copy(rev = p.num("rev"), manual = p.str("content", it.manual)) }
             "journal_summarized" -> updateJournal(p.num("day",day)) { it.copy(summaryFromSeq = p.num("fromSeq"), summary = p.str("summary"), summaryModel = p.str("model").ifBlank { null }, summaryNotice = p.str("notice").ifBlank { null }) }
@@ -319,12 +367,15 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         summaryStale = value.summaryFromSeq?.let { (journalLatest[day] ?: 0) > it } ?: false)
     val next = outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") && it.prereqs.all { x -> mastery[x]?.passed == true } }
         ?: outline.firstOrNull { !it.retired && mastery[it.id]?.passed != true && overrides[it.id] !in setOf("SKIP","DEFER") }
-    val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") }?.kps?.firstOrNull()
+    val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") && !it.posed.payload.flag("drill") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
-    return Projection(timeZone = effectiveZone, kpTitles = kpTitles.ordered(), quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
-        mastery = mastery.ordered(), review = review.ordered(), journal = journal.ordered(),
-        taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds,
-        coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum()),
+    val exam = courseExamDay(events, effectiveZone)
+    val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
+    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
+        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
+        revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
+        taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds, startedKpIds = startedKpIds,
+        coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum(), weightsScope),
         orphanedAttempts = orphans, unsupportedTypes = unsupported.sorted(), requiresServerSnapshot = unsupported.isNotEmpty())
 }
 

@@ -5,3 +5,6 @@ actual fun logicalDay(epochMillis: Long, zone: String): Long {
     val local = Instant.ofEpochMilli(epochMillis).atZone(ZoneId.of(zone))
     return (if (local.hour < 4) local.toLocalDate().minusDays(1) else local.toLocalDate()).toEpochDay()
 }
+
+actual fun calendarDay(epochMillis: Long, zone: String): Long =
+    Instant.ofEpochMilli(epochMillis).atZone(ZoneId.of(zone)).toLocalDate().toEpochDay()

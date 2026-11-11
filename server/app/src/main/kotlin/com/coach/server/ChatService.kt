@@ -22,8 +22,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -80,12 +83,37 @@ class ChatService(
     val hub = ChatHub(log)
     val tutor = TutorMachine(actor)
     val journals = JournalService(actor, bridge)
+    val reader = ReaderExplanation(actor, bridge)
     private val preparation = LessonPreparation(actor,bridge,packsDirectory)
     private val supplyLock = Mutex()
     private val waitingPools = ConcurrentHashMap.newKeySet<String>()
 
-    suspend fun prepareLessons(course: String, kps: List<String>): JsonObject = supplyLock.withLock {
-        json("results" to JsonArray(kps.map { preparation.prepare(course,it) }))
+    suspend fun prepareLessons(course: String, kps: List<String>, questionsOnly: Boolean = false): JsonObject = supplyLock.withLock {
+        json("results" to JsonArray(kps.map { if(questionsOnly) preparation.prepareQuestions(course,it) else preparation.prepare(course,it) }))
+    }
+
+    suspend fun reportClientTtft(device: String, course: String, thread: String,
+        kind: String, milliseconds: Long, model: String, fallback: Boolean) {
+        if (course.isBlank() || thread.isBlank() || kind !in setOf("next", "test", "ask", "answer", "fallback") || milliseconds !in 0..600_000) return
+        val (kp, kpType) = actor.execute {
+            val kpId = events(course).lastOrNull { it.type == "kp_opened" && it.threadId == thread }
+                ?.payload?.str("kpId") ?: return@execute null to null
+            val metadata = events(course).asReversed().firstNotNullOfOrNull { event ->
+                (event.payload["knowledgePoints"] as? JsonArray).orEmpty()
+                    .mapNotNull { it as? JsonObject }
+                    .firstOrNull { it.str("id") == kpId }
+            }
+            val type = (metadata?.get("examFormats") as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonPrimitive)?.content }
+                .map { it.uppercase() }
+                .distinct()
+                .sorted()
+                .joinToString("+")
+            kpId to type
+        }
+        if (kp.isNullOrBlank()) return
+        fun safe(value: String) = value.replace(Regex("[^A-Za-z0-9_.:-]"), "_").take(80)
+        log("COACH client_ttft device=${safe(device)} course=${safe(course)} kp=${safe(kp)} kp_type=${safe(kpType.orEmpty())} kind=$kind ms=$milliseconds model=${safe(model)} fallback=$fallback")
     }
 
     fun startSupplyWorker(): Job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
@@ -99,6 +127,7 @@ class ChatService(
         }
     }
     private val sessions = ConcurrentHashMap<String, Session>()
+    internal fun activityQuiet(): Boolean = sessions.isEmpty() && waitingPools.isEmpty()
 
     class Session(
         val messageId: String,
@@ -107,11 +136,15 @@ class ChatService(
         val model: String,
         val fallback: Boolean,
         val plan: TutorReplyPlan? = null,
+        internal val trace: FirstWordTrace? = null,
+        internal val receivedAt: Long = System.nanoTime(),
     ) {
         @Volatile var phase: String = "teach"
         @Volatile var lookupAllowed: Boolean = false
         @Volatile var sourceProcess: Process? = null
+        var restrictedGuard: RestrictedSourceGuard? = null
         @Volatile var handle: BridgeStreamHandle? = null
+        @Volatile var lessonHandle: BridgeStreamHandle? = null
         @Volatile var forcedStatus: String? = null
         @Volatile var forcedReason: String? = null
         @Volatile var lastDeltaAtMs: Long = -1
@@ -126,6 +159,7 @@ class ChatService(
             forcedStatus = status
             forcedReason = reason
             handle?.cancel()
+            lessonHandle?.cancel()
             sourceProcess?.destroyForcibly()
         }
 
@@ -133,12 +167,32 @@ class ChatService(
             this.handle = handle
             if (forcedStatus != null) handle.cancel()
         }
+
+        /** The second upstream of a staged reply; cancelling the session stops both. */
+        fun attachLesson(handle: BridgeStreamHandle) {
+            this.lessonHandle = handle
+            if (forcedStatus != null || lessonStopped) handle.cancel()
+        }
+
+        @Volatile var lessonStopped: Boolean = false
+        fun stopLesson() {
+            lessonStopped = true
+            lessonHandle?.cancel()
+        }
     }
 
     /** 追问/问答：立刻返回 messageId，流在后台推进（每帧经 [hub] 广播）。 */
-    suspend fun ask(threadId: String, courseId: String, question: String, pack: String = ""): String {
+    suspend fun ask(threadId: String, courseId: String, question: String, pack: String = "",
+        clientMsgId: String = UUID.randomUUID().toString(), device: String = "server", receivedAt: Long = System.nanoTime()): String {
+        val saved = actor.execute { saveChatInput(courseId,threadId,question,device,clientMsgId) }
+        val user = actor.execute { chatInputFrame(saved.messageId) }
+        if (!saved.inserted) {
+            // A replay acknowledges the original send; it must not advance the tutor or call AI again.
+            hub.emit(user)
+            hub.emit(history(courseId,threadId))
+            return ""
+        }
         val quick = actor.execute { requireChatThread(courseId,threadId); isQuickThread(courseId,threadId) }
-        if (quick) actor.execute { quickQuestion(courseId,threadId,question) }
         progressIntent(question)?.let { intent ->
             val (message, today) = actor.execute {
                 tutorTransaction {
@@ -151,68 +205,127 @@ class ChatService(
             }
             val session = Session(message,threadId,courseId,"",false)
             hub.emit(JsonObject(startFrame(session) + json("source" to "projection","fromSeq" to today.fromSeq)))
+            hub.emit(user)
             hub.emit(json("t" to "msg.delta","msg" to message,"threadId" to threadId,"i" to 1,"text" to today.answer(intent)))
             hub.emit(endFrame(session,"complete",null,today.answer(intent).length))
             return message
         }
+        hub.emit(user)
         if (quick) {
             val anchor = actor.execute { snapshot(courseId).projection.quickAsks.values.single { it.threadId == threadId } }
-            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null)
+            return startReply(threadId,courseId,question,pack + "\nQuick ask: course=$courseId, anchored KP=${anchor.kpId.orEmpty()}. This context is read-only. Do not assess mastery or advance the lesson.",null,saved.messageId,receivedAt)
         }
         when (tutorIntent(question)) {
-            TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack,allowExample=false)
-            TutorIntent.TEST_ME -> return nextStep(threadId,courseId,pack,true)
+            TutorIntent.NEXT_STEP -> return nextStep(threadId,courseId,pack,allowExample=false,receivedAt=receivedAt)
+            TutorIntent.TEST_ME -> return nextStep(threadId,courseId,pack,true,receivedAt=receivedAt)
             null -> Unit
         }
         val plan = if (tutor.hasThread(courseId,threadId)) tutor.followup(courseId,threadId) else null
-        return startReply(threadId,courseId,question,pack,plan)
+        return startReply(threadId,courseId,question,pack,plan,saved.messageId,receivedAt)
     }
 
-    suspend fun quickAsk(courseId: String, question: String, pack: String = ""): Pair<QuickAskThread, String> {
-        val thread = actor.execute { openQuickAsk(courseId) }
+    suspend fun quickAsk(courseId: String, question: String, pack: String = "",
+        clientMsgId: String = UUID.randomUUID().toString(), device: String = "server", receivedAt: Long = System.nanoTime()): Pair<QuickAskThread, String> {
+        val thread = actor.execute { quickAskForInput(courseId,device,clientMsgId) }
         hub.emit(json("t" to "quick.thread","threadId" to thread.threadId,"courseId" to courseId,"day" to thread.day,"kpId" to thread.kpId))
-        return thread to ask(thread.threadId,courseId,question,pack)
+        return thread to ask(thread.threadId,courseId,question,pack,clientMsgId,device,receivedAt)
     }
 
-    suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String) {
-        publish(tutor.open(courseId,threadId,kpId,concepts,title),threadId,courseId)
+    suspend fun history(courseId: String, threadId: String): JsonObject {
+        val stored = actor.execute { chatHistory(courseId,threadId) }
+        val messages = (stored["messages"] as JsonArray).map { item ->
+            val row = item.jsonObject
+            val live = sessions[row.str("msg")]
+            if (live == null) row else {
+                val cursor = live.cursor
+                JsonObject(row + json("text" to cursor.text,"i" to cursor.index,"status" to "streaming","phase" to live.phase))
+            }
+        }
+        return JsonObject(stored + ("messages" to JsonArray(messages)))
+    }
+
+    suspend fun openTutor(threadId: String, courseId: String, kpId: String, concepts: Set<String>, title: String, review: Boolean = false) {
+        publish(tutor.open(courseId,threadId,kpId,concepts,title,review),threadId,courseId)
     }
 
     /** Button actions retain §2.6's recap; text intents pass allowExample=false (§5.8). */
-    suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false, allowExample: Boolean = true): String {
+    suspend fun nextStep(threadId: String, courseId: String, pack: String = "", testUntaught: Boolean = false, allowExample: Boolean = true, receivedAt: Long = System.nanoTime()): String {
+        val traceStarted=System.nanoTime()
         var outcome = tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
+        if(System.getenv("COACH_POOL_TRACE")=="1") log("COACH_POOL thread=$threadId stage=posed elapsed_ms=${(System.nanoTime()-traceStarted)/1_000_000.0} cards=${outcome.cards.size}")
         if(outcome.waitingForPool) {
             val kp = actor.execute { events(courseId).lastOrNull { it.type=="kp_opened" && it.threadId==threadId }?.payload?.str("kpId") }
             if(kp!=null) {
                 runCatching { preparation.ensure(courseId,kp) }
-                outcome=tutor.next(courseId,threadId,testUntaught,allowExample=allowExample)
-                if(waitingPools.add(threadId)) scope.launch {
+                // Do not call next twice: a fast refill could otherwise publish the same group twice.
+                tutor.resumePool(courseId,threadId)?.let { outcome=it }
+                if(outcome.waitingForPool && actor.execute {
+                    supplyJobs(courseId,kp).any { it.kind in setOf("gen_mcq","blind_review") }
+                }) outcome=outcome.copy(poolMessage="正在准备题目（约 30 秒，含独立复核；重试可能更久）")
+                if(outcome.waitingForPool && waitingPools.add(threadId)) scope.launch {
                     try {
+                        var previous = ""
+                        var batches = 1
                         repeat(360) {
                             delay(500)
-                            val available=actor.execute { poolAvailable(courseId,kp) }
-                            if(available>=3) { publish(tutor.next(courseId,threadId,testUntaught,allowExample=allowExample),threadId,courseId);return@launch }
-                            if(actor.execute { supplyJobs(courseId,kp).isEmpty() }) {
+                            tutor.resumePool(courseId,threadId)?.let {
+                                publish(it,threadId,courseId); return@launch
+                            }
+                            if(!tutor.poolWaitActive(courseId,threadId)) return@launch
+                            val jobs=actor.execute { supplyJobs(courseId,kp).filter { it.kind in setOf("gen_mcq","blind_review") } }
+                            if(jobs.isEmpty()) {
+                                // A partial blind review can leave fewer than one full group.
+                                if(batches < 4) {
+                                    batches++
+                                    preparation.ensure(courseId,kp)
+                                    if(actor.execute { supplyJobs(courseId,kp).isNotEmpty() }) return@repeat
+                                }
                                 hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
-                                    "phase" to "pool_failed","text" to "题池暂空，补题未成功，可以重试。"));return@launch
+                                    "phase" to "pool_failed","text" to "题目准备未成功，请重试。已通过复核的题目会保留。"));return@launch
+                            }
+                            val states=actor.execute { jobs.map { it to jobState(it.id)?.first } }
+                            val phase=when {
+                                states.any { it.first.kind=="blind_review" && it.second=="running" } -> "pool_reviewing"
+                                states.any { it.first.subject.flag("retryMalformed") } -> "pool_retrying"
+                                states.any { it.second=="running" } -> "pool_generating"
+                                else -> "pool_queued"
+                            }
+                            val available=actor.execute { poolAvailable(courseId,kp) }
+                            val text=when(phase) {
+                                "pool_reviewing" -> "正在独立复核题目"
+                                "pool_retrying" -> "上一轮未通过检查，正在换一种方式重新出题"
+                                "pool_generating" -> "正在生成题目"
+                                else -> "正在排队准备题目"
+                            } + "（已有 $available 道通过复核）"
+                            if(previous!=text) {
+                                hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                                    "phase" to phase,"text" to text));previous=text
                             }
                         }
+                        hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                            "phase" to "pool_failed","text" to "准备题目用时较长，请稍后重试。已通过复核的题目会保留。"))
+                    } catch(e: kotlinx.coroutines.CancellationException) { throw e }
+                    catch(e: Exception) {
+                        log("COACH pool wait failure=${e.javaClass.simpleName}")
+                        hub.emit(json("t" to "tutor.progress","threadId" to threadId,"courseId" to courseId,
+                            "phase" to "pool_failed","text" to "准备题目中断，请重试。"))
                     } finally { waitingPools.remove(threadId) }
                 }
             }
         }
         publish(outcome,threadId,courseId)
-        return outcome.plan?.let { startReply(threadId,courseId,"请讲解当前知识点。",pack,it) }.orEmpty()
+        if(System.getenv("COACH_POOL_TRACE")=="1") log("COACH_POOL thread=$threadId stage=emitted elapsed_ms=${(System.nanoTime()-traceStarted)/1_000_000.0}")
+        return outcome.plan?.let { startReply(threadId,courseId,"请讲解当前知识点。",pack,it,receivedAt=receivedAt) }.orEmpty()
     }
 
     suspend fun configureTutor(threadId: String, courseId: String, groupSize: Int?, mode: TeachingMode?) {
         publish(tutor.settings(courseId,threadId,groupSize,mode),threadId,courseId)
     }
 
-    suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String) {
+    suspend fun explain(threadId: String, courseId: String, mode: TeachingMode, pack: String, receivedAt: Long = System.nanoTime()) {
         val outcome = tutor.explain(courseId,threadId,mode)
         publish(outcome,threadId,courseId)
-        startReply(threadId,courseId,"请按指定模式讲解。",pack,outcome.plan)
+        startReply(threadId,courseId,"请按指定模式讲解。",pack,outcome.plan,receivedAt=receivedAt)
     }
 
     suspend fun submitGroup(threadId: String, courseId: String, group: String, answers: Map<String,String>, device: String, submission: String) {
@@ -220,6 +333,10 @@ class ChatService(
     }
 
     private fun publish(outcome: TutorOutcome, thread: String, course: String) {
+        if (outcome.plan?.explanation == true) {
+            hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,
+                "state" to "PREPARE","nextLabel" to outcome.nextLabel))
+        }
         hub.emit(json("t" to "tutor.state","threadId" to thread,"courseId" to course,"state" to outcome.state.name,"nextLabel" to outcome.nextLabel))
         if (outcome.cards.isNotEmpty()) hub.emit(json("t" to "tutor.cards","threadId" to thread,"courseId" to course,
             "groupId" to outcome.cards.first().payload.str("groupId"),"cards" to JsonArray(outcome.cards.map { it.payload })))
@@ -229,25 +346,51 @@ class ChatService(
             "phase" to "pool_queued","text" to (outcome.poolMessage ?: "题池暂空，补题尚未运行")))
     }
 
-    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?): String {
+    private suspend fun startReply(threadId: String, courseId: String, question: String, pack: String, plan: TutorReplyPlan?, userMessageId: String? = null, receivedAt: Long = System.nanoTime()): String {
         val messageId = UUID.randomUUID().toString()
-        val sourcePack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
-        val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mode==TeachingMode.CURRENT)
+        val suppliedPack = pack.ifBlank { storedTeachingPack(threadId, courseId) }
+        val sourcePack = if (plan?.explanation == true) {
+            preparation.pack(courseId, plan.context.kp).ifBlank { suppliedPack }
+        } else suppliedPack
+        val prepared = if(plan?.explanation==true && plan.firstExplanation && plan.mistakes.isEmpty() && plan.mode==TeachingMode.CURRENT)
             preparation.cached(courseId,plan.context.kp,sourcePack) else null
-        val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan)
+        val session = Session(messageId, threadId, courseId, prepared?.model ?: BridgeClient.CLAUDE, false, plan, FirstWordTrace(messageId, null, receivedAt), receivedAt)
         sessions[messageId] = session
-        val recent = actor.execute { recentTurns(threadId) }
+        val recent = actor.execute { recentTurns(threadId,beforeMessage=userMessageId) }
         actor.execute { beginStreamingMessage(threadId, messageId, session.model) }
         hub.emit(startFrame(session))
-        if(prepared!=null) { scope.launch { deliverPrepared(session,prepared.text) };return messageId }
+        if(prepared!=null) { session.trace?.prepared(); scope.launch { deliverPrepared(session,prepared.text) };return messageId }
         val enriched = if (plan?.explanation != true && enrichSourcePages) {
             val hits = actor.execute { searchSourcePages(courseId,question) }
-            SourcePack.prepare(sourcePack,hits).render()
-        } else sourcePack.take(40_000)
+            val selected = SourcePack.prepare(sourcePack,hits)
+            if (selected.restricted.isNotEmpty()) session.restrictedGuard = RestrictedSourceGuard(
+                selected.restricted.map { it.text }, selected.browsable.map { it.text } + selected.legacy)
+            selected.render()
+        } else if (plan?.explanation == true) {
+            val fallback = json("name" to plan.context.title, "concepts" to plan.context.concepts)
+            when {
+                // Teaching new concepts always needs the source pages, mistakes or not.
+                plan.mistakes.isEmpty() || plan.conceptIds.isNotEmpty() -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback)
+                // Every wrong answer carries a reviewed explanation: the reasoning is already in the request. Source pages invite the model to deliberate before its first character (measured 1.4 s without them, 4-7 s with them).
+                plan.reviewedBasis -> LessonPreparation.headerOnly(sourcePack)
+                else -> preparation.boundedInput(courseId, plan.context.kp, sourcePack, fallback, LessonPreparation.MAX_RETEACH_INPUT_CHARS)
+            }
+        } else LessonPreparation.boundedInput(sourcePack,json("title" to question))
         session.lookupAllowed = allowSourceLookup && plan?.explanation != true && !sourceLookupProtected()
+        val recentTurns = recent.map { it.first to TutorOutputGuard.modelInput(it.second).let { text ->
+            if (plan?.mistakes?.isNotEmpty() == true) text.take(LessonPreparation.MAX_RETEACH_TURN_CHARS) else text } }
+        if (plan != null && plan.staged) {
+            // Part one needs no source pages (fast first character); part two teaches the new concepts from the pages.
+            val mistakesContext = listOf(TutorOutputGuard.modelInput(LessonPreparation.headerOnly(sourcePack)), plan.mistakeInstruction()).joinToString("\n")
+            val lessonContext = listOf(TutorOutputGuard.modelInput(enriched), plan.copy(mistakes = emptyList()).instruction(),
+                "The graded questions are explained in a separate part of this reply that is written in parallel; do not discuss them. Start directly with the new concepts.").joinToString("\n")
+            session.trace?.prepared()
+            scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), mistakesContext, recentTurns, lessonContext) }
+            return messageId
+        }
         val context = listOf(TutorOutputGuard.modelInput(enriched), plan?.instruction().orEmpty()).joinToString("\n")
-        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context,
-            recent.map { it.first to TutorOutputGuard.modelInput(it.second) }) }
+        session.trace?.prepared()
+        scope.launch(Dispatchers.IO) { run(session, TutorOutputGuard.modelInput(question), context, recentTurns) }
         return messageId
     }
 
@@ -273,6 +416,7 @@ class ChatService(
         publish(tutor.finish(plan,session.messageId,status==StreamStatus.COMPLETE,persist),session.threadId,session.courseId)
         session.finished.set(true);sessions.remove(session.messageId)
         hub.emit(endFrame(session,status,reason,text.length))
+        session.trace?.let { log(it.finish(status, null, null)) }
     }
 
     private suspend fun storedTeachingPack(threadId: String, courseId: String): String {
@@ -312,19 +456,22 @@ class ChatService(
         )
     }
 
-    private suspend fun run(session: Session, question: String, pack: String, recent: List<Pair<String, String>>) {
+    private suspend fun run(session: Session, question: String, pack: String, recent: List<Pair<String, String>>, lessonPack: String? = null) {
         val visibleText = StringBuilder()
         val rawAnswer = StringBuilder()
         val started = System.nanoTime()
         var lastPersist = started
         var visible = VisibleStream { drop ->
-            log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+            log("COACH visible-drop msg=${session.messageId} reason=${drop.reason}")
         }
         fun elapsedMs(): Long = (System.nanoTime() - started) / 1_000_000
 
-        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true) { attempt ->
+        fun newGuard() = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,streamSafePrefixes=true,restrictedSources=session.restrictedGuard) { attempt ->
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
+        var guard = newGuard()
+        // Text of finished parts of a staged reply; a guard revision only ever replaces what comes after it.
+        var completedPrefix = ""
         fun acceptFiltered(text: String) {
             val revision = guard.takeRevision()
             if (revision == null) {
@@ -334,31 +481,56 @@ class ChatService(
                 // Replace that prefix via the existing snapshot protocol; the letter itself never streams.
                 visible = VisibleStream()
                 visibleText.setLength(0)
+                visibleText.append(completedPrefix)
                 for (segment in visible.push(revision)) when (segment) {
                     is VisibleStream.Segment.Text -> visibleText.append(segment.text)
                     is VisibleStream.Segment.Math -> visibleText.append("\$\$").append(segment.tex).append("\$\$")
                 }
                 session.cursor = Session.Cursor(visibleText.toString(), session.cursor.index + 1)
+                session.trace?.visible(session.cursor.text)
                 hub.emit(json("t" to "msg.snapshot","msg" to session.messageId,"threadId" to session.threadId,
                     "i" to session.cursor.index,"text" to session.cursor.text,"status" to "streaming"))
             }
         }
+        var firstVisibleMs = -1L
+        var partOneEndMs = -1L
+        var lessonFirstDeltaMs = -1L
+        fun handleDelta(text: String) {
+            session.trace?.raw(text)
+            if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
+            val previous = session.cursor
+            acceptFiltered(guard.push(text))
+            if (session.cursor != previous && session.cursor.text.removePrefix(previous.text).isNotBlank()) {
+                session.lastDeltaAtMs = elapsedMs()
+                if (firstVisibleMs < 0) firstVisibleMs = session.lastDeltaAtMs
+            }
+            val now = System.nanoTime()
+            if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
+                lastPersist = now
+                // 每秒落库（§6）：写的是过滤后的可见正文与 (msg, i)
+                val cursor = session.cursor
+                scope.launch { actor.execute { updateStreamingMessage(session.messageId, cursor.text, cursor.index) } }
+            }
+        }
         val sink = object : BridgeStreamSink {
+            override fun onDelta(text: String, atMs: Long) = handleDelta(text)
+        }
+        // The lesson part of a staged reply streams in parallel with part one; its text waits here until part one is done.
+        val lessonLock = Any()
+        val lessonBuffer = StringBuilder()
+        var lessonReleased = false
+        val lessonSink = object : BridgeStreamSink {
             override fun onDelta(text: String, atMs: Long) {
-                if (rawAnswer.length < 100_000) rawAnswer.append(text.take(100_000 - rawAnswer.length))
-                val previous = session.cursor
-                acceptFiltered(guard.push(text))
-                if (session.cursor != previous && session.cursor.text.removePrefix(previous.text).isNotBlank()) {
-                    session.lastDeltaAtMs = elapsedMs()
-                }
-                val now = System.nanoTime()
-                if (now - lastPersist >= timings.persistEveryMs * 1_000_000) {
-                    lastPersist = now
-                    // 每秒落库（§6）：写的是过滤后的可见正文与 (msg, i)
-                    val cursor = session.cursor
-                    scope.launch { actor.execute { updateStreamingMessage(session.messageId, cursor.text, cursor.index) } }
+                synchronized(lessonLock) {
+                    if (lessonFirstDeltaMs < 0) lessonFirstDeltaMs = elapsedMs()
+                    if (lessonReleased) handleDelta(text) else lessonBuffer.append(text)
                 }
             }
+        }
+        fun releaseLesson() = synchronized(lessonLock) {
+            lessonReleased = true
+            if (lessonBuffer.isNotEmpty()) handleDelta(lessonBuffer.toString())
+            lessonBuffer.setLength(0)
         }
 
         val watchdog = scope.launch {
@@ -388,23 +560,72 @@ class ChatService(
             }
         }
 
+        fun internalFailure(error: Throwable) = BridgeResult.Failure(
+            reason = "internal: ${error.javaClass.simpleName}: ${error.message}",
+            terminal = null,
+            call = com.coach.ai.AiCall(
+                callId = UUID.randomUUID().toString(), task = "TEACH", requestedModel = session.model,
+                servedBy = null, status = "failed", ttftMs = null, durMs = elapsedMs(), queueMs = null,
+                physicalCalls = 0, requestId = null, inChars = 0, outChars = visibleText.length,
+                startedAt = java.time.Instant.now().toString(), error = error.message,
+            ),
+        )
+        val lessonStart = CompletableDeferred<Unit>()
+        val lessonJob = if (lessonPack == null) null else scope.async(Dispatchers.IO) {
+            try {
+                // Part one must reach the bridge first (a one-slot bridge serves in arrival order).
+                lessonStart.await()
+                delay(250)
+                if (session.lessonStopped || session.forcedStatus != null) throw java.util.concurrent.CancellationException("lesson part not needed")
+                bridge.streamChat(teachRequest(question, lessonPack, recent, session.model, session.lookupAllowed, "medium", false), lessonSink) { handle ->
+                    session.attachLesson(handle)
+                }
+            } catch (error: Exception) { internalFailure(error) }
+        }
         val result = try {
-            withContext(Dispatchers.IO) {
-                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed), sink) { handle ->
+            val first = withContext(Dispatchers.IO) {
+                session.trace?.bridge()
+                bridge.streamChat(teachRequest(question, pack, recent, session.model, session.lookupAllowed,
+                    if (lessonPack == null) session.plan?.effort ?: "medium" else "low",
+                    if (lessonPack == null) session.plan?.reviewedBasis == true else true), sink) { handle ->
                     session.attach(handle)
+                    lessonStart.complete(Unit)
                 }
             }
+            if (lessonJob == null) first
+            else if (first !is BridgeResult.Success || session.forcedStatus != null) {
+                session.stopLesson()
+                first
+            } else {
+                // Part one is complete: flush it, record its call, then release the lesson that has been waiting (or still streaming).
+                acceptFiltered(guard.finish())
+                for (segment in visible.finish()) emitSegment(session, segment, visibleText)
+                val partOne = visibleText.toString()
+                actor.execute { recordAiCall(callId = first.call.callId, task = first.call.task, requestedModel = first.call.requestedModel,
+                    servedBy = first.call.servedBy ?: session.model, ttftMs = first.call.ttftMs, durMs = first.call.durMs, inChars = first.call.inChars,
+                    outChars = partOne.length, status = first.terminal?.status ?: StreamStatus.COMPLETE, queueMs = first.call.queueMs, physicalCalls = first.call.physicalCalls) }
+                guard = newGuard()
+                visible = VisibleStream { drop ->
+                    log("COACH visible-drop msg=${session.messageId} reason=${drop.reason} excerpt=${drop.excerpt}")
+                }
+                emitSegment(session, VisibleStream.Segment.Text("\n\n"), visibleText)
+                completedPrefix = visibleText.toString()
+                partOneEndMs = elapsedMs()
+                releaseLesson()
+                val second = lessonJob.await()
+                // Server-clock timing of the pause between the two parts (the lesson text is visible once part one has ended and the lesson has started).
+                log("COACH staged msg=${session.messageId} first_visible_ms=$firstVisibleMs part_one_end_ms=$partOneEndMs lesson_first_delta_ms=$lessonFirstDeltaMs pause_ms=${(maxOf(lessonFirstDeltaMs, partOneEndMs) - partOneEndMs).coerceAtLeast(0)}")
+                if (second !is BridgeResult.Success && session.forcedStatus == null) {
+                    // Part one stays; the message ends truncated with a reason the client can offer a retry for.
+                    session.forcedStatus = StreamStatus.TRUNCATED
+                    session.forcedReason = "lesson_part_failed"
+                }
+                second
+            }
         } catch (error: Exception) {
-            BridgeResult.Failure(
-                reason = "internal: ${error.javaClass.simpleName}: ${error.message}",
-                terminal = null,
-                call = com.coach.ai.AiCall(
-                    callId = UUID.randomUUID().toString(), task = "TEACH", requestedModel = session.model,
-                    servedBy = null, status = "failed", ttftMs = null, durMs = elapsedMs(), queueMs = null,
-                    physicalCalls = 0, requestId = null, inChars = 0, outChars = visibleText.length,
-                    startedAt = java.time.Instant.now().toString(), error = error.message,
-                ),
-            )
+            session.stopLesson()
+            lessonStart.complete(Unit)
+            internalFailure(error)
         } finally {
             watchdog.cancel()
         }
@@ -465,7 +686,13 @@ class ChatService(
         } else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy ?: terminal?.servedBy))
-        log("COACH msg.end msg=${session.messageId} model=${session.model} status=$status reason=$reason chars=${content.length} ttft=${result.call.ttftMs} terminal=${terminal?.status} failure=${(result as? BridgeResult.Failure)?.reason}")
+        val rid = safeRequestId(result.call.requestId)
+        val traffic = terminal?.traffic?.takeIf { it in setOf("user", "test", "unknown") } ?: "unknown"
+        val source = terminal?.source?.takeIf { it in setOf("production", "unknown") } ?: "unknown"
+        val terminalStatus = terminal?.status?.takeIf { it in setOf("complete", "failed", "cancelled", "truncated") }
+        val failure = safeDiagnosticReason((result as? BridgeResult.Failure)?.reason)
+        log("COACH msg.end msg=${session.messageId} rid=${rid ?: "-"} traffic=$traffic source=$source model=${session.model} status=$status reason=${safeDiagnosticReason(reason)} chars=${content.length} ttft=${result.call.ttftMs} terminal=$terminalStatus failure=$failure")
+        session.trace?.let { log(it.finish(status, terminal?.queueMs, terminal?.ttftMs, rid)) }
         if (willFallback) fallback(session,question,pack)
     }
 
@@ -496,12 +723,14 @@ class ChatService(
                 session.sourceProcess = process
                 if (session.forcedStatus != null) process?.destroyForcibly()
             }
-            if (pack.pages.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
+            if (pack.browsable.isEmpty() || session.forcedStatus != null || sourceLookupProtected()) {
                 failure = "source_unavailable"
                 return
             }
             val gate = SourceCitationGate(pack.anchors)
-            val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false) { attempt ->
+            val restrictedGuard = if (pack.restricted.isEmpty()) null else RestrictedSourceGuard(
+                pack.restricted.map { it.text },pack.browsable.map { it.text })
+            val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),false,restrictedSources=restrictedGuard) { attempt ->
                 session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
             }
             val visible = VisibleStream()
@@ -527,7 +756,7 @@ class ChatService(
             }
             val request = com.coach.ai.ChatRequest(
                 task="SOURCE_LOOKUP",model=session.model,system=com.coach.ai.TeachPrompt.SYSTEM,
-                user="""Read only the supplied textbook pages. Answer the student's question using this source lookup.
+                user="""Use the browsable textbook pages to answer. Internal references must not be quoted or repeated.
                     |Write ONLY supplement paragraphs, separated by a blank line. End EVERY paragraph with its source anchor, e.g. 【S1】.
                     |Every quotation must be copied verbatim from the anchored page. No unsupported claims. No questions, grading, tools, JSON or lookup markers.
                     |Student question: ${TutorOutputGuard.modelInput(question)}
@@ -576,18 +805,20 @@ class ChatService(
      */
     private suspend fun fallback(previous: Session, question: String, pack: String) {
         val messageId = UUID.randomUUID().toString()
-        val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan)
+        val session = Session(messageId, previous.threadId, previous.courseId, fallbackModel, true, previous.plan, FirstWordTrace(messageId, previous.messageId, previous.receivedAt), previous.receivedAt)
+        session.restrictedGuard = previous.restrictedGuard
         sessions[messageId] = session
         actor.execute { beginStreamingMessage(previous.threadId, messageId, fallbackModel) }
         hub.emit(startFrame(session))
         val request = teachRequest(question, pack, emptyList(), fallbackModel, false, effort = null)
             .copy(stream = false)
-        val result = withContext(Dispatchers.IO) { bridge.chat(request) }
+        val result = withContext(Dispatchers.IO) { session.trace?.bridge(); bridge.chat(request) }
         val text = (result as? BridgeResult.Success)?.text.orEmpty()
+        session.trace?.raw(text)
         val visible = VisibleStream { drop ->
-            log("COACH visible-drop msg=$messageId reason=${drop.reason} excerpt=${drop.excerpt}")
+            log("COACH visible-drop msg=$messageId reason=${drop.reason}")
         }
-        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true) { attempt ->
+        val guard = TutorOutputGuard(session.plan?.pending.orEmpty(),session.plan?.firstExplanation == true,restrictedSources=session.restrictedGuard) { attempt ->
             session.plan?.let { plan -> runBlocking { tutor.leak(plan,attempt) } }
         }
         val segments = visible.push(guard.push(text) + guard.finish()) + visible.finish()
@@ -611,7 +842,8 @@ class ChatService(
         else actor.execute { tutorTransaction(persist) }
         sessions.remove(session.messageId)
         hub.emit(endFrame(session, status, reason, content.length, result.call.servedBy))
-        log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=$reason")
+        log("COACH fallback msg=$messageId model=$fallbackModel status=$status reason=${safeDiagnosticReason(reason)}")
+        session.trace?.let { log(it.finish(status, result.terminal?.queueMs, result.terminal?.ttftMs, result.call.requestId)) }
     }
 
     /**
@@ -623,6 +855,7 @@ class ChatService(
             if (segment.text.isEmpty()) session.cursor.index
             else {
                 text.append(segment.text)
+                session.trace?.visible(segment.text)
                 val cursor = Session.Cursor(text.toString(), session.cursor.index + 1)
                 session.cursor = cursor
                 hub.emit(json("t" to "msg.delta", "msg" to session.messageId, "i" to cursor.index, "text" to segment.text))
@@ -632,6 +865,7 @@ class ChatService(
         is VisibleStream.Segment.Math -> {
             // 落库用 Markdown 形态，重连拿到 snapshot 也能重新渲染公式
             text.append("$$").append(segment.tex).append("$$")
+            session.trace?.visible(segment.tex)
             val cursor = Session.Cursor(text.toString(), session.cursor.index + 1)
             session.cursor = cursor
             hub.emit(

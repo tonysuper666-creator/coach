@@ -6,12 +6,18 @@ import kotlinx.serialization.json.*
 
 private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only | --snapshot DIR]
     [--source DIR] [--staging DIR] [--out DIR] [--weights FILE]
-    [--seed-manifest FILE [--proposal FILE]]
+    [--seed-manifest FILE [--proposal FILE [--confirmation FILE]]]
        migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
        migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
+       migrate-deeptutor add-outline --input FILE --database OFFLINE_DIR
+       migrate-deeptutor rehearse --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE [--confirmation FILE] --out NEW_DIR
+       migrate-deeptutor rehearse-incremental --snapshot DIR --next-snapshot DIR --second-snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
+       migrate-deeptutor apply-confirmed --database DIR --backup NEW_DIR --snapshot DIR --seed-manifest FILE --proposal FILE --confirmation FILE --confirmation-sha256 SHA
+       migrate-deeptutor rollback-confirmed --database DIR --backup DIR
 Defaults: source ~/DeepTutor, staging ~/Coach/migrate-staging, out ~/Coach/migrate-out.
 seed-content defaults: data ~/Coach/data, corpus ~/Coach/corpus/ECNM10119-健康经济学/教材.
-No learning history is imported. See README for independent verification.
+rehearse writes learning history twice into a NEW isolated online backup, never into --coach-db.
+apply-confirmed requires an offline server, verified confirmation and a new backup directory. It does not activate services.
 """
 fun resolvedDestination(path: Path): Path {
     val absolute=path.toAbsolutePath().normalize()
@@ -27,6 +33,10 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 }
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
+    if(args.firstOrNull()=="add-outline") { outlineAdditionCommand(args.drop(1));return }
+    if(args.firstOrNull() in setOf("apply-confirmed","rollback-confirmed")) { formalImportCommand(args[0],args.drop(1));return }
+    if(args.firstOrNull()=="rehearse") { rehearseCommand(args.drop(1));return }
+    if(args.firstOrNull()=="rehearse-incremental") { incrementalRehearsalCommand(args.drop(1));return }
     // Keep the established corpus/manifest entry point used by TON-1095 and integration.
     // Explicit --database selects the structured CourseContent/blobs variant.
     if(args.firstOrNull()=="seed-content" && "--database" in args) {
@@ -58,13 +68,14 @@ fun main(args: Array<String>) {
     var i=0
     while(i<args.size) {
         val key=args[i++]
-        require(key in setOf("--dry-run", "--capture-only", "--source", "--staging", "--snapshot", "--out", "--weights", "--seed-manifest", "--proposal")) { "Unknown option: $key\n$USAGE" }
+        require(key in setOf("--dry-run", "--capture-only", "--source", "--staging", "--snapshot", "--out", "--weights", "--seed-manifest", "--proposal", "--confirmation")) { "Unknown option: $key\n$USAGE" }
         require(key !in options) { "Duplicate option: $key" }
         options[key] = if(key in setOf("--dry-run", "--capture-only")) "true" else args.getOrElse(i++) { error("Missing value for $key") }
     }
-    require(options.containsKey("--dry-run")) { "Only --dry-run is supported; no formal import is permitted\n$USAGE" }
+    require(options.containsKey("--dry-run")) { "Use --dry-run or an explicit subcommand\n$USAGE" }
     require(!(options.containsKey("--capture-only") && options.containsKey("--snapshot"))) { "Choose capture-only or an existing snapshot" }
     require(!options.containsKey("--proposal") || options.containsKey("--seed-manifest")) { "Proposal needs the existing seeded course manifest" }
+    require(!options.containsKey("--confirmation") || options.containsKey("--proposal")) { "Confirmation needs a reviewed proposal" }
     val home=Path.of(System.getProperty("user.home"))
     fun option(key:String, default:Path)= resolvedDestination(options[key]?.let(Path::of) ?: default)
     val source=option("--source",home.resolve("DeepTutor"))
@@ -80,18 +91,19 @@ fun main(args: Array<String>) {
     require(!out.startsWith(snap) && !snap.startsWith(out)) { "Output and captured snapshot must be separate" }
     val result=mapSnapshot(snap)
     val proposal=options["--proposal"]?.let { parseFile(Path.of(it)).jsonObject }
+    val confirmation=options["--confirmation"]?.let { parseFile(Path.of(it)).jsonObject }
     val plan=options["--seed-manifest"]?.let {
         val seed=parseFile(Path.of(it)).jsonObject
         require(seed.obj("exam_weights")==prepareSeed(snap).manifest.obj("exam_weights")) { "Existing per-KP exam weights differ from the source content plan" }
-        importPlan(result.mapping,seed,proposal)
+        importPlan(result.mapping,seed,proposal,confirmation)
     }
     require(plan!=null || !out.resolve("import-plan.json").exists()) { "Existing plan output requires --seed-manifest; use a new output directory for mapping only" }
     privateDir(out)
     out.resolve("mapping.json").writeText(canonical(result.mapping))
     out.resolve("report.md").writeText(result.report)
     out.resolve("proposal-input.json").writeText(canonical(proposalInput(result.mapping)))
-    out.resolve("confirmation.md").writeText(confirmationSummary(result.mapping,proposal))
-    out.resolve("confirmation-details.md").writeText(confirmationSheet(result.mapping,proposal))
+    out.resolve("confirmation.md").writeText(confirmationSummary(result.mapping,proposal,confirmation))
+    out.resolve("confirmation-details.md").writeText(confirmationSheet(result.mapping,proposal,confirmation))
     if(plan!=null) {
         out.resolve("import-plan.json").writeText(canonical(plan))
         val first=simulatePlan(plan);val second=simulatePlan(plan,first.state)

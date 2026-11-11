@@ -1,8 +1,14 @@
 package com.coach.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.dp
 import com.coach.domain.math.MathDelimiters
 import com.coach.ui.markdown.MarkdownContent
 import com.coach.ui.markdown.StreamingMarkdown
@@ -11,6 +17,47 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class MarkdownStructureTest {
+    @Test fun sealingPlainListsQuotesAndTablesKeepsTheirPixels() = runComposeUiTest {
+        val source = "## **重点**\n\n- 中文与 English 的长句在窄屏换行，保留 *强调* 与 `code`。\n- 价格是 \$100，另一件 \$200。\n\n> 引用里的 **粗体** 和长句也不能在封口时移动。\n\n| A | B |\n|---|---|\n| one | two |"
+        val blocks = StreamingMarkdown().append(source, true)
+        val sealed = mutableStateOf(false)
+        setContent {
+            MaterialTheme { Column(Modifier.width(240.dp).testTag("content")) {
+                blocks.forEach { MarkdownContent(it.copy(sealed = sealed.value), emptyMap()) }
+            } }
+        }
+        val before = onNodeWithTag("content").captureToImage().toAwtImage()
+        runOnIdle { sealed.value = true }
+        val after = onNodeWithTag("content").captureToImage().toAwtImage()
+        assertEquals(before.width, after.width)
+        assertEquals(before.height, after.height)
+        assertContentEquals(
+            before.getRGB(0, 0, before.width, before.height, null, 0, before.width),
+            after.getRGB(0, 0, after.width, after.height, null, 0, after.width),
+        )
+    }
+
+    @Test fun quizTextKeepsPlainContentAndRendersStructuredContent() = runComposeUiTest {
+        val math = MathAssets()
+        setContent {
+            MaterialTheme { Column {
+                QuizText("医疗支出为 50%，请选择合理解释。", "plain", math)
+                QuizText("It's a single-choice question, worth 1.5 marks.", "english", math)
+                QuizText("**重点**：保留格式", "bold", math)
+                QuizText("1. 先比较\n2. 再计算", "list", math)
+                QuizText("1. 单行列表", "single-list", math)
+            } }
+        }
+        onNodeWithText("医疗支出为 50%，请选择合理解释。").assertExists()
+        onNodeWithText("It's a single-choice question, worth 1.5 marks.").assertExists()
+        onNodeWithText("重点：保留格式").assertExists()
+        onAllNodes(hasText("**", substring = true)).assertCountEquals(0)
+        onAllNodesWithText("1.").assertCountEquals(2)
+        onNodeWithText("单行列表").assertExists()
+        onNodeWithText("先比较").assertExists()
+        onNodeWithText("再计算").assertExists()
+    }
+
     private val sample = "## 先估算再检验\n\n- 第一步：**算人均**医疗支出\n- 第二步：与 GDP 比较\n  - 注意单位\n\n1. 先写公式\n2. 再代入\n\n> 提示：别漏掉人口\n\n结论放在最后。"
 
     @Test fun listsAndHeadingsAreRenderedNotShownAsMarkdownSource() = runComposeUiTest {

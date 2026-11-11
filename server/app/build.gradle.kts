@@ -20,6 +20,9 @@ dependencies {
 }
 application { mainClass = "com.coach.server.MainKt" }
 tasks.test {
+    // Resolve after Kotlin has finished wiring test dependencies, including for opt-in replay tasks.
+    doFirst { systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath) }
+    systemProperty("coach.checkout", rootProject.projectDir.absolutePath)
     exclude("**/LiveChatTest*", "**/TutorLiveTest*")
     dependsOn(tasks.installDist)
     systemProperty("coach.serverBinary", layout.buildDirectory.file("install/app/bin/app").get().asFile.absolutePath)
@@ -28,7 +31,7 @@ tasks.test {
 // Opt-in: real CLI calls and local course material, never part of test/check.
 tasks.register<Test>("liveTest") {
     environment("COACH_TRAFFIC", "test")
-    description = "Real 8791 bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
+    description = "Real isolated bridge → Ktor → WS → shared client: first word, resume, cancel, interrupted stream"
     group = "verification"
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
@@ -40,7 +43,11 @@ tasks.register<Test>("liveTest") {
 }
 
 // All automated test traffic opts into the bridge test budget.
-tasks.withType<Test>().configureEach { environment("COACH_TRAFFIC", "test") }
+tasks.withType<Test>().configureEach {
+    environment("COACH_TRAFFIC", "test")
+    // Ledger-only child processes cannot accidentally fall back to the learner bridge.
+    environment("COACH_BRIDGE_URL", System.getenv("COACH_BRIDGE_URL") ?: "http://127.0.0.1:1")
+}
 
 tasks.register<Test>("tutorLive") {
     group = "verification"
@@ -77,4 +84,12 @@ tasks.register<JavaExec>("acceptanceReplay") {
     mainClass.set("com.coach.server.ReplayAcceptanceKt")
     workingDir(rootProject.projectDir)
     environment("COACH_TRAFFIC", "test")
+}
+
+// Explicit SQLite backup replay over the real WebSocket routes; no AI or production writes.
+tasks.register<JavaExec>("tutorMigrationReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.TutorMigrationReplayKt")
 }

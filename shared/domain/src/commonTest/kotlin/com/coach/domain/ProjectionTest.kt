@@ -16,18 +16,76 @@ private class Script {
     fun answer(id: String, score: Int = 10, purpose: String = "PRACTICE", format: String = "SINGLE_CHOICE",
         hints: Boolean = false, assisted: Boolean = false, status: String = "EXACT", question: String = id,
         fingerprint: String = question, origin: String = "COACH", keyState: String = "VERIFIED",
-        review: Boolean = false, offline: Boolean = false, kp: String = "kp") {
-        e("question_posed",json("attemptId" to id,"questionId" to question,"kpIds" to listOf(kp),"fingerprint" to fingerprint,"keyState" to keyState,"origin" to origin,"purpose" to purpose,"format" to format,"policyVersion" to 1,"review" to review))
+        review: Boolean = false, offline: Boolean = false, kp: String = "kp", mainline: Boolean = false, guessed: Boolean = false) {
+        e("question_posed",json("attemptId" to id,"questionId" to question,"kpIds" to listOf(kp),"fingerprint" to fingerprint,"keyState" to keyState,"origin" to origin,"purpose" to purpose,"format" to format,"policyVersion" to 1,"review" to review,"mainline" to mainline))
         if(hints) e("hint_revealed",json("attemptId" to id,"cause" to "LEAK"))
         if(assisted) e("followup_asked",json("pendingAttemptId" to id),"LEARNER","mac")
-        e("answer_submitted",json("attemptId" to id,"answer" to "synthetic answer","offline" to offline),"LEARNER")
+        e("answer_submitted",json("attemptId" to id,"answer" to "synthetic answer","offline" to offline,"guessed" to guessed),"LEARNER")
         e("attempt_graded",json("attemptId" to id,"score" to score,"max" to 10,"status" to status))
     }
     fun state() = project(events)
     fun mastery() = state().mastery["kp"] ?: Mastery()
+    fun revise(vararg ops: JsonObject) = e("outline_revised", json("ops" to JsonArray(ops.toList())))
 }
 
 class ProjectionTest {
+    @Test fun lateKeyDowngradeSchedulesFromTheChangeWithoutInventingOverdueDays() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (existingDue in listOf<Long?>(40, 14, null)) {
+            val s = Script()
+            s.revise(json("kpId" to "kp"))
+            val d0 = logicalDay(s.at, "Europe/London")
+            if (existingDue != null) {
+                s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+                s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to d0 + existingDue, "interval" to 40))
+            }
+            s.answer("old-right", mainline = true)
+            val before = s.state()
+            s.at += 20 * DAY
+            s.e("question_key_changed", json("questionId" to "old-right", "keyState" to key, "reason" to "synthetic recheck"))
+            val after = s.state()
+            val expected = d0 + minOf(existingDue ?: Long.MAX_VALUE, 21)
+            val actual = if (existingDue == null) after.revisit.getValue("kp") else after.review.getValue("kp").dueDay
+            assertEquals(expected, actual, "$key existingDue=$existingDue: no retroactive d1 deadline at d20")
+            assertEquals(existingDue != null, after.mastery.getValue("kp").passed)
+            assertFalse(after.mastery.getValue("kp").needsRepair)
+            assertEquals(before.journal, after.journal, "key review is not a new student answer or spaced-review failure")
+            assertEquals(after, project(s.events.reversed()), "replay preserves the effective change date")
+        }
+    }
+
+    @Test fun uncheckedMainlineOnlyBringsPassedPointsForwardRegardlessOfProvisionalGrade() {
+        for (key in listOf("UNREVIEWED", "REJECTED")) for (score in listOf(0, 10))
+            for (guessed in listOf(false, true)) for (review in listOf(false, true)) {
+                val s = Script()
+                s.revise(json("kpId" to "kp"))
+                s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+                val today = logicalDay(s.at, "Europe/London")
+                s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to today + 14, "intervalDays" to 14))
+                val before = s.state()
+                s.answer("unchecked", score = score, keyState = key, mainline = true, guessed = guessed, review = review)
+                val after = s.state()
+                val scenario = "$key score=$score guessed=$guessed review=$review"
+                assertEquals(before.mastery.getValue("kp"), after.mastery.getValue("kp"), scenario)
+                assertEquals(before.review.getValue("kp").copy(dueDay = today + 1), after.review.getValue("kp"), scenario)
+                assertContains(after.reviewsOn(today + 1), "kp", scenario)
+                assertTrue(after.revisit.isEmpty(), scenario)
+                assertEquals(0, after.journal.getValue(today).reviewFail, scenario)
+                assertEquals(0, after.journal.getValue(today).reviewPass, scenario)
+            }
+    }
+
+    @Test fun uncheckedMainlineCannotPostponeAnAlreadyDuePassedPoint() {
+        val s = Script()
+        s.revise(json("kpId" to "kp"))
+        s.e("legacy_passed", json("kpId" to "kp", "sourceRef" to "synthetic"))
+        val today = logicalDay(s.at, "Europe/London")
+        s.e("legacy_schedule", json("kpId" to "kp", "dueDay" to today, "intervalDays" to 14))
+        val before = s.state().review.getValue("kp")
+        s.answer("unchecked", keyState = "UNREVIEWED", mainline = true)
+        assertEquals(before, s.state().review.getValue("kp"))
+        assertContains(s.state().reviewsOn(today), "kp")
+    }
+
     @Test fun threeCorrectLatchAndSubsequentFailureRepairs() {
         val s=Script();s.answer("1");s.answer("2");assertFalse(s.mastery().passed)
         s.answer("3");assertTrue(s.mastery().passed);val seq=s.mastery().passedAtSeq
@@ -100,6 +158,48 @@ class ProjectionTest {
         s.e("kp_opened",json("kpId" to "kp","via" to "CONTINUE"));s.e("question_posed",json("attemptId" to "review","questionId" to "q","kpIds" to listOf("next"),"review" to true,"purpose" to "RECALL","offlinePack" to true))
         assertEquals("kp",s.state().position.continueTarget)
         repeat(3) { s.answer("$it") };assertEquals("next",s.state().position.continueTarget)
+    }
+    @Test fun reAddedKpReturnsToContinueWhileRetiredStaysOut() {
+        // 课程调整把知识点拿掉又重新加入：重新 add 的点必须回到后续学习候选，只 retire 的点不得进入。
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        assertEquals("a",s.state().position.continueTarget)
+        s.revise(json("op" to "retire","kpId" to "a"))
+        assertEquals("b",s.state().position.continueTarget)
+        s.revise(json("op" to "add","kpId" to "a"))
+        assertEquals("a",s.state().position.continueTarget)
+        // 重启与乱序/重复投递得到同一结论。
+        val expected=s.state().bytes()
+        assertEquals(expected,project(s.events.reversed()).bytes())
+        assertEquals(expected,project(s.events+s.events.take(2)).bytes())
+    }
+    @Test fun prereqAndMoveNeverReviveRetiredKp() {
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        s.revise(json("op" to "retire","kpId" to "a"))
+        s.revise(json("op" to "setPrereq","kpId" to "a","prereqs" to emptyList<String>()))
+        s.revise(json("op" to "move","kpId" to "a","index" to 1))
+        assertEquals("b",s.state().position.continueTarget)
+        // setPrereq 仍按契约改写前置：未掌握的前置挡住候选，重新 add 也不丢这条限制。
+        val p=Script()
+        p.revise(json("op" to "add","kpId" to "a"),json("op" to "add","kpId" to "b"))
+        p.revise(json("op" to "setPrereq","kpId" to "a","prereqs" to listOf("b")))
+        assertEquals("b",p.state().position.continueTarget)
+        p.revise(json("op" to "retire","kpId" to "a"))
+        p.revise(json("op" to "add","kpId" to "a"))
+        assertEquals("b",p.state().position.continueTarget)
+    }
+    @Test fun reAddedKpKeepsMasteryAndReviewEvidence() {
+        val s=Script()
+        s.revise(json("op" to "add","kpId" to "kp"),json("op" to "add","kpId" to "other"))
+        repeat(3) { s.answer("$it") }
+        val mastered=s.mastery();val scheduled=s.state().review.getValue("kp")
+        assertTrue(mastered.passed)
+        s.revise(json("op" to "retire","kpId" to "kp"))
+        s.revise(json("op" to "add","kpId" to "kp"))
+        assertEquals(mastered,s.mastery())
+        assertEquals(scheduled,s.state().review.getValue("kp"))
+        assertEquals("other",s.state().position.continueTarget)
     }
     @Test fun londonDstUsesCalendarBeforeFourAmBoundary() {
         // 2026-10-25 03:30 UTC is 03:30 local after the autumn clock change.

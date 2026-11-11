@@ -7,8 +7,10 @@ import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.protocol.*
 import com.coach.store.*
+import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
+import io.ktor.server.request.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.serialization.encodeToString
@@ -16,10 +18,13 @@ import kotlinx.serialization.json.*
 import java.nio.file.Files
 import java.net.HttpURLConnection
 import java.net.URI
+import java.sql.DriverManager
 import java.util.UUID
 import kotlin.test.*
 import kotlin.time.measureTime
+import kotlin.time.Duration.Companion.days
 
+@OptIn(kotlin.time.ExperimentalTime::class)
 class OfflinePackTest {
     private val token = "isolated-offline-pack-test-token-32-chars"
     private val options = (1..4).map { Option("o$it","Synthetic option $it") }
@@ -28,21 +33,46 @@ class OfflinePackTest {
         store.append("course","kp_opened",json("kpId" to "learning","title" to "Learning target"))
         repeat(count) { store.registerQuestion("q$it","course","ignored","SINGLE_CHOICE","Synthetic offline stem $it","VERIFIED","o${it%4+1}",options,listOf("review")) }
     }
-    private class Server(val store: LedgerStore) {
+    private class Server(val store: LedgerStore, beforeOfflinePack: suspend (String) -> Unit = {}) {
         val scope = CoroutineScope(SupervisorJob()+Dispatchers.Default)
         val actor = LedgerActor(scope,store)
-        val engine = embeddedServer(Netty,host="127.0.0.1",port=0) { ledgerRoutes(actor,MutableSharedFlow(extraBufferCapacity=64)) }.apply {
+        val engine = embeddedServer(Netty,host="127.0.0.1",port=0) {
+            intercept(ApplicationCallPipeline.Setup) {
+                if (call.request.path() == "/offline-pack") beforeOfflinePack(call.request.header("X-Coach-Device").orEmpty())
+            }
+            ledgerRoutes(actor,MutableSharedFlow(extraBufferCapacity=64))
+        }.apply {
             engineConfig.apply { connectionGroupSize=1; workerGroupSize=1; callGroupSize=2 }; start(wait=false)
         }
         suspend fun url() = "http://127.0.0.1:${engine.engine.resolvedConnectors().first().port}"
         suspend fun close() { engine.stopSuspend(0,1000);actor.close();scope.cancel() }
     }
-    private fun client(db: ClientDatabase, transport: LedgerTransport) = SyncEngine(db,"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256)
+    private val retentionClock=kotlin.time.TestTimeSource()
+    private fun client(db: ClientDatabase, transport: LedgerTransport) = SyncEngine(db,"phone",transport,listOf("course"),{ UUID.randomUUID().toString() },::sha256,retentionClock)
 
     @Test fun downloadDisconnectRestartGradeThirtyAndReconcileWithoutLossOrDuplicate() = runBlocking {
+        downloadAndReconcile(firstDevice="phone")
+    }
+
+    @Test fun tabletDownloadsFirstThenPhoneReconcilesWithoutLossOrDuplicate() = runBlocking {
+        downloadAndReconcile(firstDevice="tablet")
+    }
+
+    private suspend fun downloadAndReconcile(firstDevice: String) = coroutineScope {
         val root = Files.createTempDirectory("offline-pack-http-")
         val store = LedgerStore(root.resolve("server"));seed(store,70)
-        val server = Server(store)
+        val firstArrived = CompletableDeferred<Unit>()
+        val secondArrived = CompletableDeferred<Unit>()
+        val firstDownloaded = CompletableDeferred<Unit>()
+        val server = Server(store) { device ->
+            if (device == firstDevice) {
+                firstArrived.complete(Unit)
+                secondArrived.await()
+            } else {
+                secondArrived.complete(Unit)
+                firstDownloaded.await()
+            }
+        }
         var driver = JdbcSqliteDriver("jdbc:sqlite:${root.resolve("phone.sqlite")}")
         ClientDatabase.Schema.create(driver)
         val phone = HttpLedgerTransport(server.url(),"phone",token)
@@ -51,22 +81,52 @@ class OfflinePackTest {
             var db = ClientDatabase(driver)
             var sync = client(db,phone);sync.syncOnce()
             val before = sync.projection("course").position
-            val packs = awaitAll(async { phone.offlinePack("course",30) },async { tablet.offlinePack("course",30) })
-            val p = packs[0]
+            val transports = mapOf("phone" to phone, "tablet" to tablet)
+            val secondDevice = transports.keys.single { it != firstDevice }
+            val packs = withTimeout(10_000) {
+                val first = async {
+                    transports.getValue(firstDevice).offlinePack("course",30).also { firstDownloaded.complete(Unit) }
+                }
+                // The first HTTP request waits at the server until the second is also in flight.
+                firstArrived.await()
+                val second = async { transports.getValue(secondDevice).offlinePack("course",30) }
+                awaitAll(first,second).associateBy { it.deviceId }
+            }
+            val p = packs.getValue("phone")
             val phoneIds = p.groups.flatten().map { it.payload.str("questionId") }.toSet()
+            val tabletIds = packs.getValue("tablet").groups.flatten().map { it.payload.str("questionId") }.toSet()
             assertEquals(30,phoneIds.size)
-            assertTrue(phoneIds.intersect(packs[1].groups.flatten().map { it.payload.str("questionId") }.toSet()).isEmpty())
+            assertEquals(30,tabletIds.size)
+            assertTrue(phoneIds.intersect(tabletIds).isEmpty())
             assertEquals(p,phone.offlinePack("course",30))
             sync.downloadOfflinePack("course",30)
             assertEquals(before,sync.projection("course").position)
             assertFalse(LedgerJson.encodeToString(store.snapshot("course")).contains("correctOptionId"))
             val all = p.groups.flatten()
             val correct = p.keys.associate { it.attemptId to it.correctOptionId }
-            val allocated = (p.groups+packs[1].groups).flatten().map { event ->
-                val key = (p.keys+packs[1].keys).single { it.attemptId == event.payload.str("attemptId") }
-                (event.payload["letterMap"] as JsonObject).str(key.correctOptionId)
+            // Reservations have seq=0 and are not learning facts. Read committed pack/allocation order,
+            // rather than using client await order, timestamps, or sorting those synthetic event seqs.
+            val allocated = DriverManager.getConnection("jdbc:sqlite:${store.directory.resolve("coach.sqlite")}").use { connection ->
+                connection.createStatement().use { statement ->
+                    val storedPacks = statement.executeQuery("SELECT pack_json FROM offline_packs WHERE course_id='course' ORDER BY rowid").use { rows ->
+                        buildList { while (rows.next()) add(LedgerJson.decodeFromString<OfflineChoicePack>(rows.getString(1))) }
+                    }
+                    assertEquals(listOf(firstDevice,secondDevice),storedPacks.map { it.deviceId })
+                    assertEquals(packs,storedPacks.associateBy { it.deviceId })
+                    val letters = storedPacks.flatMap { pack -> pack.groups.flatten().map { event ->
+                        val key = pack.keys.single { it.attemptId == event.payload.str("attemptId") }
+                        (event.payload["letterMap"] as JsonObject).str(key.correctOptionId)
+                    } }
+                    val committed = statement.executeQuery("SELECT correct_letter FROM choice_allocations WHERE course_id='course' ORDER BY id").use { rows ->
+                        buildList { while (rows.next()) add(rows.getString(1)) }
+                    }
+                    assertEquals(letters,committed)
+                    committed
+                }
             }
+            assertEquals(60,allocated.size)
             assertTrue(allocated.windowed(3).all { it.distinct().size == 3 })
+            assertTrue(server.actor.execute { events("course") }.none { it.type=="question_posed" })
             all.forEach { assertNull(db.ledgerQueries.offlineKeyAfterLock(it.payload.str("attemptId")).executeAsOneOrNull()) }
             // Simulate unavailable HTTP without changing server state. UI read + submit use only SQLite.
             val disconnected = object : LedgerTransport by phone {
@@ -110,10 +170,13 @@ class OfflinePackTest {
             assertTrue(sync.offlineGroups("course",System.currentTimeMillis()).flatMap { it.cards }.all { it.grade?.note=="服务端已确认" })
             val seq=server.actor.execute { hello().lastSeq };sync.syncOnce();assertEquals(seq,server.actor.execute { hello().lastSeq })
             assertEquals(before.continueTarget,sync.projection("course").position.continueTarget)
-            server.actor.execute { backup(root.resolve("backup")) };sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
+            server.actor.execute { backup(root.resolve("backup")) };sync.syncOnce()
+            assertEquals(immutable,sync.retainedCommands())
+            retentionClock += 70.days
+            sync.syncOnce();assertTrue(sync.retainedCommands().isEmpty())
             val conn=URI(server.url()+"/offline-pack?size=10").toURL().openConnection() as HttpURLConnection
             assertEquals(401,conn.responseCode);conn.disconnect()
-            println("OFFLINE_HTTP n=30 agreement=30/30 lost=0 duplicateFirstAnswers=0 outboxPending=0 devicesOverlap=0 startMs=${openTime.inWholeMilliseconds} restart=true continueUnchanged=true")
+            println("OFFLINE_HTTP first=$firstDevice allocated=60 distinctTriples=58/58 n=30 agreement=30/30 lost=0 duplicateFirstAnswers=0 outboxPending=0 devicesOverlap=0 startMs=${openTime.inWholeMilliseconds} restart=true continueUnchanged=true")
         } finally { phone.close();tablet.close();driver.close();server.close();root.toFile().deleteRecursively() }
     }
 
@@ -147,6 +210,26 @@ class OfflinePackTest {
             assertNotEquals(p.packId,next.packId)
             assertTrue(next.groups.flatten().any { it.payload.str("questionId") in reserved })
             println("OFFLINE_RESERVATION groups=3+3+3+1 restart=true onlineOverlap=0 expiresAtBoundary=true released=20")
+        } finally { store.close();root.toFile().deleteRecursively() }
+    }
+
+    @Test fun lateAnswerFromAnExpiredPackSurvivesAnotherDevicesReservation() {
+        val root=Files.createTempDirectory("offline-late-sync-")
+        var now=1_800_000_000_000L
+        val store=LedgerStore(root) { now }
+        try {
+            seed(store,30)
+            val card=store.downloadOfflinePack("course","phone",10,1000).groups.first().first().payload
+            val letter=(card["letterMap"] as JsonObject).values.first().jsonPrimitive.content
+            val body=CommandBody("submit_answer","course",now,json("attemptId" to card.str("attemptId"),"answer" to letter,"offline" to true,"posedSnapshot" to card))
+            val bytes=canonicalJson(LedgerJson.encodeToJsonElement(body))
+            // The phone stays off the tailnet past the pack lifetime; meanwhile the desktop starts offline practice.
+            now+=1000
+            val desktop=store.downloadOfflinePack("course","tablet",10,1000)
+            assertTrue(desktop.groups.flatten().any { it.payload.str("questionId")==card.str("questionId") })
+            val receipt=store.command(WireCommand("phone","late-sync",bytes,sha256(bytes.toByteArray())))
+            assertEquals("OK",receipt.status,"phone answer rejected: ${receipt.error}")
+            assertTrue(store.events("course").any { it.type=="answer_submitted" && it.payload.str("attemptId")==card.str("attemptId") })
         } finally { store.close();root.toFile().deleteRecursively() }
     }
 

@@ -1,5 +1,5 @@
 CREATE TABLE replica(seq INTEGER PRIMARY KEY,course_id TEXT NOT NULL,event_json TEXT NOT NULL);
-CREATE TABLE outbox(command_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,payload_bytes TEXT NOT NULL,payload_sha256 TEXT NOT NULL,ack_seq INTEGER,receipt_status TEXT);
+CREATE TABLE outbox(command_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,payload_bytes TEXT NOT NULL,payload_sha256 TEXT NOT NULL,ack_seq INTEGER,receipt_status TEXT,backup_retained_millis INTEGER,backup_coverage_generation INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE sync_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 
 allEvents:
@@ -15,9 +15,13 @@ INSERT INTO outbox(command_id,device_id,payload_bytes,payload_sha256) VALUES(?,?
 ackCommand:
 UPDATE outbox SET ack_seq=?,receipt_status=? WHERE command_id=?;
 replayAfter:
-UPDATE outbox SET ack_seq=NULL,receipt_status=NULL WHERE ack_seq>? AND receipt_status<>'REJECTED';
+UPDATE outbox SET ack_seq=NULL,receipt_status=NULL,backup_retained_millis=NULL WHERE ack_seq>? AND receipt_status<>'REJECTED';
+markBackupCovered:
+UPDATE outbox SET backup_retained_millis=0,backup_coverage_generation=backup_coverage_generation+1 WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED' AND backup_retained_millis IS NULL AND (SELECT value FROM sync_meta WHERE key='epoch')=?;
+advanceBackupAge:
+UPDATE outbox SET backup_retained_millis=max(backup_retained_millis,?) WHERE command_id=? AND backup_coverage_generation=? AND backup_retained_millis IS NOT NULL;
 prune:
-DELETE FROM outbox WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED';
+DELETE FROM outbox WHERE ack_seq IS NOT NULL AND ack_seq<=? AND receipt_status<>'REJECTED' AND backup_retained_millis>=?;
 getMeta:
 SELECT value FROM sync_meta WHERE key=?;
 putMeta:
@@ -53,3 +57,14 @@ putLocalGrade:
 UPDATE offline_items SET local_correct=? WHERE attempt_id=?;
 offlineItems:
 SELECT i.*,p.expires_at,p.epoch FROM offline_items i JOIN offline_packs p USING(pack_id) WHERE p.course_id=? ORDER BY p.rowid,i.position;
+
+-- Diagnostic events never enter the learning ledger or its command receipts.
+CREATE TABLE usage_outbox(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
+usageBatch:
+SELECT * FROM usage_outbox ORDER BY rowid LIMIT 50;
+putUsage:
+INSERT OR IGNORE INTO usage_outbox VALUES(?,?);
+ackUsage:
+DELETE FROM usage_outbox WHERE id=?;
+trimUsage:
+DELETE FROM usage_outbox WHERE rowid NOT IN (SELECT rowid FROM usage_outbox ORDER BY rowid DESC LIMIT 5000);

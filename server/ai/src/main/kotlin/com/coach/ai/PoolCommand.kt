@@ -23,6 +23,8 @@ fun main(args: Array<String>): Unit = runBlocking {
         lock.use {
             val actor=LedgerActor(this,LedgerStore(data))
             try {
+                // Holding server.lock proves no live worker owns interrupted jobs.
+                actor.execute { recoverSuspension() }
                 val client=BridgeClient(BridgeConfig(requestTimeout=java.time.Duration.ofSeconds(90), testTraffic=true))
                 val worker=PoolWorker(actor,client,beforeCall={
                     // Owner removed local call-count/rate thresholds on 2026-10-31.

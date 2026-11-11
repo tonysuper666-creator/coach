@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""live 探针：真实 claude / codex CLI + 真实教材页，走 8791 的桥副本。
+"""live 探针：真实 claude / codex CLI + 真实教材页，走显式指定的独立测试桥端口。
 
 阶段（分开跑，每段都远小于 10 分钟）：
   claude       流式追问 n=20，量「客户端看到正文首字」的 p50/p90/max（不含 role/进度帧）
@@ -373,7 +373,7 @@ def report(path: Path) -> None:
     for ev in ("start", "stop"):
         ts = [r["at"][11:19] for r in bridges if r["event"] == ev]
         if ts:
-            print(f"8791 {'起' if ev == 'start' else '停'}：{', '.join(ts)}")
+            print(f"测试桥 {'起' if ev == 'start' else '停'}：{', '.join(ts)}")
     calls = sum((r.get("physical_calls") or 0) for r in rows)
     aborted = [r for r in rows if r.get("event") == "aborted"]
     print(f"本文件物理调用合计：{calls}" + (f"；中止批次 {len(aborted)} 次（期中保护）" if aborted else ""))
@@ -384,7 +384,7 @@ def main() -> int:
     ap.add_argument("--stage", required=True,
                     choices=["claude", "codex", "codex-stream", "cancel", "report"])
     ap.add_argument("-n", type=int, default=20)
-    ap.add_argument("--port", type=int, default=8791)
+    ap.add_argument("--port", type=int, help="独立测试桥端口（禁止 8790/8791）")
     ap.add_argument("--out", default="/tmp/coach-bridge-live.jsonl")
     ap.add_argument("--pack", type=int, default=PACK_LIMIT)
     ap.add_argument("--skip-quiet-check", action="store_true")
@@ -396,6 +396,8 @@ def main() -> int:
         report(out)
         return 0
 
+    if args.port is None or args.port in (8790, 8791):
+        ap.error("模型探针必须指定自己的 --port，禁止 8790/8791")
     SKIP_QUIET[0] = args.skip_quiet_check
 
     pack = build_pack(args.pack)

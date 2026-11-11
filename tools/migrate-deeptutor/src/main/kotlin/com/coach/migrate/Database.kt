@@ -53,3 +53,15 @@ fun legacy(source: String, table: String, row: JsonObject): JsonObject = buildJs
     put("content_hash", sha(canonical(row)))
     put("source_record", JsonObject(row.filterKeys { it != "_source_pk" }))
 }
+
+/** SQLite mappings hash the encoded primary key as well as the retained source columns.
+ * Keep that existing identity contract when checking the archive, which omits _source_pk.
+ */
+internal fun sourceContentHash(id:String, raw:JsonElement):String {
+    val sqliteTables=mapOf("mastery.sqlite3" to setOf("mastery_interactions","mastery_events","mastery_learning_evidence"),
+        "chat_history.db" to setOf("messages","sessions","assessment_attempts"))
+    val parts=id.split(':',limit=4)
+    val hashed=if(parts.size==4 && parts[2] in sqliteTables[parts[1]].orEmpty())
+        JsonObject(raw.jsonObject+("_source_pk" to JsonPrimitive(parts[3]))) else raw
+    return sha(canonical(hashed))
+}

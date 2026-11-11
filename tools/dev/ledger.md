@@ -37,6 +37,23 @@ Android 脚本先构建，再用同一把重任务锁启动自己的 API 35 模�
 
 Ktor 的组合根只持有一个 `LedgerActor`；命令、备份、租约、job 领取与结果提交都经它串行化。内部出题/复核服务可在 actor 中调用 `append`、`registerQuestion`、`enqueueJob`。`commitJobResult` 在同一事务内比较 `(epoch,fence)`、questionVersion、answerHash，再终结 job 并写事实；不得在 token 失效后另写事实。发件箱不接受客户端自报已通过或已稳固。
 
+### 聊天原文与恢复
+
+`msg.ask` / `quick.ask` 接收 `clientMsgId`；当前共享客户端每次发送生成一个 UUID。重发同一次发送必须保留这个 ID。服务端以认证设备 ID + `clientMsgId` 去重，先在同一事务保存 `role=user`、原始文字（包括首尾空白）、服务器接收时间与线程，再分派进度、继续或模型回答。确认帧 `msg.user` 带服务器消息 ID、`clientMsgId`、`deviceId`、`createdAt` 和原文；客户端用这组标识合并本地显示。相同 ID 改文字、课程或线程会拒绝；相同文字配新 ID 是一次新的发送。旧客户端省略 ID 仍能保存，但无法识别其重新提交是否为同一次发送。
+
+重新 `tutor.open` 会先返回线程的 `msg.history`，也可直接发送 `{"t":"msg.history","courseId":"course","threadId":"thread"}`。历史按 `mseq` 排列，用户消息为 `msg.user`，助手消息为带角色、时间、模型与状态的 `msg.snapshot`；正在生成的内容从内存游标取最新正文。界面恢复历史后再判断是否需要自动开始讲解。重复历史及确认不会重复显示用户消息。纯文字继续和进度查询也保留用户原文，不因此新增模型调用；按钮生成的内部提示不伪装成用户发言。模型上下文排除当前已保存的用户消息，避免把它重复传入两次。
+
+V006 迁移前先 `VACUUM INTO` 留副本，并保存固定覆盖起点 `userTextCoverageSince`。包含迁移前消息或线程事件的线程返回 `legacyHistoryUncovered=true`，界面提示早期对话不完整；不根据旧状态事件补造提问。发送确认只表示原文已保存；若进程在保存后、分派回答前退出，重发同 ID 仍只确认原文，不自动重做导师动作。聊天未接入离线发件箱，未收到确认的输入不能保证已送达。
+
+合成验收（桩桥，无真实 CLI、生产库或 DeepTutor）：
+
+```sh
+tools/dev/heavy ./gradlew :server:store:test :server:app:test :shared:client:jvmTest :desktopApp:compileKotlin :androidApp:compileDebugKotlin --max-workers=2 --console=plain
+tools/dev/heavy ./gradlew :shared:ui:jvmTest --tests com.coach.ui.ComposerPhoneTest --max-workers=2 --console=plain
+```
+
+`ChatFlowTest` 通过真实认证 WS 验证普通追问、进度、纯文字继续、临时问答，关闭重开服务后在另一配对设备恢复，并查询 `VACUUM INTO` 副本逐字核对用户原文、角色、时间和线程。`ChatPersistenceTest` 验证 V005 迁移不伪造缺失原话，重启后去重和覆盖起点保持；`TutorModelTest` 验证本地显示、确认及重复历史合并。
+
 未知事件/未知 schema 保留原文；领域结果标记 `requiresServerSnapshot`，UI 应使用服务端快照并提示更新。投影版本常量变更后须重新计算。
 
 Android 完整重放超过 800 ms 时启用的 `projection_cache` 以课程、投影版本、账本游标和 epoch 校验。新纪元清副本时同时清缓存；新事件使游标不匹配，后台同步重新 fold 后再发布 revision。没有变化时冷启动直接读持久投影；有新尾部时仍作全量 fold，并不宣称实现了增量累加器快照。UI 应观察 engine 的 revision，读取已备好的视图；`start()` 的同步与重算运行在 Default dispatcher。服务端命令把事件、更新后的投影缓存、command_log 回执在同一事务提交，内部事实追加会使缓存失效。

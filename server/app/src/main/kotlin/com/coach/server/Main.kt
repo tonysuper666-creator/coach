@@ -11,6 +11,7 @@ import kotlinx.coroutines.*
 import java.util.Properties
 import java.io.File
 import com.coach.store.LedgerStore
+import com.coach.store.EssayBank
 import com.coach.core.LedgerActor
 import java.nio.file.Path
 import java.nio.file.Files
@@ -27,6 +28,7 @@ fun main(args: Array<String>): Unit = runBlocking {
         pairingCommand(args, data)
         return@runBlocking
     }
+    configureBridgeTraffic(System.getenv(), managed)
     // Management commands print their result to the invoking terminal, never service logs.
     if (managed) ServiceLog.install(Path.of(System.getenv("COACH_LOG_DIR")))
     Files.createDirectories(data)
@@ -36,6 +38,8 @@ fun main(args: Array<String>): Unit = runBlocking {
         require(args.size == 2) { "usage: app restore BACKUP_DIRECTORY" }
         LedgerStore.restore(data,Path.of(args[1]))
     } else LedgerStore(data)
+    // Generated papers and packs are built from past papers: private directory, never the repo.
+    store.essays = EssayBank(Path.of(System.getenv("COACH_GENERATED_DIR") ?: File(System.getProperty("user.home"),"Coach/materials/generated").path))
     if(args.firstOrNull() == "restore") {
         println("COACH restored epoch=${store.hello().epoch} lastSeqBefore=${store.hello().lastSeqBefore}")
         store.close();lock.release();fileLock.close();return@runBlocking
@@ -62,7 +66,19 @@ fun main(args: Array<String>): Unit = runBlocking {
     actor.execute { recoverSuspension() }
     chat.tutor.recoverInterruptedReplies()
     val supplyWorker = chat.startSupplyWorker()
-    actor.execute { backupIfDue() }
+    // A failed backup (disk full, unreadable blob) must not take learning down with it;
+    // the watermark stays put, so the backup is still due when the retry comes round.
+    var backupRetryAt = 0L
+    suspend fun backupSafely() {
+        if (System.currentTimeMillis() < backupRetryAt) return
+        try { actor.execute { backupIfDue() } }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) {
+            backupRetryAt = System.currentTimeMillis() + 30 * 60_000
+            println("COACH backup failed=${e.javaClass.simpleName}: ${e.message}; retry in 30 min")
+        }
+    }
+    backupSafely()
     val maintenance = launch {
         val detector = SuspensionDetector()
         while(isActive) {
@@ -70,14 +86,37 @@ fun main(args: Array<String>): Unit = runBlocking {
             if(detector.sample(System.currentTimeMillis(),System.nanoTime())) {
                 // 进行中的消息按 truncated(reason=suspended) 收尾（§4.7），先断开再落库
                 chat.abortAll("suspended")
-                actor.execute { recoverSuspension();backupIfDue() }
+                actor.execute { recoverSuspension() }
+                backupSafely()
                 pushes.emit("wake")
                 println("COACH wake detected; messages truncated; running jobs requeued")
-            } else actor.execute { backupIfDue() }
+            } else backupSafely()
+        }
+    }
+    val observation = UsageObservation(
+        Path.of(System.getenv("COACH_LOG_DIR") ?: (if (managed) data.parent else data).resolve("logs").toString()),
+        Path.of(System.getenv("COACH_STATE_DIR") ?: (if (managed) data.parent else data).resolve("state").toString()))
+    observation.coverage.workQuiet = chat::activityQuiet
+    val defaultControl = Path.of(System.getenv("COACH_STATE_DIR") ?:
+        (if (managed) data.parent else data).resolve("state").toString()).resolve("activity-${observation.coverage.lifetime}.sock")
+    val control = System.getenv("COACH_ACTIVITY_SOCKET")?.let(Path::of) ?: defaultControl
+    runCatching { observation.coverage.startControl(control) }.onFailure {
+        // Diagnostic/control failure must refuse release evidence, while keeping learning available.
+        observation.coverage.writeFailed()
+        println("COACH activity control unavailable=${it.javaClass.simpleName}")
+    }
+    val usageSummary = launch(Dispatchers.IO) {
+        while (isActive) {
+            runCatching { observation.summarize() }.onFailure { println("COACH usage summary unavailable=${it.javaClass.simpleName}") }
+            delay(3_600_000)
         }
     }
     val math = MathProcess.locate()
-    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device); mathRoutes(math) }
+    val library=MockLibrary.configured()
+    val mocks=MockEngine(library)
+    val mainline=Mainline(library)
+    val reader = ReaderLibrary.configured()
+    val module: Application.() -> Unit = { ledgerRoutes(actor,pushes,chat,device,observation); mathRoutes(math); examFocusRoutes(); mockRoutes(actor,pushes,mocks); mainlineRoutes(actor,pushes,mainline,chat.reader); readerRoutes(actor,pushes,reader,mainline) }
 
     // This process supervises two engines, so one hook owns shutdown ordering.
     System.setProperty("io.ktor.server.engine.ShutdownHook", "false")
@@ -133,8 +172,10 @@ fun main(args: Array<String>): Unit = runBlocking {
         }
     }
     val shutdown = Thread {
-        runBlocking { children?.stop();supervisor.cancelAndJoin();maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close() }
-        local.stop(100, 1000)
+        runBlocking {
+            children?.stop();supervisor.cancelAndJoin();local.stopSuspend(100,1000)
+            maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close()
+        }
     }
     Runtime.getRuntime().addShutdownHook(shutdown)
     children?.start()
@@ -143,6 +184,6 @@ fun main(args: Array<String>): Unit = runBlocking {
         withContext(NonCancellable) { children?.stop() }
         supervisor.cancelAndJoin()
         local.stop(100, 1000)
-        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();actor.close();lock.release();fileLock.close()
+        maintenance.cancelAndJoin();supplyWorker.cancelAndJoin();usageSummary.cancelAndJoin();observation.close();actor.close();lock.release();fileLock.close()
     }
 }

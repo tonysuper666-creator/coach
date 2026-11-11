@@ -1,7 +1,8 @@
 package com.coach.ui.input
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.ui.draw.shadow
+import coach.design.tokens.CoachV7
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -38,6 +39,9 @@ class EnterGate(private val commitGraceMs: Long = 60L, private val now: () -> Lo
         if (composingBefore || composingAfter) lastComposingMs = now()
     }
 
+    /** True while a composition that just ended may still be confirmed by an Enter that arrives after the commit. */
+    fun withinGrace(): Boolean = now() - lastComposingMs <= commitGraceMs
+
     fun shouldSend(enterSends: Boolean, keyDown: Boolean, shift: Boolean, composingNow: Boolean): Boolean {
         if (composingNow) { lastComposingMs = now(); return false }
         if (!enterSends || !keyDown || shift) return false
@@ -72,12 +76,12 @@ fun ComposerField(
     val colors = CoachTheme.colors
     val currentValue by rememberUpdatedState(value)
     fun send(): Boolean {
-        val text = currentValue.text.trim()
-        if (!canSend || text.isEmpty() || !onSend(text)) return false
+        val text = currentValue.text
+        if (!canSend || text.isBlank() || !onSend(text)) return false
         onValueChange(TextFieldValue())
         return true
     }
-    Row(modifier.fillMaxWidth().background(colors.surface1, RoundedCornerShape(24.dp)).border(1.dp, colors.borderStrong, RoundedCornerShape(24.dp)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+    Row(modifier.fillMaxWidth().shadow(2.dp, RoundedCornerShape(CoachV7.Radius.m)).background(colors.surface2, RoundedCornerShape(CoachV7.Radius.m)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Box(Modifier.weight(1f).padding(vertical = 12.dp)) {
             if (value.text.isEmpty() && placeholder.isNotEmpty()) Text(placeholder, color = colors.fgSecondary, style = MaterialTheme.typography.bodyLarge)
             BasicTextField(
@@ -91,8 +95,15 @@ fun ComposerField(
                 keyboardActions = KeyboardActions(onSend = { if (gate.shouldSend(true, true, false, currentValue.composition != null)) send() }),
                 modifier = Modifier.fillMaxWidth().testTag("composer").onPreviewKeyEvent { event ->
                     if (event.key != Key.Enter && event.key != Key.NumPadEnter) return@onPreviewKeyEvent false
-                    val sends = gate.shouldSend(enterSends, event.type == KeyEventType.KeyDown, event.isShiftPressed, currentValue.composition != null)
-                    if (sends) { send(); true } else false
+                    val down = event.type == KeyEventType.KeyDown
+                    val composing = currentValue.composition != null
+                    val sends = gate.shouldSend(enterSends, down, event.isShiftPressed, composing)
+                    when {
+                        sends -> { send(); true }
+                        // An Enter that confirms a composition only commits it: it neither sends nor inserts a newline into the half-typed text.
+                        enterSends && down && !event.isShiftPressed && (composing || gate.withinGrace()) -> true
+                        else -> false
+                    }
                 },
             )
         }

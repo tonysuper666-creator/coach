@@ -3,7 +3,7 @@ package com.coach.domain
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
-const val PROJECTION_VERSION = 4
+const val PROJECTION_VERSION = 10
 val LedgerJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 enum class Format { SINGLE_CHOICE, SHORT_ANSWER, ESSAY, CALCULATION }
@@ -18,7 +18,8 @@ enum class EventType {
     mock_started, mock_submitted, legacy_imported, legacy_attempt, legacy_schedule,
     legacy_passed, exam_weights_set, explanation_pregenerated, server_restored,
     question_key_changed, answer_orphaned, tutor_state_changed, tutor_settings_changed,
-    course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported
+    course_configured, quick_ask_opened, quick_ask_message, legacy_journal_imported,
+    legacy_source_revised, study_scope_set, study_scope_advanced, tutor_concepts_changed
 }
 
 @Serializable
@@ -67,6 +68,9 @@ fun canonicalJson(value: JsonElement): String = when (value) {
 
 /** Uses local calendar date before applying the 04:00 boundary, including DST transitions. */
 expect fun logicalDay(epochMillis: Long, zone: String): Long
+
+/** The plain local calendar date in [zone] (no 04:00 shift): countdowns to a dated exam change at local midnight. */
+expect fun calendarDay(epochMillis: Long, zone: String): Long
 
 /** ULID encoding with caller-supplied clock/randomness keeps the domain free of IO. */
 fun ulid(timestampMillis: Long, entropy: ByteArray): String {

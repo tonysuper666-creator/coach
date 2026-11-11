@@ -5,8 +5,11 @@ node_modules/
 /local.properties
 /.s0-evidence/
 __pycache__/
+/.coach-winbox/
 
 /.ledger-evidence/
 /tools/bridge/.venv/
 /.service-evidence/
 /.service-build.log
+/.reminder-evidence*/
+/.reminder-*.log

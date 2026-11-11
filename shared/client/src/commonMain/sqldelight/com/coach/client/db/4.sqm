@@ -1,0 +1,6 @@
+-- Draft schema 4 used a shared logical timestamp whose offsets could jump.
+-- Its ages cannot be trusted. Preserve immutable commands and start fresh windows.
+ALTER TABLE outbox RENAME COLUMN backup_covered_at TO backup_retained_millis;
+UPDATE outbox SET backup_retained_millis=NULL;
+ALTER TABLE outbox ADD COLUMN backup_coverage_generation INTEGER NOT NULL DEFAULT 0;
+DELETE FROM sync_meta WHERE key='outboxRetentionTime';

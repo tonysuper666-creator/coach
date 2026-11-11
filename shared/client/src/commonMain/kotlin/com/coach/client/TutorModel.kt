@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlin.time.TimeSource
@@ -29,11 +30,12 @@ data class TutorMessage(
 sealed interface ChatItem {
     val key: String
     data class Tutor(val message: TutorMessage) : ChatItem { override val key get() = "t:${message.id}" }
-    data class Learner(override val key: String, val text: String) : ChatItem
+    data class Learner(override val key: String, val text: String, val clientMsgId: String? = null, val createdAt: Long? = null, val deviceId: String? = null) : ChatItem
 }
 
 /** 客户端首字时间：从点按发出到共享消费端交付第一个非空正文/公式，毫秒。进度帧不算。 */
-data class TtftSample(val threadId: String, val messageId: String, val kind: String, val ms: Long, val model: String, val fallback: Boolean)
+data class TtftSample(val threadId: String, val messageId: String, val kind: String, val ms: Long,
+    val model: String, val fallback: Boolean, val courseId: String)
 
 data class ThreadView(
     val items: List<ChatItem> = emptyList(),
@@ -43,11 +45,13 @@ data class ThreadView(
     val nextLabel: String? = null,
     /** 题池暂空时服务端给的真实进度文字。 */
     val poolText: String? = null,
+    val poolPreparing: Boolean = false,
     val notice: String? = null,
     val error: String? = null,
+    val historyLoaded: Boolean = false,
 ) {
     val streaming: Boolean get() = items.any { it is ChatItem.Tutor && !it.message.done }
-    val busy: Boolean get() = streaming || tutorState in BUSY_STATES
+    val busy: Boolean get() = streaming || poolPreparing || tutorState in BUSY_STATES
     companion object { val BUSY_STATES = setOf("PREPARE", "TEACH", "POSE", "GRADE", "REVIEW") }
 }
 
@@ -67,85 +71,246 @@ data class TutorUiState(
  */
 class TutorModel(
     private val wallClock: () -> Long,
+    private val telemetry: UsageTelemetry? = null,
     private val onTtft: (TtftSample) -> Unit = {},
 ) {
-    private val assembler = ChatStreamAssembler()
+    @kotlin.concurrent.Volatile private var ttftReporter: (TtftSample) -> Unit = onTtft
+    // 缺号回调在 [lock] 内触发：只记下要续传的消息，等锁放开后再交给发送端，避免在锁里做 I/O 或重入。
+    private val assembler = ChatStreamAssembler(onResumeRequired = { id, _ -> resumeNeeded.add(id); resumeWanted.add(id) })
     private val lock = Any()
+    private val resumeNeeded = LinkedHashSet<String>()
+    private val resumeWanted = ArrayList<String>()
+    private val resumeSentAt = HashMap<String, Long>()
+    private val lastFrameAt = HashMap<String, Long>()
+    private val stallProbed = HashSet<String>()
+
+    /** 把 msg.resume 放进当前连接的发送队列；没连上或队列满返回 false（模型随后重试）。由 [TutorClient] 挂接。 */
+    @kotlin.concurrent.Volatile internal var resumeSender: ((messageId: String) -> Boolean)? = null
     private val _state = MutableStateFlow(TutorUiState())
     val state: StateFlow<TutorUiState> = _state.asStateFlow()
 
     private val messageThread = HashMap<String, String>()
+    private val threadCourse = HashMap<String, String>()
     private val pendingSend = HashMap<String, Pair<String, TimeSource.Monotonic.ValueTimeMark>>()
     private val sampled = HashSet<String>()
+    private var localDeviceId: String? = null
+
+    fun bindDevice(device: String) = synchronized(lock) { localDeviceId = device }
+
+    fun addTtftReporter(reporter: (TtftSample) -> Unit) {
+        val previous = ttftReporter
+        ttftReporter = { sample -> previous(sample); reporter(sample) }
+    }
 
     fun unfinishedMessageIds(): List<String> = state.value.threads.values.flatMap { thread ->
         thread.items.mapNotNull { (it as? ChatItem.Tutor)?.message?.takeUnless { message -> message.done }?.id }
     }.distinct()
 
-    fun onConnection(connected: Boolean) = update {
-        copy(connected = connected, lastSeenAtMs = if (connected) wallClock() else lastSeenAtMs)
+    fun onConnection(connected: Boolean) {
+        synchronized(lock) {
+            // 旧连接上发出的续传随连接作废；新连接首先靠 [TutorClient] 的重连续传，再靠缺号重新触发。
+            resumeSentAt.clear()
+            stallProbed.clear()
+            _state.value = _state.value.copy(connected = connected, lastSeenAtMs = if (connected) wallClock() else _state.value.lastSeenAtMs)
+        }
+    }
+
+    /** 重连时由客户端直接发出续传后登记，避免紧接着的缺号再发一遍。 */
+    internal fun noteResumeSent(messageId: String) = synchronized(lock) { resumeSentAt[messageId] = wallClock() }
+
+    /**
+     * 周期调用（约 1 秒）：补发没发出去或没等到快照的续传；
+     * 生成中的消息很久没有任何新帧（可能连终态帧都丢了）时，主动对一次快照。
+     */
+    fun resumeTick() {
+        val ids = synchronized(lock) {
+            val now = wallClock()
+            for (id in unfinishedMessageIds()) {
+                val quiet = lastFrameAt[id]?.let { now - it } ?: continue
+                if (quiet >= STALL_MS && stallProbed.add(id)) resumeNeeded.add(id)
+            }
+            claimResumes(resumeNeeded.toList())
+        }
+        dispatchResumes(ids)
+    }
+
+    private fun claimResumes(ids: Collection<String>): List<String> {
+        val now = wallClock()
+        return ids.distinct().filter { id ->
+            val sentAt = resumeSentAt[id]
+            (sentAt == null || now - sentAt >= RESUME_RETRY_MS).also { if (it) resumeSentAt[id] = now }
+        }
+    }
+
+    private fun dispatchResumes(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val sender = resumeSender
+        for (id in ids) {
+            val sent = sender != null && runCatching { sender(id) }.getOrDefault(false)
+            if (!sent) synchronized(lock) { resumeSentAt.remove(id) }
+        }
+    }
+
+    private fun resumeSettled(id: String) {
+        resumeNeeded.remove(id)
+        resumeSentAt.remove(id)
+        stallProbed.remove(id)
     }
 
     /** 学习者自己发出的一句话，立刻进线程；同时开始计首字。 */
-    fun onSent(threadId: String, kind: String, learnerText: String?) = synchronized(lock) {
+    fun onSent(threadId: String, kind: String, learnerText: String?, clientMsgId: String? = null) = synchronized(lock) {
+        if(kind=="test") PoolTrace.begin(threadId)
         pendingSend[threadId] = kind to TimeSource.Monotonic.markNow()
         mutateThread(threadId) {
-            val items = if (learnerText == null) items else items + ChatItem.Learner("l:${items.size}:${wallClock()}", learnerText)
-            copy(items = items, error = null, poolText = null, notice = null)
+            val key = clientMsgId?.let { "l:$it" } ?: "l:${items.size}:${wallClock()}"
+            val items = if (learnerText == null || items.any { it.key == key || (it is ChatItem.Learner && it.clientMsgId == clientMsgId && it.deviceId == localDeviceId && clientMsgId != null) }) items
+                else items + ChatItem.Learner(key, learnerText,clientMsgId,deviceId=localDeviceId)
+            copy(items = items, error = null,
+                poolText = if (kind == "next" || kind == "test") "导师正在备课…" else null,
+                notice = null)
         }
     }
 
     fun onFailure(threadId: String, error: String) = synchronized(lock) {
+        telemetry?.record("error", "connection")
         pendingSend.remove(threadId)
-        mutateThread(threadId) { copy(error = error) }
+        mutateThread(threadId) { copy(error = error, poolText = null) }
     }
 
-    fun onFrame(frame: String) = synchronized(lock) {
-        val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return@synchronized
+    /** A full/closed transport queue never accepted this send; leave no duplicate optimistic row. */
+    fun onSendRejected(threadId: String, clientMsgId: String) = synchronized(lock) {
+        pendingSend.remove(threadId)
+        mutateThread(threadId) { copy(items = items.filterNot { it.key == "l:$clientMsgId" }) }
+    }
+
+    /** 服务端回来的一条消息大到连接装不下（多半是超长对话的历史）：不能装作载入成功，在线程里说清楚。 */
+    fun onMessageTooLarge(threadId: String) = synchronized(lock) {
+        mutateThread(threadId) { copy(error = "这段对话太长，历史没能完整载入。") }
+    }
+
+    /** 连接已收下但服务端始终没确认（补发用尽或被挤出待确认队列）：撤掉乐观行，在线程里说清哪句没送到，请学习者重发。 */
+    fun onAskUndelivered(threadId: String, clientMsgId: String) = synchronized(lock) {
+        pendingSend.remove(threadId)
+        mutateThread(threadId) {
+            val lost = items.firstOrNull { it.key == "l:$clientMsgId" } as? ChatItem.Learner
+            val quote = lost?.text?.let { if (it.length > 40) it.take(40) + "…" else it }
+            copy(items = items.filterNot { it.key == "l:$clientMsgId" }, poolText = null,
+                error = if (quote != null) "这句提问没有送达，请重新发送：「$quote」" else "有一句提问没有送达，请重新发送。")
+        }
+    }
+
+    fun onFrame(frame: String) {
+        val ids = synchronized(lock) {
+            handleFrame(frame)
+            claimResumes(resumeWanted).also { resumeWanted.clear() }
+        }
+        dispatchResumes(ids)
+    }
+
+    private fun handleFrame(frame: String) {
+        val obj = runCatching { json.parseToJsonElement(frame).jsonObject }.getOrNull() ?: return
+        if(obj.str("t")=="tutor.cards") PoolTrace.mark(obj.str("threadId"),"cards_received")
         _state.value = _state.value.copy(lastSeenAtMs = wallClock())
         when (obj.str("t")) {
-            "tutor.state" -> mutateThread(obj.str("threadId")) {
-                copy(tutorState = obj.str("state"), nextLabel = obj.str("nextLabel").ifBlank { null }, poolText = null, error = null)
+            "msg.user" -> onUserFrame(obj)
+            "msg.history" -> {
+                val thread = obj.str("threadId")
+                val ordered = (obj["messages"] as? JsonArray).orEmpty().map { it as JsonObject }
+                for (row in ordered) if (row.str("role") == "user") onUserFrame(row) else onMessageFrame(row,restoring=true)
+                val keys = ordered.map { (if (it.str("role") == "user") "l:" else "t:") + it.str("msg") }
+                mutateThread(thread) {
+                    val byKey = items.associateBy { it.key }
+                    copy(items = keys.mapNotNull { byKey[it] } + items.filter { it.key !in keys }, historyLoaded = true,
+                        notice = if (obj.str("legacyHistoryUncovered") == "true") "早期对话未完整保存，缺失的提问无法恢复。" else notice)
+                }
+            }
+            "tutor.state" -> {
+                val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
+                mutateThread(thread) {
+                    val nextState = obj.str("state")
+                    copy(tutorState = nextState, nextLabel = obj.str("nextLabel").ifBlank { null },
+                        poolText = if (nextState == "PREPARE" || nextState == "TEACH") "导师正在备课…" else null,
+                        poolPreparing = false, error = null)
+                }
             }
             "tutor.progress" -> mutateThread(obj.str("threadId")) {
                 if (obj.str("phase") == "fallback") copy(notice = obj.str("text").ifBlank { null }, poolText = null)
-                else copy(poolText = obj.str("text").ifBlank { null })
+                else copy(poolText = obj.str("text").ifBlank { null }, poolPreparing = obj.str("phase") in setOf("pool_queued","pool_generating","pool_reviewing","pool_retrying"))
             }
             "msg.error" -> {
+                telemetry?.record("error", "server")
                 val thread = obj.str("threadId")
-                if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error")) }
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
+                if (thread.isNotBlank()) mutateThread(thread) { copy(error = obj.str("error"), poolText = null) }
             }
             else -> if (obj.str("t").startsWith("msg.")) onMessageFrame(obj)
         }
     }
 
-    private fun onMessageFrame(obj: JsonObject) {
+    private fun onUserFrame(obj: JsonObject) {
+        val id = obj.str("msg")
+        if (id.isBlank()) return
+        val clientId = obj.str("clientMsgId").ifBlank { null }
+        val user = ChatItem.Learner("l:$id",obj.str("text"),clientId,obj.str("createdAt").toLongOrNull(),obj.str("deviceId").ifBlank { null })
+        mutateThread(obj.str("threadId")) {
+            val index = items.indexOfFirst { it.key == user.key || (clientId != null && it.key == "l:$clientId" && it is ChatItem.Learner && it.deviceId == user.deviceId) }
+            copy(items = if (index < 0) items + user else items.toMutableList().also { it[index] = user })
+        }
+    }
+
+    private fun onMessageFrame(obj: JsonObject, restoring: Boolean = false) {
+        // Snapshots register activity only after acceptance, and only while still streaming.
+        if (obj.str("t") != "msg.snapshot") obj.str("msg").takeIf { it.isNotBlank() }?.let {
+            lastFrameAt[it] = wallClock(); stallProbed.remove(it)
+        }
         val updates = assembler.handle(obj)
         for (update in updates) when (update) {
             is ChatUpdate.Started -> {
                 val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
                 messageThread[update.messageId] = thread
                 if (update.fallback && pendingSend[thread] == null) pendingSend[thread] = "fallback" to TimeSource.Monotonic.markNow()
                 mutateThread(thread) {
-                    copy(items = items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)), poolText = null)
+                    copy(items = if (items.any { it is ChatItem.Tutor && it.message.id == update.messageId }) items
+                        else items + ChatItem.Tutor(TutorMessage(update.messageId, update.model, update.fallback)))
                 }
             }
             is ChatUpdate.Text, is ChatUpdate.Math -> {
                 val id = messageIdOf(update)
                 val text = assembler.text(id)
-                if (text.isNotEmpty()) markFirstToken(id)
+                if (text.isNotEmpty()) {
+                    markFirstToken(id)
+                    messageThread[id]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
+                }
                 changeMessage(id) { copy(text = text, thinking = false) }
             }
             is ChatUpdate.Snapshot -> {
                 // 重连后的权威状态：整体替换，渲染层按 epoch 重建。
-                if (messageThread[update.messageId] == null) obj.str("threadId").takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
-                ensureMessage(update.messageId, obj.str("threadId"))
-                if (update.text.isNotEmpty()) markFirstToken(update.messageId)
-                changeMessage(update.messageId) { copy(text = update.text, epoch = epoch + 1, status = update.status.ifBlank { status }, thinking = false) }
+                val thread = obj.str("threadId")
+                obj.str("courseId").takeIf { it.isNotBlank() }?.let { threadCourse[thread] = it }
+                if (messageThread[update.messageId] == null) thread.takeIf { it.isNotBlank() }?.let { messageThread[update.messageId] = it }
+                ensureMessage(update.messageId, thread, obj.str("model"))
+                if (!restoring && update.text.isNotEmpty()) {
+                    markFirstToken(update.messageId)
+                    messageThread[update.messageId]?.let { owner -> mutateThread(owner) { copy(poolText = null) } }
+                }
+                if (update.text.isNotEmpty()) {
+                    messageThread[update.messageId]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
+                }
+                resumeSettled(update.messageId)
+                changeMessage(update.messageId) { copy(text = update.text, epoch = if (update.text == text) epoch else epoch + 1, status = update.status.ifBlank { status },
+                    model = obj.str("model").ifBlank { model },reason = obj.str("reason").ifBlank { reason },thinking = false) }
+                if (findMessage(update.messageId)?.done == true) lastFrameAt.remove(update.messageId)
+                else lastFrameAt[update.messageId] = wallClock()
             }
             is ChatUpdate.Progress -> changeMessage(update.messageId) { copy(thinking = update.phase == "thinking" && text.isEmpty()) }
             is ChatUpdate.Ended -> {
+                resumeSettled(update.messageId)
+                lastFrameAt.remove(update.messageId)
+                if (update.status in setOf("failed", "truncated")) telemetry?.record("error", "server")
                 val final = assembler.text(update.messageId)
+                if (final.isEmpty()) messageThread[update.messageId]?.let { thread -> mutateThread(thread) { copy(poolText = null) } }
                 // 桥实际出答的模型名随终态帧到达：消息头在这条消息结束前改成它（含桥内部换模型）。
                 changeMessage(update.messageId) { copy(status = update.status, reason = update.reason, thinking = false, model = update.model ?: model, text = if (final.isNotEmpty()) final else text) }
                 if (update.reason != "rate_limited") messageThread[update.messageId]?.let { pendingSend.remove(it) }
@@ -159,11 +324,11 @@ class TutorModel(
         else -> error("unreachable")
     }
 
-    private fun ensureMessage(id: String, threadId: String) {
+    private fun ensureMessage(id: String, threadId: String, model: String = "") {
         val thread = messageThread[id] ?: threadId.takeIf { it.isNotBlank() } ?: return
         val view = _state.value.threads[thread]
         if (view?.items?.any { it is ChatItem.Tutor && it.message.id == id } == true) return
-        mutateThread(thread) { copy(items = items + ChatItem.Tutor(TutorMessage(id, "", false))) }
+        mutateThread(thread) { copy(items = items + ChatItem.Tutor(TutorMessage(id, model, false))) }
     }
 
     private fun markFirstToken(id: String) {
@@ -171,9 +336,11 @@ class TutorModel(
         val thread = messageThread[id] ?: return
         val (kind, mark) = pendingSend.remove(thread) ?: return
         val message = findMessage(id)
-        val sample = TtftSample(thread, id, kind, mark.elapsedNow().inWholeMilliseconds, message?.model.orEmpty(), message?.fallback == true)
+        val sample = TtftSample(thread, id, kind, mark.elapsedNow().inWholeMilliseconds,
+            message?.model.orEmpty(), message?.fallback == true, threadCourse[thread].orEmpty())
         _state.value = _state.value.copy(ttft = _state.value.ttft + sample)
-        onTtft(sample)
+        telemetry?.record("first_word", if (kind == "test") "test" else if (kind == "ask") "ask" else "next", sample.ms)
+        ttftReporter(sample)
     }
 
     private fun findMessage(id: String): TutorMessage? =
@@ -197,5 +364,11 @@ class TutorModel(
 
     private fun JsonObject.str(key: String): String = (this[key] as? JsonPrimitive)?.content.orEmpty().let { if (it == "null") "" else it }
 
-    private companion object { val json = Json { ignoreUnknownKeys = true; isLenient = true } }
+    private companion object {
+        /** 同一条消息的续传在这段时间内只发一次；到点还没等到快照就再发。 */
+        const val RESUME_RETRY_MS = 3_000L
+        /** 生成中的消息这么久没有任何帧，就主动对一次快照（可能丢了终态帧）。 */
+        const val STALL_MS = 20_000L
+        val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    }
 }

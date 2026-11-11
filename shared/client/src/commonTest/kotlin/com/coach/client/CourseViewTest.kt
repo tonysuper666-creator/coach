@@ -47,6 +47,16 @@ class CourseViewTest {
         assertEquals("K1", v.continueTarget?.id)
     }
 
+    @Test fun tutorThreadUsesPersistedKpBindingAndFallsBackForNewKnowledgePoints() {
+        val events = listOf(
+            outline("K1" to "信息不对称", "K2" to "逆向选择"),
+            event("kp_opened", json("kpId" to "K1", "title" to "信息不对称"), thread = "legacy-thread-for-K1"),
+        )
+        val v = view(events)
+        assertEquals("legacy-thread-for-K1", v.tutorThreadId("K1"))
+        assertEquals("kp:K2", v.tutorThreadId("K2"))
+    }
+
     @Test fun cardsShowTheServerAssignedLettersInOrder() {
         val v = view(listOf(outline("K1" to "A"), posed("a1", "g1", mapOf("o1" to "C", "o2" to "A", "o3" to "B", "o4" to "D"), untaught = true)))
         val card = v.quizGroups("kp:K1").single().cards.single()
@@ -88,6 +98,30 @@ class CourseViewTest {
         assertEquals(listOf(3, 0), due.map { it.overdueDays })
     }
 
+    @Test fun dueReviewCountIsZeroForEmptyFutureAndRemovedKnowledgePoints() {
+        val events = listOf(outline("K1" to "Synthetic topic"))
+        val today = com.coach.domain.logicalDay(now, "Europe/London")
+        assertEquals(0, view(events).dueReviews(now).size)
+        val projection = project(events).copy(review = mapOf(
+            "K1" to com.coach.domain.Review(dueDay = today + 1),
+            "removed" to com.coach.domain.Review(dueDay = today - 1),
+        ))
+        assertEquals(0, CourseView(events, projection).dueReviews(now).size)
+    }
+
+    @Test fun dueReviewCountChangesAtCourseFourAmBoundary() {
+        // 03:59 / 04:00 in Shanghai, while London's calendar date remains the previous day.
+        val before = 1_793_390_340_000L // 2026-10-30T19:59:00Z
+        val events = listOf(event("outline_revised", json(
+            "course" to json("tz" to "Asia/Shanghai"),
+            "ops" to JsonArray(listOf(json("op" to "add", "kpId" to "K1", "title" to "Synthetic topic"))),
+        )))
+        val tomorrow = com.coach.domain.logicalDay(before, "Asia/Shanghai") + 1
+        val v = CourseView(events, project(events).copy(review = mapOf("K1" to com.coach.domain.Review(dueDay = tomorrow))))
+        assertEquals(0, v.dueReviews(before).size)
+        assertEquals(1, v.dueReviews(before + 60_000).size)
+    }
+
     @Test fun examCountdownOnlyWhenAnExamDayIsSetAndNotPast() {
         val today = com.coach.domain.logicalDay(now, "Europe/London")
         val none = view(listOf(outline("K1" to "甲")))
@@ -101,5 +135,39 @@ class CourseViewTest {
     @Test fun otherThreadsDoNotLeakIntoThisKp() {
         val v = view(listOf(outline("K1" to "A"), posed("a1", "g1", mapOf("o1" to "A", "o2" to "B"))))
         assertTrue(v.quizGroups("kp:K2").isEmpty())
+    }
+
+    @Test fun courseContentGivesModuleNamesPrerequisitesAndTheReferencePage() {
+        val kp = { id: String, name: String, prereqs: List<String> -> JsonObject(mapOf(
+            "id" to JsonPrimitive(id), "name" to JsonPrimitive(name), "moduleId" to JsonPrimitive("m1"), "prerequisiteIds" to JsonArray(prereqs.map { JsonPrimitive(it) }),
+            "sourceAnchor" to JsonObject(mapOf("docId" to JsonPrimitive("textbook:7"), "pdfPage" to JsonPrimitive(172), "bookPage" to JsonPrimitive(141))))) }
+        val view = view(listOf(event("outline_revised", json(
+            "modules" to JsonArray(listOf(json("id" to "m1", "name" to "第二章 逆向选择"))),
+            "knowledgePoints" to JsonArray(listOf(kp("K1", "【W4·Ch8】基础", emptyList()), kp("K2", "【W4·Ch8】进阶", listOf("K1"))))))))
+        val k2 = view.kp("K2")!!
+        assertEquals("第二章 逆向选择", k2.module)
+        assertEquals(listOf("K1"), k2.prereqs)
+        assertEquals("textbook:7", k2.anchorDoc); assertEquals(172, k2.anchorPdfPage); assertEquals(141, k2.anchorBookPage)
+        assertEquals("教材 p.141", k2.reference)
+    }
+
+    @Test fun openSourceUsesTheFirstOpenableAnchorsEntryThenSourceAnchor() {
+        val anchor = { doc: String, pdf: Int, book: Int -> json("docId" to doc, "pdfPage" to pdf, "bookPage" to book) }
+        fun kp(id: String, anchors: JsonArray?, source: JsonObject?) = JsonObject(buildMap {
+            put("id", JsonPrimitive(id)); put("name", JsonPrimitive(id))
+            if (anchors != null) put("anchors", anchors)
+            if (source != null) put("sourceAnchor", source)
+        })
+        val view = view(listOf(event("outline_revised", json("knowledgePoints" to JsonArray(listOf(
+            // anchors[] wins over sourceAnchor, and an entry without a page or document is skipped.
+            kp("A", JsonArray(listOf(anchor("textbook:1", 0, 0), anchor("textbook:2", 40, 12), anchor("textbook:2", 41, 13))), anchor("textbook:9", 99, 98)),
+            kp("B", null, anchor("textbook:9", 99, 98)),
+            kp("C", JsonArray(emptyList()), null),
+            kp("D", JsonArray(listOf(anchor("", 5, 1))), anchor("textbook:3", 7, 2)),
+        ))))))
+        assertEquals(Triple("textbook:2", 40, 12), view.kp("A")!!.let { Triple(it.anchorDoc, it.anchorPdfPage, it.anchorBookPage) })
+        assertEquals("textbook:9", view.kp("B")!!.anchorDoc); assertEquals(99, view.kp("B")!!.anchorPdfPage)
+        assertEquals("", view.kp("C")!!.anchorDoc)
+        assertEquals("textbook:3", view.kp("D")!!.anchorDoc); assertEquals(7, view.kp("D")!!.anchorPdfPage)
     }
 }

@@ -134,9 +134,11 @@ class MistakeReviewSmoke {
         context.startActivity(Intent(context,CoachActivity::class.java)
             .putExtra("coachUrl","http://${BuildConfig.COACH_TAIL_HOST}:$port")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
-        click(waitText("到期复习",15_000))
-        step("open offline mistake list")
-        waitText("错题 2")
+        // The prepare run ended on the mistake list; a cold restart restores that page from the saved
+        // navigation stack (TON-1445) rather than landing on Today, so no tap is needed to get back to it.
+        step("restored offline mistake list")
+        waitText("错题 2",15_000)
+        assertNull("restart must restore the review page, not Today's 到期复习 card",find("到期复习"))
         waitText("离线可回看错题；连接 Mac 后可再练。")
         scrollTo("正确答案：",substring=true)
         settleAndCapture("offline",SystemClock.elapsedRealtimeNanos())

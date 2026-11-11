@@ -71,10 +71,13 @@ class ReviewQueueSmoke {
             }
             bitmap.recycle()
         }
-        waitFor(if (after) "今天没有到期的复习" else "1 个知识点到期")
+        // Count copy follows the one status vocabulary (TON-1444): "N 节到期" on Today and in the queue.
+        waitFor(if (after) "今天没有到期的复习" else "1 节到期")
         screenshot("today")
         click(waitFor("到期复习"))
-        waitFor(if (after) "今天没有到期的复习。" else "1 个知识点到期")
+        // Today shows the same count, so the queue is proven by its own due tab, not by the count line alone.
+        waitFor(if (after) "今天没有到期的复习。" else "到期 1")
+        waitFor(if (after) "今天没有到期的复习。" else "1 节到期")
         screenshot("queue")
         if (!after) {
             click(waitFor("开始"))

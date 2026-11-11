@@ -106,7 +106,7 @@ class ReminderSmoke {
                 click(waitText("今天有 $count 个知识点要复习"))
                 // Review page, rather than Today's landing page.
                 waitText("复习")
-                waitText("$count 个知识点到期")
+                waitText("$count 节到期")
                 screenshot("review.png")
                 assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
                 android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count tap=REVIEW")

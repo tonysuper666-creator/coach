@@ -154,9 +154,12 @@ def analyze(run,trace,rows,baseline=None):
             matched=clock_row(draw,rows,run['measurementPid'])
             if len(matched)!=1:raise ValueError('ambiguous_first_frame_join')
             frame=matched[0]
-            needed=('app_id','app_pid','app_ns','app_dur','choreographer_id','choreographer_token','surface_token',
-                    'app_display_token','display_id','display_ns','display_dur','display_token','display_pid')
-            if not all(integer(frame.get(key)) for key in needed):raise ValueError('missing_frame_endpoint')
+            needed=('app_id','app_pid','app_ns','choreographer_id','choreographer_token','surface_token',
+                    'app_display_token','display_id','display_ns','display_token','display_pid')
+            # A signed -1 duration is present-but-unfinished, not an absent endpoint.
+            if not all(integer(frame.get(key)) for key in needed) or not all(
+                    type(frame.get(key)) is int for key in ('app_dur','display_dur')):
+                raise ValueError('missing_frame_endpoint')
             if frame['app_dur']<=0 or frame['display_dur']<=0:raise ValueError('unfinished_frame')
             if frame['app_pid']!=run['measurementPid'] or frame['surface_token']!=frame['choreographer_token'] or frame['app_display_token']!=frame['display_token']:
                 raise ValueError('wrong_frame_token_or_process')

@@ -230,11 +230,42 @@ class FirstPresentSqlTest(unittest.TestCase):
         report,rows=self.query(app_duration=-1)
         self.assertEqual(-1,rows[-1]['app_dur'])
         self.assertFalse(report['complete'])
+        self.assertEqual(['unfinished_frame'],report['errors'])
+        self.assertEqual([],report['samples'])
 
     def test_ambiguous_display_rows_are_not_hidden_by_having_or_min(self):
         report,rows=self.query(duplicate_display=True)
         self.assertEqual(3,len(rows))
         self.assertIn('ambiguous_first_frame_join',report['errors'])
+
+
+class FirstPresentDurationTest(unittest.TestCase):
+    def test_signed_unfinished_and_zero_durations_reject_without_accepting_a_sample(self):
+        for field in ('app_dur','display_dur'):
+            for duration in (-1,0):
+                with self.subTest(field=field,duration=duration):
+                    run,trace,rows=fixture();rows[-1][field]=duration
+                    report=analyze(run,trace,rows)
+                    self.assertEqual(['unfinished_frame'],report['errors'])
+                    self.assertFalse(report['complete']);self.assertEqual([],report['samples'])
+                    for key in ('firstPresentLatencyVerified','matchedBaselineObserved','baselineAcceptanceEvaluated',
+                                'physicalMemoryBudgetVerified','gpuReleaseVerified'):
+                        self.assertFalse(report[key])
+
+    def test_missing_or_noninteger_duration_still_reports_missing_endpoint(self):
+        for field in ('app_dur','display_dur'):
+            for value in (None,'-1',-1.0,False):
+                with self.subTest(field=field,value=value):
+                    run,trace,rows=fixture();rows[-1][field]=value
+                    report=analyze(run,trace,rows)
+                    self.assertEqual(['missing_frame_endpoint'],report['errors'])
+                    self.assertFalse(report['complete']);self.assertEqual([],report['samples'])
+
+    def test_other_missing_endpoint_is_not_hidden_by_an_unfinished_duration(self):
+        run,trace,rows=fixture();rows[-1].update(app_dur=-1,display_id=None)
+        report=analyze(run,trace,rows)
+        self.assertEqual(['missing_frame_endpoint'],report['errors'])
+        self.assertFalse(report['complete']);self.assertEqual([],report['samples'])
 
 
 class PresentContextTest(unittest.TestCase):

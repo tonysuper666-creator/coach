@@ -32,6 +32,7 @@ class MistakeReviewSmoke {
     private lateinit var device: String
     private lateinit var course: String
     private lateinit var keys: JSONObject
+    private var reviewThread: String? = null
 
     private fun step(name: String) {
         val message = "COACH_STEP ${System.currentTimeMillis()} elapsed=${SystemClock.elapsedRealtime()} $name"
@@ -100,20 +101,29 @@ class MistakeReviewSmoke {
                 samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
                 return
             }
+            // History lists older mistakes first, so the first 再练一组 on the page may belong to another kp: use the new mistake's own card.
+            val card = mistakeCard(scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")))
             // Both entries and their original answers remain in the replica, even without a new request.
-            scrollTo("当时的答案：",substring=true)
-            scrollTo("正确答案：",substring=true)
-            scrollTo("判分依据：",substring=true)
-            val retryButton = scrollTo("再练一组")
+            for (label in listOf("当时的答案：","正确答案：","判分依据：")) assertNotNull("card label missing: $label",find(label,substring=true,node=card,anyVisibility=true))
+            val retryButton = requireNotNull(find("再练一组",node=card,anyVisibility=true))
+            if (!retryButton.isVisibleToUser) { retryButton.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id);instrumentation.waitForIdleSync() }
+            // The app reuses the kp's latest REVIEW thread (CourseView.reviewThreadId); history may already hold one.
+            val ledger = events()
+            val retryThread = latestReviewOpen(ledger,kp)?.optString("threadId") ?: "review:$course:$kp"
+            val retryBase = (0 until ledger.length()).maxOfOrNull { ledger.getJSONObject(it).getLong("seq") } ?: 0L
             step("open retry questions")
             val retryMark = SystemClock.elapsedRealtimeNanos()
-            PoolTrace.begin("review:$course:$kp") // a retry is not a "test" send, so the app does not start this thread's trace
+            reviewThread = retryThread
+            PoolTrace.begin(retryThread) // a retry is not a "test" send, so the app does not start this thread's trace
             click(retryButton)
             waitText("第 1 / 3 题")
-            focus("review:$course:$kp","retry")
+            focus(retryThread,"retry")
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
-            val retry = group("review:$course:$kp")
+            val opened = latestReviewOpen(events(),null)
+            assertEquals("latest REVIEW kp_opened kpId",kp,opened?.getJSONObject("payload")?.optString("kpId"))
+            assertEquals("latest REVIEW kp_opened threadId",retryThread,opened?.optString("threadId"))
+            val retry = group(retryThread,afterSeq=retryBase)
             val oldIds = (0 until first.length()).map { first.getJSONObject(it).getJSONObject("payload").getString("questionId") }.toSet()
             assertEquals(3,retry.length())
             for (i in 0 until retry.length()) assertFalse(oldIds.contains(retry.getJSONObject(i).getJSONObject("payload").getString("questionId")))
@@ -130,13 +140,13 @@ class MistakeReviewSmoke {
             }
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
-            focus("review:$course:$kp","cleared")
+            focus(retryThread,"cleared")
             samples.put("newQuestions",3).put("clearedCount",2)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
             assertTrue(samples.getDouble("wrong-listMs")<=1000)
             assertTrue(samples.getDouble("retryMs")<=1000)
         } catch(t: Throwable) {
-            focus("kp:$kp","fail");focus("review:$course:$kp","fail")
+            focus("kp:$kp","fail");focus(reviewThread ?: "review:$course:$kp","fail")
             runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")+"\nlayout: "+layout()) }
             throw t
         } finally {
@@ -205,13 +215,26 @@ class MistakeReviewSmoke {
         val left=last.count { it.attemptId in newWrong }
         throw AssertionError("Visible text missing: 错题 ${last.size} (new mistakes still listed: $left)")
     }
-    private fun group(thread: String): JSONArray {
+    private fun group(thread: String,afterSeq: Long?=null): JSONArray {
         val all=events();val cards=JSONArray()
         for(i in 0 until all.length()) all.getJSONObject(i).let {
-            if(it.optString("type")=="question_posed" && it.optString("threadId")==thread) cards.put(it)
+            if(it.optString("type")=="question_posed" && it.optString("threadId")==thread && (afterSeq==null || it.getLong("seq")>afterSeq)) cards.put(it)
         }
         assertEquals(3,cards.length())
+        if(afterSeq!=null) assertEquals(1,(0 until cards.length()).map { cards.getJSONObject(it).getJSONObject("payload").optString("groupId") }.toSet().size)
         return cards
+    }
+    /** Latest kp_opened with via=REVIEW and a thread, for [kp] or (null) any kp: the rule CourseView.reviewThreadId reads. */
+    private fun latestReviewOpen(all: JSONArray,kp: String?): JSONObject? = (0 until all.length()).map { all.getJSONObject(it) }.filter {
+        val p=it.optJSONObject("payload")
+        it.optString("type")=="kp_opened" && p?.optString("via")=="REVIEW" && (kp==null || p.optString("kpId")==kp) &&
+            it.optString("threadId").isNotBlank() && !it.isNull("threadId")
+    }.maxByOrNull { it.getLong("seq") }
+    /** The MistakeCard holding [node]: its first ancestor whose subtree has a 再练一组 button. */
+    private fun mistakeCard(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        var n: AccessibilityNodeInfo?=node.parent
+        while(n!=null) { if(find("再练一组",node=n,anyVisibility=true)!=null) return n;n=n.parent }
+        throw AssertionError("No mistake card around the new mistake's stem")
     }
     private fun answer(cards: JSONArray, wrong: Int) {
         for(i in 0 until cards.length()) {

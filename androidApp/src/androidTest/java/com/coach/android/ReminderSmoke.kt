@@ -20,7 +20,7 @@ import java.time.ZonedDateTime
 import java.time.ZoneId
 import java.util.UUID
 
-/** Host runner owns the production-backup copy, isolated server and emulator lifecycle. */
+/** Host runner (tools/dev/check-reminder.py) owns the synthetic private copy, isolated server and emulator lifecycle. */
 @RunWith(AndroidJUnit4::class)
 class ReminderSmoke {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -97,19 +97,33 @@ class ReminderSmoke {
                 android.util.Log.i("CoachReminderTest", "scheduledAt=${prefs.getLong("nextAt", -1)} expected=${prefs.getInt("expectedCount", -1)}")
             }
             "tap" -> {
-                val count = countDue(sync = false)
+                assertMatcherRejectsSharedRows()
+                val due = dueReviews(sync = false)
+                val count = due.size
                 val notification = manager.activeNotifications.single { it.id == ReviewReminder.NOTIFICATION }
                 assertEquals("今天有 $count 个知识点要复习", notification.notification.extras.getString("android.title"))
                 instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
                 waitText("今天有 $count 个知识点要复习")
                 screenshot("notification.png")
                 click(waitText("今天有 $count 个知识点要复习"))
-                // Review page, rather than Today's landing page.
+                // Review page, rather than Today's landing page: the Review tab is the selected destination
+                // and the page header carries the reminder entry that only Review shows (checked in prepare).
+                waitNode { node -> node.contentDescription?.toString() == "导航：复习" && generateSequence(node) { it.parent }.any { it.isSelected } }
                 waitText("复习")
-                waitText("$count 个知识点到期")
+                waitNode { it.text?.toString()?.startsWith("每日提醒") == true }
+                // The page's own due list must show, to the user, the same due set the notification counted:
+                // its count header and one row per due item (title, due label, Start), scrolled into view if needed.
+                reveal { it.text?.toString() == "$count 节到期" }
+                // Each due item must own a distinct row whose title and label equal it exactly: a contained title
+                // ("Topic" in "Topic extension") or a shared row must not stand in for a missing item.
+                val rows = mutableListOf<AccessibilityNodeInfo>()
+                due.map { item ->
+                    DueRowSpec(displayTitle(item.kp.title), (if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天")
+                }.forEach { spec -> rows += reveal { row -> row !in rows && rowShows(spec, rowTexts(row)) } }
+                assertEquals(count, rows.toSet().size)
                 screenshot("review.png")
                 assertTrue(manager.activeNotifications.none { it.id == ReviewReminder.NOTIFICATION })
-                android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count tap=REVIEW")
+                android.util.Log.i("CoachReminderTest", "notificationCount=$count pageCount=$count visibleDueRows=${rows.size} tap=REVIEW")
             }
             "timezone" -> {
                 val expectedZone = args.getString("expectedZone")!!
@@ -143,7 +157,9 @@ class ReminderSmoke {
         }
     }
 
-    private suspend fun countDue(sync: Boolean): Int {
+    private suspend fun countDue(sync: Boolean): Int = dueReviews(sync).size
+
+    private suspend fun dueReviews(sync: Boolean): List<DueReview> {
         val credentials = KeystoreCredentials(context, base).load()!!
         val driver = AndroidSqliteDriver(ClientDatabase.Schema, context, "coach-client.db")
         val transport = HttpLedgerTransport(base, credentials.deviceId, credentials.token)
@@ -152,7 +168,7 @@ class ReminderSmoke {
                 { UUID.randomUUID().toString() }, { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
             if (sync) engine.syncOnce()
             return CourseView(engine.localEvents(BuildConfig.COACH_COURSE), engine.projection(BuildConfig.COACH_COURSE))
-                .dueReviews(System.currentTimeMillis()).size
+                .dueReviews(System.currentTimeMillis())
         } finally { transport.close(); driver.close() }
     }
 
@@ -175,7 +191,8 @@ class ReminderSmoke {
     }
     private fun dumpNode(node: AccessibilityNodeInfo?, path: String) {
         if (node == null) return
-        android.util.Log.i("CoachReminderTest", "$path class=${node.className} id=${node.viewIdResourceName} text=${node.text} description=${node.contentDescription} checkable=${node.isCheckable} checked=${node.isChecked} clickable=${node.isClickable} visible=${node.isVisibleToUser}")
+        val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+        android.util.Log.i("CoachReminderTest", "$path class=${node.className} id=${node.viewIdResourceName} text=${node.text} description=${node.contentDescription} checkable=${node.isCheckable} checked=${node.isChecked} clickable=${node.isClickable} selected=${node.isSelected} scrollable=${node.isScrollable} visible=${node.isVisibleToUser} bounds=${bounds.toShortString()}")
         for (i in 0 until node.childCount) dumpNode(node.getChild(i), "$path/$i")
     }
     private fun isPermissionDeny(node: AccessibilityNodeInfo) =
@@ -192,9 +209,50 @@ class ReminderSmoke {
         throw AssertionError("Accessibility target did not appear")
     }
     private fun waitText(text: String) = waitNode { it.text?.toString() == text }
+    private fun rowTexts(row: AccessibilityNodeInfo) = RowTexts(children(row).filter { shown(it) }.mapNotNull { it.text?.toString() },
+        find(row) { it.text?.toString() == "开始" && shown(it) } != null)
+    /** The QA counterexample (TON-1494): two due items whose titles contain one another, but only one row on the page. */
+    private fun assertMatcherRejectsSharedRows() {
+        val topic = DueRowSpec("Topic", "今天到期"); val extension = DueRowSpec("Topic extension", "今天到期")
+        val topicRow = RowTexts(listOf("Topic", "今天到期"), true); val extensionRow = RowTexts(listOf("Topic extension", "今天到期"), true)
+        assertNull("A contained title must not match the missing item's row", claimDueRows(listOf(topic, extension), listOf(topicRow)))
+        assertNull("Two due items must not share one row", claimDueRows(listOf(topic, topic), listOf(topicRow)))
+        assertNull("A row without Start is not a due row", claimDueRows(listOf(topic), listOf(topicRow.copy(start = false))))
+        assertEquals(listOf(1, 0), claimDueRows(listOf(topic, extension), listOf(extensionRow, topicRow)))
+        android.util.Log.i("CoachReminderTest", "rowMatcher=exact distinctRows=true containedTitleCounterexample=rejected")
+    }
+    private fun children(node: AccessibilityNodeInfo) = (0 until node.childCount).mapNotNull { node.getChild(it) }
+    private fun shown(node: AccessibilityNodeInfo) =
+        node.isVisibleToUser && android.graphics.Rect().also { node.getBoundsInScreen(it) }.let { it.width() > 0 && it.height() > 0 }
+    /** Waits for an on-screen match, scrolling the page's scrollable containers forward while it is not in view. */
+    private fun reveal(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo {
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val root = instrumentation.uiAutomation.rootInActiveWindow
+            find(root) { predicate(it) && shown(it) }?.let { return it }
+            val scrolled = generateSequence(listOf(root)) { level -> level.flatMap { node -> node?.let { children(it) }.orEmpty() }.takeIf { it.isNotEmpty() } }
+                .flatten().filterNotNull().filter { it.isScrollable && shown(it) }
+                .any { it.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) }
+            Thread.sleep(if (scrolled) 300 else 50)
+        }
+        dumpNode(instrumentation.uiAutomation.rootInActiveWindow, "timeout")
+        screenshot("timeout.png")
+        throw AssertionError("Due list content did not become visible")
+    }
     private fun click(node: AccessibilityNodeInfo) {
         var target = node
         while (!target.isClickable) target = target.parent ?: error("No clickable ancestor")
         assertTrue(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
     }
+}
+
+/** What one due item must show in its own row on the Review page: the exact title line, the exact due label, and Start. */
+internal data class DueRowSpec(val title: String, val label: String)
+internal data class RowTexts(val texts: List<String>, val start: Boolean)
+internal fun rowShows(spec: DueRowSpec, row: RowTexts) = row.start && spec.title in row.texts && spec.label in row.texts
+/** Gives each due item a different row (indices in [rows]), or null when any item has no row of its own. */
+internal fun claimDueRows(specs: List<DueRowSpec>, rows: List<RowTexts>): List<Int>? {
+    val claimed = mutableListOf<Int>()
+    for (spec in specs) claimed += rows.indices.firstOrNull { it !in claimed && rowShows(spec, rows[it]) } ?: return null
+    return claimed
 }

@@ -28,6 +28,9 @@ def export_request(request):
 
 
 def main():
+    # Also protect direct CLI launches; isolated Python ignores global encoding variables.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        stream.reconfigure(encoding='utf-8', errors='strict')
     try:
         result = export_request(json.load(sys.stdin))
         json.dump(result, sys.stdout, ensure_ascii=False)

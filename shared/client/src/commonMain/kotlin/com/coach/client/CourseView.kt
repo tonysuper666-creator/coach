@@ -23,8 +23,11 @@ import kotlinx.serialization.json.jsonObject
  * 定义：未学 = 没打开过；在学 = 打开过或做过题、还没会；会了 = 最近 3 道不同题答对且不含猜对；
  * 稳了 = 会了之后在不同两天用简答/论述/限时题答对；要补 = 会了之后又答错，已排进复习。
  */
-enum class KpStatus(val label: String, val symbol: String) {
-    NEW("未学", "○"), IN_PROGRESS("在学", "◐"), PASSED("会了", "✓"), SOLID("稳了", "✓✓"), NEEDS_REPAIR("要补", "!")
+enum class KpStatus(val state: com.coach.domain.KpState, val symbol: String) {
+    NEW(com.coach.domain.KpState.NEW, "○"), IN_PROGRESS(com.coach.domain.KpState.IN_PROGRESS, "◐"),
+    PASSED(com.coach.domain.KpState.PASSED, "✓"), SOLID(com.coach.domain.KpState.SOLID, "✓✓"),
+    NEEDS_REPAIR(com.coach.domain.KpState.NEEDS_REPAIR, "!");
+    val label: String get() = state.label
 }
 
 data class KpRow(
@@ -95,7 +98,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             for (k in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
                 val o = k as? JsonObject ?: continue
                 val id = o.s("id"); if (id.isBlank()) continue
-                titles[id] = o.s("title").ifBlank { o.s("name") }.ifBlank { id }
+                titles[id] = o.s("title").ifBlank { o.s("name") }
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
                 for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }
@@ -120,14 +123,14 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 val id = o.s("kpId").ifBlank { o.s("id") }
                 if (id.isBlank()) continue
                 val title = o.s("title").ifBlank { o.s("name") }
-                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
+                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, "")
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
                 (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
         }
-        projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
+        projection.mastery.keys.forEach { titles.putIfAbsent(it, "") }
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
@@ -140,7 +143,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 com.coach.domain.KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS
                 com.coach.domain.KpState.NEW -> KpStatus.NEW
             }
-            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
+            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "${KpStatus.SOLID.label}进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]
             KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),

@@ -197,7 +197,13 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
         }
     }
 
-    private fun executable(name: String) = if (bin.isBlank()) name else Path.of(bin).resolve(name).toString()
+    /** Windows does not append `.exe` to a path that already contains a directory. Other systems keep the given name. */
+    private fun executable(name: String): String {
+        val tool = if (windows && !name.endsWith(".exe", ignoreCase = true)) "$name.exe" else name
+        return if (bin.isBlank()) tool else Path.of(bin).resolve(tool).toString()
+    }
+
+    private val windows get() = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)
     companion object {
         fun configured(): ReaderLibrary = ReaderLibrary(System.getenv("COACH_READER_LIBRARY")?.takeIf(String::isNotBlank)?.let(Path::of))
         internal fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

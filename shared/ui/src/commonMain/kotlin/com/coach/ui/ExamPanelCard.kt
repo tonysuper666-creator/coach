@@ -63,7 +63,7 @@ internal fun ExamPanelCard(
 
             Text("各周进度", style = MaterialTheme.typography.titleMedium)
             panel.weeks.forEach { WeekLine(it) }
-            Text("进度：会了算一半，稳了算满。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("进度：${com.coach.client.KpStatus.PASSED.label}算一半，${com.coach.client.KpStatus.SOLID.label}算满。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 
@@ -87,7 +87,7 @@ private const val DAY_MILLIS = 86_400_000L
 
 /** 课程内容和分值的缺项独立显示，不因合并推荐入口而被隐藏。 */
 internal fun emptyFocusText(panel: ExamPanel): String {
-    if (panel.allSolid) return "各周都稳了，没有要补的。"
+    if (panel.allSolid) return "各周都${com.coach.client.KpStatus.SOLID.label}，没有${com.coach.client.KpStatus.NEEDS_REPAIR.label}的。"
     return buildList {
         if (panel.offFocus.isNotEmpty()) add("${weekSpans(panel.offFocus)} 还没会，期末分值为 0。")
         if (panel.unplanned.isNotEmpty()) add("有分值的${weekSpans(panel.unplanned)}在课程里还没有对应的节，暂时没法学。")

@@ -94,7 +94,7 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
 
 @OptIn(ExperimentalUuidApi::class)
 @Composable
-private fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
+internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
                                practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null, onBack: () -> Unit) {
     var retry by remember(doc) { mutableIntStateOf(0) }
     val state by produceState<ReaderLoad<JsonObject>>(ReaderLoad.Loading, reader, doc, retry) {

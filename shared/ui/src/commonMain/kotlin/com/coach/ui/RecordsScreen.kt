@@ -148,7 +148,7 @@ private fun EssayRow(c: CoachController, d: AttemptDetail, selected: Boolean, on
 
 @Composable
 private fun ChangeRow(c: CoachController, view: CourseView, change: MasteryChange, selected: Boolean, onClick: () -> Unit) {
-    val title = view.kp(change.kpId)?.title?.let { splitTitle(it).second } ?: change.kpId
+    val title = view.kp(change.kpId)?.title?.let { splitTitle(it).second } ?: "未命名的一节"
     val good = change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID
     Surface(
         onClick = onClick, tonalElevation = if (selected) 6.dp else 1.dp, shape = MaterialTheme.shapes.medium,
@@ -193,7 +193,7 @@ private fun RecordDetail(c: CoachController, view: CourseView, data: RecordsView
 private fun ChangeDetail(c: CoachController, view: CourseView, data: RecordsView, change: MasteryChange, onOpenKp: (String) -> Unit) {
     val kp = view.kp(change.kpId)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text(kp?.title?.let { splitTitle(it).second } ?: change.kpId, style = MaterialTheme.typography.titleLarge)
+        Text(kp?.title?.let { splitTitle(it).second } ?: "未命名的一节", style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(change.kind.label, if (change.kind == ChangeKind.PASSED || change.kind == ChangeKind.SOLID) successColor() else MaterialTheme.colorScheme.error)
             Text(c.formatClock(change.at), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -232,12 +232,14 @@ internal fun AttemptCard(math: MathAssets, canAskMac: Boolean, loadRubric: suspe
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("第 $number / $total 次作答 · ${formatLabel(d.format)}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                if (grade != null) {
+                if (d.pendingKey) {
+                    StatusChip("答案待核对，不计分", MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (grade != null) {
                     val full = grade.score >= grade.max
                     StatusChip(if (d.isChoice) (if (full) "答对" else "答错") else "得分 ${percent(grade)}", if (d.counted && (if (d.isChoice) full else grade.score * 10 >= grade.max * 8)) successColor() else MaterialTheme.colorScheme.error)
                 }
             }
-            if (!d.counted && d.grade != null) Text("这次批改还在复核，复核通过前不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
+            if (!d.pendingKey && !d.counted && d.grade != null) Text("这次批改还在复核，复核通过前不计入掌握。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
             if (d.voided) Text("这次作答已作废。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (d.hinted) Text("答题前看过提示，这次不进已通过窗口。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
             if (d.overtime) Text("超过时限才交卷：照常批改，不算限时成绩。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
@@ -338,7 +340,7 @@ private fun GradeBlock(d: AttemptDetail) {
         val g = d.grade
         if (g == null) { Text("还没有批改。", style = MaterialTheme.typography.bodyMedium); return }
         if (d.isChoice) {
-            Text("选择题按选项对答案。", style = MaterialTheme.typography.bodyMedium)
+            if (!d.pendingKey) Text("选择题按选项对答案。", style = MaterialTheme.typography.bodyMedium)
             if (g.feedback.isNotBlank()) Text(g.feedback, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             return
         }

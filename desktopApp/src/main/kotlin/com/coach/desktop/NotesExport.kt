@@ -4,9 +4,12 @@ import com.coach.client.CourseView
 import com.coach.domain.*
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.StandardOpenOption.WRITE
+import java.nio.file.attribute.*
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -49,13 +52,14 @@ object NotesCore {
         try {
             checkNotNull(NotesCore::class.java.getResourceAsStream("/notes-core.zip")) { "安装包缺少笔记提取器" }.use { input -> Files.newOutputStream(bundle).use { input.copyTo(it) } }
             val bootstrap = "import sys,runpy; sys.path.insert(0,sys.argv[1]); runpy.run_module('notes.desktop',run_name='__main__')"
-            val process = try { ProcessBuilder(executable, "-I", "-c", bootstrap, bundle.toString()).start() }
+            // -I ignores PYTHONUTF8/PYTHONIOENCODING; the pipe protocol must travel with the app.
+            val process = try { ProcessBuilder(executable, "-I", "-X", "utf8", "-c", bootstrap, bundle.toString()).start() }
                 catch (_: Exception) { error("无法启动 Python 3.10+；请安装或设置 COACH_PYTHON") }
             val readers = Executors.newFixedThreadPool(3)
             try {
-                val stdout = readers.submit<String> { process.inputStream.bufferedReader().use { it.readText() } }
-                val stderr = readers.submit<String> { process.errorStream.bufferedReader().use { it.readText() } }
-                val writer = readers.submit { process.outputStream.bufferedWriter().use { it.write(request.toString()) } }
+                val stdout = readers.submit<String> { process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() } }
+                val stderr = readers.submit<String> { process.errorStream.bufferedReader(Charsets.UTF_8).use { it.readText() } }
+                val writer = readers.submit { process.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(request.toString()) } }
                 if (!process.waitFor(45, TimeUnit.SECONDS)) { process.destroyForcibly(); error("笔记提取超时，请缩小范围重试") }
                 val raw = stdout.get(5, TimeUnit.SECONDS)
                 stderr.get(5, TimeUnit.SECONDS) // Drain; never log potentially private diagnostics.
@@ -76,20 +80,80 @@ object NotesCore {
 
 /** Private files appear as one new folder only after all requested formats have succeeded. */
 fun saveNotes(directory: Path, draft: NotesDraft, pdf: ByteArray?): Path {
+    return saveNotes(directory, draft, pdf, NotesExportFiles())
+}
+
+internal fun saveNotes(directory: Path, draft: NotesDraft, pdf: ByteArray?, files: NotesExportFiles): Path {
     val chosen = directory.toRealPath()
     require(Files.isDirectory(chosen)) { "请选择已有文件夹" }
     require(generateSequence(chosen) { it.parent }.none { Files.exists(it.resolve(".git")) }) { "请选择 Git 仓库之外的私人目录" }
-    val staging = Files.createTempDirectory(chosen, ".coach-notes-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+    val staging = Files.createTempDirectory(chosen, ".coach-notes-", files.permissions(chosen, true))
+    var failure: Throwable? = null
     try {
-        fun save(name: String, bytes: ByteArray) {
-            Files.write(staging.resolve(name), bytes)
-            Files.setPosixFilePermissions(staging.resolve(name), PosixFilePermissions.fromString("rw-------"))
-        }
-        save("复习提纲.md", draft.markdown.toByteArray(Charsets.UTF_8))
-        if (pdf != null) save("复习提纲.pdf", pdf)
-        val target = chosen.resolve("Coach-复习-${java.time.LocalDate.now()}-${UUID.randomUUID().toString().take(8)}")
-        return Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE)
+        files.verifyPrivate(staging, true)
+        files.write(staging.resolve("复习提纲.md"), draft.markdown.toByteArray(Charsets.UTF_8))
+        if (pdf != null) files.write(staging.resolve("复习提纲.pdf"), pdf)
+        val target = chosen.resolve("Coach-复习-${java.time.LocalDate.now()}-${UUID.randomUUID()}")
+        return files.publish(staging, target)
+    } catch (error: Throwable) {
+        failure = error
+        throw error
     } finally {
-        if (Files.exists(staging)) { Files.list(staging).use { paths -> paths.forEach { Files.deleteIfExists(it) } }; Files.deleteIfExists(staging) }
+        try {
+            if (Files.exists(staging, NOFOLLOW_LINKS)) {
+                Files.list(staging).use { paths -> paths.forEach { Files.deleteIfExists(it) } }
+                Files.deleteIfExists(staging)
+            }
+        } catch (cleanup: Exception) {
+            if (failure != null) failure.addSuppressed(cleanup) else throw cleanup
+        }
+    }
+}
+
+/** Native permissions are established on creation, then verified before any private bytes are written. */
+internal open class NotesExportFiles {
+    private fun acl(path: Path, directory: Boolean): List<AclEntry> {
+        val user = path.fileSystem.userPrincipalLookupService.lookupPrincipalByName(System.getProperty("user.name"))
+        return listOf(AclEntry.newBuilder().setType(AclEntryType.ALLOW).setPrincipal(user)
+            .setPermissions(*AclEntryPermission.values()).apply {
+                if (directory) setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT)
+            }.build())
+    }
+
+    fun permissions(parent: Path, directory: Boolean): FileAttribute<*> {
+        val store = Files.getFileStore(parent)
+        if (store.supportsFileAttributeView(PosixFileAttributeView::class.java))
+            return PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------"))
+        check(store.supportsFileAttributeView(AclFileAttributeView::class.java)) { "笔记导出需要私有文件权限" }
+        val entries = acl(parent, directory)
+        return object : FileAttribute<List<AclEntry>> {
+            override fun name() = "acl:acl"
+            override fun value() = entries
+        }
+    }
+
+    open fun verifyPrivate(path: Path, directory: Boolean) {
+        check(!Files.isSymbolicLink(path) && if (directory) Files.isDirectory(path, NOFOLLOW_LINKS) else Files.isRegularFile(path, NOFOLLOW_LINKS)) {
+            "无法保护导出文件"
+        }
+        val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, NOFOLLOW_LINKS)
+        if (posix != null) {
+            check(posix.readAttributes().permissions() == PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------")) { "无法保护导出文件" }
+        } else {
+            val view = checkNotNull(Files.getFileAttributeView(path, AclFileAttributeView::class.java, NOFOLLOW_LINKS)) { "笔记导出需要私有文件权限" }
+            check(view.acl == acl(path, directory)) { "无法保护导出文件" }
+        }
+    }
+
+    open fun write(path: Path, bytes: ByteArray) {
+        Files.createFile(path, permissions(path.parent, false))
+        verifyPrivate(path, false)
+        Files.write(path, bytes, WRITE, NOFOLLOW_LINKS)
+    }
+
+    open fun publish(staging: Path, target: Path): Path {
+        if (Files.exists(target, NOFOLLOW_LINKS)) throw FileAlreadyExistsException(target.toString())
+        // Keep staging on the selected volume; never fall back to copy/delete on failure.
+        return Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE)
     }
 }

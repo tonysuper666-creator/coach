@@ -57,7 +57,7 @@ private fun WeekNotes(d: V7PageDetails, target: String, onSource: () -> Unit, on
             }
         }
         if (d.missing.isNotEmpty()) PaperCard(contentSpacing = 0.dp) {
-            Text("要补的节", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
+            Text("${com.coach.client.KpStatus.NEEDS_REPAIR.label}的节", style = MaterialTheme.typography.labelMedium.copy(lineHeight = 16.8.sp), color = CoachTheme.colors.fgSecondary)
             Spacer(Modifier.height(12.dp))
             d.missing.forEach { item ->
                 Row { Text(KpStatus.NEEDS_REPAIR.symbol, Modifier.width(18.dp), style = MaterialTheme.typography.bodyMedium); Text(annotatedMarks(item), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium) }
@@ -90,6 +90,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
     val railAnchors = remember(week) { MarginAnchors() }
     var choosingWeek by remember { mutableStateOf(false) }
     val canSelect = true
+    val examCountdown = view.examCountdownText(rememberCourseNow(c))
     fun selectWeek(number: Int) { actions.select(number) }
     fun start() { decision?.let { actions.start(view, it) } }
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
@@ -97,7 +98,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { view.weeks.forEach { n ->
             TextButton(onClick = { choosingWeek = false; selectWeek(n) }, enabled = canSelect) { Text(view.weekLabel(n)) }
         } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
-    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = view.examCountdownText(rememberCourseNow(c)),
+    Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = examCountdown,
         compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
         backLabel = "← 路线", onBack = if (LocalAppManagedNavigation.current) null else ({ select(AppTab.ROUTE) }), directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
         margin = {
@@ -122,6 +123,11 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
         val m = LocalDeskMetrics.current
         Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState())
             .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 32.dp)) {
+            // Use Desk's actual status placement, including windows inside app navigation.
+            if (!m.statusInBar) {
+                Text(examCountdown, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                Spacer(Modifier.height(12.dp))
+            }
             PageHeader("第 $week 周", title, deck = "这一周 ${points.size} 节", week = week,
                 meta = d.weekStats.ifBlank { statusSummary(points) })
             TextButton(onClick = { actions.onPractice(week) }, modifier = Modifier.testTag("week-practice")) { Text("整周刷题") }

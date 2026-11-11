@@ -51,7 +51,8 @@ fun deskWindow(width: Float, height: Float): DeskWindow = when {
 }
 
 @Immutable
-data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val topPadding: Dp, val optionHeight: Dp) {
+data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val topPadding: Dp, val optionHeight: Dp,
+    val statusInBar: Boolean = false) {
     val inner get() = window == DeskWindow.Inner || window == DeskWindow.Medium
 }
 val LocalDeskMetrics = staticCompositionLocalOf { DeskMetrics(DeskWindow.Inner, CoachV7.Layout.mainPx, CoachV7.Layout.mainPt, CoachV7.Layout.optH) }
@@ -120,7 +121,7 @@ fun Desk(
         val metrics = DeskMetrics(window,
             if (inner) 24.dp else 16.dp,
             if (landscape) 12.dp else 20.dp,
-            48.dp)
+            48.dp, statusInBar = threeColumns)
         CompositionLocalProvider(LocalDeskMetrics provides metrics, LocalReadingFocus provides focused) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxWidth().height(if (inner) 48.dp else 72.dp).padding(horizontal = 16.dp)) {
@@ -151,7 +152,7 @@ fun Desk(
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
-                        if (threeColumns && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                        if (metrics.statusInBar && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         var typeMenu by remember { mutableStateOf(false) }
                         Box {
                             val textScale = LocalV7TextScale.current

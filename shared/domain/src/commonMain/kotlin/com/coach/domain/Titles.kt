@@ -7,7 +7,7 @@ private val SPACES = Regex("""[ 	 　]+""")
 /** Learner-facing title: first segment with every 【…】 calendar marker removed. The raw title stays in the ledger. */
 fun cleanTitle(raw: String): String {
     val main = raw.split(SEPARATOR, limit = 2).first().replace(BRACKETED, "").replace(SPACES, " ").trim()
-    return main.ifBlank { raw.replace("【", "").replace("】", "").trim() }
+    return main.ifBlank { "未命名的一节" }
 }
 
 /** The one status rule for a knowledge point; the course list and the chat answer both call it. */

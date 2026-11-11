@@ -100,7 +100,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
         else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val weeks = (body["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }
             if (weeks.isEmpty()) Text("还没有生成选择题主线。", style = MaterialTheme.typography.bodyMedium)
-            else Text("选一周，从基础题开始。答对且不是猜的才算会了。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else Text("选一周，从基础题开始。答对且不是猜的才计入答对统计。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             for (w in weeks) {
                 val n = w.num("week").toInt()
                 Surface(onClick = { c.tutor.telemetry?.record("tap", "mainline_week"); onOpen(n, true) }, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
@@ -125,7 +125,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
 private fun CoverageLines(cov: JsonObject, modifier: Modifier = Modifier) {
     val facts = cov.num("facts"); val mastered = cov.num("factsMastered")
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("考点 $facts · 有题 ${cov.num("factsWithQuestions")} · 会了 $mastered", style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag("mainline-coverage"))
+        Text("考点 $facts · 有题 ${cov.num("factsWithQuestions")} · 相关题均答对 $mastered", style = MaterialTheme.typography.labelLarge, modifier = Modifier.testTag("mainline-coverage"))
         LinearProgressIndicator(progress = { if (facts == 0L) 0f else mastered.toFloat() / facts }, modifier = Modifier.fillMaxWidth())
         Text("题 ${cov.num("answered")}/${cov.num("questions")} 已做 · ${cov.num("mastered")} 题答对" +
             (cov.num("keysPending").takeIf { it > 0 }?.let { " · $it 题答案未核对，不计分" } ?: ""),
@@ -323,7 +323,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         val candidates = if (selectedFilter.isBlank()) items else items.filter { q -> q.strings("factIds").any { it in facts } }
         val selected = if (learning) QuestionLadder.next(ladderQuestions.filter { q -> candidates.any { it.str("id") == q.id } },
             ladderSession, previouslyLearned, capabilities).question?.id else null
-        val next = if (learning) candidates.firstOrNull { it.str("id") == selected }
+        // Notes are a detour from this answer. Only the explicit next action advances the ladder.
+        val pausedAnswer = candidates.firstOrNull { it.str("id") == itemId && result?.str("itemId") == itemId }
+        val next = pausedAnswer ?: if (learning) candidates.firstOrNull { it.str("id") == selected }
             else candidates.firstOrNull { it.str("id") == itemId } ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
         val id = next?.str("id").orEmpty()
         if (id != itemId) {
@@ -411,10 +413,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
     val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
-    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-    AppBackHandler(sourceOpen, priority = 250) { sourceOpen = false }
+    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable(item.str("id"), sourceKp) { mutableStateOf(false) }
+    AppBackHandler(sourceOpen && sourceKp?.sourceReferences?.structured != true, priority = 250) { sourceOpen = false }
     val openSource = { if (sourceKp != null) sourceOpen = true else onBack() }
-    if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
+    if (sourceOpen && sourceKp?.sourceReferences?.structured == true) {
+        ClaimSourceDialog(http.reader, sourceKp, "第 $number 周 · 第 $displayedNumber 题") { sourceOpen = false }
+    } else if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }, backLabel = "← 第 $number 周 · 第 $displayedNumber 题") }
     }
@@ -578,8 +582,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                                 Spacer(Modifier.height(8.dp))
                                 Text(explanation.str("correct"), style = MaterialTheme.typography.bodyLarge)
                                 Spacer(Modifier.height(16.dp))
-                                explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                                    PrivateSourceReferences(http.reader, source, done.str("anchor"))
+                                val source = explanation.str("source").ifBlank { done.str("source") }
+                                if (source.isNotBlank() || sourceKp?.sourceReferences?.structured == true) {
+                                    ClaimSourceReferences(http.reader, sourceKp, source, done.str("anchor"), item.str("id"))
                                 }
                             }
                             val wrong = displayedChoice?.takeIf { it != answer }
@@ -608,9 +613,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Outcome(done, view.logicalToday(now), onReviewWeek)
                     LadderEssayFeedback(done) { revealFeedback = false; essayOpen = true; saveEssay(true) }
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
-                    if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
-                        PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                    }
+                    if (explanation == null) ClaimSourceReferences(http.reader, sourceKp, done.str("source"), done.str("anchor"), item.str("id"))
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.
                     options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->
@@ -618,7 +621,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     }
                     explanation?.str("background")?.takeIf { it.isNotBlank() }?.let { Labeled("背景", it) }
                     for (s in sections.filter { s -> s.strings("fact_ids").any { it in item.strings("factIds") } }) {
-                        TextButton(onClick = { position(true, section = s.str("section_id")) }, modifier = Modifier.testTag("mainline-return-section")) { Text("回看要点：${s.str("title")}") }
+                        TextButton(onClick = { position(true, section = s.str("section_id")) }, modifier = Modifier.testTag("mainline-return-section")) { Text("回看要点：${com.coach.client.displayTitle(s.str("title"))}") }
                     }
                     coverage?.let { CoverageLines(it, Modifier.padding(top = 16.dp)) }
                     if (done.str("tier") == "bridge" && only == null) {
@@ -650,12 +653,12 @@ private fun ClassEmphasis(all: List<JsonObject>, factIds: List<String>) {
     val linked = all.filter { it.str("fact_id") in factIds }
     if (linked.isEmpty()) return
     var opened by remember { mutableStateOf(false) }
-    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("mainline-emphasis")) { Text("★ 课上强调") }
+    TextButton(onClick = { opened = true }, modifier = Modifier.testTag("mainline-emphasis")) { Text("课上强调") }
     if (opened) AlertDialog(onDismissRequest = { opened = false },
         title = { Text("课上强调") },
         text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             for (m in linked) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("${m.str("fact_id")} · 第 ${m.num("week")} 周 · ${if (m.str("recording_kind") == "tutorial") "习题课" else "讲课"} ${m.str("recording_id")} · ${m.str("timestamp")}", style = MaterialTheme.typography.labelLarge)
+                Text("第 ${m.num("week")} 周 · ${if (m.str("recording_kind") == "tutorial") "习题课" else "讲课"} · ${m.str("timestamp")}", style = MaterialTheme.typography.labelLarge)
                 Text(m.str("summary"), style = MaterialTheme.typography.bodyMedium)
             }
         } },

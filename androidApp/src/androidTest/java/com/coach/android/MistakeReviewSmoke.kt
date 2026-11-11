@@ -148,12 +148,24 @@ class MistakeReviewSmoke {
     }
 
     private fun events(): JSONArray {
-        val req=Request.Builder().url("$base/v1/courses/$course/events?after=0")
-            .header("Authorization","Bearer $token").header("X-Coach-Device",device).build()
-        return http.newCall(req).execute().use { response ->
-            assertTrue(response.isSuccessful)
-            JSONObject(response.body!!.string()).getJSONArray("events")
+        // The server caps each page at 500 events; long snapshots need every page.
+        val all=JSONArray();var after=0L
+        for(pageNo in 1..50) {
+            val req=Request.Builder().url("$base/v1/courses/$course/events?after=$after")
+                .header("Authorization","Bearer $token").header("X-Coach-Device",device).build()
+            val page=http.newCall(req).execute().use { response ->
+                assertTrue(response.isSuccessful)
+                JSONObject(response.body!!.string())
+            }
+            val events=page.getJSONArray("events")
+            for(i in 0 until events.length()) all.put(events.getJSONObject(i))
+            if(!page.optBoolean("hasMore",false)) return all
+            val through=page.getLong("throughSeq")
+            if(through<=after) fail("events paging stalled at after=$after throughSeq=$through")
+            after=through
         }
+        fail("events paging exceeded 50 pages")
+        return all
     }
     private fun group(thread: String): JSONArray {
         val all=events();val cards=JSONArray()

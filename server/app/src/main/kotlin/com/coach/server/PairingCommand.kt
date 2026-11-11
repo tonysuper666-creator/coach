@@ -8,15 +8,14 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
 
 /** File fallback avoids adding a native keychain dependency; never accept symlinks. */
 internal fun secureTokenFile(path: Path) {
-    require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { "Desktop token must be a regular file" }
-    Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
+    require(Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) { "Desktop token must be a regular file" }
+    privateFiles.directory(path.toAbsolutePath().parent)
+    privateFiles.secureFile(path)
 }
 
 /** Talks to the running server; never opens its locked database or puts a token in argv/URL. */

@@ -34,7 +34,7 @@ fun Projection.today(epochMillis: Long, kpId: String? = position.current): Today
     val points = examCoverage
     // Only weights marked FINAL are the final exam's; the imported midterm-scope weights must not pass for them.
     val text = if (points.total == 0 || points.scope != "FINAL") "期末分值：还没有期末的分值数据，暂不能算覆盖分。"
-        else "期末分值：会了覆盖 ${points.passed} / ${points.total} 分，稳了 ${points.solid} 分"
+        else "期末分值：${KpState.PASSED.label}覆盖 ${points.passed} / ${points.total} 分，${KpState.SOLID.label} ${points.solid} 分"
     return TodayProgress(day, lastSeq, points, text,
         reviewsOn(day).keys.toList(),
         kpId, kpId?.let { mastery[it] },kpTitles,
@@ -44,16 +44,16 @@ fun Projection.today(epochMillis: Long, kpId: String? = position.current): Today
 fun TodayProgress.answer(intent: ProgressIntent): String = when (intent) {
     ProgressIntent.COVERAGE -> coverageText
     ProgressIntent.REMAINING -> if (examCoverage.total == 0 || examCoverage.scope != "FINAL") coverageText else
-        "$coverageText。还差 ${examCoverage.total - examCoverage.passed} 分覆盖，${examCoverage.total - examCoverage.solid} 分到稳了。"
+        "$coverageText。还差 ${examCoverage.total - examCoverage.passed} 分覆盖，${examCoverage.total - examCoverage.solid} 分到${KpState.SOLID.label}。"
     ProgressIntent.REVIEW_TODAY -> if (dueKpIds.isEmpty()) "今天没有到期复习。" else "今天到期复习：${dueKpIds.joinToString("、") { kpTitles[it]?.let(::cleanTitle) ?: "未命名的一节" }}。"
     ProgressIntent.CURRENT_KP -> {
         val title = kpTitles[currentKpId]?.let(::cleanTitle) ?: "当前这一节"
         if (currentKpId == null) "当前还没有打开任何一节。" else when (kpState(currentMastery, currentOpened)) {
-            KpState.NEEDS_REPAIR -> "$title：要补，会了之后又答错，已排进复习。"
-            KpState.SOLID -> "$title：稳了。"
-            KpState.PASSED -> "$title：会了，还没稳。"
-            KpState.IN_PROGRESS -> "$title：在学，还没会。"
-            KpState.NEW -> "$title：未学。"
+            KpState.NEEDS_REPAIR -> "$title：${KpState.NEEDS_REPAIR.label}，${KpState.PASSED.label}之后又答错，已排进复习。"
+            KpState.SOLID -> "$title：${KpState.SOLID.label}。"
+            KpState.PASSED -> "$title：${KpState.PASSED.label}，还没稳。"
+            KpState.IN_PROGRESS -> "$title：${KpState.IN_PROGRESS.label}，还没会。"
+            KpState.NEW -> "$title：${KpState.NEW.label}。"
         }
     }
 }

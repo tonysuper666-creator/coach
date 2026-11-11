@@ -76,6 +76,12 @@ dependencies {
     implementation(libs.coroutines.swing)
     implementation(libs.material3)
     testImplementation(kotlin("test"))
+    testImplementation(project(":server:app"))
+    testImplementation(project(":server:core"))
+    testImplementation(project(":server:ai"))
+    testImplementation(libs.ktor.netty)
+    @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+    testImplementation(compose.uiTest)
 }
 val localConfig = Properties().apply {
     val file = File(System.getProperty("user.home"), "Coach/config/local.properties")
@@ -125,4 +131,14 @@ tasks.processResources { dependsOn(notesCore) }
 
 tasks.withType<JavaExec>().configureEach {
     for (key in listOf("coach.exportFormulas", "coach.capturePath", "coach.captures", "coach.captureDir")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+}
+
+// Real pairing/HTTP/WS against an owned, disposable Ktor process; no desktop automation or AI traffic.
+tasks.register<JavaExec>("pairingSmoke") {
+    group = "verification"
+    description = "Verify desktop first connection, private identity, restart, offline and revocation against an isolated server"
+    dependsOn(tasks.testClasses, ":server:app:installDist")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.DesktopPairingSmoke")
+    args(rootDir.absolutePath)
 }

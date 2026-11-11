@@ -3,6 +3,9 @@ package com.coach.desktop
 import com.coach.client.CourseView
 import com.coach.domain.*
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.attribute.*
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import kotlin.test.*
@@ -69,8 +72,41 @@ class NotesExportTest {
         assertEquals(draft.attemptIds, point.attemptIds)
     }
 
+    @Test fun packagedCorePreservesUnicodeRequestsAndChineseErrors() = runBlocking {
+        val view = sample()
+        val events = view.events.map { event ->
+            if (event.type == "attempt_graded") event.copy(payload = JsonObject(event.payload + ("feedback" to JsonPrimitive("合成讲解🧪，保留中文与生僻字𠮷")))) else event
+        }
+        val draft = NotesCore.build(notesRequest(CourseView(events, project(events)), "合成课程🧪", NotesSelection(week = 1)))
+        assertTrue(draft.markdown.contains("我的答案：B. 合成选项"))
+        assertTrue(draft.markdown.contains("合成讲解🧪，保留中文与生僻字𠮷"))
+        assertFalse(draft.markdown.contains('\uFFFD'))
+        val error = assertFailsWith<IllegalStateException> {
+            NotesCore.build(buildJsonObject {
+                put("snapshot", buildJsonObject { put("course", "合成课程"); put("events", JsonArray(emptyList())) })
+                put("selection", buildJsonObject { put("week", 1) })
+            })
+        }
+        assertEquals("课程尚无账本，请先同步", error.message)
+    }
+
+    private fun assertPrivate(path: Path, directory: Boolean) {
+        val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, NOFOLLOW_LINKS)
+        if (posix != null) {
+            assertEquals(if (directory) "rwx------" else "rw-------", PosixFilePermissions.toString(posix.readAttributes().permissions()))
+        } else {
+            val entries = assertNotNull(Files.getFileAttributeView(path, AclFileAttributeView::class.java, NOFOLLOW_LINKS)).acl
+            assertEquals(1, entries.size, "No inherited or additional grants may survive")
+            val entry = entries.single()
+            assertEquals(AclEntryType.ALLOW, entry.type())
+            assertEquals(path.fileSystem.userPrincipalLookupService.lookupPrincipalByName(System.getProperty("user.name")), entry.principal())
+            assertEquals(AclEntryPermission.values().toSet(), entry.permissions())
+            assertEquals(if (directory) setOf(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT) else emptySet(), entry.flags())
+        }
+    }
+
     @Test fun privateAtomicExportNeverOverwritesAndRefusesGit() {
-        val root = Files.createTempDirectory("notes-synthetic-test")
+        val root = Files.createTempDirectory("合成笔记-test")
         try {
             val draft = NotesDraft("合成数据", emptyList(), 1)
             val first = saveNotes(root, draft, null)
@@ -78,10 +114,108 @@ class NotesExportTest {
             assertNotEquals(first, second)
             assertEquals("合成数据", Files.readString(first.resolve("复习提纲.md")))
             assertFalse(Files.exists(first.resolve("复习提纲.pdf")))
-            assertEquals("rw-------", java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(first.resolve("复习提纲.md"))))
+            for (folder in listOf(first, second)) {
+                assertPrivate(folder, true)
+                assertPrivate(folder.resolve("复习提纲.md"), false)
+            }
+            assertPrivate(second.resolve("复习提纲.pdf"), false)
+            assertContentEquals("%PDF-test".toByteArray(), Files.readAllBytes(second.resolve("复习提纲.pdf")))
             Files.createDirectory(root.resolve(".git"))
             assertFailsWith<IllegalArgumentException> { saveNotes(root, draft, null) }
             assertEquals(3, Files.list(root).use { it.count().toInt() })
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun privateExportCleansEveryFailedStageAndPreservesTheCause() {
+        for (stage in listOf("directory", "file", "pdf", "move")) {
+            val root = Files.createTempDirectory("notes-synthetic-failure-")
+            try {
+                val denied = java.nio.file.AccessDeniedException("synthetic-$stage")
+                val moveFailure = java.nio.file.AtomicMoveNotSupportedException("synthetic-stage", "synthetic-target", "synthetic-volume")
+                val files = object : NotesExportFiles() {
+                    override fun verifyPrivate(path: Path, directory: Boolean) {
+                        super.verifyPrivate(path, directory)
+                        if (stage == "directory" && directory || stage == "file" && !directory) {
+                            if (!directory) assertEquals(0L, Files.size(path), "Permission checks must precede private writes")
+                            throw denied
+                        }
+                    }
+                    override fun write(path: Path, bytes: ByteArray) {
+                        if (stage == "pdf" && path.fileName.toString().endsWith(".pdf")) throw denied
+                        super.write(path, bytes)
+                    }
+                    override fun publish(staging: Path, target: Path): Path {
+                        if (stage == "move") throw moveFailure
+                        return super.publish(staging, target)
+                    }
+                }
+                val error = assertFailsWith<java.io.IOException> { saveNotes(root, NotesDraft("合成私有正文", emptyList(), 1), "%PDF-test".toByteArray(), files) }
+                assertSame(if (stage == "move") moveFailure else denied, error)
+                assertEquals(0L, Files.list(root).use { it.count() }, "No partial export or staging directory after $stage failure")
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+
+    @Test fun unexpectedPermissionsAreRejectedBeforeWritingPrivateBytes() {
+        val root = Files.createTempDirectory("notes-synthetic-permissions-")
+        try {
+            val files = object : NotesExportFiles() {
+                override fun verifyPrivate(path: Path, directory: Boolean) {
+                    if (!directory) {
+                        assertEquals(0L, Files.size(path))
+                        val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java)
+                        if (posix != null) posix.setPermissions(PosixFilePermissions.fromString("rw-r--r--"))
+                        else {
+                            val acl = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
+                            // Reuse a real principal instead of a localized account name or SID lookup.
+                            val current = acl.acl.single().principal()
+                            val inherited = Files.getFileAttributeView(root, AclFileAttributeView::class.java).acl
+                            val other = inherited.firstOrNull { it.principal() != current }?.principal() ?: current
+                            acl.acl = acl.acl + AclEntry.newBuilder().setType(AclEntryType.ALLOW).setPrincipal(other).setPermissions(AclEntryPermission.READ_DATA).build()
+                        }
+                    }
+                    super.verifyPrivate(path, directory)
+                }
+            }
+            assertFailsWith<IllegalStateException> { saveNotes(root, NotesDraft("合成私有正文", emptyList(), 1), null, files) }
+            assertEquals(0L, Files.list(root).use { it.count() })
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun targetCollisionAndGitAncestorNeverPublishOrOverwrite() {
+        val root = Files.createTempDirectory("notes-synthetic-collision-")
+        try {
+            val draft = NotesDraft("合成正文", emptyList(), 1)
+            for (nonempty in listOf(false, true)) {
+                val existing = Files.createDirectory(root.resolve("existing-$nonempty"))
+                if (nonempty) Files.writeString(existing.resolve("keep.md"), "原有合成正文")
+                val files = object : NotesExportFiles() {
+                    override fun publish(staging: Path, target: Path) = super.publish(staging, existing)
+                }
+                assertFailsWith<java.nio.file.FileAlreadyExistsException> { saveNotes(root, draft, null, files) }
+                assertTrue(Files.isDirectory(existing))
+                if (nonempty) assertEquals("原有合成正文", Files.readString(existing.resolve("keep.md")))
+                else assertEquals(0L, Files.list(existing).use { it.count() })
+            }
+            val nested = Files.createDirectory(root.resolve("nested"))
+            Files.writeString(root.resolve(".git"), "synthetic gitdir marker")
+            assertEquals("请选择 Git 仓库之外的私人目录", assertFailsWith<IllegalArgumentException> { saveNotes(nested, draft, null) }.message)
+            assertEquals(0L, Files.list(nested).use { it.count() })
+            assertFalse(Files.list(root).use { it.anyMatch { p -> p.fileName.toString().startsWith(".coach-notes-") } })
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun filesystemWithoutPrivatePermissionsFailsClosed() {
+        val root = Files.createTempDirectory("notes-synthetic-unsupported-")
+        try {
+            val uri = java.net.URI.create("jar:" + root.resolve("synthetic.zip").toUri())
+            java.nio.file.FileSystems.newFileSystem(uri, mapOf("create" to "true")).use { fs ->
+                val folder = fs.getPath("/")
+                assertEquals("笔记导出需要私有文件权限", assertFailsWith<IllegalStateException> {
+                    saveNotes(folder, NotesDraft("合成正文", emptyList(), 1), null)
+                }.message)
+                assertEquals(0L, Files.list(folder).use { it.count() })
+            }
         } finally { root.toFile().deleteRecursively() }
     }
 

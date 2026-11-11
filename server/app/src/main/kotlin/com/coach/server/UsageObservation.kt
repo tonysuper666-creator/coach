@@ -34,8 +34,7 @@ class UsageObservation(private val logs: Path, private val state: Path,
     private val access = ServiceLog(logs, "access") { LocalDate.now(ZoneOffset.UTC) }
     private val connection = run {
         val directory = state.resolve("diagnostics")
-        Files.createDirectories(directory)
-        Files.setPosixFilePermissions(directory, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+        privateFiles.directory(directory)
         DriverManager.getConnection("jdbc:sqlite:${directory.resolve("usage.sqlite")}").also { db ->
             db.createStatement().use { s ->
                 s.execute("PRAGMA journal_mode=WAL")
@@ -66,7 +65,10 @@ class UsageObservation(private val logs: Path, private val state: Path,
             put("responseReadyMs", ready?.let(::JsonPrimitive) ?: JsonNull)
             put("firstWordMs", firstWord?.let(::JsonPrimitive) ?: JsonNull)
         }
-        runCatching { access.write((row.toString()+"\n").toByteArray()) }.onFailure { coverage.writeFailed() }
+        runCatching { access.write((row.toString()+"\n").toByteArray()) }.onFailure {
+            if (it is PrivateFilePermissionException || it is UnsupportedOperationException) throw it
+            coverage.writeFailed()
+        }
     }
 
     /** Uses receive day for offline uploads and also shows the original device timestamp. */
@@ -100,11 +102,10 @@ class UsageObservation(private val logs: Path, private val state: Path,
                 append("\n")
             }
         }
-        Files.createDirectories(state)
+        privateFiles.directory(state)
         val output = state.resolve("usage-${day.format(DateTimeFormatter.BASIC_ISO_DATE)}.md")
-        val temp = Files.createTempFile(state,"usage-", ".tmp")
+        val temp = privateFiles.tempFile(state,"usage-", ".tmp")
         try {
-            Files.setPosixFilePermissions(temp, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
             Files.writeString(temp,text)
             Files.move(temp,output,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE)
         } finally { Files.deleteIfExists(temp) }

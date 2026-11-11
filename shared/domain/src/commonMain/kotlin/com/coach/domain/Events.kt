@@ -3,7 +3,7 @@ package com.coach.domain
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 
-const val PROJECTION_VERSION = 10
+const val PROJECTION_VERSION = 12
 val LedgerJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 enum class Format { SINGLE_CHOICE, SHORT_ANSWER, ESSAY, CALCULATION }

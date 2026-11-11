@@ -20,6 +20,7 @@ import kotlinx.serialization.json.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Comparator
 import kotlin.test.*
 
 private const val token = "invented-isolated-token-01234567890123456789"
@@ -46,11 +47,34 @@ private fun writeCatalog(dir: Path, label: String) {
     }
     Files.writeString(dir.resolve("catalog.json"), buildJsonObject { put("schema", 1); put("documents", JsonArray(docs)) }.toString())
 }
+private fun popplerReady(dir: Path) = listOf("pdftoppm.exe", "pdftotext.exe", "pdfinfo.exe").all { name ->
+    runCatching { Files.isRegularFile(dir.resolve(name)) }.getOrDefault(false)
+}
+
+/** Non-Windows keeps PATH lookup. Windows passes a directory that contains the three Poppler executables. */
+private fun readerToolsDirectory(): String {
+    if (!System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) return ""
+    System.getenv("COACH_POPPLER_BIN")?.takeIf { popplerReady(Path.of(it)) }?.let { return it }
+    val onPath = (System.getenv("PATH") ?: "").split(java.io.File.pathSeparator).firstNotNullOfOrNull { entry ->
+        runCatching { Path.of(entry) }.getOrNull()?.takeIf(::popplerReady)
+    }
+    if (onPath != null) return onPath.toString()
+    val root = Path.of("D:/agent/tools/poppler")
+    if (Files.isDirectory(root)) {
+        val found = Files.walk(root, 8).use { stream ->
+            stream.filter { Files.isRegularFile(it) && it.fileName.toString().equals("pdftoppm.exe", ignoreCase = true) }
+                .map { it.parent }.filter(::popplerReady).map { it.toString() }.max(Comparator.naturalOrder()).orElse(null)
+        }
+        if (found != null) return found
+    }
+    error("Windows Poppler directory is missing; this test does not skip a missing renderer")
+}
+
 private class Service(private val root: Path) : AutoCloseable {
     val store = LedgerStore(Files.createDirectories(root.resolve("db")))
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val actor = LedgerActor(scope, store)
-    private val library = ReaderLibrary::class.java.getDeclaredConstructor(Path::class.java, String::class.java).let { it.isAccessible = true; it.newInstance(root.resolve("library"), "") }
+    private val library = ReaderLibrary::class.java.getDeclaredConstructor(Path::class.java, String::class.java).let { it.isAccessible = true; it.newInstance(root.resolve("library"), readerToolsDirectory()) }
     private val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) { readerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 64), library) }
     val base: String
     init {

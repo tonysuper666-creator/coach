@@ -180,4 +180,21 @@ class ClaimSourceReaderTest {
             assertEquals("Invented page B/book-A/4", correct.text)
         }
     }
+
+    @Test fun sourceAndPageChoicesRemainBoundToTheCatalogEditionTheUserSaw() = runBlocking {
+        FakeLibrary().use { fake ->
+            val kp = row(definition, comparison.copy(claimRef = "definition"))
+            val choice = assertIs<ClaimSourceRead.ChooseSource>(fake.a.reader.readClaimSource(kp, "definition"))
+            assertEquals("edition-book-A", choice.versions[definition.docId])
+            val range = assertIs<ClaimSourceRead.ChoosePage>(fake.a.reader.readClaimSource(row(comparison), "comparison"))
+            fake.catalogOverride = JsonArray(listOf(
+                json("id" to "book-A", "title" to "Changed book", "version" to "new-book", "pages" to 12, "kind" to "textbook"),
+                json("id" to "slides-A", "title" to "Changed slides", "version" to "new-slides", "pages" to 8, "kind" to "slides")))
+            failure(fake.a.reader.readClaimSource(kp, "definition", source = definition,
+                expectedVersion = choice.versions[definition.docId]), ClaimSourceFailure.DOCUMENT_CHANGED)
+            failure(fake.a.reader.readClaimSource(row(comparison), "comparison", source = comparison, pdfPage = 8,
+                expectedVersion = range.version), ClaimSourceFailure.DOCUMENT_CHANGED)
+            assertTrue(fake.reads.isEmpty(), "neither a source nor a page choice may transfer to another edition")
+        }
+    }
 }

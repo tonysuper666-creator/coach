@@ -28,7 +28,7 @@ internal fun ReaderCitationCards(sources: JsonArray, loadPage: suspend (String, 
     for (source in sources.mapNotNull { it as? JsonObject }) {
         TextButton(onClick = { clicked = TimeSource.Monotonic.markNow(); selected = source },
             modifier = Modifier.testTag("reader-source-${source.str("anchor")}")) {
-            Text("【${source.str("anchor")}】原文 · PDF 第 ${source.num("pdfPage")} 页")
+            Text("PDF 第 ${source.num("pdfPage")} 页")
         }
     }
     selected?.let { source ->

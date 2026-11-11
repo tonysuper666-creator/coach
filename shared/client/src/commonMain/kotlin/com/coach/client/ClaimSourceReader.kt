@@ -12,7 +12,7 @@ enum class ClaimSourceFailure {
 }
 
 sealed interface ClaimSourceRead {
-    data class ChooseSource(val sources: List<ClaimSourceAnchor>) : ClaimSourceRead
+    data class ChooseSource(val sources: List<ClaimSourceAnchor>, val versions: Map<String, String> = emptyMap()) : ClaimSourceRead
     data class ChoosePage(val source: ClaimSourceAnchor, val version: String) : ClaimSourceRead
     /** A successful existing reader request proves location/edition only, not semantic claim support. */
     data class Opened(val source: ClaimSourceAnchor, val pdfPage: Int, val version: String, val text: String) : ClaimSourceRead
@@ -31,6 +31,7 @@ suspend fun ReaderHttp.readClaimSource(
     supportedSubpoint: String? = null,
     source: ClaimSourceAnchor? = null,
     pdfPage: Int? = null,
+    expectedVersion: String? = null,
 ): ClaimSourceRead {
     val selection = kp.sourceReferences.forClaim(claimRef, supportedSubpoint)
     if (selection is KnowledgeSourceChoice.Unconfirmed)
@@ -59,8 +60,11 @@ suspend fun ReaderHttp.readClaimSource(
         if (doc.kind != candidate.sourceKind.catalogKind) return ClaimSourceRead.Unconfirmed(ClaimSourceFailure.KIND_MISMATCH)
         if (candidate.pdfPageEnd > doc.pages) return ClaimSourceRead.Unconfirmed(ClaimSourceFailure.PAGE_OUTSIDE_DOCUMENT)
     }
-    val selected = source ?: candidates.singleOrNull() ?: return ClaimSourceRead.ChooseSource(candidates)
+    val selected = source ?: candidates.singleOrNull() ?: return ClaimSourceRead.ChooseSource(
+        candidates, documents.associate { it.id to it.version })
     val document = documents.single { it.id == selected.docId }
+    if (expectedVersion != null && document.version != expectedVersion)
+        return ClaimSourceRead.Unconfirmed(ClaimSourceFailure.DOCUMENT_CHANGED)
     val page = pdfPage ?: if (selected.pdfPage == selected.pdfPageEnd) selected.pdfPage
         else return ClaimSourceRead.ChoosePage(selected, document.version)
     if (page !in selected.pdfPage..selected.pdfPageEnd) return ClaimSourceRead.Unconfirmed(ClaimSourceFailure.PAGE_OUTSIDE_SOURCE)

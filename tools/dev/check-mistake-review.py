@@ -61,6 +61,27 @@ def prepare_choice_keys(db, course):
     return kp, keys
 
 
+def run(args, timeout=90, binary=False, **kwargs):
+    return subprocess.check_output(list(map(str, args)), timeout=timeout,
+                                   text=not binary, stderr=subprocess.PIPE, **kwargs)
+
+
+def testphone_install_sh():
+    # tools/dev/formfactor-sim.sh: $COACH_TESTPHONE_DIR/install.sh, else ~/Coach/testphone/install.sh.
+    directory = os.environ.get('COACH_TESTPHONE_DIR')
+    root = Path(directory) if directory else Path.home() / 'Coach' / 'testphone'
+    return root / 'install.sh'
+
+
+def install_with_confirm(apk, run_command=run):
+    # Proven call is `install.sh <apk>`. formfactor-sim.sh requires a stdout line starting with Success.
+    # This helper's own budget is 180s. Every other run() call keeps the 90s timeout.
+    output = run_command([testphone_install_sh(), apk], timeout=180)
+    if not any(line.startswith('Success') for line in output.splitlines()):
+        raise RuntimeError('install.sh did not report Success')
+    return output
+
+
 # Phone acceptance starts below. Importing this module runs that path.
 from local_config import value
 
@@ -84,11 +105,6 @@ DATA.mkdir(mode=0o700)
 TOKEN = secrets.token_urlsafe(32)
 DEVICE = 'review-acceptance'
 children, logs = [], []
-
-
-def run(args, timeout=90, binary=False, **kwargs):
-    return subprocess.check_output(list(map(str, args)), timeout=timeout,
-                                   text=not binary, stderr=subprocess.PIPE, **kwargs)
 
 
 def port():
@@ -225,7 +241,7 @@ try:
         if installed:
             digest = run([ADB,'-s',SERIAL,'shell','sha256sum',installed]).split()[0]
             same = digest == hashlib.sha256((ROOT/apk).read_bytes()).hexdigest()
-        if not same: run([ADB, '-s', SERIAL, 'install', '-r', ROOT/apk])
+        if not same: install_with_confirm(ROOT/apk)
     run([ADB, '-s', SERIAL, 'shell', 'run-as', PACKAGE, 'mkdir', '-p', 'cache'])
     run([ADB, '-s', SERIAL, 'shell', f"run-as {PACKAGE} sh -c 'cat > cache/review-keys.json'"], input=json.dumps(keys))
     bridge = spawn('bridge', [os.environ['COACH_REVIEW_BRIDGE_PYTHON'], ROOT/'tools/bridge/subscription_bridge.py'])

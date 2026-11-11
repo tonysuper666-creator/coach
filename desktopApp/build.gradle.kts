@@ -126,3 +126,13 @@ tasks.processResources { dependsOn(notesCore) }
 tasks.withType<JavaExec>().configureEach {
     for (key in listOf("coach.exportFormulas", "coach.capturePath", "coach.captures", "coach.captureDir")) providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
 }
+
+// Real pairing/HTTP/WS against an owned, disposable Ktor process; no desktop automation or AI traffic.
+tasks.register<JavaExec>("pairingSmoke") {
+    group = "verification"
+    description = "Verify desktop first connection, private identity, restart, offline and revocation against an isolated server"
+    dependsOn(tasks.testClasses, ":server:app:installDist")
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.DesktopPairingSmoke")
+    args(rootDir.absolutePath)
+}

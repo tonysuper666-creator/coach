@@ -184,10 +184,17 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, c, revision) {
+        var traced = emptyList<String>()
         value = withContext(Dispatchers.Default) {
             val events = c.sync.localEvents(c.courseId)
-            if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
+            val active = com.coach.client.PoolTrace.active()
+            if (active.isNotEmpty()) traced = events.filter { it.type == "question_posed" && it.threadId in active }.mapNotNull { it.threadId }.distinct()
+            traced.forEach { com.coach.client.PoolTrace.mark(it, "view_events_read") }
+            val built = if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId))
+            traced.forEach { com.coach.client.PoolTrace.mark(it, "view_built") }
+            built
         }
+        traced.forEach { com.coach.client.PoolTrace.mark(it, "view_applied") }
     }
     val navigation = androidx.compose.runtime.saveable.rememberSaveable(c.courseId, saver = AppNavigation.saver) {
         val saved = c.sync.mainlineState(c.courseId, "navigation")["stack"]?.let { (it as? JsonPrimitive)?.content }

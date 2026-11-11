@@ -134,17 +134,26 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val decoded = HashMap<String, DecodedEvents>()
     private val decodedLock = Any()
     /** Within an epoch the replica only grows, so only rows after the last decoded seq are decoded;
-     * every screen rebuild and projection replay otherwise re-decodes the whole course. An epoch
-     * change or row-count mismatch falls back to a full read. */
+     * every screen rebuild and projection replay otherwise re-decodes the whole course. An epoch reset
+     * clears the replica and writes the new epoch in one transaction, so the epoch is re-read after the
+     * rows: a changed epoch or row-count mismatch means the cached prefix may belong to another epoch,
+     * and the course is read again in one statement, which never mixes epochs. */
     fun localEvents(course: String): List<Event> {
         fun after(seq: Long) = q.eventsAfter(course, seq).executeAsList().map { LedgerJson.decodeFromString<Event>(it) }
+        fun count() = q.countEvents(course).executeAsOneOrNull()
         val epoch = meta("epoch").orEmpty()
+        fun remember(events: List<Event>, count: Long?) {
+            if (meta("epoch").orEmpty() == epoch && events.size.toLong() == count)
+                synchronized(decodedLock) { decoded[course] = DecodedEvents(epoch, events.lastOrNull()?.seq ?: Long.MIN_VALUE, events) }
+        }
         val prior = synchronized(decodedLock) { decoded[course] }?.takeIf { it.epoch == epoch }
-        var events = if (prior == null) after(Long.MIN_VALUE) else prior.events + after(prior.lastSeq)
-        val count = q.countEvents(course).executeAsOneOrNull()
-        if (prior != null && events.size.toLong() != count) events = after(Long.MIN_VALUE)
-        if (meta("epoch").orEmpty() == epoch && events.size.toLong() == count)
-            synchronized(decodedLock) { decoded[course] = DecodedEvents(epoch, events.lastOrNull()?.seq ?: Long.MIN_VALUE, events) }
+        if (prior != null) {
+            val events = prior.events + after(prior.lastSeq)
+            val count = count()
+            if (meta("epoch").orEmpty() == epoch && events.size.toLong() == count) return events.also { remember(it, count) }
+        }
+        val events = after(Long.MIN_VALUE)
+        remember(events, count())
         return events
     }
     fun projection(course: String): Projection = db.transactionWithResult {

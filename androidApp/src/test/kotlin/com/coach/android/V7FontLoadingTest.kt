@@ -6,6 +6,7 @@ import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.graphics.text.TextRunShaper
 import android.util.TypedValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
@@ -76,12 +77,20 @@ class V7FontLoadingTest {
         compose.runOnIdle {
             val resolver = createFontFamilyResolver(app)
             for (family in listOf(fonts.reading, fonts.ui, fonts.note, fonts.numbers)) {
+                // Compose wraps a supplied native Typeface without changing its
+                // style. Ask Android to select each weight from that native family.
+                val base = resolver.resolve(family, FontWeight.Normal, FontStyle.Normal, FontSynthesis.None).value as Typeface
                 for (weight in listOf(300, 370, 400, 500, 600, 700)) {
-                    val face = resolver.resolve(family, FontWeight(weight), FontStyle.Normal, FontSynthesis.None).value as Typeface
+                    val face = Typeface.create(base, weight, false)
                     assertEquals(weight, face.weight)
                     val paint = Paint().apply { typeface = face }
                     assertTrue("Latin must remain readable at $weight", paint.hasGlyph("A"))
                     assertTrue("CJK must remain readable at $weight", paint.hasGlyph("学"))
+                    val glyphs = TextRunShaper.shapeTextRun("A学", 0, 2, 0, 2, 0f, 0f, false, paint)
+                    assertTrue(glyphs.glyphCount > 0)
+                    for (index in 0 until glyphs.glyphCount) {
+                        assertEquals("The selected Latin/CJK font must retain its weight", weight, glyphs.getFont(index).style.weight)
+                    }
                 }
             }
         }

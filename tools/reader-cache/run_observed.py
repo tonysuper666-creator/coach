@@ -57,11 +57,14 @@ def main():
     parser.add_argument("--renderer", default="pdftoppm")
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--serial")
+    parser.add_argument("--package", choices=[PACKAGE, PACKAGE + ".ton1463"], default=PACKAGE,
+                        help="Explicit isolated measurement identity; TON-1463 uses the per-card suffix")
     parser.add_argument("--aapt2")
     parser.add_argument("--apk", type=Path)
     parser.add_argument("--test-apk", type=Path)
     parser.add_argument("--perfetto", action="store_true", help="Collect Android FrameTimeline and the app's fixed trace markers")
     args = parser.parse_args()
+    package = args.package
     if (args.no_transport_memory_sampler or args.transport_observer is not None) and (args.platform != 'android' or args.suite not in ('transport','route')):
         parser.error('memory sampler control is limited to Android transport/route; UI/lifecycle memory sampling stays required')
     observer_mode=args.transport_observer or ('none' if args.no_transport_memory_sampler else 'both')
@@ -101,7 +104,7 @@ def main():
             syscall_build_type=subprocess.check_output(adb+['shell','getprop','ro.build.type'],text=True).strip()
             if syscall_build_type!='userdebug':
                 raise ValueError('Syscall tracing requires the existing userdebug image; no image or permission change is permitted')
-        for apk, expected in ((args.apk, PACKAGE), (args.test_apk, PACKAGE + ".test")):
+        for apk, expected in ((args.apk, package), (args.test_apk, package + ".test")):
             badging = subprocess.check_output([args.aapt2, "dump", "badging", str(apk)], text=True)
             if not re.search(r"^package: name='" + re.escape(expected) + "'", badging):
                 raise ValueError("Refusing to install an APK outside the isolated measurement package")
@@ -131,6 +134,7 @@ def main():
             meminfoEnabled=observer_mode in ('both','meminfo'),commandCounts=observer_counts,
             samplesFile=observer_file if observer_mode!='none' else None,waitAfterCycleSeconds=.2)
     if args.platform == "android":
+        identity["applicationPackage"] = package
         identity["apkSha256"] = hashlib.sha256(args.apk.read_bytes()).hexdigest()
         identity["testApkSha256"] = hashlib.sha256(args.test_apk.read_bytes()).hexdigest()
     (out / "run.json").write_text(json.dumps(identity, indent=2))
@@ -161,7 +165,7 @@ def main():
                             result = subprocess.run(["ps", "-o", "pid=,rss=", "-p", str(pid)], capture_output=True, text=True)
                             row.update(pid=pid, rssKiB=result.stdout.strip(), exit=result.returncode)
                     else:
-                        row=observe_android(adb,PACKAGE,run_id,observer_mode,
+                        row=observe_android(adb,package,run_id,observer_mode,
                             expected_suite=args.suite if args.suite in ('transport','route') else None)
                         for kind,span in row['operations'].items():
                             observer_counts[kind]+=1
@@ -222,7 +226,9 @@ def main():
                                             stdin=subprocess.PIPE, stdout=perfetto_log, stderr=subprocess.STDOUT)
                 config_name=('socket-syscalls.pbtxt' if args.socket_syscalls else 'socket-scheduling.pbtxt') if args.socket_scheduling_trace else 'frametimeline.pbtxt'
                 identity['perfettoConfig']=config_name
-                perfetto.stdin.write((Path(__file__).with_name(config_name)).read_bytes())
+                config = Path(__file__).with_name(config_name).read_bytes()
+                # Keep the app marker filter aligned with the verified APK namespace.
+                perfetto.stdin.write(config.replace(PACKAGE.encode(), package.encode()))
                 perfetto.stdin.close()
             env = dict(os.environ, COACH_READER_FIXTURE_HOST=args.host, COACH_READER_FIXTURE_PORT=str(fixture.port),
                        COACH_READER_OBSERVED_OUTPUT=str(out), COACH_READER_RUN_ID=run_id)
@@ -242,7 +248,7 @@ def main():
                     if args.socket_scheduling_trace: route_args+=['-e','readerSocketSchedule','enabled']
                     result = subprocess.run(adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class",
                         test_class, "-e", "readerPort", str(measurement_port), "-e", "readerRunId", run_id,
-                        *route_args, PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
+                        *route_args, package + ".test/androidx.test.runner.AndroidJUnitRunner"], stdout=log, stderr=subprocess.STDOUT)
                     # adb may exit 0 even if AndroidJUnitRunner reports a failing test.
                     captures = [("reader-observed.json", "trace.json")]
                     if args.suite == "performance":
@@ -256,7 +262,7 @@ def main():
                             captures.append((f"reader-lifetime-{stage}.json", f"lifetime-{stage}.json"))
                     for remote, local in captures:
                         with (out / local).open("wb") as capture:
-                            subprocess.run(adb + ["exec-out", "run-as", PACKAGE, "cat", "cache/" + remote], stdout=capture, check=True)
+                            subprocess.run(adb + ["exec-out", "run-as", package, "cat", "cache/" + remote], stdout=capture, check=True)
             identity["commandExit"] = result.returncode
             save_http_records()
             if args.platform == "android" and "OK (1 test)" not in (out / "test.log").read_text():

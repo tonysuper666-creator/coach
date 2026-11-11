@@ -4,6 +4,28 @@ import kotlin.test.*
 import kotlinx.coroutines.*
 
 class ReaderRasterLeaseTest {
+    @Test fun ownershipReceiptsDistinguishRetirementFromAComposedReferenceAndClearBeforeDispose() {
+        val receipts = mutableListOf<ReaderRasterLease.Ownership>()
+        val lease = ReaderRasterLease(Any()) { _, drawn ->
+            assertTrue(drawn)
+            assertEquals(ReaderRasterLease.Ownership(false, 0, true, true), receipts.last(),
+                "the logical value must be cleared before reporting the platform release disposition")
+        }
+        lease.observeOwnership { receipts += it }
+        val book = assertNotNull(lease.acquire())
+        val citation = assertNotNull(lease.acquire())
+        book.drawn()
+        lease.retire()
+        assertEquals(ReaderRasterLease.Ownership(false, 2, false, true), receipts.last())
+        book.close()
+        assertEquals(ReaderRasterLease.Ownership(false, 1, false, true), receipts.last())
+        citation.close()
+        assertEquals(ReaderRasterLease.Ownership(false, 0, true, true), receipts.last())
+        val count = receipts.size
+        lease.retire(); citation.close(); citation.drawn()
+        assertEquals(count, receipts.size, "closed uses cannot resurrect or mutate a released raster")
+    }
+
     @Test fun evictionWaitsForAllComposedUsesAndRecordsWhetherItWasDrawn() {
         val released = mutableListOf<Boolean>()
         val raster = Any()

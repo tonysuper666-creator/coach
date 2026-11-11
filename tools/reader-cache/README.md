@@ -1266,3 +1266,55 @@ the existing `window_frames.sql` with the run's measurement PID, retain quality
 and all dropped/ambiguous candidates, and keep wrong-geometry traces excluded
 from contractual latency/physical-memory acceptance. No route/radio work is
 required for this product verification.
+
+### Backing high water at the conforming `01d8b2b` run
+
+Independent replay of QA-C's synthetic Android performance trace identifies all
+five backings at its first maximum, event 77 at 2,288,779,626 process-local ns.
+These are the first five allocations, all decoded 1200x1600/7,680,000-byte
+bitmaps, with no scratch allocation: image/page 3/1, 6/2, 8/3, 11/4 and 14/5.
+Images 3 and 6 already have composition-detach, cache-eviction and
+`release_deferred_renderer` receipts. Image 8 is the previous cached page,
+11 is the current composed page, and 14 is the new in-flight prefetch. The next
+recorded frame-submitted event observes three weak backings, 37.063 ms after
+the first maximum. This bounds only those sampled observations, not the exact
+allocation lifetime or renderer/GPU retention interval.
+
+The 38,400,000-byte weak high water is retained as evidence. It includes two
+retired displayed pages; it is neither a five-entry cache nor proof that the
+physical incremental three-image budget passes. Conversely, comparing that
+absolute total with an incremental budget cannot establish the paired delta
+without a matching baseline. Do not recycle drawn Android bitmaps based only
+on composition disposal or a frame-submission callback, and do not force GC to
+make the peak disappear.
+
+New traces keep both high-water counters and identity-preserving snapshots at
+the exact same weak-reference sample. Receipts include storage, size, source
+session/page, publication/retirement, composed ownership and the lease's actual
+logical references before/after clearing. Release disposition is distinct from
+`valueCleared`; neither certifies native/GPU release. Snapshot metadata is
+bounded by the existing allocation limit and observation remains disabled in
+normal execution. Earlier artifacts are not backfilled with these fields.
+
+```sh
+python3 tools/reader-cache/backing_lifetimes.py OUTPUT/trace.json \
+  --output OUTPUT/backing-lifetimes.json
+```
+
+The checker rejects missing peak identities, duplicate identity/byte coverage,
+inconsistent lease ownership and missing peak-event witnesses. A complete
+report verifies the receipts only. It does not subtract retired pages from the
+original peak, claim a physical budget, or treat final-GC liveness as peak data.
+Cache eviction is recorded before `lease.retire()`: if another thread allocates
+in between, the snapshot reports a pending retirement and still counts that
+logical value. It must not mistake the eviction marker for a cleared lease.
+Native receipts for this new instrumentation and its effect on measurements
+must still be collected and kept separate from `01d8b2b`.
+
+Use the card-specific package `com.coach.readermeasurement.ton1463` for the next
+APK build (`-PcoachApplicationId=...`) and runner (`--package ...`). APK package
+guards, sampler/run-as, instrumentation and Perfetto app filters all use that
+explicit identity. Legacy measurement packages remain selectable for old
+artifacts, never silently translated or used with a mismatched test APK. Retain
+the existing geometry save/reset/restore and default UI memory sampling; remove
+both TON-1463 packages after the owned session.

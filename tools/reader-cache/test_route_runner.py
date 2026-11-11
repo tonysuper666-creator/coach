@@ -98,7 +98,20 @@ class RouteRunnerTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised: run_observed.main()
             self.assertEqual(2,raised.exception.code)
 
-    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False,host_clock=False):
+    def test_per_card_package_covers_install_observation_instrumentation_and_capture(self):
+        self.run_case(False,execute_cycle=True,package=run_observed.PACKAGE+'.ton1463')
+
+    def test_per_card_package_keeps_perfetto_app_markers_in_the_same_namespace(self):
+        self.run_case(False,mode='none',schedule_trace=True,package=run_observed.PACKAGE+'.ton1463')
+
+    def test_production_package_is_rejected_before_device_or_service_work(self):
+        args=['run_observed.py','--platform','android','--output','unused','--package','com.coach.android']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.subprocess.run') as command:
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+            command.assert_not_called()
+
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False,host_clock=False,package=run_observed.PACKAGE):
         selected=mode or ('none' if disabled else 'both')
         enabled=selected!='none'
         clients,servers=test_route_control.RouteControlTest().records()
@@ -115,8 +128,11 @@ class RouteRunnerTest(unittest.TestCase):
         sampler_events=[]
         captures=[]
 
+        class CapturedInput(io.BytesIO):
+            def close(self): self.written=self.getvalue();super().close()
+
         class FakePerfetto:
-            def __init__(self,*args,**kwargs): self.stdin=io.BytesIO();self.waited=False;captures.append(self)
+            def __init__(self,*args,**kwargs): self.stdin=CapturedInput();self.waited=False;captures.append(self)
             def wait(self,**_): self.waited=True;return 0
             def kill(self): raise AssertionError('unexpected capture termination')
 
@@ -146,8 +162,8 @@ class RouteRunnerTest(unittest.TestCase):
         def check_output(command,**_):
             if 'getprop' in command: return 'userdebug' if command[-1]=='ro.build.type' else '1'
             if command[0]=='aapt-unit':
-                package=run_observed.PACKAGE+('.test' if command[-1]==str(test_apk) else '')
-                return f"package: name='{package}'"
+                apk_package=package+('.test' if command[-1]==str(test_apk) else '')
+                return f"package: name='{apk_package}'"
             if command[:2]==['git','rev-parse']: return 'test-sha'
             if command[:2]==['git','status']: return ''
             raise AssertionError(command)
@@ -175,6 +191,7 @@ class RouteRunnerTest(unittest.TestCase):
 
         args=['run_observed.py','--platform','android','--suite','route','--host','127.0.0.2',
             '--serial','emulator-5554','--aapt2','aapt-unit','--apk',str(apk),'--test-apk',str(test_apk),'--output',str(out)]
+        args.extend(['--package',package])
         if disabled: args.append('--no-transport-memory-sampler')
         if mode is not None: args.extend(['--transport-observer',mode])
         if watch_queue: args.append('--socket-queue-watch')
@@ -204,8 +221,13 @@ class RouteRunnerTest(unittest.TestCase):
             self.assertTrue((out/('socket-syscalls.perfetto-trace' if syscalls else 'socket-scheduling.perfetto-trace')).exists())
             self.assertFalse((out/'frames.perfetto-trace').exists())
             self.assertTrue(captures[0].stdin.closed);self.assertTrue(captures[0].waited)
+            self.assertIn(('atrace_apps: "'+package+'"').encode(),captures[0].stdin.written)
         self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
         identity=json.loads((out/'run.json').read_text())
+        self.assertEqual(package,identity['applicationPackage'])
+        self.assertTrue(any(command[-1]==package+'.test/androidx.test.runner.AndroidJUnitRunner' for command in commands))
+        for command in commands:
+            if 'run-as' in command: self.assertEqual(package,command[command.index('run-as')+1])
         self.assertIs(syscalls,identity['socketSyscallsRequested'])
         self.assertIs(host_clock,identity['hostClockBoundariesRequested'])
         if syscalls:

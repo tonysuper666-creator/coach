@@ -27,22 +27,32 @@ object ReaderPageTrace {
     private var peakDecoding = 0
     private var peakDecoded = 0
     private var peakReachableBytes = 0L
+    private var peakDecodedSnapshot: JsonObject? = null
+    private var peakBytesSnapshot: JsonObject? = null
     private val events = ArrayDeque<JsonObject>()
     private val allocations = mutableListOf<Allocation>()
     private val owners = mutableMapOf<Long, Int>()
+    private val leaseOwnership = mutableMapOf<Long, ReaderRasterLease.Ownership>()
+    private val releases = mutableMapOf<Long, String>()
+    private val published = mutableSetOf<Long>()
+    private val retired = mutableSetOf<Long>()
+    private val observedImages = mutableSetOf<Long>()
     private val draws = mutableSetOf<Pair<Long, Long>>()
     private val lookups = mutableSetOf<Pair<Long, Int>>()
     private val inputTimes = mutableMapOf<Long, Long>()
     private var decodePause: ReaderDecodePause? = null
 
-    private class Allocation(val image: Long, val storage: String, val width: Int, val height: Int,
+    private class Allocation(val observation: ReaderDecodeObservation, val storage: String, val width: Int, val height: Int,
                              val bytes: Long, val weak: ReaderBitmapWeakReference)
+    { val image get() = observation.image }
 
     /** Start before composing a measurement surface. Default production execution does no observation. */
     fun start() = synchronized(lock) {
         decodePause?.resume(); decodePause = null
         epoch++; sequence = 0; sessionSequence = 0; dropped = 0; allocationOverflow = false
         decoding = 0; peakDecoding = 0; peakDecoded = 0; peakReachableBytes = 0
+        peakDecodedSnapshot = null; peakBytesSnapshot = null
+        leaseOwnership.clear(); releases.clear(); published.clear(); retired.clear(); observedImages.clear()
         events.clear(); allocations.clear(); owners.clear(); draws.clear(); lookups.clear(); inputTimes.clear(); enabled = true
     }
 
@@ -91,7 +101,22 @@ object ReaderPageTrace {
     }
 
     internal fun mark(kind: String, session: Int, page: Int, action: Long, image: Long = 0) {
-        if (enabled) synchronized(lock) { record(kind, session, page, action, image) }
+        if (enabled) synchronized(lock) {
+            if (image in observedImages) when {
+                kind == "cache_published" -> published.add(image)
+                kind == "cache_evicted" -> { published.remove(image); retired.add(image) }
+                kind.startsWith("release_") -> releases[image] = kind
+            }
+            record(kind, session, page, action, image)
+        }
+    }
+
+    internal fun ownership(observation: ReaderDecodeObservation, state: ReaderRasterLease.Ownership) {
+        if (enabled) synchronized(lock) {
+            if (observation.epoch != epoch || observation.image !in observedImages) return
+            leaseOwnership[observation.image] = state
+            record("raster_ownership", observation.session, observation.page, observation.action, observation.image)
+        }
     }
 
     internal fun decode(session: Int, page: Int, action: Long, prefetch: Boolean = false): ReaderDecodeObservation? {
@@ -111,7 +136,7 @@ object ReaderPageTrace {
             if (observation.epoch != epoch) return
             // Retain bounded allocation metadata after collection so peak sizes remain auditable.
             if (allocations.size >= ALLOCATION_LIMIT) allocationOverflow = true
-            else allocations += Allocation(observation.image, storage, width, height, bytes, weak)
+            else { allocations += Allocation(observation, storage, width, height, bytes, weak); observedImages.add(observation.image) }
             record("allocation_$storage", observation.session, observation.page, observation.action, observation.image)
         }
     }
@@ -183,14 +208,13 @@ object ReaderPageTrace {
             put("peakDecodeInFlight", peakDecoding)
             put("peakWeakLiveDecodedBackings", peakDecoded)
             put("peakWeakReachableBackingBytes", peakReachableBytes)
+            put("peakWeakLiveDecodedSnapshot", peakDecodedSnapshot ?: JsonNull)
+            put("peakWeakReachableBytesSnapshot", peakBytesSnapshot ?: JsonNull)
+            put("ownershipOrReleaseIsPhysicalProof", false)
             put("compositionOwners", owners.values.sum())
-            put("weakLiveBackings", JsonArray(alive.map { allocation -> buildJsonObject {
-                put("image", allocation.image); put("storage", allocation.storage)
-                put("width", allocation.width); put("height", allocation.height); put("bytes", allocation.bytes)
-            } }))
+            put("weakLiveBackings", JsonArray(alive.map(::backingReceipt)))
             put("allocations", JsonArray(allocations.map { allocation -> buildJsonObject {
-                put("image", allocation.image); put("storage", allocation.storage)
-                put("width", allocation.width); put("height", allocation.height); put("bytes", allocation.bytes)
+                for ((key, value) in backingReceipt(allocation)) put(key, value)
                 put("weakAlive", allocation.weak.alive())
             } }))
             put("events", JsonArray(events.toList()))
@@ -202,7 +226,10 @@ object ReaderPageTrace {
         val alive = allocations.filter { it.weak.alive() }
         val decoded = alive.count { it.storage == "decoded" }
         val bytes = alive.sumOf { it.bytes }
-        peakDecoded = maxOf(peakDecoded, decoded); peakReachableBytes = maxOf(peakReachableBytes, bytes)
+        // Capture identities with the same weak-reference sample as each high water. Do not
+        // substitute final-GC liveness or current Map size for the earlier peak.
+        if (decoded > peakDecoded) { peakDecoded = decoded; peakDecodedSnapshot = peakReceipt(kind, timestamp, alive) }
+        if (bytes > peakReachableBytes) { peakReachableBytes = bytes; peakBytesSnapshot = peakReceipt(kind, timestamp, alive) }
         if (events.size >= LIMIT) { events.removeFirst(); dropped++ }
         events.addLast(buildJsonObject {
             put("kind", kind); put("ns", timestamp); put("session", session); put("page", page)
@@ -212,6 +239,27 @@ object ReaderPageTrace {
             put("weakReachableBackingBytes", bytes)
         })
         readerTraceMarker(kind, action, image)
+    }
+
+    private fun backingReceipt(allocation: Allocation): JsonObject = buildJsonObject {
+        put("image", allocation.image); put("storage", allocation.storage)
+        put("width", allocation.width); put("height", allocation.height); put("bytes", allocation.bytes)
+        put("sourceSession", allocation.observation.session); put("sourcePage", allocation.observation.page)
+        put("prefetch", allocation.observation.prefetch)
+        put("published", allocation.image in published); put("retired", allocation.image in retired)
+        put("releaseDisposition", releases[allocation.image]?.let(::JsonPrimitive) ?: JsonNull)
+        put("compositionOwners", owners[allocation.image] ?: 0)
+        put("lease", leaseOwnership[allocation.image]?.let { state -> buildJsonObject {
+            put("cacheOwned", state.cacheOwned); put("composedUses", state.composedUses)
+            put("valueCleared", state.valueCleared); put("everDrawn", state.everDrawn)
+        } } ?: JsonNull)
+    }
+
+    private fun peakReceipt(kind: String, timestamp: Long, alive: List<Allocation>) = buildJsonObject {
+        put("event", kind); put("ns", timestamp)
+        put("decoded", alive.count { it.storage == "decoded" }); put("scratch", alive.count { it.storage == "scratch" })
+        put("bytes", alive.sumOf { it.bytes }); put("decodeInFlight", decoding)
+        put("compositionOwners", owners.values.sum()); put("backings", JsonArray(alive.map(::backingReceipt)))
     }
 }
 

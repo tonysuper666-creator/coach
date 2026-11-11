@@ -60,6 +60,7 @@ private class ReaderImageResource(reader: ReaderHttp, session: Int) {
                                 val release = releaseReaderImage(value, drawn)
                                 ReaderPageTrace.mark(release, session, key.page, 0, observation?.image ?: 0)
                             }
+                            if (observation != null) raster.observeOwnership { ReaderPageTrace.ownership(observation, it) }
                             ReaderLoadedImage(raster, key.page, session, observation, key.identity, Long.MAX_VALUE)
                         }
                     } finally { ReaderPageTrace.decoded(observation, bitmap != null) }
@@ -69,7 +70,10 @@ private class ReaderImageResource(reader: ReaderHttp, session: Int) {
     }, discard = { key, image ->
         ReaderPageTrace.mark("cache_evicted", session, key.page, 0, image.observation?.image ?: 0)
         image.raster.retire()
-    }, publish = { _, image -> image.copy(readyNs = ReaderPageTrace.nowNs()) })
+    }, publish = { _, image ->
+        ReaderPageTrace.mark("cache_published", image.sourceSession, image.sourcePage, 0, image.observation?.image ?: 0)
+        image.copy(readyNs = ReaderPageTrace.nowNs())
+    })
     init { ReaderPageTrace.mark("window_opened", session, 0, 0) }
 }
 

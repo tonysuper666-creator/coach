@@ -91,10 +91,12 @@ class MistakeReviewSmoke {
             val reviewMark = SystemClock.elapsedRealtimeNanos()
             click(reviewButton)
             click(waitText("错题 ${listed.size}")) // with due reviews the page opens on 到期; the list is only composed on 错题
+            val wrongListSplit = linkedMapOf("click" to sinceMs(reviewMark))
             // Stems render as Markdown, so wait for a plain label every card carries; the list is not lazy.
-            waitText("当时的答案：",substring=true)
-            settleAndCapture("wrong-list",reviewMark)
+            wrongListSplit.putAll(waitTarget("当时的答案：",reviewMark,interim=null,substring=true))
+            settleAndCapture("wrong-list",reviewMark,wrongListSplit)
             step("mistake list captured")
+            step("split wrong-list ${splitNote(wrongListSplit)}")
             scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")) // after the timed window
             samples.put("wrongCount",listed.size)
             if (args.getString("coachPhase") == "prepare") {
@@ -139,11 +141,17 @@ class MistakeReviewSmoke {
             val retryMark = SystemClock.elapsedRealtimeNanos()
             reviewThread = retryThread
             PoolTrace.begin(retryThread) // a retry is not a "test" send, so the app does not start this thread's trace
+            val retrySplit = linkedMapOf("traceBegin" to sinceMs(retryMark))
             click(retryButton)
-            waitText("第 1 / 3 题")
-            focus(retryThread,"retry")
-            settleAndCapture("retry",retryMark)
+            retrySplit["click"] = sinceMs(retryMark)
+            retrySplit.putAll(waitTarget("第 1 / 3 题",retryMark,interim="正在取出同一知识点的 3 道新题…"))
+            settleAndCapture("retry",retryMark,retrySplit)
             step("retry questions captured")
+            focus(retryThread,"retry") // after the timed window, as in wrong-list
+            // PoolTrace stages count from traceBegin.
+            val retryTrace = PoolTrace.snapshot(retryThread)
+            for (stage in listOf("cards_received","events_saved")) retrySplit[stage] = retryTrace[stage] ?: -1.0
+            step("split retry ${splitNote(retrySplit)}")
             val opened = latestReviewOpen(events(),null)
             val openedAt = "seq=${opened?.optLong("seq")} base=$retryBase"
             assertEquals("latest REVIEW kp_opened kpId ($openedAt)",kp,opened?.getJSONObject("payload")?.optString("kpId"))
@@ -165,6 +173,7 @@ class MistakeReviewSmoke {
             }
             settleAndCapture("cleared",clearMark)
             step("cleared list captured")
+            step("cleared branch=${if (cleared.isEmpty()) "empty" else "notice"}")
             focus(retryThread,"cleared")
             samples.put("newQuestions",3).put("clearedCount",2)
             assertTrue(samples.getDouble("initialWrongListMs")<=1000)
@@ -296,11 +305,15 @@ class MistakeReviewSmoke {
             catch(e: AssertionError) { if(it==2) throw e;Thread.sleep(400) }
         }
     }
-    private fun settleAndCapture(name: String,mark: Long) {
-        instrumentation.waitForIdleSync();Thread.sleep(100)
+    /** [split], when given, gets idle, shotStart and shotEnd in ms after [mark]; [samples] is written as before. */
+    private fun settleAndCapture(name: String,mark: Long,split: MutableMap<String,Double>?=null) {
+        instrumentation.waitForIdleSync()
+        split?.put("idle",sinceMs(mark))
+        Thread.sleep(100)
         val start=SystemClock.elapsedRealtimeNanos()
         val bitmap=ui.takeScreenshot()
         val end=SystemClock.elapsedRealtimeNanos()
+        split?.put("shotStart",(start-mark)/1_000_000.0);split?.put("shotEnd",(end-mark)/1_000_000.0)
         java.io.File(context.cacheDir,"review-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
         bitmap.recycle()
         samples.put(name+"Ms",(end-mark)/1_000_000.0).put(name+"FrameStartedMs",(start-mark)/1_000_000.0)
@@ -342,6 +355,20 @@ class MistakeReviewSmoke {
             Thread.sleep(10)
         }
         throw AssertionError("Visible text missing: ← 今天")
+    }
+    private fun sinceMs(mark: Long)=(SystemClock.elapsedRealtimeNanos()-mark)/1_000_000.0
+    private fun splitNote(split: Map<String,Double>)=split.entries.joinToString(" ") { (k,v) -> "$k=${"%.1f".format(java.util.Locale.ROOT,v)}" }
+    /** [waitText] over one tree read per poll that also notes, in ms after [mark], when [interim] first showed (-1: never seen). */
+    private fun waitTarget(text: String,mark: Long,interim: String?,substring: Boolean=false,timeout: Long=10_000): Map<String,Double> {
+        val end=SystemClock.elapsedRealtime()+timeout
+        var interimMs=-1.0
+        while(SystemClock.elapsedRealtime()<end) {
+            val r=root()
+            if(interim!=null && interimMs<0 && find(interim,true,r)!=null) interimMs=sinceMs(mark)
+            if(find(text,substring,r)!=null) return mapOf("interim" to interimMs,"target" to sinceMs(mark))
+            Thread.sleep(10)
+        }
+        throw AssertionError("Visible text missing: $text")
     }
     private fun waitText(text: String,timeout: Long=10_000,enabled: Boolean=false,substring: Boolean=false): AccessibilityNodeInfo {
         val end=SystemClock.elapsedRealtime()+timeout

@@ -32,7 +32,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     val now = rememberCourseNow(c)
     val due = view.dueReviews(now)
     var tab by remember(c.courseId) { mutableStateOf(if (due.isNotEmpty()) 1 else 0) }
-    // 离线练习不再是单独一页：两页顶部都在（顺序同 TON-1495），选到一半的答案由这里持有，换页、滚走都不丢。
+    // 离线练习不再是单独一页，两页都在；选到一半的答案由这里持有，换页、滚走都不丢。
     val offline = remember(c.courseId) { OfflineDraft() }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -47,17 +47,23 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             }
         }
         // 提醒、页签固定；说明、入口、列表和离线练习在同一个滚动里，短窗口也能滚到每一行（TON-1495）。
-        val top: @Composable () -> Unit = {
+        val notice: @Composable () -> Unit = {
+            Text(examReviewNotice(view, now), Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
+        }
+        val extras: @Composable () -> Unit = {
+            OfflinePractice(c, offline)
+            ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
+        }
+        // 错题页的主体是错题：列表紧跟考期提示，离线练习和入口排在列表之后，展开屏首屏就能看到错题。
+        if (tab == 0) MistakesPane(c, view, Modifier.weight(1f), notice) {
             Column(Modifier.fillMaxWidth()) {
-                Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
-                OfflinePractice(c, offline)
-                ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
-                if (due.isEmpty() && tab == 0) Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                extras()
+                if (due.isEmpty()) Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
         }
-        if (tab == 0) MistakesPane(c, view, Modifier.weight(1f), top)
         else Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-            top()
+            notice()
+            extras()
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (due.isEmpty()) Text("今天没有到期的复习。")
                 else {
@@ -90,7 +96,7 @@ private class OfflineDraft {
 }
 
 @Composable
-private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifier, top: @Composable () -> Unit) {
+private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifier, top: @Composable () -> Unit, bottom: @Composable () -> Unit) {
     val ui by c.tutor.model.state.collectAsState()
     var activeKp by remember { mutableStateOf<String?>(null) }
     var priorGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -113,7 +119,7 @@ private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifie
             c.tutor.model.onFailure(target, "Mac 未连接，连上后可再练；错题已保存在本机。")
         }
     }
-    // 再练时滚到错题区开头（第 0 项是说明和入口），返回时回到页顶。
+    // 再练时滚到错题区开头（第 0 项是考期提示），返回时回到页顶。
     LaunchedEffect(activeKp, group?.groupId) { listState.scrollToItem(if (activeKp != null) 1 else 0) }
     LaunchedEffect(group, view.mistakes) {
         if (group?.cards?.all { it.grade != null } == true && view.mistakes.items.none { it.kpId == activeKp }) {
@@ -171,6 +177,7 @@ private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifie
                 }
             }
         }
+        item(key = "bottom") { bottom() }
     }
 }
 

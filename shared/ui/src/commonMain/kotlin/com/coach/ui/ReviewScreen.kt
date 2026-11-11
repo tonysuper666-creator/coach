@@ -5,7 +5,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import kotlinx.coroutines.launch
@@ -14,6 +13,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
@@ -54,13 +55,14 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             OfflinePractice(c, offline)
             ReviewShortcuts(c, view, onOpenMainline, onOpenMock, onOpenEssay)
         }
-        // 错题页的主体是错题：列表紧跟考期提示，离线练习和入口排在列表之后，展开屏首屏就能看到错题。
-        if (tab == 0) MistakesPane(c, view, Modifier.weight(1f), notice) {
+        // 错题页的主体是错题：考期提示（无到期时连同「今天没有到期的复习。」）之后紧跟列表，
+        // 离线练习和入口排在列表之后，展开屏首屏就能看到错题和无到期说明。
+        if (tab == 0) MistakesPane(c, view, Modifier.weight(1f), top = {
             Column(Modifier.fillMaxWidth()) {
-                extras()
+                notice()
                 if (due.isEmpty()) Text("今天没有到期的复习。", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
             }
-        }
+        }) { Column(Modifier.fillMaxWidth()) { extras() } }
         else Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
             notice()
             extras()
@@ -102,7 +104,8 @@ private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifie
     var priorGroups by remember { mutableStateOf<Set<String>>(emptySet()) }
     var notice by remember { mutableStateOf<String?>(null) }
     val chosen = remember { mutableStateMapOf<String, String>() }
-    val listState = rememberLazyListState()
+    val scroll = rememberScrollState()
+    var sectionTop by remember { mutableStateOf(0) }
     val thread = activeKp?.let(view::reviewThreadId).orEmpty()
     val tv = ui.threads[thread]
     val group = if (activeKp == null) null else view.quizGroups(thread).lastOrNull { it.groupId !in priorGroups }
@@ -119,65 +122,63 @@ private fun MistakesPane(c: CoachController, view: CourseView, modifier: Modifie
             c.tutor.model.onFailure(target, "Mac 未连接，连上后可再练；错题已保存在本机。")
         }
     }
-    // 再练时滚到错题区开头（第 0 项是考期提示），返回时回到页顶。
-    LaunchedEffect(activeKp, group?.groupId) { listState.scrollToItem(if (activeKp != null) 1 else 0) }
+    // 再练时滚到错题区开头（其上是考期提示），返回时回到页顶。
+    LaunchedEffect(activeKp, group?.groupId) { scroll.scrollTo(if (activeKp != null) sectionTop else 0) }
     LaunchedEffect(group, view.mistakes) {
         if (group?.cards?.all { it.grade != null } == true && view.mistakes.items.none { it.kpId == activeKp }) {
             activeKp = null; notice = "连续答对 3 道，这个知识点的错题已移出。"
         }
     }
-    LazyColumn(modifier.fillMaxWidth(), state = listState, contentPadding = PaddingValues(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+    // 普通滚动而非 LazyColumn：错题后面的离线练习和入口始终已组合，短窗口里查找和无障碍树都能到达（TON-1495）。
+    Column(modifier.fillMaxWidth().verticalScroll(scroll).padding(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
-        item(key = "top") { top() }
-        item {
-            Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("同一知识点连续答对 3 道新题后，自动移出。", style = MaterialTheme.typography.bodyMedium)
-                if (!ui.connected) Text("离线可回看错题；连接 Mac 后可再练。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-                if (activeKp != null) TextButton(onClick = { activeKp = null }) { Text("← 返回错题") }
-            }
+        top()
+        Column(Modifier.onPlaced { sectionTop = it.positionInParent().y.toInt() }
+            .padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("同一知识点连续答对 3 道新题后，自动移出。", style = MaterialTheme.typography.bodyMedium)
+            if (!ui.connected) Text("离线可回看错题；连接 Mac 后可再练。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+            if (activeKp != null) TextButton(onClick = { activeKp = null }) { Text("← 返回错题") }
         }
         if (activeKp != null) {
-            if (group == null) item {
+            if (group == null) {
                 Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth()) {
                     Text(tv?.error ?: "正在取出同一知识点的 3 道新题…")
                     if (tv?.error != null) Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
                         modifier = Modifier.heightIn(min = 56.dp)) { Text("重试") }
                 }
             } else {
-                items(group.cards, key = { it.attemptId }) { card ->
+                group.cards.forEach { card -> key(card.attemptId) {
                     Box(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth()) {
                         QuizCardView(group.cards.indexOf(card) + 1, group.cards.size, card, group.submitted,
                             chosen[card.attemptId], c.math) { chosen[card.attemptId] = it }
                     }
-                }
-                item {
-                    Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        tv?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                        if (!group.submitted) Button(onClick = {
-                            if (!c.tutor.answer(thread, c.courseId, group.groupId,
-                                    group.cards.associate { it.attemptId to chosen.getValue(it.attemptId) }, "retry-${group.groupId}"))
-                                c.tutor.model.onFailure(thread, "Mac 未连接，答案尚未提交，选择已保留。")
-                        }, enabled = ui.connected && group.cards.all { chosen[it.attemptId] != null },
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
-                        else if (group.cards.all { it.grade != null }) {
-                            Text("本组 ${group.cards.count { it.grade?.correct == true }} / ${group.cards.size} 题正确")
-                            Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
-                                modifier = Modifier.heightIn(min = 56.dp)) { Text("再练一组") }
-                        } else Text("答案已提交，正在判分…")
-                    }
+                } }
+                Column(Modifier.padding(horizontal = 16.dp).widthIn(max = 680.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    tv?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    if (!group.submitted) Button(onClick = {
+                        if (!c.tutor.answer(thread, c.courseId, group.groupId,
+                                group.cards.associate { it.attemptId to chosen.getValue(it.attemptId) }, "retry-${group.groupId}"))
+                            c.tutor.model.onFailure(thread, "Mac 未连接，答案尚未提交，选择已保留。")
+                    }, enabled = ui.connected && group.cards.all { chosen[it.attemptId] != null },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("提交本组答案") }
+                    else if (group.cards.all { it.grade != null }) {
+                        Text("本组 ${group.cards.count { it.grade?.correct == true }} / ${group.cards.size} 题正确")
+                        Button(onClick = { activeKp?.let(::retry) }, enabled = ui.connected,
+                            modifier = Modifier.heightIn(min = 56.dp)) { Text("再练一组") }
+                    } else Text("答案已提交，正在判分…")
                 }
             }
         } else if (view.mistakes.items.isEmpty()) {
-            item { Text(view.mistakes.emptyText, Modifier.padding(horizontal = 16.dp, vertical = 32.dp)) }
+            Text(view.mistakes.emptyText, Modifier.padding(horizontal = 16.dp, vertical = 32.dp))
         } else {
-            items(view.mistakes.items, key = { "${it.kpId}:${it.attemptId}" }) { mistake ->
+            view.mistakes.items.forEach { mistake -> key("${mistake.kpId}:${mistake.attemptId}") {
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     MistakeCard(mistake, mistakeTitle(view, mistake.kpId), c.math, ui.connected) { retry(mistake.kpId) }
                 }
-            }
+            } }
         }
-        item(key = "bottom") { bottom() }
+        bottom()
     }
 }
 

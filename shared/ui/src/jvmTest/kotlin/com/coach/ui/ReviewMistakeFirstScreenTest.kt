@@ -57,11 +57,12 @@ class ReviewMistakeFirstScreenTest {
                 onNodeWithText("Synthetic mistake objective").assertIsDisplayed()
                 onNodeWithText("Synthetic mistake stem").assertIsDisplayed()
                 onNodeWithText("再练一组").assertIsDisplayed()
+                // Why the page opened on mistakes: the no-due line sits above the list (ReviewQueueSmoke reads it).
+                onNodeWithText("今天没有到期的复习。").assertIsDisplayed()
                 // The rest of the review page is still on this tab, below the list.
                 onNodeWithText("离线练习").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("open-mock").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("essay-entry").performScrollTo().assertIsDisplayed()
-                onNodeWithText("今天没有到期的复习。").performScrollTo().assertIsDisplayed()
             }
         } finally { tutor.close(); ledger.close() }
     }

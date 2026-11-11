@@ -478,7 +478,7 @@ class MainlineScreenTest {
             onAllNodesWithText("question S1", substring = true).assertCountEquals(0)
             onAllNodesWithText("question B1", substring = true).assertCountEquals(0)
             onNodeWithTag("mainline-option-2").performClick()
-            onNodeWithText("← 回到阅读").performClick()
+            onNodeWithText("暂离 · 阅读").performClick()
             assertEquals(1, closed)
             assertEquals(original, c.sync.mainlineState("C", "week:1"), "page practice must preserve the underlying question, choice and scroll")
         }

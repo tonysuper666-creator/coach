@@ -89,7 +89,7 @@ private fun MainlineEntry(c: CoachController, view: CourseView, onOpen: (Int?, B
         } while (true)
     }
     val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().map { it.jsonObject }
-    val number = c.learningTarget(view)?.week
+    val number = c.mainlineContinuationWeek(view, overview)
     Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).testTag("open-mainline")) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {

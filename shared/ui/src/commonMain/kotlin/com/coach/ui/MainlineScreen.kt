@@ -180,7 +180,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val items = (body?.get("items") as? JsonArray).orEmpty().map { it.jsonObject }.filter { only == null || it.str("id") in only }
     val sections = (body?.get("notes") as? JsonArray).orEmpty().map { it.jsonObject }
     val emphasis = (body?.get("emphasis") as? JsonArray).orEmpty().map { it.jsonObject }
-    var reading by remember { mutableStateOf(only == null && (entry?.takeUnless { it == "resume" }?.let { it == "notes" } ?: (saved.str("mode") != "quiz"))) }
+    var reading by remember { mutableStateOf(only == null && when (entry) {
+        "notes" -> true
+        "quiz", "resume-quiz" -> false
+        else -> saved.str("mode") != "quiz"
+    }) }
     var sectionId by remember { mutableStateOf(saved.str("section")) }
     var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
     var itemId by remember { mutableStateOf(saved.str("item")) }
@@ -189,6 +193,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
     var revealFeedback by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
+    // Reading is a separate view of the material, not a replacement for a paused answer.
+    var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
     val busy = pending != null
     val now = rememberCourseNow(c)
     val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
@@ -208,8 +214,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     fun position(mode: Boolean, id: String = itemId, section: String = sectionId, selectedFilter: String = filter) {
         if (mode && only != null) { onBack(); return }
+        if (!mode) quizStarted = true
         reading = mode; itemId = id; sectionId = section; filter = selectedFilter
-        save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "item" to JsonPrimitive(id),
+        save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
     LaunchedEffect(body != null) {
@@ -218,18 +225,25 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
             val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
             if (match != null) {
-                chosen = null; result = null
-                save("choice" to JsonNull, "result" to JsonNull)
-                position(reading, "", match.str("section_id"), if (reading) filter else match.str("section_id"))
+                if (reading) {
+                    if (sectionId != match.str("section_id")) readingScroll.scrollTo(0)
+                    position(true, section = match.str("section_id"))
+                } else {
+                    val candidates = items.filter { q -> q.strings("factIds").any { it in match.strings("fact_ids") } }
+                    val next = candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+                    val id = next?.str("id").orEmpty()
+                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull); scroll.scrollTo(0) }
+                    position(false, id, match.str("section_id"), match.str("section_id"))
+                }
             }
         }
     }
     LaunchedEffect(Unit) {
         if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
-        save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "filter" to JsonPrimitive(filter))
+        save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
         if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
-    LaunchedEffect(item?.str("id")) { if (item != null && itemId != item.str("id")) position(reading, item.str("id")) }
+    LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }
     LaunchedEffect(pending, retry) {
         val wire = pending ?: return@LaunchedEffect
         val traceId = wire.str("submissionId")
@@ -273,11 +287,17 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     fun startQuiz(selectedFilter: String = "") {
         if (pending != null) { position(false); return }
-        if (selectedFilter != filter) {
+        val facts = sections.firstOrNull { it.str("section_id") == selectedFilter }?.strings("fact_ids").orEmpty()
+        val candidates = if (selectedFilter.isBlank()) items else items.filter { q -> q.strings("factIds").any { it in facts } }
+        val next = candidates.firstOrNull { it.str("id") == itemId }
+            ?: candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
+        val id = next?.str("id").orEmpty()
+        if (id != itemId) {
             chosen = null; result = null
             save("choice" to JsonNull, "result" to JsonNull)
+            scope.launch { scroll.scrollTo(0) }
         }
-        position(false, if (selectedFilter == filter) itemId else "", selectedFilter = selectedFilter)
+        position(false, id, selectedFilter = selectedFilter)
     }
     val goUp: () -> Unit = { if (!reading && !directEntry) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
@@ -327,10 +347,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
     val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
-    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-    AppBackHandler(sourceOpen, priority = 250) { sourceOpen = false }
+    var sourceOpen by androidx.compose.runtime.saveable.rememberSaveable(item.str("id"), sourceKp) { mutableStateOf(false) }
+    AppBackHandler(sourceOpen && sourceKp?.sourceReferences?.structured != true, priority = 250) { sourceOpen = false }
     val openSource = { if (sourceKp != null) sourceOpen = true else onBack() }
-    if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
+    if (sourceOpen && sourceKp?.sourceReferences?.structured == true) {
+        ClaimSourceDialog(http.reader, sourceKp, "第 $number 周 · 第 ${index + 1} 题") { sourceOpen = false }
+    } else if (sourceOpen && sourceKp != null) androidx.compose.ui.window.Dialog(onDismissRequest = { sourceOpen = false },
         properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }, backLabel = "← 第 $number 周 · 第 ${index + 1} 题") }
     }
@@ -456,9 +478,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                             Text((reasons?.get("$wrong") as? JsonPrimitive)?.contentOrNull.orEmpty(), style = MaterialTheme.typography.bodyLarge)
                             Spacer(Modifier.height(16.dp))
                         }
-                        explanation.str("source").ifBlank { done.str("source") }.takeIf { it.isNotBlank() }?.let { source ->
-                            PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                        }
+                        ClaimSourceReferences(http.reader, sourceKp, explanation.str("source").ifBlank { done.str("source") },
+                            done.str("anchor"), item.str("id"))
                     }
                     if (!m.inner && (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank())) { Spacer(Modifier.height(20.dp)); SourceThumbnail(d, openSource) }
                 }
@@ -474,9 +495,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     Spacer(Modifier.height(24.dp))
                     Outcome(done, view.logicalToday(now), onReviewWeek)
                     if (done.str("status") in setOf("missed", "guessed")) PersonalMarks(relatedMarks(marks, sections, item.strings("factIds")), sections)
-                    if (explanation == null) done.str("source").takeIf { it.isNotBlank() }?.let { source ->
-                        PrivateSourceReferences(http.reader, source, done.str("anchor"))
-                    }
+                    if (explanation == null) ClaimSourceReferences(http.reader, sourceKp, done.str("source"), done.str("anchor"), item.str("id"))
                     Spacer(Modifier.height(16.dp))
                     // Every unselected option's reason remains immediately available in the same scroll view.
                     options.indices.filter { it != answer && it != displayedChoice }.forEach { i ->

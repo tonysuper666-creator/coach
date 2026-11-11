@@ -2,17 +2,24 @@
 
 ## 离线追加大纲（TON-1262）
 
-`add-outline` 给已有课程追加知识点。先从只读生产连接做 SQLite online backup，在新副本上验收；命令要求显式指定已有数据库目录，并持有服务端的 `server.lock`。不要对正在使用的库导入。
+`add-outline` 给已有课程追加知识点。先在新鲜只读生产副本上验收，经 QA 和 Architect 复核，再由原发布负责人核原发布门。正式操作须先停服冻结，锁内只读预检后立即 apply；命令要求显式指定已有数据库目录，服务保持停止到命令结束并核对收据。预检核对输入哈希、课程、活跃点 ID 集合哈希、全库事件 max seq/前缀哈希、epoch，以及全库表行与 blobs 哈希，状态不符零写退出。
 
 ```sh
 JAVA_HOME=/opt/homebrew/opt/openjdk@17 tools/dev/heavy ./gradlew :tools:migrate-deeptutor:test :server:store:test :tools:migrate-deeptutor:installDist
 tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor add-outline \
-  --input "$PRIVATE_OUTLINE_JSON" --database "$OFFLINE_DATABASE_DIR"
+  --input "$PRIVATE_OUTLINE_JSON" --database "$OFFLINE_DATABASE_DIR" --preflight > "$PRIVATE_PREFLIGHT_JSON"
+tools/migrate-deeptutor/build/install/migrate-deeptutor/bin/migrate-deeptutor add-outline \
+  --input "$PRIVATE_OUTLINE_JSON" --database "$OFFLINE_DATABASE_DIR" \
+  --expect "$PRIVATE_PREFLIGHT_JSON" --backup "$NEW_PRIVATE_BACKUP_DIR"
 ```
 
 输入沿用本地大纲清单：`course.id`、`additive:true`、`retiresExisting:false`、`modules`（`id/ordinal/name`）和 `knowledgePoints`（`id/moduleId/ordinal/title/week/examFormats/prerequisiteIds/anchors`）。标题用既有 `【W8·…】` 周次标记，须与 `week` 一致；锚点包含 `docId/pdfPage`，可带 `bookPage`，只引用同课程已有、可见且有正文的教材页。可选 `sourceAnchor` 必须属于 `anchors`。不导入源文档或新考试权重，不生成虚构的无教学内容周知识点。
 
-新 ID 和模块不得覆盖已有记录，顺序必须接在旧点之后，先修必须存在且无环。工具从新点生成安全的 `add` 操作，忽略输入 `ops`，在同一事务写入 `outline_kp`、模块、可选的既有 `course_content` 元数据及一条 `outline_revised` 事件。旧装载库没有 `course_content` 时继续沿用事件与 packs 路径。原有点、学习事实、教材和考试权重保留；任何写入失败全部回滚。相同规范化事件哈希重复导入输出 `unchanged`，同 ID 内容冲突则拒绝，不作修订。
+新 ID 和模块不得覆盖已有记录，顺序必须接在旧点之后，先修必须存在且无环。工具从新点生成安全的 `add` 操作，忽略输入 `ops`，在同一事务写入 `outline_kp`、模块、可选的既有 `course_content` 元数据及一条 `outline_revised` 事件。旧装载库没有 `course_content` 时继续沿用事件与 packs 路径。原有点、学习事实、教材和考试权重保留。相同规范化事件哈希重复导入输出 JSON `result: unchanged`（仍需新预检与新备份），同 ID 内容冲突则拒绝，不作修订。
+
+apply 在同一把 `server.lock` 内，先在线备份并校验完整性、blobs、恢复副本和正式入口试跑，再打开目标 LedgerStore，最后离线核完整 ID 集合、逐周回放、历史前缀与完整状态。备份目录必须全新，备份包含前置条件、全表逐行哈希、写后状态和结果收据。验证失败只在本次调用仍持续持锁、服务从未重启的窗口自动回退；回退前再比对除 `projection_cache` 外全库表行、schema 和 blobs，任何后续变化均拒绝覆盖，保持停服交 Architect。进程异常退出也须保持停服交接。
+
+**服务重启后禁止文件替换回退，即使没有后续写入。** 客户端可能已读到事件；回灌会复用序号并造成漏事件。本入口没有独立 rollback 命令；不能把其备份交给 `rollback-confirmed`。撤销应走审核后的前向 MIGRATION `outline_revised` retire；会更换 epoch 的 app restore 须另经 Architect 批准。
 
 真实输入、隔离副本及报告存放在仓库和 DeepTutor 之外的私有目录；仓库只收合成测试数据。此入口的验证不替代开讲、开练、模拟器及上线验收。
 

@@ -102,10 +102,16 @@ class MistakeReviewSmoke {
                 return
             }
             // History lists older mistakes first, so the first 再练一组 on the page may belong to another kp: use the new mistake's own card.
-            val card = mistakeCard(scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")))
+            // The cards have no accessibility node of their own, so walk the container in find's order: a card is
+            // title, stem, its three labels, then its button, and the next card's button only follows that card's title.
+            val stem = scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem"))
+            val nodes = preorder(mistakeCard(stem))
+            val stemAt = nodes.indexOf(stem)
+            assertTrue("stem not in the list container",stemAt>=0)
+            val buttonAt = (stemAt+1 until nodes.size).firstOrNull { hit(nodes[it],"再练一组",false) } ?: throw AssertionError("No 再练一组 after the new mistake's stem")
             // Both entries and their original answers remain in the replica, even without a new request.
-            for (label in listOf("当时的答案：","正确答案：","判分依据：")) assertNotNull("card label missing: $label",find(label,substring=true,node=card,anyVisibility=true))
-            val retryButton = requireNotNull(find("再练一组",node=card,anyVisibility=true))
+            for (label in listOf("当时的答案：","正确答案：","判分依据：")) assertTrue("card label missing between stem and button: $label",(stemAt+1 until buttonAt).any { hit(nodes[it],label,true) })
+            val retryButton = nodes[buttonAt]
             if (!retryButton.isVisibleToUser) { retryButton.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id);instrumentation.waitForIdleSync() }
             // The app reuses the kp's latest REVIEW thread (CourseView.reviewThreadId); history may already hold one.
             val ledger = events()
@@ -121,8 +127,9 @@ class MistakeReviewSmoke {
             settleAndCapture("retry",retryMark)
             step("retry questions captured")
             val opened = latestReviewOpen(events(),null)
-            assertEquals("latest REVIEW kp_opened kpId",kp,opened?.getJSONObject("payload")?.optString("kpId"))
-            assertEquals("latest REVIEW kp_opened threadId",retryThread,opened?.optString("threadId"))
+            val openedAt = "seq=${opened?.optLong("seq")} base=$retryBase"
+            assertEquals("latest REVIEW kp_opened kpId ($openedAt)",kp,opened?.getJSONObject("payload")?.optString("kpId"))
+            assertEquals("latest REVIEW kp_opened threadId ($openedAt)",retryThread,opened?.optString("threadId"))
             val retry = group(retryThread,afterSeq=retryBase)
             val oldIds = (0 until first.length()).map { first.getJSONObject(it).getJSONObject("payload").getString("questionId") }.toSet()
             assertEquals(3,retry.length())
@@ -230,7 +237,7 @@ class MistakeReviewSmoke {
         it.optString("type")=="kp_opened" && p?.optString("via")=="REVIEW" && (kp==null || p.optString("kpId")==kp) &&
             it.optString("threadId").isNotBlank() && !it.isNull("threadId")
     }.maxByOrNull { it.getLong("seq") }
-    /** The MistakeCard holding [node]: its first ancestor whose subtree has a 再练一组 button. */
+    /** The first ancestor of [node] whose subtree has a 再练一组 button: on the phone, the whole list container. */
     private fun mistakeCard(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
         var n: AccessibilityNodeInfo?=node.parent
         while(n!=null) { if(find("再练一组",node=n,anyVisibility=true)!=null) return n;n=n.parent }
@@ -285,12 +292,21 @@ class MistakeReviewSmoke {
     private fun root(): AccessibilityNodeInfo? { ui.clearCache();return ui.rootInActiveWindow }
     private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=root(),anyVisibility: Boolean=false): AccessibilityNodeInfo? {
         if(node==null) return null
-        val shown=norm(node.text?.toString().orEmpty());val want=norm(text)
-        // Option rows may merge the letter with a long Markdown body: match the body's opening too.
-        val hit=if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
-        if((anyVisibility || node.isVisibleToUser) && hit) return node
+        if((anyVisibility || node.isVisibleToUser) && hit(node,text,substring)) return node
         for(i in 0 until node.childCount) find(text,substring,node.getChild(i),anyVisibility)?.let { return it }
         return null
+    }
+    private fun hit(node: AccessibilityNodeInfo,text: String,substring: Boolean): Boolean {
+        val shown=norm(node.text?.toString().orEmpty());val want=norm(text)
+        // Option rows may merge the letter with a long Markdown body: match the body's opening too.
+        return if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
+    }
+    /** [node]'s subtree in the order [find] visits it. */
+    private fun preorder(node: AccessibilityNodeInfo?,out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
+        if(node==null) return out
+        out.add(node)
+        for(i in 0 until node.childCount) preorder(node.getChild(i),out)
+        return out
     }
     private fun norm(s: String)=s.replace('\u2019','\'').replace(Regex("\\s+")," ").trim()
     private fun visibleTexts(node: AccessibilityNodeInfo?=root(),out: MutableList<String> = mutableListOf()): List<String> {

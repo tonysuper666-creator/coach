@@ -649,7 +649,9 @@ private struct ReaderView: View {
                 }
             }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
-            .foregroundStyle(Appearance.ink).task { await model.loadCatalog() }
+            .foregroundStyle(Appearance.ink)
+            .toolbar(.hidden, for: .navigationBar)
+            .task { await model.loadCatalog() }
             .alert("放弃这条待确认记录？", isPresented: $showDiscard) {
                 Button("放弃记录", role: .destructive) { model.discardPending() }
                 Button("取消", role: .cancel) { }

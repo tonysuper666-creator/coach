@@ -605,6 +605,7 @@ private struct ReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: ReaderModel
     @State private var showDiscard = false
+    @FocusState private var noteFieldFocused: Bool
     init(connection: ConnectionModel, course: String) { _model = StateObject(wrappedValue: ReaderModel(connection: connection, course: course)) }
     var body: some View {
         ScrollView {
@@ -642,12 +643,13 @@ private struct ReaderView: View {
                             }
                         }.modifier(V7Card())
                     }
-                    TextField("写下批注", text: $model.draft, axis: .vertical).textFieldStyle(.roundedBorder).disabled(model.pending != nil).accessibilityIdentifier("readerNoteDraft")
+                    TextField("写下批注", text: $model.draft, axis: .vertical).focused($noteFieldFocused).textFieldStyle(.roundedBorder).disabled(model.pending != nil).accessibilityIdentifier("readerNoteDraft")
                     Button(model.editing == nil ? "保存选中文字的批注" : "保存批注修改") { Task { await model.saveNote() } }
                         .disabled(model.busy || model.pending != nil).accessibilityIdentifier("saveReaderNote")
                 }
             }.frame(maxWidth: 600, alignment: .leading).padding(CoachV7.Space.s6)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
+        }.scrollDismissesKeyboard(.immediately)
+            .frame(maxWidth: .infinity, maxHeight: .infinity).background(Appearance.paper.ignoresSafeArea())
             .safeAreaInset(edge: .top, spacing: 0) {
                 Button("返回课程和练习") { dismiss() }
                     .accessibilityIdentifier("readerBack")
@@ -659,6 +661,13 @@ private struct ReaderView: View {
             }
             .foregroundStyle(Appearance.ink)
             .toolbar(.hidden, for: .navigationBar)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("收起键盘") { noteFieldFocused = false }
+                        .accessibilityIdentifier("dismissReaderKeyboard")
+                }
+            }
             .task { await model.loadCatalog() }
             .alert("放弃这条待确认记录？", isPresented: $showDiscard) {
                 Button("放弃记录", role: .destructive) { model.discardPending() }

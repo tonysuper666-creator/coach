@@ -86,12 +86,18 @@ class CoachActivity : ComponentActivity() {
     }
 
     private fun createController(serverUrl: String, credentials: PairedCredentials): CoachController {
-        val db = ClientDatabase(AndroidSqliteDriver(ClientDatabase.Schema, this, "coach-client.db"))
+        // Explicit, process-scoped debug launch only. Never persist this on the learner's identity.
+        val agentRun = intent.getStringExtra("agentRunId")?.also {
+            check(BuildConfig.DEBUG) { "Agent runs require a debug acceptance build" }
+            com.coach.domain.agentThreadId(it,"validate")
+        }
+        val dbName = agentRun?.let { "coach-agent-$it.db" } ?: "coach-client.db"
+        val db = ClientDatabase(AndroidSqliteDriver(ClientDatabase.Schema, this, dbName))
         val reporter = com.coach.client.UsageReporter(serverUrl, credentials.deviceId, credentials.token)
         usageReporter = reporter
         val telemetry = com.coach.client.UsageTelemetry(db, System::currentTimeMillis, reporter::send)
         val http = HttpLedgerTransport(serverUrl, credentials.deviceId, credentials.token)
-        val sync = SyncEngine(db, credentials.deviceId, http, listOf(BuildConfig.COACH_COURSE), { UUID.randomUUID().toString() }, ::sha256Hex)
+        val sync = SyncEngine(db, credentials.deviceId, http, listOf(BuildConfig.COACH_COURSE), { UUID.randomUUID().toString() }, ::sha256Hex, agentRunId = agentRun)
         // 首字样本进 logcat（tag CoachTtft），总验收按它算 p50。
         val model = TutorModel(System::currentTimeMillis, telemetry) { s ->
             Log.i("CoachTtft", """{"thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""")
@@ -111,7 +117,7 @@ class CoachActivity : ComponentActivity() {
         }
         // 连接状态变化进 logcat（tag CoachConn），验收用它给「断线→横幅」计时：横幅与这个状态同源，只多一层去抖（断线持续 0.7 秒才出现，见 steadyConnected）。
         scope.launch { model.state.map { it.connected }.distinctUntilChanged().collect { Log.i("CoachConn", "connected=$it") } }
-        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model, telemetry)
+        val client = TutorClient(serverUrl, credentials.deviceId, credentials.token, model, telemetry, agentRunId = agentRun)
         val mathHttp = com.coach.client.MathHttp(serverUrl, credentials.deviceId, credentials.token)
         math = mathHttp
         transport = http

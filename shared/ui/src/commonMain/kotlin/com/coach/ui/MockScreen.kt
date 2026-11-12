@@ -133,7 +133,7 @@ private fun MockHome(c: CoachController, http: CourseHttp, view: CourseView, onB
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Hint(if (total == 0L) "题包里还没有单选题。" else "${drill.num("size", 7)} 题一组 · ${drill.num("minutes", 14)} 分钟 · 交卷立即出分和讲解，错题进按周错题本")
                 if (total > 0) {
-                    Button(onClick = { start { http.startDrill(null) } }, enabled = !busy && active == null, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("按押题权重抽题") }
+                    Button(onClick = { start { http.startDrill(null) } }, enabled = !busy && active == null, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("开始练习") }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         (drill["weeks"] as? JsonArray).orEmpty().map { it.jsonObject }.forEach { w ->
                             OutlinedButton(onClick = { start { http.startDrill(w.num("week").toInt()) } }, enabled = !busy && active == null, modifier = Modifier.heightIn(min = 48.dp)) {

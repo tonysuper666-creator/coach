@@ -18,6 +18,9 @@ import kotlin.test.*
 /** 「看原文」：看完返回，讲解页的状态原样；资料页不等章节列表就显示锚点页；取不到时如实说。 */
 @OptIn(ExperimentalTestApi::class)
 class SourceViewTest {
+    private val ledgers = mutableListOf<SyntheticLocalLedger>()
+    @AfterTest fun closeLedgers() { ledgers.forEach { it.close() } }
+
     @Test fun sourceOverlayKeepsStreamingFeedbackAndLessonInTheSameStudyPane() = runComposeUiTest {
         var reading by mutableStateOf(false)
         var message by mutableStateOf(TutorMessage("weekly-feedback", "stub", false, "错因：已复核"))
@@ -107,10 +110,10 @@ class SourceViewTest {
     }
 
     private fun controller(http: CourseHttp?) = CoachController(
-        courseId = "C", sync = SyntheticLocalLedger("C").sync, tutor = unused(), formatClock = { "" }, course = http,
+        courseId = "C", sync = SyntheticLocalLedger("C").also { ledgers += it }.sync, tutor = unused(), formatClock = { "" }, course = http,
     )
 
-    /** These screens never touch the sync engine or the tutor client; allocate without running a constructor. */
+    /** These screens never touch the tutor client; allocate without running a constructor. */
     @Suppress("UNCHECKED_CAST")
     private inline fun <reified T> unused(): T {
         val f = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }

@@ -111,10 +111,10 @@ private fun RouteRow(kp: KpRow, selected: Boolean, unmet: List<KpRow>, noConstru
                 // 状态用文字（和图标位），不只靠颜色。
                 StatusChip(kp.status.symbol + " " + kp.status.label, statusColor(kp.status))
             }
-            if (kp.formerlySolid) Text("之前稳了，最近一次简答/论述/限时题没答对，需要重新答对。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+            if (kp.formerlySolid) Text("之前${com.coach.client.KpStatus.SOLID.label}，最近一次简答/论述/限时题没答对，需要重新答对。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
             if (kp.solidProgress.isNotBlank()) Text(kp.solidProgress, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (unmet.isNotEmpty()) Text("建议先学：" + unmet.joinToString("、") { splitTitle(it.title).second.take(24) }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
-            if (noConstructed) Text("这一节还没有简答题，暂时到不了「稳了」。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (noConstructed) Text("这一节还没有简答题，暂时到不了「${com.coach.client.KpStatus.SOLID.label}」。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

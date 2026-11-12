@@ -19,6 +19,9 @@ import kotlin.test.*
 /** 模拟考的答案不能丢：选完立刻暂离、断线后恢复，Mac 上最后都得有这次作答。卷子是合成的。 */
 @OptIn(ExperimentalTestApi::class)
 class MockAutosaveTest {
+    private val ledgers = mutableListOf<SyntheticLocalLedger>()
+    @AfterTest fun closeLedgers() { ledgers.forEach { it.close() } }
+
     private class FakeMac : AutoCloseable {
         @Volatile var online = true
         @Volatile var stored = JsonObject(emptyMap())
@@ -51,7 +54,7 @@ class MockAutosaveTest {
         override fun close() { release(); http.close(); server.stop(0); workers.shutdownNow() }
     }
 
-    // The exam never touches sync or the tutor; a bare instance stands in for them.
+    // The exam never touches the tutor; a bare instance stands in for it.
     @Suppress("UNCHECKED_CAST")
     private inline fun <reified T> unused(): T {
         val f = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }
@@ -67,7 +70,7 @@ class MockAutosaveTest {
 
     /** The exam page, and a stand-in for the review page it leaves to; coming back reloads what the Mac has. */
     private fun ComposeUiTest.mount(mac: FakeMac) {
-        val c = CoachController("C", SyntheticLocalLedger("C").sync, unused(), formatClock = { "" }, nowMillis = { 1000 }, course = mac.http)
+        val c = CoachController("C", SyntheticLocalLedger("C").also { ledgers += it }.sync, unused(), formatClock = { "" }, nowMillis = { 1000 }, course = mac.http)
         setContent {
             var inExam by remember { mutableStateOf(true) }
             CoachTheme(false) {

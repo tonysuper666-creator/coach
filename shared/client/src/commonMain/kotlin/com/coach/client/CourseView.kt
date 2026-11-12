@@ -23,8 +23,11 @@ import kotlinx.serialization.json.jsonObject
  * 定义：未学 = 没打开过；在学 = 打开过或做过题、还没会；会了 = 最近 3 道不同题答对且不含猜对；
  * 稳了 = 会了之后在不同两天用简答/论述/限时题答对；要补 = 会了之后又答错，已排进复习。
  */
-enum class KpStatus(val label: String, val symbol: String) {
-    NEW("未学", "○"), IN_PROGRESS("在学", "◐"), PASSED("会了", "✓"), SOLID("稳了", "✓✓"), NEEDS_REPAIR("要补", "!")
+enum class KpStatus(val state: com.coach.domain.KpState, val symbol: String) {
+    NEW(com.coach.domain.KpState.NEW, "○"), IN_PROGRESS(com.coach.domain.KpState.IN_PROGRESS, "◐"),
+    PASSED(com.coach.domain.KpState.PASSED, "✓"), SOLID(com.coach.domain.KpState.SOLID, "✓✓"),
+    NEEDS_REPAIR(com.coach.domain.KpState.NEEDS_REPAIR, "!");
+    val label: String get() = state.label
 }
 
 data class KpRow(
@@ -67,16 +70,18 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 }
 
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
-class CourseView(val events: List<Event>, val projection: Projection) {
+class CourseView(events: List<Event>, val projection: Projection, private val agentRun: String? = null) {
+    val events: List<Event> = com.coach.domain.learnerEvidence(events, agentRun)
+    private fun lessonThread(thread: String) = agentRun?.let { com.coach.domain.agentThreadId(it, thread) } ?: thread
 
     /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
-    fun tutorThreadId(kpId: String): String = events.lastOrNull {
+    fun tutorThreadId(kpId: String): String = lessonThread(events.lastOrNull {
         it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }?.threadId ?: "kp:$kpId"
+    }?.threadId ?: "kp:$kpId")
 
-    fun reviewThreadId(kpId: String): String = events.filter {
+    fun reviewThreadId(kpId: String): String = lessonThread(events.filter {
         it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"
+    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId")
 
     val mistakes: MistakeReview by lazy { mistakeReview(events) }
 
@@ -135,14 +140,14 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 if (operation == "retire") { retired += id; continue }
                 if (operation == "add") retired -= id
                 val title = o.s("title").ifBlank { o.s("name") }
-                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
+                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, "")
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
                 (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
         }
-        projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
+        projection.mastery.keys.forEach { titles.putIfAbsent(it, "") }
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
         Rows(order.filter { it in titles }.map { id ->
@@ -155,7 +160,7 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 com.coach.domain.KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS
                 com.coach.domain.KpState.NEW -> KpStatus.NEW
             }
-            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
+            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "${KpStatus.SOLID.label}进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]
             KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),

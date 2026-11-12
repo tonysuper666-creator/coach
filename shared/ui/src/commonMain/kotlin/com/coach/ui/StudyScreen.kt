@@ -290,7 +290,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
     if (askOpen && pending != null && !readingFocus) AlertDialog(onDismissRequest = { askOpen = false },
         title = { Text("问一句") }, text = {
-            Column { Text("现在问，这题不算进「稳了」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column { Text("现在问，这题不算进「${com.coach.client.KpStatus.SOLID.label}」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ComposerField(value = draft, onValueChange = { draft = it }, onSend = { text -> send(text).also { if (it) askOpen = false } },
                 gate = enterGate, placeholder = "问一句…", maxLines = 4, canSend = ui.connected && !tv.busy) }
         }, confirmButton = { TextButton(onClick = { askOpen = false }) { Text("继续答题") } })

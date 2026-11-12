@@ -14,10 +14,12 @@ from pathlib import Path
 import secrets
 import re
 import selectors
+import signal
 import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -124,9 +126,76 @@ def _save_install_timeout(exc):
         pass
 
 
-def install_with_confirm(apk, run_command=run):
+def _run_install(args, timeout):
+    """Share one monotonic deadline with install.sh, including startup and exit.
+
+    The helper owns and reaps its directly launched clients on TERM/INT. Only
+    signal this Popen handle here, never an adb server or another installation.
+    Files avoid waiting for EOF on descriptors inherited by a daemon.
+    """
+    deadline = time.monotonic() + timeout
+    reserve = min(0.5, timeout / 8)
+    env = dict(os.environ, COACH_INSTALL_DEADLINE=str(deadline))
+    command = list(map(str, args))
+    process = None
+    cancelled = 0
+
+    def cancel(number, frame):
+        nonlocal cancelled
+        cancelled = number
+
+    previous = {}
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            for number in (signal.SIGTERM, signal.SIGINT):
+                previous[number] = signal.signal(number, cancel)
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout,
+                                       stderr=stderr, env=env, start_new_session=True)
+            while (process.poll() is None and not cancelled
+                   and time.monotonic() < deadline - reserve):
+                time.sleep(min(0.02, max(0, deadline - reserve - time.monotonic())))
+            timed_out = process.poll() is None
+        finally:
+            # Repeated cancellation cannot interrupt the bounded reap.
+            for number in previous:
+                signal.signal(number, signal.SIG_IGN)
+            try:
+                if process is not None and process.poll() is None:
+                    try:
+                        process.terminate()
+                    except ProcessLookupError:
+                        pass
+                    # Cancellation may arrive well before the work deadline.
+                    # Let the helper finish its bounded client reap before KILL.
+                    end = min(deadline - reserve / 4,
+                              time.monotonic() + min(3, timeout / 2))
+                    while process.poll() is None and time.monotonic() < end:
+                        time.sleep(min(0.01, max(0, end - time.monotonic())))
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                    while process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+            finally:
+                for number, handler in previous.items():
+                    signal.signal(number, handler)
+        stdout.seek(0)
+        stderr.seek(0)
+        output, error = stdout.read(), stderr.read()
+    if cancelled:
+        raise SystemExit(128 + cancelled)
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout, output=output, stderr=error)
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command, output=output, stderr=error)
+    return output.decode('utf-8')
+
+
+def install_with_confirm(apk, run_command=_run_install):
     # Proven call is `install.sh <apk>`. formfactor-sim.sh requires a stdout line starting with Success.
-    # This helper's own budget is 180s. Every other run() call keeps the 90s timeout.
+    # The helper shares this 180s budget. Other run() calls keep the 90s timeout.
     # TimeoutExpired keeps its captured output, then the same exception is raised.
     # Success is checked only after the process exits.
     try:

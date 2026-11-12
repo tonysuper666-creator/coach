@@ -62,7 +62,7 @@ import kotlinx.coroutines.runBlocking
 class DesktopPairingFormTest {
     @Test fun typedAddressAndCodeRejectThenPairAndReopenKeepsTheSameDevice() {
         Harness().use { service ->
-            val home = Files.createTempDirectory("coach-desktop-form-")
+            val home = realTempDirectory("coach-desktop-form-")
             // The installed app sets jpackage.app-path. This JVM does not, so say so explicitly.
             val settings = DesktopConnectionSettings(home, { null }, mac = false, property = { name ->
                 if (name == "jpackage.app-path") "/synthetic/Coach.app" else null
@@ -101,7 +101,7 @@ class DesktopPairingFormTest {
                 assertTrue(onAllNodesWithText("连接你的 Mac").fetchSemanticsNodes().isEmpty())
             }
             val device = checkNotNull(pairedDevice)
-            assertTrue(service.deviceNames().contains("Windows 电脑"))
+            assertTrue(service.deviceNames().contains(pairedDeviceName()), "os.name=${System.getProperty("os.name")}")
             assertEquals(device, deviceId(store))
             val saved = Files.readAllBytes(store.file)
             pairedDevice = null
@@ -155,7 +155,7 @@ class DesktopPairingFormTest {
 private val forbiddenPorts = setOf(18791, 8791, 8790, 3790, 19540)
 
 private class Harness : AutoCloseable {
-    private val root = Files.createTempDirectory("coach-desktop-form-server-")
+    private val root = realTempDirectory("coach-desktop-form-server-")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val admin = "synthetic-form-admin-token-0123456789"
     private val actor = LedgerActor(scope, LedgerStore(root).also { it.enroll("desktop", admin) })
@@ -219,6 +219,19 @@ private fun freePort(): Int {
     check(port !in forbiddenPorts) { "Refusing production port $port" }
     return port
 }
+
+/** Resolves the JDK temp symlink (`/tmp` → `/private/tmp`) before credential path checks. */
+private fun realTempDirectory(prefix: String): java.nio.file.Path {
+    val path = Files.createTempDirectory(prefix).toRealPath()
+    for (parent in generateSequence(path) { it.parent }) {
+        check(!Files.isSymbolicLink(parent)) { "Synthetic directory must be a real path" }
+    }
+    return path
+}
+
+/** Same `os.name` branch DesktopPairingGate sends to the live pairing service. */
+private fun pairedDeviceName(): String =
+    if (System.getProperty("os.name").startsWith("Windows")) "Windows 电脑" else "Mac 电脑"
 
 private fun deviceId(store: DesktopCredentials): String {
     val values = java.util.Properties()

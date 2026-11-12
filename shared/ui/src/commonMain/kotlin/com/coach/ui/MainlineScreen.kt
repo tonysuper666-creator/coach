@@ -19,6 +19,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
@@ -425,6 +427,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val railAnchors = remember { MarginAnchors() }
     val askState = rememberLadderQuestionAskState(http, number, item.str("id"))
     val closeAsk = { askOpen = false; askState.clear() }
+    AppBackHandler(askOpen, priority = 350, onBack = closeAsk)
     val answer = done?.num("answer")?.toInt()
     // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
     val displayedChoice = done?.num("choice")?.toInt() ?: chosen
@@ -486,6 +489,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             Text(if (nextId != null) "下一题  ›" else "", Modifier.clickable(enabled = done != null && nextId != null, onClick = ::nextQuestion), style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
+        val askOutsideRail = askOpen && !LocalDeskMarginVisible.current
         val density = LocalDensity.current
         // Medium describes columns, not spare height: keep submission reachable in these windows too.
         val dockActions = m.window != DeskWindow.Inner
@@ -645,8 +649,18 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 .verticalScroll(rememberScrollState()).background(com.coach.ui.theme.CoachTheme.colors.surface1)
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
+            // Keep wide-window help inside the page: a modal scrim would intercept the Desk
+            // controls that restore its rail and dismiss/cancel this same question instead.
+            if (askOutsideRail && m.inner) Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).widthIn(max = CoachV7.Layout.colw)
+                    .fillMaxWidth().heightIn(max = maxHeight).testTag("mainline-ask-panel")
+                    .semantics { paneTitle = "问一句" },
+                shape = MaterialTheme.shapes.large, shadowElevation = 6.dp,
+            ) {
+                LadderQuestionAsk(askState, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, closeAsk)
+            }
         }
-        if (askOpen && !LocalDeskMarginVisible.current) ModalBottomSheet(onDismissRequest = closeAsk) {
+        if (askOutsideRail && !m.inner) ModalBottomSheet(onDismissRequest = closeAsk) {
             LadderQuestionAsk(askState, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, closeAsk)
         }
     }

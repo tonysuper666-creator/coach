@@ -100,7 +100,7 @@ class WeeklyReaderTest {
                 onNodeWithText("本周脉络：节 → 考点 → 题").performScrollTo().performClick()
                 onNodeWithText("要点：Synthetic section").assertIsDisplayed()
                 onNodeWithText("○ 考点 1 · Synthetic section").assertIsDisplayed()
-                onNodeWithText("○ 考点 2 · Synthetic section").assertIsDisplayed()
+                onNodeWithText("○ 考点 2 · Synthetic section").performScrollTo().assertIsDisplayed()
                 onNodeWithText("这一题 · 待练").performScrollTo().assertIsDisplayed()
                 onNodeWithText("题：Synthetic question with a stem longer th · 猜对，待练").performScrollTo().performClick()
                 onNodeWithText("题：Synthetic mastered · 最近答对（非猜）").performScrollTo().assertIsDisplayed()

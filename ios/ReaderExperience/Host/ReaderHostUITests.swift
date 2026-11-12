@@ -2,6 +2,13 @@ import XCTest
 import UIKit
 
 final class ReaderHostUITests: XCTestCase {
+    private func recordPosition(_ name: String, _ value: String) {
+        let attachment = XCTAttachment(string: value)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func captureHighlight(_ name: String, app: XCUIApplication) {
         // Static WKWebView text can be visible without being hittable. Check
         // the source drawer's actual pixels rather than a tapability flag.
@@ -40,9 +47,8 @@ final class ReaderHostUITests: XCTestCase {
 
     func testPDFDrawerAndRestart() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-fixture"]
+        app.launchArguments = ["--fixture-scope=\(UUID().uuidString)"]
         app.launch()
-        app.launchArguments = []
         app.buttons["PDF"].tap()
         app.buttons["下一页"].tap()
         app.buttons["题目"].tap()
@@ -55,22 +61,27 @@ final class ReaderHostUITests: XCTestCase {
         captureHighlight("pdf-source", app: app)
         app.buttons["返回题目"].tap()
         XCTAssertEqual(answer.value as? String, "north")
+        recordPosition("pdf-position-before-restart", app.staticTexts["pdf-position"].label)
         app.terminate()
         app.launch()
         XCTAssertEqual(app.staticTexts["pdf-position"].label, "PDF 2")
+        recordPosition("pdf-position-after-restart", app.staticTexts["pdf-position"].label)
         app.buttons["题目"].tap()
         XCTAssertEqual(app.textFields["answer"].value as? String, "north")
         XCTAssertEqual(app.textFields["note"].value as? String, "synthetic note")
+        app.buttons["查看出处"].tap()
+        XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 10))
+        captureHighlight("pdf-source-after-restart", app: app)
     }
 
     func testEPUBSourceAfterFontChangeAndRestart() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-fixture"]
+        app.launchArguments = ["--fixture-scope=\(UUID().uuidString)"]
         app.launch()
-        app.launchArguments = []
         app.buttons["EPUB"].tap()
         app.buttons["题目"].tap()
         XCTAssertTrue(app.staticTexts["纸书页码无法确认"].waitForExistence(timeout: 15))
+        app.textFields["note"].tap(); app.textFields["note"].typeText("synthetic epub note")
         app.buttons["查看出处"].tap()
         XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["暂时无法确认出处"].exists)
@@ -96,11 +107,18 @@ final class ReaderHostUITests: XCTestCase {
         expectation(for: changed, evaluatedWith: position)
         waitForExpectations(timeout: 15)
         let savedPosition = position.label
+        recordPosition("epub-position-before-restart", savedPosition)
         app.terminate()
         app.launch()
         XCTAssertTrue(app.buttons["大字号"].waitForExistence(timeout: 15))
         let restored = NSPredicate(format: "label == %@", savedPosition)
         expectation(for: restored, evaluatedWith: app.staticTexts["epub-position"])
         waitForExpectations(timeout: 20)
+        recordPosition("epub-position-after-restart", app.staticTexts["epub-position"].label)
+        app.buttons["题目"].tap()
+        XCTAssertEqual(app.textFields["note"].value as? String, "synthetic epub note")
+        app.buttons["查看出处"].tap()
+        XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 20))
+        captureHighlight("epub-source-after-restart", app: app)
     }
 }

@@ -6,7 +6,16 @@ import ReadiumNavigator
 private let sentence = "The synthetic river bends north."
 
 @MainActor final class HostModel: NSObject, ObservableObject, EPUBNavigatorDelegate {
-    @Published var format = UserDefaults.standard.string(forKey: "fixture-format") ?? "PDF"
+    private static let fixtureScope: String? = {
+        let prefix = "--fixture-scope="
+        guard let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }),
+              let uuid = UUID(uuidString: String(argument.dropFirst(prefix.count))) else { return nil }
+        return uuid.uuidString
+    }()
+    private static func preferenceKey(_ key: String) -> String {
+        fixtureScope.map { "\(key)-\($0)" } ?? key
+    }
+    @Published var format = UserDefaults.standard.string(forKey: HostModel.preferenceKey("fixture-format")) ?? "PDF"
     @Published var pdfPage = 0
     @Published var drawer = false
     @Published var sourceOpen = false
@@ -17,7 +26,7 @@ private let sentence = "The synthetic river bends north."
     @Published var sourceEPUB: EPUBNavigatorViewController?
     @Published var answer = ""
     @Published var note = ""
-    @Published var fontSize = UserDefaults.standard.double(forKey: "fixture-font-size") == 0 ? 1.0 : UserDefaults.standard.double(forKey: "fixture-font-size")
+    @Published var fontSize = UserDefaults.standard.double(forKey: HostModel.preferenceKey("fixture-font-size")) == 0 ? 1.0 : UserDefaults.standard.double(forKey: HostModel.preferenceKey("fixture-font-size"))
     @Published var epubPosition = ""
     let document: PDFKit.PDFDocument
     private let pdfStore: FileReaderDraftStore
@@ -29,7 +38,8 @@ private let sentence = "The synthetic river bends north."
     private var sourceFlashed = false
 
     override init() {
-        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("synthetic-reader")
+        let baseDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("synthetic-reader")
+        let directory = Self.fixtureScope.map { baseDirectory.appendingPathComponent("runs").appendingPathComponent($0) } ?? baseDirectory
         pdfStore = FileReaderDraftStore(url: directory.appendingPathComponent("pdf.json"), scope: "synthetic-pdf-v1")
         epubStore = FileReaderDraftStore(url: directory.appendingPathComponent("epub.json"), scope: "synthetic-epub-v1")
         pdfDraft = ReaderDraft(position: .pdf(pageIndex: 0, columnIndex: nil))
@@ -45,13 +55,6 @@ private let sentence = "The synthetic river bends north."
         document = PDFKit.PDFDocument(data: data)!
         super.init()
         do {
-            if ProcessInfo.processInfo.arguments.contains("--reset-fixture") {
-                try? FileManager.default.removeItem(at: directory)
-                UserDefaults.standard.removeObject(forKey: "fixture-format")
-                UserDefaults.standard.removeObject(forKey: "fixture-font-size")
-                fontSize = 1.0
-                format = "PDF"
-            }
             pdfDraft = try pdfStore.load() ?? pdfDraft
             epubDraft = try epubStore.load() ?? epubDraft
             if case let .pdf(page, _) = pdfDraft.position { pdfPage = page }
@@ -77,7 +80,7 @@ private let sentence = "The synthetic river bends north."
         } catch { message = "草稿保存失败或有冲突" }
     }
     func changeFormat(_ value: String) {
-        persist(); format = value; UserDefaults.standard.set(value, forKey: "fixture-format")
+        persist(); format = value; UserDefaults.standard.set(value, forKey: Self.preferenceKey("fixture-format"))
         drawer = false; sourceOpen = false; loadFields()
         if value == "EPUB" { Task { await openEPUB() } }
     }
@@ -134,7 +137,7 @@ private let sentence = "The synthetic river bends north."
     }
     func largerText() {
         fontSize = 1.5
-        UserDefaults.standard.set(fontSize, forKey: "fixture-font-size")
+        UserDefaults.standard.set(fontSize, forKey: Self.preferenceKey("fixture-font-size"))
         epub?.submitPreferences(EPUBPreferences(columnCount: .one, fontSize: fontSize, scroll: false))
     }
 }

@@ -591,7 +591,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                                     ClaimSourceReferences(http.reader, sourceKp, source, done.str("anchor"), item.str("id"))
                                 }
                             }
-                            val wrong = displayedChoice?.takeIf { it != answer }
+                            val wrong = displayedChoice?.takeIf { it in options.indices && it != answer }
                             if (wrong != null) {
                                 Spacer(Modifier.height(16.dp))
                                 FeedbackText("${letters.getOrNull(wrong)} 错在哪", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold))
@@ -644,11 +644,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
         }
+        if (askOpen && !m.inner) ModalBottomSheet(onDismissRequest = { askOpen = false }) {
+            LadderQuestionAsk(http, number, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, { askOpen = false })
+        }
     }
 }
-    if (askOpen && LocalDeskMetrics.current.window != DeskWindow.Inner) ModalBottomSheet(onDismissRequest = { askOpen = false }) {
-        LadderQuestionAsk(http, number, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, { askOpen = false })
-    }
 }
 
 /** A modal overlay preserves the underlying question, choices and scroll position. */

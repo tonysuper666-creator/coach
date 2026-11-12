@@ -100,7 +100,9 @@ object QuestionLadder {
             question.prerequisitesKnown && question.requiredCapabilities != null &&
                 question.requiredCapabilities.all { it in knownCapabilities } && question.prerequisites.all { kp -> kp in known } &&
                 required.map { it.calculationStep }.distinct().size == requiredCount &&
-                required.all { step -> session.responses.any { it.id == step.id && it.independentCorrect } }
+                required.groupBy { it.calculationStep }.values.all { variants ->
+                    variants.any { step -> session.responses.any { it.id == step.id && it.independentCorrect } }
+                }
         }
         val primer = pool.filter { it.kind == "try_first" }.take(4)
         if (primer.size >= 2) primer.firstOrNull { it in ready && it.id !in used && it.fingerprint !in fingerprints }?.let { return LadderStep(it) }

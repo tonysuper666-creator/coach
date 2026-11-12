@@ -14,6 +14,7 @@ class PendingProjectionUpgradeTest {
     @Test fun firstReadReplacesBothPreMergeProjectionVersions() {
         verifyUpgrade(11)
         verifyUpgrade(12)
+        verifyUpgrade(13)
     }
 
     private fun verifyUpgrade(oldVersion: Int) {
@@ -39,14 +40,14 @@ class PendingProjectionUpgradeTest {
             }
             LedgerStore(root) { now }.use { store ->
                 val state = store.snapshot("C").projection
-                assertEquals(13, state.version)
+                assertEquals(PROJECTION_VERSION, state.version)
                 assertEquals(0, state.journal.values.sumOf { it.correct })
                 assertEquals(project(store.events("C")), state)
                 DriverManager.getConnection("jdbc:sqlite:${root.resolve("coach.sqlite")}").use { db ->
                     db.createStatement().use { statement ->
                         statement.executeQuery("SELECT version,last_seq FROM projection_cache WHERE name='all' AND course_id='C'").use {
                             assertTrue(it.next())
-                            assertEquals(13, it.getInt(1))
+                            assertEquals(PROJECTION_VERSION, it.getInt(1))
                             assertEquals(state.lastSeq, it.getLong(2))
                         }
                     }

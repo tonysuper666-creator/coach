@@ -30,7 +30,8 @@ interface LedgerTransport {
 class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
     private val newId: () -> String, private val hash: (ByteArray) -> String,
-    private val retentionTimeSource: TimeSource = TimeSource.Monotonic) {
+    private val retentionTimeSource: TimeSource = TimeSource.Monotonic,
+    private val agentRunId: String? = null) {
     companion object {
         // Server retention: 14 daily days + the preceding 8 weekly weeks.
         const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
@@ -57,7 +58,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     internal fun saveReaderState(course: String, week: Int, identity: String, state: JsonObject) =
         saveMainlineState(course, state, "reader:${hash(identity.encodeToByteArray())}:$week")
     fun enqueue(body: CommandBody): WireCommand {
-        val bytes = canonicalJson(LedgerJson.encodeToJsonElement(body))
+        val marked = body.copy(payload = JsonObject(body.payload + agentRunMetadata(agentRunId)))
+        val bytes = canonicalJson(LedgerJson.encodeToJsonElement(marked))
         val c = WireCommand(deviceId,newId(),bytes,hash(bytes.encodeToByteArray()))
         // Serialize/hash exactly once, before acknowledging the tap to the UI.
         q.putCommand(c.commandId,c.deviceId,c.payloadBytes,c.payloadSha256)
@@ -65,6 +67,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     }
     /** The UI receives cards only. Keys stay private and SQL only returns one after durable lock. */
     suspend fun downloadOfflinePack(course: String, size: Int = 10) = mutex.withLock {
+        check(agentRunId == null) { "Agent acceptance runs require online, isolated tutor threads" }
         val pack = transport.offlinePack(course,size)
         require(pack.deviceId == deviceId && pack.courseId == course)
         db.transaction {
@@ -178,6 +181,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     suspend fun syncOnce() = mutex.withLock {
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
+        check(agentRunId == null || hello.agentRunsSupported) { "Server cannot isolate agent evidence" }
         if(previousEpoch != hello.epoch) {
             // Fetch every snapshot before committing epoch, so interruption cannot mark an incomplete reset as done.
             val snapshots = courses.map { transport.snapshot(it) }

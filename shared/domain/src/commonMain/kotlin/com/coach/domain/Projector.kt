@@ -28,10 +28,11 @@ private data class Attempt(val posed: Event, var submitted: Event? = null, var g
 /** Ordered ledger fold. Arrival order is irrelevant: seq is authoritative, including late reviews.
  * One invocation is scoped to a course. Unknown facts are preserved by the caller and flagged here.
  */
-fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters = Upcasters()): Projection {
-    val events = input.distinctBy { it.id }.sortedWith(compareBy<Event> { it.seq }.thenBy { it.id })
-    require(events.map { it.courseId }.distinct().size <= 1) { "Project one course at a time" }
-    require(events.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
+fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters = Upcasters(), includeAgentRun: String? = null): Projection {
+    val rawEvents = input.distinctBy { it.id }.sortedWith(compareBy<Event> { it.seq }.thenBy { it.id })
+    require(rawEvents.map { it.courseId }.distinct().size <= 1) { "Project one course at a time" }
+    require(rawEvents.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
+    val events = learnerEvidence(rawEvents, includeAgentRun)
     val effectiveZone = zone ?: courseTimeZone(events)
     val quickThreads = events.filter { it.type == "quick_ask_opened" }.mapNotNull { it.threadId }.toSet()
     val kpTitles = mutableMapOf<String,String>()
@@ -375,7 +376,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
-    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = events.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
+    return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = rawEvents.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
         revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds, startedKpIds = startedKpIds,

@@ -27,6 +27,7 @@ import kotlinx.serialization.json.*
 import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import javax.imageio.ImageIO
 import kotlin.test.*
 
@@ -37,11 +38,15 @@ class MainlineScreenTest {
     private val today = logicalDay(now, "Europe/London")
     private val longCorrect = "Synthetic pears grow in the orchard; this explanation remains available in full. ".repeat(40)
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
+    internal class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
                           source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false,
-                          correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.") : AutoCloseable {
+                          correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
+                          private val explain: ((JsonObject) -> JsonObject)? = null, private val primers: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
+        val explains = CopyOnWriteArrayList<JsonObject>()
+        val cancellations = CopyOnWriteArrayList<String>()
+        private val workers = if (explain != null) Executors.newCachedThreadPool() else null
         /** Every reader request the cited-source component makes through the real CourseHttp. */
         val readerRequests = CopyOnWriteArrayList<String>()
         private val recorded = mutableMapOf<String, JsonObject>()
@@ -51,11 +56,12 @@ class MainlineScreenTest {
                        "2":"Synthetic plums ripen after the period described in the question.",
                        "3":"Synthetic figs are imported, not grown in the orchard."},
             "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"$source"}"""
-        private val items = listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
+        private val items = (if (primers) listOf("P1" to "setup", "P2" to "setup") else emptyList()) +
+            listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
         private fun weeklyBody(): JsonObject {
             val questions = items.map { (id, tier) ->
                 val metadata = LadderQuestion(id, "K", if (id == "B1") "W01-bridge" else "W01-basics",
-                    when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
+                    if (id.startsWith("P")) "try_first" else when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
                     if (id == "S1") 2 else 0, "synthetic-orchard", "synthetic-$id", eligible = true)
                 json("id" to id, "tier" to tier, "stem" to "Synthetic orchard question $id: which statement about the orchard holds?",
                     "options" to listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there"),
@@ -71,6 +77,7 @@ class MainlineScreenTest {
                     "recording_id" to "T1", "recording_kind" to "tutorial", "timestamp" to "02:01:03", "summary" to "Synthetic pears were emphasized.")))))
         }
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            workers?.let { executor = it }
             fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String, status: Int = 200) {
                 val bytes = body.toByteArray(); ex.sendResponseHeaders(status, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
             }
@@ -81,6 +88,16 @@ class MainlineScreenTest {
                 }
                 val path = ex.requestURI.path
                 when {
+                    path.endsWith("/explain/cancel") -> {
+                        val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                        cancellations += wire.str("requestId")
+                        reply(ex, "{}")
+                    }
+                    path.endsWith("/explain") -> {
+                        val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                        explains += wire
+                        reply(ex, (explain?.invoke(wire) ?: json("text" to "Synthetic source unavailable", "sources" to emptyList<String>())).toString())
+                    }
                     path.endsWith("/answer") -> {
                         val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
                         answers += wire
@@ -96,8 +113,10 @@ class MainlineScreenTest {
                         val i = items.indexOfFirst { it.first == id }
                         val next = items.getOrNull(i + 1)?.first?.let { "\"$it\"" } ?: "null"
                         val queued = status != "mastered"
+                        val firstTry = id.startsWith("P")
+                        val refs = if (primers && id == "S1") "[{\"question_id\":\"P2\"}]" else "[]"
                         reply(ex, """{"itemId":"$id","answer":1,"choice":${a["choice"]},"guessed":$guessed,"keyState":"VERIFIED","status":"$status","tier":"${items[i].second}",
-                            "independentCorrect":${right && !guessed},"remember":"Synthetic memory for $id.","dontKnow":${a.flag("dontKnow")},
+                            "independentCorrect":${right && !guessed && !firstTry},"tryFirst":$firstTry,"tryFirstRefs":$refs,"remember":"Synthetic memory for $id.","dontKnow":${a.flag("dontKnow")},
                             "explanation":$explanation,"source":"Synthetic lecture 1","anchor":"$anchor","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
                             "mistakeWeek":${if (queued) 1 else "null"},"next":$next,"coverage":${cov(if (status == "mastered") 1 else 0, i + 1)}}""")
                     }
@@ -133,7 +152,7 @@ class MainlineScreenTest {
             start()
         }
         val http = CourseHttp("http://127.0.0.1:${server.address.port}", "test", "synthetic", "C")
-        override fun close() { http.close(); server.stop(0) }
+        override fun close() { http.close(); server.stop(0); workers?.shutdownNow() }
     }
 
     private fun walk(width: Int, height: Int, retryChoice: Int? = null, firstGuessed: Boolean = false) = FakeMac(today, retryChoice != null).use { mac ->

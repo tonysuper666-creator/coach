@@ -11,7 +11,7 @@ data class WeekPoint(val id: String, val title: String, val weeks: Set<Int>)
 /** Same outline order and week interpretation for server commands and every client. */
 fun weekPoints(events: List<Event>): List<WeekPoint> {
     val points = linkedMapOf<String, WeekPoint>()
-    for (e in events.filter { it.type == "outline_revised" }) {
+    for (e in learnerEvidence(events).filter { it.type == "outline_revised" }) {
         for (raw in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
             val p = raw as? JsonObject ?: continue
             val id = p.str("id"); if (id.isBlank()) continue
@@ -51,7 +51,8 @@ fun weekMistakes(events: List<Event>, week: Int): List<Event> {
 }
 
 /** Also used by a knowledge-point export; exactly the week-review selection rules. */
-fun pendingChoiceMistakes(events: List<Event>, ids: Set<String>): List<Event> {
+fun pendingChoiceMistakes(input: List<Event>, ids: Set<String>): List<Event> {
+    val events = learnerEvidence(input)
     val answered = events.filter { it.type == "answer_submitted" }.map { it.payload.str("attemptId") }.toSet()
     val voided = events.filter { it.type == "attempt_voided" }.map { it.payload.str("attemptId") }.toSet()
     val grades = events.filter { it.type in setOf("attempt_graded", "grade_reviewed") }.associateBy { it.payload.str("attemptId") }

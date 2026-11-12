@@ -45,7 +45,9 @@ class TutorClient(
     private val token: String,
     val model: TutorModel,
     val telemetry: UsageTelemetry? = null,
+    val agentRunId: String? = null,
 ) {
+    @Volatile private var agentRunsSupported = false
     init { validateCoachBaseUrl(baseUrl); model.bindDevice(deviceId) }
     private val url = baseUrl.replaceFirst("http", "ws").trimEnd('/') + "/v1/ws"
     private val http = HttpClient(CIO) {
@@ -129,6 +131,7 @@ class TutorClient(
         val carriedMessages = model.unfinishedMessageIds().toSet()
         val pongs = Channel<ByteArray>(Channel.CONFLATED)
         val verified = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val evidenceCapability = kotlinx.coroutines.CompletableDeferred<Boolean>()
         val reader = launch {
             var parts = ArrayList<ByteArray>()
             var size = 0L
@@ -155,7 +158,16 @@ class TutorClient(
                     if (frame.fin) {
                         if (keep) {
                             val text = join(parts, size).decodeToString(throwOnInvalidSequence = true)
-                            synchronized(lifecycle) { if (!closed) { confirm(text); model.onFrame(text) } }
+                            synchronized(lifecycle) { if (!closed) {
+                                val hello = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull()
+                                // Ledger frames also carry epoch, but only the untyped Hello
+                                // negotiates capabilities. A catch-up hint must not revoke them.
+                                if (hello?.containsKey("epoch") == true && !hello.containsKey("t")) {
+                                    agentRunsSupported = hello["agentRunsSupported"] == JsonPrimitive(true)
+                                    evidenceCapability.complete(agentRunsSupported)
+                                }
+                                confirm(text); model.onFrame(text)
+                            } }
                         }
                         parts = ArrayList()
                         size = 0
@@ -185,6 +197,9 @@ class TutorClient(
         try {
             // An upgrade alone does not prove the socket can exchange frames.
             withTimeout(PONG_TIMEOUT_MS) { verified.await() }
+            if (agentRunId != null) check(withTimeout(PONG_TIMEOUT_MS) { evidenceCapability.await() }) {
+                "Server cannot isolate agent evidence"
+            }
             val reconnectResumes = synchronized(lifecycle) {
                 check(!closed)
                 model.onConnection(true)
@@ -213,6 +228,7 @@ class TutorClient(
             synchronized(lifecycle) {
                 if (live === queue) {
                     live = null
+                    agentRunsSupported = false
                     model.onConnection(false)
                     if (isActive) observeConnection(false)
                 }
@@ -265,6 +281,13 @@ class TutorClient(
 
     /** 发出一帧；没有在线连接返回 false。 */
     fun send(frame: JsonObject, recordTap: Boolean = true): Boolean {
+        if (agentRunId != null) {
+            if (!agentRunsSupported) return false
+            val thread = (frame["threadId"] as? JsonPrimitive)?.contentOrNull
+            if (thread != null && com.coach.domain.agentRunId(thread) != agentRunId) return false
+            // Daily quick-ask chooses a server-owned human thread; it is outside this acceptance run.
+            if ((frame["t"] as? JsonPrimitive)?.contentOrNull == "quick.ask") return false
+        }
         val target = when ((frame["t"] as? JsonPrimitive)?.content) {
             "tutor.open" -> "open_kp"; "tutor.next" -> "next"; "tutor.test" -> "test"
             "msg.ask" -> "ask"; "tutor.answer" -> "answer"; "msg.cancel" -> "cancel"

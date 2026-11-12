@@ -139,7 +139,7 @@ class TutorMachine(private val actor: LedgerActor) {
             requireNotBusy(c)
             val pending = pending(c)
             if (pending.isNotEmpty()) return@tutorTransaction outcome(c, cards=pending)
-            val explained = snapshot(course).projection.explainedKpIds.contains(c.kp)
+            val explained = lessonProjection(c).explainedKpIds.contains(c.kp)
             if (!c.review && !testUntaught && (!explained || allowExample && needsExample(c))) return@tutorTransaction beginExplanation(c, explained)
             pose(c, untaught=!explained)
         }
@@ -156,7 +156,7 @@ class TutorMachine(private val actor: LedgerActor) {
             val c = context(course,thread)
             if (stateEvent(c)?.payload?.str("state") != "AWAIT" || pending(c).isNotEmpty() ||
                 activeTurn(c).isNotEmpty() || poolAvailable(course,c.kp) < groupSize(c)) null
-            else pose(c,untaught=!snapshot(course).projection.explainedKpIds.contains(c.kp))
+            else pose(c,untaught=!lessonProjection(c).explainedKpIds.contains(c.kp))
         }
     }
 
@@ -167,7 +167,7 @@ class TutorMachine(private val actor: LedgerActor) {
             requireNotBusy(c)
             require(pending(c).isEmpty()) { "请先提交当前题组" }
             append(course,"tutor_settings_changed",json("kpId" to c.kp,"groupSize" to groupSize(c),"mode" to mode.name),thread=thread)
-            beginExplanation(c, snapshot(course).projection.explainedKpIds.contains(c.kp), mode)
+            beginExplanation(c, lessonProjection(c).explainedKpIds.contains(c.kp), mode)
         }
     }
 
@@ -238,7 +238,9 @@ class TutorMachine(private val actor: LedgerActor) {
             transition(c,TutorState.GRADE)
             cards.forEach { card ->
                 val id = card.payload.str("attemptId")
-                val body = CommandBody("submit_answer",course,System.currentTimeMillis(),json("attemptId" to id,"answer" to answers.getValue(id),"posedSnapshot" to card.payload,"threadId" to thread))
+                val body = CommandBody("submit_answer",course,System.currentTimeMillis(),JsonObject(
+                    json("attemptId" to id,"answer" to answers.getValue(id),"posedSnapshot" to card.payload,"threadId" to thread) +
+                        agentRunMetadata(agentRunId(thread))))
                 val bytes = LedgerJson.encodeToString(body)
                 val receipt = command(WireCommand(device,"$submissionId:$id",bytes,sha256(bytes.toByteArray())),tutorGroup=true)
                 check(receipt.status == "OK") { "Group submission rejected: ${receipt.error}" }
@@ -251,7 +253,7 @@ class TutorMachine(private val actor: LedgerActor) {
     }
 
     private fun LedgerStore.beginExplanation(c: TutorThread, explained: Boolean, requested: TeachingMode? = null): TutorOutcome {
-        val known = snapshot(c.course).projection.taughtConceptIds
+        val known = lessonProjection(c).taughtConceptIds
         val turn = uid()
         val plan = TutorReplyPlan(c,turn,true,c.concepts - known,c.concepts.intersect(known),!explained,
             requested ?: if (explained && needsExample(c)) TeachingMode.EXAMPLE else mode(c),
@@ -299,18 +301,21 @@ class TutorMachine(private val actor: LedgerActor) {
     }
     private fun LedgerStore.context(course: String, thread: String) = requireNotNull(contextOrNull(course,thread)) { "请先打开知识点" }
     private fun LedgerStore.threadEvents(c: TutorThread) = events(c.course).filter { it.threadId == c.thread }
+    private fun LedgerStore.lessonProjection(c: TutorThread) = agentRunId(c.thread)?.let {
+        project(events(c.course), includeAgentRun = it)
+    } ?: snapshot(c.course).projection
     private fun LedgerStore.stateEvent(c: TutorThread) = threadEvents(c).lastOrNull { it.type == "tutor_state_changed" }
     private fun LedgerStore.activeTurn(c: TutorThread) = stateEvent(c)?.payload?.str("turnId").orEmpty()
     private fun LedgerStore.requireNotBusy(c: TutorThread) { require(activeTurn(c).isEmpty()) { "导师正在回复，请等待或取消" } }
     private fun LedgerStore.pending(c: TutorThread): List<Event> {
-        val es = events(c.course)
+        val es = learnerEvidence(events(c.course), agentRunId(c.thread))
         val submitted = es.filter { it.type in setOf("answer_submitted","attempt_voided") }.map { it.payload.str("attemptId") }.toSet()
         return es.filter { it.threadId == c.thread && it.type == "question_posed" && it.payload.str("attemptId") !in submitted }
     }
     private fun LedgerStore.groupSize(c: TutorThread) = requireTutorGroupSize(threadEvents(c).lastOrNull { it.type == "tutor_settings_changed" }?.payload?.num("groupSize",3)?.toInt() ?: 3)
     private fun LedgerStore.mode(c: TutorThread) = TeachingMode.valueOf(threadEvents(c).lastOrNull { it.type == "tutor_settings_changed" }?.payload?.str("mode") ?: "CURRENT")
     private fun LedgerStore.needsExample(c: TutorThread): Boolean {
-        val es = events(c.course)
+        val es = learnerEvidence(events(c.course), agentRunId(c.thread))
         val lastExplanation = es.lastOrNull { it.type == "explanation_delivered" && it.payload.str("kpId") == c.kp }?.seq ?: 0
         val attempts = es.filter { it.type == "question_posed" && c.kp in it.payload.strings("kpIds") }.map { it.payload.str("attemptId") }.toSet()
         return es.count { it.type == "attempt_graded" && it.seq > lastExplanation && it.payload.str("attemptId") in attempts && it.payload.num("score") * 5 < it.payload.num("max") * 4 } >= 2

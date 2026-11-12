@@ -1,6 +1,8 @@
 package com.coach.domain
 
 import kotlinx.serialization.json.*
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlin.test.*
 
 class QuestionLadderTest {
@@ -122,5 +124,24 @@ class QuestionLadderTest {
         assertTrue(projection.review.isEmpty())
         assertTrue(projection.revisit.isEmpty())
         assertTrue(pendingChoiceMistakes(events, setOf("fruit")).isEmpty())
+    }
+
+    @Test fun aCorrectVariantOfAMissedCalculationStepUnlocksTheNextStepAndWholeExampleAfterReopen() {
+        val first = q("step1", difficulty = 2).copy(calculationChain = "sum", calculationStep = 1, completeExampleId = "whole")
+        val remedial = q("step1-variant", difficulty = 0).copy(calculationChain = "sum", calculationStep = 1, completeExampleId = "whole")
+        val second = q("step2").copy(calculationChain = "sum", calculationStep = 2, completeExampleId = "whole")
+        val whole = q("whole").copy(kind = "application", calculationChain = "sum")
+        val pool = listOf(first, remedial, second, whole)
+        var session = QuestionLadder.record(LadderSession(), first, false, "Synthetic first step")
+        assertEquals(remedial.id, QuestionLadder.next(pool, session).question?.id)
+        session = QuestionLadder.record(session, remedial, true, "Synthetic corrected step")
+        session = LedgerJson.decodeFromString<LadderSession>(LedgerJson.encodeToString(session))
+        assertEquals(second.id, QuestionLadder.next(pool, session).question?.id,
+            "A missed immutable receipt cannot permanently block an equivalent corrected step")
+        session = QuestionLadder.record(session, second, true, "Synthetic second step")
+        assertEquals(whole.id, QuestionLadder.next(pool, session).question?.id)
+        assertFalse(session.responses.first().independentCorrect)
+        assertEquals(3, session.responses.size)
+        println("LADDER_TRACE step1:miss -> step1-variant:correct -> session-serialization-roundtrip -> step2:correct -> whole")
     }
 }

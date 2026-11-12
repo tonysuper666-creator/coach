@@ -15,5 +15,7 @@ object PoolTrace {
         val start=starts[thread] ?: return@synchronized
         if(stage !in stages.getValue(thread)) stages.getValue(thread)[stage]=start.elapsedNow().inWholeNanoseconds/1_000_000.0
     } }
+    /** Threads with an open trace, for marks that cannot tell which thread they serve. */
+    fun active(): Set<String> = if(!enabled) emptySet() else synchronized(lock) { starts.keys.toSet() }
     fun snapshot(thread: String): Map<String,Double> = synchronized(lock) { stages[thread]?.toMap().orEmpty() }
 }

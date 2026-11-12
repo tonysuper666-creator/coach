@@ -133,7 +133,32 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     }
 
     fun retainedCommands(): List<WireCommand> = q.allCommands().executeAsList().map { WireCommand(it.device_id,it.command_id,it.payload_bytes,it.payload_sha256) }
-    fun localEvents(course: String): List<Event> = q.allEvents(course).executeAsList().map { LedgerJson.decodeFromString(it) }
+    private class DecodedEvents(val epoch: String, val lastSeq: Long, val events: List<Event>)
+    private val decoded = HashMap<String, DecodedEvents>()
+    private val decodedLock = Any()
+    /** Within an epoch the replica only grows, so only rows after the last decoded seq are decoded;
+     * every screen rebuild and projection replay otherwise re-decodes the whole course. An epoch reset
+     * clears the replica and writes the new epoch in one transaction, so the epoch is re-read after the
+     * rows: a changed epoch or row-count mismatch means the cached prefix may belong to another epoch,
+     * and the course is read again in one statement, which never mixes epochs. */
+    fun localEvents(course: String): List<Event> {
+        fun after(seq: Long) = q.eventsAfter(course, seq).executeAsList().map { LedgerJson.decodeFromString<Event>(it) }
+        fun count() = q.countEvents(course).executeAsOneOrNull()
+        val epoch = meta("epoch").orEmpty()
+        fun remember(events: List<Event>, count: Long?) {
+            if (meta("epoch").orEmpty() == epoch && events.size.toLong() == count)
+                synchronized(decodedLock) { decoded[course] = DecodedEvents(epoch, events.lastOrNull()?.seq ?: Long.MIN_VALUE, events) }
+        }
+        val prior = synchronized(decodedLock) { decoded[course] }?.takeIf { it.epoch == epoch }
+        if (prior != null) {
+            val events = prior.events + after(prior.lastSeq)
+            val count = count()
+            if (meta("epoch").orEmpty() == epoch && events.size.toLong() == count) return events.also { remember(it, count) }
+        }
+        val events = after(Long.MIN_VALUE)
+        remember(events, count())
+        return events
+    }
     fun projection(course: String): Projection = db.transactionWithResult {
         val epoch=meta("epoch").orEmpty()
         val seq=q.replicaSeq(course).executeAsOne()
@@ -226,9 +251,10 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
             }
             retainOrPrune(hello.epoch,receipt.backedUpThroughSeq)
         }
-        pullCourses(hello.epoch)
+        val traced=pullCourses(hello.epoch)
         _connection.value = "online"
         _revision.value += 1
+        traced.forEach { PoolTrace.mark(it,"revision_bumped") }
     }
 
     /** Event pages carry their epoch. A push with no outbox work needs one read, not
@@ -237,10 +263,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         val caughtUp=mutex.withLock {
             val epoch=meta("epoch") ?: return@withLock false
             if(q.allCommands().executeAsList().any { it.ack_seq==null }) return@withLock false
-            try { pullCourses(epoch) }
+            val traced=try { pullCourses(epoch) }
             catch(e: EpochChanged) { return@withLock false }
             _connection.value="online"
             _revision.value+=1
+            traced.forEach { PoolTrace.mark(it,"revision_bumped") }
             true
         }
         if(!caughtUp) syncOnce()
@@ -248,8 +275,13 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
 
     private class EpochChanged: IllegalStateException("Epoch changed during catch-up")
 
-    /** Caller holds mutex, for both full synchronization and push catch-up. */
-    private suspend fun pullCourses(epoch: String) {
+    /** Caller holds mutex, for both full synchronization and push catch-up.
+     * When a server snapshot download is about to follow, the saved events are published first
+     * (revision +1): screens built from local events (a retry's new questions) must not wait for that
+     * round trip. Syncs without a download publish once, when the caller bumps on return. */
+    private suspend fun pullCourses(epoch: String): Set<String> {
+        val traced=linkedSetOf<String>()
+        var saved=false
         for(course in courses) {
             var cursor = meta("cursor:$course")?.toLong() ?: 0
             do {
@@ -259,11 +291,18 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                 quizThreads.forEach { PoolTrace.mark(it,"events_read") }
                 db.transaction { save(page.events);q.putMeta("cursor:$course",page.throughSeq.toString()) }
                 quizThreads.forEach { PoolTrace.mark(it,"events_saved") }
+                traced+=quizThreads
+                if(page.events.isNotEmpty()) saved=true
                 cursor = page.throughSeq
             } while(page.hasMore)
+        }
+        for(course in courses) {
             // 不认识的事实类型要靠服务端投影；整份快照只在本地副本前进后重下，不是每次轮询都下。
             val replicaSeq=q.replicaSeq(course).executeAsOne()
-            if(projection(course).requiresServerSnapshot && meta("serverProjectionSeq:$course") != "$epoch:$replicaSeq") {
+            val needsSnapshot=projection(course).requiresServerSnapshot
+            traced.forEach { PoolTrace.mark(it,"projection_checked") }
+            if(needsSnapshot && meta("serverProjectionSeq:$course") != "$epoch:$replicaSeq") {
+                if(saved) { saved=false;_revision.value+=1;traced.forEach { PoolTrace.mark(it,"events_published") } }
                 val snapshot=transport.snapshot(course)
                 if(snapshot.hello.epoch!=epoch) throw EpochChanged()
                 db.transaction {
@@ -272,8 +311,11 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
                     q.putMeta("serverProjectionSeq:$course","$epoch:$seq")
                     cache.put(course,epoch,seq,snapshot.projection.copy(lastSeq=seq,requiresServerSnapshot=true))
                 }
+                traced.forEach { PoolTrace.mark(it,"snapshot_saved") }
             }
         }
+        traced.forEach { PoolTrace.mark(it,"courses_pulled") }
+        return traced
     }
     fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
         // One quiz publishes several durable/state/card hints. Do not make the WS reader

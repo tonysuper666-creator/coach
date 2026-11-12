@@ -63,7 +63,10 @@ class DesktopPairingFormTest {
     @Test fun typedAddressAndCodeRejectThenPairAndReopenKeepsTheSameDevice() {
         Harness().use { service ->
             val home = Files.createTempDirectory("coach-desktop-form-")
-            val settings = DesktopConnectionSettings(home, { null }, mac = false)
+            // The installed app sets jpackage.app-path. This JVM does not, so say so explicitly.
+            val settings = DesktopConnectionSettings(home, { null }, mac = false, property = { name ->
+                if (name == "jpackage.app-path") "/synthetic/Coach.app" else null
+            })
             val store = DesktopCredentials(settings.clientDirectory)
             val good = service.issueCode()
             val bad = if (good == "111111") "222222" else "111111"

@@ -19,8 +19,10 @@ class PendingClientCacheUpgradeTest {
             assertNull(cache.get("C", "epoch", 3))
             val fresh = old.copy(version = PROJECTION_VERSION, journal = mapOf(1L to Journal(answers = 1)))
             cache.put("C", "epoch", 3, fresh)
-            assertEquals(fresh, cache.get("C", "epoch", 3))
-            assertEquals(12, assertNotNull(cache.get("C", "epoch", 3)).version)
+            val read = assertNotNull(cache.get("C", "epoch", 3))
+            assertEquals(fresh, read)
+            assertEquals(PROJECTION_VERSION, read.version)
+            assertEquals(0, assertNotNull(read.journal[1L]).correct)
         }
     }
 }

@@ -3,7 +3,7 @@ package com.coach.desktop
 /** The production server and its bridge. A development or measurement run never talks to them (TON-1142; the Android card packages follow the same rule, TON-1149). */
 internal val productionPorts = setOf(18791, 8791, 8790)
 
-private val devSwitches = listOf("COACH_AUTOPLAY", "COACH_RENDER_STATE", "COACH_NOTES_VERIFY_DIR")
+private val devSwitches = listOf("COACH_AUTOPLAY", "COACH_RENDER_STATE", "COACH_NOTES_VERIFY_DIR", "COACH_ACCEPTANCE_REPLAY", "COACH_AGENT_RUN_ID")
 private val devProperties = listOf("coach.autoExitSeconds", "coach.capturePath", "coach.summaryCapturePath", "coach.captures", "coach.captureDir")
 
 /**

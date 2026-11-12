@@ -2,6 +2,7 @@ package com.coach.desktop
 
 import com.coach.client.PairedCredentials
 import com.coach.client.validateCoachBaseUrl
+import com.coach.domain.agentThreadId
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -24,9 +25,13 @@ internal class DesktopConnectionSettings(
     private val environment: (String) -> String? = System::getenv,
     private val mac: Boolean = System.getProperty("os.name").startsWith("Mac"),
 ) {
+    // Acceptance uses the existing desktop launch, never an implicit device/user identity.
+    val agentRunId: String? = desktopAcceptanceRun(environment)
     private val configFile = home.resolve("Coach/config/local.properties")
-    val clientDirectory: Path = environment("COACH_CLIENT_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
+    private val clientRoot: Path = environment("COACH_CLIENT_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
         ?: home.resolve("Coach/client")
+    // Never reuse a learner's pending outbox, even when the paired identity is the same.
+    val clientDirectory: Path = agentRunId?.let { clientRoot.resolve("agent-runs").resolve(it) } ?: clientRoot
     private val localConnection = DesktopCredentials(clientDirectory)
 
     private fun properties() = Properties().apply {
@@ -66,4 +71,17 @@ internal class DesktopConnectionSettings(
         val token = Files.readString(path).trim().takeIf(String::isNotEmpty) ?: return null
         return PairedCredentials(environment("COACH_DEVICE_ID")?.takeIf(String::isNotBlank) ?: "desktop", token)
     }
+}
+
+internal fun desktopAcceptanceRun(environment: (String) -> String?): String? {
+    val enabled = environment("COACH_ACCEPTANCE_REPLAY")
+    val run = environment("COACH_AGENT_RUN_ID")
+    if (enabled == null && run == null) return null
+    require(enabled == "1") { "COACH_AGENT_RUN_ID requires explicit COACH_ACCEPTANCE_REPLAY=1" }
+    require(!run.isNullOrBlank()) { "Acceptance replay requires COACH_AGENT_RUN_ID" }
+    agentThreadId(run, "validate") // Use the shared client/server ID contract, including path safety.
+    require(refuseProductionDefaults(environment) { null } == null) {
+        "Acceptance replay requires an isolated COACH_URL, COACH_TOKEN_FILE and COACH_CLIENT_DIR"
+    }
+    return run
 }

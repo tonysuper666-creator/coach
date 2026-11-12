@@ -1300,8 +1300,8 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
     /** Texts of protected pages matching a query. For OUTPUT GUARDS ONLY: they must never be placed in a model request. */
     fun restrictedForGuard(course: String, question: String): List<String> =
-        // Independent of the public pack's page budget: public hits must never crowd a protected page out of the guard.
-        matchSourcePages(course, question).filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(8).map { it.text }
+        // Independent of the public pack's page budget and uncapped: every protected page this query matches is known to the guard.
+        matchSourcePages(course, question).filterNot { it.learnerVisible }.sortedByDescending { it.score }.map { it.text }
 
     /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
     /** Knowledge point ids are compared trimmed and case-folded so a cosmetic mismatch between facts and outline does not disable a course. */

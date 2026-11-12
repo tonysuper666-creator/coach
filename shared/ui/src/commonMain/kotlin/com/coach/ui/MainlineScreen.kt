@@ -423,6 +423,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         Surface(Modifier.fillMaxSize()) { ResourcesScreen(c, SourceJump(sourceKp.anchorDoc, sourceKp.anchorPdfPage), onBack = { sourceOpen = false }, backLabel = "← 第 $number 周 · 第 $displayedNumber 题") }
     }
     val railAnchors = remember { MarginAnchors() }
+    val askState = rememberLadderQuestionAskState(http, number, item.str("id"))
+    val closeAsk = { askOpen = false; askState.clear() }
     val answer = done?.num("answer")?.toInt()
     // A lost response may be replayed after a local edit: the recorded choice and outcome belong together.
     val displayedChoice = done?.num("choice")?.toInt() ?: chosen
@@ -462,7 +464,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $number 周", status = "${if (only == null && filter.isBlank()) "本周" else "这一节"} ${filtered.size} 题", compactStatus = "不计时", compactTypeControl = false, showNavigation = false, onBack = goUp, backLabel = if (only != null) "暂离 · 阅读" else if (directEntry) "暂离 · $parentLabel" else "暂离 · 第 $number 周",
         directory = { WeekDirectory(view, number, onBrowseWeek) },
         margin = {
-            if (askOpen) LadderQuestionAsk(http, number, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, { askOpen = false })
+            if (askOpen) LadderQuestionAsk(askState, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, closeAsk)
             else
             AlignedRail(listOf("why", null, null), gap = 24.dp) {
                 if (d.sourceSvg.isNotBlank() || d.sourceText.isNotBlank()) SourceThumbnail(d, openSource)
@@ -644,8 +646,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 .padding(top = 1.dp).padding(horizontal = if (m.window == DeskWindow.OuterLandscape) ((maxWidth - CoachV7.Layout.colw) / 2).coerceAtLeast(m.horizontalPadding) else m.horizontalPadding,
                     vertical = if (m.window == DeskWindow.Outer) 16.dp else 12.dp)) { actions() }
         }
-        if (askOpen && !m.inner) ModalBottomSheet(onDismissRequest = { askOpen = false }) {
-            LadderQuestionAsk(http, number, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, { askOpen = false })
+        if (askOpen && !LocalDeskMarginVisible.current) ModalBottomSheet(onDismissRequest = closeAsk) {
+            LadderQuestionAsk(askState, item.str("id"), { if (done == null) { asked = true; save("asked" to JsonPrimitive(true)) } }, closeAsk)
         }
     }
 }

@@ -13,6 +13,7 @@ import com.coach.client.KpRow
 import com.coach.client.LadderEssayState
 import com.coach.domain.*
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import kotlin.random.Random
@@ -62,32 +63,51 @@ internal fun LadderCheckpoint(session: LadderSession, points: List<KpRow>, gap: 
     }
 }
 
-/** A companion panel uses the same cited reader service as paragraph questions. */
+/** Owned by the question, so changing between a companion column and a sheet cannot discard it. */
+internal class LadderQuestionAskState {
+    var question by mutableStateOf("")
+    var request by mutableStateOf<JsonObject?>(null)
+    var answer by mutableStateOf<JsonObject?>(null)
+    var error by mutableStateOf<String?>(null)
+
+    fun clear() { question = ""; request = null; answer = null; error = null }
+}
+
 @Composable
-internal fun LadderQuestionAsk(http: CourseHttp, week: Int, itemId: String, onAsked: () -> Unit, onClose: () -> Unit) {
-    var question by remember(itemId) { mutableStateOf("") }
-    var request by remember(itemId) { mutableStateOf<JsonObject?>(null) }
-    var answer by remember(itemId) { mutableStateOf<JsonObject?>(null) }
-    var error by remember(itemId) { mutableStateOf<String?>(null) }
-    LaunchedEffect(request) {
-        val wire = request ?: return@LaunchedEffect
+internal fun rememberLadderQuestionAskState(http: CourseHttp, week: Int, itemId: String): LadderQuestionAskState {
+    val state = remember(http, week, itemId) { LadderQuestionAskState() }
+    LaunchedEffect(state, state.request) {
+        val wire = state.request ?: return@LaunchedEffect
         try {
             val response = http.explainSelection(week, wire)
-            answer = response.body; error = response.error
+            coroutineContext.ensureActive()
+            if (state.request == wire) { state.answer = response.body; state.error = response.error }
         } finally {
             withContext(NonCancellable) { http.cancelSelection(week, wire.str("requestId")) }
         }
     }
+    return state
+}
+
+/** Other readers can retain their existing question-local lifecycle. */
+@Composable
+internal fun LadderQuestionAsk(http: CourseHttp, week: Int, itemId: String, onAsked: () -> Unit, onClose: () -> Unit) {
+    val state = rememberLadderQuestionAskState(http, week, itemId)
+    LadderQuestionAsk(state, itemId, onAsked, onClose)
+}
+
+@Composable
+internal fun LadderQuestionAsk(state: LadderQuestionAskState, itemId: String, onAsked: () -> Unit, onClose: () -> Unit) {
     Column(Modifier.fillMaxWidth().heightIn(max = 650.dp).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("问一句", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(question, { question = it.take(500) }, label = { Text("问一句…") }, modifier = Modifier.fillMaxWidth().testTag("ladder-question"))
+        OutlinedTextField(state.question, { state.question = it.take(500) }, label = { Text("问一句…") }, modifier = Modifier.fillMaxWidth().testTag("ladder-question"))
         Button(onClick = {
-            onAsked(); answer = null; error = null
-            request = json("requestId" to Random.nextLong().toULong().toString(16), "kind" to "explain", "itemId" to itemId, "question" to question)
-        }, enabled = question.isNotBlank() && (request == null || answer != null || error != null)) { Text("发送") }
-        if (request != null && answer == null && error == null) Text("正在查课件和教材依据…")
-        error?.let { Text(it) }
-        answer?.let { reply ->
+            onAsked(); state.answer = null; state.error = null
+            state.request = json("requestId" to Random.nextLong().toULong().toString(16), "kind" to "explain", "itemId" to itemId, "question" to state.question)
+        }, enabled = state.question.isNotBlank() && (state.request == null || state.answer != null || state.error != null)) { Text("发送") }
+        if (state.request != null && state.answer == null && state.error == null) Text("正在查课件和教材依据…")
+        state.error?.let { Text(it) }
+        state.answer?.let { reply ->
             Text(reply.str("text"))
             (reply["sources"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { source ->
                 Text("${source.str("docId")} · PDF 第 ${source.num("pdfPage")} 页")

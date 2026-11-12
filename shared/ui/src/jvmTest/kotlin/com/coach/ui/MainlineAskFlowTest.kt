@@ -71,6 +71,11 @@ class MainlineAskFlowTest {
 
     @Test fun phoneDrawerClosesToTheOriginalAnswerAndRejectsLateReply() = walk(412, 915, false)
     @Test fun mediumRailClosesToTheOriginalAnswerAndRejectsLateReply() = walk(933, 704, true)
+    @Test fun mediumCollapsedRailOpensDrawerAndReturnsToTheSameAnswer() = walk(933, 704, true, "v7-margin-toggle")
+    @Test fun mediumFocusedReadingOpensDrawerAndReturnsToTheSameAnswer() = walk(933, 704, true, "v7-focus")
+    @Test fun innerCollapsedRailOpensDrawerAndReturnsToTheSameAnswer() = walk(1280, 800, false, "v7-margin-toggle")
+    @Test fun collapsingTheMediumRailKeepsTheDraftAndInFlightRequest() = transferOpenAsk(933, 704, "v7-margin-toggle")
+    @Test fun focusingInnerReadingKeepsTheDraftAndInFlightRequest() = transferOpenAsk(1280, 800, "v7-focus")
 
     @Test fun twoFirstTriesLeadToTheirActualReferenceAndSurviveScreenReentry() {
         val now = 1_794_052_800_000L
@@ -119,7 +124,8 @@ class MainlineAskFlowTest {
         }
     }
 
-    private fun walk(width: Int, height: Int, dark: Boolean) {
+    private fun walk(width: Int, height: Int, dark: Boolean, hideBeforeAsk: String? = null) {
+        val evidence = "ask-$width" + (hideBeforeAsk?.let { "-$it" } ?: "")
         val now = 1_794_052_800_000L
         val release = CountDownLatch(1)
         val held = CountDownLatch(1)
@@ -154,19 +160,23 @@ class MainlineAskFlowTest {
                         onNodeWithTag("mainline-submit").performScrollTo().performClick()
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
                         val original = c.sync.mainlineState("C", "week:1")
+                        hideBeforeAsk?.let {
+                            onNodeWithTag(it).performClick()
+                            onNodeWithTag("v7-margin").assertDoesNotExist()
+                        }
                         onNodeWithTag("mainline-ask").performScrollTo()
                         waitForIdle()
                         val offset = c.sync.mainlineState("C", "week:1").num("quizScroll")
                         onNodeWithTag("mainline-ask").performClick()
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().size == 1 }
-                        captureLessonEvidence("ask-${width}-open", width, height,
+                        captureLessonEvidence("$evidence-open", width, height,
                             captureRoot = onNode(isRoot() and hasAnyDescendant(hasTestTag("ladder-question"))))
                         onNodeWithTag("ladder-question").performTextInput("Explain synthetic pears")
                         onNodeWithText("发送").performScrollTo().performClick()
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic pears are counted once.").fetchSemanticsNodes().isNotEmpty() }
                         onNodeWithText("SYN-BOOK · PDF 第 4 页").performScrollTo().assertIsDisplayed()
                         assertEquals("S1", mac.explains.single().str("itemId"))
-                        captureLessonEvidence("ask-${width}-reply", width, height,
+                        captureLessonEvidence("$evidence-reply", width, height,
                             captureRoot = onNode(isRoot() and hasAnyDescendant(hasTestTag("ladder-question"))))
                         onNodeWithText("回到这道题").performScrollTo().performClick()
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().isEmpty() }
@@ -174,7 +184,7 @@ class MainlineAskFlowTest {
                         for (key in listOf("item", "choice", "result", "ladderSession")) assertEquals(original[key], returned[key], key)
                         assertEquals(offset, returned.num("quizScroll"))
                         onNodeWithTag("mainline-option-1").assertIsSelected()
-                        captureLessonEvidence("ask-${width}-returned", width, height)
+                        captureLessonEvidence("$evidence-returned", width, height)
                         onNodeWithTag("mainline-ask").performScrollTo().performClick()
                         waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().isNotEmpty() }
                         onNodeWithTag("ladder-question").performTextInput("Hold synthetic response")
@@ -192,9 +202,85 @@ class MainlineAskFlowTest {
                         onNodeWithText("Synthetic late response for S1").assertDoesNotExist()
                         assertEquals("D1", c.sync.mainlineState("C", "week:1").str("item"))
                         assertFalse(c.sync.mainlineState("C", "week:1")["result"] is kotlinx.serialization.json.JsonObject)
-                        captureLessonEvidence("ask-${width}-next-after-late", width, height,
+                        captureLessonEvidence("$evidence-next-after-late", width, height,
                             captureRoot = onNode(isRoot() and hasAnyDescendant(hasTestTag("ladder-question"))))
-                        println("LADDER_TRACE viewport=${width}x$height S1:submitted -> ask:S1 -> close:S1/choice1/result-preserved -> delayed:S1 -> D1:unanswered; late-reply-hidden")
+                        println("LADDER_TRACE viewport=${width}x$height layout=${hideBeforeAsk ?: "expanded"} S1:submitted -> ask:S1 -> close:S1/choice1/result-preserved -> delayed:S1 -> D1:unanswered; late-reply-hidden")
+                    }
+                } finally { release.countDown(); tutor.close() }
+            }
+        }
+    }
+
+    private fun transferOpenAsk(width: Int, height: Int, hideControl: String) {
+        val now = 1_794_052_800_000L
+        val release = CountDownLatch(1)
+        val held = CountDownLatch(1)
+        val draft = "Hold synthetic draft across layout"
+        val reply = "Synthetic answer after changing layout"
+        MainlineScreenTest.FakeMac(logicalDay(now, "Europe/London"), explain = {
+            held.countDown()
+            check(release.await(20, TimeUnit.SECONDS))
+            json("text" to reply, "sources" to emptyList<String>())
+        }).use { mac ->
+            SyntheticLocalLedger("C").use { local ->
+                val tutor = TutorClient("http://127.0.0.1:1", "synthetic", "synthetic", TutorModel({ now }))
+                val c = CoachController("C", local.sync, tutor, formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
+                local.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
+                try {
+                    runSkikoComposeUiTest(size = Size(width.toFloat(), height.toFloat()), density = Density(1f)) {
+                        setContent { CoachTheme(false) { Surface(Modifier.fillMaxSize()) {
+                            MainlineScreen(c, CourseView(emptyList(), project(emptyList())), {}, {}, {}, {})
+                        } } }
+                        waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
+                        onNodeWithTag("mainline-option-1").performScrollTo().performClick()
+                        onNodeWithTag("mainline-submit").performScrollTo().performClick()
+                        waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+
+                        // Move an unsent draft, then a live HTTP request, from the rail to a sheet.
+                        for (send in listOf(false, true)) {
+                            onNodeWithTag("v7-margin").assertExists()
+                            onNodeWithTag("mainline-ask").performScrollTo().performClick()
+                            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().size == 1 }
+                            onNodeWithTag("ladder-question").performTextInput(draft)
+                            if (send) {
+                                onNodeWithText("发送").performScrollTo().performClick()
+                                waitUntil(timeoutMillis = 10_000) { held.count == 0L }
+                            }
+                            waitForIdle()
+                            val original = local.sync.mainlineState("C", "week:1")
+                            val requestId = mac.explains.singleOrNull()?.str("requestId")
+                            onNodeWithTag(hideControl).performClick()
+                            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().size == 1 }
+                            onNodeWithTag("v7-margin").assertDoesNotExist()
+                            assertEquals(draft, onNodeWithTag("ladder-question").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+                            assertEquals(if (send) 1 else 0, mac.explains.size)
+                            assertFalse(requestId in mac.cancellations, "A layout change must not cancel the live request")
+                            for (key in listOf("item", "choice", "result", "ladderSession", "quizScroll"))
+                                assertEquals(original[key], local.sync.mainlineState("C", "week:1")[key], key)
+                            if (send) {
+                                onNodeWithText("正在查课件和教材依据…").assertExists()
+                                release.countDown()
+                                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText(reply).fetchSemanticsNodes().isNotEmpty() }
+                                onNodeWithText(reply).performScrollTo().assertIsDisplayed()
+                                assertEquals(1, mac.explains.size, "Moving the presenter must not restart HTTP")
+                                assertEquals("S1", mac.explains.single().str("itemId"))
+                            }
+                            captureLessonEvidence("ask-$width-$hideControl-transfer-${if (send) "reply" else "draft"}", width, height,
+                                captureRoot = onNode(isRoot() and hasAnyDescendant(hasTestTag("ladder-question"))))
+                            onNodeWithText("回到这道题").performScrollTo().performClick()
+                            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().isEmpty() }
+                            for (key in listOf("item", "choice", "result", "ladderSession", "quizScroll"))
+                                assertEquals(original[key], local.sync.mainlineState("C", "week:1")[key], key)
+                            onNodeWithTag("mainline-option-1").assertIsSelected()
+                            onNodeWithTag(hideControl).performClick()
+                        }
+                        waitUntil(timeoutMillis = 10_000) { mac.explains.single().str("requestId") in mac.cancellations }
+                        onNodeWithTag("mainline-ask").performScrollTo().performClick()
+                        waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("ladder-question").fetchSemanticsNodes().size == 1 }
+                        assertEquals("", onNodeWithTag("ladder-question").fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
+                        onNodeWithText(reply).assertDoesNotExist()
+                        assertEquals(1, mac.answers.size)
+                        println("LADDER_TRACE viewport=${width}x$height control=$hideControl S1:submitted -> rail:draft -> sheet:same-draft -> close -> rail:one-request -> sheet:same-request/reply -> close/reopen:empty; question/choice/result/ladder/scroll-preserved")
                     }
                 } finally { release.countDown(); tutor.close() }
             }

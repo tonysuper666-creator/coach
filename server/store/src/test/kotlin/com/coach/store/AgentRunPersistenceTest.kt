@@ -40,7 +40,7 @@ class AgentRunPersistenceTest {
                 assertEquals("  Synthetic question\n原文  ",messages.first { it.str("role")=="user" }.str("text"))
                 messages.forEach { assertEquals(AGENT_RUN_LABEL,it.str("sampleOrigin")); assertEquals("oppo-w8",it.str("agentRunId")) }
                 store.events("course").forEach { assertEquals("oppo-w8",it.payload.str("agentRunId")); assertEquals(AGENT_RUN_LABEL,it.payload.str("sampleOrigin")) }
-                assertEquals(13,store.snapshot("course").projection.version)
+                assertEquals(PROJECTION_VERSION,store.snapshot("course").projection.version)
                 assertTrue(store.snapshot("course").projection.mastery.isEmpty())
                 store.append("course","question_posed",json("attemptId" to "human-attempt","questionId" to "human-q","kpIds" to listOf("one"),"format" to "SHORT_ANSWER"),thread="human")
                 assertFailsWith<IllegalArgumentException> {

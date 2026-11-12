@@ -30,4 +30,26 @@ class DevRunGuardTest {
         assertNull(check(isolated))
         assertNull(check(isolated + ("COACH_AUTOPLAY" to "1"), packaged))
     }
+
+    private val productionAddresses = listOf(
+        "localhost", "localhost:18791", "LOCALHOST:8791/", "127.0.0.1:8790",
+        "http://127.0.0.1:18791", "[::1]:18791", "not a url",
+    )
+    private val isolatedAddresses = listOf("http://127.0.0.1:18001", "127.0.0.1:18001")
+
+    @Test fun developmentGuardUsesConnectionAddressNormalization() {
+        val unexpectedlyAllowed = productionAddresses.filter { check(isolated + ("COACH_URL" to it)) == null }
+        val unexpectedlyRefused = isolatedAddresses.filter { check(isolated + ("COACH_URL" to it)) != null }
+        assertTrue(unexpectedlyAllowed.isEmpty() && unexpectedlyRefused.isEmpty(),
+            "Allowed unsafe addresses: $unexpectedlyAllowed; refused isolated addresses: $unexpectedlyRefused")
+    }
+
+    @Test fun acceptanceReplayUsesConnectionAddressNormalization() {
+        val replay = isolated + mapOf("COACH_ACCEPTANCE_REPLAY" to "1", "COACH_AGENT_RUN_ID" to "synthetic_run")
+        fun accepted(address: String) = runCatching { desktopAcceptanceRun((replay + ("COACH_URL" to address))::get) }.isSuccess
+        val unexpectedlyAllowed = productionAddresses.filter(::accepted)
+        val unexpectedlyRefused = isolatedAddresses.filterNot(::accepted)
+        assertTrue(unexpectedlyAllowed.isEmpty() && unexpectedlyRefused.isEmpty(),
+            "Allowed unsafe addresses: $unexpectedlyAllowed; refused isolated addresses: $unexpectedlyRefused")
+    }
 }

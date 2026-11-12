@@ -17,7 +17,7 @@ internal fun refuseProductionDefaults(env: (String) -> String?, property: (Strin
     if (!development) return null
     val missing = listOf("COACH_URL", "COACH_TOKEN_FILE", "COACH_CLIENT_DIR").filterNot(::set)
     if (missing.isNotEmpty()) return "Refusing production defaults for a development run: set ${missing.joinToString()} to an isolated test server, token file and ledger directory."
-    val port = runCatching { java.net.URI(env("COACH_URL")!!.trim()).let { if (it.port >= 0) it.port else 80 } }.getOrNull()
+    val port = runCatching { java.net.URI(desktopServerUrl(env("COACH_URL")!!)).port }.getOrNull()
         ?: return "Refusing development run: COACH_URL is not a valid URL."
     if (port in productionPorts) return "Refusing development run: COACH_URL uses production port $port; start an isolated test server on its own port."
     return null

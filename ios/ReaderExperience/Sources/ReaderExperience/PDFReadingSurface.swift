@@ -1,3 +1,19 @@
+#if canImport(PDFKit)
+import PDFKit
+
+/// Copies before changing a page box, so the source document remains intact.
+public enum PDFPageCrop {
+    public static func copy(_ document: PDFDocument, pageIndex: Int, bounds: CGRect) -> PDFDocument? {
+        guard let page = document.page(at: pageIndex), page.rotation == 0,
+              !bounds.isNull, !bounds.isEmpty, page.bounds(for: .cropBox).contains(bounds),
+              let data = document.dataRepresentation(), let copy = PDFDocument(data: data),
+              let copiedPage = copy.page(at: pageIndex) else { return nil }
+        copiedPage.setBounds(bounds, for: .cropBox)
+        return copy
+    }
+}
+#endif
+
 #if canImport(UIKit)
 import SwiftUI
 import PDFKit
@@ -26,8 +42,10 @@ public struct PDFReadingSurface: UIViewRepresentable {
     public let document: PDFDocument
     public let pageIndex: Int
     public let selection: PDFSelection?
-    public init(document: PDFDocument, pageIndex: Int, selection: PDFSelection? = nil) {
-        self.document = document; self.pageIndex = pageIndex; self.selection = selection
+    /// Supplied in PDF page coordinates by a verified layout adapter.
+    public let focusBounds: CGRect?
+    public init(document: PDFDocument, pageIndex: Int, selection: PDFSelection? = nil, focusBounds: CGRect? = nil) {
+        self.document = document; self.pageIndex = pageIndex; self.selection = selection; self.focusBounds = focusBounds
     }
     public func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
@@ -35,12 +53,15 @@ public struct PDFReadingSurface: UIViewRepresentable {
         view.displayMode = .singlePage
         // Source highlighting belongs to this temporary view, never the
         // document being read or a persisted PDF annotation.
-        let displayedDocument = selection.flatMap { _ in document.dataRepresentation().flatMap(PDFDocument.init(data:)) } ?? document
+        let needsCopy = selection != nil || focusBounds != nil
+        guard let originalPage = document.page(at: pageIndex),
+              let displayedDocument = focusBounds.map({ PDFPageCrop.copy(document, pageIndex: pageIndex, bounds: $0) }) ?? (needsCopy ? document.dataRepresentation().flatMap(PDFDocument.init(data:)) : document),
+              let displayedPage = displayedDocument.page(at: pageIndex) else { return view }
+        if focusBounds != nil { view.displayBox = .cropBox }
         view.document = displayedDocument
-        if let page = displayedDocument.page(at: pageIndex) { view.go(to: page) }
+        view.go(to: displayedPage)
         if let selection, displayedDocument !== document,
-           let originalPage = document.page(at: pageIndex),
-           let displayedPage = displayedDocument.page(at: pageIndex) {
+           document.page(at: pageIndex) != nil {
             let bounds = selection.bounds(for: originalPage)
             let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
             annotation.color = UIColor.systemYellow.withAlphaComponent(0.6)

@@ -6,6 +6,7 @@ On macOS with Xcode and the repository's heavy-work guard:
 
 ```sh
 tools/dev/heavy --local swift test --package-path ios/ReaderExperience
+tools/dev/heavy --local bash ios/ReaderExperience/Host/check_anchor_process.sh
 tools/dev/heavy --local xcodebuild -quiet build-for-testing -project ios/ReaderExperience/Host/ReaderHost.xcodeproj -scheme ReaderHost -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/ReaderExperience/.build/host -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO
 tools/dev/heavy --emulator xcodebuild test-without-building -xctestrun ios/ReaderExperience/.build/host/Build/Products/ReaderHost_iphonesimulator27.2-arm64-x86_64.xctestrun -destination 'platform=iOS Simulator,id=YOUR_DEVICE_ID' -parallel-testing-enabled NO -resultBundlePath "ios/ReaderExperience/.build/host/reader-$(uuidgen).xcresult"
 ```
@@ -16,4 +17,4 @@ The `.xctestrun` filename includes the installed SDK version and architectures; 
 
 `CoachSourcePage` decodes the existing document-page response fields, but a page response does not identify a question's supporting sentence and therefore resolves as unavailable. Product authentication, reader wiring and cross-device synchronization remain outside this host. The file store coordinates cooperating local writers and detects stale revisions; it is not a sync engine.
 
-The host does not yet implement PDF crop/column focus or Duo arrangements. Passing synthetic-host tests does not establish real-book performance, cross-device restoration, sentence correctness across editions, or the six Duo postures.
+The host supplies explicit crop and two-column rectangles for its generated PDF; it does not infer columns for arbitrary documents. PDF notes are bound to document, version, page and verified exact text; EPUB notes use document, version and Readium locator. Older unanchored notes remain stored without being silently reassigned. Duo arrangements are not implemented. Passing synthetic-host tests does not establish real-book performance, cross-device restoration, sentence correctness across editions, or the six Duo postures.

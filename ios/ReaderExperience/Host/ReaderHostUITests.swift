@@ -2,6 +2,47 @@ import XCTest
 import UIKit
 
 final class ReaderHostUITests: XCTestCase {
+    private func waitForNote(_ app: XCUIApplication) {
+        let note = app.textFields["note"]
+        XCTAssertTrue(note.waitForExistence(timeout: 20))
+        expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: note)
+        waitForExpectations(timeout: 20)
+    }
+
+    func testPDFDocumentIsolationColumnAndReturn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--fixture-scope=\(UUID().uuidString)"]
+        app.launch()
+        app.buttons["PDF"].tap()
+        app.buttons["下一栏"].tap()
+        XCTAssertEqual(app.staticTexts["pdf-column"].label, "第2栏")
+        app.buttons["题目"].tap()
+        waitForNote(app)
+        app.textFields["note"].tap(); app.textFields["note"].typeText("document A")
+        app.buttons["收起"].tap()
+        app.buttons["切换文档"].tap()
+        app.buttons["题目"].tap()
+        waitForNote(app)
+        XCTAssertNotEqual(app.textFields["note"].value as? String, "document A")
+        app.textFields["note"].tap(); app.textFields["note"].typeText("document B")
+        app.buttons["收起"].tap()
+        app.buttons["切换文档"].tap()
+        app.buttons["题目"].tap()
+        waitForNote(app)
+        XCTAssertEqual(app.textFields["note"].value as? String, "document A")
+        app.buttons["回到批注"].tap()
+        XCTAssertEqual(app.staticTexts["pdf-position"].label, "PDF 2")
+        XCTAssertEqual(app.staticTexts["pdf-column"].label, "第2栏")
+        recordPosition("pdf-note-before-restart", "\(app.staticTexts["pdf-position"].label) \(app.staticTexts["pdf-column"].label)")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "pdf-focused-column"; screenshot.lifetime = .keepAlways; add(screenshot)
+        app.terminate(); app.launch()
+        XCTAssertEqual(app.staticTexts["pdf-position"].label, "PDF 2")
+        XCTAssertEqual(app.staticTexts["pdf-column"].label, "第2栏")
+        recordPosition("pdf-note-after-restart", "\(app.staticTexts["pdf-position"].label) \(app.staticTexts["pdf-column"].label)")
+        app.buttons["题目"].tap(); waitForNote(app)
+        XCTAssertEqual(app.textFields["note"].value as? String, "document A")
+    }
     private func recordPosition(_ name: String, _ value: String) {
         let attachment = XCTAttachment(string: value)
         attachment.name = name
@@ -54,6 +95,7 @@ final class ReaderHostUITests: XCTestCase {
         app.buttons["题目"].tap()
         let answer = app.textFields["answer"]
         XCTAssertTrue(answer.waitForExistence(timeout: 10))
+        waitForNote(app)
         answer.tap(); answer.typeText("north")
         app.textFields["note"].tap(); app.textFields["note"].typeText("synthetic note")
         app.buttons["查看出处"].tap()
@@ -67,6 +109,7 @@ final class ReaderHostUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["pdf-position"].label, "PDF 2")
         recordPosition("pdf-position-after-restart", app.staticTexts["pdf-position"].label)
         app.buttons["题目"].tap()
+        waitForNote(app)
         XCTAssertEqual(app.textFields["answer"].value as? String, "north")
         XCTAssertEqual(app.textFields["note"].value as? String, "synthetic note")
         app.buttons["查看出处"].tap()
@@ -81,6 +124,7 @@ final class ReaderHostUITests: XCTestCase {
         app.buttons["EPUB"].tap()
         app.buttons["题目"].tap()
         XCTAssertTrue(app.staticTexts["纸书页码无法确认"].waitForExistence(timeout: 15))
+        waitForNote(app)
         app.textFields["note"].tap(); app.textFields["note"].typeText("synthetic epub note")
         app.buttons["查看出处"].tap()
         XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 20))
@@ -116,7 +160,15 @@ final class ReaderHostUITests: XCTestCase {
         waitForExpectations(timeout: 20)
         recordPosition("epub-position-after-restart", app.staticTexts["epub-position"].label)
         app.buttons["题目"].tap()
+        waitForNote(app)
         XCTAssertEqual(app.textFields["note"].value as? String, "synthetic epub note")
+        app.buttons["回到批注"].tap()
+        let returnedPosition = app.staticTexts["epub-position"]
+        expectation(for: NSPredicate(format: "label != %@", savedPosition), evaluatedWith: returnedPosition)
+        waitForExpectations(timeout: 20)
+        recordPosition("epub-note-return", returnedPosition.label)
+        app.buttons["题目"].tap()
+        waitForNote(app)
         app.buttons["查看出处"].tap()
         XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 20))
         captureHighlight("epub-source-after-restart", app: app)

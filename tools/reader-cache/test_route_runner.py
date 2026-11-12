@@ -1,0 +1,260 @@
+"""Runner format integration with a fake device; never starts a native app."""
+import json
+import io
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import uuid
+
+import run_observed
+import test_route_control
+from test_queue_readiness import add_watch
+
+
+class RouteRunnerTest(unittest.TestCase):
+    def test_socket_only_native_report_needs_no_cio_samples_and_uses_route_argument(self):
+        self.run_case(False,execute_cycle=True)
+
+    def test_disabled_sampler_starts_no_thread_and_is_explicitly_recorded(self):
+        self.run_case(True)
+
+    def test_partial_observers_have_separate_commands_files_and_metadata(self):
+        for mode in ('stage','meminfo','none'):
+            with self.subTest(mode=mode): self.run_case(False,mode,execute_cycle=True)
+
+    def test_observer_exception_keeps_failed_span_and_fails_runner(self):
+        self.run_case(False,execute_cycle=True,fail_stage=True)
+
+    def test_stale_or_wrong_process_stage_fails_after_retaining_associations(self):
+        for changed in ({'runId':'previous'},{'pid':99},{'stage':'transport_complete'}):
+            with self.subTest(changed=changed): self.run_case(False,execute_cycle=True,stage_overrides=changed)
+
+    def test_queue_observation_is_forwarded_and_retains_request_associations(self):
+        self.run_case(False,'none',watch_queue=True)
+
+    def test_scheduling_trace_is_forwarded_collected_and_joined(self):
+        self.run_case(False,'none',schedule_trace=True)
+
+    def test_syscalls_use_the_existing_userdebug_image_and_owned_capture(self):
+        self.run_case(False,'none',schedule_trace=True,syscalls=True)
+
+    def test_host_clock_flag_is_forwarded_only_in_the_route_syscall_diagnostic(self):
+        self.run_case(False,'none',schedule_trace=True,syscalls=True,host_clock=True)
+
+    def test_host_clock_flag_requires_the_route_syscall_diagnostic(self):
+        args=['run_observed.py','--platform','android','--suite','route','--host-clock-boundaries','--output','unused']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
+    def test_syscalls_require_the_scheduling_capture(self):
+        args=['run_observed.py','--platform','android','--suite','route','--socket-syscalls','--output','unused']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
+    def test_user_image_is_rejected_before_installs_or_service_start(self):
+        root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
+        args=['run_observed.py','--platform','android','--suite','route','--host','192.0.2.1',
+            '--serial','emulator-unit','--transport-observer','none','--socket-scheduling-trace',
+            '--socket-syscalls','--aapt2','aapt-unit','--apk','unused.apk','--test-apk','unused-test.apk','--output',str(root)]
+        with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
+                patch('run_observed.subprocess.check_output',side_effect=['1','user']) as properties, \
+                patch('run_observed.subprocess.run') as commands,patch('run_observed.Fixture') as service:
+            with self.assertRaisesRegex(ValueError,'existing userdebug image'): run_observed.main()
+        self.assertEqual(['ro.kernel.qemu','ro.build.type'],[call.args[0][-1] for call in properties.call_args_list])
+        commands.assert_not_called();service.assert_not_called()
+
+    def test_scheduling_trace_does_not_mix_other_observers_or_frame_capture(self):
+        for extra in (['--transport-observer','both'],['--transport-observer','none','--socket-queue-watch'],
+                      ['--transport-observer','none','--perfetto']):
+            args=['run_observed.py','--platform','android','--suite','route','--socket-scheduling-trace','--output','unused',*extra]
+            with self.subTest(extra=extra),patch('sys.argv',args),patch('run_observed.sys.stderr'):
+                with self.assertRaises(SystemExit) as raised: run_observed.main()
+                self.assertEqual(2,raised.exception.code)
+
+    def test_queue_observer_requires_route_and_no_repeated_adb_observer(self):
+        for suite,mode in (('route','both'),('route','stage'),('transport','none'),('performance','none')):
+            args=['run_observed.py','--platform','android','--suite',suite,'--transport-observer',mode,
+                '--socket-queue-watch','--output','unused']
+            with self.subTest(suite=suite,mode=mode),patch('sys.argv',args),patch('run_observed.sys.stderr'):
+                with self.assertRaises(SystemExit) as raised: run_observed.main()
+                self.assertEqual(2,raised.exception.code)
+
+    def test_sampler_cannot_be_disabled_for_memory_or_ui_acceptance(self):
+        for suite in ('performance','behavior','lifecycle'):
+            for selection in (['--no-transport-memory-sampler'], *[['--transport-observer',mode] for mode in ('both','stage','meminfo','none')]):
+                args=['run_observed.py','--platform','android','--suite',suite,'--output','unused',*selection]
+                with self.subTest(suite=suite,selection=selection),patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.Fixture') as service:
+                    with self.assertRaises(SystemExit) as raised: run_observed.main()
+                    self.assertEqual(2,raised.exception.code)
+                    service.assert_not_called()
+
+    def test_conflicting_old_and_new_observer_flags_are_rejected(self):
+        args=['run_observed.py','--platform','android','--suite','route','--output','unused',
+            '--transport-observer','stage','--no-transport-memory-sampler']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'):
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+
+    def test_per_card_package_covers_install_observation_instrumentation_and_capture(self):
+        self.run_case(False,execute_cycle=True,package=run_observed.PACKAGE+'.ton1463')
+
+    def test_per_card_package_keeps_perfetto_app_markers_in_the_same_namespace(self):
+        self.run_case(False,mode='none',schedule_trace=True,package=run_observed.PACKAGE+'.ton1463')
+
+    def test_production_package_is_rejected_before_device_or_service_work(self):
+        args=['run_observed.py','--platform','android','--output','unused','--package','com.coach.android']
+        with patch('sys.argv',args),patch('run_observed.sys.stderr'),patch('run_observed.subprocess.run') as command:
+            with self.assertRaises(SystemExit) as raised: run_observed.main()
+            self.assertEqual(2,raised.exception.code)
+            command.assert_not_called()
+
+    def run_case(self,disabled,mode=None,execute_cycle=False,fail_stage=False,stage_overrides=None,watch_queue=False,schedule_trace=False,syscalls=False,host_clock=False,package=run_observed.PACKAGE):
+        selected=mode or ('none' if disabled else 'both')
+        enabled=selected!='none'
+        clients,servers=test_route_control.RouteControlTest().records()
+        if watch_queue:
+            for client in clients: add_watch(client)
+        if schedule_trace:
+            for client in clients: client.update(readTraceLabel='ReaderSocket/first-read/'+client['probeId'],readTid=1)
+        root=run_observed.ROOT/'build/reader-runner-tests'/uuid.uuid4().hex
+        root.mkdir(parents=True)
+        apk=root/'app.apk';apk.write_bytes(b'invented package')
+        test_apk=root/'test.apk';test_apk.write_bytes(b'invented test package')
+        out=root/'out'
+        commands=[]
+        sampler_events=[]
+        captures=[]
+
+        class CapturedInput(io.BytesIO):
+            def close(self): self.written=self.getvalue();super().close()
+
+        class FakePerfetto:
+            def __init__(self,*args,**kwargs): self.stdin=CapturedInput();self.waited=False;captures.append(self)
+            def wait(self,**_): self.waited=True;return 0
+            def kill(self): raise AssertionError('unexpected capture termination')
+
+        class FakeFixture:
+            def __init__(self,*_,**options):
+                self.port=45678;self.material_sha256='a'*64
+                self.requests=servers;self.transfers=servers
+                if options.get('loopback_control') is not True: raise AssertionError('missing second listener')
+                if options.get('host_clock',False)!=host_clock: raise AssertionError('wrong host clock mode')
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+
+        class NoSampler:
+            def __init__(self,**kwargs):
+                sampler_events.append('constructed');self.target=kwargs['target']
+            def start(self):
+                sampler_events.append('started')
+                if execute_cycle: self.target()
+            def join(self): sampler_events.append('joined')
+
+        class OneCycleStop:
+            def __init__(self): self.stopped=False
+            def is_set(self): return self.stopped
+            def set(self): self.stopped=True
+            def wait(self,*_): self.stopped=True
+
+        def check_output(command,**_):
+            if 'getprop' in command: return 'userdebug' if command[-1]=='ro.build.type' else '1'
+            if command[0]=='aapt-unit':
+                apk_package=package+('.test' if command[-1]==str(test_apk) else '')
+                return f"package: name='{apk_package}'"
+            if command[:2]==['git','rev-parse']: return 'test-sha'
+            if command[:2]==['git','status']: return ''
+            raise AssertionError(command)
+
+        def run(command,**kwargs):
+            commands.append(command)
+            if 'pull' in command:
+                Path(command[-1]).write_bytes(b'invented scheduling trace fixture')
+                return SimpleNamespace(returncode=0)
+            if command[-1]=='cache/reader-stage.json':
+                if fail_stage: raise OSError('unit observer failure')
+                data=dict(runId='unit-run',suite='route',pid=1234,stage='transport_running')
+                data.update(stage_overrides or {})
+                return SimpleNamespace(returncode=0,stdout=json.dumps(data))
+            if 'dumpsys' in command:
+                return SimpleNamespace(returncode=0,stdout='unit meminfo')
+            if 'instrument' in command:
+                kwargs['stdout'].write('OK (1 test)')
+            elif 'exec-out' in command:
+                report={'socketControl':clients} if command[-1]=='cache/reader-transport.json' else {'process':{'pid':1234}}
+                kwargs['stdout'].write(json.dumps(report).encode())
+            elif 'install' not in command:
+                raise AssertionError(command)
+            return SimpleNamespace(returncode=0)
+
+        args=['run_observed.py','--platform','android','--suite','route','--host','127.0.0.2',
+            '--serial','emulator-5554','--aapt2','aapt-unit','--apk',str(apk),'--test-apk',str(test_apk),'--output',str(out)]
+        args.extend(['--package',package])
+        if disabled: args.append('--no-transport-memory-sampler')
+        if mode is not None: args.extend(['--transport-observer',mode])
+        if watch_queue: args.append('--socket-queue-watch')
+        if schedule_trace: args.append('--socket-scheduling-trace')
+        if syscalls: args.append('--socket-syscalls')
+        if host_clock: args.append('--host-clock-boundaries')
+        with patch('sys.argv',args),patch('run_observed.sys.platform','darwin'), \
+                patch('run_observed.Fixture',FakeFixture),patch('run_observed.threading.Thread',NoSampler), \
+                patch('run_observed.threading.Event',OneCycleStop),patch('run_observed.uuid.uuid4',return_value=SimpleNamespace(hex='unit-run')), \
+                patch('run_observed.subprocess.Popen',FakePerfetto), \
+                patch('run_observed.subprocess.check_output',check_output),patch('run_observed.subprocess.run',run):
+            if fail_stage:
+                with self.assertRaisesRegex(RuntimeError,'memory sampler failed'): run_observed.main()
+            elif stage_overrides:
+                with self.assertRaisesRegex(RuntimeError,'active stage was not observed'): run_observed.main()
+            else:
+                run_observed.main()
+        self.assertTrue(json.loads((out/'route-comparison.json').read_text())['complete'])
+        self.assertEqual('route',json.loads((out/'summary.json').read_text())['suite'])
+        instrument=next(command for command in commands if 'instrument' in command)
+        self.assertEqual('host-loopback',instrument[instrument.index('readerRouteControl')+1])
+        if watch_queue:
+            self.assertEqual('available',instrument[instrument.index('readerQueueWatch')+1])
+            self.assertTrue(json.loads((out/'queue-watch.json').read_text())['complete'])
+        if schedule_trace:
+            self.assertEqual('enabled',instrument[instrument.index('readerSocketSchedule')+1])
+            self.assertTrue((out/('socket-syscalls.perfetto-trace' if syscalls else 'socket-scheduling.perfetto-trace')).exists())
+            self.assertFalse((out/'frames.perfetto-trace').exists())
+            self.assertTrue(captures[0].stdin.closed);self.assertTrue(captures[0].waited)
+            self.assertIn(('atrace_apps: "'+package+'"').encode(),captures[0].stdin.written)
+        self.assertFalse(json.loads((out/'run.json').read_text())['packetCapture']['requested'])
+        identity=json.loads((out/'run.json').read_text())
+        self.assertEqual(package,identity['applicationPackage'])
+        self.assertTrue(any(command[-1]==package+'.test/androidx.test.runner.AndroidJUnitRunner' for command in commands))
+        for command in commands:
+            if 'run-as' in command: self.assertEqual(package,command[command.index('run-as')+1])
+        self.assertIs(syscalls,identity['socketSyscallsRequested'])
+        self.assertIs(host_clock,identity['hostClockBoundariesRequested'])
+        if syscalls:
+            self.assertEqual('socket-syscalls.pbtxt',identity['perfettoConfig'])
+            self.assertEqual('userdebug',identity['syscallBuildType'])
+        for key in ('memorySamplerEnabled','memorySamplerStarted','memorySamplerJoined'):
+            self.assertIs(enabled,identity[key])
+        self.assertEqual(['constructed','started','joined'] if enabled else [],sampler_events)
+        observer=identity['androidObserver']
+        self.assertEqual(selected,observer['mode'])
+        stage_count=int(execute_cycle and selected in ('both','stage'))
+        meminfo_count=int(execute_cycle and selected in ('both','meminfo') and not fail_stage)
+        self.assertEqual(dict(stage=stage_count,meminfo=meminfo_count),observer['commandCounts'])
+        self.assertEqual(stage_count,sum(command[-1]=='cache/reader-stage.json' for command in commands))
+        self.assertEqual(meminfo_count,sum('dumpsys' in command for command in commands))
+        if enabled and execute_cycle:
+            samples=out/observer['samplesFile']
+            row=json.loads(samples.read_text().strip())
+            self.assertEqual(selected,row['observerMode'])
+            self.assertEqual(bool(meminfo_count),'meminfo' in row)
+            if fail_stage: self.assertEqual('OSError',row['operations']['stage']['error'])
+        self.assertEqual(['OSError'] if fail_stage else [],identity['memorySamplerErrors'])
+        if selected in ('stage','none'): self.assertFalse((out/'memory.jsonl').exists())
+        if not fail_stage:
+            audit=json.loads((out/'stage-audit.json').read_text())
+            self.assertEqual(selected in ('both','stage'),audit['requested'])
+            self.assertEqual(selected in ('both','stage') and not stage_overrides,audit['verified'])
+
+
+if __name__=='__main__': unittest.main()

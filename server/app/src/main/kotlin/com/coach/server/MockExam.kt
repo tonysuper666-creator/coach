@@ -306,7 +306,7 @@ class MockEngine(private val library: MockLibrary, private val clock: () -> Long
             val choice = fresh.indices.first { i -> r -= w[i]; r <= 0 || i == fresh.lastIndex }
             picked += fresh[choice]; left.remove(fresh[choice])
         }
-        val title = if (week == null) "单选速刷 · 按押题权重" else "单选速刷 · 第 $week 周"
+        val title = if (week == null) "单选速刷 · 全课程" else "单选速刷 · 第 $week 周"
         return json("id" to "drill", "kind" to "drill", "course" to course, "title" to title,
             "sections" to JsonArray(listOf(json("title" to title, "instructions" to "共 ${picked.size} 题，限时作答。", "items" to JsonArray(picked)))))
     }

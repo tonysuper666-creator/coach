@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import Vision
 
 final class ReaderHostUITests: XCTestCase {
     private func waitForNote(_ app: XCUIApplication) {
@@ -115,6 +116,67 @@ final class ReaderHostUITests: XCTestCase {
         app.buttons["查看出处"].tap()
         XCTAssertTrue(app.staticTexts["source-verified"].waitForExistence(timeout: 10))
         captureHighlight("pdf-source-after-restart", app: app)
+    }
+
+    private func assertVisibleMainSentence(_ name: String, app: XCUIApplication) {
+        let deadline = Date().addingTimeInterval(15)
+        var screenshot = app.screenshot()
+        var recognized = ""
+        repeat {
+            screenshot = app.screenshot()
+            if let image = screenshot.image.cgImage {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                try? VNImageRequestHandler(cgImage: image).perform([request])
+                recognized = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+            }
+            if recognized.localizedCaseInsensitiveContains("synthetic river bends north") { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        } while Date() < deadline
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        recordPosition("\(name)-recognized", recognized)
+        XCTAssertTrue(recognized.localizedCaseInsensitiveContains("synthetic river bends north"),
+                      "The target sentence must be visible in the main reading surface; OCR: \(recognized)")
+    }
+
+    func testEPUBReturnToNoteShowsMainSentenceAfterRestart() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--fixture-scope=\(UUID().uuidString)"]
+        app.launch()
+        app.buttons["EPUB"].tap()
+        app.buttons["题目"].tap(); waitForNote(app)
+        app.textFields["note"].tap(); app.textFields["note"].typeText("epub anchor note")
+        app.buttons["收起"].tap()
+        let position = app.staticTexts["epub-position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 15))
+        let initial = position.label
+        app.buttons["下一页"].tap()
+        expectation(for: NSPredicate(format: "label != %@", initial), evaluatedWith: position)
+        waitForExpectations(timeout: 15)
+        let firstPage = position.label
+        app.buttons["下一页"].tap()
+        expectation(for: NSPredicate(format: "label != %@", firstPage), evaluatedWith: position)
+        waitForExpectations(timeout: 15)
+        let moved = position.label
+        recordPosition("epub-before-note-return", moved)
+        app.buttons["题目"].tap(); waitForNote(app)
+        XCTAssertEqual(app.textFields["note"].value as? String, "epub anchor note")
+        app.buttons["回到批注"].tap()
+        expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.buttons["收起"])
+        waitForExpectations(timeout: 20)
+        assertVisibleMainSentence("epub-main-return", app: app)
+        let returned = position.label
+        XCTAssertNotEqual(returned, moved, "Returning to the annotation must move back from a different page")
+        recordPosition("epub-main-return-position", returned)
+        app.terminate(); app.launch()
+        expectation(for: NSPredicate(format: "label == %@", returned), evaluatedWith: app.staticTexts["epub-position"])
+        waitForExpectations(timeout: 20)
+        assertVisibleMainSentence("epub-main-restart", app: app)
+        recordPosition("epub-main-restart-position", app.staticTexts["epub-position"].label)
+        app.buttons["题目"].tap(); waitForNote(app)
+        XCTAssertEqual(app.textFields["note"].value as? String, "epub anchor note")
     }
 
     func testEPUBSourceAfterFontChangeAndRestart() {

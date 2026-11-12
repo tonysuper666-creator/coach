@@ -243,7 +243,9 @@ struct HostView: View {
                     else if let epub = model.epub { EPUBReadingSurface(navigator: epub) }
                     else { Text("正在打开 EPUB") }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                if model.drawer {
+                // A stable navigator viewport prevents reflow from moving the target after a jump.
+                .overlay(alignment: .bottom) {
+                  if model.drawer {
                     VStack(alignment: .leading, spacing: 8) {
                         if model.sourceOpen {
                             Button("返回题目") { model.sourceOpen = false; model.sourceEPUB = nil }
@@ -268,6 +270,7 @@ struct HostView: View {
                     }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).padding().background(.regularMaterial)
                      .frame(height: geometry.size.height * 0.5)
                      .gesture(DragGesture(minimumDistance: 40).onEnded { if $0.translation.height > 40 && model.sourceOpen { model.sourceOpen = false } })
+                  }
                 }
             }
         }

@@ -46,10 +46,13 @@ internal fun ClaimSourceReferences(reader: ReaderHttp, kp: KpRow?, source: Strin
     }
 }
 
+/** Desk's margin sheet (300) and directory drawer (400) stay enabled under this full-screen dialog. */
+internal const val ClaimSourceBackPriority = 450
+
 @Composable
 internal fun ClaimSourceDialog(reader: ReaderHttp?, kp: KpRow, backLabel: String = "返回题目", onClose: () -> Unit) {
     val back = LocalAppBack.current
-    AppBackHandler(true, priority = 15, onBack = onClose)
+    AppBackHandler(true, priority = ClaimSourceBackPriority, onBack = onClose)
     Dialog(onDismissRequest = { if (back == null) onClose() else back.back() },
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
         key(reader, kp) {
@@ -128,7 +131,8 @@ private fun ClaimSourceContent(reader: ReaderHttp, kp: KpRow, backLabel: String,
                     }
                 }
                 is ClaimSourceRead.Unconfirmed -> SourceUnconfirmed(read.reason, onClose)
-                is ClaimSourceRead.Opened -> PrivatePdfDocument(reader, loaded.document!!, read.pdfPage, onBack = onClose)
+                is ClaimSourceRead.Opened -> PrivatePdfDocument(reader, loaded.document!!, read.pdfPage,
+                    recordProgress = false, backFloor = ClaimSourceBackPriority, onBack = onClose)
             }
         }
     }

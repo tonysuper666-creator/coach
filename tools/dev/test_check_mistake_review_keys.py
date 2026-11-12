@@ -4,6 +4,8 @@ Synthetic rows only. The phone script is not imported: its module body builds
 and talks to a device. These tests execute the real prepare_choice_keys source,
 so the original pick and the key query run together.
 """
+import ast
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -233,6 +235,133 @@ class InstallHelperGateTest(unittest.TestCase):
         self.assertIsInstance(error, RuntimeError)
         self.assertIn('did not report Success', str(error))
         self.assertEqual(saw, apk)
+
+
+def _hash_gated_apk_loop(source_path):
+    """The script's own for-loop that hashes apks and then installs.
+
+    Identified by structure (a list of apk paths and a sha256 compare), then
+    executed. A source-text search would stay green if that text moved off
+    the live branch.
+    """
+    tree = ast.parse(source_path.read_text(encoding='utf-8'))
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For) or not isinstance(node.iter, ast.List):
+            continue
+        elts = node.iter.elts
+        if not elts or not all(
+                isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value.endswith('.apk')
+                for item in elts):
+            continue
+        if any(isinstance(child, ast.Attribute) and child.attr == 'sha256' for child in ast.walk(node)):
+            found.append(node)
+    if len(found) != 1:
+        raise AssertionError(f'expected one hash-gated apk install loop, found {len(found)}')
+    return found[0]
+
+
+def _helper_stub(directory, message, code):
+    if os.name == 'nt':
+        stub = directory / 'install-stub.cmd'
+        stub.write_text(
+            '@echo off\n'
+            '>>"%~dp0saw.txt" echo %~1\n'
+            f'echo {message}\n'
+            f'exit /b {int(code)}\n',
+            encoding='ascii', newline='\r\n')
+        return stub
+    stub = directory / 'install-stub.sh'
+    stub.write_text(
+        '#!/bin/sh\n'
+        'printf "%s\\n" "$1" >> "$(dirname "$0")/saw.txt"\n'
+        f'printf "%s\\n" "{message}"\n'
+        f'exit {int(code)}\n',
+        encoding='ascii', newline='\n')
+    stub.chmod(0o755)
+    return stub
+
+
+class InstallBranchGateTest(unittest.TestCase):
+    """Run the real needs-install loop with synthetic apks, adb, and a helper process."""
+
+    def _drive(self, mode, message, code):
+        loop = _hash_gated_apk_loop(SOURCE)
+        rels = [item.value for item in loop.iter.elts]
+        adb_calls = []
+        original = _NAMESPACE['testphone_install_sh']
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            root = directory / 'tree'
+            payload = b'synthetic-ton1511-apk'
+            for rel in rels:
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload if mode == 'match' else payload + rel.encode('ascii'))
+            _NAMESPACE['testphone_install_sh'] = lambda: _helper_stub(directory, message, code)
+
+            def adb_run(args, timeout=90, **kwargs):
+                argv = list(map(str, args))
+                adb_calls.append(argv)
+                if 'install' in argv:
+                    return 'Success\n'
+                if 'pm' in argv and 'path' in argv:
+                    if mode == 'missing':
+                        raise subprocess.CalledProcessError(1, argv)
+                    return 'package:/data/app/base.apk\n'
+                if 'sha256sum' in argv:
+                    digest = hashlib.sha256(payload).hexdigest() if mode == 'match' else '0' * 64
+                    return digest + '\n'
+                raise AssertionError(argv)
+
+            module = ast.Module(body=[loop], type_ignores=[])
+            ast.fix_missing_locations(module)
+            namespace = {
+                'PACKAGE': 'com.coach.android.ton1511',
+                'ROOT': root,
+                'ADB': 'ADB-STUB',
+                'SERIAL': 'SERIAL-STUB',
+                'run': adb_run,
+                'install_with_confirm': install_with_confirm,
+                'hashlib': hashlib,
+                'subprocess': subprocess,
+            }
+            error = None
+            try:
+                exec(compile(module, str(SOURCE), 'exec'), namespace)
+            except (subprocess.CalledProcessError, RuntimeError) as caught:
+                error = caught
+            finally:
+                _NAMESPACE['testphone_install_sh'] = original
+            saw_path = directory / 'saw.txt'
+            saw = saw_path.read_text(encoding='ascii').splitlines() if saw_path.exists() else []
+            return saw, adb_calls, error, [str(root / rel) for rel in rels]
+
+    def test_needs_install_runs_helper_for_app_and_test_apk(self):
+        for mode in ('missing', 'mismatch'):
+            with self.subTest(mode=mode):
+                saw, adb_calls, error, expected = self._drive(mode, 'Success', 0)
+                self.assertIsNone(error)
+                self.assertEqual(saw, expected)
+                self.assertFalse(any('install' in argv for argv in adb_calls))
+                packages = [argv[-1] for argv in adb_calls if 'pm' in argv and 'path' in argv]
+                self.assertEqual(packages, ['com.coach.android.ton1511', 'com.coach.android.ton1511.test'])
+
+    def test_helper_failure_from_the_install_branch_is_rejected(self):
+        cases = (
+            ('nonzero', 'Success', 3, subprocess.CalledProcessError),
+            ('no-success-line', 'installed', 0, RuntimeError),
+        )
+        for name, message, code, kind in cases:
+            with self.subTest(name=name):
+                saw, adb_calls, error, expected = self._drive('missing', message, code)
+                self.assertIsInstance(error, kind)
+                if kind is subprocess.CalledProcessError:
+                    self.assertEqual(error.returncode, 3)
+                else:
+                    self.assertIn('did not report Success', str(error))
+                self.assertEqual(saw, [expected[0]])
+                self.assertFalse(any('install' in argv for argv in adb_calls))
 
 
 if __name__ == '__main__':

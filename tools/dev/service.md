@@ -2,6 +2,17 @@
 
 目标：登录后 30 秒内，两路认证监听、桥副本 8791、公式服务都可用；子进程死亡或健康检查失败后 60 秒内恢复。Ktor 是唯一重启决策者，LaunchAgent `local.coach.server` 只重启 Ktor。不防系统休眠。Mac 关机或睡着时手机走离线，不能保证在线。
 
+## 隔离验证 Tailscale 绑定失败时的回环响应
+
+```sh
+tools/dev/heavy ./gradlew :server:app:installDist --offline --console=plain
+tools/dev/heavy python3 tools/dev/check-tailnet-bind.py --java /opt/homebrew/opt/openjdk@17/bin/java --output ../tailnet-bind.json
+```
+
+探针调用实际产品 `Main`，在其协程事件循环旁采集 100ms 心跳；不复制监听、认证或重试实现。它用未分配的文档地址制造真实绑定失败，在随机回环端口持续 18 秒检查有效令牌返回 200、错误令牌返回 401，单次请求超时保持 2 秒。通过要求请求零失败、心跳最大间隔小于 2 秒、至少两次 `BindException`、子进程与临时目录完成清理；不保存令牌、响应正文或原始服务日志。JSON 保存运行 jar 哈希和安全指标。
+
+需要已经缓存的匹配 Kotlin 编译器；不会下载依赖。服务使用临时 home、合成账本和令牌，关闭托管子服务与来源查询，不调用 AI，也不修改 Tailscale 或生产服务。此回归验证绑定失败的隔离路径，不能替代真实登录、Tailscale 应用/守护进程重启、接口恢复后的真实重绑验收。产品旧红/新绿收据见 `docs/verification/ton1094-listener-20261112.md`。
+
 ## 安装
 
 先配置 `~/Coach/config/local.properties` 中的 `coach.tailHost` 为本机 Tailscale IPv4。需要 JDK 17、Python 3、Node 22、已登录的订阅 CLI；不需要管理员权限。不修改 DeepTutor、8790、Tailscale 配置或账户。

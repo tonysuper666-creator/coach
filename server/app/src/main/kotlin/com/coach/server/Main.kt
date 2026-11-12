@@ -142,7 +142,7 @@ fun main(args: Array<String>): Unit = runBlocking {
                 parentCoroutineContext = engineJob + engineErrors, module = module)
             tail.engineConfig.apply { connectionGroupSize = 1; workerGroupSize = 1; callGroupSize = 2 }
             try {
-                tail.start(wait = false)
+                tail.startSuspend(wait = false)
                 println("COACH tailnet ready http://$tailHost:$port/v1/hello")
                 backoff = 1000L
                 // A disconnected/replaced interface is detected and re-bound on its return.

@@ -112,7 +112,7 @@ class CourseView(events: List<Event>, val projection: Projection, private val ag
                 val id = o.s("id"); if (id.isBlank()) continue
                 if ((o["retired"] as? JsonPrimitive)?.contentOrNull == "true") { retired += id; continue }
                 retired -= id
-                titles[id] = o.s("title").ifBlank { o.s("name") }.ifBlank { id }
+                titles[id] = o.s("title").ifBlank { o.s("name") }
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
                 for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }

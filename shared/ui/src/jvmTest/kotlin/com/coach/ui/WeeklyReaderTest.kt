@@ -71,7 +71,7 @@ class WeeklyReaderTest {
             runComposeUiTest {
                 setContent {
                     var state by remember { mutableStateOf(http.readerState(engine, 1)) }
-                    WeeklyReader(c, 1, listOf(section), section, listOf(json("id" to "secret-question-id", "factIds" to listOf("F1"), "stem" to "Synthetic question with a stem longer than forty characters", "status" to "guessed"), json("id" to "other-question-id", "factIds" to listOf("F2"))),
+                    WeeklyReader(c, 1, listOf(section), section, listOf(json("id" to "secret-question-id", "factIds" to listOf("F1"), "stem" to "Synthetic question with a stem longer than forty characters", "status" to "guessed"), json("id" to "other-question-id", "factIds" to listOf("F2")), json("id" to "mastered-question-id", "factIds" to listOf("F1"), "stem" to "Synthetic mastered", "status" to "mastered")),
                         (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
                         { transform -> state = transform(state); persisted = state; http.saveReaderState(engine, 1, state) }, {}, { sectionId, questionId -> selectedQuestion = sectionId to questionId }, {},
                         { state = JsonObject(state + ("focus" to JsonPrimitive(it))); persisted = state; http.saveReaderState(engine, 1, state) }, {})
@@ -103,6 +103,8 @@ class WeeklyReaderTest {
                 onNodeWithText("○ 考点 2 · Synthetic section").assertIsDisplayed()
                 onNodeWithText("这一题 · 待练").performScrollTo().assertIsDisplayed()
                 onNodeWithText("题：Synthetic question with a stem longer th · 猜对，待练").performScrollTo().performClick()
+                onNodeWithText("题：Synthetic mastered · 最近答对（非猜）").performScrollTo().assertIsDisplayed()
+                onNodeWithText("答对过", substring = true).assertDoesNotExist()
                 assertEquals("S1" to "secret-question-id", selectedQuestion)
                 onNodeWithText("secret-question-id", substring = true).assertDoesNotExist()
                 onNodeWithText("收起本周脉络").performClick()

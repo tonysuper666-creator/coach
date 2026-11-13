@@ -112,6 +112,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     /** All members lock with their immutable outbox bytes in one transaction, before reading any key. */
     fun submitOfflineGroup(course: String, groupId: String, answers: Map<String,String>, now: Long) {
         db.transaction {
+            // Lock before validation so two submitters cannot both read an unlocked group.
+            q.lockOfflineSubmission()
             val rows = q.offlineItems(course).executeAsList().filter { it.group_id == groupId }
             require(rows.isNotEmpty() && rows.all { it.command_id == null && it.expires_at > now && it.epoch == epoch }) { "题组已提交或已过期" }
             require(answers.keys == rows.map { it.attempt_id }.toSet())
@@ -134,16 +136,24 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
 
     fun retainedCommands(): List<WireCommand> = q.allCommands().executeAsList().map { WireCommand(it.device_id,it.command_id,it.payload_bytes,it.payload_sha256) }
     fun localEvents(course: String): List<Event> = q.allEvents(course).executeAsList().map { LedgerJson.decodeFromString(it) }
-    fun projection(course: String): Projection = db.transactionWithResult {
-        val epoch=meta("epoch").orEmpty()
-        val seq=q.replicaSeq(course).executeAsOne()
-        cache.get(course,epoch,seq)?.let { return@transactionWithResult it }
-        val local=project(localEvents(course))
-        val snapshot=if(local.requiresServerSnapshot) meta("serverProjection:$course")?.let { LedgerJson.decodeFromString<Projection>(it) } else null
-        val state=snapshot?.copy(lastSeq=seq,requiresServerSnapshot=true,unsupportedTypes=local.unsupportedTypes) ?: local
-        cache.put(course,epoch,seq,state)
-        state
+    fun projection(course: String): Projection {
+        val read = db.transactionWithResult {
+            val epoch = meta("epoch").orEmpty()
+            val seq = q.replicaSeq(course).executeAsOne()
+            val cached = cache.get(course, epoch, seq)
+            if (cached != null) return@transactionWithResult ProjectionRead(epoch, seq, null, cached, true)
+            val local = project(localEvents(course))
+            val snapshotBytes = meta("serverProjection:$course")
+            val snapshot = if (local.requiresServerSnapshot) snapshotBytes?.let { LedgerJson.decodeFromString<Projection>(it) } else null
+            val state = snapshot?.copy(lastSeq=seq,requiresServerSnapshot=true,unsupportedTypes=local.unsupportedTypes) ?: local
+            ProjectionRead(epoch, seq, snapshotBytes, state, false)
+        }
+        // Never upgrade a read transaction to a write. The conditional write prevents
+        // an old computation from overwriting a newer epoch, cursor or server snapshot.
+        if (!read.cached) cache.putIfCurrent(course, read.epoch, read.seq, read.snapshot, read.state)
+        return read.state
     }
+    private data class ProjectionRead(val epoch: String, val seq: Long, val snapshot: String?, val state: Projection, val cached: Boolean)
     fun receipt(commandId: String): Receipt? = meta("receipt:$commandId")?.let { LedgerJson.decodeFromString(it) }
     private fun meta(key: String) = q.getMeta(key).executeAsOneOrNull()
     private fun save(events: List<Event>) { for(e in events) q.putEvent(e.seq,e.courseId,LedgerJson.encodeToString(e)) }

@@ -1,5 +1,20 @@
 # Reader explanation block citations
 
+## Current candidate scope
+
+The 2026-11-13 instruction limits this delivery and its verification to invented
+documents. Run the candidate on Mac with `tools/dev/heavy --local`; do not read,
+bind, import or export private textbooks or exam papers. No installer, production
+change, `Main.kt` change or PR150/TON-1447 controller work belongs to this change.
+
+`ReaderBlockCitationsTest` exercises an isolated on-disk layout cache and an exact
+import-to-PDF binding through the production explanation service, bridge protocol,
+actor and source store. Replacing that binding produces an explicit authorized
+whole-page fallback. `WeeklyReaderTest` consumes block and fallback answer payloads
+over local HTTP, selects a real passage, clicks both source cards and returns to
+the same answer and reading state without a source-page GET. Existing legacy-page,
+missing-resource, quotation, scope and deadline checks remain in place.
+
 ## PR142 compatibility preparation
 
 PR148 carries only PR142's byte-identical public `VisibleScope` type and its
@@ -60,9 +75,9 @@ exact source ID and imported version only; duplicate bindings fail closed. When
 no binding matches, only a direct identical file hash can establish provenance.
 The anchor index version and model token include both digests. Binding metadata
 does not grant visibility or substitute PDF/cache text for authorized source text.
-Do not create bindings by matching titles or similar passages. The author found
-no direct hash intersection between the current visible imports and the existing
-10-document layout caches; independent QA must establish provenance first.
+Do not create bindings by matching titles or similar passages. A synthetic test
+binding establishes the contract only; it does not establish provenance for any
+private document.
 
 Opaque model IDs bind document, full version, page, layout block and exact source
 snapshot/range. The server renders short citation labels and returns verified text
@@ -93,11 +108,14 @@ application logs as citation evidence; extract only these receipts.
 ```sh
 tools/dev/heavy --local ./gradlew :server:app:test \
   --tests 'com.coach.server.ReaderBlockCitationsTest' \
+  --tests 'com.coach.server.ReaderScopedCitationsTest' \
   --tests 'com.coach.server.ReaderExplanationTest' \
   --tests 'com.coach.server.ReaderTimingTest' \
   --tests 'com.coach.server.SourceLookup*' \
   :server:store:test --tests 'com.coach.store.ReaderSourceSnapshotTest' \
   --tests 'com.coach.store.SourcePageStoreTest' \
+  --tests 'com.coach.store.VisibleScopeBoundaryTest' \
+  :shared:domain:jvmTest --tests 'com.coach.domain.scope.VisibleScopeTest' \
   :shared:ui:jvmTest --tests 'com.coach.ui.ReaderCitationCardsTest' \
   --tests 'com.coach.ui.WeeklyReaderTest'
 ```
@@ -107,9 +125,19 @@ separates blocks, fallback pages, legacy page loads and missing resources. Its
 timings and screenshots use invented material; they do not establish corpus hit
 rate or real textbook latency.
 
-## Independent acceptance still required
+## Independent acceptance
 
-At the exact candidate head, a reviewer from a different model vendor must fix
+Have a reviewer from a different model vendor repeat the synthetic candidate
+checks at the exact head and inspect the synthetic card screenshots. Compose
+PR142 at its current exact head before claiming its learned-window integration;
+PR148 alone preserves only the learner ceiling supplied by main's route.
+
+The earlier private-corpus acceptance below remains unverified and outside the
+current synthetic-only instruction. It must not trigger private-material work or
+be reported as passed using synthetic results. A later authorized corpus run
+would require all of the following:
+
+At the exact candidate head, a reviewer from a different model vendor would fix
 50 references across 10 local textbooks and the trusted-order criterion before
 running them. Record only neutral textbook IDs, physical page numbers, block IDs
 and correctness, plus excluded untrusted-page counts. Do not export book names,
@@ -119,5 +147,5 @@ hits; the threshold is at least 45 correct blocks out of the fixed 50.
 Measure each actual click through content draw with the receipts above. Report
 sample count, maximum and distribution separately for block and page outcomes;
 each successful sample must be at most 300 ms. Report missing outcomes separately.
-Run applicable cross-platform checks and repeat integration checks after related
-changes enter main. Local synthetic checks alone do not complete TON-1465.
+Repeat integration checks after related changes enter main. Synthetic timings do
+not establish private-corpus hit rate or real-textbook click latency.

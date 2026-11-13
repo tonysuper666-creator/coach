@@ -20,6 +20,64 @@ class ReaderBlockCitationsTest {
     private fun token(c: ReaderBlockCitations) = Regex("【(S1B[a-f0-9]+)】").find(c.render())!!.groupValues[1]
     private fun bound(l: LayoutPage = layout(), hash: String = page.sourceSha256!!) = ReaderCitationPage(l, hash)
 
+    @Test fun diskLayoutAndExplicitImportBindingReachTheProductionAnswerOrFallBackToTheAuthorizedPage() = runBlocking {
+        val dir = Files.createTempDirectory("synthetic-reader-cache-answer-")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val actor = LedgerActor(scope, LedgerStore(dir))
+        fun hash(text: String) = java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val imported = page.copy(sourceSha256 = hash(page.text))
+        val pdfHash = hash("Synthetic original document fixture")
+        val root = Files.createDirectories(dir.resolve("layout"))
+        val version = Files.createDirectories(root.resolve("unrelated-cache-name/v1/pages")).parent
+        try { StubTutor().use { stub ->
+            Files.writeString(version.parent.resolve("latest.json"), json("version" to "v1").toString())
+            Files.writeString(version.resolve("manifest.json"), json("schema_version" to 1,
+                "doc_sha256" to pdfHash, "pages_total" to 2).toString())
+            Files.writeString(version.resolve("pages/00002.json"), json("schema_version" to 1,
+                "doc_sha256" to pdfHash, "page_number" to 2, "page_index" to 1, "page_base" to 1,
+                "status" to "ok", "reading_order_status" to "single_column", "columns" to 1,
+                "size" to listOf(600, 800), "blocks" to JsonArray(listOf(json("id" to "b1", "kind" to "text",
+                    "bbox" to listOf(20, 20, 500, 60), "reading_order" to 0, "column" to 0,
+                    "status" to "ok", "in_reading_flow" to true, "text" to "Synthetic pears grow here.")))).toString())
+            fun bind(sourceHash: String) = Files.writeString(root.resolve("source-bindings.json"),
+                json("schema_version" to 1, "bindings" to JsonArray(listOf(json("source_doc_id" to imported.docId,
+                    "source_sha256" to sourceHash, "pdf_sha256" to pdfHash)))).toString())
+            bind(imported.sourceSha256!!)
+            actor.execute { registerSourcePage("c", imported.docId, "Synthetic book", imported.pdfPage, imported.text) }
+            java.sql.DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db ->
+                db.prepareStatement("UPDATE source_docs SET blob_sha256=?").use {
+                    it.setString(1, imported.sourceSha256); it.executeUpdate()
+                }
+            }
+            val cache = ReaderCitationLayout(root)
+            val id = token(ReaderBlockCitations(SourcePack(listOf(imported)), cache::page))
+            val reader = ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), citationLayout = cache::page)
+            suspend fun answer(request: String): JsonObject {
+                stub.stream(1, payload(id), StubTutor.terminal("complete"), StubTutor.DONE)
+                return reader.explain("d", "c", json("requestId" to request, "kind" to "explain"),
+                    "Synthetic pears", listOf(imported), com.coach.domain.scope.VisibleScope.learner())
+            }
+            val block = answer("a1")["sources"]!!.jsonArray.single().jsonObject
+            assertEquals("block", block.str("mode"))
+            assertEquals("Synthetic  pears\ngrow here.", block.str("text"))
+            assertEquals(imported.sourceSha256, block.str("version"))
+            assertEquals(pdfHash, block.str("pdfVersion"))
+            assertEquals("b1", block.str("blockId"))
+            assertEquals(block.str("text"), imported.text.substring(block.num("startUtf16").toInt(), block.num("endUtf16").toInt()))
+            assertFalse(stub.requestBodies.last().contains("Other text."))
+            // The same cached block and old model ID cannot establish a different import's provenance.
+            bind(hash("Synthetic replaced import"))
+            val fallback = answer("a2")["sources"]!!.jsonArray.single().jsonObject
+            assertEquals("page", fallback.str("mode"))
+            assertEquals(imported.text, fallback.str("text"))
+            assertEquals(imported.docId, fallback.str("docId"))
+            assertEquals(2, fallback.num("pdfPage"))
+            assertEquals(JsonNull, fallback["blockId"])
+            assertTrue(fallback.str("notice").contains("整页"))
+        } } finally { actor.close(); scope.cancel(); dir.toFile().deleteRecursively() }
+    }
+
     @Test fun slowLayoutIsInterruptedByTheExistingFirstContentDeadline() = runBlocking {
         val dir = Files.createTempDirectory("synthetic-reader-deadline-")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

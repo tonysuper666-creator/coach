@@ -253,14 +253,16 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
                 PaperButton({ onLesson(0) }, enabled = !ui.busy) { Text("从头回看") }
             } else {
                 Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
-                Text("先理解这一节在说什么，再尝试用自己的话说明。")
+                Text(if (book.questionMode == QuestionMode.NONE) "先理解这一节在说什么，再尝试用自己的话说明。" else "先试着回答，再对照原文理解这一节。")
                 PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
-                SelectionContainer { Text(lesson.text, fontSize = 19.sp, lineHeight = 31.sp) }
                 HorizontalDivider()
+                val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                 if (book.questionMode != QuestionMode.NONE) {
-                    val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
                     else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer)
+                }
+                if (practice == null || (book.questionMode == QuestionMode.CHOICE && ui.answer.revealed)) {
+                    SelectionContainer { Text(lesson.text, fontSize = 19.sp, lineHeight = 31.sp) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,

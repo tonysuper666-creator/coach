@@ -40,9 +40,8 @@ internal fun windowsLibraryDirectory(
 internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
     application {
-        val controller = remember { TextbookController(TextbookLibrary(directory)) }
         Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = 1100.dp, height = 800.dp)) {
-            TextbookWorkspace(controller, chooseBook = {
+            WindowsTextbooksContent(directory, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)
                     try {
@@ -57,4 +56,11 @@ internal fun runWindowsTextbooks() {
             }
         }
     }
+}
+
+/** The production Windows entry content, also rendered offscreen with an owned library in tests. */
+@Composable
+internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
+    val controller = remember(directory) { TextbookController(TextbookLibrary(directory)) }
+    TextbookWorkspace(controller, chooseBook)
 }

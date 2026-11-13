@@ -79,9 +79,10 @@ internal class TextbookLibrary(val directory: Path) {
             database().use { db ->
                 db.autoCommit = false
                 try {
-                    db.prepareStatement("INSERT INTO books(id,title,format,touched) VALUES(?,?,?,?)").use { sql ->
+                    db.prepareStatement("INSERT INTO books(id,title,format,mode,touched) VALUES(?,?,?,?,?)").use { sql ->
                         sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, format)
-                        sql.setLong(4, System.currentTimeMillis()); sql.executeUpdate()
+                        sql.setString(4, QuestionMode.CHOICE.name)
+                        sql.setLong(5, System.currentTimeMillis()); sql.executeUpdate()
                     }
                     db.prepareStatement("INSERT INTO pages(book,page,text) VALUES(?,?,?)").use { sql ->
                         for (page in extracted.pages) {

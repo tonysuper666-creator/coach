@@ -48,7 +48,7 @@ class TextbookLibraryTest {
         assertEquals(3, imported.pages.size)
         assertEquals(3, imported.lessons.size)
         assertFalse(imported.learning)
-        assertEquals(QuestionMode.NONE, imported.questionMode)
+        assertEquals(QuestionMode.CHOICE, imported.questionMode)
         Files.move(source, source.resolveSibling("moved.pdf"))
         assertEquals(3, library.renderPdf(imported, 3).let { if (it.width > 0 && it.height > 0) 3 else 0 })
         c.read()

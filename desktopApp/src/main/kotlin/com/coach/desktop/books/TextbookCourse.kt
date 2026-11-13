@@ -14,7 +14,7 @@ internal data class BookLesson(val id: String, val title: String, val blocks: Li
 internal data class Textbook(
     val id: String, val title: String, val format: String, val pages: List<BookPage>,
     val readingPage: Int = 1, val lessonIndex: Int = 0, val learning: Boolean = false,
-    val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.NONE,
+    val promptSeen: Boolean = false, val questionMode: QuestionMode = QuestionMode.CHOICE,
 ) {
     val lessons: List<BookLesson> by lazy { StudyCoachCourse.plan(id, title, pages) }
     val finished get() = learning && lessonIndex >= lessons.size

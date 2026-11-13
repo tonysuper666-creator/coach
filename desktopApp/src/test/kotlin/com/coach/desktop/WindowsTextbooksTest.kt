@@ -92,6 +92,8 @@ class WindowsTextbooksTest {
             ready(controller) { it.catalog.isEmpty() }
             onNodeWithTag("upload-textbook").performClick()
             ready(controller) { it.prompt == BookPrompt.IMPORTED }
+            onNodeWithTag("question-mode-NONE").performClick()
+            ready(controller) { it.book?.questionMode == QuestionMode.NONE }
             onNodeWithTag("enable-learning").performClick()
             ready(controller) { it.screen == BookScreen.LEARNING }
             assertEquals(QuestionMode.NONE, controller.state.value.book!!.questionMode)

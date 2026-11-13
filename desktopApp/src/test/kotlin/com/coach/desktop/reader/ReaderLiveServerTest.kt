@@ -60,7 +60,8 @@ class ReaderLiveServerTest {
         assumeTrue("设 COACH_READER_LIVE=1 才连真实服务进程", System.getenv("COACH_READER_LIVE") == "1")
         val root = repoRoot()
         val script = File(root, "desktopApp/src/test/kotlin/com/coach/desktop/reader/live/reader_live_server.py")
-        val pb = ProcessBuilder("python", script.path).directory(root).redirectErrorStream(false)
+        val python = sequenceOf("python3", "python").firstOrNull { runCatching { ProcessBuilder(it, "--version").start().waitFor() == 0 }.getOrDefault(false) } ?: "python"
+        val pb = ProcessBuilder(python, script.path).directory(root).redirectErrorStream(false)
         pb.redirectError(File(root, "desktopApp/build/reader-live-launcher.err"))
         val env = pb.environment(); env.keys.removeAll { it.startsWith("COACH_") || it.startsWith("BRIDGE_") }
         val process = pb.start()

@@ -190,6 +190,34 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     val quoteAnchor = remember(ui.page, source) {
         source?.blocks?.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source?.text
     }
+    val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
+        value = PageImage.Loading
+        if (book.format == "pdf") {
+            value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderPdf(book, page.number).toComposeImageBitmap()) } }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { PageImage.Failed }
+        }
+    }
+    val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
+    val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
+        view?.document == book.id && view.pdfPage == ui.page
+    val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
+    val located = if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor) else null
+    val loadedImage = (image as? PageImage.Ready)?.image
+    val aspectOk = boxes != null && loadedImage != null &&
+        kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
+    val sourceWarning = if (source == null || book.format != "pdf") null else when {
+        image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
+        remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
+        remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
+        samePage && remote.boxes is com.coach.desktop.reader.BoxesState.Failed -> "无法确认原句：无法读取这一页的文字位置。"
+        samePage && quoteAnchor.isNullOrBlank() -> "无法确认原句：没有可定位的原文。"
+        located == com.coach.desktop.reader.Located.NoTextLayer -> "无法确认原句：这一页没有可定位的文字。"
+        located == com.coach.desktop.reader.Located.NotFound -> "无法确认原句：这一页没有找到对应内容。"
+        located == com.coach.desktop.reader.Located.Ambiguous -> "无法确认原句：这一页有多处相同内容。"
+        located is com.coach.desktop.reader.Located.Found && loadedImage != null && !aspectOk -> "无法确认原句：页面图像与文字位置不一致。"
+        else -> null
+    }
 
     LaunchedEffect(book.id, ui.page, quoteAnchor) {
         remote.loadCatalog()
@@ -217,24 +245,24 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开启 learning") }
             }
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
+            sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
                 if (textView) {
                     val highlight = MaterialTheme.colorScheme.secondaryContainer
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
-                        for (block in source?.blocks.orEmpty().filter { it.page == ui.page }) {
+                        val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
+                        val confirmedBlocks = if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
+                            blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
+                        } else emptyList()
+                        for (block in confirmedBlocks) {
                             if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
                         }
                     }
                     SelectionContainer { Text(marked, fontSize = 19.sp, lineHeight = 31.sp,
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp).testTag("reader-text")) }
                 } else {
-                    val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
-                        value = PageImage.Loading
-                        value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderPdf(book, page.number).toComposeImageBitmap()) } }
-                        catch (cancel: CancellationException) { throw cancel }
-                        catch (_: Exception) { PageImage.Failed }
-                    }
                     when (val loaded = image) {
                         PageImage.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                         PageImage.Failed -> Column(Modifier.align(Alignment.Center)) {
@@ -242,14 +270,6 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                             TextButton(onClick = { retry++ }) { Text("重试") }
                         }
                         is PageImage.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
-                            val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
-                                view?.document == book.id && view.pdfPage == ui.page
-                            val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
-                            val located = if (boxes != null && quoteAnchor != null) {
-                                com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor)
-                            } else null
-                            val aspectOk = boxes != null && kotlin.math.abs(loaded.image.width.toDouble() / loaded.image.height - boxes.width / boxes.height) < 0.05
                             Box(Modifier.fillMaxWidth()) {
                                 Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
                                     modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))

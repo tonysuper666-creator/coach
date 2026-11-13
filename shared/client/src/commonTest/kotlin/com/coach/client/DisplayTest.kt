@@ -8,6 +8,11 @@ class DisplayTest {
     private fun row(id: String, status: KpStatus, title: String = "【W3·Ch6】$id", module: String = "03 医院与医生") =
         KpRow(id, title, status, explained = false, conceptIds = listOf(id), module = module)
 
+    @Test fun latestCorrectAttemptDoesNotClaimSectionMastery() {
+        assertEquals("最近答对（非猜）", latestCorrectAttemptLabel())
+        assertTrue(KpStatus.entries.none { it.label == latestCorrectAttemptLabel() })
+    }
+
     @Test fun oneVocabularyForEveryStatus() {
         assertEquals(listOf("未学", "在学", "会了", "稳了", "要补"), KpStatus.entries.map { it.label })
         val banned = listOf("已读", "未读", "在读", "还缺", "要回炉", "需修复", "需回炉", "学习中", "稳固", "已掌握", "已通过", "未开始")

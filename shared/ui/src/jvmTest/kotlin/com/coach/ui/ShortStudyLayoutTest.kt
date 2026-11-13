@@ -14,6 +14,9 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class ShortStudyLayoutTest {
+    private val ledgers = mutableListOf<SyntheticLocalLedger>()
+    @AfterTest fun closeLedgers() { ledgers.forEach { it.close() } }
+
     @Suppress("UNCHECKED_CAST")
     private fun <T> unused(clazz: Class<T>): T {
         val f = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe").apply { isAccessible = true }
@@ -30,7 +33,7 @@ class ShortStudyLayoutTest {
         val view = CourseView(events, project(events))
         val kp = assertNotNull(view.weekTarget)
         val tutor = TutorClient("http://127.0.0.1:29169", "d", "test", TutorModel(wallClock = { 1000L }))
-        val controller = CoachController("C", SyntheticLocalLedger("C").sync, tutor, formatClock = { "" })
+        val controller = CoachController("C", SyntheticLocalLedger("C").also { ledgers += it }.sync, tutor, formatClock = { "" })
         // main 的 v7：讲解已完成且不在对话里时先进阅读页。这里测的是对话视图，所以按「上次停在对话」恢复（与 main 的阅读位置恢复同一条路径）。
         controller.sync.saveMainlineState("C", json("kind" to "tutor", "kpId" to "a"), "learning")
         val message = TutorMessage("m", "synthetic", false, "第一行讲解。\n第二行讲解。\n第三行讲解。", status = "complete")

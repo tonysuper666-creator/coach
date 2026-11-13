@@ -46,6 +46,28 @@ tools/dev/heavy python3 -m unittest discover -s tools/corpus -p 'test_prepare_re
 
 ## Coach 副本与总验回放
 
+### 桌面代跑入口（TON-1101）
+
+复用桌面的 `:desktopApp:run` 启动入口；以下两项仅用于明确开启的隔离验收，不在用户界面增加开关：
+
+```sh
+COACH_ACCEPTANCE_REPLAY=1 COACH_AGENT_RUN_ID='desktop-acceptance-<UTC>' \
+COACH_URL='http://127.0.0.1:<自有隔离服务端口>' \
+COACH_TOKEN_FILE='<该服务已配对身份的私有token文件>' \
+COACH_CLIENT_DIR='<私有验收缓存目录>' \
+tools/dev/heavy --local ./gradlew :desktopApp:run --max-workers=2
+```
+
+run ID 复用共享的 1–80 位字母、数字、下划线、连字符合同。必须同时显式设置上述身份和隔离配置；配置缺失、非法 ID、生产端口或配对地址偏离显式地址时拒绝运行。相同 ID 同时传入真实 `TutorClient` 与 `SyncEngine`，两条通道均须确认 `hello.agentRunsSupported=true`，才允许发送代跑操作。缓存及待上传命令使用 `COACH_CLIENT_DIR/agent-runs/<run>`，不打开原真人缓存或重标历史；恢复普通启动时不设置这两个验收变量，原客户端目录和行为保持不变。服务端 `:server:app:acceptanceReplay` 入口与输入格式保持不变。
+
+无窗口接线回归使用合成桥、临时服务端和实际桌面会话类：
+
+```sh
+tools/dev/heavy --local ./gradlew :desktopApp:test --tests com.coach.desktop.DesktopAgentRunTest --max-workers=2 --console=plain
+```
+
+该测试覆盖账本追赶后开讲、两通道标记、旧服务端拒绝及真人投影保留；不代表真实 CLI live、AX 或实际界面操作顺序已验收。
+
 ### OPPO 代跑隔离（TON-1101）
 
 先合入并部署支持 `hello.agentRunsSupported=true` 的服务端，再安装对应 debug 客户端。代跑使用已有配对身份，通过 Activity extra `agentRunId` 显式启用：

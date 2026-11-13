@@ -13,6 +13,9 @@ import kotlin.test.*
 /** Exercise the actual StudyScreen and its navigation callback, without a server or device. */
 @OptIn(ExperimentalTestApi::class)
 class StudyAdvanceNavigationTest {
+    private val ledgers = mutableListOf<SyntheticLocalLedger>()
+    @AfterTest fun closeLedgers() { ledgers.forEach { it.close() } }
+
     private fun view(passed: Boolean): CourseView {
         val event = Event(1, "outline", "C", "outline_revised", recordedAt = 1, occurredAt = 1, deviceId = "d", actor = "LEARNER", payload = json(
             "ops" to JsonArray(listOf(json("op" to "add", "kpId" to "a", "title" to "【W1】知识点甲")))))
@@ -26,7 +29,7 @@ class StudyAdvanceNavigationTest {
     @Suppress("UNCHECKED_CAST")
     private fun unusedSync(): SyncEngine {
         // CoachController reads device-local mainline state on construction: use a real in-memory ledger.
-        return SyntheticLocalLedger("C").sync
+        return SyntheticLocalLedger("C").also { ledgers += it }.sync
     }
 
     @Test fun openingPreviouslyPassedPointKeepsItsStudyScreenVisible() = runDesktopComposeUiTest(width = 390, height = 800) {

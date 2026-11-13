@@ -2,6 +2,7 @@ package com.coach.desktop.books
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.input.key.Key
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -13,6 +14,86 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class SourceRoundTripTest {
+    private fun longLessonController(): Pair<TextbookController, TextbookLibrary> {
+        val root = Files.createTempDirectory("coach-long-lesson-")
+        val file = root.resolve("synthetic.pdf")
+        PDDocument().use { pdf ->
+            repeat(2) { pageNumber ->
+                val page = PDPage(); pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { out ->
+                    out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
+                    out.newLineAtOffset(50f, 710f)
+                    out.showText(if (pageNumber == 0) "Chapter 1 Plants" else "Chapter 2 Cells")
+                    out.newLineAtOffset(0f, -20f)
+                    if (pageNumber == 0) {
+                        out.showText("Photosynthesis is the process by which plants use light to make sugars.")
+                        repeat(32) { index ->
+                            out.newLineAtOffset(0f, -18f)
+                            out.showText("Plants use light and water to grow in this example number ${index + 1}.")
+                        }
+                    } else out.showText("Chlorophyll is a pigment found in plant cells.")
+                    out.endText()
+                }
+            }
+            pdf.save(file.toFile())
+        }
+        val library = TextbookLibrary(root.resolve("library"))
+        val imported = library.importBook(file)
+        library.save(imported.copy(readingPage = 2, learning = true, questionMode = QuestionMode.SHORT_ANSWER))
+        return TextbookController(library) to library
+    }
+
+    @Test fun longLessonRestoresScrollFocusAndDraftAfterSource() {
+        val (controller, library) = longLessonController()
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            val book = controller.state.value.book!!
+            val lesson = book.lessons[book.lessonIndex]
+            val prompt = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!.prompt
+            onNodeWithTag("short-answer").performScrollTo().performTextInput("My unfinished draft")
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.text == "My unfinished draft" }
+            onNodeWithTag("open-practice-source").performScrollTo()
+            val before = onNodeWithTag("textbook-learning").fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            assertTrue(before > 0f, "fixture must scroll")
+            onNodeWithTag("open-practice-source").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            onNodeWithText("返回学习").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            val after = onNodeWithTag("textbook-learning").fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            assertEquals(before, after, 1f, "return must preserve scroll position")
+            onNodeWithTag("open-practice-source").assertIsFocused()
+            onNodeWithText(prompt).assertExists()
+            onNodeWithTag("short-answer").assertTextContains("My unfinished draft")
+            assertEquals(PracticeAnswer("My unfinished draft"), controller.state.value.answer)
+            assertEquals(lesson.id, controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex].id)
+            assertEquals(2, library.book(book.id).readingPage)
+        }
+    }
+
+    @Test fun escapeReturnsOnlyFromSourceToLearning() {
+        val (controller, library) = longLessonController()
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            val book = controller.state.value.book!!
+            onNodeWithTag("short-answer").performScrollTo().performTextInput("Draft for escape")
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.text == "Draft for escape" }
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
+            waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            assertEquals(PracticeAnswer("Draft for escape"), controller.state.value.answer)
+            assertEquals(2, library.book(book.id).readingPage)
+            onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
+            waitForIdle()
+            assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+        }
+    }
     @Test fun questionOnSecondPageOpensItsActualSentenceAndKeepsAnswer() {
         val root = Files.createTempDirectory("coach-cross-page-source-")
         val pdfFile = root.resolve("synthetic.pdf")

@@ -1,7 +1,9 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -10,6 +12,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -35,10 +44,28 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
+    var returnFocus by remember { mutableStateOf<SourceFocus?>(null) }
+    val readerFocus = remember { FocusRequester() }
+    val lessonSourceFocus = remember { FocusRequester() }
+    val practiceSourceFocus = remember { FocusRequester() }
+    val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) { controller.load() }
+    LaunchedEffect(ui.screen, ui.source) {
+        if (ui.screen == BookScreen.READER && ui.source != null) readerFocus.requestFocus()
+    }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
+    fun returnFromReader() {
+        if (ui.source != null) returnFocus = if (practiceSource == null) SourceFocus.LESSON else SourceFocus.PRACTICE
+        run { controller.back() }
+    }
     CoachTheme {
-        Surface(Modifier.fillMaxSize().testTag("windows-textbooks"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+        Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
+            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
+                ui.source != null && ui.prompt == null && !ui.busy) {
+                returnFromReader(); true
+            } else false
+        }.focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
+            color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column {
                 if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
@@ -51,9 +78,10 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                         onLearn = { run { controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
-                        onPage = { run { controller.page(it) } }, onBack = { run { controller.back() } },
+                        onPage = { run { controller.page(it) } }, onBack = { returnFromReader() },
                         onLearn = { run { controller.learn() } })
-                    else -> TextbookLearning(ui, onBack = { run { controller.back() } },
+                    else -> TextbookLearning(ui, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
+                        onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; run { controller.source() } },
                         onPracticeSource = { practice ->
                             val lesson = book.lessons[book.lessonIndex]
@@ -79,6 +107,7 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
 }
 
 private data class PracticeSource(val page: Int?, val quote: String?, val warning: String?)
+private enum class SourceFocus { LESSON, PRACTICE }
 
 @Composable
 private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit) {
@@ -331,16 +360,28 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
 }
 
 @Composable
-private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
+private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
+    returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
+    LaunchedEffect(returnFocus, ui.busy) {
+        if (ui.busy) return@LaunchedEffect
+        // The restored button needs a layout frame before it can accept focus.
+        if (returnFocus != null) withFrameNanos { }
+        when (returnFocus) {
+            SourceFocus.LESSON -> lessonSourceFocus.requestFocus()
+            SourceFocus.PRACTICE -> practiceSourceFocus.requestFocus()
+            null -> return@LaunchedEffect
+        }
+        onFocusRestored()
+    }
     Desk(crumb = book.title, onBack = onBack, backLabel = "返回书桌", showNavigation = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
         }) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("textbook-learning"),
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp).testTag("textbook-learning"),
             verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (lesson == null) "这一遍学完了" else "理解 → 回忆 → 继续", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -353,13 +394,13 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
             } else {
                 Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
                 Text("先理解这一节在说什么，再尝试用自己的话说明。")
-                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
+                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 SelectionContainer { Text(lesson.text, fontSize = 19.sp, lineHeight = 31.sp) }
                 HorizontalDivider()
                 if (book.questionMode != QuestionMode.NONE) {
                     val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy)
+                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,
@@ -374,11 +415,11 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
 }
 
 @Composable
-private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean) {
+private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
     Text(if (mode == QuestionMode.CHOICE) "原文填空" else "简答自检", style = MaterialTheme.typography.titleMedium)
     Text(practice.prompt)
-    TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.testTag("open-practice-source")) { Text("查看对应原文") }
+    TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
         for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
             draft = option; onAnswer(PracticeAnswer(option, revealed = true))

@@ -42,7 +42,7 @@ fun runRenderSpike() {
     }
     val summaryLine = androidx.compose.runtime.mutableStateOf<String?>(null)
     application {
-    Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = 840.dp, height = 600.dp)) {
+    Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = 840.dp, height = 600.dp)) {
         RenderingReplayScreen(state, corpus, true, "FLAT", ::save, { line ->
             println(line)
             if (line.startsWith("SUMMARY")) summaryLine.value = line

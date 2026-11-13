@@ -1,7 +1,10 @@
 # Review queue contract candidate
 
-This isolated candidate has no production consumer. It does not modify the formal
-scheduler, Events/State/Projector, the question ladder, or client/server/UI code.
+This candidate started as an isolated contract. TON-1448 now reads it from the
+shared client's review entry (`ReviewQueueView.kt` builds the board,
+`ReviewScreen.kt` renders it and remembers the last opened entry); the formal
+scheduler, Events/State/Projector, the question ladder and server code remain
+untouched.
 
 `ledgerQueueCandidate` replays the real main `Event` inputs with `learnerEvidence`
 and `project`, reads `Projection.review/revisit`, and migrates the actionable
@@ -44,4 +47,6 @@ tools/dev/heavy --local ./gradlew :shared:domain:jvmTest --priority=low --consol
 ```
 
 No formal content, private exam text, device acceptance or release evidence is
-implied by this candidate. TON-1448 stays backlog with its TON-1447 dependency.
+implied by this candidate. What is still open on TON-1448: actual variant
+allocation, weighted scheduling/retention and the cross-platform release path
+(the review entry itself is wired on the shared client).

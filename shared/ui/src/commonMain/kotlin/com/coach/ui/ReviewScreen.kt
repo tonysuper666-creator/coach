@@ -16,14 +16,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.client.ReviewBoard
+import com.coach.client.ReviewItem
+import com.coach.client.reviewBoard
+import com.coach.client.reviewCursor
+import com.coach.client.saveReviewCursor
 import com.coach.domain.*
 import kotlinx.serialization.json.*
 
-/** Due queue from the ledger; Start opens the independent review tutor thread. */
+/**
+ * 复习入口：到期日程、答错、猜对合成一队（身份由已验队列合同去重），开始即进独立复习线程。
+ * 队列是账本回放出来的纯函数结果，离开再回来会接着上次点开的那一项。
+ */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
     val now = rememberCourseNow(c)
-    val due = view.dueReviews(now)
+    val day = view.logicalToday(now)
+    // 账本回放一次一块，只在换天或账本变（view 是新实例）时重算，不跟着秒针每秒重放。
+    val board = remember(view, day) { reviewBoard(c.courseId, view, day) }
+    var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId)) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
@@ -48,13 +59,20 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 }
             }
             if (onOpenEssay != null) EssayEntry(c, onOpenEssay)
-            if (due.isEmpty()) {
+            if (board.items.isEmpty()) {
                 CenterMessage("今天没有到期的复习。")
+                // 低频/无题也要说得清：是还没到期、还有未核题，还是根本还没有可复习的题。
+                Text(emptyReviewHint(board), Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
             } else {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("${due.size} 节到期", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    due.forEach { item ->
-                        key(item.kp.id) {
+                    Text(board.headline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (board.unverifiedAnswered > 0) Text("另有 ${board.unverifiedAnswered} 道题答案还没核，只提醒再看一次，不计分",
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    board.items.forEach { item ->
+                        key(item.entryId) {
+                            val resumed = item.entryId == cursor
                             val (tag, main) = splitTitle(item.kp.title)
                             Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("review-${item.kp.id}")) {
                                 Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -62,8 +80,14 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                                         if (tag.isNotBlank()) Text(sourceLine(tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                         Text((if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                                        Text(reviewItemMeta(item), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                        if (resumed) Text("上次练到这里", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                     }
-                                    Button(onClick = { onOpenKp(item.kp.id, true) }, modifier = Modifier.heightIn(min = 56.dp)) { Text("开始") }
+                                    Button(onClick = {
+                                        saveReviewCursor(c.sync, c.courseId, item.entryId, board.day)
+                                        cursor = item.entryId
+                                        onOpenKp(item.kp.id, true)
+                                    }, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (resumed) "继续" else "开始") }
                                 }
                             }
                         }
@@ -73,6 +97,19 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         }
     }
 }
+
+/** 低频或没题时，说清是哪一种「没有」，而不是只留一句空话。 */
+private fun emptyReviewHint(board: ReviewBoard): String = board.nextDueDay?.let { "下一次复习在 ${dayLabel(it)}。" }
+    ?: if (board.unverifiedAnswered > 0) "还有 ${board.unverifiedAnswered} 道题答案没核，不计分，所以没排进错题队列。"
+    else "还没有排进复习的题：先学一节或做一组题，答错、猜对的会自动排进来。"
+
+/** 来源 · 原题/变式身份 · 先修 · 考纲权重：只写账本里真实有的输入，缺什么就不写什么。 */
+private fun reviewItemMeta(item: ReviewItem): String = listOfNotNull(
+    item.reasonLabel.takeIf { it.isNotBlank() },
+    item.identityLabel,
+    item.prereqTitles.takeIf { it.isNotEmpty() }?.joinToString("、", prefix = "先修："),
+    item.examWeight.takeIf { it > 0 }?.let { "考纲权重 $it" },
+).joinToString(" · ")
 
 /** Existing Review entry: one click to the current week's question, a separate reading route. */
 @Composable

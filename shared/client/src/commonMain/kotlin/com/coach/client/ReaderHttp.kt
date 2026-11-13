@@ -17,13 +17,23 @@ class ReaderHttp internal constructor(
     private val bytes: suspend (String) -> ByteArray?,
     private val text: suspend (String) -> String?,
     internal val courseId: String? = null,
+    private val imageTransfer: (suspend (String, (String) -> Unit) -> ByteArray?)? = null,
 ) {
     suspend fun catalog(): ReaderReply = request("", null)
     suspend fun resolve(source: String): ReaderReply = request("resolve?source=${source.encodeURLParameter()}", null)
     suspend fun page(document: String, pdfPage: Int): ReaderReply = request("${document.encodeURLPathPart()}/pages/$pdfPage", null)
-    suspend fun image(document: String, pdfPage: Int, version: String? = null): ByteArray? = bytes(
-        "${document.encodeURLPathPart()}/pages/$pdfPage/image" + (version?.let { "?version=${it.encodeURLParameter()}" } ?: "")
-    )
+    suspend fun image(document: String, pdfPage: Int, version: String? = null, onStage: (String) -> Unit = {}): ByteArray? {
+        val path = "${document.encodeURLPathPart()}/pages/$pdfPage/image" + (version?.let { "?version=${it.encodeURLParameter()}" } ?: "")
+        val transfer = imageTransfer
+        return if (transfer == null) bytes(path) else transfer(path, onStage)
+    }
+
+    /** Synthetic fixture diagnostic only. Ordinary page requests do not carry a probe token. */
+    suspend fun probeSyntheticImage(pdfPage: Int, probeId: String, onStage: (String) -> Unit = {}): ByteArray? {
+        require(probeId.matches(Regex("[A-Za-z0-9_-]{1,80}")))
+        val transfer = checkNotNull(imageTransfer)
+        return transfer("synthetic-baseline/pages/$pdfPage/image?version=v1&readerProbe=${probeId.encodeURLParameter()}", onStage)
+    }
     /** Word boxes in PDF points for the displayed page; the version check keeps an old document from being highlighted. */
     suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply =
         request("${document.encodeURLPathPart()}/pages/$pdfPage/boxes?version=${version.encodeURLParameter()}", null)

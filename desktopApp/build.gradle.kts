@@ -72,6 +72,7 @@ dependencies {
     implementation(libs.sqldelight.driver)
     implementation(libs.sqlite.jdbc)
     implementation(libs.serialization.json)
+    implementation("org.apache.pdfbox:pdfbox:3.0.8")
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)
     implementation(libs.material3)
@@ -80,6 +81,7 @@ dependencies {
     testImplementation(project(":server:core"))
     testImplementation(project(":server:ai"))
     testImplementation(libs.ktor.netty)
+    testImplementation(libs.ktor.websockets)
     @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
     testImplementation(compose.uiTest)
 }

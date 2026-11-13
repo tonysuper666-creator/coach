@@ -40,6 +40,7 @@ internal fun resolveCourse(environment: String?, packaged: String?): String =
 
 /** Installed clients resolve their Mac locally and enter learning only with their own identity. */
 fun runCoach() {
+    if (System.getProperty("os.name").startsWith("Windows")) { runWindowsTextbooks(); return }
     refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val settings = DesktopConnectionSettings()
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
@@ -65,8 +66,11 @@ fun runCoach() {
 }
 
 /** The gate disposes all network clients and the ledger when an identity is revoked. */
-private class DesktopLearningSession(settings: DesktopConnectionSettings, identity: DesktopIdentity, course: String) : AutoCloseable {
-    val home = System.getProperty("user.home")
+internal class DesktopLearningSession(settings: DesktopConnectionSettings, identity: DesktopIdentity, course: String) : AutoCloseable {
+    init {
+        requireDevelopmentServer(settings, identity.serverUrl)
+    }
+    val home = settings.home.toString()
     private val baseUrl = identity.serverUrl
     private val deviceId = identity.credentials.deviceId
     private val token = identity.credentials.token
@@ -79,6 +83,7 @@ private class DesktopLearningSession(settings: DesktopConnectionSettings, identi
         db, deviceId, transport, listOf(course),
         { UUID.randomUUID().toString() },
         { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } },
+        agentRunId = settings.agentRunId,
     )
 
     private val reporter = com.coach.client.UsageReporter(baseUrl, deviceId, token)
@@ -88,7 +93,7 @@ private class DesktopLearningSession(settings: DesktopConnectionSettings, identi
     private val model = TutorModel(System::currentTimeMillis, telemetry) { s: TtftSample ->
         ttftFile.appendText("""{"at":"${Instant.now()}","thread":"${s.threadId}","msg":"${s.messageId}","kind":"${s.kind}","ms":${s.ms},"model":"${s.model}","fallback":${s.fallback}}""" + "\n")
     }
-    private val tutor = TutorClient(baseUrl, deviceId, token, model, telemetry)
+    private val tutor = TutorClient(baseUrl, deviceId, token, model, telemetry, agentRunId = settings.agentRunId)
     private val clock = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
     private val packDir = File(env("COACH_PACK_DIR", File(home, "Coach/corpus/packs/$course").path))
     val mathHttp = com.coach.client.MathHttp(baseUrl, deviceId, token)

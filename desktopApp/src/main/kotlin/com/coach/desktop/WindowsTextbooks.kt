@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
@@ -98,6 +99,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, chooseBook: sus
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
+    // Answer saves belong to the window, not to 书架: switching tabs must not cancel the last keystrokes.
+    val drafts = remember(controller) { AnswerDrafts(controller, scope) }
     val book = ui.book
     // The library is read once for the whole host, so 今天 and 课程 show existing books before 书架 is opened.
     LaunchedEffect(controller) {
@@ -128,13 +131,13 @@ internal fun WindowsTextbookHost(controller: TextbookController, chooseBook: sus
                                 "今天会显示书架上读到一半的教材。书架现在是空的，先去上传一本。")
                             else HostTodayBook(book, busy = ui.busy,
                                 onRead = { openInWorkspace { controller.read() } },
-                                onLearn = { openInWorkspace { controller.learn() } })
+                                onLearn = { openInWorkspace { drafts.flush(); controller.learn() } })
                             AppTab.ROUTE -> if (book == null) HostEmptyState("host-course-empty", "还没有课程",
                                 "课程按书架上的教材分节。书架现在是空的，先去上传一本，再回来按节学。")
                             else HostCourseBook(book, busy = ui.busy,
-                                onLearn = { openInWorkspace { controller.learn() } },
+                                onLearn = { openInWorkspace { drafts.flush(); controller.learn() } },
                                 onRead = { openInWorkspace { controller.read() } })
-                            else -> TextbookWorkspace(controller, chooseBook)
+                            else -> TextbookWorkspace(controller, drafts, chooseBook)
                         }
                     }
                     if (rail) Row(Modifier.fillMaxSize()) {

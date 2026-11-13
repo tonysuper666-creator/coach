@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -23,13 +24,57 @@ import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
 
+/**
+ * Answer writes that outlive the bookshelf composition.
+ *
+ * The workspace is removed from composition whenever the learner switches to 今天 or 课程, so a save
+ * launched from its `rememberCoroutineScope` was cancelled while it was still waiting on SQLite. This
+ * queue belongs to the host window instead, and every entry carries the book, lesson and question mode
+ * it was typed in: a write that waits long enough for the learner to move on still lands on the lesson
+ * it came from instead of the one that happens to be open when it finally runs.
+ */
+internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
+    private data class Draft(val book: String, val lesson: String, val mode: QuestionMode, val answer: PracticeAnswer)
+
+    private var pending: Draft? = null
+    private var writer: Job? = null
+
+    fun save(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
+        pending = Draft(book, lesson, mode, answer)
+        if (writer?.isActive != true) writer = scope.launch { drain() }
+    }
+
+    /** Waits until every accepted keystroke has reached the library, so 继续学 cannot reopen a stale draft. */
+    suspend fun flush() { writer?.join() }
+
+    private suspend fun drain() {
+        while (true) {
+            val draft = pending ?: break
+            pending = null
+            val book = controller.state.value.book
+            if (book?.id == draft.book && book.lessons.getOrNull(book.lessonIndex)?.id == draft.lesson &&
+                book.questionMode == draft.mode) controller.answer(draft.answer)
+            else controller.library.saveAnswer(draft.book, draft.lesson, draft.mode, draft.answer)
+        }
+    }
+}
+
+/** A workspace-local queue, for callers that own the whole screen and never unmount it mid-answer. */
 @Composable
-internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
+internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts {
+    val scope = rememberCoroutineScope()
+    return remember(controller) { AnswerDrafts(controller, scope) }
+}
+
+@Composable
+internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
@@ -44,13 +89,22 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                     ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
                         onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
                         onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
-                        onLearn = { run { controller.learn() } })
+                        onLearn = { run { drafts.flush(); controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         onPage = { run { controller.page(it) } }, onBack = { run { controller.back() } },
-                        onLearn = { run { controller.learn() } })
+                        onLearn = { run { drafts.flush(); controller.learn() } })
                     else -> TextbookLearning(ui, onBack = { run { controller.back() } },
-                        onSource = { run { controller.source() } }, onLesson = { run { controller.lesson(it) } },
-                        onSettings = { run { controller.questionSettings() } }, onAnswer = { run { controller.answer(it) } })
+                        onSource = { run { controller.source() } },
+                        // Moving on waits for the pending write: the answer must reach its own lesson before the
+                        // open lesson changes, otherwise the batch would be attributed to the new one.
+                        onLesson = { run { drafts.flush(); controller.lesson(it) } },
+                        onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                            ui.book?.let { current ->
+                                current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
+                                    drafts.save(current.id, lesson.id, current.questionMode, answer)
+                                }
+                            }
+                        })
                 }
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
@@ -276,6 +330,10 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
 @Composable
 private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
+    var typing by remember(lesson, mode) { mutableStateOf(false) }
+    // Coming back from 今天/课程 rebuilds this screen with the answer the queue has already saved.
+    // While the learner is typing the field owns the text, so a slower echo cannot overwrite keystrokes.
+    LaunchedEffect(answer.text, typing) { if (!typing) draft = answer.text }
     Text(if (mode == QuestionMode.CHOICE) "原文填空" else "简答自检", style = MaterialTheme.typography.titleMedium)
     Text(practice.prompt)
     if (mode == QuestionMode.CHOICE) {
@@ -289,7 +347,7 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
         }
     } else {
         OutlinedTextField(draft, { draft = it; onAnswer(PracticeAnswer(it)) }, label = { Text("写下你的理解") },
-            minLines = 3, modifier = Modifier.fillMaxWidth().testTag("short-answer"))
+            minLines = 3, modifier = Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }.testTag("short-answer"))
         TextButton({ onAnswer(PracticeAnswer(draft, revealed = true)) }, enabled = draft.isNotBlank(),
             modifier = Modifier.testTag("reveal-reference")) { Text("对照原文自检") }
         if (answer.revealed) {

@@ -58,8 +58,8 @@ fun ResourcesScreen(c: CoachController, jump: SourceJump?, onBack: (() -> Unit)?
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp).testTag("source-back")) { Text(backLabel) }
-            else if (open != null) TextButton(onClick = { openDoc = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 资料") }
-            Text("资料", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleLarge)
+            else if (open != null) TextButton(onClick = { openDoc = null }, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 书架") }
+            Text("书架", Modifier.weight(1f).padding(start = 8.dp).testTag("library-title"), style = MaterialTheme.typography.titleLarge)
             if (jump == null && http != null) TextButton(onClick = { privateReader = true }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-private-reader")) { Text("教材阅读") }
         }
         HorizontalDivider()

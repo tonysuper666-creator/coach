@@ -2,6 +2,7 @@ package com.coach.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toAwtImage
@@ -97,6 +98,7 @@ class ThreeDestinationNavigationTest {
                 onNodeWithTag("navigation-back").performClick()
                 onNodeWithContentDescription("导航：书架").performClick()
                 nav()
+                onNodeWithTag("library-title").assertTextEquals("书架").assertIsDisplayed()
                 capture("library")
             }
         } finally { tutor.close(); driver.close() }
@@ -128,6 +130,42 @@ class ThreeDestinationNavigationTest {
             onNodeWithTag("v7-directory-toggle").performClick()
             onNodeWithTag("v7-directory-drawer").assertIsDisplayed()
             onNodeWithText("合成周目录").assertIsDisplayed()
+        }
+    }
+
+    @Test fun standaloneDeskRetainsTaskAcrossWindowChangesAndKeepsDirectoryInDrawer() {
+        runDesktopComposeUiTest(1600, 1000) {
+            var width by mutableStateOf(1500)
+            setContent {
+                CoachTheme(false) {
+                    Box(Modifier.size(width.dp, 900.dp)) {
+                        Desk("合成题目", directory = { Text("合成周目录") }, margin = { Text("合成出处") }) {
+                            var selected by remember { mutableStateOf(false) }
+                            Button(onClick = { selected = true }) { Text(if (selected) "已选择 B" else "选择 B") }
+                        }
+                    }
+                }
+            }
+            onNodeWithText("选择 B").performClick()
+            for (size in listOf(1500, 1100, 900, 411, 1500)) {
+                runOnIdle { width = size }
+                waitForIdle()
+                onNodeWithText("已选择 B").assertIsDisplayed()
+                onNodeWithTag("v7-paper").assertIsDisplayed()
+                onNodeWithTag("v7-directory").assertDoesNotExist()
+                onNodeWithTag("v7-directory-toggle").assertIsDisplayed()
+                if (size >= 700) onNodeWithTag("v7-margin").assertIsDisplayed()
+                else onNodeWithTag("v7-margin").assertDoesNotExist()
+                if (size == 1500 || size == 411) {
+                    val file = File("build/screens/standalone-desk-$size.png")
+                    file.parentFile.mkdirs()
+                    ImageIO.write(onNodeWithTag("v7-desk").captureToImage().toAwtImage(), "png", file)
+                }
+            }
+            onNodeWithTag("v7-directory-toggle").performClick()
+            onNodeWithText("合成周目录").assertIsDisplayed()
+            onNodeWithText("收起目录").performClick()
+            onNodeWithText("已选择 B").assertIsDisplayed()
         }
     }
 }

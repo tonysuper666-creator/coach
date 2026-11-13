@@ -150,4 +150,60 @@ class SyntheticReaderWindowTest {
         assertNotNull(docs)
         assertTrue(docs.size >= 2, "包含 orchard-text 与 orchard-read 两份合成文档")
     }
+
+    @Test
+    fun reopeningSamePageDoesNotStayIdle() {
+        val (r, _) = rig()
+        try {
+            runBlocking {
+                r.session.remote!!.loadCatalog()
+                r.session.openRemote("orchard-text")
+            }
+            r.frames(10)
+            assertEquals(1, r.page())
+            assertIs<PageState.Ready>(r.session.remote!!.page)
+
+            // 首次跨页打开第 3 页
+            runBlocking { r.session.openRemoteAt("orchard-text", 3, "q-orchard-text-3-1") }
+            r.frames(10)
+            assertEquals(3, r.page())
+            assertIs<PageState.Ready>(r.session.remote!!.page)
+            assertIs<StudyState.Ready>(r.session.remote!!.study)
+
+            // 再次重复调用打开同一文档同一页
+            runBlocking { r.session.openRemoteAt("orchard-text", 3, "q-orchard-text-3-1") }
+            r.frames(10)
+            assertEquals(3, r.page())
+            // 关键回归断言：修复同页重开停在 Idle 缺陷，状态必须处于 Ready
+            assertIs<PageState.Ready>(r.session.remote!!.page, "同书同页重开后正文必须正常加载就绪，不能停在 Idle")
+            assertIs<StudyState.Ready>(r.session.remote!!.study, "同书同页重开后题目必须就绪")
+        } finally {
+            r.close()
+        }
+    }
+
+    @Test
+    fun rawAnchorPhraseHighlightsWhenMatchedAndReportsWhenUnlocated() {
+        val (r, _) = rig()
+        try {
+            runBlocking {
+                r.session.remote!!.loadCatalog()
+                // 传纯原句文本（非题目 ID），第 3 页包含该短语
+                r.session.openRemoteAt("orchard-text", 3, "预防 为主 ， 综合 防治")
+            }
+            r.frames(10)
+            assertEquals(3, r.page())
+            // 关键回归断言：原句短语能够被正确解释并高亮
+            assertEquals("已在页上标出原句", r.session.uiHighlight)
+
+            // 传不存在的未映射原句短语：清楚提示，不假装已高亮
+            runBlocking {
+                r.session.openRemoteAt("orchard-text", 3, "不存在 的 原句 文本 无法 匹配")
+            }
+            r.frames(10)
+            assertEquals("没找到这句原文，无法确认位置", r.session.uiHighlight, "缺少映射时给出明确提示")
+        } finally {
+            r.close()
+        }
+    }
 }

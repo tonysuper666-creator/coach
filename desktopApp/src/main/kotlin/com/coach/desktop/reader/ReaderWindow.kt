@@ -220,6 +220,14 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         state = state.openProvenance(q.id, state.position.page)
     }
 
+    /** 导航版本计数器：每次打开文档、翻页或直达时递增，保证即使同书同页重开也能触发加载 Effect。 */
+    var navGeneration by mutableIntStateOf(0)
+        private set
+
+    /** 宿主提供的返回回调与按钮文案（如返回书桌/返回学习）。 */
+    var onBack by mutableStateOf<(() -> Unit)?>(null)
+    var backLabel by mutableStateOf<String?>(null)
+
     /** 本次组合实际渲染的栏，供测试读取。 */
     var renderedPanes: List<ReaderPane> = emptyList()
 
@@ -319,6 +327,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     suspend fun openRemote(documentId: String, targetPdfPage: Int? = null, anchor: String? = null) {
         val r = remote ?: return
         cancelNote(); highlightNoteId = null
+        navGeneration++
         val defaultStart = r.open(documentId)
         val doc = r.current
         if (defaultStart == null || doc == null) {
@@ -342,6 +351,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 翻到上一页（按页翻）。 */
     fun prevPage() {
         if (state.position.page > 0) {
+            navGeneration++
             state = state.apply(ReaderAction.PrevPage)
         }
     }
@@ -349,6 +359,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 翻到下一页（按页翻）。 */
     fun nextPage() {
         if (state.pageCount > 0 && state.position.page < state.pageCount - 1) {
+            navGeneration++
             state = state.apply(ReaderAction.NextPage)
         }
     }
@@ -358,6 +369,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val maxPages = remote?.current?.pages ?: state.pageCount
         if (maxPages <= 0) return
         val clamped = pdfPage.coerceIn(1, maxPages)
+        navGeneration++
         state = state.goTo(PdfPages.toIndex(clamped)).let { s ->
             if (anchor != null) s.copy(flashAnchor = anchor) else s
         }
@@ -473,8 +485,8 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
         if (remote != null) {
             LaunchedEffect(remote) { remote.loadCatalog() }
             LaunchedEffect(session.noteSaveTick) { if (session.noteSaveTick > 0) session.commitNote() }
-            // 切页/切书：只留最后一次导航；页成功后再保存进度，保存失败不影响阅读。
-            LaunchedEffect(remote.current?.id, session.state.position.page) {
+            // 切页/切书：只留最后一次导航；重开同书同页依 navGeneration 刷新；页成功后再保存进度，保存失败不影响阅读。
+            LaunchedEffect(remote.current?.id, session.state.position.page, session.navGeneration) {
                 if (remote.current != null) {
                     val pdf = PdfPages.toPdf(session.state.position.page)
                     remote.show(pdf)
@@ -563,19 +575,29 @@ private fun ReaderBar(session: ReaderSession, shown: List<ReaderPane>) {
         }
         Text(pos, Modifier.testTag("bar-position"), fontSize = 12.sp, color = Color(0xFF666666))
         if (state.pageCount > 0) {
+            val curPage = PdfPages.toPdf(state.position.page)
+            Text("$curPage / ${state.pageCount}", Modifier.testTag("reader-page-number").padding(start = 8.dp), fontSize = 12.sp, color = Color(0xFF666666))
             val canPrev = state.position.page > 0
             val canNext = state.position.page < state.pageCount - 1
             Text(
                 "上一页",
-                Modifier.testTag("bar-prev-page").clickable(enabled = canPrev) { session.prevPage() }.padding(start = 12.dp),
+                Modifier.testTag("bar-prev-page").testTag("previous-page").clickable(enabled = canPrev) { session.prevPage() }.padding(start = 12.dp),
                 color = if (canPrev) Accent else Color(0xFF999999),
                 fontSize = 12.sp,
             )
             Text(
                 "下一页",
-                Modifier.testTag("bar-next-page").clickable(enabled = canNext) { session.nextPage() }.padding(start = 8.dp),
+                Modifier.testTag("bar-next-page").testTag("next-page").clickable(enabled = canNext) { session.nextPage() }.padding(start = 8.dp),
                 color = if (canNext) Accent else Color(0xFF999999),
                 fontSize = 12.sp,
+            )
+        }
+        session.onBack?.let { back ->
+            Text(
+                session.backLabel ?: "返回",
+                Modifier.testTag("reader-back").clickable { back() }.padding(start = 16.dp),
+                color = Accent,
+                fontSize = 14.sp,
             )
         }
         if (state.provenanceStack.isNotEmpty()) {
@@ -702,10 +724,13 @@ private fun RemoteBody(session: ReaderSession, remote: ReaderRemote) {
 private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView) {
     val state = session.state
     val bitmap = remember(view.image) { view.image?.let { b -> runCatching { org.jetbrains.skia.Image.makeFromEncoded(b).toComposeImageBitmap() }.getOrNull() } }
-    // 高亮的引文：题目点出处时是该题登记的原句；否则是用户点选的批注。
+    // 高亮的引文：题目点出处时优先查题目的原句；若未命中题目 ID 则直接作为文本锚点；否则是用户点选的批注。
     val quote = remember(state.flashAnchor, session.highlightNoteId, remote.notes, remote.study) {
-        state.flashAnchor?.let { id -> remote.studyQuestions.firstOrNull { it.id == id }?.anchor }
-            ?: session.highlightNoteId?.let { id -> remote.notes.firstOrNull { it.id == id && remote.noteValid(it, view) }?.quote }
+        state.flashAnchor?.takeIf { it.isNotBlank() }?.let { raw ->
+            remote.studyQuestions.firstOrNull { it.id == raw }?.anchor ?: raw
+        } ?: session.highlightNoteId?.let { id ->
+            remote.notes.firstOrNull { it.id == id && remote.noteValid(it, view) }?.quote
+        }
     }
     val located: Located? = when (val b = remote.boxes) {
         is BoxesState.Ready -> quote?.let { QuoteLocator.locate(b.boxes, it) }

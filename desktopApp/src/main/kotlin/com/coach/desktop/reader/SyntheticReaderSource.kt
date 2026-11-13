@@ -275,12 +275,18 @@ class SyntheticReaderSource : ReaderSource {
 }
 
 /**
- * 资料来源解析器：优先读取已配置的隔离测试/生产服务（COACH_URL 与令牌），若无则提供内置合成样例文档。
+ * 资料来源解析器：优先读取已配置的隔离测试/生产服务（COACH_URL 与令牌），其次读取本地 Windows TextbookLibrary，若无则回退至合成样例文档。
  */
 object ReaderSourceResolver {
     fun resolve(
         env: (String) -> String? = System::getenv,
         prop: (String) -> String? = System::getProperty,
+    ): ReaderSource = resolveInternal(env, prop, null)
+
+    internal fun resolveInternal(
+        env: (String) -> String? = System::getenv,
+        prop: (String) -> String? = System::getProperty,
+        libraryDirectory: Path? = null,
     ): ReaderSource {
         val url = env("COACH_URL") ?: prop("coach.url")
         val course = env("COACH_COURSE") ?: prop("coach.course") ?: "orchard"
@@ -290,6 +296,17 @@ object ReaderSourceResolver {
         if (url != null && token != null) {
             val http = CourseHttp(url, deviceId, token, course)
             return ReaderHttpSource(http.reader)
+        }
+        val explicitLib = libraryDirectory
+            ?: env("COACH_LIBRARY_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
+            ?: prop("coach.library.dir")?.takeIf(String::isNotBlank)?.let(Path::of)
+        if (explicitLib != null && Files.exists(explicitLib)) {
+            return LocalBooksReaderSource(com.coach.desktop.books.TextbookLibrary(explicitLib))
+        }
+        val defaultHome = prop("user.home")?.let(Path::of) ?: Path.of(System.getProperty("user.home"))
+        val candidate = defaultHome.resolve("Coach/books")
+        if (Files.exists(candidate.resolve("library.sqlite"))) {
+            return LocalBooksReaderSource(com.coach.desktop.books.TextbookLibrary(candidate))
         }
         return SyntheticReaderSource()
     }

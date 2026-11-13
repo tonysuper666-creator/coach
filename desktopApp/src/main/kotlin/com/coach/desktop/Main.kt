@@ -24,6 +24,10 @@ private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
 
 fun main() {
     if (System.getProperty("coach.exportFormulas") != null) { exportFormulas(); return }
+    if (System.getenv("COACH_MODE") == "reader" || System.getProperty("coach.reader") != null) {
+        com.coach.desktop.reader.main()
+        return
+    }
     if (System.getenv("COACH_MODE") != "spike") { runCoach(); return }
     runRenderSpike()
 }

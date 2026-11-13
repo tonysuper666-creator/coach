@@ -91,6 +91,46 @@ class VariantAllocationTest {
         assertEquals(QueueReadiness.PENDING_SYNC, after.entries.single().readiness)
     }
 
+    /**
+     * QA's first counterexample: one live variant, two NEEDS_VARIANT entries on the same KP. Both used to go
+     * READY on the same question, producing two attempt ids for one question. A question is spent once.
+     */
+    @Test fun oneCandidateIsNeverSpentOnTwoEntriesOfWorkInTheSameScope() {
+        val before = ReviewQueueCandidate(scope)
+            .observe(scope, "kp", QueueQuestion("q-kp", "orig-v1", "fp-kp"),
+                QueueSource("wrong-kp", QueueReason.WRONG), day)
+            .observe(scope, "kp", question = null, source = QueueSource("due-kp", QueueReason.DUE),
+                dueDay = day, unknownDueId = "legacy-due-kp")
+        assertEquals(2, before.entries.size)
+
+        val allocated = before.allocateVariants(port(candidate()))
+        val ready = allocated.queue.entries.filter { it.readiness == QueueReadiness.READY }
+        val missing = allocated.queue.entries.filter { it.readiness == QueueReadiness.NEEDS_VARIANT }
+        assertEquals(1, ready.size)
+        assertEquals("q-variant", ready.single().variants.single().question.id)
+        assertEquals(1, missing.size, "the entry that could not get a question stays a gap")
+        assertTrue(missing.single().variants.isEmpty())
+        assertTrue(missing.single().currentAttemptId == null)
+        assertEquals(1, allocated.selections.count { it.variant != null })
+        assertEquals(1, allocated.selections.count { it.variant == null })
+        val questions = allocated.queue.entries.flatMap { entry -> entry.variants.map { it.question.id } }
+        assertEquals(questions.distinct(), questions, "one question cannot own two variant attempts")
+    }
+
+    @Test fun aQuestionAlreadyAllocatedInTheQueueIsNotSpentAgain() {
+        // The first pass spends the only candidate on the mistake row.
+        val firstPass = queue("kp").allocateVariants(port(candidate())).queue
+        // A later due record for the same KP arrives; the pool still only holds the spent question.
+        val secondPass = firstPass
+            .observe(scope, "kp", question = null, source = QueueSource("due-kp", QueueReason.DUE),
+                dueDay = day, unknownDueId = "legacy-due-kp")
+            .allocateVariants(port(candidate()))
+        assertEquals(1, secondPass.queue.entries.count { it.readiness == QueueReadiness.READY })
+        val dueRow = secondPass.queue.entries.single { it.originalQuestion == null }
+        assertTrue(dueRow.variants.isEmpty())
+        assertEquals(QueueReadiness.NEEDS_VARIANT, dueRow.readiness)
+    }
+
     @Test fun aRealLedgerEntryKeepsItsOriginalIdentityWhenAVariantIsAllocated() {
         val events = mutableListOf<Event>()
         val now = 1_793_188_800_000L
@@ -112,12 +152,14 @@ class VariantAllocationTest {
         val known = fromLedger.entries.single { it.originalQuestion != null }
         val unknownDue = fromLedger.entries.single { it.originalQuestion == null }
         assertEquals("q-kp", known.originalQuestion?.id)
-        val allocated = fromLedger.allocateVariants(port(candidate())).queue
+        // Two real candidates so both rows can be served; each question is still spent only once.
+        val allocated = fromLedger.allocateVariants(port(candidate(), candidate(id = "q-variant-2"))).queue
         val after = allocated.entries.single { it.id == known.id }
         assertEquals(known.id, after.id)
         assertEquals(known.originalQuestion, after.originalQuestion)
         assertEquals(known.originalAttempts, after.originalAttempts)
         assertEquals(QueueReadiness.READY, after.readiness)
+        assertEquals(2, allocated.entries.flatMap { it.variants }.map { it.question.id }.distinct().size)
         // The unlinked due row keeps its own identity; the variant never rewrites it into the mistake.
         val stillUnknown = allocated.entries.single { it.id == unknownDue.id }
         assertNull(stillUnknown.originalQuestion)

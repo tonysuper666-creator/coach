@@ -52,4 +52,36 @@ class ReviewScheduleOrderTest {
         assertEquals(listOf("kp-a", "kp-b", "kp-c"), order(entries, weights))
         assertEquals(order(entries, weights), order(entries.reversed(), weights))
     }
+
+    /**
+     * QA's second counterexample: a low-frequency point that has waited 30→60 days is beaten every day by a
+     * fresh high-weight point that is only 3 days overdue, so it is picked 0 times in 31 days. Weight must not
+     * order the starving group itself.
+     */
+    @Test fun anOldLowFrequencyPointSurvivesADailyHighWeightBacklog() {
+        var lowFirst = 0
+        for (offset in 0..30) {
+            val on = day + offset
+            // Same low-frequency point, still waiting. Each day adds one high-weight point that is already 3 days overdue.
+            val entries = due("kp-low" to day - 30, "kp-high" to on - 3)
+            val first = scheduleOrder(entries, on, mapOf("kp-high" to 3, "kp-low" to 0)).first()
+            if (first.kpId == "kp-low") lowFirst++
+        }
+        assertTrue(lowFirst >= 1, "the low-frequency point was never reached in 31 days")
+        assertEquals("kp-low", scheduleOrder(
+            due("kp-low" to day - 30, "kp-high" to day - 3), day,
+            mapOf("kp-high" to 3, "kp-low" to 0)).first().kpId)
+    }
+
+    @Test fun everyStarvingEntryIsReachedBeforeAnyFreshHighWeightEntry() {
+        // All three already exceed the bound: the longest wait goes first, weights do not reorder the group.
+        val starving = order(
+            due("kp-old" to day - 60, "kp-mid" to day - 10, "kp-edge" to day - 3),
+            mapOf("kp-edge" to 5, "kp-mid" to 4, "kp-old" to 0))
+        assertEquals(listOf("kp-old", "kp-mid", "kp-edge"), starving)
+        // A fresh high-weight point cannot jump ahead of a starving one, so each starving entry is reached
+        // within one pass of the starving group.
+        assertEquals(listOf("kp-old", "kp-fresh"), order(
+            due("kp-old" to day - 30, "kp-fresh" to day), mapOf("kp-fresh" to 9)))
+    }
 }

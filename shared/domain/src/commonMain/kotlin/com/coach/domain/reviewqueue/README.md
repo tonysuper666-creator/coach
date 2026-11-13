@@ -31,24 +31,31 @@ allocation appends a link without changing the unknown item's identity.
 provenance boundary. `allocateVariants` now drives it from an injectable
 `VariantCandidatePort`: it re-checks every candidate itself (same course, KP and
 provenance boundary, `VALID` revision, verified key, different question than the
-original, not already allocated) and only assigns what passes. A port that returns
-nothing leaves the entry as a visible missing question (`NEEDS_VARIANT`, zero
-variants); nothing is invented. The store implements the port with
-`reviewVariantCandidates`, the same verified, unposed single-choice pool the
-question route takes from. Distinct wording, content validity verification and
-offline availability remain the bank's responsibility. Withdrawal/replacement
-retains original answers and all variant links, makes an affected current variant
-not ready, and preserves pending sync attempt identities. A valid alternative can
-remain ready when only the original is withdrawn.
+original, not already allocated) and only assigns what passes. A question is
+spent once per scope: variants already on the queue are counted as taken before
+allocation starts, and each assignment adds to that set, so two `NEEDS_VARIANT`
+entries on one KP cannot become two attempts on the same question. A port that
+returns nothing, or whose candidates are all already spent, leaves the entry as a
+visible missing question (`NEEDS_VARIANT`, zero variants); nothing is invented. The
+store implements the port with `reviewVariantCandidates`, the same verified,
+unposed single-choice pool the question route takes from. Distinct wording, content
+validity verification and offline availability remain the bank's responsibility.
+Withdrawal/replacement retains original answers and all variant links, makes an
+affected current variant not ready, and preserves pending sync attempt identities.
+A valid alternative can remain ready when only the original is withdrawn.
 
 `entries` is deterministic by due day then identity. `dueEntries(day)` is the one
 list a future Today count and queue view can share, including not-ready gaps.
 The client's board renders `scheduleOrder(...)`, which makes the known
-`exam_weights_set` weights an actual ordering input: higher weight first, but an
-entry overdue past a fixed bound is promoted ahead of weight so a low-frequency
-point is reached rather than starved. The exam date comes from the course
-configuration (`courseExamDay`/`Projection.examDay`); inside the last seven days the
-waiting bound tightens. It is deterministic and clock-free.
+`exam_weights_set` weights an actual ordering input. Entries not yet overdue past
+the bound are ordered by weight; entries past the bound form a starving group that
+is ordered by due day, oldest wait first, so weight cannot re-order it. That gives a
+checkable fairness bound: a starving entry is reached after at most one pass over
+the other starving entries, and a fresh high-weight entry can never jump ahead of
+it. A high-frequency point cannot push a low-frequency one out indefinitely. The
+exam date comes from the course configuration (`courseExamDay`/`Projection.examDay`);
+inside the last seven days the waiting bound tightens. It is deterministic and
+clock-free.
 The serialized candidate retains entry order, cursor, source union, original
 answers and pending associations. It is an immutable contract/snapshot: it does not
 reconcile a fresh ledger snapshot with a saved in-flight session, acknowledge

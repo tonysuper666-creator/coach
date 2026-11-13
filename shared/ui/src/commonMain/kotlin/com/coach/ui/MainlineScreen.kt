@@ -31,7 +31,9 @@ import com.coach.client.SubmissionTrace
 import com.coach.domain.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
@@ -155,25 +157,35 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     DisposableEffect(Unit) { onDispose { c.readerFocus = false } }
     // Page practice must not overwrite the answer behind the citation overlay.
     val stateKey = if (only == null) "week:$number" else "pagePractice:$number:${only.sorted().joinToString(",")}"
-    var saved by remember { mutableStateOf(c.sync.mainlineState(c.courseId, stateKey)) }
+    // The page document is deliberately not snapshot state: saves also run on the dispatcher the week request
+    // resumes on, and a snapshot read there can still see the page as it was before the target moved. That stale
+    // whole page then wrote the previous item back over the new one. A flow hands every save the latest merged
+    // document whatever thread it runs on, so a scroll or body save can never revert the item on its own.
+    val page = remember { MutableStateFlow(c.sync.mainlineState(c.courseId, stateKey)) }
+    // Merge and write are one critical section: merges happen on whatever thread produced them, and a save that
+    // merged an older page must finish writing before a later one starts, or its slow write would land last and
+    // put the previous item back. Ordered writes also let the target check below trust what it reads.
+    val pageLock = remember { Any() }
     fun save(vararg fields: Pair<String, JsonElement>) {
-        saved = JsonObject(saved + fields)
-        c.sync.saveMainlineState(c.courseId, saved, stateKey)
+        synchronized(pageLock) {
+            val merged = page.updateAndGet { JsonObject(it + fields) }
+            c.sync.saveMainlineState(c.courseId, merged, stateKey)
+        }
     }
-    var ladderSession by remember { mutableStateOf((saved["ladderSession"] as? JsonObject)?.let {
+    var ladderSession by remember { mutableStateOf((page.value["ladderSession"] as? JsonObject)?.let {
         runCatching { LedgerJson.decodeFromJsonElement<LadderSession>(it) }.getOrNull()
     } ?: LadderSession()) }
     fun saveSession(next: LadderSession) { ladderSession = next; save("ladderSession" to LedgerJson.encodeToJsonElement(next)) }
-    var recapVisible by remember { mutableStateOf(saved.flag("recapVisible")) }
-    var asked by remember { mutableStateOf(saved.flag("asked")) }
+    var recapVisible by remember { mutableStateOf(page.value.flag("recapVisible")) }
+    var asked by remember { mutableStateOf(page.value.flag("asked")) }
     var askOpen by remember { mutableStateOf(false) }
-    var body by remember { mutableStateOf(saved["body"] as? JsonObject) }
+    var body by remember { mutableStateOf(page.value["body"] as? JsonObject) }
     var error by remember { mutableStateOf<String?>(null) }
     var retryable by remember { mutableStateOf(true) }
     var retry by remember { mutableStateOf(0) }
     LaunchedEffect(retry) {
         // A persisted in-flight answer owns its original displayed options until its receipt arrives.
-        if (saved["pending"] is JsonObject && body != null) return@LaunchedEffect
+        if (page.value["pending"] is JsonObject && body != null) return@LaunchedEffect
         do {
             val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
             error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
@@ -189,23 +201,23 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var reading by remember { mutableStateOf(only == null && when (entry) {
         "notes" -> true
         "quiz", "resume-quiz" -> false
-        else -> saved.str("mode") == "notes"
+        else -> page.value.str("mode") == "notes"
     }) }
-    var sectionId by remember { mutableStateOf(saved.str("section")) }
-    var filter by remember { mutableStateOf(if (entry == "quiz") "" else saved.str("filter")) }
-    var itemId by remember { mutableStateOf(saved.str("item")) }
-    var chosen by remember { mutableStateOf((saved["choice"] as? JsonPrimitive)?.intOrNull) }
-    var result by remember { mutableStateOf(saved["result"] as? JsonObject) }
+    var sectionId by remember { mutableStateOf(page.value.str("section")) }
+    var filter by remember { mutableStateOf(if (entry == "quiz") "" else page.value.str("filter")) }
+    var itemId by remember { mutableStateOf(page.value.str("item")) }
+    var chosen by remember { mutableStateOf((page.value["choice"] as? JsonPrimitive)?.intOrNull) }
+    var result by remember { mutableStateOf(page.value["result"] as? JsonObject) }
     // A fresh answer reveals its feedback once; restoring an answer keeps the reader's scroll.
     var revealFeedback by remember { mutableStateOf(false) }
     val feedbackTrace = LocalFeedbackLayoutTrace.current
     var feedbackSubmissionId by remember { mutableStateOf("") }
     LaunchedEffect(reading) { if (reading) revealFeedback = false }
-    var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
+    var pending by remember { mutableStateOf(page.value["pending"] as? JsonObject) }
     // Do not render an automatically selected question before an explicit entry has been persisted.
     var targetReady by remember { mutableStateOf(targetKpId == null || entry !in setOf("quiz", "notes") || pending != null) }
     // Reading is a separate view of the material, not a replacement for a paused answer.
-    var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
+    var quizStarted by remember { mutableStateOf(page.value.str("mode") == "quiz" || page.value.flag("quizStarted") || chosen != null || result != null || pending != null) }
     val busy = pending != null
     val now = rememberCourseNow(c)
     val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
@@ -234,8 +246,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             else filtered.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0))
     val item = if (targetReady) filtered.getOrNull(index) else null
     val displayedNumber = if (learning) ladderSession.responses.size + if (result == null) 1 else 0 else index + 1
-    val scroll = rememberScrollState(saved.num("quizScroll").toInt())
-    val readingScroll = rememberScrollState(saved.num("readScroll").toInt())
+    val scroll = rememberScrollState(page.value.num("quizScroll").toInt())
+    val readingScroll = rememberScrollState(page.value.num("readScroll").toInt())
     LaunchedEffect(reading) {
         snapshotFlow { if (reading) readingScroll.value else scroll.value }.collect { offset ->
             feedbackTrace?.invoke("save submission=$feedbackSubmissionId reading=$reading reveal=$revealFeedback scroll=$offset")
@@ -249,6 +261,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
+    // A target may only be shown once the stored page really holds it: the next launch comes back to this item,
+    // so presenting a question the store never accepted would show a place the learner cannot return to.
+    fun targetStored(id: String): Boolean =
+        synchronized(pageLock) { c.sync.mainlineState(c.courseId, stateKey).str("item") == id }
     LaunchedEffect(body != null, pending) {
         if (body != null && targetKpId != null && entry in setOf("quiz", "notes")) {
             // An unacknowledged answer owns its question and must finish before switching targets.
@@ -263,7 +279,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val pausedKp = metadata?.str("kpId").orEmpty()
             val sameTarget = if (pausedKp.isNotBlank()) pausedKp == targetKpId else match != null &&
                 (metadata?.str("sectionId") == match.str("section_id") || paused?.strings("factIds").orEmpty().any { it in match.strings("fact_ids") })
-            if (!reading && paused != null && sameTarget) { targetReady = true; return@LaunchedEffect }
+            if (!reading && paused != null && sameTarget) { targetReady = targetStored(itemId); return@LaunchedEffect }
             if (match == null && learning && !reading) {
                 val next = QuestionLadder.next(targetQuestions, targetSession, targetLearned, capabilities).question?.id.orEmpty()
                 if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
@@ -286,11 +302,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     val resetScroll = id != itemId
                     if (resetScroll) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
                     position(false, id, match.str("section_id"), match.str("section_id"))
-                    targetReady = true
-                    if (resetScroll) scroll.scrollTo(0)
+                    targetReady = targetStored(id)
+                    if (targetReady && resetScroll) scroll.scrollTo(0)
                 }
             }
-            targetReady = true
+            targetReady = targetStored(itemId)
         }
     }
     LaunchedEffect(Unit) {

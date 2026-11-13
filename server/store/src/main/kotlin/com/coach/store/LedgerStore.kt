@@ -28,6 +28,10 @@ class PairingCode(val code: String, val expiresAt: Long)
 
 class ReviewVariantRejected(val code: String) : IllegalArgumentException(code)
 
+/** Fields only the server-side review allocation writes; an offline pack never carries any of them. */
+private val REVIEW_RESERVED_FIELDS = setOf("exactReview","reviewIdentity","reviewEntryId","availability")
+private fun JsonObject.hasReviewReservedField(): Boolean = REVIEW_RESERVED_FIELDS.any { containsKey(it) }
+
 class LedgerStore(val directory: Path, private val clock: () -> Long = System::currentTimeMillis) : AutoCloseable {
     private val dbFile = directory.resolve("coach.sqlite")
     private val connection: Connection
@@ -727,12 +731,20 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "submit_answer" -> {
                     val posedSnapshot = p["posedSnapshot"] as? JsonObject
                     val attemptId = p.str("attemptId")
-                    val exactReview = events(body.courseId).firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == attemptId && it.payload.flag("exactReview") }
+                    val posedFacts = events(body.courseId).filter { it.type == "question_posed" && it.payload.str("attemptId") == attemptId }
+                    // Exact review exists only as a fact this store posed inside takeReviewVariant. A snapshot
+                    // that merely says exactReview proves nothing: submit_answer emits through the command path,
+                    // so any pose it creates carries a command id and can never satisfy provenExactPose.
+                    val exactReview = posedFacts.firstOrNull { provenExactPose(it, body.courseId, attemptId) }
+                    val unprovenReviewPose = posedFacts.firstOrNull { it.payload.hasReviewReservedField() }
                     val reviewKey = exactReview?.let { pose -> query("SELECT fingerprint,key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, pose.payload.str("questionId")) { it.getString(1) to it.getString(2) }.singleOrNull() }
                     if (exactReview != null && (exactReview.deviceId != c.deviceId ||
                             exactReview.payload.str("agentRunId").ifBlank { null } != requestedRun || posedSnapshot != exactReview.payload ||
                             reviewKey?.first != exactReview.payload.str("fingerprint") || reviewKey?.second != "VERIFIED")) {
                         status="REJECTED"; error="REVIEW_SCOPE_OR_QUESTION_CHANGED"
+                    } else if (exactReview == null && (unprovenReviewPose != null || posedSnapshot?.hasReviewReservedField() == true)) {
+                        // Reserved allocation fields without a server allocation are a forgery, not an offline answer.
+                        status="REJECTED"; error="REVIEW_RESERVED_FIELDS"
                     } else if (attemptId.isBlank() || posedSnapshot == null || posedSnapshot.str("attemptId") != attemptId || posedSnapshot.strings("kpIds").isEmpty() || posedSnapshot.str("questionId").isBlank() || posedSnapshot.str("fingerprint").isBlank() || posedSnapshot.str("purpose").isBlank() || posedSnapshot.num("policyVersion")<1) {
                         status="REJECTED"; error="INVALID_POSED_SNAPSHOT"
                     } else {
@@ -774,6 +786,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             } else {
                                 if (posed == null) {
                                     // Key state and format come from authoritative storage, never the client snapshot.
+                                    // Reserved allocation fields were already refused above, so this pose stays a plain fact.
                                     val snapshot = JsonObject(posedSnapshot + mapOf("format" to JsonPrimitive(question.first),"keyState" to JsonPrimitive(question.third)))
                                     emit("question_posed",snapshot,"attempt:$attemptId")
                                 }
@@ -1216,6 +1229,25 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 }
         }
 
+    /**
+     * The only client-uncopyable proof that a posed fact came from [takeReviewVariant]: this store poses it
+     * inside its own transaction, so it has no command id, owns the exact review thread and group, and its
+     * review identity recomputes to itself. A client-written snapshot cannot produce any of that, because
+     * every command-path emit carries a command id.
+     */
+    private fun provenExactPose(e: Event, course: String, attempt: String): Boolean {
+        if (e.type != "question_posed" || e.commandId != null) return false
+        if (e.idemKey != "attempt:$attempt" || e.threadId != "review-practice:$course:$attempt") return false
+        if (e.payload.str("groupId") != "review:$attempt" || !e.payload.flag("exactReview")) return false
+        val identity = e.payload.str("reviewIdentity")
+        if (identity.isBlank()) return false
+        val kp = e.payload.strings("kpIds").singleOrNull() ?: return false
+        val recomputed = canonicalJson(json("course" to course,"device" to e.deviceId,"run" to null,"kp" to kp,
+            "entry" to e.payload.str("reviewEntryId"),"attempt" to attempt,"question" to e.payload.str("questionId"),
+            "fingerprint" to e.payload.str("fingerprint")))
+        return recomputed == identity
+    }
+
     /** Exact selection, consumption and one frozen posed fact share the actor-owned transaction. */
     fun takeReviewVariant(course: String, device: String, run: String?, kp: String, entryId: String,
         attemptId: String, expected: QueueQuestion): List<Event> = transaction {
@@ -1237,10 +1269,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (previous.isNotEmpty()) {
             val pose = previous.singleOrNull() ?: refuse("REVIEW_IDENTITY_CONFLICT")
             if (pose.deviceId != device) refuse("REVIEW_SCOPE_MISMATCH")
-            if (pose.payload.str("reviewIdentity") != identity || !pose.payload.flag("exactReview")) refuse("REVIEW_IDENTITY_CONFLICT")
+            // A replay may only land on a pose this store allocated; a client-written exactReview is not proof.
+            if (!provenExactPose(pose, course, attemptId) || pose.payload.str("reviewIdentity") != identity) refuse("REVIEW_IDENTITY_CONFLICT")
             if (facts.any { it.type == "attempt_voided" && it.payload.str("attemptId") == attemptId }) refuse("REVIEW_QUESTION_UNAVAILABLE")
             return@transaction previous
         }
+        // Another attempt already owns this review group; refuse as a conflict instead of failing inside pose allocation.
+        if (facts.any { it.type == "question_posed" && it.payload.str("groupId") == "review:$attemptId" }) refuse("REVIEW_IDENTITY_CONFLICT")
         val state = projection(course)
         if (state.requiresServerSnapshot) refuse("REVIEW_SNAPSHOT_REQUIRED")
         val day = logicalDay(clock(), state.timeZone)

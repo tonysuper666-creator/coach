@@ -14,6 +14,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
@@ -174,10 +176,39 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     val source = ui.source
+
+    val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
+    val remote = remember(readerSource) { com.coach.desktop.reader.ReaderRemote(readerSource) }
+    val session = remember(remote) {
+        com.coach.desktop.reader.ReaderSession(
+            com.coach.desktop.reader.ReaderFixture(book.title, emptyList(), emptyList()),
+            1200,
+            remote,
+        )
+    }
+
+    val quoteAnchor = remember(ui.page, source) {
+        source?.let { StudyCoachCourse.sourceQuote(it, ui.page) }
+    }
+
+    LaunchedEffect(book.id, ui.page, quoteAnchor) {
+        remote.loadCatalog()
+        if (quoteAnchor != null) {
+            session.openRemoteAt(book.id, ui.page, quoteAnchor)
+        } else {
+            session.openRemote(book.id, ui.page)
+        }
+        // 这里只拥有原文视图；作答仍归原 controller，出处浏览不保存独立读书书签。
+        if (remote.current?.id == book.id && remote.current?.version == "1" &&
+            com.coach.desktop.reader.PdfPages.toPdf(session.state.position.page) == ui.page) {
+            remote.show(ui.page)
+        }
+    }
+
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书桌", showNavigation = false,
         status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
-            for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
+            for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -211,20 +242,40 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                             TextButton(onClick = { retry++ }) { Text("重试") }
                         }
                         is PageImage.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
-                                modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height))
+                            val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
+                            val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
+                                view?.document == book.id && view.pdfPage == ui.page
+                            val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
+                            val located = if (boxes != null && quoteAnchor != null) {
+                                com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor)
+                            } else null
+                            val aspectOk = boxes != null && kotlin.math.abs(loaded.image.width.toDouble() / loaded.image.height - boxes.width / boxes.height) < 0.05
+                            Box(Modifier.fillMaxWidth()) {
+                                Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
+                                    modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
+                                if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
+                                    androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
+                                        val k = size.width / boxes.width.toFloat()
+                                        for (r in located.rects) drawRect(
+                                            androidx.compose.ui.graphics.Color(0xFFFFE9A8).copy(alpha = 0.55f),
+                                            topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
+                                            size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton({ onPage(ui.page - 1) }, enabled = !ui.busy && ui.page > 1, modifier = Modifier.testTag("previous-page")) { Text("上一页") }
+                OutlinedButton({ onPage(ui.page - 1); session.prevPage() }, enabled = !ui.busy && ui.page > 1, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
                 Text("${ui.page} / ${book.pages.size}", modifier = Modifier.testTag("reader-page-number"))
-                OutlinedButton({ onPage(ui.page + 1) }, enabled = !ui.busy && ui.page < book.pages.size, modifier = Modifier.testTag("next-page")) { Text("下一页") }
+                OutlinedButton({ onPage(ui.page + 1); session.nextPage() }, enabled = !ui.busy && ui.page < book.pages.size, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 Spacer(Modifier.weight(1f))
                 OutlinedTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, label = { Text("页码") }, singleLine = true,
                     modifier = Modifier.width(80.dp).testTag("page-jump"))
-                TextButton({ jump.toIntOrNull()?.let(onPage) }, enabled = !ui.busy && jump.toIntOrNull()?.let { it in 1..book.pages.size } == true) { Text("前往") }
+                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { it in 1..book.pages.size } == true) { Text("前往") }
             }
             Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
         }

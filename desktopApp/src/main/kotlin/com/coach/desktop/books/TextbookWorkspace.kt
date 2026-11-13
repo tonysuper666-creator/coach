@@ -34,6 +34,7 @@ import java.nio.file.Path
 internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
+    var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
     LaunchedEffect(controller) { controller.load() }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
     CoachTheme {
@@ -49,10 +50,24 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                         onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
                         onLearn = { run { controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
+                        practiceSource = practiceSource,
                         onPage = { run { controller.page(it) } }, onBack = { run { controller.back() } },
                         onLearn = { run { controller.learn() } })
                     else -> TextbookLearning(ui, onBack = { run { controller.back() } },
-                        onSource = { run { controller.source() } }, onLesson = { run { controller.lesson(it) } },
+                        onSource = { practiceSource = null; run { controller.source() } },
+                        onPracticeSource = { practice ->
+                            val lesson = book.lessons[book.lessonIndex]
+                            val matches = lesson.blocks.filterNot { it.heading }.flatMap { block ->
+                                Regex(Regex.escape(practice.reference)).findAll(block.text).map { block.page }.toList()
+                            }
+                            val anchor = when (matches.size) {
+                                1 -> PracticeSource(matches.single(), practice.reference, null)
+                                0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+                                else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
+                            }
+                            practiceSource = anchor
+                            run { controller.source(); anchor.page?.let { controller.page(it) } }
+                        }, onLesson = { run { controller.lesson(it) } },
                         onSettings = { run { controller.questionSettings() } }, onAnswer = { run { controller.answer(it) } })
                 }
             }
@@ -62,6 +77,8 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
         }
     }
 }
+
+private data class PracticeSource(val page: Int?, val quote: String?, val warning: String?)
 
 @Composable
 private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit) {
@@ -169,7 +186,7 @@ private sealed interface PageImage {
 }
 
 @Composable
-private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.pages[ui.page - 1]
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
@@ -187,8 +204,10 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
         )
     }
 
-    val quoteAnchor = remember(ui.page, source) {
-        source?.blocks?.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source?.text
+    val quoteAnchor = remember(ui.page, source, practiceSource) {
+        if (source == null) null
+        else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
+        else source.blocks.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source.text
     }
     val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
         value = PageImage.Loading
@@ -206,7 +225,10 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     val loadedImage = (image as? PageImage.Ready)?.image
     val aspectOk = boxes != null && loadedImage != null &&
         kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
-    val sourceWarning = if (source == null || book.format != "pdf") null else when {
+    val sourceWarning = if (source == null) null else when {
+        practiceSource?.warning != null -> practiceSource.warning
+        practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
+        book.format != "pdf" -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
         remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
@@ -253,11 +275,17 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
-                        val confirmedBlocks = if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
+                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
                             blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
                         } else emptyList()
                         for (block in confirmedBlocks) {
                             if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
+                        }
+                        if (practiceSource != null && quoteAnchor != null &&
+                            (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
+                            val start = page.text.indexOf(quoteAnchor)
+                            if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0)
+                                addStyle(SpanStyle(background = highlight), start, start + quoteAnchor.length)
                         }
                     }
                     SelectionContainer { Text(marked, fontSize = 19.sp, lineHeight = 31.sp,
@@ -303,7 +331,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
 }
 
 @Composable
-private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> Unit, onLesson: (Int) -> Unit,
+private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
@@ -331,7 +359,7 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
                 if (book.questionMode != QuestionMode.NONE) {
                     val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, onSource, !ui.busy)
+                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,

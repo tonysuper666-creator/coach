@@ -3,6 +3,8 @@ package com.coach.desktop.books
 import androidx.compose.ui.test.*
 import androidx.compose.ui.semantics.SemanticsProperties
 import org.apache.pdfbox.Loader
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
 import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
@@ -11,6 +13,96 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class SourceRoundTripTest {
+    @Test fun questionOnSecondPageOpensItsActualSentenceAndKeepsAnswer() {
+        val root = Files.createTempDirectory("coach-cross-page-source-")
+        val pdfFile = root.resolve("synthetic.pdf")
+        PDDocument().use { pdf ->
+            for ((heading, body) in listOf(
+                "Chapter 1 Plants" to "Plants grow quickly near bright windows in spring.",
+                "" to "Photosynthesis is the process by which plants use light to make sugars.",
+                "Chapter 2 Cells" to "Chlorophyll is a pigment found in plant cells."
+            )) {
+                val page = PDPage(); pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { out ->
+                    out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
+                    out.newLineAtOffset(50f, 710f)
+                    if (heading.isNotEmpty()) { out.showText(heading); out.newLineAtOffset(0f, -48f) }
+                    out.showText(body); out.endText()
+                }
+            }
+            pdf.save(pdfFile.toFile())
+        }
+        val library = TextbookLibrary(root.resolve("library"))
+        val imported = library.importBook(pdfFile)
+        library.save(imported.copy(readingPage = 3, learning = true, questionMode = QuestionMode.CHOICE))
+        val controller = TextbookController(library)
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            val book = controller.state.value.book!!
+            val lesson = book.lessons[book.lessonIndex]
+            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+            assertEquals(1, lesson.firstPage)
+            assertEquals("Photosynthesis is the process by which plants use light to make sugars.", practice.reference)
+            val selected = practice.options.first { it != practice.answer }
+            onNodeWithTag("choice-${practice.options.indexOf(selected)}").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer == PracticeAnswer(selected, revealed = true) }
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            assertEquals(2, controller.state.value.page)
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size == 1 }
+            onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：${practice.reference}")
+            onNodeWithText("上一页").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 1 && !controller.state.value.busy }
+            onNodeWithText("无法确认原句：本题依据在第 2 页。").assertIsDisplayed()
+            onNodeWithTag("remote-highlight").assertDoesNotExist()
+            onNodeWithText("返回学习").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            assertEquals(PracticeAnswer(selected, revealed = true), controller.state.value.answer)
+            onNodeWithText(practice.prompt).assertExists()
+            assertEquals(3, library.book(book.id).readingPage)
+        }
+    }
+    @Test fun repeatedQuestionReferenceAcrossPagesDoesNotGuessAHighlight() {
+        val root = Files.createTempDirectory("coach-cross-page-duplicate-")
+        val file = root.resolve("synthetic.pdf")
+        val reference = "Photosynthesis is the process by which plants use light to make sugars."
+        PDDocument().use { pdf ->
+            for (number in 1..2) {
+                val page = PDPage(); pdf.addPage(page)
+                PDPageContentStream(pdf, page).use { out ->
+                    out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
+                    out.newLineAtOffset(50f, 710f)
+                    if (number == 1) { out.showText("Chapter 1 Plants"); out.newLineAtOffset(0f, -48f) }
+                    out.showText(reference); out.endText()
+                }
+            }
+            pdf.save(file.toFile())
+        }
+        val library = TextbookLibrary(root.resolve("library"))
+        val imported = library.importBook(file)
+        library.save(imported.copy(learning = true, questionMode = QuestionMode.CHOICE))
+        val controller = TextbookController(library)
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-image").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("无法确认原句：本题依据出现多次。").assertIsDisplayed()
+            onNodeWithTag("remote-highlight").assertDoesNotExist()
+            onNodeWithText("下一页").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
+            onNodeWithText("无法确认原句：本题依据出现多次。").assertIsDisplayed()
+            onNodeWithTag("remote-highlight").assertDoesNotExist()
+            onNodeWithText("返回学习").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            assertEquals(PracticeAnswer(), controller.state.value.answer)
+        }
+    }
     @Test fun duplicateSentenceShowsReasonAndKeepsDraftAfterTurningPage() {
         val root = Files.createTempDirectory("coach-duplicate-source-")
         val pdfFile = syntheticTextbook(root.resolve("synthetic"))

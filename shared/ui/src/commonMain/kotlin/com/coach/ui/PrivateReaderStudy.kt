@@ -34,7 +34,7 @@ internal fun pageStudy(body: JsonObject?): PageStudy? {
 }
 
 private fun statusLabel(status: String) = when (status) {
-    "mastered" -> "答对过（非猜）"; "missed" -> "做错过"; "guessed" -> "猜对过"; "pending" -> "答案键待核对"; else -> "未做"
+    "mastered" -> com.coach.client.latestCorrectAttemptLabel(); "missed" -> "做错过"; "guessed" -> "猜对过"; "pending" -> "答案键待核对"; else -> "未做"
 }
 
 /** "本页考点 n 个 · 已掌握 m · 题 k 道": the index of this page only, loaded per page and never from another course. */

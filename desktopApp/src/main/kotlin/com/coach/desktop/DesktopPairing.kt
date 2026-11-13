@@ -23,6 +23,7 @@ internal class DesktopPairing(
 
     suspend fun pair(address: String, code: String, name: String): DesktopIdentity {
         val url = desktopServerUrl(address)
+        requireDevelopmentServer(settings, url)
         val client = PairingClient(url)
         try {
             val value = client.pair(code, name.take(80))

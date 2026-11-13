@@ -80,6 +80,7 @@ dependencies {
     testImplementation(project(":server:core"))
     testImplementation(project(":server:ai"))
     testImplementation(libs.ktor.netty)
+    testImplementation(libs.ktor.websockets)
     @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
     testImplementation(compose.uiTest)
 }

@@ -33,6 +33,7 @@ class SourceRoundTripTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             assertEquals(lesson.id, controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex].id)
             assertEquals(PracticeAnswer(selected, revealed = true), controller.state.value.answer)
+            onNodeWithText(practice.prompt).assertExists()
             onNodeWithText("你选择：$selected").assertExists()
             assertEquals(3, library.book(book.id).readingPage)
         }

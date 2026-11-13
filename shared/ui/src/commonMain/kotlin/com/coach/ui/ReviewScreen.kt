@@ -31,7 +31,7 @@ import com.coach.domain.reviewqueue.VariantCandidatePort
 import kotlinx.serialization.json.*
 
 /**
- * 复习入口：到期日程、答错、猜对合成一队（身份由已验队列合同去重），开始即进独立复习线程。
+ * 复习入口：到期日程、答错、猜对合成一队，选中的精确题目交给有类型的练习宿主。
  * 队列是账本回放出来的纯函数结果，离开再回来会接着上次点开的那一项。
  *
  * [variantCandidates] 是题库候选端口：本机有题级候选通道时从它取同考点、已核键的新题；
@@ -55,7 +55,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     }
     // 账本回放一次一块，只在换天或账本变（view 是新实例）时重算，不跟着秒针每秒重放。
     val board = remember(view, day, source) { reviewBoard(c.courseId, view, day, source) }
-    var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId)) }
+    var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId, c.tutor.agentRunId)) }
     var practiceError by remember { mutableStateOf<String?>(null) }
     val savedTarget = reviewPracticeTarget(c.sync, c.courseId, c.tutor.agentRunId)
     fun openPractice(target: ReviewPracticeTarget) {

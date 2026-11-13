@@ -170,19 +170,18 @@ private fun nextDueDay(view: CourseView, day: Long): Long? {
 }
 
 /** 上次从这个入口点开的条目；退出重进后仍然指得回来。 */
-fun reviewCursor(sync: SyncEngine, courseId: String): String? =
-    (sync.mainlineState(courseId, REVIEW_PAGE)["entryId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+fun reviewCursor(sync: SyncEngine, courseId: String, agentRunId: String? = null): String? =
+    (sync.mainlineState(courseId, reviewPage(agentRunId))["entryId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
 /**
  * 上一次点开的那一项落到的具体作答身份：已经选好变式时是那道变式的 attemptId，
  * 还没有候选时是 null。
  *
- * 目前没有消费者：复习入口点「开始」只把身份写进本机光标，然后调用
- * `onOpenKp(kpId, true)`，练习路由还没有读取它。等练习消费接口接上后，
- * 练习线程据此接着练同一道题，而不是重新挑一道。
+ * 类型化复习组件通过 reviewPracticeTarget 消费此光标，重试与恢复沿用同一题。
+ * 共享/Windows 默认宿主的挂接仍受单独文件租约约束。
  */
-fun reviewCursorAttempt(sync: SyncEngine, courseId: String): String? =
-    (sync.mainlineState(courseId, REVIEW_PAGE)["attemptId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+fun reviewCursorAttempt(sync: SyncEngine, courseId: String, agentRunId: String? = null): String? =
+    (sync.mainlineState(courseId, reviewPage(agentRunId))["attemptId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
 fun saveReviewCursor(
     sync: SyncEngine,
@@ -190,15 +189,17 @@ fun saveReviewCursor(
     entryId: String,
     day: Long,
     variantAttemptId: String? = null,
+    agentRunId: String? = null,
 ) {
     sync.saveMainlineState(
         courseId,
         json("entryId" to entryId, "day" to day, "attemptId" to variantAttemptId),
-        REVIEW_PAGE,
+        reviewPage(agentRunId),
     )
 }
 
-private const val REVIEW_PAGE = "review"
+/** Preserve the legacy learner key; agent runs each own an independent cursor. */
+private fun reviewPage(run: String?) = run?.let { "review:agent:${it.length}:$it" } ?: "review"
 
 /** 最近一次 exam_weights_set 的每点权重；没有任何权重事件就是空。 */
 private fun examWeights(events: List<Event>): Map<String, Int> =

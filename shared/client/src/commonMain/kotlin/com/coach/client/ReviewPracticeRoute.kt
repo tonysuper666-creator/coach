@@ -4,6 +4,8 @@ import com.coach.domain.*
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.QueueReadiness
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /** Exact practice-host input. A bare KP callback cannot represent this request. */
 data class ReviewPracticeTarget(
@@ -25,7 +27,7 @@ fun prepareReviewPractice(sync: SyncEngine, courseId: String, run: String?, item
     sync.saveMainlineState(courseId, json("courseId" to courseId, "deviceId" to sync.deviceId, "agentRunId" to run,
         "kpId" to target.kpId, "entryId" to target.entryId, "attemptId" to attempt,
         "question" to json("id" to question.id, "version" to question.version, "fingerprint" to question.fingerprint)), targetPage(run))
-    saveReviewCursor(sync, courseId, item.entryId, day, attempt)
+    saveReviewCursor(sync, courseId, item.entryId, day, attempt, run)
     return reviewPracticeTarget(sync, courseId, run)
 }
 
@@ -39,7 +41,7 @@ fun reviewPracticeTarget(sync: SyncEngine, courseId: String, run: String? = null
     return target.takeIf {
         it.courseId == courseId && it.deviceId == sync.deviceId && it.agentRunId == run &&
             it.kpId.isNotBlank() && it.entryId.isNotBlank() && it.attemptId.isNotBlank() && it.question.id.isNotBlank() &&
-            it.entryId == reviewCursor(sync, courseId) && it.attemptId == reviewCursorAttempt(sync, courseId)
+            it.entryId == reviewCursor(sync, courseId, run) && it.attemptId == reviewCursorAttempt(sync, courseId, run)
     }
 }
 
@@ -54,8 +56,8 @@ sealed interface ReviewPracticeSession {
 
 /**
  * Restore an already posed single-card session through the existing CourseView/QuizGroup parser.
- * /pool is metadata only. Until an exact allocation endpoint exists, a new target returns
- * MISSING_ALLOCATION; it must not call takePoolGroup/next or generate a synthetic posed fact.
+ * /pool is metadata only. A missing target pose requires the authenticated exact allocation
+ * endpoint; this pure restore must never call takePoolGroup/next or generate a synthetic fact.
  */
 fun restoreReviewPracticeSession(sync: SyncEngine, courseId: String, kpId: String, run: String?, view: CourseView, nowMillis: Long): ReviewPracticeSession {
     fun reject(reason: ReviewPracticeFailure) = ReviewPracticeSession.Rejected(reason)
@@ -76,8 +78,14 @@ fun restoreReviewPracticeSession(sync: SyncEngine, courseId: String, kpId: Strin
     val key = view.events.filter { it.type == "question_key_changed" && it.payload.str("questionId") == target.question.id }
         .maxByOrNull { it.seq }?.payload?.str("keyState") ?: p.str("keyState")
     if (p.str("keyState") != "VERIFIED" || key != "VERIFIED") return reject(ReviewPracticeFailure.UNVERIFIED)
+    // Legacy authenticated LedgerStore poses have no availability field. Explicit unknown states
+    // still fail closed; frozen VERIFIED key + current key/void facts establish the legacy shape.
+    val expiry = p["expiresAt"]
+    val deadline = if (expiry == null) null else {
+        (expiry as? JsonPrimitive)?.longOrNull ?: return reject(ReviewPracticeFailure.UNAVAILABLE)
+    }
     if (view.events.any { it.type == "attempt_voided" && it.payload.str("attemptId") == target.attemptId } ||
-        p.str("availability") != "VALID" || p.num("expiresAt", Long.MAX_VALUE) <= nowMillis)
+        ("availability" in p && p.str("availability") != "VALID") || deadline?.let { it <= nowMillis } == true)
         return reject(ReviewPracticeFailure.UNAVAILABLE)
     val thread = pose.threadId?.takeIf { it.isNotBlank() } ?: return reject(ReviewPracticeFailure.INCOMPLETE_CARD)
     val group = view.quizGroups(thread).singleOrNull { g -> g.cards.any { it.attemptId == target.attemptId } }

@@ -139,6 +139,14 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")
 
+    /** Reserve/pose exactly this selected identity; retries reuse its attempt and never request a KP fallback. */
+    suspend fun takeReviewVariant(target: ReviewPracticeTarget): MockReply {
+        if (target.courseId != course || target.deviceId != deviceId) return MockReply(null, "REVIEW_SCOPE_MISMATCH")
+        return mockCall("review-practice", com.coach.domain.json("courseId" to target.courseId,"deviceId" to target.deviceId,
+            "agentRunId" to target.agentRunId,"kpId" to target.kpId,"entryId" to target.entryId,"attemptId" to target.attemptId,
+            "question" to com.coach.domain.json("id" to target.question.id,"version" to target.question.version,"fingerprint" to target.question.fingerprint)))
+    }
+
     suspend fun sources(): List<SourceDoc>? = getObject("sources")?.let { root ->
         (root["docs"] as? JsonArray)?.mapNotNull { v ->
             val o = v as? JsonObject ?: return@mapNotNull null

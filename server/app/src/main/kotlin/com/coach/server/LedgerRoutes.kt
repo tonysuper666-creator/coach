@@ -3,6 +3,8 @@ package com.coach.server
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.protocol.*
+import com.coach.store.ReviewVariantRejected
+import com.coach.domain.reviewqueue.QueueQuestion
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -85,6 +87,33 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             if (events == null || events.size !in 1..50 || !events.all(com.coach.client.UsageVocabulary::valid)) return@post call.respond(HttpStatusCode.BadRequest)
             observer.accept(call.attributes[observedDevice], events)
             call.respond(HttpStatusCode.NoContent)
+        }
+        post("/v1/courses/{course}/review-practice") {
+            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val course = call.parameters["course"]!!
+            val device = call.attributes[observedDevice]
+            if (input.str("courseId") != course || input.str("deviceId") != device)
+                return@post call.respondText(json("error" to "REVIEW_SCOPE_MISMATCH").toString(),ContentType.Application.Json,HttpStatusCode.Forbidden)
+            val q = input["question"] as? JsonObject ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
+            try {
+                val facts = actor.execute {
+                    if (!authorize(device,credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
+                    takeReviewVariant(course,device,input.str("agentRunId").ifBlank { null },
+                    input.str("kpId"),input.str("entryId"),input.str("attemptId"),
+                    QueueQuestion(q.str("id"),q.str("version").ifBlank { null },q.str("fingerprint").ifBlank { null })) }
+                pushes.tryEmit(course)
+                call.respondText(json("events" to JsonArray(facts.map { LedgerJson.encodeToJsonElement(agentEvidenceForWire(it)) })).toString(),ContentType.Application.Json)
+            } catch (e: ReviewVariantRejected) {
+                val status = when(e.code) {
+                    "REVIEW_DEVICE_UNAUTHORIZED" -> HttpStatusCode.Unauthorized
+                    "REVIEW_SCOPE_MISMATCH" -> HttpStatusCode.Forbidden
+                    "INVALID_REVIEW_REQUEST" -> HttpStatusCode.BadRequest
+                    else -> HttpStatusCode.Conflict
+                }
+                call.respondText(json("error" to e.code).toString(),ContentType.Application.Json,status)
+            }
         }
         post("/v1/courses/{course}/constructed") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject

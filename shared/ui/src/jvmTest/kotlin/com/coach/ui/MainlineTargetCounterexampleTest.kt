@@ -74,6 +74,17 @@ class MainlineTargetCounterexampleTest {
                     assertTrue(mac.answers.all { it == mac.answers.first() })
                 }
             }
+            // Dispose the screen and close the database immediately after the target is visible.
+            // A later coroutine must not be required to make the selected item durable.
+            driver.close()
+            driver = JdbcSqliteDriver("jdbc:sqlite:${file.absolutePath}")
+            c = controller(driver)
+            assertEquals("D1", c.sync.mainlineState("C", "week:1").str("item"))
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}, directEntry = true, initialWeek = 1) } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic orchard question D1:", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("mainline-outcome").assertDoesNotExist()
+            }
         } finally {
             driver.close(); tutor.close(); file.delete()
         }

@@ -202,6 +202,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var feedbackSubmissionId by remember { mutableStateOf("") }
     LaunchedEffect(reading) { if (reading) revealFeedback = false }
     var pending by remember { mutableStateOf(saved["pending"] as? JsonObject) }
+    // Do not render an automatically selected question before an explicit entry has been persisted.
+    var targetReady by remember { mutableStateOf(targetKpId == null || entry !in setOf("quiz", "notes") || pending != null) }
     // Reading is a separate view of the material, not a replacement for a paused answer.
     var quizStarted by remember { mutableStateOf(saved.str("mode") == "quiz" || saved.flag("quizStarted") || chosen != null || result != null || pending != null) }
     val busy = pending != null
@@ -230,7 +232,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
         ?: (if (learning) filtered.indexOfFirst { it.str("id") == ladderStep.question?.id }
             else filtered.indexOfFirst { it.str("status") != "mastered" }.coerceAtLeast(0))
-    val item = filtered.getOrNull(index)
+    val item = if (targetReady) filtered.getOrNull(index) else null
     val displayedNumber = if (learning) ladderSession.responses.size + if (result == null) 1 else 0 else index + 1
     val scroll = rememberScrollState(saved.num("quizScroll").toInt())
     val readingScroll = rememberScrollState(saved.num("readScroll").toInt())
@@ -261,7 +263,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val pausedKp = metadata?.str("kpId").orEmpty()
             val sameTarget = if (pausedKp.isNotBlank()) pausedKp == targetKpId else match != null &&
                 (metadata?.str("sectionId") == match.str("section_id") || paused?.strings("factIds").orEmpty().any { it in match.strings("fact_ids") })
-            if (!reading && paused != null && sameTarget) return@LaunchedEffect
+            if (!reading && paused != null && sameTarget) { targetReady = true; return@LaunchedEffect }
             if (match == null && learning && !reading) {
                 val next = QuestionLadder.next(targetQuestions, targetSession, targetLearned, capabilities).question?.id.orEmpty()
                 if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
@@ -281,19 +283,23 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                     } else candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
                     val id = next?.str("id").orEmpty()
                     if (filter != match.str("section_id")) saveSession(ladderSession.copy(complete = false))
-                    if (id != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull); scroll.scrollTo(0) }
+                    val resetScroll = id != itemId
+                    if (resetScroll) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
                     position(false, id, match.str("section_id"), match.str("section_id"))
+                    targetReady = true
+                    if (resetScroll) scroll.scrollTo(0)
                 }
             }
+            targetReady = true
         }
     }
     LaunchedEffect(Unit) {
         if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
         save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
     }
-    LaunchedEffect(pending) {
-        // Preserve a requested target across another restart while its prior answer is retrying.
-        if (only == null && pending == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
+    LaunchedEffect(pending, targetReady) {
+        // Keep the entry until its target is persisted, including while a prior answer is retrying.
+        if (only == null && pending == null && targetReady) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
     LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }
     LaunchedEffect(pending, retry) {

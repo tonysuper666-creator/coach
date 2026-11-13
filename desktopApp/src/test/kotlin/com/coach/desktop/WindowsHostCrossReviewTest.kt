@@ -52,12 +52,12 @@ class WindowsHostCrossReviewTest {
         }
     }
 
-    private fun ComposeUiTest.waitForBlockedWrite() {
-        waitUntil(timeoutMillis = 3_000) {
-            Thread.getAllStackTraces().values.any { stack ->
-                stack.any { it.className == TextbookLibrary::class.java.name && it.methodName == "saveAnswer" }
-            }
-        }
+    private fun blockedIn(method: String) = Thread.getAllStackTraces().values.any { stack ->
+        stack.any { it.className == TextbookLibrary::class.java.name && it.methodName == method }
+    }
+
+    private fun ComposeUiTest.waitForBlockedWrite(method: String = "saveAnswer") {
+        waitUntil(timeoutMillis = 3_000) { blockedIn(method) }
     }
 
     @Test fun twoBooksKeepIndependentUnsubmittedDraftsBookmarksAndSelectionAcrossContinueAndReload() {
@@ -196,6 +196,46 @@ class WindowsHostCrossReviewTest {
                 "A delayed write must not leak into the lesson the learner moved to")
             assertEquals("", c.state.value.answer.text)
             println("BOUND PASS: lesson 1 keeps 'first edit plus final edit'; lesson 2 stays empty after the move.")
+        }
+    }
+
+    /**
+     * Builder-C's example, opposite order to the guard above: 下一节 is clicked first, nothing is pending so
+     * `flush()` returns at once and the lesson switch itself waits on SQLite. The lesson-2 field is still the
+     * visible one and is not disabled while busy, so the learner's last sentence is typed during that wait.
+     */
+    @Test fun aKeystrokeTypedWhileTheLessonSwitchWaitsStaysWithTheVisibleLesson() {
+        val f = fixture()
+        val c = TextbookController(f.library)
+        val typed = f.a.lessons[1].id
+        val next = f.a.lessons[2].id
+        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+            setContent { WindowsTextbookHost(c) { null } }
+            ready(c) { it.catalog.size == 2 && it.book != null }
+            onNodeWithTag("book-${f.a.id}").performClick()
+            ready(c) { it.book?.id == f.a.id }
+            onNodeWithTag("home-learn").performClick()
+            ready(c) { it.screen == BookScreen.LEARNING && it.answer.text == "alpha earlier draft" }
+            DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}").use { blocker ->
+                blocker.createStatement().use { it.execute("BEGIN IMMEDIATE") }
+                try {
+                    onNodeWithTag("next-lesson").performScrollTo().performClick()
+                    waitForBlockedWrite("save")
+                    assertEquals(1, c.state.value.book!!.lessonIndex, "lesson 2 is still the visible lesson")
+                    onNodeWithTag("short-answer").performScrollTo().performTextReplacement("lesson two final words")
+                    waitForIdle()
+                } finally {
+                    blocker.createStatement().use { it.execute("ROLLBACK") }
+                }
+            }
+            waitUntil(timeoutMillis = 15_000) { c.state.value.book?.lessonIndex == 2 && !c.state.value.busy }
+            awaitTrue { f.library.answer(f.a.id, typed, QuestionMode.SHORT_ANSWER).text == "lesson two final words" }
+            val typedStored = f.library.answer(f.a.id, typed, QuestionMode.SHORT_ANSWER).text
+            val nextStored = f.library.answer(f.a.id, next, QuestionMode.SHORT_ANSWER).text
+            println("VISIBLE-LESSON PASS: lesson 2 stored='$typedStored'; lesson 3 stored='$nextStored'; visible on 3/3='${c.state.value.answer.text}'")
+            assertEquals("lesson two final words", typedStored, "The keystroke belongs to the lesson it was typed in")
+            assertEquals("", nextStored, "A keystroke typed on lesson 2 must not be written into lesson 3")
+            assertEquals("", c.state.value.answer.text, "The open lesson's answer box must not echo another lesson's draft")
         }
     }
 

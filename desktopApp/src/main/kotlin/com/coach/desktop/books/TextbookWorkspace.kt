@@ -58,10 +58,9 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
         while (true) {
             val draft = pending ?: break
             pending = null
-            val book = controller.state.value.book
-            if (book?.id == draft.book && book.lessons.getOrNull(book.lessonIndex)?.id == draft.lesson &&
-                book.questionMode == draft.mode) controller.answer(draft.answer)
-            else controller.library.saveAnswer(draft.book, draft.lesson, draft.mode, draft.answer)
+            // The controller checks the identity and writes under the same lock, so a lesson switch that is
+            // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
+            controller.saveDraft(draft.book, draft.lesson, draft.mode, draft.answer)
         }
     }
 }

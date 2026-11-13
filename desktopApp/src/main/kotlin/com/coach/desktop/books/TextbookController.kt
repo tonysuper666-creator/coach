@@ -123,7 +123,25 @@ internal class TextbookController(val library: TextbookLibrary) {
     suspend fun answer(answer: PracticeAnswer) = action(showBusy = false) {
         val book = mutable.value.book ?: return@action
         val lesson = book.lessons.getOrNull(book.lessonIndex) ?: return@action
-        library.saveAnswer(book.id, lesson.id, book.questionMode, answer)
-        mutable.update { it.copy(answer = answer) }
+        writeAnswer(book.id, lesson.id, book.questionMode, answer)
+    }
+
+    /**
+     * Stores an answer under the book, lesson and mode it was typed in, not the one that happens to be open.
+     *
+     * The identity check and the write share this action's lock: a lesson switch that was already waiting on
+     * SQLite updates the open lesson first, so checking before the lock would let a keystroke typed in the
+     * still-visible lesson land in the one the switch finally opens.
+     */
+    suspend fun saveDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) = action(showBusy = false) {
+        writeAnswer(book, lesson, mode, answer)
+    }
+
+    private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
+        library.saveAnswer(book, lesson, mode, answer)
+        val open = mutable.value.book
+        if (open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
+            mutable.update { it.copy(answer = answer) }
+        }
     }
 }

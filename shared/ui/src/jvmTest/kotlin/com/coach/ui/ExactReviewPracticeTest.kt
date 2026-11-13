@@ -82,11 +82,17 @@ class ExactReviewPracticeTest {
         val driver = JdbcSqliteDriver("jdbc:sqlite:${mac.dir.resolve("client.sqlite")}")
         init { if (create) ClientDatabase.Schema.create(driver) }
         val transport = HttpLedgerTransport(mac.base, "phone", mac.token)
+        /** Set once the first command really reached the server, before its acknowledgement was dropped. */
+        val firstSendCommitted = java.util.concurrent.atomic.AtomicBoolean(false)
         val ledger = if (!loseFirstAck) transport else object : LedgerTransport by transport {
             var lost = false
             override suspend fun command(command: com.coach.protocol.WireCommand): com.coach.protocol.Receipt {
                 val receipt = transport.command(command)
-                if (!lost) { lost = true; throw java.io.IOException("Synthetic lost acknowledgement after real commit") }
+                if (!lost) {
+                    lost = true
+                    firstSendCommitted.set(true)
+                    throw java.io.IOException("Synthetic lost acknowledgement after real commit")
+                }
                 return receipt
             }
         }
@@ -179,6 +185,9 @@ class ExactReviewPracticeTest {
                 onNodeWithTag("study-option-$attempt-A").performClick()
                 onNodeWithTag("review-submit").performClick()
                 waitUntil(timeoutMillis=15_000) { onAllNodesWithText("重试同步").fetchSemanticsNodes().isNotEmpty() }
+                // 重试入口只证明本机已留下命令；首次发送可能还在路上。等到服务端真的落库，
+                // 重启后的重放才必然落在同一条 command id 上，而不是一次全新的提交。
+                waitUntil(timeoutMillis=15_000) { device.firstSendCommitted.get() }
             }
             command=device.sync.mainlineState("C","review-answer:$attempt").str("commandId")
             assertTrue(command.isNotBlank())

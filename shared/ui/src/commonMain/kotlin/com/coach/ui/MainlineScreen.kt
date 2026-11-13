@@ -245,6 +245,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             // Use actual section/fact IDs from the imported course, never infer an answer link from ordering.
             val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
             val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
+            // Preserve a paused receipt or request only when it belongs to this target.
+            val pausedId = pending?.str("itemId") ?: result?.str("itemId")
+            val paused = items.firstOrNull { it.str("id") == itemId && it.str("id") == pausedId }
+            val metadata = paused?.get("ladder") as? JsonObject
+            val sameTarget = metadata?.str("kpId") == targetKpId || (match != null &&
+                (metadata?.str("sectionId") == match.str("section_id") || paused?.strings("factIds").orEmpty().any { it in match.strings("fact_ids") }))
+            if (!reading && paused != null && sameTarget) return@LaunchedEffect
             if (match == null && learning && !reading) {
                 val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id.orEmpty()
                 if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }

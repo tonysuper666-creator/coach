@@ -25,8 +25,9 @@ import kotlin.test.*
 class MainlineTodayIntegrationTest {
     @Test fun phoneTodayOpensQuestionAndRestoresAnswerFromSqlite() = walk(412, 915)
     @Test fun wideTodayOpensQuestionAndRestoresAnswerFromSqlite() = walk(933, 704)
+    @Test fun targetedEntryPreservesFeedbackAfterDatabaseReopen() = walk(933, 704, targetedReentry = true)
 
-    private fun walk(width: Int, height: Int) {
+    private fun walk(width: Int, height: Int, targetedReentry: Boolean = false) {
         val root = Files.createTempDirectory("synthetic-today")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(Files.createDirectories(root.resolve("ledger")))
@@ -95,6 +96,11 @@ class MainlineTodayIntegrationTest {
             driver = JdbcSqliteDriver("jdbc:sqlite:$file")
             c = controller()
             val reopened = c
+            if (targetedReentry) {
+                val active = reopened.sync.mainlineState("SYN-COURSE-A")
+                reopened.sync.saveMainlineState("SYN-COURSE-A", JsonObject(active + mapOf(
+                    "entry" to JsonPrimitive("quiz"), "targetKp" to JsonPrimitive("SYN-K1"))))
+            }
             runSkikoComposeUiTest(size = Size(width.toFloat(), height.toFloat()), density = Density(1f)) {
                 setContent { CoachApp(reopened, dark = false) }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }

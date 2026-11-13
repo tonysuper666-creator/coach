@@ -72,6 +72,7 @@ dependencies {
     implementation(libs.sqldelight.driver)
     implementation(libs.sqlite.jdbc)
     implementation(libs.serialization.json)
+    implementation("org.apache.pdfbox:pdfbox:3.0.8")
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)
     implementation(libs.material3)

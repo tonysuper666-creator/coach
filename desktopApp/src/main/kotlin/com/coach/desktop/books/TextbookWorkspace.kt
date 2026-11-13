@@ -32,11 +32,6 @@ import java.nio.file.Path
 internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
-    // Leaving 书架 for 今天 or 课程 and coming back keeps the open page: the controller already holds it.
-    LaunchedEffect(controller) {
-        val current = controller.state.value
-        if (current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
-    }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
     CoachTheme {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {

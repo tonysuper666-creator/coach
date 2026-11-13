@@ -173,7 +173,7 @@ class WindowsTextbooksTest {
             ready(controller) { it.answer.revealed }
             onNodeWithText("与原文一致。").assertExists()
             nav("今天").performClick()
-            onNodeWithTag("host-today-empty").assertIsDisplayed()
+            onNodeWithTag("host-today-book").assertIsDisplayed()
             nav("书架").performClick()
             onNodeWithTag("textbook-learning").assertIsDisplayed()
             onNodeWithText("与原文一致。").assertExists()
@@ -198,6 +198,83 @@ class WindowsTextbooksTest {
             ready(controller) { it.page == 2 && it.book?.readingPage == 2 }
         }
         val reopened = TextbookLibrary(root.resolve("library")).book(controller.state.value.book!!.id)
+        assertEquals(1, reopened.lessonIndex)
+        assertEquals(2, reopened.readingPage)
+        assertEquals(QuestionMode.CHOICE, reopened.questionMode)
+    }
+
+    /**
+     * 今天 and 课程 are not just labels: both read the controller 书架 owns. A book that is already on disk
+     * is continuable before 书架 is opened, and continuing it lands in the same reader and lesson screens.
+     */
+    @Test fun todayAndCourseContinueTheBookThatTheBookshelfAlreadyHas() {
+        val root = Files.createTempDirectory("coach-windows-today-course-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val stored = library.importBook(syntheticTextbook(root.resolve("friend")))
+        val controller = TextbookController(library)
+        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+            setContent { WindowsTextbookHost(controller) { null } }
+            ready(controller) { it.book?.id == stored.id }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            fun panel(tag: String, text: String) = onNode(hasAnyAncestor(hasTestTag(tag)) and hasText(text, substring = true))
+
+            // 已有教材在盘上：不进书架，今天就有这本可接着读的书，位置来自同一条记录。
+            nav("今天").performClick()
+            onNodeWithTag("host-today-book").assertIsDisplayed()
+            panel("host-today-book", stored.title).assertIsDisplayed()
+            panel("host-today-book", "读到第 1 页").assertIsDisplayed()
+            capture("host-today-existing-book-1440x900", "windows-host")
+
+            // 课程就是这本教材按节分，未开启 learning 时用的是书架自己的开启流程。
+            nav("课程").performClick()
+            onNodeWithTag("host-course-book").assertIsDisplayed()
+            panel("host-course-book", "共 3 节").assertIsDisplayed()
+            capture("host-course-existing-book-1440x900", "windows-host")
+            onNodeWithTag("host-course-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("enable-learning").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("question-mode-CHOICE").performClick()
+            ready(controller) { it.book?.questionMode == QuestionMode.CHOICE }
+            onNodeWithTag("enable-learning").performClick()
+            ready(controller) { it.screen == BookScreen.LEARNING }
+
+            // 作答后去今天：同一份进度，继续学回到同一节，作答还在。
+            val learning = controller.state.value.book!!
+            val practice = StudyCoachCourse.practice(learning, learning.lessons[0], QuestionMode.CHOICE)!!
+            onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
+            ready(controller) { it.answer.revealed }
+            nav("今天").performClick()
+            panel("host-today-book", "学习停在第 1 / 3 节").assertIsDisplayed()
+            onNodeWithTag("host-today-learn").performClick()
+            ready(controller) { it.screen == BookScreen.LEARNING }
+            onNodeWithText("与原文一致。").assertExists()
+
+            // 看原文再返回，学习位置往后走一节；今天读到的是书架真实书签，不是学习出处页。
+            onNodeWithTag("open-lesson-source").performScrollTo().performClick()
+            ready(controller) { it.screen == BookScreen.READER && it.source != null }
+            onNodeWithTag("next-page").performClick()
+            ready(controller) { it.page == 2 }
+            assertEquals(1, controller.state.value.book!!.readingPage)
+            onNodeWithText("返回学习").performClick()
+            ready(controller) { it.screen == BookScreen.LEARNING && it.source == null }
+            onNodeWithTag("next-lesson").performScrollTo().performClick()
+            ready(controller) { it.book?.lessonIndex == 1 }
+            nav("今天").performClick()
+            panel("host-today-book", "学习停在第 2 / 3 节").assertIsDisplayed()
+            onNodeWithTag("host-today-read").performClick()
+            ready(controller) { it.screen == BookScreen.READER && it.source == null }
+            onNodeWithTag("reader-page-number").assertTextEquals("1 / 3")
+            onNodeWithTag("next-page").performClick()
+            ready(controller) { it.page == 2 && it.book?.readingPage == 2 }
+
+            // 三个入口来回切不重新读库：阅读器还停在原页，书签没被重置。
+            nav("课程").performClick()
+            panel("host-course-book", "读到第 2 页").assertIsDisplayed()
+            nav("书架").performClick()
+            onNodeWithTag("reader-page-number").assertTextEquals("2 / 3")
+            assertEquals(BookScreen.READER, controller.state.value.screen)
+            capture("host-return-keeps-page-1440x900", "windows-host")
+        }
+        val reopened = TextbookLibrary(root.resolve("library")).book(stored.id)
         assertEquals(1, reopened.lessonIndex)
         assertEquals(2, reopened.readingPage)
         assertEquals(QuestionMode.CHOICE, reopened.questionMode)

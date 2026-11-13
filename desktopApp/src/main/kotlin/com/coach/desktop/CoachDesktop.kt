@@ -40,6 +40,7 @@ internal fun resolveCourse(environment: String?, packaged: String?): String =
 
 /** Installed clients resolve their Mac locally and enter learning only with their own identity. */
 fun runCoach() {
+    if (System.getProperty("os.name").startsWith("Windows")) { runWindowsTextbooks(); return }
     refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val settings = DesktopConnectionSettings()
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))

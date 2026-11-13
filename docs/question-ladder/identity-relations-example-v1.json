@@ -1,0 +1,59 @@
+{
+  "contract": "candidate-identity-relations/v1",
+  "classification": "synthetic example; no course data",
+  "integration_status": "proposal",
+  "snapshot": {
+    "id": "SYN-SNAPSHOT-1",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "note": "placeholder only"
+  },
+  "aliases": [
+    {
+      "from": "SYN-Q01-v1",
+      "to": "SYN-Q01-v2",
+      "scope": "proposed_prerequisite_resolution",
+      "reason": "synthetic revision",
+      "historical_attempts_rewritten": false
+    }
+  ],
+  "items": [
+    {
+      "candidate_id": "SYN-Q01-v2",
+      "version": 2,
+      "capability_id": "SYN-CAP-A",
+      "capability_relation": "partial",
+      "prerequisites_as_frozen": [],
+      "prerequisites_proposed_resolved": [],
+      "key_state": "UNREVIEWED",
+      "star": null
+    },
+    {
+      "candidate_id": "SYN-Q02-v1",
+      "version": 1,
+      "capability_id": "SYN-CAP-A",
+      "capability_relation": "supporting",
+      "prerequisites_as_frozen": [
+        "SYN-Q01-v1"
+      ],
+      "prerequisites_proposed_resolved": [
+        "SYN-Q01-v2"
+      ],
+      "key_state": "UNREVIEWED",
+      "star": null
+    },
+    {
+      "candidate_id": "SYN-Q03-v1",
+      "version": 1,
+      "capability_id": "SYN-CAP-B",
+      "capability_relation": "partial",
+      "prerequisites_as_frozen": [
+        "SYN-Q02-v1"
+      ],
+      "prerequisites_proposed_resolved": [
+        "SYN-Q02-v1"
+      ],
+      "key_state": "UNREVIEWED",
+      "star": null
+    }
+  ]
+}

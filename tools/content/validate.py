@@ -8,12 +8,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 WORD = re.compile(r"[A-Za-z]+")
+HAN_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f\U00030000-\U000323af]+")
 TEXT_SUFFIXES = {'.md', '.txt', '.json', '.py', '.svg'}
 
 
 def grams(text):
     words = [word.lower() for word in WORD.findall(text)]
-    return {tuple(words[i:i + 8]) for i in range(len(words) - 7)}
+    sequences = {tuple(words[i:i + 8]) for i in range(len(words) - 7)}
+    for run in HAN_RUN.findall(text):
+        sequences.update(run[i:i + 15] for i in range(len(run) - 14))
+    return sequences
 
 
 def exam_index(directory):
@@ -26,7 +30,7 @@ def exam_index(directory):
     for path in paths:
         bank.update(grams(path.read_text(encoding='utf-8')))
     if not bank:
-        raise ValueError('exam directory contains no eight-word sequences')
+        raise ValueError('exam directory contains no eight-word or 15-Han-character sequences')
     return bank
 
 
@@ -241,7 +245,12 @@ def check_file(path, bank):
         for content in contents:
             hits.update(grams(content) & bank)
         if hits:
-            errors.append(f'overlap: {len(hits)} distinct eight-word matches')
+            english = sum(isinstance(hit, tuple) for hit in hits)
+            chinese = len(hits) - english
+            if english:
+                errors.append(f'overlap: {english} distinct eight-word matches')
+            if chinese:
+                errors.append(f'overlap: {chinese} distinct 15-Han-character matches')
         return scope, errors
     except (OSError, UnicodeError) as exc:
         return 'not checked (read error)', [f'read error: {type(exc).__name__}']
@@ -276,7 +285,7 @@ def main(argv=None):
                 failures += 1
             status = f'{len(errors)} problem(s)' if errors else ('not checked' if scope.startswith('not checked') else 'pass')
             rows.append((str(path.relative_to(root)), scope, status, errors))
-        lines = ['# Content validation', '', 'Exam index: all UTF-8 .md/.txt files under the supplied directory; matches are case-insensitive sequences of eight English letter-only words. No exam text is included.', '', 'Format validation applies to paper/pack JSON; other supported text is checked for overlap only. Unsupported files are not checked.', '', '| File | Scope | Result |', '| --- | --- | --- |']
+        lines = ['# Content validation', '', 'Exam index: all UTF-8 .md/.txt files under the supplied directory; matches are case-insensitive sequences of eight English letter-only words or 15 consecutive Han characters. No exam text is included.', '', 'Format validation applies to paper/pack JSON; other supported text is checked for overlap only. Unsupported files are not checked.', '', '| File | Scope | Result |', '| --- | --- | --- |']
         for name, scope, status, errors in rows:
             safe_name = name.replace("|", "\\|")
             lines.append(f'| {safe_name} | {scope} | {status} |')

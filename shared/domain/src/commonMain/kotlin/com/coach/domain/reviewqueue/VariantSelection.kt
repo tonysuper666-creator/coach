@@ -47,7 +47,8 @@ private val deterministicAttemptIds = VariantAttemptId { entryId, question ->
  * 同课程、同考点、同运行范围、有效版本、已核键、且不是原题的题时才分配，其余条目原样保留为缺题。
  * 已完成、待同步的条目不参与，避免覆盖已有作答身份。
  *
- * 一道题在同一 scope 里只占一次：队列里已有的变式先计入已占用，本轮再逐条累计。
+ * 一道题在同一 scope 里只占一次：队列里已有变式的身份先计入已占用，本轮再逐条累计；
+ * 已经作答过的原题号（包括没有关联到原题、但同队列另一行带着的那道题）也不再发出去当变式。
  * 端口只给一道题时，先轮到的那条拿到它，另一条如实保持缺题，不会一道题生成两个作答身份。
  */
 fun ReviewQueueCandidate.allocateVariants(
@@ -56,9 +57,11 @@ fun ReviewQueueCandidate.allocateVariants(
 ): VariantAllocation {
     var queue = this
     val occupied = entries.flatMap { it.variants }.map { it.question.identity() }.toMutableSet()
+    // 队列里已经作答过的原题：另一行（尤其是没有原题链接的到期行）不能再把它当新变式发一次。
+    val answeredIds = entries.mapNotNull { it.originalQuestion?.id }.toMutableSet()
     val selections = entries.filter { !it.completed && it.readiness == QueueReadiness.NEEDS_VARIANT }.map { entry ->
         val variant = selectVariant(entry, port.candidates(scope.courseId, scope.agentRunId, entry.kpId),
-            attemptIds, occupied)
+            attemptIds, occupied, answeredIds)
         if (variant != null) queue = queue.assignVariant(entry.id, variant)
         VariantSelection(entry.id, variant)
     }
@@ -71,6 +74,7 @@ private fun ReviewQueueCandidate.selectVariant(
     candidates: List<VariantCandidate>,
     attemptIds: VariantAttemptId,
     occupied: MutableSet<String>,
+    answeredIds: Set<String>,
 ): QueueVariant? {
     val ordered = candidates.sortedWith(
         compareBy({ it.variantGroupId.orEmpty() }, { it.question.identity() }))
@@ -81,6 +85,7 @@ private fun ReviewQueueCandidate.selectVariant(
         if (candidate.question.id.isBlank()) continue
         // The original is never replayed as its own variant, and one question is never allocated twice.
         if (candidate.question.id == entry.originalQuestion?.id) continue
+        if (candidate.question.id in answeredIds) continue
         if (entry.variants.any { it.question == candidate.question }) continue
         val identity = candidate.question.identity()
         if (identity in occupied) continue

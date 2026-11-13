@@ -7,6 +7,8 @@ import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.QueueReadiness
 import com.coach.domain.reviewqueue.QueueReason
+import com.coach.domain.reviewqueue.VariantCandidatePort
+import com.coach.domain.reviewqueue.allocateVariants
 import com.coach.domain.reviewqueue.ledgerQueueCandidate
 import com.coach.domain.reviewqueue.scheduleOrder
 import com.coach.domain.str
@@ -31,6 +33,8 @@ data class ReviewItem(
     val revisit: Boolean,
     val readiness: QueueReadiness,
     val variantCount: Int,
+    /** 已经选好的变式作答身份；null 表示这一行还没选到题，入口不能拿它当可练。 */
+    val variantAttemptId: String?,
     val pendingSync: Int,
     /** 真实已知的先修知识点（大纲 prereqs），没有解析到名字时退回 id。 */
     val prereqTitles: List<String>,
@@ -55,6 +59,7 @@ data class ReviewItem(
      */
     val identityLabel: String
         get() = when {
+            original == null && variantCount > 0 -> "原题未关联 · 已备 $variantCount 道变式"
             original == null -> "原题未关联 · 练同知识点变式"
             variantCount > 0 -> "原题 ${original.id.take(8)} · 已备 $variantCount 道变式"
             pendingSync > 0 || readiness == QueueReadiness.PENDING_SYNC -> "原题 ${original.id.take(8)} · 作答待同步"
@@ -92,8 +97,19 @@ data class ReviewBoard(
 }
 
 /**
+ * 本机还没有「题库 → 复习队列」的题级通道时的默认候选源：如实报没有候选。
+ * 队列因此保持缺题（「待生成变式」），不拿账本里已经出过的题冒充新变式。
+ */
+val NoVariantCandidates: VariantCandidatePort = VariantCandidatePort { _, _, _ -> emptyList() }
+
+/**
  * 纯函数：用真实账本（[CourseView.events]）构造复习入口要显示的队列。
  * 队列身份由已验的 [ledgerQueueCandidate] 决定；这里只做展示层的取舍，不改合同、不写账本。
+ *
+ * 缺口（[QueueReadiness.NEEDS_VARIANT]）先交给 [variants] 这条可注入的题库端口挑选：
+ * 只有同课程、同考点、有效版本、已核键、不是原题的一道题才会被选上，且同一 scope 内一道题只花一次；
+ * 端口没有候选（默认 [NoVariantCandidates]）或候选不合格时，这一行原样保持缺题，
+ * 入口显示「待生成变式」，不会把没有的题说成可练。
  *
  * 到期日程本身不携带原题身份（主干的 `Review` 没有题号）；只有分配器/迁移显式给出的
  * `DueOriginalLink` 才能把它关联到某道原题。同知识点、同一天、恰好一道错题都不构成证据：
@@ -102,15 +118,22 @@ data class ReviewBoard(
  * 账本要求服务端权威快照时不做任何猜测：返回 [ReviewBoard.snapshotRequired]，
  * 由入口显示「待同步/无法确认」，而不是抛异常或报「今天没有复习」。
  */
-fun reviewBoard(courseId: String, view: CourseView, day: Long): ReviewBoard {
+fun reviewBoard(
+    courseId: String,
+    view: CourseView,
+    day: Long,
+    variants: VariantCandidatePort = NoVariantCandidates,
+): ReviewBoard {
     // view.projection 就是这块屏幕正在渲染的同一次回放；它读不懂的账本事实，队列也读不懂。
     if (view.projection.requiresServerSnapshot) {
         return ReviewBoard(day, emptyList(), 0, null, snapshotRequired = true)
     }
     val candidate = ledgerQueueCandidate(courseId, view.events, day)
+    // 先补缺口，再排程：排的是真的能练的队列，不是「本来能练但没接上」的列表。
+    val allocated = candidate.allocateVariants(variants).queue
     val weights = examWeights(view.events)
     // 权重与考前窗口都来自账本/课程配置：排序是真实排程，不是只把权重写在行里。
-    val due = scheduleOrder(candidate.dueEntries(day), day, weights, view.projection.examDay)
+    val due = scheduleOrder(allocated.dueEntries(day), day, weights, view.projection.examDay)
     val items = due.map { entry ->
         val kp = view.kp(entry.kpId) ?: KpRow(
             entry.kpId, view.projection.kpTitles[entry.kpId].orEmpty(), KpStatus.NEW, false, listOf(entry.kpId))
@@ -125,6 +148,7 @@ fun reviewBoard(courseId: String, view: CourseView, day: Long): ReviewBoard {
             revisit = entry.sources.any { it.reason == QueueReason.DUE && it.legacySchedule?.lastResult == REVISIT },
             readiness = entry.readiness,
             variantCount = entry.variants.count { it.availability == QueueAvailability.VALID },
+            variantAttemptId = entry.currentAttemptId?.takeIf { entry.readiness != QueueReadiness.NEEDS_VARIANT },
             pendingSync = entry.pendingSyncAttemptIds.size,
             prereqTitles = kp.prereqs.map { id -> view.kp(id)?.title?.takeIf { it.isNotBlank() } ?: id },
             examWeight = weights[entry.kpId] ?: 0,
@@ -144,8 +168,25 @@ private fun nextDueDay(view: CourseView, day: Long): Long? {
 fun reviewCursor(sync: SyncEngine, courseId: String): String? =
     (sync.mainlineState(courseId, REVIEW_PAGE)["entryId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
 
-fun saveReviewCursor(sync: SyncEngine, courseId: String, entryId: String, day: Long) {
-    sync.saveMainlineState(courseId, json("entryId" to entryId, "day" to day), REVIEW_PAGE)
+/**
+ * 上一次点开的那一项落到的具体作答身份：已经选好变式时是那道变式的 attemptId，
+ * 还没有候选时是 null。练习线程据此接着练同一道题，而不是重新挑一道。
+ */
+fun reviewCursorAttempt(sync: SyncEngine, courseId: String): String? =
+    (sync.mainlineState(courseId, REVIEW_PAGE)["attemptId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+
+fun saveReviewCursor(
+    sync: SyncEngine,
+    courseId: String,
+    entryId: String,
+    day: Long,
+    variantAttemptId: String? = null,
+) {
+    sync.saveMainlineState(
+        courseId,
+        json("entryId" to entryId, "day" to day, "attemptId" to variantAttemptId),
+        REVIEW_PAGE,
+    )
 }
 
 private const val REVIEW_PAGE = "review"

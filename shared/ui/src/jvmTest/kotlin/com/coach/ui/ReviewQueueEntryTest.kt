@@ -11,6 +11,10 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.*
 import com.coach.client.db.ClientDatabase
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.QueueAvailability
+import com.coach.domain.reviewqueue.QueueQuestion
+import com.coach.domain.reviewqueue.VariantCandidate
+import com.coach.domain.reviewqueue.VariantCandidatePort
 import com.coach.protocol.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -126,6 +130,41 @@ class ReviewQueueEntryTest {
                 onNodeWithText("继续").assertIsDisplayed()
                 assertEquals(saved, reviewCursor(e.c.sync, "C"), "重进后仍指向同一项")
                 onNodeWithText("4 项复习").assertIsDisplayed()
+            }
+        } finally { e.close() }
+    }
+
+    @Test fun aPreparedVariantFromThePoolTurnsExactlyOneGapIntoPractice() {
+        // 合成题库端口：只给 K1 一道已核键的新题，其余考点如实没有候选。
+        val port = VariantCandidatePort { _, _, kp ->
+            if (kp == "K1") listOf(VariantCandidate("C", "K1", QueueQuestion("q-synthetic-variant"),
+                availability = QueueAvailability.VALID, keyVerified = true,
+                variantGroupId = "synthetic-group", agentRunId = null)) else emptyList()
+        }
+        val e = entry(mixedFacts())
+        val view = CourseView(e.events, project(e.events))
+        val opened = mutableListOf<Pair<String, Boolean>>()
+        try {
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
+                    ReviewScreen(e.c, view, { id, start -> opened += id to start }, onBack = {},
+                        variantCandidates = port)
+                } } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("4 项复习").fetchSemanticsNodes().isNotEmpty() }
+                // 补上变式不改变队列条目的数量，也不把缺题说成可练。
+                onNodeWithText("4 项复习").assertIsDisplayed()
+                onAllNodesWithText("已备 1 道变式", substring = true).assertCountEquals(1)
+                onAllNodesWithText("已备 2 道变式", substring = true).assertCountEquals(0)
+
+                val board = reviewBoard("C", view, day, port)
+                val ready = board.items.single { it.variantCount > 0 }
+                val expectedAttempt = assertNotNull(ready.variantAttemptId)
+                assertEquals(1, board.items.count { it.variantCount > 0 }, "一道题不能被两行同时占用")
+
+                // 点开这一行：本机记下的必须是这道变式的作答身份，而不是空或另一道题。
+                onAllNodesWithText("开始")[board.items.indexOf(ready)].performScrollTo().performClick()
+                assertEquals(listOf("K1" to true), opened)
+                assertEquals(expectedAttempt, reviewCursorAttempt(e.c.sync, "C"))
             }
         } finally { e.close() }
     }

@@ -4,8 +4,12 @@ import com.coach.domain.Event
 import com.coach.domain.json
 import com.coach.domain.logicalDay
 import com.coach.domain.project
+import com.coach.domain.reviewqueue.QueueAvailability
+import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.QueueReadiness
 import com.coach.domain.reviewqueue.QueueReason
+import com.coach.domain.reviewqueue.VariantCandidate
+import com.coach.domain.reviewqueue.VariantCandidatePort
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlin.test.*
@@ -39,6 +43,83 @@ class ReviewQueueViewTest {
         "attempt_graded", json("attemptId" to attemptId, "score" to score, "max" to max, "status" to "VERIFIED"), at)
 
     private fun board(events: List<Event>) = reviewBoard("C", CourseView(events, project(events)), day)
+
+    private fun board(events: List<Event>, port: VariantCandidatePort) =
+        reviewBoard("C", CourseView(events, project(events)), day, port)
+
+    /** 题库端口的合成候选：只描述题库真实持有的一道题，不让队列自己造题。 */
+    private fun candidate(
+        questionId: String,
+        kpId: String = "K1",
+        keyVerified: Boolean = true,
+        availability: QueueAvailability = QueueAvailability.VALID,
+        agentRunId: String? = null,
+    ) = VariantCandidate(
+        courseId = "C",
+        kpId = kpId,
+        question = QueueQuestion(questionId),
+        availability = availability,
+        keyVerified = keyVerified,
+        variantGroupId = "synthetic-group",
+        agentRunId = agentRunId,
+    )
+
+    private fun port(vararg candidates: VariantCandidate) = VariantCandidatePort { _, _, _ -> candidates.toList() }
+
+    @Test fun aPortCandidateTurnsOneGapIntoAReadyVariantAndLeavesTheOtherHonestlyEmpty() {
+        val events = listOf(
+            outline(kp("K0", "前置：极限"), kp("K1", "合成：导数应用", "K0")),
+            event("legacy_passed", json("kpId" to "K0")),
+            event("legacy_schedule", json("kpId" to "K0", "dueDay" to day, "interval" to 15)),
+            event("exam_weights_set", json("scope" to "course", "weights" to json("K0" to 1, "K1" to 3))),
+            posed("a1", "q1", "K1", "VERIFIED"), answered("a1", "B", guessed = true), graded("a1", 1),
+            posed("a2", "q1", "K1", "VERIFIED"), answered("a2", "C"), graded("a2", 0),
+        )
+        val b = board(events, port(candidate("q-variant-1")))
+        assertEquals(3, b.items.size, "补变式不改变队列条目的数量")
+        // 同一考点有两行缺口（错题行 + 未知原题的到期行），只给一道候选时只有一行能变成可练。
+        val ready = b.items.filter { it.variantCount > 0 }
+        assertEquals(1, ready.size, "一道候选不能被两行同时占用")
+        assertEquals(QueueReadiness.READY, ready.single().readiness)
+        assertEquals(1, ready.single().variantCount)
+        assertNotNull(ready.single().variantAttemptId, "可练的那一行必须带着变式的作答身份")
+        assertTrue(ready.single().identityLabel.contains("已备 1 道变式"), ready.single().identityLabel)
+        assertEquals("K1", ready.single().kp.id)
+
+        val gap = b.items.single { it.variantCount == 0 && it.kp.id == "K1" }
+        assertEquals(QueueReadiness.NEEDS_VARIANT, gap.readiness)
+        assertNull(gap.variantAttemptId, "没拿到候选的行不能编一个作答身份")
+        assertTrue(gap.identityLabel.contains("待生成变式") || gap.identityLabel.contains("原题未关联"),
+            gap.identityLabel)
+
+        // 别的考点没有候选，保持原样。
+        val other = b.items.single { it.kp.id == "K0" }
+        assertEquals(QueueReadiness.NEEDS_VARIANT, other.readiness)
+        assertEquals(0, other.variantCount)
+        assertNull(other.variantAttemptId)
+    }
+
+    @Test fun candidatesThatAreTheOriginalUnverifiedOrOtherScopeStayGaps() {
+        val events = listOf(
+            outline(kp("K1", "合成：导数应用")),
+            posed("a2", "q1", "K1", "VERIFIED"), answered("a2", "C"), graded("a2", 0),
+        )
+        // 原题重放、未核键、已撤回、别的运行范围、别的考点：没有一条能当变式。
+        val b = board(events, port(
+            candidate("q1"),
+            candidate("q-unverified", keyVerified = false),
+            candidate("q-retired", availability = QueueAvailability.RETIRED),
+            candidate("q-agent", agentRunId = "run-1"),
+            candidate("q-other-kp", kpId = "K9"),
+        ))
+        val item = b.items.single { it.original?.id == "q1" }
+        assertEquals(QueueReadiness.NEEDS_VARIANT, item.readiness)
+        assertEquals(0, item.variantCount)
+        assertNull(item.variantAttemptId)
+        assertTrue(item.identityLabel.contains("待生成变式"), item.identityLabel)
+        // 队列里其他行也一样：没有一条不合格的候选被当成可练。
+        assertTrue(b.items.all { it.variantCount == 0 && it.variantAttemptId == null }, b.items.toString())
+    }
 
     @Test fun dueWithoutLinkStaysUnknownNextToTheMistakeItCameFrom() {
         val events = listOf(

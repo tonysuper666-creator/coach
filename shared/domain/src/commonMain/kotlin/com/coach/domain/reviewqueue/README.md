@@ -34,18 +34,28 @@ provenance boundary, `VALID` revision, verified key, different question than the
 original, not already allocated) and only assigns what passes. A question is
 spent once per scope: variants already on the queue are counted as taken before
 allocation starts, and each assignment adds to that set, so two `NEEDS_VARIANT`
-entries on one KP cannot become two attempts on the same question. A port that
-returns nothing, or whose candidates are all already spent, leaves the entry as a
-visible missing question (`NEEDS_VARIANT`, zero variants); nothing is invented. The
-store implements the port with `reviewVariantCandidates`, the same verified,
-unposed single-choice pool the question route takes from. Distinct wording, content
-validity verification and offline availability remain the bank's responsibility.
+entries on one KP cannot become two attempts on the same question. An original
+question already answered in the queue is spent as well: an unlinked due row on
+the same KP cannot take that same question number back as its "variant". A port
+that returns nothing, or whose candidates are all already spent, leaves the entry
+as a visible missing question (`NEEDS_VARIANT`, zero variants); nothing is
+invented. The store implements the port with `reviewVariantCandidates`, the same
+verified, unposed single-choice pool the question route takes from. Distinct
+wording, content validity verification and offline availability remain the bank's
+responsibility.
 Withdrawal/replacement retains original answers and all variant links, makes an
 affected current variant not ready, and preserves pending sync attempt identities.
 A valid alternative can remain ready when only the original is withdrawn.
 
 `entries` is deterministic by due day then identity. `dueEntries(day)` is the one
 list a future Today count and queue view can share, including not-ready gaps.
+The client's review entry takes the port as an injectable parameter
+(`reviewBoard(..., variants: VariantCandidatePort)` / `ReviewScreen(variantCandidates = ...)`),
+allocates before it schedules, and shows a served row as "已备 N 道变式" with its
+allocated attempt identity; the same identity is written to the review cursor when
+the row is opened, so the practice route can resume that exact attempt. The default
+`NoVariantCandidates` reports nothing, which is why the entry keeps saying "待生成
+变式" until a real question-level pool channel exists on the device.
 The client's board renders `scheduleOrder(...)`, which makes the known
 `exam_weights_set` weights an actual ordering input. Entries not yet overdue past
 the bound are ordered by weight; entries past the bound form a starving group that
@@ -70,6 +80,8 @@ tools/dev/heavy --local ./gradlew :shared:domain:jvmTest --priority=low --consol
 
 No formal content, private exam text, device acceptance or release evidence is
 implied by this candidate. What is still open on TON-1448: the transport that
-feeds `VariantCandidatePort` from the pool to each client, cross-device session
-reconciliation and the release path (the review entry, allocation and weighted
-ordering are wired on the shared client).
+feeds `VariantCandidatePort` from the pool to each client (the entry-side seam and
+its synthetic-data evidence exist; a device still reports no candidates), the
+practice route consuming the persisted variant attempt identity, cross-device
+session reconciliation and the release path (the review entry, allocation and
+weighted ordering are wired on the shared client).

@@ -131,6 +131,23 @@ class VariantAllocationTest {
         assertEquals(QueueReadiness.NEEDS_VARIANT, dueRow.readiness)
     }
 
+    /**
+     * A sibling due row has no original link, so nothing but the spend-set stops it from taking the very
+     * question the learner already answered on the same KP. That would be a replay, not a variant.
+     */
+    @Test fun anAnsweredOriginalIsNeverHandedToASiblingRowAsItsVariant() {
+        val before = ReviewQueueCandidate(scope)
+            .observe(scope, "kp", QueueQuestion("q-kp", "orig-v1", "fp-kp"),
+                QueueSource("wrong-kp", QueueReason.WRONG), day)
+            .observe(scope, "kp", question = null, source = QueueSource("due-kp", QueueReason.DUE),
+                dueDay = day, unknownDueId = "legacy-due-kp")
+        // The pool still offers that same question (even in another version) and nothing else.
+        val allocated = before.allocateVariants(port(candidate(id = "q-kp")))
+        assertTrue(allocated.queue.entries.all { it.variants.isEmpty() })
+        assertTrue(allocated.selections.all { it.variant == null })
+        assertTrue(allocated.queue.entries.all { it.readiness == QueueReadiness.NEEDS_VARIANT })
+    }
+
     @Test fun aRealLedgerEntryKeepsItsOriginalIdentityWhenAVariantIsAllocated() {
         val events = mutableListOf<Event>()
         val now = 1_793_188_800_000L

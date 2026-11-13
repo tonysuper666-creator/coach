@@ -16,24 +16,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
+import com.coach.client.NoVariantCandidates
 import com.coach.client.ReviewBoard
 import com.coach.client.ReviewItem
 import com.coach.client.reviewBoard
 import com.coach.client.reviewCursor
 import com.coach.client.saveReviewCursor
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.VariantCandidatePort
 import kotlinx.serialization.json.*
 
 /**
  * 复习入口：到期日程、答错、猜对合成一队（身份由已验队列合同去重），开始即进独立复习线程。
  * 队列是账本回放出来的纯函数结果，离开再回来会接着上次点开的那一项。
+ *
+ * [variantCandidates] 是题库候选端口：本机有题级候选通道时从它取同考点、已核键的新题；
+ * 默认 [NoVariantCandidates] 表示这台设备还没有这条通道，缺口保持「待生成变式」，不造题。
  */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}, variantCandidates: VariantCandidatePort = NoVariantCandidates) {
     val now = rememberCourseNow(c)
     val day = view.logicalToday(now)
     // 账本回放一次一块，只在换天或账本变（view 是新实例）时重算，不跟着秒针每秒重放。
-    val board = remember(view, day) { reviewBoard(c.courseId, view, day) }
+    val board = remember(view, day, variantCandidates) { reviewBoard(c.courseId, view, day, variantCandidates) }
     var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId)) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -99,7 +104,7 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                                         if (resumed) Text("上次练到这里", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                     }
                                     Button(onClick = {
-                                        saveReviewCursor(c.sync, c.courseId, item.entryId, board.day)
+                                        saveReviewCursor(c.sync, c.courseId, item.entryId, board.day, item.variantAttemptId)
                                         cursor = item.entryId
                                         onOpenKp(item.kp.id, true)
                                     }, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (resumed) "继续" else "开始") }

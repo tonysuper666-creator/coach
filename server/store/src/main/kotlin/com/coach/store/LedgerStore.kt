@@ -1,6 +1,9 @@
 package com.coach.store
 
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.QueueAvailability
+import com.coach.domain.reviewqueue.QueueQuestion
+import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.protocol.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -1190,6 +1193,19 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun poolAvailable(course: String, kp: String): Int = unseenPoolIds(course,kp).size
     fun poolStems(course: String, kp: String): List<String> = query(
         "SELECT stem_md FROM questions JOIN question_kp USING(question_id) WHERE course_id=? AND kp_id=?",course,kp) { it.getString(1) }
+
+    /**
+     * 复习变式的候选：就是主线选题用的那条池子（同课程、同考点、单选、已核键、还没出过题）。
+     * 池子里没有就返回空，由队列保持「缺题」；这里绝不补题、不改出题状态。
+     */
+    fun reviewVariantCandidates(course: String, kp: String): List<VariantCandidate> =
+        unseenPoolIds(course, kp).mapNotNull { id ->
+            query("SELECT fingerprint FROM questions WHERE course_id=? AND question_id=?", course, id) { it.getString(1) }
+                .singleOrNull()?.let { fingerprint ->
+                    VariantCandidate(course, kp, QueueQuestion(id, null, fingerprint.ifBlank { null }),
+                        QueueAvailability.VALID, keyVerified = true)
+                }
+        }
 
     /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
     fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,

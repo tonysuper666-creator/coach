@@ -28,19 +28,32 @@ unknown due gap and a known mistake remain separate visible items. Actual varian
 allocation appends a link without changing the unknown item's identity.
 
 `assignVariant` requires an allocated valid alternative on the same course/KP and
-provenance boundary. Selection, distinct wording, content validity verification
-and offline availability are the allocator's responsibility. Withdrawal/replacement
+provenance boundary. `allocateVariants` now drives it from an injectable
+`VariantCandidatePort`: it re-checks every candidate itself (same course, KP and
+provenance boundary, `VALID` revision, verified key, different question than the
+original, not already allocated) and only assigns what passes. A port that returns
+nothing leaves the entry as a visible missing question (`NEEDS_VARIANT`, zero
+variants); nothing is invented. The store implements the port with
+`reviewVariantCandidates`, the same verified, unposed single-choice pool the
+question route takes from. Distinct wording, content validity verification and
+offline availability remain the bank's responsibility. Withdrawal/replacement
 retains original answers and all variant links, makes an affected current variant
 not ready, and preserves pending sync attempt identities. A valid alternative can
 remain ready when only the original is withdrawn.
 
 `entries` is deterministic by due day then identity. `dueEntries(day)` is the one
 list a future Today count and queue view can share, including not-ready gaps.
+The client's board renders `scheduleOrder(...)`, which makes the known
+`exam_weights_set` weights an actual ordering input: higher weight first, but an
+entry overdue past a fixed bound is promoted ahead of weight so a low-frequency
+point is reached rather than starved. The exam date comes from the course
+configuration (`courseExamDay`/`Projection.examDay`); inside the last seven days the
+waiting bound tightens. It is deterministic and clock-free.
 The serialized candidate retains entry order, cursor, source union, original
 answers and pending associations. It is an immutable contract/snapshot: it does not
 reconcile a fresh ledger snapshot with a saved in-flight session, acknowledge
-commands, allocate questions, or write the ledger. Those integration decisions,
-weighted scheduling/retention and low-frequency-topic coverage remain on TON-1448.
+commands, or write the ledger. That cross-device reconciliation and the question
+route's own transport remain open; nothing here claims cross-device recovery.
 
 Synthetic behavior verification, using the existing Windows slot/Idle wrapper:
 
@@ -49,6 +62,7 @@ tools/dev/heavy --local ./gradlew :shared:domain:jvmTest --priority=low --consol
 ```
 
 No formal content, private exam text, device acceptance or release evidence is
-implied by this candidate. What is still open on TON-1448: actual variant
-allocation, weighted scheduling/retention and the cross-platform release path
-(the review entry itself is wired on the shared client).
+implied by this candidate. What is still open on TON-1448: the transport that
+feeds `VariantCandidatePort` from the pool to each client, cross-device session
+reconciliation and the release path (the review entry, allocation and weighted
+ordering are wired on the shared client).

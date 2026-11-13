@@ -8,6 +8,7 @@ import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.QueueReadiness
 import com.coach.domain.reviewqueue.QueueReason
 import com.coach.domain.reviewqueue.ledgerQueueCandidate
+import com.coach.domain.reviewqueue.scheduleOrder
 import com.coach.domain.str
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -108,7 +109,9 @@ fun reviewBoard(courseId: String, view: CourseView, day: Long): ReviewBoard {
     }
     val candidate = ledgerQueueCandidate(courseId, view.events, day)
     val weights = examWeights(view.events)
-    val items = candidate.dueEntries(day).map { entry ->
+    // 权重与考前窗口都来自账本/课程配置：排序是真实排程，不是只把权重写在行里。
+    val due = scheduleOrder(candidate.dueEntries(day), day, weights, view.projection.examDay)
+    val items = due.map { entry ->
         val kp = view.kp(entry.kpId) ?: KpRow(
             entry.kpId, view.projection.kpTitles[entry.kpId].orEmpty(), KpStatus.NEW, false, listOf(entry.kpId))
         ReviewItem(
@@ -126,7 +129,7 @@ fun reviewBoard(courseId: String, view: CourseView, day: Long): ReviewBoard {
             prereqTitles = kp.prereqs.map { id -> view.kp(id)?.title?.takeIf { it.isNotBlank() } ?: id },
             examWeight = weights[entry.kpId] ?: 0,
         )
-    }.sortedWith(compareBy({ it.dueDay }, { -it.examWeight }, { it.kp.id }, { it.entryId }))
+    }
     return ReviewBoard(day, items, unverifiedAnswered(view), nextDueDay(view, day))
 }
 

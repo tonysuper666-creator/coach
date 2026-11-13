@@ -1,7 +1,9 @@
 package com.coach.desktop
 
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
 import java.io.File
 import java.nio.file.Files
@@ -41,7 +43,7 @@ class WindowsTextbooksTest {
             onNodeWithTag("next-page").performClick()
             ready(controller) { it.page == 2 }
             capture("reader")
-            onNodeWithText("返回书桌").performClick()
+            onNodeWithText("返回书架").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
             capture("home")
             onNodeWithTag("home-learn").performClick()
@@ -105,14 +107,110 @@ class WindowsTextbooksTest {
         }
     }
 
+    /**
+     * The live host path: 今天/课程/书架 plus 设置 in one chrome, and the textbook flow still runs inside 书架.
+     * 1440×900 dp is the shipped window; the desk keeps at most two columns beside the rail.
+     */
+    @Test fun defaultHostKeepsThreeDestinationsAndTheTextbookFlowInTwoColumns() {
+        val root = Files.createTempDirectory("coach-windows-host-ui-")
+        val source = syntheticTextbook(root.resolve("friend"))
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+            setContent { WindowsTextbookHost(controller) { source } }
+            ready(controller) { it.catalog.isEmpty() && it.book == null }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+
+            // 旧缺口：Windows 入口直接落在书桌，没有三入口。新入口三处同在，书名与导航都叫书架。
+            onNodeWithTag("host-navigation").assertIsDisplayed()
+            nav("今天").assertIsDisplayed()
+            nav("课程").assertIsDisplayed()
+            nav("书架").assertIsDisplayed()
+            onNodeWithTag("library-title").assertTextEquals("书架")
+            capture("host-library-1440x900", "windows-host")
+
+            // 设置右上角，内容是本机的书架位置。
+            onNodeWithTag("open-settings").assertIsDisplayed().performClick()
+            onNodeWithTag("settings-library-directory").assertTextEquals(root.resolve("library").toString())
+            onNodeWithTag("close-settings").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("settings-library-directory").fetchSemanticsNodes().isEmpty() }
+
+            // 今天和课程在这台没有课程数据的机器上是真实空态，不伪造进度。
+            nav("今天").performClick()
+            onNodeWithTag("host-today-empty").assertIsDisplayed()
+            onAllNodesWithTag("upload-textbook").assertCountEquals(0)
+            capture("host-today-1440x900", "windows-host")
+            nav("课程").performClick()
+            onNodeWithTag("host-course-empty").assertIsDisplayed()
+            onAllNodesWithTag("upload-textbook").assertCountEquals(0)
+            capture("host-course-1440x900", "windows-host")
+            nav("书架").performClick()
+            onNodeWithTag("upload-textbook").assertIsDisplayed()
+
+            // 上传 → 出题选选择 → 直接开始学。
+            onNodeWithTag("upload-textbook").performClick()
+            ready(controller) { it.prompt == BookPrompt.IMPORTED }
+            onNodeWithTag("question-mode-CHOICE").performClick()
+            ready(controller) { it.book?.questionMode == QuestionMode.CHOICE }
+            onNodeWithTag("enable-learning").performClick()
+            ready(controller) { it.screen == BookScreen.LEARNING }
+
+            // 两栏落在实际宿主：正文与出处栏并排，目录只在抽屉里。
+            onNodeWithTag("v7-paper").assertIsDisplayed()
+            onNodeWithTag("v7-margin").assertIsDisplayed()
+            onAllNodesWithTag("v7-directory-drawer").assertCountEquals(0)
+            onNodeWithTag("v7-directory-toggle").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isNotEmpty() }
+            onNode(hasAnyAncestor(hasTestTag("v7-directory-drawer")) and hasText("学习路线")).assertIsDisplayed()
+            capture("host-learning-directory-1440x900", "windows-host")
+            onNodeWithText("收起目录").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isEmpty() }
+            waitForIdle()
+
+            // 作答、出处和翻页照旧；去今天再回书架，学习位置和作答都还在。
+            val learning = controller.state.value.book!!
+            val practice = StudyCoachCourse.practice(learning, learning.lessons[0], QuestionMode.CHOICE)!!
+            onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
+            ready(controller) { it.answer.revealed }
+            onNodeWithText("与原文一致。").assertExists()
+            nav("今天").performClick()
+            onNodeWithTag("host-today-empty").assertIsDisplayed()
+            nav("书架").performClick()
+            onNodeWithTag("textbook-learning").assertIsDisplayed()
+            onNodeWithText("与原文一致。").assertExists()
+            onNodeWithTag("open-lesson-source").performScrollTo().performClick()
+            ready(controller) { it.screen == BookScreen.READER && it.source != null }
+            onNodeWithTag("next-page").performClick()
+            ready(controller) { it.page == 2 }
+            // 学习时看原文只翻原文，不挪动书架上的阅读书签。
+            assertEquals(1, controller.state.value.book!!.readingPage)
+            capture("host-source-1440x900", "windows-host")
+            onNodeWithText("返回学习").performClick()
+            ready(controller) { it.screen == BookScreen.LEARNING && it.source == null }
+            onNodeWithTag("next-lesson").performScrollTo().performClick()
+            ready(controller) { it.book?.lessonIndex == 1 }
+
+            // 回书架再读：真页翻读把书签落在第 2 页。
+            onNodeWithText("返回书架").performClick()
+            ready(controller) { it.screen == BookScreen.HOME }
+            onNodeWithTag("home-read").performClick()
+            ready(controller) { it.screen == BookScreen.READER && it.source == null }
+            onNodeWithTag("next-page").performClick()
+            ready(controller) { it.page == 2 && it.book?.readingPage == 2 }
+        }
+        val reopened = TextbookLibrary(root.resolve("library")).book(controller.state.value.book!!.id)
+        assertEquals(1, reopened.lessonIndex)
+        assertEquals(2, reopened.readingPage)
+        assertEquals(QuestionMode.CHOICE, reopened.questionMode)
+    }
+
     private fun ComposeUiTest.ready(controller: TextbookController, condition: (LibraryUi) -> Boolean) {
         waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && condition(controller.state.value) }
         assertNull(controller.state.value.error)
         waitForIdle()
     }
 
-    private fun ComposeUiTest.capture(name: String) {
+    private fun ComposeUiTest.capture(name: String, tag: String = "windows-textbooks") {
         val output = File("build/screens/windows-textbooks").apply { mkdirs() }
-        ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", File(output, "$name.png"))
+        ImageIO.write(onNodeWithTag(tag).captureToImage().toAwtImage(), "png", File(output, "$name.png"))
     }
 }

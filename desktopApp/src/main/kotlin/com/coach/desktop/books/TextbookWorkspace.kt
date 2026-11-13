@@ -32,7 +32,11 @@ import java.nio.file.Path
 internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
-    LaunchedEffect(controller) { controller.load() }
+    // Leaving 书架 for 今天 or 课程 and coming back keeps the open page: the controller already holds it.
+    LaunchedEffect(controller) {
+        val current = controller.state.value
+        if (current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
+    }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
     CoachTheme {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
@@ -67,7 +71,7 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 1000.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(36.dp),
             verticalArrangement = Arrangement.spacedBy(22.dp)) {
-            Text("我的书桌", style = MaterialTheme.typography.headlineLarge)
+            Text("书架", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("library-title"))
             Text("带来一本教材，从想读的地方开始。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
             Text("PDF、EPUB、Markdown 或文本 · 教材和进度保存在这台电脑", style = MaterialTheme.typography.bodySmall)
@@ -85,7 +89,7 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
                     }, "home-learn", !ui.busy, Modifier.weight(1f), onLearn)
                 }
                 HorizontalDivider()
-                Text("书架", style = MaterialTheme.typography.titleMedium)
+                Text("全部教材", style = MaterialTheme.typography.titleMedium)
                 for (item in ui.catalog) {
                     OutlinedButton(onClick = { onSelect(item.id) }, enabled = !ui.busy,
                         modifier = Modifier.fillMaxWidth().testTag("book-${item.id}")) {
@@ -174,7 +178,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     val source = ui.source
-    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书桌", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书架", showNavigation = false,
         status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -236,7 +240,7 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
-    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书桌", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }

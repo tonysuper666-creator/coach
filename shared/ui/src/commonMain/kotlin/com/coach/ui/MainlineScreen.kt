@@ -209,7 +209,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val section = sections.firstOrNull { it.str("section_id") == sectionId } ?: sections.firstOrNull()
     val filtered = if (filter.isBlank() && targetKpId == null) items else {
         val facts = sections.firstOrNull { it.str("section_id") == filter }?.strings("fact_ids").orEmpty()
-        items.filter { q -> q.strings("factIds").any { it in facts } || (q["ladder"] as? JsonObject)?.str("sectionId") == filter ||
+        items.filter { q -> q.str("id") == pending?.str("itemId") || q.strings("factIds").any { it in facts } || (q["ladder"] as? JsonObject)?.str("sectionId") == filter ||
             (q["ladder"] as? JsonObject)?.str("kpId") == targetKpId || (q["ladder"] as? JsonObject)?.str("kind") == "try_first" }
     }
     val learning = body?.flag("learning") == true
@@ -217,7 +217,14 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     val ladderQuestions = filtered.mapNotNull { q -> (q["ladder"] as? JsonObject)?.let { raw -> runCatching { LedgerJson.decodeFromJsonElement<LadderQuestion>(raw) }.getOrNull() } }
     val previouslyLearned = view.kps.filter { it.status in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }.map { it.id }.toSet()
     val capabilities = runtime.context.knownCapabilities.orEmpty()
-    val ladderStep = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities)
+    val exactTargetQuestions = ladderQuestions.filter { it.kpId == targetKpId }
+    val targetQuestions = exactTargetQuestions.ifEmpty { ladderQuestions }
+    // A wrong answer in a different target must not force remediation in this target.
+    val targetSession = if (targetKpId != null && exactTargetQuestions.isNotEmpty())
+        ladderSession.copy(responses = ladderSession.responses.filter { it.kpId == targetKpId }) else ladderSession
+    val learnedAcrossTargets = ladderSession.responses.map { it.kpId }.toSet().filter { QuestionLadder.learned(ladderSession, it) }
+    val targetLearned = previouslyLearned + learnedAcrossTargets
+    val ladderStep = QuestionLadder.next(targetQuestions, targetSession, targetLearned, capabilities)
     val index = filtered.indexOfFirst { it.str("id") == itemId }.takeIf {
         it >= 0 && (!learning || result != null || pending != null || itemId == ladderStep.question?.id)
     }
@@ -240,8 +247,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         save("mode" to JsonPrimitive(if (mode) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "item" to JsonPrimitive(id),
             "section" to JsonPrimitive(section), "filter" to JsonPrimitive(selectedFilter))
     }
-    LaunchedEffect(body != null) {
+    LaunchedEffect(body != null, pending) {
         if (body != null && targetKpId != null && entry in setOf("quiz", "notes")) {
+            // An unacknowledged answer owns its question and must finish before switching targets.
+            if (pending != null) return@LaunchedEffect
             // Use actual section/fact IDs from the imported course, never infer an answer link from ordering.
             val concepts = view.kp(targetKpId)?.conceptIds.orEmpty()
             val match = sections.firstOrNull { it.str("section_id") == targetKpId || it.strings("fact_ids").any { f -> f in concepts } }
@@ -249,11 +258,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val pausedId = pending?.str("itemId") ?: result?.str("itemId")
             val paused = items.firstOrNull { it.str("id") == itemId && it.str("id") == pausedId }
             val metadata = paused?.get("ladder") as? JsonObject
-            val sameTarget = metadata?.str("kpId") == targetKpId || (match != null &&
-                (metadata?.str("sectionId") == match.str("section_id") || paused?.strings("factIds").orEmpty().any { it in match.strings("fact_ids") }))
+            val pausedKp = metadata?.str("kpId").orEmpty()
+            val sameTarget = if (pausedKp.isNotBlank()) pausedKp == targetKpId else match != null &&
+                (metadata?.str("sectionId") == match.str("section_id") || paused?.strings("factIds").orEmpty().any { it in match.strings("fact_ids") })
             if (!reading && paused != null && sameTarget) return@LaunchedEffect
             if (match == null && learning && !reading) {
-                val next = QuestionLadder.next(ladderQuestions, ladderSession, previouslyLearned, capabilities).question?.id.orEmpty()
+                val next = QuestionLadder.next(targetQuestions, targetSession, targetLearned, capabilities).question?.id.orEmpty()
                 if (next != itemId) { chosen = null; result = null; save("choice" to JsonNull, "result" to JsonNull) }
                 if (filter != targetKpId) saveSession(ladderSession.copy(complete = false))
                 position(false, next, selectedFilter = targetKpId)
@@ -264,8 +274,9 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 } else {
                     val candidates = items.filter { q -> q.strings("factIds").any { it in match.strings("fact_ids") } }
                     val next = if (learning) {
-                        val scoped = ladderQuestions.filter { it.kpId == targetKpId || it.sectionId == match.str("section_id") || it.kind == "try_first" }
-                        val selected = QuestionLadder.next(scoped, ladderSession, previouslyLearned, capabilities).question?.id
+                        val scoped = if (exactTargetQuestions.isNotEmpty()) exactTargetQuestions else
+                            ladderQuestions.filter { it.kpId == targetKpId || it.sectionId == match.str("section_id") || it.kind == "try_first" }
+                        val selected = QuestionLadder.next(scoped, targetSession, targetLearned, capabilities).question?.id
                         items.firstOrNull { it.str("id") == selected }
                     } else candidates.firstOrNull { it.str("status") != "mastered" } ?: candidates.firstOrNull()
                     val id = next?.str("id").orEmpty()
@@ -279,7 +290,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     LaunchedEffect(Unit) {
         if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
         save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
-        if (only == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
+    }
+    LaunchedEffect(pending) {
+        // Preserve a requested target across another restart while its prior answer is retrying.
+        if (only == null && pending == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
     }
     LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }
     LaunchedEffect(pending, retry) {

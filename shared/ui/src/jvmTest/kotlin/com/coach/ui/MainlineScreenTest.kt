@@ -41,7 +41,8 @@ class MainlineScreenTest {
     internal class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
                           source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false,
                           correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
-                          private val explain: ((JsonObject) -> JsonObject)? = null, private val primers: Boolean = false) : AutoCloseable {
+                          private val explain: ((JsonObject) -> JsonObject)? = null, private val primers: Boolean = false,
+                          private val splitKps: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
         val explains = CopyOnWriteArrayList<JsonObject>()
@@ -60,7 +61,7 @@ class MainlineScreenTest {
             listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
         private fun weeklyBody(): JsonObject {
             val questions = items.map { (id, tier) ->
-                val metadata = LadderQuestion(id, "K", if (id == "B1") "W01-bridge" else "W01-basics",
+                val metadata = LadderQuestion(id, if (splitKps && id == "D1") "OTHER" else "K", if (id == "B1") "W01-bridge" else "W01-basics",
                     if (id.startsWith("P")) "try_first" else when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
                     if (id == "S1") 2 else 0, "synthetic-orchard", "synthetic-$id", eligible = true)
                 json("id" to id, "tier" to tier, "stem" to "Synthetic orchard question $id: which statement about the orchard holds?",

@@ -99,10 +99,12 @@ private fun DocList(docs: List<SourceDoc>, onOpen: (SourceDoc) -> Unit) {
 private fun PageReader(c: CoachController, docs: List<SourceDoc>?, key: PageKey, onPage: (PageKey) -> Unit, onRetry: () -> Unit) {
     val doc = docs?.firstOrNull { it.docId == key.docId }
     var retry by remember { mutableStateOf(0) }
-    val page by produceState<Load<SourcePage>>(c.sourcePages[key]?.let { Load.Ready(it) } ?: Load.Pending, key, retry) {
-        value = c.sourcePages[key]?.let { Load.Ready(it) }
-            ?: c.course?.page(key.docId, key.pdfPage)?.also { c.sourcePages[key] = it }?.let { Load.Ready(it) }
-            ?: Load.Failed
+    val page by androidx.compose.runtime.key(key) {
+        produceState<Load<SourcePage>>(c.sourcePages[key]?.let { Load.Ready(it) } ?: Load.Pending, retry) {
+            value = c.sourcePages[key]?.let { Load.Ready(it) }
+                ?: c.course?.page(key.docId, key.pdfPage)?.also { c.sourcePages[key] = it }?.let { Load.Ready(it) }
+                ?: Load.Failed
+        }
     }
     val first = doc?.firstPdfPage ?: key.pdfPage
     val last = doc?.lastPdfPage ?: key.pdfPage

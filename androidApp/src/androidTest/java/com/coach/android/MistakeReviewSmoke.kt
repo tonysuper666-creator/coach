@@ -1,0 +1,494 @@
+package com.coach.android
+
+import kotlin.math.roundToInt
+import android.content.Intent
+import android.os.Bundle
+import android.os.SystemClock
+import android.view.accessibility.AccessibilityNodeInfo
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.coach.client.PairedCredentials
+import com.coach.client.PoolTrace
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/** OPPO replay against an isolated production copy. Keys are an explicit test-only input,
+ * read from this test package's cache, never requested from the running application. */
+@RunWith(AndroidJUnit4::class)
+class MistakeReviewSmoke {
+    private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val context = instrumentation.targetContext
+    private val args = InstrumentationRegistry.getArguments()
+    private val ui get() = instrumentation.uiAutomation
+    private val http = OkHttpClient()
+    private val samples by lazy { java.io.File(context.cacheDir,"review-metrics.json").takeIf { it.exists() }?.let { JSONObject(it.readText()) } ?: JSONObject() }
+    private lateinit var base: String
+    private lateinit var token: String
+    private lateinit var device: String
+    private lateinit var course: String
+    private lateinit var keys: JSONObject
+    private var reviewThread: String? = null
+
+    private fun step(name: String) {
+        val message = "COACH_STEP ${System.currentTimeMillis()} elapsed=${SystemClock.elapsedRealtime()} $name"
+        instrumentation.sendStatus(0, Bundle().apply { putString("stream", "\n$message\n") })
+        trace(message)
+    }
+
+    @Test fun wrongAnswersRetryAndClear() {
+        step("wrongAnswersRetryAndClear started")
+        val port = requireNotNull(args.getString("coachPort")).toInt()
+        require(port !in setOf(8790,8791,18791,3790))
+        require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
+        base = "http://${BuildConfig.COACH_TAIL_HOST}:$port"
+        token = requireNotNull(args.getString("coachToken"))
+        device = requireNotNull(args.getString("coachDevice"))
+        course = BuildConfig.COACH_COURSE
+        keys = JSONObject(java.io.File(context.cacheDir,"review-keys.json").readText())
+        val kp = requireNotNull(args.getString("coachKp"))
+        KeystoreCredentials(context,base).save(PairedCredentials(device,token))
+        val resume = args.getString("coachPhase") == "resume"
+        if (!resume) context.deleteDatabase("coach-client.db")
+        PoolTrace.enabled = true
+        try {
+            step("launch activity")
+            context.startActivity(Intent(context,CoachActivity::class.java).putExtra("coachUrl",base).putExtra("openKp",kp)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+            var before = emptySet<String>()
+            if (!resume) {
+            step("request initial questions")
+            click(waitText("出题",15_000,enabled=true))
+            waitText("第 1 / 3 题",15_000)
+            focus("kp:$kp","initial")
+            val first = group("kp:$kp")
+            // The copy keeps the course's history, so the tab counts older mistakes too: assert against a ledger baseline.
+            before = mistakes().map { it.attemptId }.toSet()
+            samples.put("baselineWrongCount",before.size)
+            step("answer initial questions")
+            answer(first, wrong = 2)
+            scrollTo("提交本组答案").let(::click)
+            scrollTo("本组 1 / 3 题正确",substring=true)
+            step("initial answers graded")
+            focus("kp:$kp","graded")
+            backToToday()
+            } else backToToday(15_000)
+            val first = group("kp:$kp")
+            val newWrong = (0 until 2).map { first.getJSONObject(it).getJSONObject("payload").getString("attemptId") }.toSet()
+            val listed = mistakes()
+            val listedIds = listed.map { it.attemptId }.toSet()
+            if (!resume) {
+                assertEquals(samples.getInt("baselineWrongCount")+2,listed.size)
+                assertEquals(newWrong,listedIds-before)
+            } else assertEquals(samples.getInt("wrongCount"),listed.size)
+            assertTrue(listedIds.containsAll(newWrong))
+            val reviewButton = waitText("到期复习")
+            step("open mistake list")
+            val reviewMark = SystemClock.elapsedRealtimeNanos()
+            click(reviewButton)
+            click(waitText("错题 ${listed.size}")) // with due reviews the page opens on 到期; the list is only composed on 错题
+            val wrongListSplit = linkedMapOf("click" to sinceMs(reviewMark))
+            // Stems render as Markdown, so wait for a plain label every card carries; the list is not lazy.
+            wrongListSplit.putAll(waitTarget("当时的答案：",reviewMark,interim=null,substring=true))
+            settleAndCapture("wrong-list",reviewMark,wrongListSplit)
+            step("mistake list captured")
+            step("split wrong-list ${splitNote(wrongListSplit)}")
+            scrollTo(first.getJSONObject(0).getJSONObject("payload").getString("stem")) // after the timed window
+            samples.put("wrongCount",listed.size)
+            if (args.getString("coachPhase") == "prepare") {
+                samples.put("initialWrongListMs",samples.getDouble("wrong-listMs"))
+                return
+            }
+            // History lists older mistakes first, so the first 再练一组 on the page may belong to another kp: use the new mistake's own card.
+            // The cards have no accessibility node of their own, so walk the container in find's order: a card is
+            // title, stem, its three labels, then its button, and the next card's button only follows that card's title.
+            val stemText = first.getJSONObject(0).getJSONObject("payload").getString("stem")
+            var stem = scrollTo(stemText)
+            // Off-screen nodes are left out of the tree or ordered by fake bounds, so lift the stem into the page's upper half
+            // first: the card's labels and button must be on screen to follow it.
+            fun pageRect() = scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+            fun centerY(n: AccessibilityNodeInfo) = android.graphics.Rect().also(n::getBoundsInScreen).centerY()
+            var page = pageRect()
+            var drags = 0
+            while (page != null && centerY(stem) > page.centerY()) {
+                if (drags == 4) throw AssertionError("stem still in the lower half after 4 drags: centerY=${centerY(stem)} page=${page.top}-${page.bottom}")
+                scroll(true);drags++
+                stem = find(stemText,anyVisibility=true) ?: throw AssertionError("stem lost after drag $drags")
+                page = pageRect()
+            }
+            val nodes = preorder(mistakeCard(stem))
+            val stemAt = nodes.indexOf(stem)
+            val labels = listOf("当时的答案：","正确答案：","判分依据：")
+            // Numbers only, never text: where the stem, every 再练一组 and each label sit in the walk.
+            fun layoutNote() = "stemAt=$stemAt nodes=${nodes.size} buttons=${nodes.indices.filter { hit(nodes[it],"再练一组",false) }} " +
+                labels.mapIndexed { i,l -> "label$i=${nodes.indices.filter { hit(nodes[it],l,true) }}" }.joinToString(" ") +
+                " stemClass=${stem.className} stemY=${centerY(stem)} page=${page?.top}-${page?.bottom} drags=$drags"
+            assertTrue("stem not in the list container: ${layoutNote()}",stemAt>=0)
+            val buttonAt = (stemAt+1 until nodes.size).firstOrNull { hit(nodes[it],"再练一组",false) } ?: throw AssertionError("No 再练一组 after the new mistake's stem: ${layoutNote()}")
+            // Both entries and their original answers remain in the replica, even without a new request.
+            for ((i,label) in labels.withIndex()) assertTrue("card label$i missing between stem and button: ${layoutNote()}",(stemAt+1 until buttonAt).any { hit(nodes[it],label,true) })
+            val retryButton = nodes[buttonAt]
+            if (!retryButton.isVisibleToUser) { retryButton.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id);instrumentation.waitForIdleSync() }
+            // The app reuses the kp's latest REVIEW thread (CourseView.reviewThreadId); history may already hold one.
+            val ledger = events()
+            val retryThread = latestReviewOpen(ledger,kp)?.optString("threadId") ?: "review:$course:$kp"
+            val retryBase = (0 until ledger.length()).maxOfOrNull { ledger.getJSONObject(it).getLong("seq") } ?: 0L
+            step("open retry questions")
+            val retryMark = SystemClock.elapsedRealtimeNanos()
+            reviewThread = retryThread
+            PoolTrace.begin(retryThread) // a retry is not a "test" send, so the app does not start this thread's trace
+            val retrySplit = linkedMapOf("traceBegin" to sinceMs(retryMark))
+            click(retryButton)
+            retrySplit["click"] = sinceMs(retryMark)
+            retrySplit.putAll(waitTarget("第 1 / 3 题",retryMark,interim="正在取出同一知识点的 3 道新题…"))
+            settleAndCapture("retry",retryMark,retrySplit)
+            step("retry questions captured")
+            focus(retryThread,"retry") // after the timed window, as in wrong-list
+            // PoolTrace stages count from traceBegin.
+            val retryTrace = PoolTrace.snapshot(retryThread)
+            for (stage in listOf("cards_received","events_saved")) retrySplit[stage] = retryTrace[stage] ?: -1.0
+            step("split retry ${splitNote(retrySplit)}")
+            val opened = latestReviewOpen(events(),null)
+            val openedAt = "seq=${opened?.optLong("seq")} base=$retryBase"
+            assertEquals("latest REVIEW kp_opened kpId ($openedAt)",kp,opened?.getJSONObject("payload")?.optString("kpId"))
+            assertEquals("latest REVIEW kp_opened threadId ($openedAt)",retryThread,opened?.optString("threadId"))
+            val retry = group(retryThread,afterSeq=retryBase)
+            val oldIds = (0 until first.length()).map { first.getJSONObject(it).getJSONObject("payload").getString("questionId") }.toSet()
+            assertEquals(3,retry.length())
+            for (i in 0 until retry.length()) assertFalse(oldIds.contains(retry.getJSONObject(i).getJSONObject("payload").getString("questionId")))
+            step("answer retry questions")
+            answer(retry,wrong=0)
+            val clearMark=SystemClock.elapsedRealtimeNanos()
+            click(scrollTo("提交本组答案"))
+            val cleared = waitCleared(newWrong)
+            // The empty-state line only shows once the whole course list is empty, which history can prevent.
+            if (cleared.isEmpty()) waitText("错题都已掌握，继续保持。")
+            else {
+                waitText("连续答对 3 道，这个知识点的错题已移出。")
+                assertNull(find("错题都已掌握，继续保持。"))
+            }
+            settleAndCapture("cleared",clearMark)
+            step("cleared list captured")
+            step("cleared branch=${if (cleared.isEmpty()) "empty" else "notice"}")
+            focus(retryThread,"cleared")
+            samples.put("newQuestions",3).put("clearedCount",2)
+            assertTrue(samples.getDouble("initialWrongListMs")<=1000)
+            assertTrue(samples.getDouble("wrong-listMs")<=1000)
+            assertTrue(samples.getDouble("retryMs")<=1000)
+        } catch(t: Throwable) {
+            focus("kp:$kp","fail");focus(reviewThread ?: "review:$course:$kp","fail")
+            runCatching { settleAndCapture("fail",SystemClock.elapsedRealtimeNanos());java.io.File(context.cacheDir,"review-fail.txt").writeText(visibleTexts().joinToString("\n")+"\nlayout: "+layout()) }
+            throw t
+        } finally {
+            java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
+            PoolTrace.enabled = false
+        }
+    }
+
+    @Test fun cachedMistakesSurviveRestartWithoutMac() {
+        step("cachedMistakesSurviveRestartWithoutMac started")
+        require(context.packageName.startsWith("com.coach.") && context.packageName != "com.coach.android") // never the production package
+        val port=requireNotNull(args.getString("coachPort")).toInt()
+        require(port !in setOf(8790,8791,18791,3790))
+        context.startActivity(Intent(context,CoachActivity::class.java)
+            .putExtra("coachUrl","http://${BuildConfig.COACH_TAIL_HOST}:$port")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        // The prepare run ended on the mistake list; a cold restart restores that page from the saved
+        // navigation stack (TON-1445) rather than landing on Today, so no tap is needed to get back to it.
+        step("restored offline mistake list")
+        val wrongCount=samples.getInt("wrongCount") // written by the prepare run from the ledger
+        click(waitText("错题 $wrongCount",15_000)) // the tab is not saved: a cold start opens on 到期 again
+        assertNull("restart must restore the review page, not Today's 到期复习 card",find("到期复习"))
+        waitText("离线可回看错题；连接 Mac 后可再练。")
+        scrollTo("正确答案：",substring=true)
+        settleAndCapture("offline",SystemClock.elapsedRealtimeNanos())
+        step("offline mistake list captured")
+        samples.put("offlineWrongCount",wrongCount)
+        java.io.File(context.cacheDir,"review-metrics.json").writeText(samples.toString(2))
+    }
+
+    private fun events(): JSONArray {
+        // The server caps each page at 500 events; long snapshots need every page.
+        val all=JSONArray();var after=0L
+        for(pageNo in 1..50) {
+            val req=Request.Builder().url("$base/v1/courses/$course/events?after=$after")
+                .header("Authorization","Bearer $token").header("X-Coach-Device",device).build()
+            val page=http.newCall(req).execute().use { response ->
+                assertTrue(response.isSuccessful)
+                JSONObject(response.body!!.string())
+            }
+            val events=page.getJSONArray("events")
+            for(i in 0 until events.length()) all.put(events.getJSONObject(i))
+            if(!page.optBoolean("hasMore",false)) return all
+            val through=page.getLong("throughSeq")
+            if(through<=after) fail("events paging stalled at after=$after throughSeq=$through")
+            after=through
+        }
+        fail("events paging exceeded 50 pages")
+        return all
+    }
+    /** The course's mistakes recomputed from the server ledger with the same rules the app uses for its tab. */
+    private fun mistakes(): List<com.coach.client.Mistake> {
+        val all=events()
+        val list=(0 until all.length()).map { com.coach.domain.LedgerJson.decodeFromString(com.coach.domain.Event.serializer(),all.getJSONObject(it).toString()) }
+        return com.coach.client.mistakeReview(list).items
+    }
+    /** After the retry is graded: neither new mistake remains in the ledger and the tab shows the recomputed count. */
+    private fun waitCleared(newWrong: Set<String>,timeout: Long=10_000): List<com.coach.client.Mistake> {
+        val end=SystemClock.elapsedRealtime()+timeout
+        var last: List<com.coach.client.Mistake> = emptyList()
+        while(SystemClock.elapsedRealtime()<end) {
+            last=mistakes()
+            if(last.none { it.attemptId in newWrong } && find("错题 ${last.size}")!=null) return last
+            Thread.sleep(100) // each probe re-reads the whole ledger
+        }
+        val left=last.count { it.attemptId in newWrong }
+        throw AssertionError("Visible text missing: 错题 ${last.size} (new mistakes still listed: $left)")
+    }
+    private fun group(thread: String,afterSeq: Long?=null): JSONArray {
+        val all=events();val cards=JSONArray()
+        for(i in 0 until all.length()) all.getJSONObject(i).let {
+            if(it.optString("type")=="question_posed" && it.optString("threadId")==thread && (afterSeq==null || it.getLong("seq")>afterSeq)) cards.put(it)
+        }
+        assertEquals(3,cards.length())
+        if(afterSeq!=null) assertEquals(1,(0 until cards.length()).map { cards.getJSONObject(it).getJSONObject("payload").optString("groupId") }.toSet().size)
+        return cards
+    }
+    /** Latest kp_opened with via=REVIEW and a thread, for [kp] or (null) any kp: the rule CourseView.reviewThreadId reads. */
+    private fun latestReviewOpen(all: JSONArray,kp: String?): JSONObject? = (0 until all.length()).map { all.getJSONObject(it) }.filter {
+        val p=it.optJSONObject("payload")
+        it.optString("type")=="kp_opened" && p?.optString("via")=="REVIEW" && (kp==null || p.optString("kpId")==kp) &&
+            it.optString("threadId").isNotBlank() && !it.isNull("threadId")
+    }.maxByOrNull { it.getLong("seq") }
+    /** The first ancestor of [node] whose subtree has a 再练一组 button: on the phone, the whole list container. */
+    private fun mistakeCard(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        var n: AccessibilityNodeInfo?=node.parent
+        while(n!=null) { if(find("再练一组",node=n,anyVisibility=true)!=null) return n;n=n.parent }
+        throw AssertionError("No mistake card around the new mistake's stem")
+    }
+    private fun answer(cards: JSONArray, wrong: Int) {
+        for(i in 0 until cards.length()) {
+            val p=cards.getJSONObject(i).getJSONObject("payload")
+            val correct=keys.getString(p.getString("questionId"))
+            val opts=p.getJSONArray("options")
+            val opt=(0 until opts.length()).map { opts.getJSONObject(it) }.first {
+                if(i<wrong) it.getString("optionId")!=correct else it.getString("optionId")==correct
+            }
+            pick(opt.getString("text"),i+1)
+        }
+    }
+    /** The newest question group's focus stages in ms (focus_requested, then focus_settled or focus_timeout); no question text. */
+    private fun focus(thread: String,at: String)=step("focus $at $thread ${JSONObject(PoolTrace.snapshot(thread))}")
+    private fun trace(line: String)=java.io.File(context.cacheDir,"review-trace.txt").appendText("${SystemClock.elapsedRealtime()} $line\n")
+    private fun snap(name: String) { runCatching {
+        val bitmap=ui.takeScreenshot()
+        java.io.File(context.cacheDir,"review-snap-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG,60,it) }
+        bitmap.recycle() } }
+    /** The option's letter sits right before its text in the tree: "✓ B" there means this very row is chosen. */
+    private fun chosen(optionText: String): Boolean {
+        val nodes=visibleTexts();val want=norm(optionText).take(40)
+        val at=nodes.indexOfFirst { norm(it.drop(2)).contains(want) }
+        return at>0 && nodes[at-1].contains("✓")
+    }
+    private fun marks()=visibleTexts().count { it.contains("✓") }
+    /** Reveals the row and taps it. A wrong or missed tap is caught later: the submit button stays disabled
+     * ("选完 3 题后提交") until every card has a choice, and [click] refuses a disabled button. */
+    private fun pick(optionText: String,card: Int) {
+        step("select answer card=$card")
+        repeat(3) {
+            trace("pick attempt $it card=$card text=${optionText.take(50)}")
+            try { val node=scrollTo(optionText,card=card);snap("c${card}a$it-before");tap(node);Thread.sleep(400);snap("c${card}a$it-after");return }
+            catch(e: AssertionError) { if(it==2) throw e;Thread.sleep(400) }
+        }
+    }
+    /** [split], when given, gets idle, shotStart and shotEnd in ms after [mark]; [samples] is written as before. */
+    private fun settleAndCapture(name: String,mark: Long,split: MutableMap<String,Double>?=null) {
+        instrumentation.waitForIdleSync()
+        split?.put("idle",sinceMs(mark))
+        Thread.sleep(100)
+        val start=SystemClock.elapsedRealtimeNanos()
+        val bitmap=ui.takeScreenshot()
+        val end=SystemClock.elapsedRealtimeNanos()
+        split?.put("shotStart",(start-mark)/1_000_000.0);split?.put("shotEnd",(end-mark)/1_000_000.0)
+        java.io.File(context.cacheDir,"review-$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }
+        bitmap.recycle()
+        samples.put(name+"Ms",(end-mark)/1_000_000.0).put(name+"FrameStartedMs",(start-mark)/1_000_000.0)
+    }
+    /** The live tree: on a loaded emulator the accessibility cache can still hold pre-drag bounds, so a moved page read as
+     * unmoved and the search dragged straight back, and a tap landed on a row that had already scrolled away. */
+    private fun root(): AccessibilityNodeInfo? { ui.clearCache();return ui.rootInActiveWindow }
+    private fun find(text: String,substring: Boolean=false,node: AccessibilityNodeInfo?=root(),anyVisibility: Boolean=false): AccessibilityNodeInfo? {
+        if(node==null) return null
+        if((anyVisibility || node.isVisibleToUser) && hit(node,text,substring)) return node
+        for(i in 0 until node.childCount) find(text,substring,node.getChild(i),anyVisibility)?.let { return it }
+        return null
+    }
+    private fun hit(node: AccessibilityNodeInfo,text: String,substring: Boolean): Boolean {
+        val shown=norm(node.text?.toString().orEmpty());val want=norm(text)
+        // Option rows may merge the letter with a long Markdown body: match the body's opening too.
+        return if(substring) shown.contains(want) else shown==want || (want.length>40 && shown.contains(want.take(40)))
+    }
+    /** [node]'s subtree in the order [find] visits it. */
+    private fun preorder(node: AccessibilityNodeInfo?,out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
+        if(node==null) return out
+        out.add(node)
+        for(i in 0 until node.childCount) preorder(node.getChild(i),out)
+        return out
+    }
+    private fun norm(s: String)=s.replace('\u2019','\'').replace(Regex("\\s+")," ").trim()
+    private fun visibleTexts(node: AccessibilityNodeInfo?=root(),out: MutableList<String> = mutableListOf()): List<String> {
+        if(node==null) return out
+        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { out.add((if(node.isVisibleToUser) "V " else "H ")+it.take(400)) }
+        for(i in 0 until node.childCount) visibleTexts(node.getChild(i),out)
+        return out
+    }
+    /** Back to 今天. A wide window keeps it beside the study pane, which then has no back button. */
+    private fun backToToday(timeout: Long=10_000) {
+        val end=SystemClock.elapsedRealtime()+timeout
+        while(SystemClock.elapsedRealtime()<end) {
+            find("← 今天")?.let { click(it);return }
+            if(find("到期复习")!=null && find("学习范围",substring=true)!=null) return
+            Thread.sleep(10)
+        }
+        throw AssertionError("Visible text missing: ← 今天")
+    }
+    private fun sinceMs(mark: Long)=(SystemClock.elapsedRealtimeNanos()-mark)/1_000_000.0
+    private fun splitNote(split: Map<String,Double>)=split.entries.joinToString(" ") { (k,v) -> "$k=${"%.1f".format(java.util.Locale.ROOT,v)}" }
+    /** [waitText] over one tree read per poll that also notes, in ms after [mark], when [interim] first showed (-1: never seen). */
+    private fun waitTarget(text: String,mark: Long,interim: String?,substring: Boolean=false,timeout: Long=10_000): Map<String,Double> {
+        val end=SystemClock.elapsedRealtime()+timeout
+        var interimMs=-1.0
+        while(SystemClock.elapsedRealtime()<end) {
+            val r=root()
+            if(interim!=null && interimMs<0 && find(interim,true,r)!=null) interimMs=sinceMs(mark)
+            if(find(text,substring,r)!=null) return mapOf("interim" to interimMs,"target" to sinceMs(mark))
+            Thread.sleep(10)
+        }
+        throw AssertionError("Visible text missing: $text")
+    }
+    private fun waitText(text: String,timeout: Long=10_000,enabled: Boolean=false,substring: Boolean=false): AccessibilityNodeInfo {
+        val end=SystemClock.elapsedRealtime()+timeout
+        while(SystemClock.elapsedRealtime()<end) {
+            find(text,substring)?.let { node ->
+                var button: AccessibilityNodeInfo?=node
+                while(button!=null && !button.isClickable) button=button.parent
+                if(!enabled || button?.isEnabled==true) return node
+            }
+            Thread.sleep(10)
+        }
+        throw AssertionError("Visible text missing: $text")
+    }
+    /** Injects a steady 30-step finger drag; unlike `input swipe` its pace never depends on shell start-up. */
+    private fun drag(x: Int,fromY: Int,toY: Int) {
+        val t0=SystemClock.uptimeMillis()
+        fun send(action: Int,at: Long,y: Float) {
+            val e=android.view.MotionEvent.obtain(t0,at,action,x.toFloat(),y,0)
+            e.source=android.view.InputDevice.SOURCE_TOUCHSCREEN
+            ui.injectInputEvent(e,true);e.recycle()
+        }
+        send(android.view.MotionEvent.ACTION_DOWN,t0,fromY.toFloat())
+        val steps=30
+        for(i in 1..steps) { Thread.sleep(16);send(android.view.MotionEvent.ACTION_MOVE,SystemClock.uptimeMillis(),fromY+(toY-fromY)*i/steps.toFloat()) }
+        send(android.view.MotionEvent.ACTION_UP,SystemClock.uptimeMillis(),toY.toFloat())
+    }
+    private fun layout(node: AccessibilityNodeInfo?=root(),out: StringBuilder=StringBuilder()): String {
+        if(node==null) return out.toString()
+        if(!node.text.isNullOrBlank()) { val r=android.graphics.Rect();node.getBoundsInScreen(r);out.append(node.text).append('@').append(r.top).append(';') }
+        for(i in 0 until node.childCount) layout(node.getChild(i),out)
+        return out.toString()
+    }
+    private fun scrollables(n: AccessibilityNodeInfo?=root(),out: MutableList<AccessibilityNodeInfo> = mutableListOf()): List<AccessibilityNodeInfo> {
+        if(n==null) return out
+        if(n.isScrollable) out.add(n)
+        for(i in 0 until n.childCount) scrollables(n.getChild(i),out)
+        return out
+    }
+    private fun area(n: AccessibilityNodeInfo): Int { val r=android.graphics.Rect();n.getBoundsInScreen(r);return r.width()*r.height() }
+    private var scrollNote=""
+    /** One bounded drag in the page's largest scroll container; false when the content did not move. */
+    private fun scroll(forward: Boolean): Boolean {
+        val list=scrollables().maxByOrNull(::area) ?: run { scrollNote="no scrollable node";return false }
+        val rect=android.graphics.Rect();list.getBoundsInScreen(rect)
+        scrollNote="scrollable $rect of ${scrollables().size}"
+        val x=rect.centerX()
+        val high=rect.top+rect.height()*7/10
+        val low=rect.top+rect.height()*3/10
+        val from=if(forward) high else low
+        val to=if(forward) low else high
+        // Every card is composed even when off screen, so only positions show whether the page really moved.
+        val before=layout()
+        drag(x,from,to)
+        instrumentation.waitForIdleSync();Thread.sleep(400)
+        return layout()!=before
+    }
+    private val cardNumber=Regex("第 (\\d+) / \\d+ 题")
+    /** Card numbers whose header is on screen; the page is a column of cards, so these say which way to drag. */
+    private fun shownCards()=visibleTexts().mapNotNull { cardNumber.find(it)?.groupValues?.get(1)?.toInt() }
+    /** Page-edge margins in dp: they were tuned as 60/30/20 px on a 420dpi phone, where these give the same or more pixels;
+     * in raw px a 160dpi window demanded 2.6× the distance and refused a fully visible last row. */
+    private fun dp(v: Int)=(v*context.resources.displayMetrics.density).roundToInt()
+    /** Looks for [text] by dragging toward it. [card] (1-based) names the card the text belongs to when known;
+     * otherwise the drag reverses whenever the content stops moving. A fling can carry past a long option, so
+     * direction is re-decided after every drag from what is on screen, never assumed. */
+    private fun scrollTo(text: String,substring: Boolean=false,card: Int?=null): AccessibilityNodeInfo {
+        // Every card is composed, so the row can be asked to bring itself on screen; the page's own anchoring
+        // pulls back short drags, which made drag-and-search unreliable on long cards.
+        repeat(4) {
+            val node=find(text,substring,anyVisibility=true) ?: return@repeat
+            val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+            val r=android.graphics.Rect();node.getBoundsInScreen(r)
+            trace("reveal #$it ${text.take(30)} at ${r.centerY()} page=${page?.top}-${page?.bottom}")
+            if(page!=null && r.centerY()>=page.top+dp(23) && r.centerY()<=page.bottom-dp(23)) return node
+            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+            instrumentation.waitForIdleSync();Thread.sleep(700)
+        }
+        var forward=true;var stuck=0;val seen=linkedSetOf<String>()
+        repeat(40) {
+            val hit=find(text,substring)
+            // A row half under the composer or the header would take the tap meant for it: only a row well inside the page counts.
+            val page=scrollables().maxByOrNull(::area)?.let { n -> android.graphics.Rect().also(n::getBoundsInScreen) }
+            if(hit!=null) {
+                val r=android.graphics.Rect();hit.getBoundsInScreen(r)
+                if(page==null || (r.centerY()>=page.top+dp(23) && r.centerY()<=page.bottom-dp(23)) || (stuck>=2 && r.centerY()>=page.top+dp(8) && r.centerY()<=page.bottom-dp(12))) { trace("found after $it drags: ${text.take(40)}");return hit }
+                trace("found at ${r.centerY()} outside page ${page.top}-${page.bottom}; nudging")
+                val down=r.centerY()>page.bottom-dp(23)
+                // At the very end of the page the row cannot rise further; after two fruitless nudges tap it where it is.
+                if(!scroll(down)) stuck++ else stuck=0
+                return@repeat
+            }
+            val now=visibleTexts();seen.addAll(now)
+            val cards=shownCards()
+            val atFooter=now.any { it.contains("选完") || it.contains("提交本组答案") }
+            if(card!=null && cards.isNotEmpty()) forward=cards.max()<=card && !(cards.max()==card && atFooter)
+            else if(card!=null && atFooter) forward=false
+            trace("drag #$it forward=$forward cards=$cards footer=$atFooter want=$card")
+            if(!scroll(forward)) { forward=!forward;scroll(forward) }
+        }
+        throw AssertionError("Cannot scroll to: $text; "+scrollNote+"; every node seen while scrolling: "+seen.joinToString(" | "))
+    }
+    /** A real touch at the option's centre: the same path a finger takes, so it also proves the row is on screen.
+     * A touch while the page still settles after a drag only stops the fling, so wait until the row holds still. */
+    private fun tap(node: AccessibilityNodeInfo) {
+        val r=android.graphics.Rect();node.getBoundsInScreen(r)
+        val end=SystemClock.uptimeMillis()+3_000
+        while(SystemClock.uptimeMillis()<end) {
+            Thread.sleep(150)
+            val now=android.graphics.Rect();if(!node.refresh()) break;node.getBoundsInScreen(now)
+            if(now==r) break
+            r.set(now)
+        }
+        trace("tap ${r.centerX()},${r.centerY()}")
+        ui.executeShellCommand("input tap ${r.centerX()} ${r.centerY()}").use { d -> java.io.FileInputStream(d.fileDescriptor).use { it.readBytes() } }
+        instrumentation.waitForIdleSync()
+    }
+    private fun click(node: AccessibilityNodeInfo) {
+        var target=node
+        while(!target.isClickable) target=target.parent ?: throw AssertionError("No clickable ancestor")
+        assertTrue(target.isEnabled)
+        assertTrue(target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+    }
+}

@@ -373,7 +373,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val explanation = verifiedChoiceExplanation(questionId)
         return verdict + "\n你选的 ${chosen.trim().uppercase()}：$selected\n正确项 ${map.getValue(correct)}：$right\n" +
             if (explanation.isNotBlank()) "你的选择与已复核解析不符：$explanation"
-            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。点「换个例子再讲」可结合原题解释。"
+            else "这道题暂无已复核解析，不能仅凭选项判断你的具体错因。"
     }
 
 
@@ -776,7 +776,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                     if (correct != null) emit("attempt_graded",json("attemptId" to attemptId,
                                         "score" to if(frozenMap[correct] == p.str("answer").trim().uppercase()) 1 else 0,
                                         "max" to 1,"status" to "EXACT",
-                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap)),"attempt:$attemptId:grade:exact")
+                                        "feedback" to gradedChoiceFeedback(qid,correct,p.str("answer"),frozenMap),
+                                        "correctAnswer" to "${frozenMap[correct]} · ${choiceOptions(qid).first { it.optionId == correct }.text}",
+                                        "rationale" to verifiedChoiceExplanation(qid).ifBlank { "按本题已复核答案判分。" }),"attempt:$attemptId:grade:exact")
                                 } else enqueueConstructedGrade(body.courseId,attemptId,qid,p.str("answer"),posed?.threadId,p.str("finalAnswer"))
                             }
                         }

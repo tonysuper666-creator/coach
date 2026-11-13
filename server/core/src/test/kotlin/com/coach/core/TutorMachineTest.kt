@@ -46,6 +46,29 @@ internal class TutorFixture : AutoCloseable {
 }
 
 class TutorMachineTest {
+    @Test fun mistakeRetryUsesIndependentRecallThreadAndPreservesLearningState() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(count = 9); f.open(); f.teach()
+            val learningBefore = f.events().filter { it.threadId == "thread" }
+            f.machine.open("course", "review:course:kp-1", "kp-1", setOf("cost"), "Synthetic objective", review = true)
+            val retry = f.machine.retryMistakes("course", "review:course:kp-1")
+            assertEquals(3, retry.cards.size)
+            assertTrue(retry.cards.all { it.threadId == "review:course:kp-1" && it.payload.str("purpose") == "RECALL" && it.payload.flag("review") })
+            assertEquals(learningBefore, f.events().filter { it.threadId == "thread" })
+            assertEquals(3, f.machine.next("course", "thread").cards.size)
+        }
+    }
+    @Test fun firstWrongAnswerDoesNotSuggestAnUnavailableExampleButton() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(); f.open(); f.teach()
+            val cards = f.machine.next("course", "thread").cards
+            val result = f.submit(cards, setOf(0))
+            val feedback = result.grades.first().payload.str("feedback")
+            assertTrue(feedback.contains("暂无已复核解析"))
+            assertFalse(feedback.contains("换个例子再讲"), feedback)
+            assertNotEquals("换个例子再讲", result.nextLabel)
+        }
+    }
     @Test fun gradedMistakesUseReviewedExplanationsAndNeverLeakPendingKeys() = runBlocking {
         TutorFixture().use { f ->
             f.actor.execute {
@@ -118,6 +141,25 @@ class TutorMachineTest {
             assertEquals(first.state, reopened.state)
             assertEquals(eventsAfterOpen, f.events())
             assertEquals(1, f.events().count { it.type == "kp_opened" })
+        }
+    }
+
+    @Test fun mistakeRetryAlwaysTakesThreeUnseenQuestionsAndNeverStartsPreparation() = runBlocking {
+        TutorFixture().use { f ->
+            f.seed(count=6); f.open()
+            f.machine.settings("course","thread",groupSize=1)
+            val first=f.machine.retryMistakes("course","thread")
+            assertEquals(3,first.cards.size)
+            assertNull(first.plan)
+            assertFalse(first.waitingForPool)
+            assertEquals(first.cards,f.machine.retryMistakes("course","thread").cards)
+            f.submit(first.cards,setOf(0,1))
+            val next=f.machine.retryMistakes("course","thread")
+            assertEquals(3,next.cards.size)
+            assertTrue(next.cards.none { n -> first.cards.any { it.payload.str("questionId")==n.payload.str("questionId") } })
+            f.submit(next.cards,id="retry")
+            assertFailsWith<IllegalArgumentException> { f.machine.retryMistakes("course","thread") }
+            assertTrue(f.actor.execute { supplyJobs("course","kp-1") }.isEmpty())
         }
     }
 

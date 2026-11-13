@@ -93,12 +93,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     // 没等到开始就离开了：这次的启动作废，下次从别处打开不会突然开讲。
     DisposableEffect(kp.id) { onDispose { c.startRequests.remove(kp.id) } }
 
-    // A newly passed queue item opens its successor after grading/streaming settles.
-    LaunchedEffect(kp.status, view.weekTarget?.id, tv.busy, pending) {
-        if (weekActions != null && view.weekProgress(kp.id) != null && kp.status in setOf(KpStatus.PASSED, KpStatus.SOLID) && !tv.busy && pending == null) {
-            weekActions.onOpen(view.weekTarget?.id)
-        }
-    }
+    // 只有这次打开期间亲眼看到「没过 → 过了」才自动打开下一个；打开一个早已通过的点不会被跳走。
+    AdvanceOnNewPass(kp.id, kp.status, view.weekProgress(kp.id) != null, view.weekTarget?.id, tv.busy || pending != null, weekActions?.onOpen)
 
     var readingFocus by rememberSaveable(kp.id) { mutableStateOf(initialFocus) }
     var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.sync.mainlineState(c.courseId, "learning").str("kind") == "tutor") }
@@ -118,6 +114,10 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         tv.items.filterIsInstance<ChatItem.Tutor>().flatMap { item -> com.coach.ui.v7.footnotes(item.message.text).map { note -> note.copy(id = "${item.message.id}:${item.message.epoch}:${note.id}") } }.distinctBy { it.id }
     }
     CompositionLocalProvider(com.coach.ui.v7.LocalMarginAnchors provides marginAnchors) {
+    // 矮窗口（横屏手机、分屏）：标题区收成一行，把高度留给正文；「详情 ▾」再展开。
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val compactHeight = maxHeight < 480.dp
+    var showCompactHeader by remember(kp.id) { mutableStateOf(false) }
     val parentLabel = backLabel ?: if (reviewMode) "← 复习" else "← 今天"
     com.coach.ui.v7.Desk(crumb = moduleDisplayName(kp.module).ifBlank { "课程" }, focus = readingFocus, onFocus = { readingFocus = !readingFocus }, onBack = onBack, backLabel = if (pending != null) "暂离 · ${parentLabel.removePrefix("← ")}" else parentLabel, showNavigation = pending == null,
         directory = { com.coach.ui.v7.WeekDirectory(view, view.projection.studyScope?.week, weekActions?.let { it::select }) },
@@ -135,7 +135,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
 
                 Column(Modifier.weight(1f)) {
                     val (tag, main) = splitTitle(kp.title)
-                    if (pending != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (compactHeight && !showCompactHeader && pending == null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(main, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = { showCompactHeader = true }) { Text("详情 ▾") }
+                    }
+                    else if (pending != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(main, Modifier.weight(1f).testTag("study-quiz-heading"),
                             style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (!readingFocus) TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("study-ask")) { Text("问一句") }
@@ -143,10 +147,11 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     else com.coach.ui.v7.PageHeader(if (reviewMode) "到期复习" else view.weekProgress(kp.id).orEmpty(), main)
                     // 范围、看原文（点开就是本知识点锚点所在的教材页）、状态放在同一组里，放不下就换行，不压标题。
                     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
-                    if (!readingFocus && pending == null) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
+                    if (!readingFocus && pending == null && (!compactHeight || showCompactHeader)) FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.Center) {
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Text(if (showScope) "收起出处" else sourceLine(tag).ifBlank { "出处" } + if (additionalScope.isNotEmpty()) " · 另 ${additionalScope.size} 处 ▾" else " ▾", style = MaterialTheme.typography.labelMedium)
                         }
+                        if (compactHeight) TextButton(onClick = { showCompactHeader = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("收起详情 ▴") }
                         if (openReference != null && (kp.anchorDoc.isNotBlank() || kp.sourceReferences.structured)) com.coach.ui.v7.PaperButton(onClick = { openReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
                             Text(if (kp.sourceReferences.structured) "查看主张出处" else "看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
@@ -206,12 +211,13 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         LaunchedEffect(groups.size) {
             if (groups.size > seenGroups && (pending != null || seenGroups > 0)) {
                 PoolTrace.mark(thread,"focus_requested")
-                (groups.last().cards.firstOrNull { it.answer == null } ?: groups.last().cards.firstOrNull())?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
-                PoolTrace.mark(thread,"focus_settled")
+                val settled = (groups.last().cards.firstOrNull { it.answer == null } ?: groups.last().cards.firstOrNull())?.let { chat.scrollItemTopIntoView("q:${it.attemptId}") }
+                PoolTrace.mark(thread, if (settled == false) "focus_timeout" else "focus_settled")
             }
             seenGroups = groups.size
         }
         Box(Modifier.weight(1f).widthIn(max = READING_WIDTH).fillMaxWidth().testTag("study-scroll-viewport")) {
+        Box(Modifier.fillMaxSize().testTag("study-reading")) {
             if (rows.isEmpty()) Text(
                 if (reviewMode) "正在准备复习题；也可以点「开始复习」。" else if (kp.explained) "这一节讲过了。点「下一步」继续出题，或直接问一句。" else "还没开始。点下面的「开始讲解」。",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -245,6 +251,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 FilledTonalButton(onClick = { scope.launch { chat.scrollToTail() } }, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp).heightIn(min = 48.dp)) { Text("回到最新") }
             }
         }
+        }
         Spacer(Modifier.height(8.dp))
         if (!readingFocus && pending == null) Column(Modifier.widthIn(max = READING_WIDTH).fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // 答题时「下一步 / 出题」本来就点不了，不占高度，把空间让给题目；键盘弹出时同样收起。
@@ -260,8 +267,15 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text(nextText) }
                 com.coach.ui.v7.PaperButton(onClick = { next(true) }, enabled = ui.connected && !tv.busy,
                     modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("出题") }
+                if (compactHeight && weekActions != null && view.weekTarget?.id == kp.id) {
+                    com.coach.ui.v7.PaperButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
+                        modifier = Modifier.weight(1f).heightIn(min = 56.dp)) { Text("下一知识点") }
+                }
             }
-            if (!imeOpen && weekActions != null && view.weekTarget?.id == kp.id) {
+            if (!imeOpen && compactHeight && weekActions != null && view.weekTarget?.id == kp.id) {
+                weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+            if (!imeOpen && !compactHeight && weekActions != null && view.weekTarget?.id == kp.id) {
                 com.coach.ui.v7.PaperButton(onClick = { weekActions.next(view, kp.id) }, enabled = ui.connected && !tv.busy && !weekActions.busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("下一节 →") }
                 weekActions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -281,8 +295,22 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                 gate = enterGate, placeholder = "问一句…", maxLines = 4, canSend = ui.connected && !tv.busy) }
         }, confirmButton = { TextButton(onClick = { askOpen = false }) { Text("继续答题") } })
 }
+}
 
 }
+}
+
+/** Only advance after this open session observes an unpassed point become passed. */
+@Composable
+internal fun AdvanceOnNewPass(id: String, status: KpStatus, inWeek: Boolean, nextId: String?, busy: Boolean, onOpen: ((String?) -> Unit)?) {
+    var wasUnpassed by remember(id) { mutableStateOf(status != KpStatus.PASSED && status != KpStatus.SOLID) }
+    LaunchedEffect(id, status, inWeek, nextId, busy, onOpen) {
+        if (status != KpStatus.PASSED && status != KpStatus.SOLID) wasUnpassed = true
+        else if (wasUnpassed && inWeek && !busy && onOpen != null) {
+            wasUnpassed = false
+            onOpen(nextId)
+        }
+    }
 }
 
 private sealed interface StudyRow {

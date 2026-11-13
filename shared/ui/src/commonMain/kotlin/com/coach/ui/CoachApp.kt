@@ -220,7 +220,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val select: (AppTab) -> Unit = navigation::select
     fun openStudy(id: String, start: Boolean, review: Boolean = false) {
         c.tutor.telemetry?.record("tap", "open_kp")
-        val label = view?.kp(id)?.title?.let { splitTitle(it).second } ?: "未命名的一节"
+        val label = view?.kpAny(id)?.title?.let { splitTitle(it).second } ?: "未命名的一节"
         val destination = AppEntry(AppPage.STUDY, id = id, autoStart = start, review = review, label = label)
         if (entry.page == AppPage.STUDY) navigation.replace(destination) else navigation.push(destination)
     }
@@ -252,7 +252,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
     val openEssay: () -> Unit = { openTask(AppPage.ESSAY, "论述限时练习") }
     val studyEntry = navigation.entries.lastOrNull { it.page == AppPage.STUDY }
-    val target = studyEntry?.let { view?.kp(it.id) }
+    // 已打开的点即使被退休也要继续显示：名称、教材页和阅读内容不能凭空消失。
+    val target = studyEntry?.let { view?.kpAny(it.id) }
     LaunchedEffect(target?.id, ui.connected) {
         if (target != null && ui.connected && target.anchorDoc.isNotBlank()) runCatching { prefetchSourcePage(c, target.anchorDoc, target.anchorPdfPage) }
     }
@@ -316,7 +317,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
                                     }
                                     AppPage.WEEK -> if (current != null) com.coach.ui.v7.WeekPage(c, current, ui, weekActions, openKp, page.week!!) else CenterMessage("正在加载课程…")
-                                    AppPage.STUDY -> current?.kp(page.id)?.let { kp ->
+                                    AppPage.STUDY -> current?.kpAny(page.id)?.let { kp ->
                                         StudyScreen(c, kp, current, ui, page.autoStart, { navigation.back() }, initialDraft, openReference,
                                             if (page.review) null else weekActions, page.review, backLabel = "← ${navigation.entries.getOrNull(navigation.entries.indexOf(page) - 1)?.label ?: page.tab.label}")
                                     } ?: CenterMessage("正在加载课程…")
@@ -351,6 +352,23 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 系统返回键的关闭顺序：原文 → 周复习 → 学习线程。应用里由 [AppNavigation] 的返回栈按同一顺序出栈；
+ * 这里保留分层规则本身，供 [AppBackTest] 钉住顺序。
+ */
+@Composable
+internal fun AppBackHandler(sourceOpen: Boolean, reviewOpen: Boolean, studyOpen: Boolean,
+                            closeSource: () -> Unit, closeReview: () -> Unit, closeStudy: () -> Unit,
+                            register: @Composable (Boolean, () -> Unit) -> Unit) {
+    register(sourceOpen || reviewOpen || studyOpen) {
+        when {
+            sourceOpen -> closeSource()
+            reviewOpen -> closeReview()
+            studyOpen -> closeStudy()
         }
     }
 }
@@ -408,11 +426,14 @@ private fun AppNavBar(selected: AppTab, onSelect: (AppTab) -> Unit, v7: Boolean 
 }
 
 @Composable
-private fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) -> Unit) {
+internal fun AppNavRail(selected: AppTab, compact: Boolean, onSelect: (AppTab) -> Unit) {
     NavigationRail(containerColor = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxHeight().testTag("app-navigation")) {
         Spacer(Modifier.weight(1f))
         AppTab.entries.forEach { t ->
-            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" }, icon = { AppNavIcon(t) }, label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
+            NavigationRailItem(selected = t == selected, onClick = { onSelect(t) }, modifier = Modifier.semantics { contentDescription = "导航：${t.label}" },
+                // 窄侧轨只画图标：读屏读名称，不读「◉」「☰」这类字形。
+                icon = { Box(if (compact) Modifier.clearAndSetSemantics { contentDescription = t.label } else Modifier) { AppNavIcon(t) } },
+                label = if (compact) null else ({ Text(t.label) }), alwaysShowLabel = !compact)
         }
         Spacer(Modifier.weight(1f))
     }

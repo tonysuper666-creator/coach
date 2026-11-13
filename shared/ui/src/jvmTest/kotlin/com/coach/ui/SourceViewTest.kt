@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseHttp
+import com.coach.client.TutorMessage
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -19,6 +20,26 @@ import kotlin.test.*
 class SourceViewTest {
     private val ledgers = mutableListOf<SyntheticLocalLedger>()
     @AfterTest fun closeLedgers() { ledgers.forEach { it.close() } }
+
+    @Test fun sourceOverlayKeepsStreamingFeedbackAndLessonInTheSameStudyPane() = runComposeUiTest {
+        var reading by mutableStateOf(false)
+        var message by mutableStateOf(TutorMessage("weekly-feedback", "stub", false, "错因：已复核"))
+        val math = MathAssets()
+        setContent {
+            val study = remember { movableContentOf { TutorBubble(message, math, {}) } }
+            Box(Modifier.size(500.dp, 500.dp)) {
+                SourceOverlay(covered = reading, base = { study() }, overlay = { Text("教材第 7 页") })
+            }
+        }
+        onNodeWithText("错因：已复核", substring = true).assertExists()
+        runOnIdle { reading = true }; waitForIdle()
+        onNodeWithText("教材第 7 页").assertExists()
+        runOnIdle { message = message.copy(text = "错因：已复核\n\n继续学习：下一知识点", status = "complete") }
+        waitForIdle()
+        runOnIdle { reading = false }; waitForIdle()
+        onNodeWithText("错因：已复核", substring = true).assertExists()
+        onNodeWithText("继续学习：下一知识点", substring = true).assertExists()
+    }
 
     /** Stand-in for the study pane: a counter that only survives if the pane stays composed (draft, chosen option, running stream). */
     private class Harness {
@@ -128,6 +149,24 @@ class SourceViewTest {
                 waitForIdle()
                 onNodeWithText("这是第 41 页的正文。", substring = true).assertExists() // no wait: it was already on the device
                 assertEquals(1, fake.pageHits.get())
+            }
+        } finally { fake.stop() }
+    }
+
+    @Test fun turningPagesRendersTheirOwnTextAndCachedReturn() {
+        val fake = Fake()
+        try {
+            runComposeUiTest {
+                showResources(fake, SourceJump("textbook:2", 41))
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 41 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("（12 / 31）", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("下一页").performClick()
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 42 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("source-page-label").assertTextContains("PDF 第 42 页", substring = true)
+                onNodeWithText("这是第 41 页的正文。", substring = true).assertDoesNotExist()
+                onNodeWithText("上一页").performClick()
+                waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("这是第 41 页的正文。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                assertEquals(2, fake.pageHits.get(), "return uses the cached page")
             }
         } finally { fake.stop() }
     }

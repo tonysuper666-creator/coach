@@ -11,11 +11,13 @@ data class WeekPoint(val id: String, val title: String, val weeks: Set<Int>)
 /** Same outline order and week interpretation for server commands and every client. */
 fun weekPoints(events: List<Event>): List<WeekPoint> {
     val points = linkedMapOf<String, WeekPoint>()
+    val retired = mutableSetOf<String>()
     for (e in learnerEvidence(events).filter { it.type == "outline_revised" }) {
         for (raw in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
             val p = raw as? JsonObject ?: continue
             val id = p.str("id"); if (id.isBlank()) continue
-            if (p.flag("retired")) { points.remove(id); continue }
+            if (p.flag("retired")) { retired += id; continue }
+            retired -= id
             val title = p.str("title").ifBlank { p.str("name") }
             val week = (p["week"] as? JsonPrimitive)?.intOrNull?.takeIf { it > 0 }
             points[id] = WeekPoint(id, title, week?.let { setOf(it) } ?: titleWeeks(title))
@@ -23,18 +25,20 @@ fun weekPoints(events: List<Event>): List<WeekPoint> {
         for (raw in (e.payload["ops"] as? JsonArray).orEmpty()) {
             val p = raw as? JsonObject ?: continue
             val id = p.str("kpId").ifBlank { p.str("id") }; if (id.isBlank()) continue
-            if (p.str("op") == "retire") { points.remove(id); continue }
+            val operation = p.str("op", "add")
+            if (operation == "retire") { retired += id; continue }
+            if (operation == "add") retired -= id
             val title = p.str("title").ifBlank { p.str("name") }.ifBlank { points[id]?.title.orEmpty() }
             val week = (p["week"] as? JsonPrimitive)?.intOrNull?.takeIf { it > 0 }
             points[id] = WeekPoint(id, title, week?.let { setOf(it) } ?: if (p.str("title").isBlank() && p.str("name").isBlank()) points[id]?.weeks ?: titleWeeks(title) else titleWeeks(title))
-            if (p.str("op") == "move") {
+            if (operation == "move") {
                 val rows = points.values.toMutableList(); val row = rows.removeAt(rows.indexOfFirst { it.id == id })
                 rows.add(p.num("index").toInt().coerceIn(0, rows.size), row)
                 points.clear(); rows.forEach { points[it.id] = it }
             }
         }
     }
-    return points.values.toList()
+    return points.values.filter { it.id !in retired }
 }
 
 @Serializable data class StudyScope(val id: String, val week: Int, val kpIds: List<String>, val cursor: Int = 0) {

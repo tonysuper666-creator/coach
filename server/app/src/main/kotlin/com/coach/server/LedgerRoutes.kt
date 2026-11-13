@@ -376,6 +376,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                         chat?.history(message.str("courseId"),message.str("threadId"))?.let { send(Frame.Text(it.toString())) }
                     }
                     "tutor.next", "tutor.test" -> chat?.nextStep(message.str("threadId"),message.str("courseId"),message.str("pack"),message.str("t") == "tutor.test",receivedAt=receivedAt)
+                    "tutor.retryMistakes" -> chat?.retryMistakes(message.str("threadId"),message.str("courseId"))
                     "tutor.settings" -> chat?.configureTutor(message.str("threadId"),message.str("courseId"),
                         message["groupSize"]?.jsonPrimitive?.int, message["mode"]?.jsonPrimitive?.content?.let { TeachingMode.valueOf(it) })
                     "tutor.explain" -> chat?.explain(message.str("threadId"),message.str("courseId"),TeachingMode.valueOf(message.str("mode")),message.str("pack"),receivedAt)

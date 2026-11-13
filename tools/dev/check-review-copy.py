@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Review practice against a disposable, readonly-backed production copy. No real AI calls.
+"""Review practice against an explicit private database copy. No real AI calls.
 
 Build :server:app:installDist through tools/dev/heavy first. Only synthetic fixture facts
 are inspected/reported; the copied database, credentials and server logs are deleted.
@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -29,10 +30,18 @@ spec.loader.exec_module(smoke)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--application-id', default='com.coach.android.ton1291', help='isolated TON-specific APK package')
     parser.add_argument('--android', metavar='SERIAL', help='Run only on coach_1128_c70_r; invoke under tools/dev/heavy --emulator')
     parser.add_argument('--screenshots', type=Path, help='Export synthetic emulator screenshots here')
+    parser.add_argument('--mistakes', action='store_true', help='Exercise wrong answers, offline replay and independent review retry on the emulator')
+    parser.add_argument('--private-data-dir', required=True, type=Path, help='prepared private database/token copies outside the installed Coach tree')
     args = parser.parse_args()
+    assert re.fullmatch(r'com\.coach\.android\.ton[0-9]+', args.application_id), 'Use an isolated TON-specific APK package'
+    assert not args.mistakes or args.android, '--mistakes requires the isolated emulator'
     os.umask(0o077)
+    source_data = args.private_data_dir.resolve()
+    assert not source_data.is_relative_to((Path.home() / 'Coach').resolve()), 'Refusing installed Coach tree'
+    assert all((source_data / name).is_file() and not (source_data / name).is_symlink() for name in ('coach.sqlite', 'device-token'))
     assert smoke.BINARY.is_file(), 'Build installDist through tools/dev/heavy first'
     android_host = ''
     adb = None
@@ -63,11 +72,10 @@ def main():
             base = Path(temporary)
             data = base / 'data'
             data.mkdir(mode=0o700)
-            production = Path.home() / 'Coach/data'
-            with sqlite3.connect((production / 'coach.sqlite').resolve().as_uri() + '?mode=ro', uri=True) as source:
+            with sqlite3.connect((source_data / 'coach.sqlite').as_uri() + '?mode=ro', uri=True) as source:
                 with sqlite3.connect(data / 'coach.sqlite') as copy:
                     source.backup(copy)
-            shutil.copyfile(production / 'device-token', data / 'device-token')
+            shutil.copyfile(source_data / 'device-token', data / 'device-token')
             token = (data / 'device-token').read_text().strip()
             now = int(time.time() * 1000)
             local = datetime.datetime.fromtimestamp(now / 1000, ZoneInfo('Europe/London'))
@@ -87,14 +95,18 @@ def main():
                     ('legacy_schedule', {'kpId': kp, 'dueDay': day + 12, 'interval': 15}),
                     ('exam_set', {'examDay': day + 7}),
                 ]
+                if args.mistakes:
+                    facts = [facts[0], ('explanation_delivered', {'kpId': kp, 'conceptIds': ['synthetic']})]
                 for i, (kind, payload) in enumerate(facts, 1):
                     event = dict(seq=seq+i, id=f'{course}-e{i}', courseId=course, type=kind,
                                  schema=1, recordedAt=now, occurredAt=now, deviceId='desktop',
                                  actor='SYSTEM', effectIndex=0, idemKey=f'{course}-e{i}', payload=payload)
                     db.execute('insert into events(seq,id,course_id,type,schema,recorded_at,occurred_at,device_id,actor,effect_index,idem_key,payload,event_json) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                                (event['seq'], event['id'], course, kind, 1, now, now, 'desktop', 'SYSTEM', 0, event['idemKey'], json.dumps(payload), json.dumps(event)))
-                for i in range(3):
+                keys = {}
+                for i in range(6 if args.mistakes else 3):
                     q = f'{course}-q{i}'
+                    keys[q] = f'{q}-0'
                     options = [{'optionId': f'{q}-{j}', 'text': f'Synthetic option {i}-{j}'} for j in range(4)]
                     db.execute('insert into questions(question_id,course_id,format,stem_md,options,origin,fingerprint,key_state) values(?,?,?,?,?,?,?,?)',
                                (q, course, 'SINGLE_CHOICE', f'Synthetic review question {i}', json.dumps(options), 'COACH', hashlib.sha256(q.encode()).hexdigest(), 'VERIFIED'))
@@ -104,11 +116,17 @@ def main():
             port = smoke.free_port()
             while port == 3790:
                 port = smoke.free_port()
-            env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))}
+            for name in ('home', 'tmp', 'packs'):
+                (base / name).mkdir(mode=0o700)
+            env = {k: v for k, v in os.environ.items() if not k.startswith(('COACH_', 'BRIDGE_'))
+                   and k not in ('JAVA_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS')}
             env.update(COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data / 'device-token'),
                        COACH_LOG_DIR=str(base / 'logs'), COACH_STATE_DIR=str(base / 'state'), COACH_RUN_DIR=str(base / 'run'),
                        COACH_PACKS_DIR=str(base / 'packs'), COACH_TAIL_HOST=android_host, COACH_PORT=str(port),
-                       COACH_TRAFFIC='test', COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge.server_address[1]}')
+                       COACH_TRAFFIC='test', COACH_MANAGE_SERVICES='0', COACH_SOURCE_LOOKUP='false',
+                       COACH_ACTIVITY_SOCKET=str(base / 'activity.sock'),
+                       JAVA_OPTS=f'-Duser.home={base}/home -Djava.io.tmpdir={base}/tmp',
+                       COACH_BRIDGE_URL=f'http://127.0.0.1:{bridge.server_address[1]}')
 
             def request(path):
                 req = urllib.request.Request(f'http://127.0.0.1:{port}{path}', headers={
@@ -149,20 +167,61 @@ def main():
                 result = subprocess.run([adb, '-s', args.android, 'shell', 'am', 'instrument', '-w',
                     '-e', 'class', 'com.coach.android.ReviewQueueSmoke',
                     '-e', 'coachPort', str(port), '-e', 'coachToken', token, '-e', 'coachPhase', phase,
-                    'com.coach.android.ton1291.test/androidx.test.runner.AndroidJUnitRunner'], capture_output=True, timeout=150)
+                    args.application_id + '.test/androidx.test.runner.AndroidJUnitRunner'], capture_output=True, timeout=150)
                 passed = result.returncode == 0 and b'OK (1 test)' in result.stdout
                 args.screenshots.mkdir(parents=True, exist_ok=True)
                 (args.screenshots / f'instrument-{phase}.txt').write_text(
                     (result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
                 for screen in (['today', 'queue', 'practice'] if phase == 'before' else ['today', 'queue']):
                     name = f'review-{phase}-{screen}.png'
-                    shot = subprocess.run([adb, '-s', args.android, 'exec-out', 'run-as', 'com.coach.android.ton1291', 'cat', f'cache/{name}'], capture_output=True)
+                    shot = subprocess.run([adb, '-s', args.android, 'exec-out', 'run-as', args.application_id, 'cat', f'cache/{name}'], capture_output=True)
                     if shot.returncode == 0 and shot.stdout.startswith(b'\x89PNG'):
                         (args.screenshots / name).write_bytes(shot.stdout)
                 assert passed, 'Synthetic emulator review flow failed; instrument output withheld to protect credentials'
 
+            def mistake_android(method, phase):
+                result = subprocess.run([adb, '-s', args.android, 'shell', 'am', 'instrument', '-w',
+                    '-e', 'class', 'com.coach.android.MistakeReviewSmoke#' + method,
+                    '-e', 'coachPort', str(port), '-e', 'coachToken', token, '-e', 'coachDevice', 'desktop',
+                    '-e', 'coachKp', kp, '-e', 'coachPhase', phase,
+                    args.application_id + '.test/androidx.test.runner.AndroidJUnitRunner'], capture_output=True, timeout=240)
+                args.screenshots.mkdir(parents=True, exist_ok=True)
+                (args.screenshots / f'mistake-{phase}.txt').write_text(
+                    (result.stdout + result.stderr).decode(errors='replace').replace(token, '<redacted>'))
+                for name in ('review-metrics.json', 'review-fail.txt', 'review-trace.txt',
+                             'review-wrong-list.png', 'review-offline.png', 'review-retry.png', 'review-cleared.png', 'review-fail.png'):
+                    artifact = subprocess.run([adb, '-s', args.android, 'exec-out', 'run-as', args.application_id, 'cat', 'cache/' + name], capture_output=True)
+                    if artifact.returncode == 0:
+                        (args.screenshots / name).write_bytes(artifact.stdout.replace(token.encode(), b'<redacted>'))
+                assert result.returncode == 0 and b'OK (1 test)' in result.stdout, 'Synthetic mistake emulator flow failed; see sanitized phase output'
+
+            def force_stop():
+                subprocess.run([adb, '-s', args.android, 'shell', 'am', 'force-stop', args.application_id], check=True, capture_output=True)
+
             try:
                 start()
+                if args.mistakes:
+                    subprocess.run([adb, '-s', args.android, 'shell', 'run-as', args.application_id, 'mkdir', '-p', 'cache'], check=True, capture_output=True)
+                    subprocess.run([adb, '-s', args.android, 'shell', f"run-as {args.application_id} sh -c 'cat > cache/review-keys.json'"],
+                                   input=json.dumps(keys).encode(), check=True, capture_output=True)
+                    mistake_android('wrongAnswersRetryAndClear', 'prepare')
+                    stop(); force_stop()
+                    mistake_android('cachedMistakesSurviveRestartWithoutMac', 'offline')
+                    force_stop(); start()
+                    mistake_android('wrongAnswersRetryAndClear', 'resume')
+                    stop()
+                    with sqlite3.connect(data / 'coach.sqlite') as db:
+                        posed = [(row[0], json.loads(row[1])) for row in db.execute("select thread_id,payload from events where course_id=? and type='question_posed'", (course,))]
+                        learning = [p for t, p in posed if t == 'kp:' + kp]
+                        retry = [p for t, p in posed if t == thread_id]
+                        assert len(learning) == len(retry) == 3
+                        assert all(p['purpose'] == 'RECALL' and p['review'] for p in retry)
+                        assert not {p['questionId'] for p in learning} & {p['questionId'] for p in retry}
+                        assert db.execute('pragma integrity_check').fetchone()[0] == 'ok'
+                    print(json.dumps(dict(result='pass', fixture='synthetic private copy', emulator='coach_1128_c70_r',
+                        phases=['prepare', 'offline', 'resume'], learningCards=3, independentRecallCards=3,
+                        protectedPortsUsed=False, productionConnections=0, realTutorCalls=0)))
+                    return
                 before = request(f'/v1/courses/{course}/snapshot')['projection']
                 review = before['review'][kp]
                 assert review['dueDay'] == day and review['intervalDays'] == 3
@@ -211,7 +270,7 @@ def main():
                     assert len(posed) == 3 and all(p['review'] and p['purpose'] == 'RECALL' for p in posed)
                     assert db.execute("select count(*) from events where course_id=? and type='explanation_delivered'", (course,)).fetchone()[0] == 0
                     assert db.execute('pragma integrity_check').fetchone()[0] == 'ok'
-                print(json.dumps(dict(result='pass', snapshot='SQLite backup through readonly production connection',
+                print(json.dumps(dict(result='pass', snapshot='explicit private SQLite copy',
                     productionWrites=0, protectedPortsUsed=False, realTutorCalls=0,
                     compressedInterval=3, ledgerDueCountBefore=due_before, ledgerDueCountAfter=due_after,
                     reviewCards=3, gradedCards=3, samePendingGroupAfterRestart=True,
@@ -222,7 +281,7 @@ def main():
                 stop()
     finally:
         if args.android:
-            subprocess.run([adb, '-s', args.android, 'shell', 'am', 'force-stop', 'com.coach.android.ton1291'], capture_output=True)
+            subprocess.run([adb, '-s', args.android, 'shell', 'am', 'force-stop', args.application_id], capture_output=True)
         bridge.shutdown()
         bridge_thread.join()
         bridge.server_close()

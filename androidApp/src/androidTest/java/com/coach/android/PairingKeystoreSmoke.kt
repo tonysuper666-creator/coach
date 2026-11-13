@@ -71,7 +71,7 @@ class PairingKeystoreSmoke {
         assertEquals("http://${BuildConfig.COACH_TAIL_HOST}:18892",coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18892"))
         val card = "com.coach.android.ton1149"
         assertEquals("http://${BuildConfig.COACH_TAIL_HOST}:18892", coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18892", card))
-        assertThrows(IllegalStateException::class.java) { coachServerUrl(null, card) }
+        assertThrows(IllegalStateException::class.java) { resolveCoachServerUrl(null, card, true, BuildConfig.COACH_TAIL_HOST, BuildConfig.COACH_PORT, -1) }
         assertThrows(IllegalStateException::class.java) { coachServerUrl("http://10.0.2.2:18892", card) }
         assertThrows(IllegalStateException::class.java) { coachServerUrl("http://${BuildConfig.COACH_TAIL_HOST}:18791", card) }
         assertThrows(SecurityException::class.java) { TutorClient("http://10.0.2.2:18791","test","x".repeat(43),TutorModel(System::currentTimeMillis)) }

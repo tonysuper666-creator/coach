@@ -44,7 +44,12 @@ fun TodayScreen(
                     } else {
                         Text("今天的都做完了。可以到路线浏览其他节。", style = MaterialTheme.typography.titleMedium)
                     }
-                    weekActions?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    // 今天页也能直接「选一周来学」：没选范围时各周铺开，学完一周时给「换下一周」。
+                    if (weekActions != null) {
+                        WeekPicker(view, weekActions, ui.connected, directWhenUnscoped = true)
+                        WeekSummary(view, weekActions, ui.connected)
+                    }
+                    // 选周 / 开始学习的失败都由 WeekPicker 里的同一行错误显示，这里不重复。
                     ReviewCard(view.dueReviews(now).size, onOpenReview)
                     Text(view.examCountdownText(now), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.tertiary)
                 }
@@ -67,7 +72,7 @@ internal fun splitTitle(title: String): Pair<String, String> {
 }
 
 @Composable
-private fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
+internal fun ContinueCard(kp: KpRow, resume: Boolean, onClick: () -> Unit) {
     val (tag, main) = splitTitle(kp.title)
     Surface(
         color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary,

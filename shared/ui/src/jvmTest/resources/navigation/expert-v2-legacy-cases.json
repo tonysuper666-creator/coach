@@ -1,0 +1,1628 @@
+{
+    "fixture_version":  1,
+    "issue":  "TON-1449",
+    "kind":  "navigation-migration-cases",
+    "pinned_head":  "ccdeabfe59381b126181630de774048218d44151",
+    "pinned_head_committed_at":  "2026-11-12T03:57:53Z",
+    "pinned_head_subject":  "Merge pull request #175 from tonysuper666-creator/agent/builder-r/ton1101-desktop-agent-run",
+    "expert_attachment_id":  "01a1cdde-1a6a-74e6-b3d7-3c8e6cdcaea1",
+    "ids_are_synthetic":  true,
+    "product_migration_implemented":  false,
+    "ownership":  [
+                      {
+                          "from":  "TODAY",
+                          "to":  "今天",
+                          "decision":  "已裁决",
+                          "serialized_token":  "待决定"
+                      },
+                      {
+                          "from":  "ROUTE",
+                          "to":  "课程",
+                          "decision":  "已裁决",
+                          "serialized_token":  "待决定"
+                      },
+                      {
+                          "from":  "RECORDS",
+                          "to":  "课程下成绩",
+                          "decision":  "已裁决",
+                          "serialized_token":  "待实现"
+                      },
+                      {
+                          "from":  "RESOURCES",
+                          "to":  "书架",
+                          "decision":  "已裁决",
+                          "serialized_token":  "待决定"
+                      },
+                      {
+                          "from":  "REVIEW",
+                          "to":  "今天下复习",
+                          "decision":  "已裁决",
+                          "serialized_token":  "待实现"
+                      }
+                  ],
+    "kept_pages":  [
+                       "STUDY",
+                       "MAINLINE",
+                       "SOURCE",
+                       "MOCK",
+                       "ESSAY",
+                       "WEEK_REVIEW"
+                   ],
+    "kept_page_fields":  [
+                             "id",
+                             "week",
+                             "review",
+                             "parent_tab",
+                             "back_level"
+                         ],
+    "not_in_app_entry":  [
+                             "choice",
+                             "result",
+                             "pending",
+                             "quizScroll",
+                             "readScroll"
+                         ],
+    "codec_proof":  {
+                        "ran":  true,
+                        "compile_exit":  0,
+                        "run_exit":  0,
+                        "kotlin":  "2.4.0",
+                        "kotlinx_serialization":  "1.11.0",
+                        "encode_defaults":  false,
+                        "ignore_unknown_keys":  false,
+                        "explicit_nulls":  true,
+                        "coerce_input_values":  false,
+                        "encode":  "Json.encodeToString(entries)",
+                        "restore":  "decode List\u003cAppEntry\u003e, require non-empty and first.page==HOME, else null",
+                        "not_a_migrator":  true,
+                        "not_run":  [
+                                        "Gradle",
+                                        "Compose UI",
+                                        "Android",
+                                        "device",
+                                        "install"
+                                    ]
+                    },
+    "cases":  [
+                  {
+                      "id":  "built-today-home",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "id":  "",
+                                                                      "pdfPage":  1,
+                                                                      "label":  "今天",
+                                                                      "autoStart":  false,
+                                                                      "week":  null,
+                                                                      "review":  false
+                                                                  },
+                                                         "note":  "顶层今天。新枚举序列化名未在当前 AppTab 中出现。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-route-home",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{\"tab\":\"ROUTE\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"ROUTE\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "ROUTE",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "路线"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "label_rewrite":  "待决定",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "label_decoded":  "路线",
+                                                                      "week":  null,
+                                                                      "id":  "",
+                                                                      "review":  false
+                                                                  },
+                                                         "note":  "显示归属为课程。省略的 label 现等于旧 tab.label「路线」；是否改写已存 label 未裁决。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-resources-home",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{\"tab\":\"RESOURCES\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"RESOURCES\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "RESOURCES",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "资料"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "label_rewrite":  "待决定",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "书架",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "id":  "",
+                                                                      "label_decoded":  "资料"
+                                                                  },
+                                                         "note":  "显示归属为书架。已存缺省 label 为「资料」。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-records-home",
+                      "covers":  [
+                                     "RECORDS"
+                                 ],
+                      "old_input":  "[{\"tab\":\"RECORDS\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"RECORDS\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "记录"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "RECORDS"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "inserted_parent":  "待决定",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "RECORDS",
+                                                                      "label_decoded":  "记录"
+                                                                  },
+                                                         "note":  "AppPage 没有成绩页，RECORDS 仍是顶层 tab。已存栈没有课程父帧；是否补一层课程父级未裁决。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-review-nested",
+                      "covers":  [
+                                     "REVIEW嵌套"
+                                 ],
+                      "old_input":  "[{},{\"tab\":\"REVIEW\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"tab\":\"REVIEW\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "复习"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "REVIEW嵌套"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "REVIEW",
+                                                                      "label_decoded":  "复习"
+                                                                  },
+                                                         "note":  "复习现为 HOME+tab，不是独立 AppPage。返回必须回到上一帧今天。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-review-study",
+                      "covers":  [
+                                     "REVIEW嵌套",
+                                     "题"
+                                 ],
+                      "old_input":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"STUDY\",\"tab\":\"REVIEW\",\"id\":\"SYN-KP-1\",\"review\":true,\"label\":\"合成节甲\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"STUDY\",\"tab\":\"REVIEW\",\"id\":\"SYN-KP-1\",\"review\":true,\"label\":\"合成节甲\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "复习"
+                                                    },
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "SYN-KP-1",
+                                                        "autoStart":  false,
+                                                        "review":  true,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "合成节甲"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "REVIEW嵌套",
+                                                      "题"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "REVIEW"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "STUDY",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "合成节甲",
+                                                                      "autoStart":  false,
+                                                                      "id":  "SYN-KP-1",
+                                                                      "review":  true
+                                                                  },
+                                                         "note":  "STUDY 的 id 与 review 保留。上级是今天下复习。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "choices:\u003creviewThreadId(SYN-KP-1)\u003e"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-review-mainline-mock",
+                      "covers":  [
+                                     "REVIEW嵌套",
+                                     "考试"
+                                 ],
+                      "old_input":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"MAINLINE\",\"tab\":\"REVIEW\",\"week\":3,\"label\":\"选择题主线\"},{\"page\":\"MOCK\",\"tab\":\"REVIEW\",\"label\":\"模拟考\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"MAINLINE\",\"tab\":\"REVIEW\",\"week\":3,\"label\":\"选择题主线\"},{\"page\":\"MOCK\",\"tab\":\"REVIEW\",\"label\":\"模拟考\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "复习"
+                                                    },
+                                                    {
+                                                        "page":  "MAINLINE",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  3,
+                                                        "pdfPage":  1,
+                                                        "label":  "选择题主线"
+                                                    },
+                                                    {
+                                                        "page":  "MOCK",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "模拟考"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "REVIEW嵌套",
+                                                      "考试"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "REVIEW"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "MAINLINE",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "选择题主线",
+                                                                      "week":  3,
+                                                                      "id":  "",
+                                                                      "review":  false
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  3,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "MOCK",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "id":  "",
+                                                                      "label":  "模拟考"
+                                                                  },
+                                                         "note":  "本帧没有考试 id。不得补造 id。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "mainlineState(course).week=3",
+                                                          "mainlineState(course, \"week:3\") choice/result/pending/quizScroll/readScroll"
+                                                      ],
+                                       "mock_draft_key":  "待决定"
+                                   }
+                  },
+                  {
+                      "id":  "built-legacy-open-mainline",
+                      "covers":  [
+                                     "REVIEW嵌套",
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{\"tab\":\"REVIEW\"},{\"page\":\"MAINLINE\",\"tab\":\"REVIEW\",\"label\":\"选择题主线\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"REVIEW\"},{\"page\":\"MAINLINE\",\"tab\":\"REVIEW\",\"label\":\"选择题主线\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "复习"
+                                                    },
+                                                    {
+                                                        "page":  "MAINLINE",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "选择题主线"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "REVIEW嵌套",
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "inserted_today_parent":  "待决定",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "REVIEW"
+                                                                  },
+                                                         "note":  "已存根就是复习，栈内没有今天。"
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "MAINLINE",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "选择题主线",
+                                                                      "week":  null,
+                                                                      "id":  ""
+                                                                  }
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "mainlineState(course).open=true"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-records-study-source",
+                      "covers":  [
+                                     "RECORDS嵌套",
+                                     "题到出处"
+                                 ],
+                      "old_input":  "[{\"tab\":\"RECORDS\"},{\"page\":\"STUDY\",\"tab\":\"RECORDS\",\"id\":\"SYN-KP-2\",\"label\":\"合成节乙\"},{\"page\":\"SOURCE\",\"tab\":\"RECORDS\",\"id\":\"SYN-DOC-1\",\"pdfPage\":4,\"label\":\"原文\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"RECORDS\"},{\"page\":\"STUDY\",\"tab\":\"RECORDS\",\"id\":\"SYN-KP-2\",\"label\":\"合成节乙\"},{\"page\":\"SOURCE\",\"tab\":\"RECORDS\",\"id\":\"SYN-DOC-1\",\"pdfPage\":4,\"label\":\"原文\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "记录"
+                                                    },
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "SYN-KP-2",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "合成节乙"
+                                                    },
+                                                    {
+                                                        "page":  "SOURCE",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "SYN-DOC-1",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  4,
+                                                        "label":  "原文"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "RECORDS嵌套",
+                                                      "题到出处"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "RECORDS"
+                                                                  },
+                                                         "note":  "成绩的课程父级是否补帧见 records-home。"
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "STUDY",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "合成节乙",
+                                                                      "id":  "SYN-KP-2",
+                                                                      "review":  false
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "SOURCE",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "原文",
+                                                                      "pdfPage":  4,
+                                                                      "id":  "SYN-DOC-1"
+                                                                  },
+                                                         "note":  "返回上一帧仍是同一 STUDY id。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "choices:\u003ctutorThreadId(SYN-KP-2)\u003e"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-records-mock",
+                      "covers":  [
+                                     "RECORDS嵌套",
+                                     "考试到成绩与重开"
+                                 ],
+                      "old_input":  "[{\"tab\":\"RECORDS\"},{\"page\":\"MOCK\",\"tab\":\"RECORDS\",\"id\":\"SYN-MOCK-1\",\"label\":\"模拟考\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"RECORDS\"},{\"page\":\"MOCK\",\"tab\":\"RECORDS\",\"id\":\"SYN-MOCK-1\",\"label\":\"模拟考\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "记录"
+                                                    },
+                                                    {
+                                                        "page":  "MOCK",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "SYN-MOCK-1",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "模拟考"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "RECORDS嵌套",
+                                                      "考试到成绩与重开"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "RECORDS"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "MOCK",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "id":  "SYN-MOCK-1",
+                                                                      "label":  "模拟考"
+                                                                  },
+                                                         "note":  "重开身份是已存 id，不新建。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "mainlineState(course, \"mock-drafts\")[\"SYN-MOCK-1\"]"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-mainline-exam",
+                      "covers":  [
+                                     "考试"
+                                 ],
+                      "old_input":  "[{},{\"page\":\"MAINLINE\",\"id\":\"continue\",\"week\":3,\"label\":\"第 3 周\"},{\"page\":\"MOCK\",\"label\":\"模拟考\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"page\":\"MAINLINE\",\"id\":\"continue\",\"week\":3,\"label\":\"第 3 周\"},{\"page\":\"MOCK\",\"label\":\"模拟考\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "MAINLINE",
+                                                        "tab":  "TODAY",
+                                                        "id":  "continue",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  3,
+                                                        "pdfPage":  1,
+                                                        "label":  "第 3 周"
+                                                    },
+                                                    {
+                                                        "page":  "MOCK",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "模拟考"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "考试"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天",
+                                                         "page":  "MAINLINE",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "第 3 周",
+                                                                      "week":  3,
+                                                                      "id":  "continue"
+                                                                  },
+                                                         "note":  "省略的 tab 解码为 TODAY。"
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "今天",
+                                                         "page":  "MOCK",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "id":  "",
+                                                                      "label":  "模拟考"
+                                                                  },
+                                                         "note":  "本帧没有考试 id。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "mainlineState(course).week/targetKp/entry",
+                                                          "mainlineState(course, \"week:3\") choice/result/pending/quizScroll/readScroll"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-after-select-records",
+                      "covers":  [
+                                     "考试到成绩"
+                                 ],
+                      "old_input":  "[{\"tab\":\"RECORDS\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"RECORDS\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "RECORDS",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "记录"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "考试到成绩"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "reconstruct_discarded_exam_stack":  "不可从本输入恢复",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程下成绩",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "RECORDS"
+                                                                  },
+                                                         "note":  "select(RECORDS) 会换成只有这一帧的栈。已丢掉的考试帧不能从本 JSON 补回。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "若考试作答仍在 week:\u003cn\u003e 或 mock-drafts，槽位保留，但不构成导航栈"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-route-week-mistakes",
+                      "covers":  [
+                                     "RECORDS以外的嵌套",
+                                     "WEEK_REVIEW"
+                                 ],
+                      "old_input":  "[{\"tab\":\"ROUTE\"},{\"page\":\"WEEK\",\"tab\":\"ROUTE\",\"week\":3,\"label\":\"第 3 周\"},{\"page\":\"WEEK_REVIEW\",\"tab\":\"ROUTE\",\"week\":3,\"label\":\"第 3 周错题\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"tab\":\"ROUTE\"},{\"page\":\"WEEK\",\"tab\":\"ROUTE\",\"week\":3,\"label\":\"第 3 周\"},{\"page\":\"WEEK_REVIEW\",\"tab\":\"ROUTE\",\"week\":3,\"label\":\"第 3 周错题\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "ROUTE",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "路线"
+                                                    },
+                                                    {
+                                                        "page":  "WEEK",
+                                                        "tab":  "ROUTE",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  3,
+                                                        "pdfPage":  1,
+                                                        "label":  "第 3 周"
+                                                    },
+                                                    {
+                                                        "page":  "WEEK_REVIEW",
+                                                        "tab":  "ROUTE",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  3,
+                                                        "pdfPage":  1,
+                                                        "label":  "第 3 周错题"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "RECORDS以外的嵌套",
+                                                      "WEEK_REVIEW"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "课程",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "ROUTE",
+                                                                      "label_decoded":  "路线"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "课程",
+                                                         "page":  "WEEK",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "week":  3,
+                                                                      "label":  "第 3 周"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "课程",
+                                                         "page":  "WEEK_REVIEW",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "week":  3,
+                                                                      "label":  "第 3 周错题"
+                                                                  },
+                                                         "note":  "上级仍是课程下的周，不改挂到今天。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-review-essay",
+                      "covers":  [
+                                     "REVIEW嵌套",
+                                     "考试"
+                                 ],
+                      "old_input":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"ESSAY\",\"tab\":\"REVIEW\",\"label\":\"论述限时练习\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"tab\":\"REVIEW\"},{\"page\":\"ESSAY\",\"tab\":\"REVIEW\",\"label\":\"论述限时练习\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "复习"
+                                                    },
+                                                    {
+                                                        "page":  "ESSAY",
+                                                        "tab":  "REVIEW",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "论述限时练习"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "REVIEW嵌套",
+                                                      "考试"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待实现",
+                                                         "keep":  {
+                                                                      "tab_was":  "REVIEW"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "今天下复习",
+                                                         "page":  "ESSAY",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "id":  "",
+                                                                      "label":  "论述限时练习"
+                                                                  },
+                                                         "note":  "本帧没有论述 id。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "mainlineState(course, \"essay-draft\") posed/attempt/deadline/text/handedIn"
+                                                      ],
+                                       "essay_id":  "待决定"
+                                   }
+                  },
+                  {
+                      "id":  "built-study-source",
+                      "covers":  [
+                                     "题到出处"
+                                 ],
+                      "old_input":  "[{},{\"page\":\"STUDY\",\"id\":\"SYN-KP-3\",\"autoStart\":true,\"label\":\"合成节丙\"},{\"page\":\"SOURCE\",\"id\":\"SYN-DOC-2\",\"label\":\"原文\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"page\":\"STUDY\",\"id\":\"SYN-KP-3\",\"autoStart\":true,\"label\":\"合成节丙\"},{\"page\":\"SOURCE\",\"id\":\"SYN-DOC-2\",\"label\":\"原文\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "TODAY",
+                                                        "id":  "SYN-KP-3",
+                                                        "autoStart":  true,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "合成节丙"
+                                                    },
+                                                    {
+                                                        "page":  "SOURCE",
+                                                        "tab":  "TODAY",
+                                                        "id":  "SYN-DOC-2",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "原文"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "题到出处"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天",
+                                                         "page":  "STUDY",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "合成节丙",
+                                                                      "autoStart":  true,
+                                                                      "id":  "SYN-KP-3"
+                                                                  },
+                                                         "note":  "省略的 tab 解码为 TODAY。"
+                                                     },
+                                                     {
+                                                         "level":  2,
+                                                         "owner":  "今天",
+                                                         "page":  "SOURCE",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "原文",
+                                                                      "pdfPage":  1,
+                                                                      "id":  "SYN-DOC-2"
+                                                                  },
+                                                         "note":  "pdfPage 缺省 1 被省略。返回上一帧是同一 STUDY。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "choices:\u003ctutorThreadId(SYN-KP-3)\u003e"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "built-study-after-back",
+                      "covers":  [
+                                     "回题"
+                                 ],
+                      "old_input":  "[{},{\"page\":\"STUDY\",\"id\":\"SYN-KP-3\",\"autoStart\":true,\"label\":\"合成节丙\"}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{},{\"page\":\"STUDY\",\"id\":\"SYN-KP-3\",\"autoStart\":true,\"label\":\"合成节丙\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    },
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "TODAY",
+                                                        "id":  "SYN-KP-3",
+                                                        "autoStart":  true,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "合成节丙"
+                                                    }
+                                                ],
+                                    "round_trip_equals_built":  true
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "回题"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "tab_was":  "TODAY"
+                                                                  }
+                                                     },
+                                                     {
+                                                         "level":  1,
+                                                         "owner":  "今天",
+                                                         "page":  "STUDY",
+                                                         "page_token":  "保留",
+                                                         "keep":  {
+                                                                      "label":  "合成节丙",
+                                                                      "autoStart":  true,
+                                                                      "id":  "SYN-KP-3"
+                                                                  },
+                                                         "note":  "back() 去掉出处帧后，题目帧的 id、autoStart、label 仍在。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+                                                          "choices:\u003ctutorThreadId(SYN-KP-3)\u003e"
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-empty-object",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    }
+                                                ]
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "label":  "今天",
+                                                                      "pdfPage":  1,
+                                                                      "id":  ""
+                                                                  },
+                                                         "note":  "空对象解码为 HOME/TODAY 及全部缺省。不新增字段。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-study-omitted-defaults",
+                      "covers":  [
+                                     "缺省字段",
+                                     "未知结构"
+                                 ],
+                      "old_input":  "[{\"page\":\"STUDY\",\"id\":\"SYN-KP-4\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"page\":\"STUDY\",\"id\":\"SYN-KP-4\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "TODAY",
+                                                        "id":  "SYN-KP-4",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    }
+                                                ]
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段",
+                                                      "未知结构"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "decode 成功，但首帧不是 HOME，restore 整栈拒绝。缺省 label 变成 tab.label「今天」，不是节名。不得补造 HOME 父帧或节名。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-explicit-null-week",
+                      "covers":  [
+                                     "旧字段",
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{\"week\":null}]",
+                      "codec":  {
+                                    "restore_accepted":  true,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "HOME",
+                                                        "tab":  "TODAY",
+                                                        "id":  "",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    }
+                                                ]
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "旧字段",
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+                                                     {
+                                                         "level":  0,
+                                                         "owner":  "今天",
+                                                         "page":  "HOME",
+                                                         "page_token":  "待决定",
+                                                         "keep":  {
+                                                                      "week":  null
+                                                                  },
+                                                         "note":  "显式 null 与缺省相同。再次编码为 [{}]。"
+                                                     }
+                                                 ],
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-settings-page",
+                      "covers":  [
+                                     "旧字段"
+                                 ],
+                      "old_input":  "[{\"tab\":\"REVIEW\"},{\"page\":\"SETTINGS\",\"tab\":\"REVIEW\",\"label\":\"设置\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.SerializationException",
+                                    "exception_message":  "com.coach.ui.AppPage does not contain element with name \u0027SETTINGS\u0027 at path $[1].page"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "旧字段"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "历史 AppPage.SETTINGS 已不在当前枚举。整栈拒绝，连同前面的 REVIEW 帧一起丢。设置帧落到右上角、丢弃或保留，裁决未写。先解析再迁是待实现。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-unknown-tab",
+                      "covers":  [
+                                     "未知条目"
+                                 ],
+                      "old_input":  "[{\"tab\":\"ARCHIVE\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.SerializationException",
+                                    "exception_message":  "com.coach.ui.AppTab does not contain element with name \u0027ARCHIVE\u0027 at path $[0].tab"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "未知条目"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "ARCHIVE 没有映射。整栈拒绝。不得编造归属。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-unknown-page",
+                      "covers":  [
+                                     "未知条目"
+                                 ],
+                      "old_input":  "[{\"page\":\"LIBRARY\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.SerializationException",
+                                    "exception_message":  "com.coach.ui.AppPage does not contain element with name \u0027LIBRARY\u0027 at path $[0].page"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "未知条目"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "LIBRARY 没有映射。整栈拒绝。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-extra-field",
+                      "covers":  [
+                                     "旧字段"
+                                 ],
+                      "old_input":  "[{\"tab\":\"ROUTE\",\"shelf\":\"SYN-OLD\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.json.JsonDecodingException",
+                                    "exception_message":  "Unexpected JSON token at offset 17: Encountered an unknown key \u0027shelf\u0027 at path: $[0]\nUse \u0027ignoreUnknownKeys = true\u0027 in \u0027Json {}\u0027 builder or \u0027@JsonIgnoreUnknownKeys\u0027 annotation to ignore unknown keys.\nJSON input: [{\"tab\":\"ROUTE\",\"shelf\":\"SYN-OLD\"}]"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "旧字段"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "未知键 shelf 令整栈拒绝。先读出已知的 ROUTE 字段是待实现。是否保留未知键未裁决。",
+                                       "known_owner_if_parsed":  "课程",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-empty-array",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  true,
+                                    "canonical":  "[]"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "空数组 decode 成功但 restore 拒绝。没有可迁移帧。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-non-home-root",
+                      "covers":  [
+                                     "缺省字段"
+                                 ],
+                      "old_input":  "[{\"page\":\"STUDY\",\"id\":\"SYN-KP-5\"}]",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  true,
+                                    "canonical":  "[{\"page\":\"STUDY\",\"id\":\"SYN-KP-5\"}]",
+                                    "decoded":  [
+                                                    {
+                                                        "page":  "STUDY",
+                                                        "tab":  "TODAY",
+                                                        "id":  "SYN-KP-5",
+                                                        "autoStart":  false,
+                                                        "review":  false,
+                                                        "week":  null,
+                                                        "pdfPage":  1,
+                                                        "label":  "今天"
+                                                    }
+                                                ]
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "缺省字段"
+                                                  ],
+                                       "decision":  "待决定",
+                                       "implementation":  "待实现",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "首帧 STUDY 能 decode，restore 因根不是 HOME 而拒绝。不得补造父帧。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-blank",
+                      "covers":  [
+                                     "未知条目"
+                                 ],
+                      "old_input":  "",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.json.JsonDecodingException",
+                                    "exception_message":  "Expected start of the array \u0027[\u0027, but had \u0027EOF\u0027 instead at path: $\nJSON input: "
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "未知条目"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "无迁移帧",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "空字符串不是栈。不制造占位入口。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  },
+                  {
+                      "id":  "raw-not-json",
+                      "covers":  [
+                                     "未知条目"
+                                 ],
+                      "old_input":  "SYN-NOT-JSON",
+                      "codec":  {
+                                    "restore_accepted":  false,
+                                    "decode_ok":  false,
+                                    "exception_class":  "kotlinx.serialization.json.JsonDecodingException",
+                                    "exception_message":  "Unexpected JSON token at offset 0: Expected start of the array \u0027[\u0027, but had \u0027S\u0027 instead at path: $\nJSON input: SYN-NOT-JSON"
+                                },
+                      "expected":  {
+                                       "covers":  [
+                                                      "未知条目"
+                                                  ],
+                                       "decision":  "已裁决",
+                                       "implementation":  "无迁移帧",
+                                       "stack":  [
+
+                                                 ],
+                                       "current":  "非 JSON 不是栈。不制造占位入口。",
+                                       "task_state":  [
+
+                                                      ]
+                                   }
+                  }
+              ]
+}

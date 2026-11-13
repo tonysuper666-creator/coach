@@ -134,7 +134,7 @@ class ReviewQueueEntryTest {
         } finally { e.close() }
     }
 
-    @Test fun aPreparedVariantFromThePoolTurnsExactlyOneGapIntoPractice() {
+    @Test fun aPreparedVariantFromThePoolTurnsExactlyOneGapIntoAReadyRow() {
         // 合成题库端口：只给 K1 一道已核键的新题，其余考点如实没有候选。
         val port = VariantCandidatePort { _, _, kp ->
             if (kp == "K1") listOf(VariantCandidate("C", "K1", QueueQuestion("q-synthetic-variant"),
@@ -162,6 +162,7 @@ class ReviewQueueEntryTest {
                 assertEquals(1, board.items.count { it.variantCount > 0 }, "一道题不能被两行同时占用")
 
                 // 点开这一行：本机记下的必须是这道变式的作答身份，而不是空或另一道题。
+                // 这里只证到「身份已保存在本机」；练习路由还没有读取它，所以不断言练习真的开始了这一道。
                 onAllNodesWithText("开始")[board.items.indexOf(ready)].performScrollTo().performClick()
                 assertEquals(listOf("K1" to true), opened)
                 assertEquals(expectedAttempt, reviewCursorAttempt(e.c.sync, "C"))

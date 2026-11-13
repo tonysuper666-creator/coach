@@ -32,6 +32,10 @@ import kotlinx.serialization.json.*
  *
  * [variantCandidates] 是题库候选端口：本机有题级候选通道时从它取同考点、已核键的新题；
  * 默认 [NoVariantCandidates] 表示这台设备还没有这条通道，缺口保持「待生成变式」，不造题。
+ *
+ * 点「开始」只做两件事：把这一行的变式作答身份写进本机光标，再用 [onOpenKp] 打开考点。
+ * 练习路由目前只收到 `kpId` 和 `startNow`，还没有读取这个身份的消费者，所以这里能证的是
+ * 「候选注入 → 分配 → 显示 → 本机保存身份」，不是「练习真的开始那道变式」。
  */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}, variantCandidates: VariantCandidatePort = NoVariantCandidates) {

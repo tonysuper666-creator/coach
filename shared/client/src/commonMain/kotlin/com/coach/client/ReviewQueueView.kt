@@ -170,7 +170,11 @@ fun reviewCursor(sync: SyncEngine, courseId: String): String? =
 
 /**
  * 上一次点开的那一项落到的具体作答身份：已经选好变式时是那道变式的 attemptId，
- * 还没有候选时是 null。练习线程据此接着练同一道题，而不是重新挑一道。
+ * 还没有候选时是 null。
+ *
+ * 目前没有消费者：复习入口点「开始」只把身份写进本机光标，然后调用
+ * `onOpenKp(kpId, true)`，练习路由还没有读取它。等练习消费接口接上后，
+ * 练习线程据此接着练同一道题，而不是重新挑一道。
  */
 fun reviewCursorAttempt(sync: SyncEngine, courseId: String): String? =
     (sync.mainlineState(courseId, REVIEW_PAGE)["attemptId"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }

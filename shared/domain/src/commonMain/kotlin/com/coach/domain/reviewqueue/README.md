@@ -53,7 +53,11 @@ The client's review entry takes the port as an injectable parameter
 (`reviewBoard(..., variants: VariantCandidatePort)` / `ReviewScreen(variantCandidates = ...)`),
 allocates before it schedules, and shows a served row as "已备 N 道变式" with its
 allocated attempt identity; the same identity is written to the review cursor when
-the row is opened, so the practice route can resume that exact attempt. The default
+the row is opened, so a practice route that reads the cursor can resume that exact
+attempt. That consumer does not exist yet: the entry still opens the KP with
+`onOpenKp(kpId, true)`, so what is proven here is "candidate injected → allocated →
+shown → identity saved on this device", not "practice actually starts that
+variant". The default
 `NoVariantCandidates` reports nothing, which is why the entry keeps saying "待生成
 变式" until a real question-level pool channel exists on the device.
 The client's board renders `scheduleOrder(...)`, which makes the known

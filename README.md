@@ -1,8 +1,12 @@
-# Coach（代号）
+# Coach（代号，占位名 LerningCoach）
+
+> [!IMPORTANT]
+> **权威产品决定入口**：参见 [PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)。以李政最新追加更正为准：软件开发第一、项目优先级未降；长期读教材/文献/好书、课程可配置；考试资料仅填充，不因缺课件/真题挡功能；先做后讲、自己的题覆盖真题知识点且不直接放真题；教材优先；V7已定、一套风格派生；精确占位 `LerningCoach`（正式名未定）；三移动形态+Mac/Windows桌面、无Web、无产品工期；iOS已有账号内部TestFlight/直装不上架；暂不合并Sable；不测Mac睡眠，不反复索辅助功能授权，OPPO可替代样本。
 
 把 StudyCoach 的学习闭环与证据规则、DeepTutor 的导师能力合在一起，从 0 重写的学习应用。目标：安卓原生 + macOS 桌面（之后 Windows），服务端先放用户的 Mac，AI 经订阅 CLI。
 
-- 已定决定与背景：`docs/background/新应用立项方案v2.md`
+- 当前权威产品决定：[docs/PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)
+- 历史决定与立项背景：`docs/background/新应用立项方案v2.md`
 - 设计委员会（Opus 5.5 / Sonnet 5.5 / GPT-6-Astra 各出完整设计 → 交叉评审 → 分歧核查）：`docs/design/`
 - 第一件事：整合三份设计、裁决分歧，产出 `docs/DESIGN.md` 与 ADR，再按 M0 开卡。见 Multica 里负责人 Mika 的立项卡。
 - 参考源码（只读，不在本仓库里）：StudyCoach（`gh repo clone tonysuper666-creator/studycoach`，已归档）、DeepTutor（`~/DeepTutor`）。

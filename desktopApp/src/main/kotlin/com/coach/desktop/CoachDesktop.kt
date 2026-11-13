@@ -46,7 +46,7 @@ fun runCoach() {
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
-        Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
                 DisposableEffect(session) {

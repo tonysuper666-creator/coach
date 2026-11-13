@@ -132,6 +132,7 @@ class SourceRoundTripTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.answer == PracticeAnswer(selected, revealed = true) }
             onNodeWithTag("open-practice-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
             assertEquals(2, controller.state.value.page)
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().size == 1 }
             onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：${practice.reference}")

@@ -236,7 +236,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
     val quoteAnchor = remember(ui.page, source, practiceSource) {
         if (source == null) null
         else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
-        else source.blocks.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source.text
+        else StudyCoachCourse.sourceQuote(source, ui.page)
     }
     val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
         value = PageImage.Loading

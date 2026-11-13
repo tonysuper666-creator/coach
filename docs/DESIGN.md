@@ -1,6 +1,24 @@
-Coach 最终设计 v1（2026-10-29，负责人 Mika 整合裁决）
+# Coach 最终设计 v1（2026-10-29，负责人 Mika 整合裁决；当前权威产品决定见顶部链接）
 
-本文是团队据以开工的唯一设计。底稿是 `docs/design/round1-opus-full.md`（两份评审都建议以它为底），按节替换为评审与核查员的裁决。每条决定后的 `〔来源〕` 指向出处：`C#n` = `committee-result.json` 共识第 n 条，`d1–d8` = 分歧裁决（见 `docs/adr/`），`O/S/A §n` = Opus/Sonnet/Astra 设计第 n 节，`评O/评S/评A` = 三份评审，`评R3` = 设计第二意见 `docs/design/round3-architect-review.md`（TON-1036，F = 致命、I = 重要、m = 次要；按 Mika 2026-10-29 的裁决落地），`漏#n` = 立项卡列的「三份都漏掉」第 n 条。
+> [!IMPORTANT]
+> **当前权威产品决定**：以 [PRODUCT_DECISIONS.md](PRODUCT_DECISIONS.md) 为唯一有效真源（源自李政 TON-1472 追加更正指令 `01a1d3e7-294c-7a26-8049-956bf497def9` 及项目描述）。
+> 本设计文档中保留的历史早期规划（如 10-29 期中节奏、旧备选方案、旧命名或合并 Sable 等）均作为历史记录保留，**不再重新发起选型或请李政重选**。
+> **当前核心决定摘要**：
+> 1. 软件开发第一、项目优先级未降；
+> 2. 长期读教材/文献/好书、课程可配置；
+> 3. 考试资料仅填充，不因缺课件/真题挡功能；
+> 4. 先做后讲、自己的题覆盖真题知识点且不直接放真题；
+> 5. 教材优先；
+> 6. V7 已定（案头风格，一套风格派生变体）；
+> 7. 精确占位 `LerningCoach`，正式名未定，不把 Coutil 等旧候选落成正式名；
+> 8. 长期覆盖三移动形态（直板/Fold8/Duo）+ Mac/Windows 原生桌面、无 Web、无产品工期；当前唯一开发范围是 Windows（上传教材先读/直接学、询问是否开启 learning、出题可选不出/选择/简答、学习位置打开对应原文、阅读器翻真页；安卓/iOS/Fold8/Mac 安装包暂停，Windows 安装包最后；长期形态保留）；
+> 9. iOS 使用已有开发者账号内部 TestFlight/直装不上架（签名团队沿现有配置、不改变身份）；
+> 10. 暂不合并 Sable；
+> 11. 不测 Mac 睡眠，不反复索辅助功能授权，OPPO 可替代样本（租约等待入口为 `~/Coach/testphone/wait.sh`）。
+>
+> 团队运作与调度规则参见工作区唯一规则技能：`multica-team-operating-rules` 与 `butler-panel-card-rules`。
+
+本文是团队据以开工的设计底稿。底稿是 `docs/design/round1-opus-full.md`（两份评审都建议以它为底），按节替换为评审与核查员的裁决。每条决定后的 `〔来源〕` 指向出处：`C#n` = `committee-result.json` 共识第 n 条，`d1–d8` = 分歧裁决（见 `docs/adr/`），`O/S/A §n` = Opus/Sonnet/Astra 设计第 n节，`评O/评S/评A` = 三份评审，`评R3` = 设计第二意见 `docs/design/round3-architect-review.md`（TON-1036，F = 致命、I = 重要、m = 次要；按 Mika 2026-10-29 的裁决落地），`漏#n` = 立项卡列的「三份都漏掉」第 n 条。
 
 标注：**决定** = 照此实现；**M0 验证** = 由 M0 spike 给出数字后定参；**开放** = 现在答不了，写明谁来答、什么时候答。
 

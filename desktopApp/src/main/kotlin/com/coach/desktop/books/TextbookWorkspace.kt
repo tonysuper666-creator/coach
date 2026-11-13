@@ -311,7 +311,7 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
                 if (book.questionMode != QuestionMode.NONE) {
                     val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer)
+                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, onSource, !ui.busy)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,
@@ -326,15 +326,17 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
 }
 
 @Composable
-private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit) {
+private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
     Text(if (mode == QuestionMode.CHOICE) "原文填空" else "简答自检", style = MaterialTheme.typography.titleMedium)
     Text(practice.prompt)
+    TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
         for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
             draft = option; onAnswer(PracticeAnswer(option, revealed = true))
         }, enabled = !answer.revealed, modifier = Modifier.fillMaxWidth().testTag("choice-$index")) { Text(option) }
         if (answer.revealed) {
+            Text("你选择：${answer.text}")
             Text(if (answer.text == practice.answer) "与原文一致。" else "再对照一下原文：${practice.answer}")
             Text("原文：${practice.reference}")
             TextButton({ draft = ""; onAnswer(PracticeAnswer()) }) { Text("重新作答") }

@@ -119,14 +119,16 @@ class LocalBooksReaderSourceTest {
             assertIs<Located.Found>(located, "Sentence should be accurately located in PDFBox word boxes")
             assertTrue(located.rects.isNotEmpty())
 
-            // Progress save and state persistence
+            // Without persistent CAS/idempotency, this adapter must refuse the write.
+            val dbBefore = Files.readAllBytes(library.directory.resolve("library.sqlite"))
             val saveReply = source.saveProgress(expectedSha, "1", 3, 1L, "mut-1")
-            assertTrue(saveReply.ok)
+            assertEquals(501, saveReply.status)
+            assertContentEquals(dbBefore, Files.readAllBytes(library.directory.resolve("library.sqlite")))
 
             val updatedState = source.state(expectedSha)
             val updatedProgress = updatedState.body!!["progress"]!!.jsonObject
-            assertEquals(3, updatedProgress["pdfPage"]?.jsonPrimitive?.content?.toInt())
-            assertEquals(3, library.book(expectedSha).readingPage)
+            assertEquals(1, updatedProgress["pdfPage"]?.jsonPrimitive?.content?.toInt())
+            assertEquals(1, library.book(expectedSha).readingPage)
         } finally {
             tempDir.toFile().deleteRecursively()
         }

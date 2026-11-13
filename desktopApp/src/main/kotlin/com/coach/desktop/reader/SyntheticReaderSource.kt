@@ -2,6 +2,8 @@ package com.coach.desktop.reader
 
 import com.coach.client.CourseHttp
 import com.coach.client.ReaderReply
+import com.coach.desktop.developmentLaunch
+import com.coach.desktop.windowsLibraryDirectory
 import kotlinx.serialization.json.*
 import java.nio.file.Files
 import java.nio.file.Path
@@ -300,13 +302,16 @@ object ReaderSourceResolver {
         val explicitLib = libraryDirectory
             ?: env("COACH_LIBRARY_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
             ?: prop("coach.library.dir")?.takeIf(String::isNotBlank)?.let(Path::of)
-        if (explicitLib != null && Files.exists(explicitLib)) {
-            return LocalBooksReaderSource(com.coach.desktop.books.TextbookLibrary(explicitLib))
-        }
-        val defaultHome = prop("user.home")?.let(Path::of) ?: Path.of(System.getProperty("user.home"))
-        val candidate = defaultHome.resolve("Coach/books")
-        if (Files.exists(candidate.resolve("library.sqlite"))) {
-            return LocalBooksReaderSource(com.coach.desktop.books.TextbookLibrary(candidate))
+        // 与 Windows 书架共用同一个守卫；开发启动绝不自动探测私人资料库。
+        if (explicitLib == null && developmentLaunch(env, prop)) return SyntheticReaderSource()
+        val home = prop("user.home")?.let(Path::of) ?: Path.of(System.getProperty("user.home"))
+        val directory = windowsLibraryDirectory(
+            environment = { key -> if (key == "COACH_LIBRARY_DIR") explicitLib?.toString() else env(key) },
+            property = prop,
+            home = home,
+        )
+        if (explicitLib != null || Files.exists(directory.resolve("library.sqlite"))) {
+            return LocalBooksReaderSource(com.coach.desktop.books.TextbookLibrary(directory))
         }
         return SyntheticReaderSource()
     }

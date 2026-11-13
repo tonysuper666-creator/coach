@@ -14,6 +14,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
@@ -186,7 +188,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     }
 
     val quoteAnchor = remember(ui.page, source) {
-        source?.blocks?.firstOrNull { it.page == ui.page }?.text ?: source?.text
+        source?.blocks?.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source?.text
     }
 
     LaunchedEffect(book.id, ui.page, quoteAnchor) {
@@ -195,6 +197,11 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
             session.openRemoteAt(book.id, ui.page, quoteAnchor)
         } else {
             session.openRemote(book.id, ui.page)
+        }
+        // 这里只拥有原文视图；作答仍归原 controller，出处浏览不保存独立读书书签。
+        if (remote.current?.id == book.id && remote.current?.version == "1" &&
+            com.coach.desktop.reader.PdfPages.toPdf(session.state.position.page) == ui.page) {
+            remote.show(ui.page)
         }
     }
 
@@ -235,7 +242,10 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                             TextButton(onClick = { retry++ }) { Text("重试") }
                         }
                         is PageImage.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            val boxes = (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes
+                            val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
+                            val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
+                                view?.document == book.id && view.pdfPage == ui.page
+                            val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
                             val located = if (boxes != null && quoteAnchor != null) {
                                 com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor)
                             } else null
@@ -244,7 +254,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                                 Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
                                     modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
                                 if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
-                                    androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").matchParentSize()) {
+                                    androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
                                         val k = size.width / boxes.width.toFloat()
                                         for (r in located.rects) drawRect(
                                             androidx.compose.ui.graphics.Color(0xFFFFE9A8).copy(alpha = 0.55f),

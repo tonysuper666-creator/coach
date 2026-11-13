@@ -6,6 +6,8 @@ import com.coach.desktop.books.TextbookLibrary
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -14,28 +16,30 @@ import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.pdfbox.text.TextPosition
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
-import java.nio.file.Files
-import java.nio.file.Path
 import java.security.MessageDigest
 import javax.imageio.ImageIO
 
 /**
  * 将本地 Windows TextbookLibrary 适配为 ReaderSource。
  *
- * 资料 ID 为自造/导入 PDF 文件的 SHA-256 哈希；同时兼容按文件绝对路径直接定位。
- * 提供真实的 catalog、page、image、boxes（PDFBox 词框）、study（章节原文考点）及 progress 持久化。
+ * 仅识别经书架显式导入的内容 SHA-256 ID；本地不可变副本的版本为 1。
+ * HTTP 的 opaque ID 与页文本哈希都不是本地文件身份。读取不会隐式导入文件。
+ * 书签仍由书架控制器保存；没有持久 CAS/幂等与批注存储时，拒绝 ReaderSource 写入。
  */
 internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSource {
 
-    private fun findBook(document: String): Textbook? {
-        val byId = runCatching { library.book(document) }.getOrNull()
-        if (byId != null) return byId
-        val path = Path.of(document)
-        if (Files.isRegularFile(path)) {
-            val imported = runCatching { library.importBook(path) }.getOrNull()
-            if (imported != null) return imported
-        }
-        return null
+    private val localId = Regex("[0-9a-f]{64}")
+
+    private fun findBook(document: String): Textbook? =
+        if (localId.matches(document)) runCatching { library.book(document) }.getOrNull() else null
+
+    private fun refused(status: Int, message: String) =
+        ReaderReply(status, buildJsonObject { put("error", message) })
+
+    private fun locationFailure(book: Textbook, pdfPage: Int, version: String = "1"): ReaderReply? = when {
+        version != "1" -> refused(409, "资料版本已改变，请重新定位")
+        pdfPage !in 1..book.pages.size -> refused(409, "页码超出了这本教材的范围")
+        else -> null
     }
 
     override suspend fun catalog(): ReaderReply {
@@ -65,7 +69,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
             put("progress", buildJsonObject {
                 put("pdfPage", book.readingPage)
                 put("version", "1")
-                put("revision", 1L)
+                put("revision", 0L) // 只读投影；不宣称提供 CAS 修订号。
                 put("stale", false)
             })
             put("notes", JsonArray(emptyList()))
@@ -75,7 +79,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun page(document: String, pdfPage: Int): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
-        if (pdfPage !in 1..book.pages.size) return ReaderReply(404, null)
+        locationFailure(book, pdfPage)?.let { return it }
         val p = book.pages[pdfPage - 1]
         val sha = MessageDigest.getInstance("SHA-256").digest(p.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         val body = buildJsonObject {
@@ -91,7 +95,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? {
         val book = findBook(document) ?: return null
-        if (pdfPage !in 1..book.pages.size) return null
+        if (version != "1" || pdfPage !in 1..book.pages.size) return null
         val bufferedImage = if (book.format == "pdf") {
             runCatching { library.renderPdf(book, pdfPage) }.getOrNull()
         } else {
@@ -125,10 +129,11 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun study(document: String, pdfPage: Int): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
+        locationFailure(book, pdfPage)?.let { return it }
         val lessons = book.lessons.filter { pdfPage in it.firstPage..it.lastPage }
         val questions = buildJsonArray {
             for (lesson in lessons) {
-                val anchor = lesson.blocks.firstOrNull { it.page == pdfPage }?.text ?: lesson.text
+                val anchor = lesson.blocks.firstOrNull { it.page == pdfPage && !it.heading }?.text ?: lesson.text
                 add(buildJsonObject {
                     put("id", lesson.id)
                     put("stem", lesson.title)
@@ -138,6 +143,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
             }
         }
         val body = buildJsonObject {
+            put("documentId", book.id)
+            put("pdfPage", pdfPage)
+            put("version", "1")
             put("questions", questions)
             put("unlocated", 0)
             put("available", lessons.isNotEmpty())
@@ -147,7 +155,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
-        if (pdfPage !in 1..book.pages.size) return ReaderReply(404, null)
+        locationFailure(book, pdfPage, version)?.let { return it }
         if (book.format != "pdf") {
             return ReaderReply(200, buildJsonObject {
                 put("version", version)
@@ -192,20 +200,17 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun saveProgress(document: String, version: String, pdfPage: Int, baseRevision: Long, mutationId: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
-        library.save(book.copy(readingPage = pdfPage))
-        return ReaderReply(200, buildJsonObject {
-            put("ok", true)
-            put("pdfPage", pdfPage)
-            put("revision", baseRevision + 1)
-        })
+        locationFailure(book, pdfPage, version)?.let { return it }
+        return refused(501, "本地阅读进度由书架保存，暂不支持此写入方式")
     }
 
     override suspend fun saveNote(document: String, body: JsonObject): ReaderReply {
-        return ReaderReply(200, buildJsonObject {
-            put("ok", true)
-            put("id", body["id"] ?: JsonPrimitive(""))
-            put("revision", 1L)
-        })
+        val book = findBook(document) ?: return ReaderReply(404, null)
+        val version = (body["version"] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
+        val pdfPage = (body["pdfPage"] as? JsonPrimitive)?.intOrNull
+            ?: return refused(409, "批注缺少可确认的页码")
+        locationFailure(book, pdfPage, version)?.let { return it }
+        return refused(501, "本地阅读器暂不支持保存批注，草稿仍保留")
     }
 }
 

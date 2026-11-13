@@ -208,13 +208,21 @@ class MockExamTest {
         try {
             store.append("C1", "outline_revised", json("knowledgePoints" to JsonArray((1..2).map { w -> json("id" to "kp-drill-$w", "title" to "drill topic", "week" to w) })))
             val byWeek = mocks.start(store, "C1", json("drill" to json("week" to 1)))
-            val weekItems = byWeek.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray
+            val weekPaper = byWeek.getValue("paper").jsonObject
+            val weekSection = weekPaper.getValue("sections").jsonArray.single().jsonObject
+            assertEquals("单选速刷 · 第 1 周", weekPaper.str("title"))
+            assertEquals("单选速刷 · 第 1 周", weekSection.str("title"))
+            val weekItems = weekSection.getValue("items").jsonArray
             assertEquals(3, weekItems.size, "a week with three choices gives three, never repeats")
             assertEquals(14 * 60_000L, byWeek.num("deadline") - now.get())
             mocks.submit(store, "C1", byWeek.str("mockId"), JsonObject(emptyMap()), false)
 
             val weighted = mocks.start(store, "C1", json("drill" to JsonObject(emptyMap())))
-            val keys = weighted.getValue("paper").jsonObject.getValue("sections").jsonArray.single().jsonObject.getValue("items").jsonArray.map { it.jsonObject.str("id") }
+            val weightedPaper = weighted.getValue("paper").jsonObject
+            val weightedSection = weightedPaper.getValue("sections").jsonArray.single().jsonObject
+            assertEquals("单选速刷 · 全课程", weightedPaper.str("title"))
+            assertEquals("单选速刷 · 全课程", weightedSection.str("title"))
+            val keys = weightedSection.getValue("items").jsonArray.map { it.jsonObject.str("id") }
             assertEquals(7, keys.distinct().size)
             val id = weighted.str("mockId")
             mocks.save(store, "C1", id, json(keys.first() to json("choice" to 0)))

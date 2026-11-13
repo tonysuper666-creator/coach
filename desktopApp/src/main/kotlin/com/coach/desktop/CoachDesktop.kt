@@ -67,9 +67,7 @@ fun runCoach() {
 /** The gate disposes all network clients and the ledger when an identity is revoked. */
 internal class DesktopLearningSession(settings: DesktopConnectionSettings, identity: DesktopIdentity, course: String) : AutoCloseable {
     init {
-        require(settings.agentRunId == null || identity.serverUrl == settings.serverUrl()) {
-            "Acceptance identity must use the explicitly configured isolated server"
-        }
+        requireDevelopmentServer(settings, identity.serverUrl)
     }
     val home = settings.home.toString()
     private val baseUrl = identity.serverUrl

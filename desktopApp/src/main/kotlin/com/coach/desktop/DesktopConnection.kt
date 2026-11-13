@@ -24,9 +24,11 @@ internal class DesktopConnectionSettings(
     val home: Path = Path.of(System.getProperty("user.home")),
     private val environment: (String) -> String? = System::getenv,
     private val mac: Boolean = System.getProperty("os.name").startsWith("Mac"),
+    private val property: (String) -> String? = System::getProperty,
 ) {
     // Acceptance uses the existing desktop launch, never an implicit device/user identity.
     val agentRunId: String? = desktopAcceptanceRun(environment)
+    fun developmentRun(): Boolean = developmentLaunch(environment, property)
     private val configFile = home.resolve("Coach/config/local.properties")
     private val clientRoot: Path = environment("COACH_CLIENT_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
         ?: home.resolve("Coach/client")
@@ -70,6 +72,19 @@ internal class DesktopConnectionSettings(
         if (!Files.isRegularFile(path, NOFOLLOW_LINKS)) return null
         val token = Files.readString(path).trim().takeIf(String::isNotEmpty) ?: return null
         return PairedCredentials(environment("COACH_DEVICE_ID")?.takeIf(String::isNotBlank) ?: "desktop", token)
+    }
+}
+
+/**
+ * A development launch may pair or open a session only at [DesktopConnectionSettings.serverUrl],
+ * which is the normalized `COACH_URL` once isolation is configured. Equivalent spellings match
+ * after [desktopServerUrl]. The packaged app is unchanged, including a stored identity for another address.
+ */
+internal fun requireDevelopmentServer(settings: DesktopConnectionSettings, address: String) {
+    if (!settings.developmentRun()) return
+    require(desktopServerUrl(address) == settings.serverUrl()) {
+        if (settings.agentRunId != null) "Acceptance identity must use the explicitly configured isolated server"
+        else "Development run must use the isolated COACH_URL"
     }
 }
 

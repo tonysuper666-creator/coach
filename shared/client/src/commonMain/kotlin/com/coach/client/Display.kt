@@ -62,3 +62,9 @@ fun CourseView.examCountdownText(nowMillis: Long): String = when {
     daysToExam(nowMillis) == null -> "期末已结束"
     else -> "距期末 ${daysToExam(nowMillis)} 天"
 }
+
+/**
+ * One question's latest graded answer was correct and was not a guess.
+ * That is not 「会了」: section mastery still needs the ledger's own evidence.
+ */
+fun latestCorrectAttemptLabel(): String = "最近答对（非猜）"

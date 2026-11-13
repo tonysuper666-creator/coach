@@ -2,6 +2,7 @@ package com.coach.desktop.reader
 
 import com.coach.client.ReaderReply
 import com.coach.desktop.books.Textbook
+import com.coach.desktop.books.StudyCoachCourse
 import com.coach.desktop.books.TextbookLibrary
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -133,7 +134,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         val lessons = book.lessons.filter { pdfPage in it.firstPage..it.lastPage }
         val questions = buildJsonArray {
             for (lesson in lessons) {
-                val anchor = lesson.blocks.firstOrNull { it.page == pdfPage && !it.heading }?.text ?: lesson.text
+                val anchor = StudyCoachCourse.sourceQuote(lesson, pdfPage).orEmpty()
                 add(buildJsonObject {
                     put("id", lesson.id)
                     put("stem", lesson.title)

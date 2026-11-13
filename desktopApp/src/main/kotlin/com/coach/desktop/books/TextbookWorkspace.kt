@@ -188,7 +188,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
     }
 
     val quoteAnchor = remember(ui.page, source) {
-        source?.blocks?.firstOrNull { it.page == ui.page && !it.heading }?.text ?: source?.text
+        source?.let { StudyCoachCourse.sourceQuote(it, ui.page) }
     }
 
     LaunchedEffect(book.id, ui.page, quoteAnchor) {

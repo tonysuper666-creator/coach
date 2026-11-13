@@ -11,10 +11,10 @@
 > 5. 教材优先；
 > 6. V7 已定（案头风格，一套风格派生变体）；
 > 7. 精确占位 `LerningCoach`，正式名未定，不把 Coutil 等旧候选落成正式名；
-> 8. 三移动形态（直板/Fold8/Duo）+ Mac/Windows 原生桌面、无 Web、无产品工期；
-> 9. iOS 使用已有开发者账号内部 TestFlight/直装不上架；
+> 8. 长期覆盖三移动形态（直板/Fold8/Duo）+ Mac/Windows 原生桌面、无 Web、无产品工期；当前唯一开发范围是 Windows（上传教材先读/直接学、询问是否开启 learning、出题可选不出/选择/简答、学习位置打开对应原文、阅读器翻真页；安卓/iOS/Fold8/Mac 安装包暂停，Windows 安装包最后；长期形态保留）；
+> 9. iOS 使用已有开发者账号内部 TestFlight/直装不上架（签名团队沿现有配置、不改变身份）；
 > 10. 暂不合并 Sable；
-> 11. 不测 Mac 睡眠，不反复索辅助功能授权，OPPO 可替代样本。
+> 11. 不测 Mac 睡眠，不反复索辅助功能授权，OPPO 可替代样本（租约等待入口为 `~/Coach/testphone/wait.sh`）。
 >
 > 团队运作与调度规则参见工作区唯一规则技能：`multica-team-operating-rules` 与 `butler-panel-card-rules`。
 

@@ -1,7 +1,7 @@
 # Coach（代号，占位名 LerningCoach）
 
 > [!IMPORTANT]
-> **权威产品决定入口**：参见 [PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)。以李政最新追加更正为准：软件开发第一、项目优先级未降；长期读教材/文献/好书、课程可配置；考试资料仅填充，不因缺课件/真题挡功能；先做后讲、自己的题覆盖真题知识点且不直接放真题；教材优先；V7已定、一套风格派生；精确占位 `LerningCoach`（正式名未定）；三移动形态+Mac/Windows桌面、无Web、无产品工期；iOS已有账号内部TestFlight/直装不上架；暂不合并Sable；不测Mac睡眠，不反复索辅助功能授权，OPPO可替代样本。
+> **权威产品决定入口**：参见 [PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)。以李政最新追加更正为准：软件开发第一、项目优先级未降；长期读教材/文献/好书、课程可配置；考试资料仅填充，不因缺课件/真题挡功能；先做后讲、自己的题覆盖真题知识点且不直接放真题；教材优先；V7已定、一套风格派生；精确占位 `LerningCoach`（正式名未定）；长期覆盖三移动形态+Mac/Windows桌面、无Web、无产品工期；当前唯一开发范围是Windows（上传教材先读/直接学、询问是否开启learning、出题可选不出/选择/简答、学习位置打开对应原文、阅读器翻真页；安卓/iOS/Fold8/Mac安装包暂停，Windows安装包最后；长期形态保留）；iOS已有账号内部TestFlight/直装不上架（沿现有配置、不改变身份）；暂不合并Sable；不测Mac睡眠，不反复索辅助功能授权，OPPO可替代样本（等待入口走 `~/Coach/testphone/wait.sh`）。
 
 把 StudyCoach 的学习闭环与证据规则、DeepTutor 的导师能力合在一起，从 0 重写的学习应用。目标：安卓原生 + macOS 桌面（之后 Windows），服务端先放用户的 Mac，AI 经订阅 CLI。
 

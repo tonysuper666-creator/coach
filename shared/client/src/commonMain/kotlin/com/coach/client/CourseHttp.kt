@@ -169,10 +169,10 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
                 val questionId = o.s("questionId")
                 val availability = QueueAvailability.entries.firstOrNull { it.name == o.s("availability") }
                     ?: return@mapNotNull null
-                if (questionId.isBlank()) return@mapNotNull null
+                if (questionId.isBlank() || kpId.isBlank() || o.s("kpId") != kpId) return@mapNotNull null
                 VariantCandidate(
                     courseId = course,
-                    kpId = o.s("kpId").ifBlank { kpId },
+                    kpId = o.s("kpId"),
                     question = QueueQuestion(questionId, null, o.s("fingerprint").ifBlank { null }),
                     availability = availability,
                     keyVerified = o.s("keyState") == "VERIFIED",

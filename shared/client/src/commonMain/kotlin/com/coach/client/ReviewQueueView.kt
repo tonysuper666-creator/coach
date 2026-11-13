@@ -40,6 +40,9 @@ data class ReviewItem(
     val prereqTitles: List<String>,
     /** 真实已知的考纲权重（exam_weights_set），0 表示这门课没有给这个点定权重。 */
     val examWeight: Int,
+    /** Identity of the allocated question, never inferred from its attempt ID. */
+    val variantQuestion: QueueQuestion? = null,
+    val agentRunId: String? = null,
 ) {
     val hasUnknownOriginal: Boolean get() = original == null
 
@@ -152,6 +155,8 @@ fun reviewBoard(
             pendingSync = entry.pendingSyncAttemptIds.size,
             prereqTitles = kp.prereqs.map { id -> view.kp(id)?.title?.takeIf { it.isNotBlank() } ?: id },
             examWeight = weights[entry.kpId] ?: 0,
+            variantQuestion = entry.variants.singleOrNull { it.attemptId == entry.currentAttemptId && it.availability == QueueAvailability.VALID }?.question,
+            agentRunId = allocated.scope.agentRunId,
         )
     }
     return ReviewBoard(day, items, unverifiedAnswered(view), nextDueDay(view, day))

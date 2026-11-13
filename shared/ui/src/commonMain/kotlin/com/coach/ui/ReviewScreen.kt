@@ -22,6 +22,9 @@ import com.coach.client.ReviewItem
 import com.coach.client.reviewBoard
 import com.coach.client.reviewCursor
 import com.coach.client.saveReviewCursor
+import com.coach.client.ReviewPracticeTarget
+import com.coach.client.prepareReviewPractice
+import com.coach.client.reviewPracticeTarget
 import com.coach.domain.*
 import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.domain.reviewqueue.VariantCandidatePort
@@ -35,12 +38,11 @@ import kotlinx.serialization.json.*
  * 不注入时，只要 [CoachController.course] 在（Windows 连上 Mac），就按本屏要排的考点
  * 向真实 `/pool` 题级接口要一次候选。两条路都拿不到时候口保持「待生成变式」，不造题。
  *
- * 点「开始」只做两件事：把这一行的变式作答身份写进本机光标，再用 [onOpenKp] 打开考点。
- * 练习路由目前只收到 `kpId` 和 `startNow`，还没有读取这个身份的消费者，所以这里能证的是
- * 「候选注入/拉取 → 分配 → 显示 → 本机保存身份」，不是「练习真的开始那道变式」。
+ * [onOpenPractice] receives the exact persisted identity. Without an exact practice host,
+ * report that the route is unavailable; the legacy KP callback must never choose another question.
  */
 @Composable
-fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}, variantCandidates: VariantCandidatePort = NoVariantCandidates) {
+fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}, variantCandidates: VariantCandidatePort = NoVariantCandidates, onOpenPractice: ((ReviewPracticeTarget) -> Unit)? = null) {
     val now = rememberCourseNow(c)
     val day = view.logicalToday(now)
     val pool = rememberPoolCandidates(c, view, day)
@@ -54,6 +56,13 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
     // 账本回放一次一块，只在换天或账本变（view 是新实例）时重算，不跟着秒针每秒重放。
     val board = remember(view, day, source) { reviewBoard(c.courseId, view, day, source) }
     var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId)) }
+    var practiceError by remember { mutableStateOf<String?>(null) }
+    val savedTarget = reviewPracticeTarget(c.sync, c.courseId, c.tutor.agentRunId)
+    fun openPractice(target: ReviewPracticeTarget) {
+        val host = onOpenPractice
+        if (host == null) practiceError = "这道题的练习入口尚未接通，尚未开始。选中的题和原作答已保留，不会换成另一题。"
+        else { practiceError = null; host(target) }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) { Text("← 今天") }
@@ -61,6 +70,10 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             reminderSettings()
         }
         HorizontalDivider()
+        practiceError?.let { Text(it, Modifier.fillMaxWidth().padding(16.dp).testTag("review-practice-error"), color = MaterialTheme.colorScheme.error) }
+        if (savedTarget != null && board.items.none { it.variantAttemptId == savedTarget.attemptId }) {
+            TextButton(onClick = { openPractice(savedTarget) }, modifier = Modifier.testTag("resume-exact-review")) { Text("继续上次选中的复习题") }
+        }
         // The entry cards and due queue share the available height. Keep them in
         // one scroll so short windows cannot squeeze the queue out of reach.
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
@@ -118,9 +131,9 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                                         if (resumed) Text("上次练到这里", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                                     }
                                     Button(onClick = {
-                                        saveReviewCursor(c.sync, c.courseId, item.entryId, board.day, item.variantAttemptId)
-                                        cursor = item.entryId
-                                        onOpenKp(item.kp.id, true)
+                                        val target = prepareReviewPractice(c.sync, c.courseId, c.tutor.agentRunId, item, board.day)
+                                        if (target == null) practiceError = "这项复习还没有可用的已核变式，尚未开始；原作答已保留。"
+                                        else { cursor = item.entryId; openPractice(target) }
                                     }, modifier = Modifier.heightIn(min = 56.dp)) { Text(if (resumed) "继续" else "开始") }
                                 }
                             }

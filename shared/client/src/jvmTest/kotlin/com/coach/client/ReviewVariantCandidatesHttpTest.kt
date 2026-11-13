@@ -10,6 +10,20 @@ import kotlin.test.*
  * 没见过的可用状态不算可练，未核键照实标 false，字段缺失时返回 null（不知道，而不是「没有」）。
  */
 class ReviewVariantCandidatesHttpTest {
+    @Test fun missingBlankOrDifferentKpCannotBecomeAReadyCandidate() = runBlocking<Unit> {
+        val seen = mutableListOf<String>()
+        val server = serve("""{"variants":[
+            {"questionId":"missing","keyState":"VERIFIED","availability":"VALID"},
+            {"questionId":"empty","kpId":"","keyState":"VERIFIED","availability":"VALID"},
+            {"questionId":"blank","kpId":"  ","keyState":"VERIFIED","availability":"VALID"},
+            {"questionId":"other","kpId":"K2","keyState":"VERIFIED","availability":"VALID"},
+            {"questionId":"valid","kpId":"K1","fingerprint":"fp","keyState":"VERIFIED","availability":"VALID"}]}""", seen)
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "synthetic-token", "C")
+        try {
+            assertEquals(listOf("valid"), assertNotNull(http.reviewVariantCandidates("K1")).map { it.question.id })
+        } finally { http.close(); server.stop(0) }
+    }
+
     private fun serve(body: String, seen: MutableList<String>): com.sun.net.httpserver.HttpServer {
         val server = com.sun.net.httpserver.HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->

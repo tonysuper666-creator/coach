@@ -35,6 +35,29 @@ import kotlin.test.*
  */
 @OptIn(ExperimentalTestApi::class)
 class ReviewQueueEntryTest {
+    @Test fun absentExactPracticeHostNeverFallsBackToAnArbitraryKpQuestion() {
+        val port = VariantCandidatePort { _, _, kp ->
+            if (kp == "K1") listOf(VariantCandidate("C", kp, QueueQuestion("exact-variant", "v2", "fp2"),
+                keyVerified = true)) else emptyList()
+        }
+        val e = entry(mixedFacts())
+        val view = CourseView(e.events, project(e.events))
+        val opened = mutableListOf<String>()
+        try {
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
+                    ReviewScreen(e.c, view, { kp, _ -> opened += kp }, onBack = null, variantCandidates = port)
+                } } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("已备 1 道变式", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                val board = reviewBoard("C", view, day, port)
+                val index = board.items.indexOfFirst { it.variantAttemptId != null }
+                onAllNodesWithText("开始")[index].performScrollTo().performClick()
+                runOnIdle { assertTrue(opened.isEmpty(), "No exact practice host: a KP callback must never start a different question") }
+                onNodeWithText("这道题的练习入口尚未接通，尚未开始。", substring = true).assertIsDisplayed()
+            }
+        } finally { e.close() }
+    }
+
     private val now = 1_794_052_800_000L
     private val zone = "Europe/London"
     private val day = logicalDay(now, zone)
@@ -94,7 +117,7 @@ class ReviewQueueEntryTest {
         return Entry(driver, tutor, c, events, course)
     }
 
-    @Test fun realEntryKeepsUnknownDueIdentityAndResumesAfterReentry() {
+    @Test fun realEntryKeepsUnknownDueIdentityAndDoesNotStartWithoutAReadyVariant() {
         val e = entry(mixedFacts())
         val view = CourseView(e.events, project(e.events))
         val opened = mutableListOf<Pair<String, Boolean>>()
@@ -125,18 +148,15 @@ class ReviewQueueEntryTest {
                 onAllNodesWithText("原题未关联 · 练同知识点变式", substring = true).assertCountEquals(3)
 
                 onAllNodesWithText("开始").onFirst().performClick()
-                assertEquals(1, opened.size)
-                assertEquals("K1", opened.single().first, "同一天权重高的错题排在到期日程前面")
-                assertTrue(opened.single().second, "点开即直接进复习，不停在讲解")
-                val saved = reviewCursor(e.c.sync, "C")
-                assertNotNull(saved, "点开的那一项要写进本机状态")
+                assertTrue(opened.isEmpty(), "缺题不能退回任意考点题")
+                assertNull(reviewCursor(e.c.sync, "C"), "缺题不覆盖已有选择")
+                onNodeWithText("这项复习还没有可用的已核变式", substring = true).assertIsDisplayed()
 
                 // 重新组合（等价于离开复习页再回来）：光标从本机存储读回，不靠界面内状态。
                 generation += 1
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("继续").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("上次练到这里").assertIsDisplayed()
-                onNodeWithText("继续").assertIsDisplayed()
-                assertEquals(saved, reviewCursor(e.c.sync, "C"), "重进后仍指向同一项")
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("4 项复习").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("上次练到这里").assertDoesNotExist()
+                assertNull(reviewCursor(e.c.sync, "C"), "重进不能把未开始的题冒充续练")
                 onNodeWithText("4 项复习").assertIsDisplayed()
             }
         } finally { e.close() }
@@ -155,8 +175,12 @@ class ReviewQueueEntryTest {
         try {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
-                    ReviewScreen(e.c, view, { id, start -> opened += id to start }, onBack = {},
-                        variantCandidates = port)
+                    ReviewScreen(e.c, view, { _, _ -> fail("Legacy KP callback must not run") }, onBack = {},
+                        variantCandidates = port, onOpenPractice = { target ->
+                            assertEquals("q-synthetic-variant", target.question.id)
+                            assertEquals("C", target.courseId)
+                            opened += target.kpId to true
+                        })
                 } } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("4 项复习").fetchSemanticsNodes().isNotEmpty() }
                 // 补上变式不改变队列条目的数量，也不把缺题说成可练。
@@ -213,7 +237,12 @@ class ReviewQueueEntryTest {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
                     // 不注入端口：入口只靠 CoachController.course 走真实 /pool。
-                    ReviewScreen(e.c, view, { id, start -> opened += id to start }, onBack = {})
+                    ReviewScreen(e.c, view, { _, _ -> fail("Legacy KP callback must not run") }, onBack = {},
+                        onOpenPractice = { target ->
+                            assertEquals("q-pool-live", target.question.id)
+                            assertEquals(attempt, target.attemptId)
+                            opened += target.kpId to true
+                        })
                 } } } }
                 waitUntil(timeoutMillis = 15_000) {
                     onAllNodesWithText("已备 1 道变式", substring = true).fetchSemanticsNodes().isNotEmpty()

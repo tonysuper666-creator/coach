@@ -1,0 +1,156 @@
+{
+  "issue": "TON-1094",
+  "ai_calls": 0,
+  "records": {
+    "backup-audit-20261111.json": {
+      "observedAt": "2026-11-11T17:48:50.071732+00:00",
+      "productionSourceHead": "b837b4c2e833b3bc74dfeeaed8d439046546e978",
+      "nightlyCompleted": [
+        {
+          "completedAt": "2026-11-04T03:30:02.334000+00:00",
+          "throughSeq": 135
+        },
+        {
+          "completedAt": "2026-11-05T03:30:02.121000+00:00",
+          "throughSeq": 135
+        },
+        {
+          "completedAt": "2026-11-06T03:30:03.514000+00:00",
+          "throughSeq": 135
+        },
+        {
+          "completedAt": "2026-11-07T03:30:01.265000+00:00",
+          "throughSeq": 736
+        },
+        {
+          "completedAt": "2026-11-08T03:30:04.596000+00:00",
+          "throughSeq": 736
+        },
+        {
+          "completedAt": "2026-11-09T03:30:04.776000+00:00",
+          "throughSeq": 736
+        },
+        {
+          "completedAt": "2026-11-10T03:30:00.441000+00:00",
+          "throughSeq": 747
+        },
+        {
+          "completedAt": "2026-11-11T03:30:00.623000+00:00",
+          "throughSeq": 809
+        }
+      ],
+      "restore": {
+        "backupCopiedBeforeRestore": true,
+        "installedLedgerStoreRestore": true,
+        "integrityOk": true,
+        "originalEventsBefore": 809,
+        "originalEventsAfter": 809,
+        "courseEventsBefore": 809,
+        "courseEventsAfter": 809,
+        "eventContentsEqual": true,
+        "additionalSystemRestoreEvents": 1,
+        "messagesBefore": 123,
+        "messagesAfter": 123,
+        "blobs": 24,
+        "blobContentsEqual": true,
+        "epochChanged": true,
+        "lastSeqBeforeCorrect": true
+      },
+      "productionModified": false,
+      "ai_calls": 0,
+      "privateCopyRemoved": true
+    },
+    "child-recovery-audit-20261111.json": {
+      "startedAt": "2026-11-11T17:49:02.153673+00:00",
+      "sourceHead": "b837b4c2e833b3bc74dfeeaed8d439046546e978",
+      "ai_calls": 0,
+      "passed": true,
+      "checks": [
+        {
+          "service": "bridge",
+          "signal": "SIGKILL",
+          "recoveredSeconds": 2.063,
+          "authenticatedLoopbackAndTailnet": true
+        },
+        {
+          "service": "mathsvc",
+          "signal": "SIGKILL",
+          "recoveredSeconds": 2.017,
+          "authenticatedLoopbackAndTailnet": true
+        }
+      ],
+      "finishedAt": "2026-11-11T17:49:06.382235+00:00"
+    },
+    "tailnet-audit-first-attempt-20261111.json": {
+      "startedAt": "2026-11-11T17:49:42.392740+00:00",
+      "sourceHead": "b837b4c2e833b3bc74dfeeaed8d439046546e978",
+      "method": "Tailscale CLI down then up without preference changes; tunnel restart, not daemon-process restart",
+      "ai_calls": 0,
+      "disconnectedBackendState": "Stopped",
+      "failureCleanupExceptionType": "AssertionError",
+      "finishedAt": "2026-11-11T17:49:47.215541+00:00",
+      "upFailureCause": "Audit runner used up --timeout=30s; CLI required all non-default preferences. Correct recovery used bare up to preserve existing settings.",
+      "firstFailure": "loopback request timed out during disconnect; origin not established"
+    },
+    "tailnet-audit-20261111.json": {
+      "startedAt": "2026-11-11T17:51:25.140872+00:00",
+      "sourceHead": "b837b4c2e833b3bc74dfeeaed8d439046546e978",
+      "method": "Tailscale CLI down then up without preference changes; tunnel restart, not daemon-process restart",
+      "ai_calls": 0,
+      "disconnectedBackendState": "Stopped",
+      "failureCleanupRestoredRunning": true,
+      "finishedAt": "2026-11-11T17:51:35.484694+00:00"
+    },
+    "tailnet-rebind-observation-20261111.json": {
+      "startedAt": "2026-11-11T17:54:16.883946+00:00",
+      "sourceHead": "b837b4c2e833b3bc74dfeeaed8d439046546e978",
+      "method": "Tailscale CLI down then up without preference changes; tunnel restart, not daemon-process restart",
+      "ai_calls": 0,
+      "disconnectedBackendState": "Stopped",
+      "interfaceAbsentSamples": 7,
+      "downSamples": 7,
+      "loopbackSamplesDuringDown": [
+        {
+          "authenticated": true,
+          "seconds": 0.011
+        },
+        {
+          "authenticated": true,
+          "seconds": 0.011
+        },
+        {
+          "authenticated": true,
+          "seconds": 0.01
+        },
+        {
+          "authenticated": true,
+          "seconds": 0.01
+        },
+        {
+          "authenticated": true,
+          "seconds": 0.011
+        },
+        {
+          "authenticated": false,
+          "exceptionType": "TimeoutError",
+          "seconds": 2.003
+        },
+        {
+          "authenticated": true,
+          "seconds": 1.33
+        }
+      ],
+      "loopbackAuthenticatedDuringDown": false,
+      "readySecondsAfterUp": 1.756,
+      "connectedBackendState": "Running",
+      "interfaceReturned": true,
+      "jvmUnchanged": true,
+      "childPidsUnchanged": true,
+      "newTailnetReadyMarkers": 1,
+      "authenticatedLoopbackAndTailnet": true,
+      "rebindObserved": true,
+      "uninterruptedLoopbackPassed": false,
+      "finishedAt": "2026-11-11T17:54:25.829043+00:00"
+    }
+  }
+}

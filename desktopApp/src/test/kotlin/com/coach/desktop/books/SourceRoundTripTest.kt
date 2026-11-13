@@ -94,6 +94,30 @@ class SourceRoundTripTest {
             assertEquals(BookScreen.LEARNING, controller.state.value.screen)
         }
     }
+    @Test fun escapeReturnsAfterPagingToBoundary() {
+        val (controller, library) = longLessonController()
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            val book = controller.state.value.book!!
+            onNodeWithTag("short-answer").performScrollTo().performTextInput("Boundary draft")
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+            onNodeWithText("下一页").performMouseInput { click() }
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.page == 2 && !controller.state.value.busy }
+            onNodeWithText("下一页").assertIsNotEnabled()
+            onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
+            waitUntil(timeoutMillis = 5_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            assertEquals(PracticeAnswer("Boundary draft"), controller.state.value.answer)
+            assertEquals(2, library.book(book.id).readingPage)
+            onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
+            waitForIdle()
+            assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+        }
+    }
+
     @Test fun questionOnSecondPageOpensItsActualSentenceAndKeepsAnswer() {
         val root = Files.createTempDirectory("coach-cross-page-source-")
         val pdfFile = root.resolve("synthetic.pdf")

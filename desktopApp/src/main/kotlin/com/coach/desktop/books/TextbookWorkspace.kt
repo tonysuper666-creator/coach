@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -35,8 +36,10 @@ import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
 
 @Composable
@@ -45,6 +48,7 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
     var returnFocus by remember { mutableStateOf<SourceFocus?>(null) }
+    var readerHasFocus by remember { mutableStateOf(false) }
     val readerFocus = remember { FocusRequester() }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
@@ -64,7 +68,8 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                 ui.source != null && ui.prompt == null && !ui.busy) {
                 returnFromReader(); true
             } else false
-        }.focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
+        }.onFocusChanged { readerHasFocus = it.hasFocus }
+            .focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
             color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column {
                 if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -78,7 +83,20 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                         onLearn = { run { controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
-                        onPage = { run { controller.page(it) } }, onBack = { returnFromReader() },
+                        onPage = { page ->
+                            val restoreFocus = ui.source != null && readerHasFocus
+                            run {
+                                controller.page(page)
+                                if (restoreFocus) {
+                                    val lostFocus = withTimeoutOrNull(1_000) {
+                                        snapshotFlow { !readerHasFocus }.first { it }
+                                    } == true
+                                    val current = controller.state.value
+                                    if (lostFocus && !readerHasFocus && current.screen == BookScreen.READER &&
+                                        current.source != null && current.prompt == null) readerFocus.requestFocus()
+                                }
+                            }
+                        }, onBack = { returnFromReader() },
                         onLearn = { run { controller.learn() } })
                     else -> TextbookLearning(ui, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },

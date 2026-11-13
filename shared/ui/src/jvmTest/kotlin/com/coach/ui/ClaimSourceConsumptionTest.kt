@@ -323,4 +323,43 @@ class ClaimSourceConsumptionTest {
             service.receipt("late-reply-question-switch")
         }
     }
+
+    @Test fun claimPeekKeepsSavedProgressAndSystemBackBeatsTheCoveredDesk() {
+        SyntheticService().use { service ->
+            val covered = intArrayOf(0, 0)
+            val dispatcher = AppBackDispatcher()
+            val kp = view(book).kp("K")!!
+            runComposeUiTest {
+                setContent {
+                    CompositionLocalProvider(LocalAppBack provides dispatcher) {
+                        AppBackHandler(true, priority = 300) { covered[0]++ }
+                        AppBackHandler(true, priority = 400) { covered[1]++ }
+                        CoachTheme(false) {
+                            Box(Modifier.size(800.dp, 900.dp)) { ClaimSourceReferences(service.http.reader, kp, "") }
+                        }
+                    }
+                }
+                onNodeWithTag("claim-source-open").performClick()
+                waitTag("private-page-label")
+                onNodeWithTag("private-page-label").assertTextEquals("PDF 第 4 页 / 6")
+                onNodeWithTag("private-next").performClick()
+                waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("PDF 第 5 页 / 6").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("private-page-label").assertTextEquals("PDF 第 5 页 / 6")
+                onNodeWithTag("private-focus").performClick()
+                onNodeWithTag("private-focus").assertTextEquals("退出专心读")
+                runOnIdle { assertTrue(dispatcher.back()) }
+                waitForIdle()
+                onNodeWithTag("claim-source-dialog").assertExists()
+                onNodeWithTag("private-focus").assertTextEquals("专心读")
+                runOnIdle { assertTrue(dispatcher.back()) }
+                waitForIdle()
+                onNodeWithTag("claim-source-dialog").assertDoesNotExist()
+                assertEquals(0, covered[0])
+                assertEquals(0, covered[1])
+                val progressPosts = service.evidence.mapNotNull { it["request"]?.jsonPrimitive?.content }
+                    .filter { it.startsWith("POST ") && it.contains("/progress") }
+                assertEquals(emptyList(), progressPosts)
+            }
+        }
+    }
 }

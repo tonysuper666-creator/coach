@@ -224,7 +224,7 @@ internal fun WeeklyReader(
                                         TextButton(onClick = { onQuiz(s.str("section_id"), q.str("id")) }, modifier = Modifier.padding(start = 16.dp)) {
                                             val stem = q.str("stem").trim()
                                             Text((if (stem.isEmpty()) "这一题" else "题：${stem.take(40)}") + " · " + when (q.str("status")) {
-                                                "mastered" -> "答对过（非猜）"; "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
+                                                "mastered" -> com.coach.client.latestCorrectAttemptLabel(); "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
                                             })
                                         }
                                 }

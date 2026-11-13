@@ -335,7 +335,7 @@ class PrivateReaderScreenTest {
                 if (unlocated > 0) onNodeWithTag("private-study-unlocated").assertTextContains("另有 3 条", substring = true) else onAllNodesWithTag("private-study-unlocated").assertCountEquals(0)
                 onNodeWithTag("private-study-toggle").performClick()
                 onNodeWithTag("private-study-fact-f-$course").assertExists()
-                onNodeWithTag("private-study-question-q-$course").assertExists()
+                onNodeWithTag("private-study-question-q-$course").assertTextContains(if (mastered) "最近答对（非猜）" else "做错过", substring = true)
                 onAllNodesWithTag("private-study-fact-f-${if (course == "C") "OTHER" else "C"}").assertCountEquals(0)
             }
         }

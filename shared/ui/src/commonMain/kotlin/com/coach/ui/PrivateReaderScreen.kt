@@ -99,7 +99,8 @@ internal fun PrivateReaderScreen(reader: ReaderHttp, practice: (@Composable (wee
 @Composable
 internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initialPage: Int? = null, initialAnchor: String = "",
                                practice: (@Composable (week: Int, ids: Set<String>, close: () -> Unit) -> Unit)? = null,
-                               openingAction: Long = 0, validatedState: JsonObject? = null, onBack: () -> Unit) {
+                               openingAction: Long = 0, validatedState: JsonObject? = null,
+                               recordProgress: Boolean = true, backFloor: Int = 0, onBack: () -> Unit) {
     val traceSession = remember(reader, doc) { ReaderPageTrace.session() }
     var traceAction by remember(reader, doc) { mutableLongStateOf(openingAction) }
     DisposableEffect(traceSession) {
@@ -143,8 +144,8 @@ internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initia
             if (showNotes) PrivateReaderAnnotations(reader, doc, page, onShow = { quote -> focus = HighlightFocus(page, quote); showNotes = false }) { showNotes = false }
             var showMap by remember(doc) { mutableStateOf(false) }
             var readingFocus by remember(doc) { mutableStateOf(false) }
-            AppBackHandler(priority = 20) { if (!busy && pending == null) onBack() }
-            AppBackHandler(readingFocus, priority = 100) { readingFocus = false }
+            AppBackHandler(priority = 20 + backFloor) { if (!busy && pending == null) onBack() }
+            AppBackHandler(readingFocus, priority = 100 + backFloor) { readingFocus = false }
             TaskChrome(readingFocus)
             fun send(write: ProgressWrite) {
                 pending = write
@@ -169,11 +170,12 @@ internal fun PrivatePdfDocument(reader: ReaderHttp, doc: PrivateDocument, initia
                 images.show(target, action = action, allowPrefetch = true)
                 focus = null
                 page = target
-                send(ProgressWrite(target, maxOf(revision, images.confirmedRevision() ?: 0L), Uuid.random().toString()))
+                // A claim peek passes recordProgress=false so locating or turning a citation page cannot replace the saved position.
+                if (recordProgress) send(ProgressWrite(target, maxOf(revision, images.confirmedRevision() ?: 0L), Uuid.random().toString()))
             }
             if (showMap) ChapterMapDialog(reader, doc.id, doc.pages, onJump = { target -> showMap = false; if (target != page) move(target) }, onClose = { showMap = false }, practice = practice)
-            LaunchedEffect(doc, loaded.value, initialPage) {
-                if (initialPage != null && initialPage != restored) move(initialPage, openingAction)
+            LaunchedEffect(doc, loaded.value, initialPage, recordProgress) {
+                if (recordProgress && initialPage != null && initialPage != restored) move(initialPage, openingAction)
                 // move() clears any mark from the previous page; a citation's own anchor belongs to the page it opened on.
                 if (initialPage != null && initialAnchor.isNotBlank()) focus = HighlightFocus(initialPage, initialAnchor)
             }

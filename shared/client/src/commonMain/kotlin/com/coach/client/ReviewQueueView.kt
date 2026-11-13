@@ -2,17 +2,12 @@ package com.coach.client
 
 import com.coach.domain.Event
 import com.coach.domain.REVISIT
-import com.coach.domain.Review
 import com.coach.domain.json
-import com.coach.domain.reviewqueue.DueOriginalLink
 import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.QueueReadiness
 import com.coach.domain.reviewqueue.QueueReason
-import com.coach.domain.reviewqueue.QueueScope
-import com.coach.domain.reviewqueue.ReviewQueueCandidate
 import com.coach.domain.reviewqueue.ledgerQueueCandidate
-import com.coach.domain.reviewqueue.legacyDueId
 import com.coach.domain.str
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -77,12 +72,18 @@ data class ReviewBoard(
     val unverifiedAnswered: Int,
     /** 队列空了以后最近的一条到期日；没有未完成项就是 null。 */
     val nextDueDay: Long?,
+    /**
+     * 账本里有这一版读不了的权威事实（[com.coach.domain.Projection.requiresServerSnapshot]）。
+     * 这时队列、计数和下一次到期都不可判定：不能当成空队列或已完成，也不能拿旧投影硬猜，
+     * 只能如实告诉用户要先取服务端快照。
+     */
+    val snapshotRequired: Boolean = false,
 ) {
     /** 全是间隔复习到期时沿用旧文案「N 节到期」；混入错题/猜对或「再看一次」时改说「N 项复习」。 */
-    val dueOnly: Boolean get() = items.all { it.reasons == listOf(QueueReason.DUE) && !it.revisit }
+    val dueOnly: Boolean get() = !snapshotRequired && items.all { it.reasons == listOf(QueueReason.DUE) && !it.revisit }
     val headline: String
         get() = when {
-            items.isEmpty() -> ""
+            snapshotRequired || items.isEmpty() -> ""
             dueOnly -> "${items.size} 节到期"
             else -> "${items.size} 项复习"
         }
@@ -93,14 +94,19 @@ data class ReviewBoard(
  * 纯函数：用真实账本（[CourseView.events]）构造复习入口要显示的队列。
  * 队列身份由已验的 [ledgerQueueCandidate] 决定；这里只做展示层的取舍，不改合同、不写账本。
  *
- * 到期日程本身不带原题链接。唯一的例外是「再看一次」：`Projection.revisit` 是某道答错/猜对题
- * 排出来的重练日，同一天同一知识点只有一道这样的原题时，把这道题的真实身份交给队列去重，
- * 两行并成一行；有多道时无法确认是哪一道，就不合并、不猜。
+ * 到期日程本身不携带原题身份（主干的 `Review` 没有题号）；只有分配器/迁移显式给出的
+ * `DueOriginalLink` 才能把它关联到某道原题。同知识点、同一天、恰好一道错题都不构成证据：
+ * 那种情况下到期行保持「原题未关联」，宁可多一行，也不把别人的题认成原题。
+ *
+ * 账本要求服务端权威快照时不做任何猜测：返回 [ReviewBoard.snapshotRequired]，
+ * 由入口显示「待同步/无法确认」，而不是抛异常或报「今天没有复习」。
  */
 fun reviewBoard(courseId: String, view: CourseView, day: Long): ReviewBoard {
-    val base = ledgerQueueCandidate(courseId, view.events, day)
-    val links = revisitLinks(courseId, view, day, base)
-    val candidate = if (links.isEmpty()) base else ledgerQueueCandidate(courseId, view.events, day, links)
+    // view.projection 就是这块屏幕正在渲染的同一次回放；它读不懂的账本事实，队列也读不懂。
+    if (view.projection.requiresServerSnapshot) {
+        return ReviewBoard(day, emptyList(), 0, null, snapshotRequired = true)
+    }
+    val candidate = ledgerQueueCandidate(courseId, view.events, day)
     val weights = examWeights(view.events)
     val items = candidate.dueEntries(day).map { entry ->
         val kp = view.kp(entry.kpId) ?: KpRow(
@@ -129,22 +135,6 @@ private fun nextDueDay(view: CourseView, day: Long): Long? {
     val active = view.projection.activeKpIds ?: view.projection.kpTitles.keys
     return (view.projection.review.filterKeys { it in active }.values.map { it.dueDay } +
         view.projection.revisit.filterKeys { it in active }.values).filter { it > day }.minOrNull()
-}
-
-/** 「再看一次」的原题关联：只有当天同知识点恰好一道错题/猜对题时才给出，避免把共享知识点当成同一道题。 */
-private fun revisitLinks(
-    courseId: String, view: CourseView, day: Long, queue: ReviewQueueCandidate,
-): List<DueOriginalLink> {
-    val scope = QueueScope(courseId)
-    val mistakes = queue.entries.filter { it.originalQuestion != null }.groupBy { it.kpId }
-    return view.projection.revisit.flatMap { (kpId, revisitDay) ->
-        // 有正式复习日程时适配器按日程取身份，这里不抢它的来源。
-        if (revisitDay > day || view.projection.review[kpId] != null) return@flatMap emptyList()
-        val questions = mistakes[kpId].orEmpty().filter { it.dueDay == revisitDay }
-            .mapNotNull { it.originalQuestion }.distinct()
-        if (questions.size != 1) return@flatMap emptyList()
-        listOf(DueOriginalLink(legacyDueId(scope, kpId, Review(revisitDay, lastResult = REVISIT)), questions.single()))
-    }
 }
 
 /** 上次从这个入口点开的条目；退出重进后仍然指得回来。 */

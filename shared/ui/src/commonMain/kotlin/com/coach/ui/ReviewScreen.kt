@@ -59,7 +59,17 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                 }
             }
             if (onOpenEssay != null) EssayEntry(c, onOpenEssay)
-            if (board.items.isEmpty()) {
+            if (board.snapshotRequired) {
+                // 账本里有这一版读不了的记录：不能猜、也不能显示成「没有复习」。
+                CenterMessage("今天复习什么还确认不了。")
+                Text(
+                    "这台设备上有当前版本读不了的账本记录，要先取服务端的权威快照才能排。" +
+                        "本机已经做过的练习还在，不会丢；连上服务端同步后这里会重新列出要复习的题。",
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            } else if (board.items.isEmpty()) {
                 CenterMessage("今天没有到期的复习。")
                 // 低频/无题也要说得清：是还没到期、还有未核题，还是根本还没有可复习的题。
                 Text(emptyReviewHint(board), Modifier.fillMaxWidth().padding(horizontal = 24.dp),
@@ -70,14 +80,19 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                     Text(board.headline, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (board.unverifiedAnswered > 0) Text("另有 ${board.unverifiedAnswered} 道题答案还没核，只提醒再看一次，不计分",
                         style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // 同一知识点可能同时有「错题」和「未知原题的到期」两行；标签要唯一，首行沿用旧 review-<kpId>。
+                    val rowOfKp = mutableMapOf<String, Int>()
                     board.items.forEach { item ->
                         key(item.entryId) {
+                            val occurrence = rowOfKp.getOrElse(item.kp.id) { 0 }
+                            rowOfKp[item.kp.id] = occurrence + 1
+                            val rowTag = if (occurrence == 0) "review-${item.kp.id}" else "review-${item.kp.id}-${occurrence + 1}"
                             val resumed = item.entryId == cursor
-                            val (tag, main) = splitTitle(item.kp.title)
-                            Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag("review-${item.kp.id}")) {
+                            val (section, main) = splitTitle(item.kp.title)
+                            Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().testTag(rowTag)) {
                                 Row(Modifier.padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Column(Modifier.weight(1f)) {
-                                        if (tag.isNotBlank()) Text(sourceLine(tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        if (section.isNotBlank()) Text(sourceLine(section), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         Text(main, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                         Text((if (item.revisit) "再看一次 · " else "") + if (item.overdueDays == 0) "今天到期" else "逾期 ${item.overdueDays} 天", style = MaterialTheme.typography.labelMedium, color = if (item.overdueDays == 0) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
                                         Text(reviewItemMeta(item), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)

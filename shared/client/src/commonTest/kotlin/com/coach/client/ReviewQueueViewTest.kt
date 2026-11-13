@@ -40,7 +40,7 @@ class ReviewQueueViewTest {
 
     private fun board(events: List<Event>) = reviewBoard("C", CourseView(events, project(events)), day)
 
-    @Test fun wrongAndGuessedOnOneQuestionFormOneEntryNextToTheDueSchedule() {
+    @Test fun dueWithoutLinkStaysUnknownNextToTheMistakeItCameFrom() {
         val events = listOf(
             outline(kp("K0", "前置：极限"), kp("K1", "合成：导数应用", "K0")),
             event("legacy_passed", json("kpId" to "K0")),
@@ -52,17 +52,17 @@ class ReviewQueueViewTest {
         )
         val b = board(events)
         assertEquals(day, b.day)
-        assertEquals(2, b.items.size, "到期日程 + 同一道错题/猜对题目 = 两项，不是三项")
+        // 到期日程不携带题号：同知识点同日的「再看一次」不能借那道错题的身份，宁可多一列。
+        assertEquals(3, b.items.size, "到期日程 + 错题/猜对 + 该知识点的未知到期行 = 三项")
         assertFalse(b.dueOnly)
-        assertEquals("2 项复习", b.headline)
+        assertEquals("3 项复习", b.headline)
+        assertEquals("K1", b.items.first().kp.id, "考纲权重高的排在同一天的前面")
 
-        val mistake = b.items[0]
-        assertEquals("K1", mistake.kp.id, "考纲权重高的排在同一天的前面")
-        // 这道题既答错过也猜对过，重练日又是同一天：三个来源合并成一行，原题身份只有一个。
-        assertEquals(setOf(QueueReason.DUE, QueueReason.WRONG, QueueReason.GUESSED), mistake.reasons.toSet())
-        assertEquals("q1", mistake.original?.id)
+        val mistake = b.items.single { it.original?.id == "q1" }
+        assertEquals("K1", mistake.kp.id)
+        // 同一道题的猜对和答错合成一条，来源不丢。
+        assertEquals(setOf(QueueReason.WRONG, QueueReason.GUESSED), mistake.reasons.toSet())
         assertFalse(mistake.hasUnknownOriginal)
-        assertTrue(mistake.revisit, "到时重练的那一行仍然标成「再看一次」")
         assertEquals(QueueReadiness.NEEDS_VARIANT, mistake.readiness)
         assertEquals(0, mistake.variantCount)
         assertTrue(mistake.identityLabel.contains("待生成变式"), mistake.identityLabel)
@@ -70,14 +70,21 @@ class ReviewQueueViewTest {
         assertEquals(3, mistake.examWeight, "权重来自账本里的 exam_weights_set")
         assertEquals(0, mistake.overdueDays)
 
-        val due = b.items[1]
-        assertEquals("K0", due.kp.id)
-        assertTrue(due.hasUnknownOriginal, "到期日程没有原题时保持未知，不借用同知识点的错题")
+        val revisit = b.items.single { it.kp.id == "K1" && it.original == null }
+        assertEquals(listOf(QueueReason.DUE), revisit.reasons)
+        assertTrue(revisit.revisit, "重练日那一行仍标成「再看一次」")
+        assertNotNull(revisit.unknownDueId, "未知原题的到期行保留稳定身份")
+        assertTrue(revisit.identityLabel.contains("原题未关联"), revisit.identityLabel)
+        assertNotEquals(mistake.entryId, revisit.entryId, "未知到期行不能与错题共用一个条目身份")
+
+        val due = b.items.single { it.kp.id == "K0" }
+        assertTrue(due.hasUnknownOriginal, "纯到期日程没有原题时保持未知")
         assertNotNull(due.unknownDueId)
         assertEquals(listOf(QueueReason.DUE), due.reasons)
         assertTrue(due.identityLabel.contains("原题未关联"), due.identityLabel)
         assertEquals(0, b.unverifiedAnswered)
         assertNull(b.nextDueDay)
+        assertFalse(b.snapshotRequired, "正常账本不该被说成待快照")
     }
 
     @Test fun unverifiedAnswerIsCountedForDisplayButNeverEntersTheQueue() {

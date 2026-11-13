@@ -82,7 +82,7 @@ class ReviewQueueEntryTest {
         return Entry(driver, tutor, c, events)
     }
 
-    @Test fun realEntryMergesWrongGuessedAndDueThenResumesAfterReentry() {
+    @Test fun realEntryKeepsUnknownDueIdentityAndResumesAfterReentry() {
         val e = entry(mixedFacts())
         val view = CourseView(e.events, project(e.events))
         val opened = mutableListOf<Pair<String, Boolean>>()
@@ -96,21 +96,21 @@ class ReviewQueueEntryTest {
                         }
                     } } }
                 }
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("3 项复习").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("3 项复习").assertIsDisplayed()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("4 项复习").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("4 项复习").assertIsDisplayed()
                 // 未核答案报数量，但不计分；它仍按投影器的口径提醒「再看一次」。
                 onNodeWithText("另有 1 道题答案还没核，只提醒再看一次，不计分").assertIsDisplayed()
 
-                val mistake = onNodeWithTag("review-K1")
-                mistake.performScrollTo().assertIsDisplayed()
+                // 到期日程本身没有题号：它不能并进上面那道错题，也不许显示成「答错 · 猜对 · 到期」。
                 onNodeWithText(
-                    "答错 · 猜对 · 到期 · 原题 q1 · 待生成变式 · 先修：极限基础 · 考纲权重 3",
+                    "答错 · 猜对 · 原题 q1 · 待生成变式 · 先修：极限基础 · 考纲权重 3",
                     substring = true,
-                ).assertIsDisplayed()
+                ).performScrollTo().assertIsDisplayed()
+                onAllNodesWithText("到期 · 原题 q1", substring = true).assertCountEquals(0)
                 // 错题那一行和未核那一行都只是「再看一次」，但只有前者带答错/猜对来源。
                 onAllNodesWithText("再看一次 · 今天到期").assertCountEquals(2)
-                // 纯到期日程和未核答案都没有可追的原题，就不假装它是某道错题。
-                onAllNodesWithText("原题未关联 · 练同知识点变式", substring = true).assertCountEquals(2)
+                // 纯到期日程、该知识点的重练日、未核答案都没有可追的原题，就不假装它是某道错题。
+                onAllNodesWithText("原题未关联 · 练同知识点变式", substring = true).assertCountEquals(3)
 
                 onAllNodesWithText("开始").onFirst().performClick()
                 assertEquals(1, opened.size)
@@ -125,7 +125,27 @@ class ReviewQueueEntryTest {
                 onNodeWithText("上次练到这里").assertIsDisplayed()
                 onNodeWithText("继续").assertIsDisplayed()
                 assertEquals(saved, reviewCursor(e.c.sync, "C"), "重进后仍指向同一项")
-                onNodeWithText("3 项复习").assertIsDisplayed()
+                onNodeWithText("4 项复习").assertIsDisplayed()
+            }
+        } finally { e.close() }
+    }
+
+    @Test fun unknownLedgerFactsAskForSnapshotInsteadOfShowingAnEmptyDoneState() {
+        // 这一版读不懂的账本事实：入口不能崩，也不能显示成「今天没有到期的复习」。
+        val events = listOf(event("future_synthetic_fact_v99", json()))
+        val e = entry(events)
+        val view = CourseView(events, project(events))
+        try {
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
+                    ReviewScreen(e.c, view, { _, _ -> }, onBack = {})
+                } } } }
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("今天复习什么还确认不了。").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithText("今天复习什么还确认不了。").assertIsDisplayed()
+                onNodeWithText("要先取服务端的权威快照", substring = true).assertIsDisplayed()
+                onNodeWithText("本机已经做过的练习还在", substring = true).assertIsDisplayed()
+                onNodeWithText("今天没有到期的复习。").assertDoesNotExist()
+                onNodeWithText("开始").assertDoesNotExist()
             }
         } finally { e.close() }
     }

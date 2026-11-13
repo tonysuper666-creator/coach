@@ -9,7 +9,9 @@ untouched.
 `ledgerQueueCandidate` replays the real main `Event` inputs with `learnerEvidence`
 and `project`, reads `Projection.review/revisit`, and migrates the actionable
 `reviewsOn(day)` records. Unsupported facts and conflicting event replays are
-rejected. The mistake adapter currently covers checked single-choice answers;
+rejected; the client entry turns the unsupported-fact rejection into an explicit
+"waiting for an authoritative snapshot" state instead of an exception or an empty
+queue. The mistake adapter currently covers checked single-choice answers;
 constructed answers and the PR150 ladder await their real integration contracts.
 
 Known item identity includes course, provenance boundary, KP and original question

@@ -23,6 +23,7 @@ import com.coach.client.reviewBoard
 import com.coach.client.reviewCursor
 import com.coach.client.saveReviewCursor
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.domain.reviewqueue.VariantCandidatePort
 import kotlinx.serialization.json.*
 
@@ -31,18 +32,27 @@ import kotlinx.serialization.json.*
  * 队列是账本回放出来的纯函数结果，离开再回来会接着上次点开的那一项。
  *
  * [variantCandidates] 是题库候选端口：本机有题级候选通道时从它取同考点、已核键的新题；
- * 默认 [NoVariantCandidates] 表示这台设备还没有这条通道，缺口保持「待生成变式」，不造题。
+ * 不注入时，只要 [CoachController.course] 在（Windows 连上 Mac），就按本屏要排的考点
+ * 向真实 `/pool` 题级接口要一次候选。两条路都拿不到时候口保持「待生成变式」，不造题。
  *
  * 点「开始」只做两件事：把这一行的变式作答身份写进本机光标，再用 [onOpenKp] 打开考点。
  * 练习路由目前只收到 `kpId` 和 `startNow`，还没有读取这个身份的消费者，所以这里能证的是
- * 「候选注入 → 分配 → 显示 → 本机保存身份」，不是「练习真的开始那道变式」。
+ * 「候选注入/拉取 → 分配 → 显示 → 本机保存身份」，不是「练习真的开始那道变式」。
  */
 @Composable
 fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, startNow: Boolean) -> Unit, onBack: (() -> Unit)?, onOpenMock: (() -> Unit)? = null, onOpenEssay: (() -> Unit)? = null, onOpenMainline: ((Int?, Boolean) -> Unit)? = null, reminderSettings: @Composable () -> Unit = {}, variantCandidates: VariantCandidatePort = NoVariantCandidates) {
     val now = rememberCourseNow(c)
     val day = view.logicalToday(now)
+    val pool = rememberPoolCandidates(c, view, day)
+    // 拉回来的真实候选先于注入端口为空时生效；注入端口有条目就仍由它说话。
+    val source = remember(pool, variantCandidates) {
+        if (pool.isEmpty()) variantCandidates
+        else VariantCandidatePort { courseId, run, kp ->
+            variantCandidates.candidates(courseId, run, kp).ifEmpty { pool[kp].orEmpty() }
+        }
+    }
     // 账本回放一次一块，只在换天或账本变（view 是新实例）时重算，不跟着秒针每秒重放。
-    val board = remember(view, day, variantCandidates) { reviewBoard(c.courseId, view, day, variantCandidates) }
+    val board = remember(view, day, source) { reviewBoard(c.courseId, view, day, source) }
     var cursor by remember(view, day) { mutableStateOf(reviewCursor(c.sync, c.courseId)) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -120,6 +130,25 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
             }
         }
     }
+}
+
+/**
+ * 真实题库的题级候选：按本屏要排的考点，向 Mac 的 `/pool?kp=` 要一次。
+ * 回来之前保持空（缺口仍是缺口）；没有课程接口（测试、未配对）、离线或服务端还没这个字段，
+ * 都停在空，入口按「待生成变式」显示，不拿账本里出过的题顶替。
+ */
+@Composable
+private fun rememberPoolCandidates(c: CoachController, view: CourseView, day: Long): Map<String, List<VariantCandidate>> {
+    val http = c.course
+    val pool by produceState<Map<String, List<VariantCandidate>>>(emptyMap(), http, view, day) {
+        if (http == null) return@produceState
+        val kps = reviewBoard(c.courseId, view, day, NoVariantCandidates).items.map { it.kp.id }.distinct()
+        // 课程接口是阻塞调用：挪到 IO，别让要显示这一屏的那一帧等 socket。
+        value = withContext(Dispatchers.IO) {
+            kps.mapNotNull { kp -> http.reviewVariantCandidates(kp)?.let { kp to it } }.toMap()
+        }
+    }
+    return pool
 }
 
 /** 低频或没题时，说清是哪一种「没有」，而不是只留一句空话。 */

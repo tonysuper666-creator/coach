@@ -58,8 +58,18 @@ attempt. That consumer does not exist yet: the entry still opens the KP with
 `onOpenKp(kpId, true)`, so what is proven here is "candidate injected → allocated →
 shown → identity saved on this device", not "practice actually starts that
 variant". The default
-`NoVariantCandidates` reports nothing, which is why the entry keeps saying "待生成
-变式" until a real question-level pool channel exists on the device.
+`NoVariantCandidates` still reports nothing. On a paired device the entry now feeds
+itself from the real pool: `/v1/courses/{course}/pool?kp=` answers question-level
+rows (question id, KP, fingerprint, key state, availability) only for the KP named
+in the query — the bank is not enumerated course-wide, and stems, options and
+answers are not sent — and `CourseHttp.reviewVariantCandidates(kpId)` hands those
+rows to the same port. It returns `null` when the answer cannot be read (offline,
+or a server without the field) and an empty list when the bank truly has nothing,
+so a missing candidate stays a visible gap instead of becoming an invented
+question. Rows whose availability or question id the client cannot attest are
+dropped; an unreviewed key is passed on as unverified and the selector re-checks
+it. `ReviewScreen` fetches for exactly the KPs its board is about to schedule and
+an injected port still wins when it has candidates.
 The client's board renders `scheduleOrder(...)`, which makes the known
 `exam_weights_set` weights an actual ordering input. Entries not yet overdue past
 the bound are ordered by weight; entries past the bound form a starving group that
@@ -83,9 +93,8 @@ tools/dev/heavy --local ./gradlew :shared:domain:jvmTest --priority=low --consol
 ```
 
 No formal content, private exam text, device acceptance or release evidence is
-implied by this candidate. What is still open on TON-1448: the transport that
-feeds `VariantCandidatePort` from the pool to each client (the entry-side seam and
-its synthetic-data evidence exist; a device still reports no candidates), the
-practice route consuming the persisted variant attempt identity, cross-device
-session reconciliation and the release path (the review entry, allocation and
-weighted ordering are wired on the shared client).
+implied by this candidate. What is still open on TON-1448: the practice route
+consuming the persisted variant attempt identity, cross-device session
+reconciliation and the release path. The pool → client question-level transport,
+the entry-side allocation and the weighted ordering are wired and covered by
+synthetic tests (real isolated server + real HTTP client in the entry test).

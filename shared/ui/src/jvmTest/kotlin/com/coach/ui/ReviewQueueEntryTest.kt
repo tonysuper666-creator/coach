@@ -10,15 +10,23 @@ import androidx.compose.ui.unit.dp
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.*
 import com.coach.client.db.ClientDatabase
+import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.domain.reviewqueue.VariantCandidatePort
 import com.coach.protocol.*
+import com.coach.server.ledgerRoutes
+import com.coach.store.LedgerStore
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.netty.Netty
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.nio.file.Files
 import kotlin.test.*
 
 /**
@@ -64,11 +72,11 @@ class ReviewQueueEntryTest {
         posed("a9", "q9", "K3", keyState = null), answered("a9", "A"), graded("a9", 0),
     )
 
-    private class Entry(private val driver: JdbcSqliteDriver, private val tutor: TutorClient, val c: CoachController, val events: List<Event>) : AutoCloseable {
-        override fun close() { tutor.close(); driver.close() }
+    private class Entry(private val driver: JdbcSqliteDriver, private val tutor: TutorClient, val c: CoachController, val events: List<Event>, private val course: CourseHttp? = null) : AutoCloseable {
+        override fun close() { course?.close(); tutor.close(); driver.close() }
     }
 
-    private fun entry(events: List<Event>): Entry {
+    private fun entry(events: List<Event>, course: CourseHttp? = null): Entry {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val db = ClientDatabase(driver)
@@ -82,8 +90,8 @@ class ReviewQueueEntryTest {
         }
         val sync = SyncEngine(db, "synthetic", transport, listOf("C"), { "id" }, { "hash" })
         val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
-        val c = CoachController("C", sync, tutor, formatClock = { "12:00" }, nowMillis = { now })
-        return Entry(driver, tutor, c, events)
+        val c = CoachController("C", sync, tutor, formatClock = { "12:00" }, nowMillis = { now }, course = course)
+        return Entry(driver, tutor, c, events, course)
     }
 
     @Test fun realEntryKeepsUnknownDueIdentityAndResumesAfterReentry() {
@@ -168,6 +176,62 @@ class ReviewQueueEntryTest {
                 assertEquals(expectedAttempt, reviewCursorAttempt(e.c.sync, "C"))
             }
         } finally { e.close() }
+    }
+
+    @Test fun theRealPoolOverHttpTurnsExactlyOneGapIntoAPreparedRow() {
+        // 真实隔离服务端：同一个自建 SQLite 题库 + 真鉴权 + 真 /pool，不是内存里拼一个列表。
+        val dir = Files.createTempDirectory("review-pool-entry")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val store = LedgerStore(dir).also { it.enroll("phone", "synthetic-private-token-32-characters") }
+        val actor = LedgerActor(scope, store)
+        val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+            ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 8))
+        }
+        server.start(false)
+        val port = runBlocking { server.engine.resolvedConnectors().single().port }
+        val http = CourseHttp("http://127.0.0.1:$port",
+            "phone", "synthetic-private-token-32-characters", "C")
+        // K1 一道活题、一道未核键；K2 一道别的考点的活题。都没有出过题。
+        runBlocking {
+            actor.execute {
+                val options = listOf(Option("o1", "synthetic one"), Option("o2", "synthetic two"))
+                registerQuestion("q-pool-live", "C", "fp-live", "SINGLE_CHOICE", "Synthetic pool live", "VERIFIED", "o1", options, listOf("K1"))
+                registerQuestion("q-pool-unverified", "C", "fp-unv", "SINGLE_CHOICE", "Synthetic pool unverified", "UNREVIEWED", "o1", options, listOf("K1"))
+                registerQuestion("q-pool-other", "C", "fp-other", "SINGLE_CHOICE", "Synthetic pool other point", "VERIFIED", "o1", options, listOf("K2"))
+            }
+        }
+        val e = entry(mixedFacts(), http)
+        val view = CourseView(e.events, project(e.events))
+        val opened = mutableListOf<Pair<String, Boolean>>()
+        try {
+            // 期望值也来自同一次真实响应：未核键和别的考点都进不来，只有这道活题能练。
+            val fetched = runBlocking { assertNotNull(http.reviewVariantCandidates("K1")) }
+            assertEquals(listOf("q-pool-live"), fetched.map { it.question.id })
+            val expected = reviewBoard("C", view, day, VariantCandidatePort { _, _, kp -> if (kp == "K1") fetched else emptyList() })
+            val ready = expected.items.single { it.variantCount > 0 }
+            val attempt = assertNotNull(ready.variantAttemptId)
+            runComposeUiTest {
+                setContent { CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 880.dp)) {
+                    // 不注入端口：入口只靠 CoachController.course 走真实 /pool。
+                    ReviewScreen(e.c, view, { id, start -> opened += id to start }, onBack = {})
+                } } } }
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithText("已备 1 道变式", substring = true).fetchSemanticsNodes().isNotEmpty()
+                }
+                // 拉到一道题不改变队列条目的数量，也不把原题身份换成变式身份。
+                onNodeWithText("4 项复习").assertIsDisplayed()
+                onAllNodesWithText("已备 1 道变式", substring = true).assertCountEquals(1)
+                onAllNodesWithText("已备 2 道变式", substring = true).assertCountEquals(0)
+                // 拿到题的那一行显示的身份，就是域层按真实候选算出来的那一个；其余行仍是缺口。
+                onAllNodesWithText(ready.identityLabel, substring = true).assertCountEquals(1)
+                onAllNodesWithText("已备", substring = true).assertCountEquals(1)
+                onAllNodesWithText("开始")[expected.items.indexOf(ready)].performScrollTo().performClick()
+                assertEquals(listOf("K1" to true), opened)
+                assertEquals(attempt, reviewCursorAttempt(e.c.sync, "C"))
+            }
+        } finally {
+            e.close(); server.stop(0, 0); scope.cancel(); dir.toFile().deleteRecursively()
+        }
     }
 
     @Test fun unknownLedgerFactsAskForSnapshotInsteadOfShowingAnEmptyDoneState() {

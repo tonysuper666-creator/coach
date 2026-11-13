@@ -111,8 +111,19 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             call.respondText(actor.execute { essayPrompts(call.parameters["course"]!!) }.toString(),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/pool") {
-            val supply=actor.execute { constructedSupply(call.parameters["course"]!!) }
-            call.respondText(json("constructed" to JsonObject(supply.mapValues { JsonPrimitive(it.value) })).toString(),ContentType.Application.Json)
+            val course=call.parameters["course"]!!
+            val supply=actor.execute { constructedSupply(course) }
+            // 题级候选只在点名考点时给出：题库不是可以按 course 整包枚举的语料，别的考点的题不在这里倾倒。
+            val kp=call.request.queryParameters["kp"]?.takeIf { it.isNotBlank() }
+            val variants=if(kp==null) emptyList() else actor.execute { reviewVariantCandidates(course,kp) }
+            val rows=variants.map { candidate ->
+                json("questionId" to candidate.question.id,"kpId" to candidate.kpId,
+                    "fingerprint" to candidate.question.fingerprint,
+                    "keyState" to if(candidate.keyVerified) "VERIFIED" else "UNREVIEWED",
+                    "availability" to candidate.availability.name)
+            }
+            call.respondText(json("constructed" to JsonObject(supply.mapValues { JsonPrimitive(it.value) }),
+                "kpId" to kp,"variants" to JsonArray(rows)).toString(),ContentType.Application.Json)
         }
         post("/v1/prewarm") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject

@@ -315,19 +315,52 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         answers.clear(); selectedQuestion = 0; message = null; openedFromQuestions = false
     }
 
-    /** 切到另一本书：旧书页、题目、作答不带过去。失败时保持无书状态，失败原因在 remote.failure。 */
-    suspend fun openRemote(documentId: String) {
+    /** 切到另一本书：旧书页、题目、作答不带过去。失败时保持无书状态，失败原因在 remote.failure。可指定初始目标页码与锚点。 */
+    suspend fun openRemote(documentId: String, targetPdfPage: Int? = null, anchor: String? = null) {
         val r = remote ?: return
         cancelNote(); highlightNoteId = null
-        val start = r.open(documentId)
+        val defaultStart = r.open(documentId)
         val doc = r.current
-        if (start == null || doc == null) {
+        if (defaultStart == null || doc == null) {
             // 失败：不留旧书的页数和位置。
             state = state.copy(pageCount = 0, position = ReaderPosition(0), provenanceStack = emptyList(), flashAnchor = null)
             answers.clear(); selectedQuestion = 0
             return
         }
+        val start = (targetPdfPage ?: defaultStart).coerceIn(1, doc.pages)
         attachDocument(doc, start)
+        if (!anchor.isNullOrBlank()) {
+            state = state.copy(flashAnchor = anchor)
+        }
+    }
+
+    /** 学到某一处要能按位置打开对应页（指定资料 ID、PDF 页码与可选锚点）。 */
+    suspend fun openRemoteAt(documentId: String, targetPdfPage: Int, anchor: String? = null) {
+        openRemote(documentId, targetPdfPage = targetPdfPage, anchor = anchor)
+    }
+
+    /** 翻到上一页（按页翻）。 */
+    fun prevPage() {
+        if (state.position.page > 0) {
+            state = state.apply(ReaderAction.PrevPage)
+        }
+    }
+
+    /** 翻到下一页（按页翻）。 */
+    fun nextPage() {
+        if (state.pageCount > 0 && state.position.page < state.pageCount - 1) {
+            state = state.apply(ReaderAction.NextPage)
+        }
+    }
+
+    /** 直接翻到指定页（从 1 起的 pdfPage）。 */
+    fun goToPage(pdfPage: Int, anchor: String? = null) {
+        val maxPages = remote?.current?.pages ?: state.pageCount
+        if (maxPages <= 0) return
+        val clamped = pdfPage.coerceIn(1, maxPages)
+        state = state.goTo(PdfPages.toIndex(clamped)).let { s ->
+            if (anchor != null) s.copy(flashAnchor = anchor) else s
+        }
     }
 
     /** 用户选择“用另一台的位置”。 */
@@ -529,6 +562,22 @@ private fun ReaderBar(session: ReaderSession, shown: List<ReaderPane>) {
             else -> "页数未知"
         }
         Text(pos, Modifier.testTag("bar-position"), fontSize = 12.sp, color = Color(0xFF666666))
+        if (state.pageCount > 0) {
+            val canPrev = state.position.page > 0
+            val canNext = state.position.page < state.pageCount - 1
+            Text(
+                "上一页",
+                Modifier.testTag("bar-prev-page").clickable(enabled = canPrev) { session.prevPage() }.padding(start = 12.dp),
+                color = if (canPrev) Accent else Color(0xFF999999),
+                fontSize = 12.sp,
+            )
+            Text(
+                "下一页",
+                Modifier.testTag("bar-next-page").clickable(enabled = canNext) { session.nextPage() }.padding(start = 8.dp),
+                color = if (canNext) Accent else Color(0xFF999999),
+                fontSize = 12.sp,
+            )
+        }
         if (state.provenanceStack.isNotEmpty()) {
             Text("  返回题目", Modifier.testTag("bar-return").clickable { session.returnFromProvenance() }, color = Accent, fontSize = 14.sp)
         }

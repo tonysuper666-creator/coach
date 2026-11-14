@@ -1406,13 +1406,29 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
 
+    /** Recheck the exact evidence snapshot before releasing a delayed reader answer. */
+    fun readerSourceCurrent(course: String, page: SourcePage, scope: com.coach.domain.scope.VisibleScope): Boolean {
+        if (!page.learnerVisible || page.pdfPage <= 0 || !scope.permits(page.docId, page.pdfPage, page.learnerVisible)) return false
+        val visible = browsablePage(course, page.docId, page.pdfPage) ?: return false
+        if (visible.str("text") != page.text) return false
+        return query("SELECT blob_sha256 FROM source_docs WHERE course_id=? AND doc_id=? AND tutor_visible=1",
+            course, page.docId) { it.getString(1) == page.sourceSha256 }.singleOrNull() == true
+    }
+
     /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */
     fun constructedSupply(course: String): Map<String,Int> = query(
         """SELECT k.kp_id,count(*) FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
            WHERE q.course_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY' GROUP BY k.kp_id""",course) { it.getString(1) to it.getInt(2) }.toMap()
 
     /** FTS syntax comes from escaped tokens, never from a model or a raw MATCH expression. */
-    fun searchSourcePages(course: String, question: String): List<SourcePage> {
+    fun searchSourcePages(course: String, question: String, scope: com.coach.domain.scope.VisibleScope): List<SourcePage> {
+        val unique = matchSourcePages(course, question).filter { scope.permits(it.docId, it.pdfPage, it.learnerVisible) }
+        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
+            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
+    }
+
+    /** Every tutor-visible page of the course matching the query, best score per page, before any scope or page budget is applied. */
+    private fun matchSourcePages(course: String, question: String): List<SourcePage> {
         val terms = Regex("[\\p{IsHan}]{3,}|[A-Za-z0-9]{2,}").findAll(question.take(2000))
             .flatMap { match ->
                 val value = match.value
@@ -1423,14 +1439,56 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         for (table in listOf("fts_en","fts_zh")) {
             val expression = terms.filter { table == "fts_en" || it.length >= 3 }.joinToString(" OR ") { "\"$it\"" }
             if (expression.isBlank()) continue
-            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
+            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible,d.blob_sha256 FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
                 SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4),
-                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
+                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()), it.getString(8))
             }
         }
-        val unique = found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
-        return (unique.filter { it.learnerVisible }.sortedByDescending { it.score } +
-            unique.filterNot { it.learnerVisible }.sortedByDescending { it.score }.take(2)).take(6)
+        return found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }
+    }
+
+    /** Texts of protected pages matching a query. For OUTPUT GUARDS ONLY: they must never be placed in a model request. */
+    fun restrictedForGuard(course: String, question: String): List<String> =
+        // Independent of the public pack's page budget and uncapped: every protected page this query matches is known to the guard.
+        matchSourcePages(course, question).filterNot { it.learnerVisible }.sortedByDescending { it.score }.map { it.text }
+
+    /** Outline anchors per active knowledge point, in outline order (module order, then point order). */
+    /** Knowledge point ids are compared trimmed and case-folded so a cosmetic mismatch between facts and outline does not disable a course. */
+    private fun kpKey(id: String) = id.trim().lowercase()
+
+    private fun outlineAnchors(course: String): List<Pair<String, List<Pair<String, Int>>>> {
+        val moduleOrder = runCatching { query("SELECT module_id,ord FROM course_modules WHERE course_id=?", course) { it.getString(1) to it.getInt(2) }.toMap() }.getOrDefault(emptyMap())
+        return query("SELECT kp_id,module_id,ord,anchors FROM outline_kp WHERE course_id=? AND coalesce(retired,0)=0", course) {
+            val anchors = runCatching { LedgerJson.parseToJsonElement(it.getString(4) ?: "[]").jsonArray.map { a -> a.jsonObject.str("docId") to a.jsonObject.num("pdfPage").toInt() } }.getOrDefault(emptyList())
+            Triple(kpKey(it.getString(1)), (moduleOrder[it.getString(2)] ?: 0) * 100000 + it.getInt(3), anchors)
+        }.sortedBy { it.second }.map { it.first to it.third }
+    }
+
+    /**
+     * Trusted "already studied" ceiling, derived from the learning record: knowledge points with these ids are learned, every other
+     * active point is not. Fails closed ([VisibleScope.NONE]) when nothing learned can be mapped to source pages.
+     */
+    fun learnedScope(course: String, base: com.coach.domain.scope.VisibleScope, learnedKps: Set<String>): com.coach.domain.scope.VisibleScope {
+        val all = outlineAnchors(course)
+        val keys = learnedKps.map(::kpKey).toSet()
+        val learned = all.filter { it.first in keys }.flatMap { it.second }
+        if (learned.isEmpty()) return com.coach.domain.scope.VisibleScope.NONE
+        val unlearned = all.filter { it.first !in keys }.flatMap { it.second }
+        // Only documents the learned points are anchored in take part; a document without outline anchors cannot be placed, so it is closed.
+        return base.narrowToDocs(*learned.map { it.first }.distinct().toTypedArray())
+            .limitPages(com.coach.domain.scope.VisibleScope.learnedWindows(learned, unlearned))
+    }
+
+    /** Learned = every point up to and including [currentKp] in outline order. */
+    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKp: String?): com.coach.domain.scope.VisibleScope =
+        learnedThrough(course, base, listOfNotNull(currentKp))
+
+    /** Several current points (one reading section may cite more than one): the latest of them in outline order bounds what is learned. */
+    fun learnedThrough(course: String, base: com.coach.domain.scope.VisibleScope, currentKps: Collection<String>): com.coach.domain.scope.VisibleScope {
+        val order = outlineAnchors(course).map { it.first }
+        val idx = currentKps.maxOfOrNull { order.indexOf(kpKey(it)) } ?: -1
+        if (idx < 0) return com.coach.domain.scope.VisibleScope.NONE
+        return learnedScope(course, base, order.take(idx + 1).toSet())
     }
 
     fun jobState(id: String): Pair<String,Long>? = query("SELECT state,fence FROM jobs WHERE job_id=?",id) { it.getString(1) to it.getLong(2) }.singleOrNull()

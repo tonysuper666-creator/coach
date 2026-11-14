@@ -74,8 +74,8 @@ class CoachController(
     internal val startRequests = mutableStateMapOf<String, Boolean>()
     /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
     internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(
-        sync.mainlineState(courseId, "mock-drafts").mapNotNull { (key, value) -> (value as? JsonObject)?.let { key to it } }.toMap())
-    internal fun persistMockDrafts() { sync.saveMainlineState(courseId, JsonObject(mockDrafts.value), "mock-drafts") }
+        mainlineState("mock-drafts").mapNotNull { (key, value) -> (value as? JsonObject)?.let { key to it } }.toMap())
+    internal fun persistMockDrafts() { saveMainlineState(JsonObject(mockDrafts.value), "mock-drafts") }
     /** 模拟考的保存和续考时读卷都排这一把锁：同一时刻只有一个请求在路上，旧答案不会后到覆盖新答案，续考读到的也是最后存上的。 */
     internal val mockSaving = kotlinx.coroutines.sync.Mutex()
     /** 每场考试最后发出的保存序号，只增不减（锁内读写）。 */
@@ -86,7 +86,7 @@ class CoachController(
         private set
 
     init {
-        val saved = sync.mainlineState(courseId, "essay-draft")
+        val saved = mainlineState("essay-draft")
         val posed = saved["posed"] as? JsonObject
         val attempt = (saved["attempt"] as? JsonPrimitive)?.content.orEmpty()
         val deadline = (saved["deadline"] as? JsonPrimitive)?.content?.toLongOrNull()
@@ -98,7 +98,7 @@ class CoachController(
 
     internal fun persistEssay() {
         val s = essay
-        sync.saveMainlineState(courseId, if (s == null) com.coach.domain.json() else com.coach.domain.json(
+        saveMainlineState(if (s == null) com.coach.domain.json() else com.coach.domain.json(
             "attempt" to s.attemptId, "posed" to s.posed, "deadline" to s.deadline, "text" to s.text, "handedIn" to s.handedIn), "essay-draft")
     }
 

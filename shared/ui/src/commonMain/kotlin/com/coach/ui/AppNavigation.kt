@@ -8,7 +8,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
 @Serializable
-internal enum class AppPage { HOME, WEEK, STUDY, SOURCE, MAINLINE, MOCK, ESSAY, WEEK_REVIEW }
+internal enum class AppPage { HOME, WEEK, STUDY, SOURCE, MAINLINE, MOCK, ESSAY, WEEK_REVIEW, REVIEW_PRACTICE }
 
 /** Each task carries its actual arrival point; showing a source never replaces that task. */
 @Serializable

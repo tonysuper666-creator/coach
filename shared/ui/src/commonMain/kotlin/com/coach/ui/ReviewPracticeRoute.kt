@@ -19,10 +19,11 @@ import kotlinx.coroutines.*
 fun CoachController.restoreReviewPractice(kpId: String, view: CourseView): ReviewPracticeSession =
     restoreReviewPracticeSession(sync, courseId, kpId, tutor.agentRunId, view, nowMillis())
 
-/** Review-owned component/typed host port. Shared CoachApp/AppNavigation wiring remains with 1449. */
+/** The navigation attempt must still match the scoped persisted selection before any allocation. */
 @Composable
-fun ReviewPracticeScreen(c: CoachController, onClose: () -> Unit) {
+fun ReviewPracticeScreen(c: CoachController, expectedAttemptId: String? = null, onClose: () -> Unit) {
     val target = reviewPracticeTarget(c.sync, c.courseId, c.tutor.agentRunId)
+        ?.takeIf { expectedAttemptId == null || it.attemptId == expectedAttemptId }
     val revision by c.sync.revision.collectAsState()
     var refresh by remember(c) { mutableStateOf(0) }
     var retry by remember(c) { mutableStateOf(0) }

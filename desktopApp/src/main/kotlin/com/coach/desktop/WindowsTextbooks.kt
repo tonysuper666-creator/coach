@@ -167,7 +167,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                         when (tab.hostDestination) {
                             AppTab.TODAY -> if (book == null) HostEmptyState("host-today-empty", "今天还没有要接着读的书",
                                 "今天会显示书架上读到一半的教材。书架现在是空的，先去上传一本。")
-                            else HostTodayBook(book, busy = ui.busy,
+                            else HostTodayBook(book, busy = ui.busy, reviews = ui.reviews.size,
+                                onReview = { openInWorkspace { if (drafts.flush()) controller.showReviews() } },
                                 onRead = { openInWorkspace { controller.read() } },
                                 onLearn = { openInWorkspace { drafts.flush(); controller.learn() } })
                             AppTab.ROUTE -> if (book == null) HostEmptyState("host-course-empty", "还没有课程",
@@ -196,10 +197,15 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
 
 /** 今天: the book on this machine, at the page and lesson 书架 left off. */
 @Composable
-private fun HostTodayBook(book: Textbook, busy: Boolean, onRead: () -> Unit, onLearn: () -> Unit) {
+private fun HostTodayBook(book: Textbook, busy: Boolean, reviews: Int, onReview: () -> Unit, onRead: () -> Unit, onLearn: () -> Unit) {
     HostPanel("host-today-book", "今天接着读", "《${book.title}》${book.progressLine()}", busy, onRead,
         "host-today-read", "接着读 · 第 ${book.readingPage} 页", onLearn, "host-today-learn",
-        if (book.learning) "继续学 · 第 ${book.lessonIndex + 1} / ${book.lessons.size} 节" else "开始学这本书")
+        if (book.learning) "继续学 · 第 ${book.lessonIndex + 1} / ${book.lessons.size} 节" else "开始学这本书",
+        extra = {
+            if (reviews > 0) PrimaryButton(onReview, enabled = !busy, modifier = Modifier.testTag("host-today-review")) {
+                Text("复习 $reviews 题")
+            }
+        })
 }
 
 /** 课程: the same book split into lessons; no remote course or knowledge map is invented here. */
@@ -216,7 +222,8 @@ private fun HostCourseBook(book: Textbook, busy: Boolean, onLearn: () -> Unit, o
 
 @Composable
 private fun HostPanel(tag: String, title: String, body: String, busy: Boolean, onPrimary: () -> Unit,
-    primaryTag: String, primaryLabel: String, onSecondary: (() -> Unit)?, secondaryTag: String?, secondaryLabel: String?) {
+    primaryTag: String, primaryLabel: String, onSecondary: (() -> Unit)?, secondaryTag: String?, secondaryLabel: String?,
+    extra: @Composable () -> Unit = {}) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 900.dp).fillMaxWidth().verticalScroll(rememberScrollState())
             .padding(36.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -227,6 +234,7 @@ private fun HostPanel(tag: String, title: String, body: String, busy: Boolean, o
                 if (onSecondary != null && secondaryTag != null && secondaryLabel != null) OutlinedButton(onSecondary,
                     enabled = !busy, modifier = Modifier.testTag(secondaryTag)) { Text(secondaryLabel) }
             }
+            extra()
         }
     }
 }

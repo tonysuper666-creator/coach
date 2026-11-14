@@ -10,13 +10,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
 
-internal enum class BookScreen { HOME, READER, LEARNING }
+internal enum class BookScreen { HOME, READER, LEARNING, REVIEWS, REVIEWING }
 internal enum class BookPrompt { IMPORTED, START, AFTER_READING, QUESTIONS }
 internal data class LibraryUi(
     val catalog: List<BookSummary> = emptyList(), val book: Textbook? = null,
     val screen: BookScreen = BookScreen.HOME, val prompt: BookPrompt? = null,
     val page: Int = 1, val source: BookLesson? = null,
     val answer: PracticeAnswer = PracticeAnswer(), val busy: Boolean = false, val error: String? = null,
+    val reviews: List<LocalBookReview> = emptyList(), val review: LocalBookReview? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary) {
@@ -35,19 +36,25 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun load() = action {
         val catalog = library.catalog()
-        val book = catalog.firstOrNull()?.let { library.book(it.id) }
-        mutable.value = LibraryUi(catalog = catalog, book = book, busy = true)
+        val active = library.activeReview()
+        val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
+        mutable.value = LibraryUi(catalog = catalog, book = book, busy = true, reviews = library.reviews(),
+            review = active, answer = active?.answer ?: PracticeAnswer(),
+            screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING)
     }
 
     suspend fun importBook(path: Path) = action {
         val book = library.importBook(path)
-        mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage, busy = true)
+        library.closeReview()
+        mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
+            busy = true, reviews = library.reviews())
     }
 
     suspend fun select(id: String) = action {
         val book = library.book(id)
         library.save(book)
-        mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true)
+        library.closeReview()
+        mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews())
     }
 
     private fun persist(book: Textbook) {
@@ -57,12 +64,16 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun read() = action {
         val book = mutable.value.book ?: return@action
+        library.closeReview()
+        mutable.update { it.copy(review = null) }
         mutable.update { it.copy(screen = BookScreen.READER, page = book.readingPage, source = null,
             prompt = if (!book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
     }
 
     suspend fun learn() = action {
         val book = mutable.value.book ?: return@action
+        library.closeReview()
+        mutable.update { it.copy(review = null) }
         if (!book.learning) mutable.update { it.copy(prompt = BookPrompt.START) }
         else openLearning(book)
     }
@@ -70,7 +81,7 @@ internal class TextbookController(val library: TextbookLibrary) {
     private fun openLearning(book: Textbook) {
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
-        mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer) }
+        mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null) }
     }
 
     suspend fun enableLearning() = action {
@@ -104,13 +115,20 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun source() = action {
         val book = mutable.value.book ?: return@action
-        val lesson = book.lessons.getOrNull(book.lessonIndex) ?: return@action
+        val lesson = mutable.value.review?.let { review -> book.lessons.find { it.id == review.lesson } }
+            ?: book.lessons.getOrNull(book.lessonIndex) ?: return@action
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = lesson.firstPage, prompt = null) }
     }
 
     suspend fun back() = action {
-        if (mutable.value.source != null) mutable.update { it.copy(screen = BookScreen.LEARNING, source = null) }
-        else mutable.update { it.copy(screen = BookScreen.HOME, prompt = null) }
+        if (mutable.value.source != null) mutable.update {
+            it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)
+        } else {
+            val fromReview = mutable.value.review != null
+            library.closeReview()
+            mutable.update { it.copy(screen = if (fromReview) BookScreen.REVIEWS else BookScreen.HOME,
+                review = null, prompt = null, reviews = library.reviews()) }
+        }
     }
 
     suspend fun lesson(index: Int) = action {
@@ -118,6 +136,36 @@ internal class TextbookController(val library: TextbookLibrary) {
         require(index in 0..book.lessons.size) { "没有这一节学习内容。" }
         val next = book.copy(lessonIndex = index)
         persist(next); openLearning(next)
+    }
+
+    suspend fun showReviews() = action {
+        library.closeReview()
+        mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
+            prompt = null, reviews = library.reviews()) }
+    }
+
+    suspend fun openReview(entry: LocalBookReview) = action {
+        val review = library.review(entry.book, entry.lesson, entry.mode)
+        val book = library.book(review.book)
+        library.openReview(review)
+        mutable.update { it.copy(book = book, screen = BookScreen.REVIEWING, source = null,
+            prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
+    }
+
+    suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer): Boolean {
+        var saved = false
+        action(showBusy = false) {
+            val review = library.review(book, lesson, mode)
+            library.saveReviewAnswer(review, answer)
+            val updated = library.review(book, lesson, mode)
+            val open = mutable.value.review
+            mutable.update { it.copy(reviews = library.reviews()) }
+            if (open?.book == book && open.lesson == lesson && open.mode == mode) {
+                mutable.update { it.copy(review = updated, answer = answer) }
+            }
+            saved = true
+        }
+        return saved
     }
 
     suspend fun answer(answer: PracticeAnswer) = action(showBusy = false) {
@@ -144,8 +192,9 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
         library.saveAnswer(book, lesson, mode, answer)
+        mutable.update { it.copy(reviews = library.reviews()) }
         val open = mutable.value.book
-        if (open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
+        if (mutable.value.review == null && open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
             mutable.update { it.copy(answer = answer) }
         }
     }

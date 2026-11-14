@@ -1,5 +1,9 @@
 package com.coach.desktop.reader
 
+import com.coach.desktop.DesktopConnectionSettings
+import com.coach.desktop.DesktopIdentity
+import com.coach.desktop.DesktopPairing
+import com.coach.desktop.desktopServerUrl
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -101,12 +105,24 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
     }
 }
 
-/** 本机草稿存储只给"真实本地书库"启用：身份 = 该书库目录的哈希。HTTP/合成来源没有可信的拥有者/课程/来源身份，一律不启用。 */
+/** 本机草稿按真实书库或已登记配对分别隔离；通用 HTTP/合成来源不能自行取得存储。 */
 object ReaderDraftScope {
     fun forSource(source: ReaderSource, libraryDir: Path?): FileNoteDraftStore? {
         if (source !is LocalBooksReaderSource || libraryDir == null) return null
         val abs = libraryDir.toAbsolutePath().normalize().toString()
         val id = MessageDigest.getInstance("SHA-256").digest(abs.toByteArray()).joinToString("") { "%02x".format(it) }.take(32)
         return FileNoteDraftStore(libraryDir.resolve("reader-drafts"), "local-library:$id")
+    }
+
+    /** 配对门交来的当前设备身份；这是配对设备分区，不是学习者身份。令牌不参与 key 或草稿内容。 */
+    internal fun forPairedSession(settings: DesktopConnectionSettings, identity: DesktopIdentity, course: String): FileNoteDraftStore? {
+        if (course.isBlank() || identity.credentials.deviceId.isBlank()) return null
+        val address = runCatching { desktopServerUrl(identity.serverUrl) }.getOrNull() ?: return null
+        // Bare credentials from a synthetic/test source are insufficient: this client must have registered this pairing.
+        val registered = runCatching { DesktopPairing(settings).load() }.getOrNull() ?: return null
+        if (desktopServerUrl(registered.serverUrl) != address || registered.credentials.deviceId != identity.credentials.deviceId) return null
+        val key = MessageDigest.getInstance("SHA-256").digest("$address\n${identity.credentials.deviceId}\n$course".toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(32)
+        return FileNoteDraftStore(settings.clientDirectory.resolve("reader-drafts").resolve("paired").resolve(key), "paired-device:$key")
     }
 }

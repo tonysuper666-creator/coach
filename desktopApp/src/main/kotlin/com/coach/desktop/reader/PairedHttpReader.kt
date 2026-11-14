@@ -63,8 +63,7 @@ internal fun ReaderHostContent(host: ReaderHostController, request: ReaderOpenRe
     DisposableEffect(host) { onDispose { host.close() } }
     LaunchedEffect(host, request) { host.open(request) }
     Column(Modifier.fillMaxSize()) {
-        // The server has no learner/owner identity contract. Do not invent a persistent HTTP scope.
-        Text("未保存的批注仅在此窗口保留，关闭前请复制。", Modifier.testTag("reader-persistence-notice").padding(8.dp))
+        if (!host.session.draftsKept()) Text("未保存的批注仅在此窗口保留，关闭前请复制。", Modifier.testTag("reader-persistence-notice").padding(8.dp))
         if (!host.authorized) Text("配对已失效。未保存的文字仍在此窗口，请先复制。", Modifier.testTag("reader-pairing-revoked").padding(8.dp))
         val failure = host.openingFailure
         if (failure != null) Text(failure.text, Modifier.padding(8.dp))
@@ -81,6 +80,6 @@ internal fun pairedReaderHost(
     require(course.isNotBlank())
     val credentials = identity.credentials
     val http = CourseHttp(identity.serverUrl, credentials.deviceId, credentials.token, course)
-    // Raw pairing credentials prove transport authorization, not a durable learner-owned draft scope.
-    return ReaderHostController(ReaderHttpSource(http.reader), closeTransport = http::close)
+    val drafts = ReaderDraftScope.forPairedSession(settings, identity, course)
+    return ReaderHostController(ReaderHttpSource(http.reader), drafts = drafts, closeTransport = http::close)
 }

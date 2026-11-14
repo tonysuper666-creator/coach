@@ -90,7 +90,7 @@ private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView,
     val reply by produceState<MockReply?>(MockReply(cached ?: knownWeeks, null), revision) {
         // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
         do {
-            val r = withContext(Dispatchers.IO) { http.mainline() }
+            val r = withContext(Dispatchers.IO) { http.mainline(c.tutor.agentRunId) }
             if (r.body != null) { value = r; c.saveMainlineState(json("body" to r.body), "home") }
             if (!r.retryable) break
             delay(1500)
@@ -187,7 +187,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         // A persisted in-flight answer owns its original displayed options until its receipt arrives.
         if (page.value["pending"] is JsonObject && body != null) return@LaunchedEffect
         do {
-            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number) }
+            val r = withContext(Dispatchers.IO) { http.mainlineWeek(number, c.tutor.agentRunId) }
             error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
             retryable = r.retryable
             if (r.body != null) { body = r.body; save("body" to r.body!!); break }
@@ -326,7 +326,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val r = withContext(Dispatchers.IO) {
                 SubmissionTrace.mark(traceId, "ui.ioStart")
                 http.answerMainline(number, wire.str("itemId"), wire.num("choice").toInt(), wire.flag("guessed"), wire.str("submissionId"),
-                    (wire["layout"] as? JsonPrimitive)?.intOrNull, wire.flag("dontKnow"), wire.flag("learning"), wire.flag("assisted")).also { SubmissionTrace.mark(traceId, "ui.answerReturned") }
+                    (wire["layout"] as? JsonPrimitive)?.intOrNull, wire.flag("dontKnow"), wire.flag("learning"), wire.flag("assisted"), c.tutor.agentRunId).also { SubmissionTrace.mark(traceId, "ui.answerReturned") }
             }
             SubmissionTrace.mark(traceId, "ui.mainResumed")
             val b = r.body

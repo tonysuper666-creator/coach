@@ -9,6 +9,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -98,6 +106,7 @@ internal fun LocalExamPane(controller: LocalExamController) {
     val attempt = checkNotNull(ui.attempt)
     val scope = rememberCoroutineScope()
     val source = ui.source
+    val focusManager = LocalFocusManager.current
     if (source != null) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(28.dp).testTag("local-frozen-source"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -159,7 +168,12 @@ internal fun LocalExamPane(controller: LocalExamController) {
             } else if (!submitted) {
                 OutlinedTextField(answer.str("text"), { controller.answer(key, json("text" to it)) },
                     label = { Text("写下你的回答") }, enabled = !ui.busy, readOnly = ui.conflict, minLines = 3,
-                    modifier = Modifier.fillMaxWidth().testTag("local-text-$key"))
+                    modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+                        if (event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
+                            focusManager.moveFocus(if (event.isShiftPressed) FocusDirection.Previous else FocusDirection.Next)
+                            true
+                        } else false
+                    }.testTag("local-text-$key"))
                 TextButton({ controller.answer(key, json("text" to "")) }, enabled = !ui.busy && !ui.conflict,
                     modifier = Modifier.testTag("local-clear-$key")) { Text("清空作答") }
             } else {

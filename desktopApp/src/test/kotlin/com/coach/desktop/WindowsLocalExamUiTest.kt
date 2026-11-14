@@ -6,11 +6,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.coach.desktop.books.*
 import com.coach.desktop.books.exam.*
 import com.coach.domain.*
@@ -23,6 +25,60 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class WindowsLocalExamUiTest {
+    @Test fun essayKeyboardTabPreservesDraftAndReachesSubmitInShortWindow() {
+        val root = Files.createTempDirectory("coach-essay-keyboard-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+        val lesson = book.lessons.first()
+        val source = json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to 1,
+            "quote" to lesson.blocks.first { !it.heading }.text)
+        val paper = LocalExamPaper(json("id" to "keyboard-paper", "bookId" to book.id, "title" to "Synthetic essay",
+            "kind" to "paper", "origin" to "AUTHORED", "key_state" to "UNREVIEWED",
+            "sections" to JsonArray(listOf(json("title" to "Synthetic", "items" to JsonArray(listOf(
+                json("id" to "essay", "type" to "essay", "stem" to "请说明学习过程。", "marks" to 3, "source" to source)
+            )))))))
+        val store = LocalExamStore(library)
+        store.register(paper)
+        val c = TextbookController(library)
+        val draft = "学习需要观察和练习。".repeat(45)
+        fun hash(s: String) = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        runSkikoComposeUiTest(size = Size(1044f, 528f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(c) { null } }
+            ready(c)
+            nav("课程").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-paper-start-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("local-paper-start-0").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { store.active(book.id) != null }
+            val id = store.active(book.id)!!.str("mockId")
+            onNodeWithTag("local-text-essay").performScrollTo().performClick().performTextReplacement(draft)
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == draft }
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-clear-essay").assertIsFocused()
+            onNodeWithTag("local-text-essay").assertTextContains(draft)
+            assertEquals(hash(draft), hash(store.get(book.id, id)["answers"]!!.jsonObject["essay"]!!.jsonObject.str("text")))
+            println("ESSAY_TAB_HASH=${hash(draft)} attempt=$id")
+            onNodeWithTag("local-clear-essay").performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }
+            onNodeWithTag("local-text-essay").assertIsFocused()
+            onNodeWithTag("local-text-essay").performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }
+            onNodeWithTag("local-exam-back").assertIsFocused()
+            onNodeWithTag("local-exam-back").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-text-essay").assertIsFocused()
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Enter) }
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text")?.contains('\n') == true }
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-clear-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-source-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-submit").assertIsFocused().assertIsDisplayed()
+            val submitBounds = onNodeWithTag("local-submit").getUnclippedBoundsInRoot()
+            assertTrue(submitBounds.top >= 0.dp && submitBounds.bottom <= 528.dp, "submit outside viewport: $submitBounds")
+            capture("essay-keyboard-submit-focused")
+            onNodeWithTag("local-submit").performKeyInput { pressKey(Key.Enter) }
+            onNodeWithTag("local-confirm-submit").assertIsDisplayed().performClick()
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id).str("status") == "submitted" }
+            assertEquals(1, store.get(book.id, id)["result"]!!.jsonObject.num("pending"))
+        }
+    }
     private fun ComposeUiTest.nav(label: String) =
         onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
 

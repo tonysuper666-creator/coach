@@ -26,7 +26,7 @@ class ReaderHttpSourceTest {
     class Seen(val method: String, val rawPath: String, val query: String?, val auth: String?, val device: String?, val contentType: String?, val body: String)
 
     /** 回环服务：把 reader 路径下的请求转给 fake（它实现了和服务端同形状的响应），并记录每个请求。 */
-    private class Loopback(val fake: FakeReaderService) {
+    internal class Loopback(val fake: FakeReaderService) {
         val seen = java.util.Collections.synchronizedList(mutableListOf<Seen>())
         var override: ((Seen) -> Triple<Int, ByteArray, String>?)? = null
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)

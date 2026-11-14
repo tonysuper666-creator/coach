@@ -568,8 +568,9 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
     Text(practice.prompt)
     TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
+        GuessMark(guessed = answer.guessed, enabled = true, onGuessed = { onAnswer(answer.copy(guessed = it)) })
         for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
-            draft = option; onAnswer(PracticeAnswer(option, revealed = true))
+            draft = option; onAnswer(answer.copy(text = option, revealed = true))
         }, enabled = !answer.revealed, modifier = Modifier.fillMaxWidth().testTag("choice-$index")) { Text(option) }
         if (answer.revealed) {
             Text("你选择：${answer.text}")

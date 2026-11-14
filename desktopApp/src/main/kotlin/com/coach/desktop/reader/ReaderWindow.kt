@@ -73,7 +73,7 @@ data class ReaderFixture(
 }
 
 /** 窗口会话：状态、题目选择与作答都在这里，窗口缩放或出处往返都不清空。 */
-class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null) {
+class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null, val readOnly: Boolean = false) {
     var state by mutableStateOf(ReaderState(DesktopReaderLayouts.forWidth(initialWidthDp), pageCount = fixture.pages.size))
         private set
     var selectedQuestion by mutableIntStateOf(0)
@@ -109,6 +109,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     }
 
     fun beginNote() {
+        if (readOnly) return
         if (remote == null || currentView() == null) { message = "这一页还没加载好，不能写批注"; return }
         if (pageLines().isEmpty()) { message = "这一页没有可选的文字"; return }
         noteDraft = null; noteLine = 0
@@ -172,7 +173,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         if (r.current == null) return
         val pdf = PdfPages.toPdf(state.position.page)
         r.show(pdf)
-        if (r.page is PageState.Ready) r.saveProgressAuto(pdf)
+        if (!readOnly && r.page is PageState.Ready) r.saveProgressAuto(pdf)
     }
 
     // ---- 409 之后的显式处理：都只在用户点击时发生，不自动重试 ----
@@ -490,7 +491,7 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                 if (remote.current != null) {
                     val pdf = PdfPages.toPdf(session.state.position.page)
                     remote.show(pdf)
-                    if (remote.page is PageState.Ready) remote.saveProgressAuto(pdf)
+                    if (!session.readOnly && remote.page is PageState.Ready) remote.saveProgressAuto(pdf)
                 }
             }
         }

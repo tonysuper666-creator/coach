@@ -103,7 +103,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
         backLabel = "← 路线", onBack = if (LocalAppManagedNavigation.current) null else ({ select(AppTab.ROUTE) }), directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
         margin = {
             Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
-            if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { start() })
+            if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { decision?.let { actions.read(it) } }, { start() })
             else Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
                 PaperCard { Text("第 $week 周 · ${KpStatus.PASSED.label} $passed / ${points.size}", style = MaterialTheme.typography.bodyMedium); WeekBrowseSummary(view, week, actions) }
                 target?.takeIf { it.reference.isNotBlank() }?.let { NoteCard("出处", it.reference) }
@@ -130,6 +130,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
             }
             PageHeader("第 $week 周", title, deck = "这一周 ${points.size} 节", week = week,
                 meta = d.weekStats.ifBlank { statusSummary(points) })
+            TextButton(onClick = { actions.onPractice(week) }, modifier = Modifier.testTag("week-practice")) { Text("整周刷题") }
             Spacer(Modifier.height(if (m.inner) 0.dp else 0.dp))
             PaperCard(contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {
                 points.forEachIndexed { index, kp ->
@@ -167,7 +168,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
             } }
             if (!m.inner) {
                 Spacer(Modifier.height(24.dp))
-                if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { target?.let { onOpen(it.id, false) } }, { start() })
+                if (d.mustKnow.isNotEmpty()) WeekNotes(d, targetLabel, { decision?.let { actions.read(it) } }, { start() })
                 else WeekBrowseSummary(view, week, actions)
             }
         }

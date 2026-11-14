@@ -17,6 +17,7 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
     var error by mutableStateOf<String?>(null); private set
     var onOpen: (String?) -> Unit = {}
     var onReview: (Int) -> Unit = {}
+    var onPractice: (Int) -> Unit = {}
     var onBrowse: (Int) -> Unit = {}
     internal var onStart: (LearningTarget) -> Unit = {}
     fun select(week: Int) { onBrowse(week) }

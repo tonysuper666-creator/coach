@@ -3,6 +3,10 @@ package com.coach.desktop.books
 import androidx.compose.ui.test.*
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.input.key.Key
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -46,7 +50,9 @@ class SourceRoundTripTest {
     @Test fun longLessonRestoresScrollFocusAndDraftAfterSource() {
         val (controller, library) = longLessonController()
         runComposeUiTest {
-            setContent { TextbookWorkspace(controller) { null } }
+            // The question-first layout hides the long source until requested. Keep a
+            // constrained viewport so this still tests a real, nonzero scroll position.
+            setContent { Box(Modifier.size(900.dp, 450.dp)) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
             onNodeWithTag("home-learn").performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }

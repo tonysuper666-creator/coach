@@ -7,6 +7,11 @@ import io.ktor.client.engine.HttpClientEngineConfig
 import io.ktor.client.engine.HttpClientEngineFactory
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import com.coach.protocol.ReaderTimeoutPolicy
+import com.coach.domain.MainlineEssayIdentity
+import com.coach.domain.MainlineEssayDocument
+import com.coach.domain.LedgerJson
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.timeout
@@ -38,7 +43,8 @@ data class SourceDoc(val docId: String, val title: String, val firstPdfPage: Int
 data class SourcePage(val docId: String, val pdfPage: Int, val bookPage: Int?, val text: String)
 
 /** 模拟考接口的一次回答：成功时 [body] 是服务端原样的 JSON；失败时 [error] 是服务端写的原因，连不上 Mac 时两者都是 null。 */
-class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false)
+class MockReply(val body: JsonObject?, val error: String?, val retryable: Boolean = false, val statusCode: Int? = null)
+class MainlineEssayReply(val document: MainlineEssayDocument?, val error: String?, val retryable: Boolean = false)
 /** 题库里一道可以限时练的论述题。[fromMockPaper] 的题出自整套模拟卷，先练了那套卷就不再是生题。 */
 data class EssayPrompt(val id: String, val week: Int, val marks: Double, val wordTarget: Int, val stem: String, val pack: String, val fromMockPaper: Boolean)
 /** [weeks] 是课程大纲里已有知识点的周，自己贴题时从这里选；[unmatched] 是因为那一周还没有知识点而暂时练不了的题数。 */
@@ -85,7 +91,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
             SubmissionTrace.mark(traceId, "http.bodyAsTextDone")
             Json.parseToJsonElement(text).jsonObject.also { SubmissionTrace.mark(traceId, "http.parsed") }
         }.getOrNull()
-        if (response.status.isSuccess()) MockReply(parsed, null, parsed == null) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）", response.status.value in setOf(408, 429) || response.status.value >= 500)
+        if (response.status.isSuccess()) MockReply(parsed, null, parsed == null, response.status.value) else MockReply(null, parsed?.s("error")?.ifBlank { null } ?: "服务端拒绝了这次请求（${response.status.value}）", response.status.value in setOf(408, 429) || response.status.value >= 500, response.status.value)
     } catch (error: kotlinx.coroutines.CancellationException) {
         throw error
     } catch (error: Exception) {
@@ -108,7 +114,7 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** 选择题主线：各周的题数与覆盖面板。 */
     suspend fun mainline(): MockReply = mockCall("mainline", null)
     /** 一周的题，按铺垫 → 细节 → 桥接排好；不含答案和讲解。 */
-    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1", null)
+    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1&learning=v1", null)
     suspend fun explainSelection(week: Int, input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/courses/${course.encodeURLPathPart()}/mainline/$week/explain") {
             // Includes server processing and its final JSON response; coordinate with COACH_READER_TOTAL_TIMEOUT_MS.
@@ -128,10 +134,27 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
      * 一道题答一次：返回对错、全部讲解、复习安排和新的覆盖数。同一个 [submissionId] 重发只算一次。
      * [choice] 是屏幕上的第几个选项，[layout] 原样带回这道题读下来时的 `layout`，Mac 据此认出是哪一种打乱顺序。
      */
-    suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String, layout: Int?): MockReply =
+    suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String, layout: Int?, dontKnow: Boolean = false, learning: Boolean = false, assisted: Boolean = false): MockReply =
         mockCall("mainline/$week/answer", buildJsonObject {
             put("itemId", itemId); put("choice", choice); put("guessed", guessed); put("submissionId", submissionId); layout?.let { put("layout", it) }
+            put("dontKnow", dontKnow); put("learning", learning)
+            put("assisted", assisted)
         }, submissionId)
+
+    /** Always fetched with this paired account; a cached answer never authorizes an asset read. */
+    suspend fun mainlineEssay(week: Int, identity: MainlineEssayIdentity): MainlineEssayReply {
+        if (!identity.valid) return MainlineEssayReply(null, "论述关联资料待核，暂不能查看示范全文与评分点。")
+        val response = mockCall("mainline/$week/essay", LedgerJson.encodeToJsonElement(identity).jsonObject)
+        val raw = response.body ?: return MainlineEssayReply(null, when (response.statusCode) {
+            401, 403 -> "当前设备无权读取这份示范，请重新确认课程访问权限。"
+            409 -> "示范资料身份或版本已改变，请返回题目后重试。"
+            404, 501, 503 -> "全文读取尚未接通，示范全文与评分点仍待核。"
+            else -> "暂时无法读取示范，阅读位置已保存。"
+        }, response.retryable)
+        val document = runCatching { LedgerJson.decodeFromJsonElement<MainlineEssayDocument>(raw) }.getOrNull()
+        return if (document?.matches(course, identity) == true) MainlineEssayReply(document, null)
+            else MainlineEssayReply(null, "示范资料与当前题目不一致，请返回题目后重试。")
+    }
 
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")

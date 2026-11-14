@@ -22,7 +22,7 @@ private data class Attempt(val posed: Event, var submitted: Event? = null, var g
     val ratio get() = grade?.let { it.num("score").toDouble() / it.num("max", 1).coerceAtLeast(1) } ?: 0.0
     /** A right answer the learner marked as a guess is not evidence that the point is known. */
     val guessed get() = submitted?.payload?.flag("guessed") == true
-    val pass get() = ratio >= 0.8 && !guessed
+    val pass get() = ratio >= 0.8 && !guessed && submitted?.payload?.flag("dontKnow") != true
 }
 
 /** Ordered ledger fold. Arrival order is irrelevant: seq is authoritative, including late reviews.
@@ -101,7 +101,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         (a.grade!!.str("status",a.grade!!.str("grader")) == "EXACT" || a.reviewed)
     fun eligible(a: Attempt, kp: String): Boolean = a.submitted != null && !a.voided && !a.hinted && kp in a.firstKps && a.fresh &&
         a.posed.payload.num("policyVersion", 1) == 1L && a.posed.payload.str("format") in knownFormats && a.posed.payload.str("origin") != "LEGACY" &&
-        keys[a.question] == "VERIFIED" && !a.pendingKey && graded(a)
+        keys[a.question] == "VERIFIED" && !a.pendingKey && !a.posed.payload.flag("tryFirst") && graded(a)
     fun solidContext(a: Attempt): Boolean {
         val purpose = a.posed.payload.str("purpose")
         val mc = a.posed.payload.str("format") == "SINGLE_CHOICE"
@@ -203,6 +203,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         }
     }
     fun refreshAttempt(a: Attempt, e: Event) {
+        if (a.posed.payload.flag("tryFirst")) return
         for (kp in a.kps) refresh(kp, e, a)
         revisitAfter(a, e)
         val correct = graded(a) && !a.voided && !a.pendingKey && a.pass
@@ -213,6 +214,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     }
     fun firstness(a: Attempt) {
         a.firstKps.clear()
+        if (a.posed.payload.flag("tryFirst")) { a.fresh = false; return }
         if(a.voided) { a.fresh=false;return }
         a.firstKps.addAll(a.kps.filter { "$it:${a.question}" !in firstQuestion })
         a.fresh=fingerprintTimes[a.posed.payload.str("fingerprint")].orEmpty().none { kotlin.math.abs(a.answerTime-it)<14L*86400000 }

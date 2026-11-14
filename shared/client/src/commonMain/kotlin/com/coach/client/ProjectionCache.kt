@@ -13,4 +13,10 @@ class ProjectionCache(private val db: ClientDatabase) {
         require(state.lastSeq==lastSeq)
         db.ledgerQueries.putProjection(course,PROJECTION_VERSION.toLong(),lastSeq,epoch,LedgerJson.encodeToString(state))
     }
+    /** Publish only if the read snapshot still describes the current replica. */
+    fun putIfCurrent(course: String, epoch: String, lastSeq: Long, snapshot: String?, state: Projection) {
+        require(state.lastSeq == lastSeq)
+        db.ledgerQueries.putProjectionIfCurrent(course, PROJECTION_VERSION.toLong(), lastSeq, epoch,
+            LedgerJson.encodeToString(state), snapshot)
+    }
 }

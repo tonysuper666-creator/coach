@@ -49,7 +49,7 @@ class ReviewLayoutTest {
         val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
         val c = CoachController("C", SyncEngine(db, "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
             tutor, formatClock = { "12:00" }, nowMillis = { now })
-        // Match the original Fold evidence, including the extra empty-mainline notice.
+        // A cached weekly overview must not resurrect an ordinary-learning entry in review.
         c.sync.saveMainlineState("C", json("body" to json("weeks" to JsonArray(emptyList()))), "home")
         if (offline) {
             db.ledgerQueries.putMeta("epoch", "synthetic-epoch")
@@ -93,8 +93,8 @@ class ReviewLayoutTest {
                         onAllNodesWithText("Mac 未连接，下载未完成；已有题仍可练习。").fetchSemanticsNodes().isNotEmpty()
                     }
                 }
-                onNodeWithText("选其他周").reveal().performClick()
-                assertEquals(listOf<Pair<Int?, Boolean>>(null to false), mainline)
+                onNodeWithTag("open-mainline").assertDoesNotExist()
+                assertTrue(mainline.isEmpty(), "Review must not open the ordinary weekly question route")
                 onNodeWithTag("open-mock").reveal().performClick()
                 assertEquals(1, mocks)
                 onNodeWithTag("essay-entry").reveal().performClick()

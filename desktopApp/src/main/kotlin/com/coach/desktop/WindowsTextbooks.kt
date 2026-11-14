@@ -18,11 +18,13 @@ import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.TextbookWorkspace
+import com.coach.desktop.books.rememberAnswerDrafts
 import com.coach.ui.AppTab
 import com.coach.ui.CoachTheme
 import com.coach.ui.DeskNavigation
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
@@ -60,9 +62,12 @@ internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
     application {
         val controller = remember { TextbookController(TextbookLibrary(directory)) }
-        Window(onCloseRequest = ::exitApplication, title = "Coach",
+        val drafts = rememberAnswerDrafts(controller)
+        val scope = rememberCoroutineScope()
+        val closeGuard = remember(drafts, scope) { TextbookCloseGuard(drafts, scope, ::exitApplication) }
+        Window(onCloseRequest = closeGuard::requestClose, title = "Coach",
             state = rememberWindowState(width = WINDOWS_WINDOW_WIDTH.dp, height = WINDOWS_WINDOW_HEIGHT.dp)) {
-            WindowsTextbookHost(controller, chooseBook = {
+            WindowsTextbookHost(controller, drafts, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)
                     try {
@@ -71,12 +76,47 @@ internal fun runWindowsTextbooks() {
                     } finally { dialog.dispose() }
                 }
             })
+            TextbookCloseWarning(closeGuard)
             LaunchedEffect(window) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
-                System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { delay(it * 1000); exitApplication() }
+                System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { delay(it * 1000); closeGuard.requestClose() }
             }
         }
     }
+}
+
+internal class TextbookCloseGuard(
+    private val drafts: AnswerDrafts,
+    private val scope: CoroutineScope,
+    private val close: () -> Unit,
+) {
+    var failed by mutableStateOf(false)
+        private set
+    private var closing = false
+
+    fun requestClose() {
+        if (closing) return
+        closing = true
+        failed = false
+        scope.launch {
+            try {
+                if (drafts.flush()) close() else failed = true
+            } finally { closing = false }
+        }
+    }
+
+    fun dismiss() { failed = false }
+}
+
+@Composable
+internal fun TextbookCloseWarning(guard: TextbookCloseGuard) {
+    if (guard.failed) AlertDialog(
+        onDismissRequest = guard::dismiss,
+        title = { Text("草稿还没有保存") },
+        text = { Text("窗口会保持打开，草稿仍在。请排除保存问题后重试。") },
+        confirmButton = { TextButton(guard::requestClose, Modifier.testTag("retry-close")) { Text("重试保存并关闭") } },
+        dismissButton = { TextButton(guard::dismiss) { Text("继续编辑") } },
+    )
 }
 
 /** Legacy tokens keep their storage identity; the three visible destinations are the same projection the app uses. */
@@ -94,13 +134,11 @@ private val AppTab.hostDestination: AppTab
  * library they stay an honest empty state instead of invented progress.
  */
 @Composable
-internal fun WindowsTextbookHost(controller: TextbookController, chooseBook: suspend () -> Path?) {
+internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
-    // Answer saves belong to the window, not to 书架: switching tabs must not cancel the last keystrokes.
-    val drafts = remember(controller) { AnswerDrafts(controller, scope) }
     val book = ui.book
     // The library is read once for the whole host, so 今天 and 课程 show existing books before 书架 is opened.
     LaunchedEffect(controller) {

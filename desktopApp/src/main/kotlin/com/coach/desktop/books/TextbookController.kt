@@ -133,8 +133,13 @@ internal class TextbookController(val library: TextbookLibrary) {
      * SQLite updates the open lesson first, so checking before the lock would let a keystroke typed in the
      * still-visible lesson land in the one the switch finally opens.
      */
-    suspend fun saveDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) = action(showBusy = false) {
-        writeAnswer(book, lesson, mode, answer)
+    suspend fun saveDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer): Boolean {
+        var saved = false
+        action(showBusy = false) {
+            writeAnswer(book, lesson, mode, answer)
+            saved = true
+        }
+        return saved
     }
 
     private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {

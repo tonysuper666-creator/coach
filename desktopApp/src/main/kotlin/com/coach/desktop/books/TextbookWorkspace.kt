@@ -25,8 +25,10 @@ import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Path
@@ -41,26 +43,40 @@ import java.nio.file.Path
  * it came from instead of the one that happens to be open when it finally runs.
  */
 internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
-    private data class Draft(val book: String, val lesson: String, val mode: QuestionMode, val answer: PracticeAnswer)
+    private data class Key(val book: String, val lesson: String, val mode: QuestionMode)
 
-    private var pending: Draft? = null
+    private val pending = mutableStateMapOf<Key, PracticeAnswer>()
     private var writer: Job? = null
 
     fun save(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
-        pending = Draft(book, lesson, mode, answer)
-        if (writer?.isActive != true) writer = scope.launch { drain() }
+        pending[Key(book, lesson, mode)] = answer
+        startWriter()
     }
 
-    /** Waits until every accepted keystroke has reached the library, so 继续学 cannot reopen a stale draft. */
-    suspend fun flush() { writer?.join() }
+    fun current(book: String, lesson: String, mode: QuestionMode, saved: PracticeAnswer): PracticeAnswer =
+        pending[Key(book, lesson, mode)] ?: saved
+
+    /** A failed write remains queued for an explicit retry, including when closing the window. */
+    suspend fun flush(): Boolean {
+        if (writer?.isActive != true && pending.isNotEmpty()) startWriter()
+        writer?.join()
+        return pending.isEmpty()
+    }
+
+    private fun startWriter() {
+        if (writer?.isActive != true) {
+            // Start before the owning composition can disappear; finish accepted writes even if it does.
+            writer = scope.launch(start = CoroutineStart.UNDISPATCHED) { withContext(NonCancellable) { drain() } }
+        }
+    }
 
     private suspend fun drain() {
         while (true) {
-            val draft = pending ?: break
-            pending = null
+            val (key, answer) = pending.entries.firstOrNull()?.toPair() ?: break
             // The controller checks the identity and writes under the same lock, so a lesson switch that is
             // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
-            controller.saveDraft(draft.book, draft.lesson, draft.mode, draft.answer)
+            if (!controller.saveDraft(key.book, key.lesson, key.mode, answer)) return
+            if (pending[key] == answer) pending.remove(key)
         }
     }
 }
@@ -92,7 +108,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         onPage = { run { controller.page(it) } }, onBack = { run { controller.back() } },
                         onLearn = { run { drafts.flush(); controller.learn() } })
-                    else -> TextbookLearning(ui, onBack = { run { controller.back() } },
+                    else -> {
+                        val lesson = book.lessons.getOrNull(book.lessonIndex)
+                        val displayed = if (lesson == null) ui else ui.copy(
+                            answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
+                        TextbookLearning(displayed, onBack = { run { controller.back() } },
                         onSource = { run { controller.source() } },
                         // Moving on waits for the pending write: the answer must reach its own lesson before the
                         // open lesson changes, otherwise the batch would be attributed to the new one.
@@ -104,6 +124,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             }
                         })
+                    }
                 }
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,

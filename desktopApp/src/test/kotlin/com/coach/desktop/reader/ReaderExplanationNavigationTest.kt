@@ -48,6 +48,8 @@ class ReaderExplanationNavigationTest {
                 val view = (reader.remote!!.page as PageState.Ready).view
                 assertEquals(1, view.pdfPage); assertEquals("synthetic-book", view.document)
                 assertTrue(view.text.contains(h.blockText)); assertNotNull(view.image, "actual PDF rendering")
+                r.until("visible block highlight") { r.node("remote-highlight") != null }
+                assertEquals("已在页上标出原句", reader.uiHighlight)
                 assertEquals(h.blockText, reader.state.flashAnchor)
                 assertTrue(reader.readOnly)
                 r.click("reader-back")

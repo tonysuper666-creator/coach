@@ -79,6 +79,7 @@ object CitationWindowSmoke {
                             until("PDF content drawn") { session.clickToDrawMs != null && node("reader-back") != null }
                             val view = (session.opened!!.remote!!.page as PageState.Ready).view
                             check(view.pdfPage == 1 && view.document == "synthetic-book" && view.image != null)
+                            until("visible block highlight") { node("remote-highlight") != null }
                             check(session.opened!!.state.flashAnchor == fixture.blockText)
                             screenshot("page")
                             click("reader-back")

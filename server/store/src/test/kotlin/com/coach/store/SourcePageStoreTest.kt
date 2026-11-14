@@ -26,9 +26,9 @@ class SourcePageStoreTest {
                 } }
                 repeat(2) { // Repair and reopening must both retain working imports and version ownership.
                     LedgerStore(dir).use { store ->
-                        assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard").map { it.docId })
-                        assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择").map { it.docId })
-                        assertEquals(emptyList(),store.searchSourcePages("c","adverse selection"))
+                        assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
+                        assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
+                        assertEquals(emptyList(),store.searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal()))
                         DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
                             s.executeQuery("PRAGMA user_version").use { r -> assertTrue(r.next()); assertEquals(7,r.getInt(1)) }
                             s.executeQuery("SELECT count(*) FROM pool_details").use { r -> assertTrue(r.next()); assertEquals(0,r.getInt(1)) }
@@ -38,12 +38,12 @@ class SourcePageStoreTest {
                 LedgerStore(dir).use { store ->
                     DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
                         s.execute("INSERT INTO source_pages(doc_id,pdf_page,text) VALUES('book',2,'Grossman health capital')")
-                        assertEquals(listOf(2),store.searchSourcePages("c","Grossman").map { it.pdfPage })
+                        assertEquals(listOf(2),store.searchSourcePages("c","Grossman",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.pdfPage })
                         s.execute("UPDATE source_pages SET text='Insurance risk pooling' WHERE doc_id='book' AND pdf_page=2")
-                        assertEquals(emptyList(),store.searchSourcePages("c","Grossman"))
-                        assertEquals(listOf(2),store.searchSourcePages("c","risk pooling").map { it.pdfPage })
+                        assertEquals(emptyList(),store.searchSourcePages("c","Grossman",com.coach.domain.scope.VisibleScope.tutorInternal()))
+                        assertEquals(listOf(2),store.searchSourcePages("c","risk pooling",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.pdfPage })
                         s.execute("DELETE FROM source_pages WHERE doc_id='book' AND pdf_page=2")
-                        assertEquals(emptyList(),store.searchSourcePages("c","risk pooling"))
+                        assertEquals(emptyList(),store.searchSourcePages("c","risk pooling",com.coach.domain.scope.VisibleScope.tutorInternal()))
                     } }
                 }
             } finally { dir.toFile().deleteRecursively() }
@@ -62,7 +62,7 @@ class SourcePageStoreTest {
                 s.execute("PRAGMA user_version=6")
             } }
             LedgerStore(dir).use { store ->
-                val pages = store.searchSourcePages("c","deductible").associateBy { it.docId }
+                val pages = store.searchSourcePages("c","deductible",com.coach.domain.scope.VisibleScope.tutorInternal()).associateBy { it.docId }
                 assertTrue(pages.getValue("book").learnerVisible)
                 assertFalse(pages.getValue("appendix").learnerVisible)
                 assertNotNull(store.browsablePage("c","book",1))

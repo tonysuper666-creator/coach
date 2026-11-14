@@ -15,6 +15,8 @@ import java.nio.file.Path
 import kotlin.math.roundToLong
 
 internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String, val anchor: String = "")
+/** Evidence and the reading ceiling must come from the same validated server identity. */
+internal data class MainlineSelection(val quote: String, val currentKps: Set<String>)
 internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String, val anchor: String = "", val learning: JsonObject? = null) {
     val verified get() = unit.keyState == "VERIFIED"
     val options get() = unit.options.mapIndexed { i, t -> Option("o$i", t) }
@@ -253,13 +255,13 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     private fun find(names: Set<String>, week: Int) = weeks(names).first.firstOrNull { it.week == week } ?: throw MockError(HttpStatusCode.NotFound, "找不到第 $week 周的选择题")
 
     /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
-    internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
+    internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): MainlineSelection {
         syntheticFor(course, number)?.let { runtime ->
             val q = runtime.questions.singleOrNull { it.ref == input.str("itemId") && runtime.ladder(it).eligible }
                 ?: throw MockError(HttpStatusCode.Conflict, "题目身份已改变，请返回后重试。")
             val question = input.str("question").trim()
             if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
-            return "当前题：${q.stem}\n学习提问：$question"
+            return MainlineSelection("当前题：${q.stem}\n学习提问：$question", setOf(q.kp).filter(String::isNotBlank).toSet())
         }
         val week = find(courseNames(store.events(course), course), number)
         if (input.str("itemId").isNotBlank()) {
@@ -269,7 +271,9 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             val question = input.str("question").trim()
             if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
             // The server supplies the current frozen stem, never a caller's substituted quote or key.
-            return "当前题：${item.unit.stem}\n学习提问：$question"
+            // Ignore sectionId and caller-supplied point IDs on the question path. Eligibility
+            // has checked this pack point against the approved learning contract.
+            return MainlineSelection("当前题：${item.unit.stem}\n学习提问：$question", setOf(item.unit.kp).filter(String::isNotBlank).toSet())
         }
         val section = week.notes.firstOrNull { it.str("section_id") == input.str("sectionId") }
             ?: throw MockError(HttpStatusCode.Conflict, "要点已更新，请重新读取后再选中。")
@@ -278,7 +282,9 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         if (input.str("version") != section.str("content_version") || start < 0 || end <= start ||
             end > text.length || end - start > 2000 || text.substring(start.toInt(), end.toInt()) != input.str("quote"))
             throw MockError(HttpStatusCode.Conflict, "选中文本与当前要点不一致，请重新读取后再选中。")
-        return input.str("quote")
+        val factIds = section.strings("fact_ids").toSet()
+        val currentKps = week.facts.filter { it.id in factIds }.map { it.kp }.filter(String::isNotBlank).toSet()
+        return MainlineSelection(input.str("quote"), currentKps)
     }
 
     fun home(store: LedgerStore, course: String, run: String? = null): JsonObject {
@@ -497,11 +503,14 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
-                val (quote, pages) = actor.execute {
-                    val quote = mainline.selection(this, course, call.week(), input)
-                    quote to searchSourcePages(course, quote).filter { it.learnerVisible }
+                val (quote, found) = actor.execute {
+                    val selected = mainline.selection(this, course, call.week(), input)
+                    // Trusted ceiling: learner-visible documents, only up to the validated selection's knowledge points in outline order (fail-closed).
+                    val scope = learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), selected.currentKps)
+                    selected.quote to (scope to searchSourcePages(course, selected.quote, scope))
                 }
-                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages)
+                val (scope, pages) = found
+                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages, scope)
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

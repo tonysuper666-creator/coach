@@ -6,6 +6,7 @@ plugins {
 }
 dependencies {
     api(project(":shared:protocol"))
+    api(project(":shared:domain"))
     testImplementation(kotlin("test"))
     implementation(libs.sqlite.jdbc)
     implementation(libs.sqldelight.driver) { exclude(group = "org.xerial", module = "sqlite-jdbc") }

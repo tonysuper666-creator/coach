@@ -22,7 +22,7 @@ import com.sun.net.httpserver.HttpServer
 
 /** Synthetic-only real product HTTP fixture. Pack/outline adapted from MainlineQuestionCitationsTest.
  * The bridge emits deterministic SSE; no model process or production configuration is consulted. */
-internal class SyntheticCitationServer : AutoCloseable {
+internal class SyntheticCitationServer(bindHost: String = "127.0.0.1") : AutoCloseable {
     val dir = Files.createTempDirectory("synthetic-citation-window-")
     val jobs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
@@ -113,7 +113,7 @@ internal class SyntheticCitationServer : AutoCloseable {
     // fixture, so the production configuration/API need not be widened for a synthetic library.
     val library = ReaderLibrary::class.java.getDeclaredConstructor(Path::class.java, String::class.java)
         .newInstance(dir.resolve("library"), System.getProperty("coach.pdf.bin") ?: "")
-    val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
+    val engine = embeddedServer(Netty, host = bindHost, port = 0) {
         val pushes = MutableSharedFlow<String>(extraBufferCapacity = 16)
         ledgerRoutes(actor, pushes)
         mainlineRoutes(actor, pushes, mainline, ReaderExplanation(actor, BridgeClient(BridgeConfig("http://127.0.0.1:${bridge.address.port}")), citationLayout = ::layout))

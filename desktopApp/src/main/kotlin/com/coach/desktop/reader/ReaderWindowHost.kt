@@ -9,7 +9,6 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.VerifyHooks
-import com.coach.client.CourseHttp
 import kotlinx.coroutines.delay
 import org.jetbrains.skiko.SkiaLayer
 import java.awt.Component
@@ -37,15 +36,7 @@ fun main() {
         val item = System.getProperty("coach.reader.item") ?: System.getenv("COACH_READER_ITEM")
         val explanation = remember(item) { runCatching {
             if (item == null) null else {
-                val week = (System.getProperty("coach.reader.week") ?: System.getenv("COACH_READER_WEEK"))?.toIntOrNull()
-                    ?: error("请明确指定题目周次")
-                val url = System.getenv("COACH_URL") ?: System.getProperty("coach.url") ?: error("请配置讲解服务地址")
-                val course = System.getenv("COACH_COURSE") ?: System.getProperty("coach.course") ?: error("请明确指定课程")
-                val token = System.getenv("COACH_TOKEN") ?: System.getenv("COACH_TOKEN_FILE")?.let { java.nio.file.Files.readString(Path.of(it)).trim() }
-                    ?: error("请配置隔离账号凭据")
-                require(token.isNotBlank()) { "账号凭据为空" }
-                val http = CourseHttp(url, System.getenv("COACH_DEVICE_ID") ?: "desktop", token, course)
-                http to DesktopExplanationSession(ExplanationOwner(course, week, item), CourseExplanationTransport(http), ReaderHttpSource(http.reader))
+                explanationConnection(item)
             }
         } }
         DisposableEffect(explanation) { onDispose { explanation.getOrNull()?.first?.close() } }

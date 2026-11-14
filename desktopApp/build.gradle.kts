@@ -164,7 +164,28 @@ tasks.register<JavaExec>("citationWindowSmoke") {
     dependsOn(tasks.testClasses)
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("com.coach.desktop.reader.CitationWindowSmoke")
-    for (key in listOf("coach.citation.auto", "coach.pdf.bin")) {
+    for (key in listOf("coach.citation.auto", "coach.citation.samples")) {
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+}
+
+// Only synthetic connection values are loaded by this replay; never read the user's pairing config.
+tasks.named<JavaExec>("citationWindowSmoke") {
+    providers.gradleProperty("coach.citation.environment").orNull?.let { name ->
+        val connection = Properties().apply { file(name).inputStream().use { load(it) } }
+        val allowed = setOf("COACH_URL", "COACH_COURSE", "COACH_DEVICE_ID", "COACH_TOKEN_FILE", "COACH_READER_ITEM", "COACH_READER_WEEK")
+        require(connection.stringPropertyNames().all { it in allowed })
+        require(connection.getProperty("COACH_COURSE") == "SYNTHETIC")
+        connection.forEach { key, value -> environment(key.toString(), value.toString()) }
+    }
+}
+tasks.register<JavaExec>("citationFixtureServer") {
+    group = "verification"
+    description = "Host the disposable synthetic HTTP/PDF fixture on Mac for a remote native client"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.reader.CitationFixtureHost")
+    for (key in listOf("coach.citation.control", "coach.citation.bind", "coach.pdf.bin")) {
         providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
     }
 }

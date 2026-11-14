@@ -64,15 +64,26 @@ tools/dev/heavy --local ./gradlew :desktopApp:test \
   --tests 'com.coach.desktop.reader.ReaderRemoteTest' \
   --tests 'com.coach.desktop.reader.ReaderWindowTest'
 
-# Native, interactive window; close it to dispose its server and temporary files.
-tools/dev/heavy --local ./gradlew :desktopApp:citationWindowSmoke
+# Mac only: own disposable source sandbox + synthetic SSE bridge. Leave foreground
+# running during the native client replay, then create CONTROL/stop to close it.
+tools/dev/heavy --local ./gradlew :desktopApp:citationFixtureServer \
+  -Pcoach.citation.bind=0.0.0.0 -Pcoach.citation.control=FRESH_PRIVATE_CONTROL_DIR
 
-# Owned interactive desktop with an English input method: AWT mouse/keyboard replay.
-# The harness does not change the host input method; Chinese IME composition is
-# not an ASCII typing replay. A timeout fails the task and captures its own window.
-# On Windows, point coach.pdf.bin at the existing Poppler bin if it is not in PATH.
+# Read ready.properties for its ephemeral port. On the isolated Windows runner,
+# use a private client.properties file with the existing host environment keys:
+# COACH_URL=http://MAC_REACHABLE_ADDRESS:EPHEMERAL_PORT
+# COACH_COURSE=SYNTHETIC
+# COACH_DEVICE_ID=phone
+# COACH_TOKEN_FILE=PRIVATE_SYNTHETIC_TOKEN_FILE
+# COACH_READER_ITEM=fruit1
+# COACH_READER_WEEK=1
+# Token file contains only the fixture credential synthetic-private-token-32-characters.
+# No production pairing/configuration is read. The replay rejects other courses.
+# Run through the current isolated interactive Windows runner (console 1), whose
+# task/arguments are the following; do not run a Mac-only sandbox inside Windows:
 ./gradlew :desktopApp:citationWindowSmoke -Pcoach.citation.auto=true \
-  -Pcoach.autoExitSeconds=90
+  -Pcoach.citation.samples=20 -Pcoach.autoExitSeconds=180 \
+  -Pcoach.citation.environment=PRIVATE_CLIENT_PROPERTIES_FILE
 ```
 
 The native replay selects an option, types an unsubmitted draft, requests the
@@ -88,26 +99,54 @@ desktop reader host had no explanation-source consumer; server JSON alone did
 not exercise this path.
 
 `clickToDrawMs` measures the source handler's monotonic timestamp through the
-first draw of the ready reader subtree, including HTTP/PDF work. It is one
-sample, not proof that all real clicks meet 300 ms, and does not measure monitor
-scanout. Offscreen Compose results do not count as native Windows clicks.
+first draw of the ready reader subtree, including HTTP/PDF work. The replay records every sample and the nearest-rank p95, including the first
+cold click. This does not measure monitor scanout or establish performance for
+real textbooks, networks or other Windows machines. Offscreen Compose results do not count as native Windows clicks.
 The 50 textbook cases, Windows acceptance, performance threshold and final
 independent integration/Architect review remain separate gates.
 
-## Candidate validation and remaining native gap
+## Split-fixture regression
 
-The Mac run passed the five new HTTP/navigation tests. The existing reader
-regression selection passed 46 tests before the additional changed-PDF HTTP
-regression was added; that additional test then passed in the five-test run.
-These results are not native Windows acceptance.
+The native harness requires explicit remote configuration and uses the same
+`explanationConnection` function as `ReaderWindowHost`. It never starts a server
+in the Windows process. The service's existing Mac source sandbox is unchanged.
+The Mac fixture binds externally only when explicitly requested; its deterministic
+bridge stays on loopback. `ready.properties` and a stop file live outside Git;
+close the fixture after the replay and collect its bridge request count.
 
-The Windows synthetic native entry started successfully. Two author mouse/key
-replays stopped before requesting the explanation because the active Chinese
-IME composed the scripted ASCII draft. The second replay records choice 1,
-draft length 21 rather than the expected 25, and exits 1. No source-click,
-return, or native drawing-time result was obtained. The first harness revision
-incorrectly inherited Compose's process-exit success despite its printed failure;
-this candidate disables that implicit exit and fails on exceptions or timeout.
-The harness leaves input-method configuration alone. Independently repeat with
-English input in its owned window, or use the same entry manually, before
-counting Windows click/return or the 300 ms gate as verified.
+The Robot replay handles Shift-English only in its own synthetic draft field,
+with one bounded retry if English was already selected. It leaves the product
+IME implementation unchanged. It captures the synthetic client area and records
+source-to-ready-content draw times for repeated real mouse clicks, checking the
+owner, option and unsubmitted draft after every return. Errors and incomplete
+replays exit nonzero.
+
+The shared host connection regression exercises explicit URL/device/token-file
+configuration against real product HTTP routes, without starting any server in
+the client connection factory. Mac targeted validation: 48 tests, zero failures,
+errors or skips. Native Windows evidence is recorded separately in the delivery
+receipt; Mac/offscreen tests alone are not Windows acceptance.
+
+## Author native replay receipt (2026-11-14)
+
+Mac hosted the synthetic product HTTP service and deterministic bridge; the
+Windows client connected over the private test network. The current isolated
+runner used interactive session 1, slot 0, with source snapshot
+`62d4919ebbaa869ac5c97c6e8c5bab0fed8afd0e`. Its job
+`heavy-3e9bd266039846908111ac54baf4562d` exited 0. The desktop sources in that
+snapshot match this candidate; this receipt was added afterwards.
+
+All 20 real mouse source clicks opened physical page 1 with the expected block
+highlight. Every return retained the same owner, selected option and exact
+25-character unsubmitted draft. Samples in milliseconds:
+`222,166,89,94,86,86,85,86,85,85,84,84,85,87,210,104,198,177,86,162`.
+Nearest-rank p95 was 210 ms; maximum was 222 ms, including the first cold click.
+The receipt and three synthetic client-area screenshots accompany the issue
+delivery. The Mac fixture then closed successfully (exit 0); its two bridge
+requests comprise one earlier harness attempt and the completed replay. The
+earlier attempt exposed a harness wait/cast race, fixed by waiting for ready
+content and the highlight before inspecting the page.
+
+This is author evidence for this synthetic block-source path, pending independent
+acceptance. Native whole-page fallback timing, textbook accuracy, other network
+conditions and final integration/Architect gates are not established by it.

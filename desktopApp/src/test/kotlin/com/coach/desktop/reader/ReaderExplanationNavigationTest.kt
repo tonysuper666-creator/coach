@@ -29,6 +29,25 @@ class ReaderExplanationNavigationTest {
         override fun close() = scene.close()
     }
 
+    @Test fun hostConnectionUsesExplicitRemoteIdentityForRealHttp(): Unit = runBlocking {
+        SyntheticCitationServer().use { h ->
+            val tokenFile = h.dir.resolve("synthetic-client-token")
+            java.nio.file.Files.writeString(tokenFile, "synthetic-private-token-32-characters")
+            val env = mapOf("COACH_URL" to h.base, "COACH_COURSE" to "SYNTHETIC", "COACH_DEVICE_ID" to "phone",
+                "COACH_TOKEN_FILE" to tokenFile.toString(), "COACH_READER_WEEK" to "1")
+            val (client, session) = explanationConnection("fruit1", env::get, { null })
+            try {
+                session.load(); session.choose(1); session.edit("Remote synthetic draft"); session.explain()
+                assertNull(session.error); assertEquals(1, h.bridgeRequests.get())
+                session.open(session.citations.single())
+                assertNull(session.error); assertEquals(1, (session.opened!!.remote!!.page as PageState.Ready).view.pdfPage)
+                session.back(); assertEquals(ExplanationOwner("SYNTHETIC", 1, "fruit1"), session.owner)
+                assertEquals(1, session.choice); assertEquals("Remote synthetic draft", session.draft)
+            } finally { client.close() }
+            assertFails { explanationConnection("fruit1", { null }, { null }) }
+        }
+    }
+
     @Test fun actualHttpCitationOpensExistingReaderAndReturnsSameOwnerDraft() {
         SyntheticCitationServer().use { h ->
             val s = h.session()

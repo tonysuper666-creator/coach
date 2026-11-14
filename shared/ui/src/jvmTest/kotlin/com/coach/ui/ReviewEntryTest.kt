@@ -70,6 +70,7 @@ class ReviewEntryTest {
                 onNodeWithText("到期复习").performClick()
                 onNodeWithText("1 节到期").performScrollTo().assertIsDisplayed()
                 if (integrated) {
+                    onNodeWithTag("open-mainline").assertDoesNotExist()
                     onNodeWithText("每日提醒 08:00").assertDoesNotExist()
                     onNodeWithTag("open-settings").performClick()
                     onNodeWithText("每日提醒 08:00").assertIsDisplayed()

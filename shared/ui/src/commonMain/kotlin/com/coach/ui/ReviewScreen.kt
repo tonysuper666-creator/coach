@@ -36,7 +36,6 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
             Text(examReviewNotice(view, now), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
             OfflinePractice(c)
-            if (onOpenMainline != null) MainlineEntry(c, view, onOpenMainline)
             if (onOpenMock != null) Surface(onClick = onOpenMock, tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 56.dp).testTag("open-mock")) {
                 Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -70,52 +69,6 @@ fun ReviewScreen(c: CoachController, view: CourseView, onOpenKp: (kpId: String, 
                     }
                 }
             }
-        }
-    }
-}
-
-/** Existing Review entry: one click to the current week's question, a separate reading route. */
-@Composable
-private fun MainlineEntry(c: CoachController, view: CourseView, onOpen: (Int?, Boolean) -> Unit) {
-    var overview by remember { mutableStateOf(c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject) }
-    var error by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(c) {
-        val http = c.course ?: return@LaunchedEffect
-        do {
-            // The course endpoint is a blocking call: keep it off the composition dispatcher, or the frame that
-            // has to show the answer waits for the socket and the entry stays on 正在连接… while it does.
-            val reply = withContext(Dispatchers.IO) { http.mainline() }
-            error = reply.error
-            val body = reply.body
-            if (body != null) {
-                overview = body
-                c.sync.saveMainlineState(c.courseId, json("body" to body), "home")
-                break
-            }
-            if (!reply.retryable) break
-            delay(1500)
-        } while (true)
-    }
-    val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().map { it.jsonObject }
-    val number = c.mainlineContinuationWeek(view, overview)
-    Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp).testTag("open-mainline")) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-            Text("选择题主线", style = MaterialTheme.typography.bodyLarge)
-            Text("按周从基础题做起，答完立刻看讲解", style = MaterialTheme.typography.labelMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Swap the placeholder for the real entry instead of renaming one button in place: the label of the
-                // week is then carried by a button that already exists, so the screen reader hears the current week.
-                if (number != null) {
-                    Button(onClick = { onOpen(number, true) }, modifier = Modifier.testTag("mainline-continue")) { Text("继续第 $number 周") }
-                    TextButton(onClick = { onOpen(number, false) }) { Text("看本周要点") }
-                } else {
-                    Text("正在连接…", Modifier.padding(vertical = 14.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                TextButton(onClick = { onOpen(null, false) }) { Text("选其他周") }
-            }
-            if (number == null && error != null) Text("Mac 暂时不可用，正在自动重连…", color = MaterialTheme.colorScheme.error)
-            else if (overview != null && weeks.isEmpty()) Text("还没有生成选择题主线。")
         }
     }
 }

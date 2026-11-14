@@ -6,11 +6,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
@@ -23,6 +27,7 @@ import kotlinx.serialization.json.*
 import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import javax.imageio.ImageIO
 import kotlin.test.*
 
@@ -31,22 +36,49 @@ import kotlin.test.*
 class MainlineScreenTest {
     private val now = 1_794_052_800_000L
     private val today = logicalDay(now, "Europe/London")
+    private val longCorrect = "Synthetic pears grow in the orchard; this explanation remains available in full. ".repeat(40)
 
-    private class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
-                          source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false) : AutoCloseable {
+    internal class FakeMac(today: Long, private val loseFirstReply: Boolean = false, private val includeNotes: Boolean = false, private var initialFailures: Int = 0, private val anchor: String = "", private val setupEmphasis: Boolean = false,
+                          source: String = "Synthetic lecture 1, slide 4", private val strictResolve: Boolean = false,
+                          correct: String = "Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
+                          private val explain: ((JsonObject) -> JsonObject)? = null, private val primers: Boolean = false,
+                          private val splitKps: Boolean = false) : AutoCloseable {
         @Volatile var offline = false
         val answers = CopyOnWriteArrayList<JsonObject>()
+        val explains = CopyOnWriteArrayList<JsonObject>()
+        val cancellations = CopyOnWriteArrayList<String>()
+        private val workers = if (explain != null) Executors.newCachedThreadPool() else null
         /** Every reader request the cited-source component makes through the real CourseHttp. */
         val readerRequests = CopyOnWriteArrayList<String>()
         private val recorded = mutableMapOf<String, JsonObject>()
         private fun cov(mastered: Int, answered: Int) = """{"facts":3,"factsWithQuestions":3,"factsMastered":$mastered,"questions":3,"answered":$answered,"mastered":$mastered,"keysPending":0}"""
-        private val explanation = """{"correct":"Synthetic pears are the only fruit grown in the synthetic orchard, so this statement matches the lecture example.",
+        private val explanation = """{"correct":${JsonPrimitive(correct)},
             "options":{"0":"Synthetic apples were sold out before the season started, so they cannot be the answer.",
                        "2":"Synthetic plums ripen after the period described in the question.",
                        "3":"Synthetic figs are imported, not grown in the orchard."},
             "background":"The synthetic orchard story sets up the supply example used later in the week.","source":"$source"}"""
-        private val items = listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
+        private val items = (if (primers) listOf("P1" to "setup", "P2" to "setup") else emptyList()) +
+            listOf("S1" to "setup", "D1" to "detail", "B1" to "bridge")
+        private fun weeklyBody(): JsonObject {
+            val questions = items.map { (id, tier) ->
+                val metadata = LadderQuestion(id, if (splitKps && id == "D1") "OTHER" else "K", if (id == "B1") "W01-bridge" else "W01-basics",
+                    if (id.startsWith("P")) "try_first" else when (tier) { "setup" -> "introduction"; "bridge" -> "application"; else -> "concept" },
+                    if (id == "S1") 2 else 0, "synthetic-orchard", "synthetic-$id", eligible = true)
+                json("id" to id, "tier" to tier, "stem" to "Synthetic orchard question $id: which statement about the orchard holds?",
+                    "options" to listOf("Apples are grown there", "Pears are grown there", "Plums ripen early", "Figs are grown there"),
+                    "status" to "new", "keyState" to "VERIFIED", "factIds" to listOf("F-$id"), "ladder" to LedgerJson.encodeToJsonElement(metadata))
+            }
+            val body = json("week" to 1, "learning" to true, "title" to "Synthetic orchard", "coverage" to LedgerJson.parseToJsonElement(cov(0, 0)), "items" to JsonArray(questions))
+            if (!includeNotes) return body
+            return JsonObject(body + mapOf(
+                "notes" to JsonArray(listOf(
+                    json("section_id" to "W01-basics", "title" to "Synthetic basics", "body" to "Synthetic apples are sold out. ", "fact_ids" to listOf("F-S1", "F-D1"), "sources" to listOf("Synthetic lecture 1")),
+                    json("section_id" to "W01-bridge", "title" to "Synthetic bridge notes", "body" to "Synthetic pears connect the orchard to the next topic.", "fact_ids" to listOf("F-B1"), "sources" to listOf("Synthetic lecture 1")))),
+                "emphasis" to JsonArray(listOf(json("fact_id" to if (setupEmphasis) "F-S1" else "F-B1", "week" to 1,
+                    "recording_id" to "T1", "recording_kind" to "tutorial", "timestamp" to "02:01:03", "summary" to "Synthetic pears were emphasized.")))))
+        }
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            workers?.let { executor = it }
             fun reply(ex: com.sun.net.httpserver.HttpExchange, body: String, status: Int = 200) {
                 val bytes = body.toByteArray(); ex.sendResponseHeaders(status, bytes.size.toLong()); ex.responseBody.use { it.write(bytes) }
             }
@@ -57,6 +89,16 @@ class MainlineScreenTest {
                 }
                 val path = ex.requestURI.path
                 when {
+                    path.endsWith("/explain/cancel") -> {
+                        val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                        cancellations += wire.str("requestId")
+                        reply(ex, "{}")
+                    }
+                    path.endsWith("/explain") -> {
+                        val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
+                        explains += wire
+                        reply(ex, (explain?.invoke(wire) ?: json("text" to "Synthetic source unavailable", "sources" to emptyList<String>())).toString())
+                    }
                     path.endsWith("/answer") -> {
                         val wire = Json.parseToJsonElement(ex.requestBody.bufferedReader().readText()).jsonObject
                         answers += wire
@@ -67,19 +109,20 @@ class MainlineScreenTest {
                         }
                         val id = a["itemId"]!!.jsonPrimitive.content
                         val guessed = a["guessed"]!!.jsonPrimitive.boolean
-                        val right = a["choice"]!!.jsonPrimitive.int == 1
+                        val right = a["choice"]!!.jsonPrimitive.int == 1 && !a.flag("dontKnow")
                         val status = if (!right) "missed" else if (guessed) "guessed" else "mastered"
                         val i = items.indexOfFirst { it.first == id }
                         val next = items.getOrNull(i + 1)?.first?.let { "\"$it\"" } ?: "null"
                         val queued = status != "mastered"
+                        val firstTry = id.startsWith("P")
+                        val refs = if (primers && id == "S1") "[{\"question_id\":\"P2\"}]" else "[]"
                         reply(ex, """{"itemId":"$id","answer":1,"choice":${a["choice"]},"guessed":$guessed,"keyState":"VERIFIED","status":"$status","tier":"${items[i].second}",
+                            "independentCorrect":${right && !guessed && !firstTry},"tryFirst":$firstTry,"tryFirstRefs":$refs,"remember":"Synthetic memory for $id.","dontKnow":${a.flag("dontKnow")},
                             "explanation":$explanation,"source":"Synthetic lecture 1","anchor":"$anchor","kpId":"K","dueDay":${if (queued) today + 1 else "null"},
                             "mistakeWeek":${if (queued) 1 else "null"},"next":$next,"coverage":${cov(if (status == "mastered") 1 else 0, i + 1)}}""")
                     }
                     path.endsWith("/mainline/1") && initialFailures-- > 0 -> reply(ex, """{"error":"Synthetic Mac temporarily unavailable"}""", 503)
-                    path.endsWith("/mainline/1") -> reply(ex, """{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)},"items":[""" +
-                        items.joinToString(",") { (id, tier) -> """{"id":"$id","tier":"$tier","stem":"Synthetic orchard question $id: which statement about the orchard holds?",
-                            "options":["Apples are grown there","Pears are grown there","Plums ripen early","Figs are grown there"],"status":"new","keyState":"VERIFIED","factIds":["F-$id"]}""" } + "]" + (if (includeNotes) ""","notes":[{"section_id":"W01-basics","title":"Synthetic basics","body":"Synthetic apples are sold out. " ,"fact_ids":["F-S1","F-D1"],"sources":["Synthetic lecture 1"]},{"section_id":"W01-bridge","title":"Synthetic bridge notes","body":"Synthetic pears connect the orchard to the next topic.","fact_ids":["F-B1"],"sources":["Synthetic lecture 1"]}],"emphasis":[{"fact_id":"${if (setupEmphasis) "F-S1" else "F-B1"}","week":1,"recording_id":"T1","recording_kind":"tutorial","timestamp":"02:01:03","summary":"Synthetic pears were emphasized."}]""" else "") + "}")
+                    path.endsWith("/mainline/1") -> reply(ex, weeklyBody().toString())
                     else -> reply(ex, """{"weeks":[{"week":1,"title":"Synthetic orchard","coverage":${cov(0, 0)}}],"invalid":[]}""")
                 }
             }
@@ -110,7 +153,7 @@ class MainlineScreenTest {
             start()
         }
         val http = CourseHttp("http://127.0.0.1:${server.address.port}", "test", "synthetic", "C")
-        override fun close() { http.close(); server.stop(0) }
+        override fun close() { http.close(); server.stop(0); workers?.shutdownNow() }
     }
 
     private fun walk(width: Int, height: Int, retryChoice: Int? = null, firstGuessed: Boolean = false) = FakeMac(today, retryChoice != null).use { mac ->
@@ -137,9 +180,8 @@ class MainlineScreenTest {
                 onNodeWithText("考点 3 · 有题 3 · 相关题均答对 0").assertIsDisplayed()
                 capture("mainline-weeks-$width")
                 onNodeWithTag("mainline-week-1").performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("mainline-skip").performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("S1")
+                onNodeWithTag("mainline-notes").assertDoesNotExist()
 
                 if (retryChoice != null) {
                     onNodeWithTag("mainline-option-$retryChoice").performClick()
@@ -161,6 +203,7 @@ class MainlineScreenTest {
                     else onNodeWithText("✗", useUnmergedTree = true).assertDoesNotExist()
                     val outcome = if (retryChoice == 0) "答错。" else if (firstGuessed) "猜对：不算会。" else "答对。"
                     onNodeWithText(outcome).performScrollTo().assertIsDisplayed()
+                    assertFeedbackTextReadable(outcome)
                     capture("mainline-retry-$retryChoice-$firstGuessed-$width")
                     return@runComposeUiTest
                 }
@@ -190,7 +233,7 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
                 // Right but marked as a guess: still not mastered, still queued.
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("细节题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("D1")
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-guess").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -201,7 +244,7 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-next").performScrollTo().performClick()
 
                 // The bridge question leads on to step grading and the timed essay.
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("综合题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("B1")
                 onNodeWithTag("mainline-option-1").performClick()
                 onNodeWithTag("mainline-submit").performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -210,17 +253,16 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-essay").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-steps").performClick()
                 assertTrue(steps, "the bridge question opens step grading")
-                onNodeWithText("这一周做完了").assertExists()
+                onNodeWithTag("mainline-next").performScrollTo().performClick()
+                onNodeWithText("本节脉络").assertExists()
+                assertEquals(listOf("S1", "D1", "B1"), mac.answers.map { it.str("itemId") })
                 capture("mainline-bridge-$width")
             }
         } finally { tutor.close(); driver.close() }
     }
 
-    /**
-     * 复习页的主线入口：课程回答一到，入口就要显示当前周并能点进去。设备烟测在像素已经画出「继续第 1 周」时
-     * 读到的仍是「正在连接…」，所以这个标签必须来自回答到达后才出现的节点，而不是把一个禁用按钮原地改名。
-     */
-    @Test fun reviewEntryShowsTheCurrentWeekOnceTheCourseAnswers() = FakeMac(today).use { mac ->
+    /** Whole-week practice belongs to its week and starts the real question screen in one click. */
+    @Test fun weekPracticeStartsTheDisplayedWeekWithoutReadingOrAnExtraStart() = FakeMac(today).use { mac ->
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         ClientDatabase.Schema.create(driver)
         val transport = object : LedgerTransport {
@@ -233,21 +275,38 @@ class MainlineScreenTest {
         val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ now }))
         val c = CoachController("C", SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" }, { "hash" }),
             tutor, formatClock = { "12:00" }, nowMillis = { now }, course = mac.http)
-        val view = CourseView(emptyList(), project(emptyList()))
-        var opened: Pair<Int?, Boolean>? = null
+        val events = listOf(Event(1, "synthetic-week", "C", "outline_revised", recordedAt = now, occurredAt = now,
+            deviceId = "synthetic", actor = "SYSTEM", payload = json("knowledgePoints" to JsonArray(listOf(json("id" to "K", "title" to "Synthetic orchard", "week" to 1))))))
+        val view = CourseView(events, project(events))
+        var opened by androidx.compose.runtime.mutableStateOf<Int?>(null)
+        var showReview by androidx.compose.runtime.mutableStateOf(true)
         try {
             runComposeUiTest {
                 setContent {
                     CoachTheme(false) { Surface { Box(Modifier.size(420.dp, 900.dp)) {
-                        ReviewScreen(c, view, { _, _ -> }, {}, onOpenMainline = { number, start -> opened = number to start })
+                        val scope = androidx.compose.runtime.rememberCoroutineScope()
+                        val actions = androidx.compose.runtime.remember(c) { WeekActions(c, scope) }
+                        actions.onPractice = { number ->
+                            c.sync.saveMainlineState("C", json("week" to number, "entry" to "quiz"))
+                            opened = number
+                        }
+                        when {
+                            showReview -> ReviewScreen(c, view, { _, _ -> }, {}, onOpenMainline = { _, _ -> error("Obsolete review entry must not dispatch") })
+                            opened == null -> com.coach.ui.v7.WeekPage(c, view, TutorUiState(), actions, { _, _ -> }, 1)
+                            else -> MainlineScreen(c, view, {}, {}, {}, {}, directEntry = true, initialWeek = opened)
+                        }
                     } } }
                 }
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("继续第 1 周").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("正在连接…").assertDoesNotExist()
-                onNodeWithTag("mainline-continue").assertIsEnabled().performClick()
-                assertEquals(1 to true, opened)
-                onNodeWithText("看本周要点").assertExists()
-                capture("review-mainline-entry")
+                onNodeWithTag("open-mainline").assertDoesNotExist()
+                runOnIdle { showReview = false }
+                onNodeWithTag("week-practice").assertIsEnabled()
+                assertTrue(mac.answers.isEmpty(), "Browsing a week must not answer a question")
+                onNodeWithTag("week-practice").performClick()
+                awaitQuestion("S1")
+                assertEquals(1, opened)
+                onNodeWithTag("mainline-notes").assertDoesNotExist()
+                onNodeWithTag("mainline-open-notes").assertExists()
+                capture("week-practice-direct-entry")
             }
         } finally { tutor.close(); driver.close() }
     }
@@ -276,6 +335,8 @@ class MainlineScreenTest {
                 onNodeWithTag("mainline-week-1").performClick()
                 // The first GET fails; retry must recover without another tap.
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic Mac temporarily unavailable").fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("S1")
+                onNodeWithTag("mainline-open-notes").performScrollTo().performClick()
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithText("○ Synthetic bridge notes").performScrollTo().performClick()
                 onNodeWithTag("mainline-emphasis").performScrollTo()
@@ -288,7 +349,8 @@ class MainlineScreenTest {
                 waitForIdle()
                 assertEquals(readingBeforeStar, c.sync.mainlineState("C", "week:1"))
                 onNodeWithTag("mainline-section-quiz").performScrollTo().performClick()
-                waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("综合题 · 第 1/1 题").fetchSemanticsNodes().isNotEmpty() }
+                awaitQuestion("B1")
+                onNodeWithText("第 1 题").assertExists()
                 onNodeWithTag("mainline-option-1").performScrollTo().performClick()
                 onNodeWithTag("mainline-emphasis").performScrollTo()
                 waitForIdle()
@@ -314,7 +376,8 @@ class MainlineScreenTest {
             runComposeUiTest {
                 setContent { CoachTheme(false) { Surface { MainlineScreen(c, view, {}, {}, {}, {}) } } }
                 waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithText("综合题 · 第 1/1 题").performScrollTo().assertIsDisplayed()
+                awaitQuestion("B1")
+                onNodeWithText("第 1 题").performScrollTo().assertIsDisplayed()
                 onNodeWithTag("mainline-option-1").assertIsSelected()
                 onNodeWithTag("mainline-return-section").performScrollTo().performClick()
                 onNodeWithText("Synthetic pears connect", substring = true).performScrollTo().assertIsDisplayed()
@@ -338,10 +401,101 @@ class MainlineScreenTest {
     }
 
     private fun ComposeUiTest.capture(name: String) {
-        val dir = File("build/screens").also { it.mkdirs() }
-        ImageIO.write(onRoot().captureToImage().toAwtImage(), "png", File(dir, "$name.png"))
-        // Keep successful geometry too: a visible heading can coexist with the body below the viewport.
-        File(dir, "$name.txt").writeText(onRoot(useUnmergedTree = true).printToString(maxDepth = 50))
+        captureLessonEvidence(name)
+    }
+
+    private fun ComposeUiTest.awaitQuestion(id: String) {
+        waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Synthetic orchard question $id:", substring = true).fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithTag("mainline-option-0").assertExists()
+    }
+
+    /** Geometry alone cannot detect an overlay that fades otherwise visible text. */
+    private fun ComposeUiTest.assertFeedbackTextReadable(text: String, matchIndex: Int = 0) {
+        val interaction = onAllNodesWithText(text)[matchIndex]
+        val node = interaction.fetchSemanticsNode()
+        val bounds = node.boundsInRoot
+        val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
+        assertEquals(node.size.height.toFloat(), bounds.height, "all lines must be unclipped: $text")
+        assertTrue(bounds.top >= viewport.top && bounds.bottom <= viewport.bottom, "text stays above the action area: $bounds, $viewport")
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        assertTrue(layouts.isNotEmpty(), "text layout is available")
+        val pixels = onRoot().captureToImage().toAwtImage()
+        val layout = layouts.single()
+        for (line in 0 until layout.lineCount) {
+            val top = kotlin.math.floor(bounds.top + layout.getLineTop(line)).toInt().coerceIn(0, pixels.height - 1)
+            val bottom = kotlin.math.ceil(bounds.top + layout.getLineBottom(line)).toInt().coerceIn(top + 1, pixels.height)
+            val left = kotlin.math.floor(bounds.left).toInt().coerceIn(0, pixels.width - 1)
+            val right = kotlin.math.ceil(bounds.right).toInt().coerceIn(left + 1, pixels.width)
+            val darkest = (top until bottom).minOf { y -> (left until right).minOf { x ->
+                val rgb = pixels.getRGB(x, y)
+                (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+            } }
+            // These fixtures use the light theme's dark body ink. Fully faded lines in the
+            // reported screenshots have minima 175..208; allow antialiasing, not washed-out ink.
+            assertTrue(darkest <= 96, "line ${line + 1} is faded (darkest=$darkest): $text")
+        }
+    }
+
+    /** A clipped last row must not leave half its glyphs next to the fixed actions. */
+    private fun ComposeUiTest.assertNoPartialBottomLine(text: String): Int? {
+        val interaction = onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("mainline-scroll-viewport")))[0]
+        val node = interaction.fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val layout = layouts.single()
+        val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
+        val pixels = onRoot().captureToImage().toAwtImage()
+        var clippedLine: Int? = null
+        for (line in 0 until layout.lineCount) {
+            val top = node.positionInRoot.y + layout.getLineTop(line)
+            val bottom = node.positionInRoot.y + layout.getLineBottom(line)
+            if (top >= viewport.top && top < viewport.bottom && bottom > viewport.bottom + 1f) {
+                clippedLine = line
+                val left = kotlin.math.ceil(node.positionInRoot.x + layout.getLineLeft(line)).toInt()
+                val right = kotlin.math.floor(node.positionInRoot.x + layout.getLineRight(line)).toInt()
+                val start = kotlin.math.ceil(top).toInt()
+                val end = kotlin.math.floor(viewport.bottom).toInt()
+                if (left < right && start < end) {
+                    val darkest = (start until end).minOf { y -> (left until right).minOf { x ->
+                        val rgb = pixels.getRGB(x, y)
+                        (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+                    } }
+                    assertTrue(darkest > 160, "partial bottom line ${line + 1} painted clipped glyphs (darkest=$darkest)")
+                }
+            }
+        }
+        return clippedLine
+    }
+
+    private fun ComposeUiTest.revealAndReadFeedbackLine(text: String, lineIndex: Int? = null) {
+        val interaction = onNodeWithText(text)
+        val layouts = mutableListOf<TextLayoutResult>()
+        interaction.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val layout = layouts.single()
+        assertEquals(text, layout.layoutInput.text.text, "The full explanation must remain in the document")
+        val line = lineIndex ?: (layout.lineCount - 1)
+        val viewport = onNodeWithTag("mainline-scroll-viewport")
+        val edge = viewport.fetchSemanticsNode().boundsInRoot.bottom
+        val bottom = interaction.fetchSemanticsNode().positionInRoot.y + layout.getLineBottom(line)
+        viewport.performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, bottom - edge + 16f) }
+        waitForIdle()
+        val origin = interaction.fetchSemanticsNode().positionInRoot
+        val bounds = viewport.fetchSemanticsNode().boundsInRoot
+        val top = origin.y + layout.getLineTop(line)
+        val end = origin.y + layout.getLineBottom(line)
+        assertTrue(top >= bounds.top && end <= bounds.bottom, "the complete requested line must scroll above the actions")
+        val pixels = onRoot().captureToImage().toAwtImage()
+        val darkest = (kotlin.math.ceil(top).toInt() until kotlin.math.floor(end).toInt()).minOf { y ->
+            (kotlin.math.ceil(origin.x + layout.getLineLeft(line)).toInt() until
+                kotlin.math.floor(origin.x + layout.getLineRight(line)).toInt()).minOf { x ->
+                val rgb = pixels.getRGB(x, y)
+                (((rgb shr 16) and 255) + ((rgb shr 8) and 255) + (rgb and 255)) / 3
+            }
+        }
+        assertTrue(darkest <= 96, "the requested explanation line must have solid body ink, not be faded or hidden")
+        val actions = onNodeWithTag("mainline-actions").fetchSemanticsNode().boundsInRoot
+        assertTrue(actions.top >= bounds.bottom, "the actions must not overlap the feedback viewport")
     }
 
     @Test fun phoneWalksOneWeekWithExplanationsOnTheSamePage() = walk(412, 915)
@@ -360,7 +514,10 @@ class MainlineScreenTest {
         // leave the desk at y=146..1200px. The full 986x624dp walk above omits those insets.
         runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f)) {
             setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 24.dp)) {
-                CompositionLocalProvider(com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.REVIEW, vertical) {} }) {
+                CompositionLocalProvider(
+                    com.coach.ui.v7.LocalDeskNavigation provides { vertical -> DeskNavigation(AppTab.REVIEW, vertical) {} },
+                    LocalFeedbackLayoutTrace provides { event -> println("COACH_FEEDBACK_LAYOUT $event") }
+                ) {
                     MainlineScreen(c, view, {}, {}, {}, {})
                 }
             } } } }
@@ -376,16 +533,24 @@ class MainlineScreenTest {
                 waitUntil(timeoutMillis = 15_000) {
                     val viewport = scroll.fetchSemanticsNode().boundsInRoot
                     val source = citation.fetchSemanticsNode().boundsInRoot
-                    // The last 40dp of the scroller is covered by the fixed action bar's fade.
+                    // Preserve the original 40dp citation clearance above the action area.
                     explanation.isDisplayed() && citation.isDisplayed() && source.top >= viewport.top && source.bottom <= viewport.bottom - 80f
                 }
                 explanation.assertIsDisplayed()
                 citation.assertIsDisplayed()
+                assertFeedbackTextReadable("记住这个")
+                assertFeedbackTextReadable("Synthetic memory for S1.")
+                assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
+                assertNoPartialBottomLine("背景")
                 capture("outer-feedback-1972x1248")
             } catch (failure: Throwable) {
                 capture("outer-feedback-1972x1248-failure")
                 throw failure
             }
+            onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
+            assertFeedbackTextReadable("The synthetic orchard story sets up the supply example used later in the week.")
+            capture("outer-feedback-details-1972x1248")
             // Once the reader scrolls further down, returning from notes must retain that position.
             onNodeWithText("答错。").performScrollTo().assertIsDisplayed()
             val beforeNotes = scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
@@ -397,8 +562,60 @@ class MainlineScreenTest {
             assertEquals(beforeNotes, scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(),
                 "returning to a completed answer must preserve the reader's scroll")
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("outer-feedback-restored-1972x1248")
         }
     }
+    @Test fun longExplanationKeepsCitationAboveFadeAndFullFeedbackScrollable() = FakeMac(today, includeNotes = true, setupEmphasis = true, correct = longCorrect).use { mac ->
+        val c = controller(mac)
+        c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
+        val view = CourseView(emptyList(), project(emptyList()))
+        runSkikoComposeUiTest(size = Size(1972f, 1248f), density = Density(2f)) {
+            setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 24.dp)) {
+                MainlineScreen(c, view, {}, {}, {}, {})
+            } } } }
+            awaitQuestion("S1")
+            onNodeWithTag("mainline-option-0").performClick()
+            onNodeWithTag("mainline-submit").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            val scroller = onNode(hasScrollAction() and hasAnyDescendant(hasTestTag("mainline-heading")))
+            waitUntil(timeoutMillis = 15_000) {
+                val viewport = scroller.fetchSemanticsNode().boundsInRoot
+                val citation = onNodeWithTag("private-citation").fetchSemanticsNode().boundsInRoot
+                citation.top >= viewport.top && citation.bottom <= viewport.bottom - 80f
+            }
+            assertFeedbackTextReadable("Synthetic apples were sold out before the season started, so they cannot be the answer.")
+            capture("outer-long-feedback-1972x1248")
+            onNodeWithText(longCorrect).assertExists()
+            onNodeWithText("为什么对", substring = true).performScrollTo().assertIsDisplayed()
+            val clippedLine = assertNotNull(assertNoPartialBottomLine(longCorrect), "exercise a paragraph crossing the viewport edge")
+            capture("outer-long-feedback-start-1972x1248")
+            revealAndReadFeedbackLine(longCorrect, clippedLine)
+            assertNoPartialBottomLine(longCorrect)
+            capture("outer-long-feedback-continued-line-1972x1248")
+            revealAndReadFeedbackLine(longCorrect)
+            capture("outer-long-feedback-last-line-1972x1248")
+            onNodeWithText("Synthetic apples were sold out before the season started, so they cannot be the answer.").performScrollTo().assertIsDisplayed()
+            onNodeWithText("Synthetic plums ripen after the period described in the question.").performScrollTo().assertIsDisplayed()
+            onAllNodesWithText("The synthetic orchard story sets up the supply example used later in the week.")[0].performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("The synthetic orchard story sets up the supply example used later in the week.")
+            capture("outer-long-feedback-details-1972x1248")
+            onNodeWithText("Synthetic figs are imported, not grown in the orchard.").performScrollTo().assertIsDisplayed()
+            assertFeedbackTextReadable("Synthetic figs are imported, not grown in the orchard.")
+            onNodeWithTag("private-citation").performScrollTo().assertIsDisplayed()
+            onNodeWithText("回到要点").assertIsDisplayed()
+            onNodeWithTag("mainline-next").assertIsDisplayed()
+            val before = scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
+            onNodeWithText("回到要点").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("mainline-skip").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
+            onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("outer-long-feedback-restored-1972x1248")
+        }
+    }
+
     @Test fun innerSubmissionShowsCompleteInlineActionsAndCitationWithoutManualScroll() = FakeMac(today, includeNotes = true, setupEmphasis = true).use { mac ->
         val c = controller(mac)
         c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
@@ -433,7 +650,10 @@ class MainlineScreenTest {
             capture("inner-first-answer-2448x1848")
             val viewport = onNodeWithTag("mainline-scroll-viewport").fetchSemanticsNode().boundsInRoot
             val next = onNodeWithTag("mainline-next").fetchSemanticsNode()
-            val nextText = onNodeWithText("下一题  ›", useUnmergedTree = true).fetchSemanticsNode()
+            val nextText = onNode(
+                hasText("下一题  ›") and hasAnyAncestor(hasTestTag("mainline-next")),
+                useUnmergedTree = true
+            ).fetchSemanticsNode()
             val back = onNodeWithText("回到要点").fetchSemanticsNode()
             val backText = onNodeWithText("回到要点", useUnmergedTree = true).fetchSemanticsNode()
             val citation = onNodeWithTag("private-citation").fetchSemanticsNode()
@@ -459,6 +679,7 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(before, scroller.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value())
             onNodeWithTag("mainline-option-0").assertIsSelected()
+            capture("inner-answer-restored-2448x1848")
         }
     }
     @Test fun lostWrongReplyAutomaticallyResendsImmutableChoice() = walk(412, 915, 0, false)
@@ -526,9 +747,7 @@ class MainlineScreenTest {
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-week-1").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("mainline-skip").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            awaitQuestion("S1")
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }
@@ -536,7 +755,8 @@ class MainlineScreenTest {
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("private-highlight-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("private-page-label").assertTextContains("第 2 页", substring = true)
             onNodeWithTag("private-highlight-status").assertTextContains("已在页上标出", substring = true)
-            ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png", File("build/screens/mainline-v7-cited-page.png").also { it.parentFile.mkdirs() })
+            assertTrue(ImageIO.write(onNodeWithTag("private-page-label").onParent().captureToImage().toAwtImage(), "png",
+                File(System.getProperty("coach.testScreens"), "mainline-v7-cited-page.png").also { it.parentFile.mkdirs() }))
             onNodeWithTag("private-document-back").performClick()
             onNodeWithTag("private-citation").assertExists()
             onNodeWithTag("v7-desk").assertExists()
@@ -557,9 +777,7 @@ class MainlineScreenTest {
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-week-1").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("mainline-week-1").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-notes").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("mainline-skip").performClick()
-            waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("基础题", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            awaitQuestion("S1")
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-outcome").fetchSemanticsNodes().isNotEmpty() }

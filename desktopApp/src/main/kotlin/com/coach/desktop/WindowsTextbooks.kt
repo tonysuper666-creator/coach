@@ -175,7 +175,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                             else HostCourseBook(book, busy = ui.busy,
                                 onLearn = { openInWorkspace { drafts.flush(); controller.learn() } },
                                 onRead = { openInWorkspace { controller.read() } })
-                            else -> TextbookWorkspace(controller, drafts, chooseBook)
+                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, chooseBook = chooseBook)
                         }
                     }
                     if (rail) Row(Modifier.fillMaxSize()) {
@@ -255,4 +255,11 @@ private fun HostSettings(directory: Path, onClose: () -> Unit) {
     }, confirmButton = {
         TextButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }
     })
+}
+
+/** Production host content with an owned library for offscreen tests. */
+@Composable
+internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
+    val controller = remember(directory) { TextbookController(TextbookLibrary(directory)) }
+    WindowsTextbookHost(controller, chooseBook = chooseBook)
 }

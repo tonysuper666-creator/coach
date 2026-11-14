@@ -241,7 +241,12 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             }
             (common ?: explicit)?.let { weekActions.start(current, it) }
         }
-        else openStudy(id, false)
+        else if (current != null) {
+            current.kp(id)?.let { kp ->
+                val week = current.weeks.firstOrNull { n -> current.weekKps(n).any { it.id == id } }
+                startLearning(LearningTarget(kp, week, false, legacy = week == null))
+            }
+        }
     }
     val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }
     fun openTask(page: AppPage, label: String, id: String = "") {
@@ -274,7 +279,15 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                 if (navigation.current.page == AppPage.WEEK) navigation.replace(destination) else navigation.push(destination)
             }
         }
-        weekActions.onOpen = { id -> if (id != null) openStudy(id, true) else navigation.back() }
+        weekActions.onOpen = { id -> if (id != null) openKp(id, true) else navigation.back() }
+        weekActions.onPractice = { week ->
+            c.sync.saveMainlineState(c.courseId, JsonObject((c.sync.mainlineState(c.courseId) - "targetKp") + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive("resume-quiz"))))
+            val weekly = c.sync.mainlineState(c.courseId, "week:$week")
+            val session = JsonObject(((weekly["ladderSession"] as? JsonObject) ?: json()) + ("complete" to JsonPrimitive(false)))
+            val updated = JsonObject(weekly + mapOf("mode" to JsonPrimitive("quiz"), "filter" to JsonPrimitive(""), "ladderSession" to session))
+            c.sync.saveMainlineState(c.courseId, updated, "week:$week")
+            navigation.push(AppEntry(AppPage.MAINLINE, id = "week-practice", week = week, label = "第 $week 周"))
+        }
         weekActions.onReview = { week -> navigation.push(AppEntry(AppPage.WEEK_REVIEW, week = week, label = "第 $week 周错题")) }
     }
     var hideTaskChrome by remember { mutableStateOf(false) }
@@ -334,9 +347,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                             if (page.review) null else weekActions, page.review, backLabel = "← ${navigation.entries.getOrNull(navigation.entries.indexOf(page) - 1)?.label ?: page.tab.label}")
                                     } ?: CenterMessage("正在加载课程…")
                                     AppPage.MAINLINE -> if (current != null) MainlineScreen(c, current, { navigation.back() },
-                                        { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview, directEntry = page.id == "continue", parentLabel = navigation.parentLabel,
+                                        { openTask(AppPage.MOCK, "模拟考") }, openEssay, weekActions.onReview, directEntry = page.id in setOf("continue", "week-practice"), parentLabel = navigation.parentLabel,
                                         initialWeek = page.week, browseOnly = page.id == "catalog", onBrowseWeek = weekActions::select,
-                                        onStartWeek = { n -> (c.learningTarget(current, n) ?: current.weekKps(n).firstOrNull()?.let { LearningTarget(it, n, false) })?.let { weekActions.start(current, it) } })
+                                        onStartWeek = { n -> (c.learningTarget(current, n) ?: current.weekKps(n).firstOrNull()?.let { LearningTarget(it, n, false) })?.let { weekActions.start(current, it) } },
+                                        onNextSection = { id -> navigation.back(); openKp(id, true) })
                                     AppPage.MOCK -> if (current != null) MockScreen(c, current, { navigation.back() }, page.id.ifEmpty { null }, weekActions.onReview, backLabel = "← ${navigation.parentLabel}")
                                     AppPage.ESSAY -> if (current != null) EssayScreen(c, current, { navigation.back() }, backLabel = "暂离 · ${navigation.parentLabel}")
                                     AppPage.WEEK_REVIEW -> if (current != null && page.week != null) WeekMistakesScreen(c, current, page.week, "← ${navigation.parentLabel}") { navigation.back() } else CenterMessage("暂时无法打开原来的周次，已保留任务。")

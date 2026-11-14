@@ -120,6 +120,18 @@ tasks.withType<JavaExec>().configureEach {
     providers.gradleProperty("coach.autoExitSeconds").orNull?.let { systemProperty("coach.autoExitSeconds", it) }
 }
 
+// Existing native reader host, with an explicit HTTP question owner for citation navigation.
+tasks.register<JavaExec>("runReaderWindow") {
+    group = "application"
+    description = "Open the native reader; COACH_READER_ITEM/WEEK enable the HTTP explanation workspace"
+    dependsOn(tasks.classes)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.reader.ReaderWindowHostKt")
+    for (key in listOf("coach.url", "coach.course", "coach.reader.item", "coach.reader.week", "coach.reader.doc", "coach.reader.page", "coach.library.dir")) {
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+}
+
 // Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.
 val notesCore by tasks.registering(Zip::class) {
     from(rootProject.file("tools")) {
@@ -143,4 +155,16 @@ tasks.register<JavaExec>("pairingSmoke") {
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("com.coach.desktop.DesktopPairingSmoke")
     args(rootDir.absolutePath)
+}
+
+// Disposable synthetic fixture uses the same native workspace, product HTTP routes and ReaderWindow.
+tasks.register<JavaExec>("citationWindowSmoke") {
+    group = "verification"
+    description = "Open an isolated native citation window backed by real synthetic HTTP/PDF"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.reader.CitationWindowSmoke")
+    for (key in listOf("coach.citation.auto", "coach.pdf.bin")) {
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
 }

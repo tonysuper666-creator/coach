@@ -192,6 +192,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val run = c.tutor.agentRunId
     val navigationPage = run?.let { "navigation:agent:${it.length}:$it" } ?: "navigation"
     val sessionKey = "${c.courseId}:${c.sync.deviceId}:$navigationPage"
+    val contentScope = run?.let { "${c.courseId}:agent:${it.length}:$it" } ?: c.courseId
     val navigation = androidx.compose.runtime.saveable.rememberSaveable(sessionKey, saver = AppNavigation.saver) {
         val saved = c.sync.mainlineState(c.courseId, navigationPage)["stack"]?.let { (it as? JsonPrimitive)?.content }
         if (initialKp == null && initialTab == AppTab.TODAY && saved != null) AppNavigation.restore(saved) ?: AppNavigation(listOf(AppEntry(tab = initialTab)))
@@ -303,7 +304,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY)
                         val showNav = !task && !hideTaskChrome
                         val render: @Composable (AppEntry) -> Unit = { page ->
-                            holder.SaveableStateProvider("$sessionKey:${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
+                            holder.SaveableStateProvider("$contentScope:${page.page}:${page.tab}:${page.id}:${page.review}:${page.week}") {
                                 when (page.page) {
                                     AppPage.HOME -> when (page.tab) {
                                         AppTab.TODAY -> TodayScreen(c, current, ui, selectedKpId = null, onOpenReview = openReview, onOpen = openKp, weekActions = weekActions)

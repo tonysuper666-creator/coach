@@ -1,6 +1,7 @@
 package com.coach.desktop
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -57,6 +58,13 @@ internal fun windowsLibraryDirectory(
 /** Desktop windows keep the two-column desk: the rail takes its width first, the paper and margin share the rest. */
 private const val WINDOWS_WINDOW_WIDTH = 1440
 private const val WINDOWS_WINDOW_HEIGHT = 900
+
+/** An optional per-process override; without it the existing system preference remains authoritative. */
+internal fun windowsThemeOverride(value: String?): Boolean? = when {
+    value.equals("dark", ignoreCase = true) -> true
+    value.equals("light", ignoreCase = true) -> false
+    else -> null
+}
 
 /** Windows mainline: a new learner can bring a book without a preconfigured course or Mac pairing. */
 internal fun runWindowsTextbooks() {
@@ -155,7 +163,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
         if (current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
     }
     fun openInWorkspace(action: suspend () -> Unit) { tab = AppTab.RESOURCES; scope.launch { action() } }
-    CoachTheme {
+    val systemDark = isSystemInDarkTheme()
+    val dark = remember { windowsThemeOverride(System.getProperty("coach.windows.theme")) }
+    CoachTheme(dark ?: systemDark) {
         Surface(Modifier.fillMaxSize().testTag("windows-host"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {

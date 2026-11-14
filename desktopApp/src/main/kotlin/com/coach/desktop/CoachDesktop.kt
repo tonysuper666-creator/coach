@@ -40,12 +40,13 @@ internal fun resolveCourse(environment: String?, packaged: String?): String =
 
 /** Installed clients resolve their Mac locally and enter learning only with their own identity. */
 fun runCoach() {
+    if (System.getProperty("os.name").startsWith("Windows")) { runWindowsTextbooks(); return }
     refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val settings = DesktopConnectionSettings()
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
-        Window(onCloseRequest = ::exitApplication, title = "Coach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
                 DisposableEffect(session) {

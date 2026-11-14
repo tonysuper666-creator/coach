@@ -84,6 +84,34 @@ class PracticeSourceMultiBlockTest {
             onNodeWithTag("source-anchor-status").assertTextEquals("无法确认原句：本题依据出现多次。")
         }
     }
+
+    @Test fun crossBlockReferenceAcrossPagesStaysUnconfirmedInsteadOfGuessingTheFirstBlockPage() {
+        val root = Files.createTempDirectory("coach-practice-source-cross-block-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val imported = library.importBook(crossPageTextbook(root.resolve("synthetic")))
+        library.save(imported.copy(readingPage = 1, lessonIndex = 0, learning = true, questionMode = QuestionMode.SHORT_ANSWER))
+        val controller = TextbookController(library)
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+
+            val book = controller.state.value.book!!
+            val lesson = book.lessons[book.lessonIndex]
+            assertEquals(listOf(2, 3), lesson.blocks.filterNot { it.heading }.map { it.page },
+                "同一节两块正文分别落在第 2 页与第 3 页")
+            val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.SHORT_ANSWER)!!
+            assertEquals(lesson.text, practice.reference, "简答依据跨两个 SourceBlock（第 2 页与第 3 页）")
+
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && !controller.state.value.busy }
+
+            assertEquals(lesson.firstPage, controller.state.value.page, "跨页依据不应只猜首块所在页")
+            onNodeWithTag("source-anchor-status")
+                .assertTextEquals("无法确认原句：本题依据跨越多页，无法定位到单一页面。")
+        }
+    }
 }
 
 private fun multiBlockTextbook(directory: Path, body: List<String>): Path {
@@ -109,6 +137,35 @@ private fun multiBlockTextbook(directory: Path, body: List<String>): Path {
         page("Chapter 1 Cells", emptyList())
         page(null, body)
         page("Chapter 2 Water", listOf("Transpiration pulls water from the roots up to the leaves."))
+        pdf.save(file.toFile())
+    }
+    return file
+}
+
+/** 一节的两块正文分处两页：简答依据跨页，任何单页锚点都只能是猜。 */
+private fun crossPageTextbook(directory: Path): Path {
+    Files.createDirectories(directory)
+    val file = directory.resolve("A cross-page biology textbook.pdf")
+    PDDocument().use { pdf ->
+        pdf.documentInformation.title = "A cross-page biology textbook"
+        val font = PDType1Font(Standard14Fonts.FontName.HELVETICA)
+        fun page(heading: String?, paragraph: String?) {
+            val page = PDPage(); pdf.addPage(page)
+            PDPageContentStream(pdf, page).use { out ->
+                var y = 710f
+                if (heading != null) {
+                    out.beginText(); out.setFont(font, 18f); out.newLineAtOffset(50f, y); out.showText(heading); out.endText()
+                    y -= 48f
+                }
+                if (paragraph != null) {
+                    out.beginText(); out.setFont(font, 11f); out.newLineAtOffset(50f, y); out.showText(paragraph); out.endText()
+                }
+            }
+        }
+        page("Chapter 1 Cells", null)
+        page(null, "Chlorophyll is a green pigment that absorbs light in plant cells.")
+        page(null, "Water moves through the leaf along the xylem and out through the stomata.")
+        page("Chapter 2 Water", "Transpiration pulls water from the roots up to the leaves.")
         pdf.save(file.toFile())
     }
     return file

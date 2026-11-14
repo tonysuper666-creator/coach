@@ -182,11 +182,17 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             val hits = Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
                             val anchor = when (hits.size) {
                                 1 -> {
-                                    val start = hits.single().range.first
-                                    val owner = spans.firstOrNull { start >= it.second && start < it.third }
-                                        ?: spans.lastOrNull { start >= it.second }
-                                    if (owner == null) PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
-                                    else PracticeSource(owner.first.page, practice.reference, null)
+                                    // 依据可能跨多个正文块；只有命中覆盖的块同属一页时，页锚点才是确定的。
+                                    val hit = hits.single()
+                                    val covered = spans.filter { it.third > hit.range.first && it.second <= hit.range.last }
+                                    val pages = covered.map { it.first.page }.distinct()
+                                    when {
+                                        covered.isEmpty() ->
+                                            PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+                                        pages.size > 1 ->
+                                            PracticeSource(null, null, "无法确认原句：本题依据跨越多页，无法定位到单一页面。")
+                                        else -> PracticeSource(pages.single(), practice.reference, null)
+                                    }
                                 }
                                 0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
                                 else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")

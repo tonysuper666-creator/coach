@@ -14,6 +14,11 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.roundToLong
 
+/** Main-only adapter until PR142 passes its section-derived scope. Scoped calls resolve to the required-scope member. */
+private suspend fun ReaderExplanation.explain(device: String, course: String, input: JsonObject, quote: String,
+    pages: List<com.coach.store.SourcePage>): JsonObject =
+    explain(device, course, input, quote, pages, com.coach.domain.scope.VisibleScope.learner())
+
 internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String, val anchor: String = "")
 /** Evidence and the reading ceiling must come from the same validated server identity. */
 internal data class MainlineSelection(val quote: String, val currentKps: Set<String>)

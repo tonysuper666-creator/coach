@@ -61,9 +61,10 @@ class ReaderExplanationTest {
         assertNotEquals(notesVersion("Synthetic A"), notesVersion("Synthetic B"))
         assertEquals(notesVersion("Synthetic A"), notesVersion("Synthetic A"))
     }
-    private class Harness : AutoCloseable {
+    private inner class Harness : AutoCloseable {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(Files.createTempDirectory("reader-synthetic-"))
+        init { pack.pages.forEach { store.registerSourcePage("c", it.docId, "Synthetic slides", it.pdfPage, it.text) } }
         val actor = LedgerActor(scope, store)
         val stub = StubTutor()
         val reader = ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)))

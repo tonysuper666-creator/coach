@@ -59,6 +59,7 @@ class SourcePageStoreTest {
             }
             DriverManager.getConnection("jdbc:sqlite:${dir.resolve("coach.sqlite")}").use { db -> db.createStatement().use { s ->
                 s.execute("ALTER TABLE source_docs DROP COLUMN learner_visible")
+                s.executeUpdate("UPDATE source_docs SET blob_sha256='${"a".repeat(64)}' WHERE doc_id='book'")
                 s.execute("PRAGMA user_version=6")
             } }
             LedgerStore(dir).use { store ->
@@ -67,6 +68,7 @@ class SourcePageStoreTest {
                 assertFalse(pages.getValue("appendix").learnerVisible)
                 assertNotNull(store.browsablePage("c","book",1))
                 assertNull(store.browsablePage("c","appendix",1))
+                assertEquals("a".repeat(64), pages.getValue("book").sourceSha256)
             }
             assertTrue(Files.list(dir.resolve("backups")).use { paths -> paths.anyMatch { it.fileName.toString().startsWith("pre-V007-") } })
         } finally { dir.toFile().deleteRecursively() }

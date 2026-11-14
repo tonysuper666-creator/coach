@@ -154,16 +154,24 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
      */
     private fun persistDraft(d: NoteDraft, text: String) {
         val st = drafts ?: return; val id = identityOf(d) ?: return
-        val clearing = text.isEmpty() && !noteBaseline.isNullOrEmpty() && noteStash == null
+        val atBaseline = text.isEmpty() || text == noteBaseline
+        val fromStash = noteStash != null && atBaseline                  // 采用服务端版本后被换下的本地文字（可能是“清空”）
+        val clearing = !fromStash && text.isEmpty() && !noteBaseline.isNullOrEmpty()
         val effective: String? = when {
+            fromStash -> noteStash
             clearing -> ""
-            text.isEmpty() || text == noteBaseline -> noteStash
+            atBaseline -> null
             else -> text
         }
-        if (effective == null || (effective.isEmpty() && !clearing)) { clearStored(d); return }
-        persistFailed = !st.put(StoredDraft(id, d.id, d.quote, effective, d.baseRevision, cleared = effective.isEmpty()))
+        if (effective == null) { clearStored(d); return }
+        val base = if (fromStash) stashBase ?: d.baseRevision else d.baseRevision
+        persistFailed = !st.put(StoredDraft(id, d.id, d.quote, effective, base, cleared = effective.isEmpty()))
         draftTick++
     }
+
+    /** 编辑代次：每次打开/关闭编辑区都 +1；在途请求的回执只能收尾它自己那一代的编辑器。 */
+    private var editGen = 0
+    private var stashBase: Long? = null
 
     /** 采用本机草稿：身份/修订号原样保留（不接管同一行别的批注，不用最新远端修订号覆盖）；缺修订号且服务端已有这条就拒绝猜测。 */
     private fun takeStored(sd: StoredDraft, doc: ReaderDocInfo, v: ReaderPageView): Boolean {
@@ -171,7 +179,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val serverNote = r.notes.firstOrNull { it.id == sd.noteId }
         val base = sd.baseRevision ?: if (serverNote != null) { message = "这份本机草稿缺少原修订号，不能安全带回"; return false } else 0L
         noteDraft = NoteDraft(sd.noteId, doc.id, doc.version, v.pdfPage, v.textSha256, sd.identity.start, sd.identity.end, sd.quote, sd.note, base)
-        noteText = sd.note; noteLine = -1; noteBaseline = serverNote?.note; noteAttempt = null; noteStash = null
+        noteText = sd.note; noteLine = -1; noteBaseline = serverNote?.note; noteAttempt = null; noteStash = null; stashBase = null; editGen++
         return true
     }
 
@@ -183,6 +191,13 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         highlightNoteId = d.id
         clearStored(d)
         if (noteText != noteBaseline) persistDraft(noteDraft!!, noteText)
+    }
+
+    /** 已被关闭/换掉的编辑器收到迟到的 ack：服务端确实收下了这段文字，只清掉与之完全一致的本机草稿，不碰当前编辑器。 */
+    private fun lateAck(d: NoteDraft, acknowledgedText: String) {
+        val sid = identityOf(d) ?: return
+        val cur = drafts?.get(sid) ?: return
+        if (cur.noteId == d.id && cur.note == acknowledgedText) clearStored(d)
     }
 
     /** 当前书/版本/页上本机留着的、还没保存成功的草稿（身份必须全部匹配）。 */
@@ -202,6 +217,9 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         return takeStored(sd, doc, v)
     }
 
+    /** 用户在列表里明确丢弃某一份本机草稿（例如缺修订号、不能安全带回的旧稿）。 */
+    fun discardLocalDraft(sd: StoredDraft) { drafts?.remove(sd.identity); draftTick++ }
+
     /** 明确“放弃草稿”：连本机存的这一份一起丢。 */
     fun discardDraft() { noteDraft?.let { clearStored(it) }; clearEditor() }
 
@@ -211,7 +229,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 普通关闭编辑区/关书：未保存的文字留在本机，不等于放弃。 */
     fun cancelNote() { noteDraft?.let { persistDraft(it, noteText) }; clearEditor() }
 
-    private fun clearEditor() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null }
+    private fun clearEditor() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null; stashBase = null; editGen++ }
 
     private fun confirmLine() {
         val r = remote ?: return; val v = currentView() ?: return
@@ -223,7 +241,8 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val base = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
             range.first, end, quote, existing?.note.orEmpty(), existing?.revision ?: 0L)
         val local = identityOf(base)?.let { drafts?.get(it) }?.takeIf { it.quote == quote } // 同一锚点上本机留着的草稿
-        if (local != null && takeStored(local, doc, v)) return
+        if (local != null) { if (!takeStored(local, doc, v)) noteLine = -1; return } // 被拒绝的本机稿：不开基线编辑器，稿原样保留
+        editGen++
         noteDraft = base
         noteText = existing?.note.orEmpty(); noteLine = -1
         noteBaseline = existing?.note; noteAttempt = null; noteStash = null
@@ -240,12 +259,14 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     suspend fun commitNote() {
         val r = remote ?: return; val d = noteDraft ?: return
         val toSave = d.copy(note = noteText)
+        val gen = editGen
         noteSaving = true; noteAttempt = toSave.note
         try { r.saveNote(toSave) } finally { noteSaving = false }
         val st = r.noteSave
-        if (st is NoteSaveState.Saved && st.id == d.id && noteDraft?.id == d.id) {
-            finishAck(d, toSave, st.revision) // 只把“实际发出去的文字”记为已保存；真实 ack 之后才清除匹配的草稿
-        } else if (noteDraft?.id == d.id) {
+        val mine = gen == editGen && noteDraft?.id == d.id           // 这份回执是否属于现在还开着的这个编辑器
+        if (st is NoteSaveState.Saved && st.id == d.id) {
+            if (mine) finishAck(d, toSave, st.revision) else lateAck(d, toSave.note) // 只把“实际发出去的文字”记为已保存；真实 ack 之后才清除匹配的草稿
+        } else if (mine) {
             persistDraft(d, noteText) // 失败/断网/冲突：草稿留在本机
         }
     }
@@ -265,6 +286,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val r = remote ?: return; val d = noteDraft ?: return
         val server = r.adoptServerNote() ?: return
         noteStash = noteText
+        stashBase = d.baseRevision // 被换下的本地文字依据的是原修订号
         persistDraft(d, noteText) // 被换下的本地文字先落盘
         noteDraft = d.copy(note = server.note, baseRevision = server.revision)
         noteText = server.note; noteBaseline = server.note; noteAttempt = null
@@ -276,11 +298,12 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     suspend fun overwriteWithMine() {
         val r = remote ?: return; val d = noteDraft ?: return
         val toSave = d.copy(note = noteText)
+        val gen = editGen
         noteSaving = true; noteAttempt = toSave.note
         try {
             if (r.overwriteWithMine(toSave)) {
                 val st = r.noteSave as NoteSaveState.Saved
-                finishAck(d, toSave, st.revision)
+                if (gen == editGen && noteDraft?.id == d.id) finishAck(d, toSave, st.revision) else lateAck(d, toSave.note)
             }
         } finally { noteSaving = false }
     }
@@ -892,7 +915,10 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
             Column(Modifier.testTag("local-drafts").padding(top = 8.dp)) {
                 Text("本页有未保存的草稿（只在本机）", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF8A6D1F))
                 local.forEachIndexed { i, sd ->
-                    Text("继续编辑：" + sd.quote.take(24), Modifier.testTag("local-draft-$i").clickable { session.resumeLocalDraft(sd) }.padding(top = 2.dp), fontSize = 12.sp, color = Accent)
+                    Row {
+                        Text("继续编辑：" + sd.quote.take(24), Modifier.testTag("local-draft-$i").clickable { session.resumeLocalDraft(sd) }.padding(top = 2.dp), fontSize = 12.sp, color = Accent)
+                        Text("　丢弃", Modifier.testTag("local-draft-discard-$i").clickable { session.discardLocalDraft(sd) }.padding(top = 2.dp), fontSize = 12.sp, color = Color(0xFFA33B2D))
+                    }
                 }
             }
         }

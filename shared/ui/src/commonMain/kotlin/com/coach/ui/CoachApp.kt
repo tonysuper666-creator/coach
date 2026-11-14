@@ -196,7 +196,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val navigation = androidx.compose.runtime.saveable.rememberSaveable(sessionKey, saver = AppNavigation.saver) {
         val saved = c.sync.mainlineState(c.courseId, navigationPage)["stack"]?.let { (it as? JsonPrimitive)?.content }
         if (initialKp == null && initialTab == AppTab.TODAY && saved != null) AppNavigation.restore(saved) ?: AppNavigation.recover(saved)
-        else if (initialKp == null && initialTab == AppTab.TODAY && c.sync.mainlineState(c.courseId).flag("open"))
+        else if (run == null && initialKp == null && initialTab == AppTab.TODAY && c.sync.mainlineState(c.courseId).flag("open"))
             AppNavigation(listOf(AppEntry(tab = AppTab.REVIEW), AppEntry(AppPage.MAINLINE, AppTab.REVIEW, label = "选择题主线")))
         else AppNavigation(listOf(AppEntry(tab = initialTab)) + listOfNotNull(initialKp?.let {
             AppEntry(AppPage.STUDY, initialTab, it, initialAutoStart, label = it)
@@ -213,7 +213,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val mainline = navigation.entries.any { it.page == AppPage.MAINLINE }
     SideEffect {
         c.sync.saveMainlineState(c.courseId, com.coach.domain.json("stack" to navigation.encode()), navigationPage)
-        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + ("open" to JsonPrimitive(mainline))))
+        if (run == null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + ("open" to JsonPrimitive(mainline))))
     }
     val dispatcher = remember { AppBackDispatcher() }
     PlatformBackHandler(dispatcher.enabled) { dispatcher.back() }

@@ -7,7 +7,7 @@ import kotlinx.serialization.json.*
 
 /** Legacy enum tokens are storage identities. Primary destinations are a separate projection. */
 @Serializable
-internal enum class AppPage { HOME, WEEK, STUDY, SOURCE, MAINLINE, MOCK, ESSAY, WEEK_REVIEW, SETTINGS, UNKNOWN }
+internal enum class AppPage { HOME, WEEK, STUDY, SOURCE, MAINLINE, MOCK, ESSAY, WEEK_REVIEW, SETTINGS, UNKNOWN, REVIEW_PRACTICE }
 
 @Serializable
 internal data class AppEntry(

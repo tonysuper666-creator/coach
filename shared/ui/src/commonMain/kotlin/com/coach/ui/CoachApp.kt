@@ -180,7 +180,7 @@ enum class AppTab(val label: String, val glyph: String? = null) {
 
 /** [initialSource] 同样只用于验收：打开知识点后直接展开「看原文」（桌面截图用）。[initialDraft] 只用于验收：把一句话预填进输入框（`adb` 敲不了中文），不会自动发送。 */
 @Composable
-fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}) {
+fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Boolean = false, dark: Boolean? = null, initialDraft: String? = null, initialTab: AppTab = AppTab.TODAY, initialSource: Boolean = false, settings: @Composable () -> Unit = {}, courseActions: @Composable (CourseView) -> Unit = {}, reviewCandidates: com.coach.domain.reviewqueue.VariantCandidatePort = com.coach.client.NoVariantCandidates) {
     val ui by c.tutor.model.state.collectAsState()
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, c, revision) {
@@ -189,8 +189,12 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
             if (events.isEmpty() && revision == 0L) null else CourseView(events, c.sync.projection(c.courseId), c.tutor.agentRunId)
         }
     }
-    val navigation = androidx.compose.runtime.saveable.rememberSaveable(c.courseId, saver = AppNavigation.saver) {
-        val saved = c.sync.mainlineState(c.courseId, "navigation")["stack"]?.let { (it as? JsonPrimitive)?.content }
+    val run = c.tutor.agentRunId
+    val navigationPage = run?.let { "navigation:agent:${it.length}:$it" } ?: "navigation"
+    val sessionKey = "${c.courseId}:${c.sync.deviceId}:$navigationPage"
+    val contentScope = run?.let { "${c.courseId}:agent:${it.length}:$it" } ?: c.courseId
+    val navigation = androidx.compose.runtime.saveable.rememberSaveable(sessionKey, saver = AppNavigation.saver) {
+        val saved = c.sync.mainlineState(c.courseId, navigationPage)["stack"]?.let { (it as? JsonPrimitive)?.content }
         if (initialKp == null && initialTab == AppTab.TODAY && saved != null) AppNavigation.restore(saved) ?: AppNavigation.recover(saved)
         else if (initialKp == null && initialTab == AppTab.TODAY && c.sync.mainlineState(c.courseId).flag("open"))
             AppNavigation(listOf(AppEntry(tab = AppTab.REVIEW), AppEntry(AppPage.MAINLINE, AppTab.REVIEW, label = "选择题主线")))
@@ -208,7 +212,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
     val mainline = navigation.entries.any { it.page == AppPage.MAINLINE }
     SideEffect {
-        c.sync.saveMainlineState(c.courseId, com.coach.domain.json("stack" to navigation.encode()), "navigation")
+        c.sync.saveMainlineState(c.courseId, com.coach.domain.json("stack" to navigation.encode()), navigationPage)
         c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + ("open" to JsonPrimitive(mainline))))
     }
     val dispatcher = remember { AppBackDispatcher() }
@@ -321,7 +325,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                         val task = entry.page in listOf(AppPage.MOCK, AppPage.ESSAY)
                         val showNav = !task && !hideTaskChrome
                         val render: @Composable (AppEntry) -> Unit = { page ->
-                            holder.SaveableStateProvider(page.stateKey(c.courseId)) {
+                            holder.SaveableStateProvider(page.stateKey(contentScope)) {
                                 if (page.unsupported) UnsupportedDestination() else
                                 when (page.page) {
                                     AppPage.HOME -> when (page.tab) {
@@ -337,6 +341,10 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                                 val decision = current.let { c.learningTarget(it) }
                                                 if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
                                                 navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
+                                            }, variantCandidates = reviewCandidates,
+                                            onOpenPractice = { target ->
+                                                if (target == com.coach.client.reviewPracticeTarget(c.sync, c.courseId, run))
+                                                    navigation.push(AppEntry(AppPage.REVIEW_PRACTICE, id = target.attemptId, label = "复习这道题"))
                                             }) else CenterMessage("正在加载课程…")
                                         AppTab.RECORDS -> RecordsScreen(c, current, layout.nav != NavStyle.BottomBar, onOpenMock = { id -> navigation.push(AppEntry(AppPage.MOCK, id = id, label = "模拟考")) }) { id -> openStudy(id, false) }
                                         AppTab.RESOURCES -> ResourcesScreen(c, null, null)
@@ -360,6 +368,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                     }
                                     AppPage.UNKNOWN -> UnsupportedDestination()
                                     AppPage.SOURCE -> Unit
+                                    AppPage.REVIEW_PRACTICE -> ReviewPracticeScreen(c, expectedAttemptId = page.id) { navigation.back() }
                                 }
                             }
                         }
@@ -368,7 +377,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                 val reading = entry.page == AppPage.SOURCE && !entry.unsupported
                                 SourceOverlay(reading,
                                     base = { render(if (reading) navigation.entries[navigation.entries.lastIndex - 1] else entry) },
-                                    overlay = { holder.SaveableStateProvider(entry.sourceStateKey(c.courseId)) { ResourcesScreen(c, SourceJump(entry.id, entry.pdfPage), { navigation.back() }, "← ${navigation.parentLabel}") } })
+                                    overlay = { holder.SaveableStateProvider(entry.sourceStateKey(contentScope)) { ResourcesScreen(c, SourceJump(entry.id, entry.pdfPage), { navigation.back() }, "← ${navigation.parentLabel}") } })
                             }
                         }
                         // One movable page and one chrome owner, including a rail/bottom-bar transition.

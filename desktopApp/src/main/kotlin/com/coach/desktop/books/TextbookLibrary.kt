@@ -1,5 +1,9 @@
 package com.coach.desktop.books
 
+import com.coach.domain.Review
+import com.coach.domain.initialReview
+import com.coach.domain.logicalDay
+import com.coach.domain.nextReview
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
@@ -16,6 +20,7 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
+import java.time.ZoneId
 import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipFile
@@ -23,7 +28,8 @@ import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
-internal class TextbookLibrary(val directory: Path) {
+internal class TextbookLibrary(val directory: Path,
+    private val reviewDay: () -> Long = { logicalDay(System.currentTimeMillis(), ZoneId.systemDefault().id) }) {
     init {
         Files.createDirectories(directory)
         database().use { db ->
@@ -44,6 +50,11 @@ internal class TextbookLibrary(val directory: Path) {
             ensureColumn(db, "answers", "guessed", "INTEGER NOT NULL DEFAULT 0")
             ensureColumn(db, "book_reviews", "wrong_guessed", "INTEGER NOT NULL DEFAULT 0")
             ensureColumn(db, "book_reviews", "answer_guessed", "INTEGER NOT NULL DEFAULT 0")
+            // No historical answer timestamps exist: never invent a deadline while migrating.
+            ensureColumn(db, "book_reviews", "due_day", "INTEGER")
+            ensureColumn(db, "book_reviews", "interval", "INTEGER")
+            ensureColumn(db, "book_reviews", "ease", "REAL")
+            ensureColumn(db, "book_reviews", "anchor", "INTEGER")
         }
         backfillReviews()
     }
@@ -152,7 +163,7 @@ internal class TextbookLibrary(val directory: Path) {
 
     @Synchronized fun saveAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
         val candidate = answer.revealed && (mode == QuestionMode.CHOICE && answer.text.isNotBlank() ||
-            mode == QuestionMode.SHORT_ANSWER && answer.understood == false)
+            mode == QuestionMode.SHORT_ANSWER && answer.understood != null)
         val source = if (candidate) book(book) else null
         val section = source?.lessons?.find { it.id == lesson }
         val practice = section?.let { StudyCoachCourse.practice(checkNotNull(source), it, mode) }
@@ -166,8 +177,20 @@ internal class TextbookLibrary(val directory: Path) {
                     sql.setInt(7, if (answer.guessed) 1 else 0)
                     sql.executeUpdate()
                 }
-                if (practice != null && practice.needsReview(mode, answer)) {
-                    recordReview(db, checkNotNull(source), checkNotNull(section), mode, practice, answer, reopen = true)
+                if (practice != null) {
+                    val queue = practice.needsReview(mode, answer)
+                    recordReview(db, checkNotNull(source), checkNotNull(section), mode, practice, answer, reopen = queue, queue = queue)
+                    val initial = initialReview(reviewDay())
+                    // Ordinary practice initializes the ledger schedule; a miss brings it forward.
+                    // Only the explicit review path advances its interval/ease.
+                    db.prepareStatement("""UPDATE book_reviews SET
+                        due_day=CASE WHEN ?=1 THEN min(COALESCE(due_day,?),?) ELSE COALESCE(due_day,?) END,
+                        interval=COALESCE(interval,?),ease=COALESCE(ease,?) WHERE book=? AND lesson=? AND mode=?""").use { sql ->
+                        sql.setInt(1, if (queue) 1 else 0)
+                        sql.setLong(2, initial.dueDay); sql.setLong(3, initial.dueDay); sql.setLong(4, initial.dueDay)
+                        sql.setInt(5, initial.intervalDays); sql.setDouble(6, initial.ease)
+                        sql.setString(7, book); sql.setString(8, lesson); sql.setString(9, mode.name); sql.executeUpdate()
+                    }
                 }
                 db.commit()
             } catch (failure: Exception) { db.rollback(); throw failure }
@@ -195,34 +218,44 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     private fun recordReview(db: Connection, book: Textbook, lesson: BookLesson, mode: QuestionMode,
-        practice: Practice, answer: PracticeAnswer, reopen: Boolean) {
+        practice: Practice, answer: PracticeAnswer, reopen: Boolean, queue: Boolean = true) {
         val conflict = if (reopen) """DO UPDATE SET wrong_text=excluded.wrong_text,wrong_guessed=excluded.wrong_guessed,
             prompt=excluded.prompt,reference=excluded.reference,solution=excluded.solution,options=excluded.options,
             answer_text='',revealed=0,understood=NULL,answer_guessed=0,completed=0 WHERE book_reviews.completed=1""" else "DO NOTHING"
-        db.prepareStatement("""INSERT INTO book_reviews(book,lesson,mode,book_title,lesson_title,prompt,reference,solution,options,wrong_text,wrong_guessed)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(book,lesson,mode) $conflict""").use { sql ->
+        db.prepareStatement("""INSERT INTO book_reviews(book,lesson,mode,book_title,lesson_title,prompt,reference,solution,options,wrong_text,wrong_guessed,completed)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(book,lesson,mode) $conflict""").use { sql ->
             sql.setString(1, book.id); sql.setString(2, lesson.id); sql.setString(3, mode.name)
             sql.setString(4, book.title); sql.setString(5, lesson.title); sql.setString(6, practice.prompt)
             sql.setString(7, practice.reference); sql.setString(8, practice.answer)
             sql.setString(9, Json.encodeToString(practice.options)); sql.setString(10, answer.text)
             sql.setInt(11, if (answer.guessed) 1 else 0)
+            sql.setInt(12, if (queue) 0 else 1)
             sql.executeUpdate()
         }
     }
 
-    private fun java.sql.ResultSet.asReview(): LocalBookReview = LocalBookReview(
+    private fun java.sql.ResultSet.asReview(day: Long = reviewDay()): LocalBookReview {
+        val stored = LocalBookReview(
         getString("book"), getString("lesson"), QuestionMode.valueOf(getString("mode")),
         getString("book_title"), getString("lesson_title"),
         Practice(getString("prompt"), getString("reference"), getString("solution"), Json.decodeFromString(getString("options"))),
         getString("wrong_text"), getInt("wrong_guessed") == 1,
         PracticeAnswer(getString("answer_text"), getInt("revealed") == 1,
             getInt("understood").let { if (wasNull()) null else it == 1 }, getInt("answer_guessed") == 1), getInt("completed") == 1,
-    )
+        )
+        val due = getLong("due_day").let { if (wasNull()) null else it }
+        // Keep the prior response on disk until a new response is saved. Read-only projection
+        // reopens a completed original only when due, with a fresh response rather than its old key.
+        return if (stored.completed && due != null && due <= day)
+            stored.copy(answer = PracticeAnswer(), completed = false) else stored
+    }
 
     @Synchronized fun reviews(): List<LocalBookReview> = database().use { db ->
-        db.createStatement().use { sql ->
-            sql.executeQuery("SELECT * FROM book_reviews WHERE completed=0 ORDER BY rowid").use { rows ->
-                buildList { while (rows.next()) add(rows.asReview()) }
+        val day = reviewDay()
+        db.prepareStatement("SELECT * FROM book_reviews WHERE completed=0 OR due_day<=? ORDER BY rowid").use { sql ->
+            sql.setLong(1, day)
+            sql.executeQuery().use { rows ->
+                buildList { while (rows.next()) add(rows.asReview(day)) }
             }
         }
     }
@@ -234,6 +267,24 @@ internal class TextbookLibrary(val directory: Path) {
         }
     }
 
+    /** Null means no known deadline, including migrated historical rows. UI authors may consume this fact. */
+    @Synchronized fun reviewDueDay(review: LocalBookReview): Long? = database().use { db ->
+        schedule(db, review)?.dueDay
+    }
+
+    private fun schedule(db: Connection, review: LocalBookReview): Review? =
+        db.prepareStatement("SELECT due_day,interval,ease,anchor FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+            sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
+            sql.executeQuery().use { row ->
+                check(row.next()) { "这道复习题已不在书架中。" }
+                val due = row.getLong(1).let { if (row.wasNull()) null else it }
+                val interval = row.getInt(2).let { if (row.wasNull()) null else it }
+                val ease = row.getDouble(3).let { if (row.wasNull()) null else it }
+                val anchor = row.getLong(4).let { if (row.wasNull()) null else it }
+                if (due == null || interval == null || ease == null) null else Review(due, interval, ease, lastReviewDay = anchor)
+            }
+        }
+
     @Synchronized fun saveReviewAnswer(review: LocalBookReview, answer: PracticeAnswer) {
         val completed = answer.revealed && when (review.mode) {
             // A guessed correct choice is not mastery: the row stays queued instead of completing.
@@ -242,15 +293,39 @@ internal class TextbookLibrary(val directory: Path) {
             QuestionMode.NONE -> false
         }
         database().use { db ->
-            db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,answer_guessed=?,completed=?
-                WHERE book=? AND lesson=? AND mode=?""").use { sql ->
-                sql.setString(1, answer.text); sql.setInt(2, if (answer.revealed) 1 else 0)
-                if (answer.understood == null) sql.setNull(3, java.sql.Types.INTEGER) else sql.setInt(3, if (answer.understood) 1 else 0)
-                sql.setInt(4, if (answer.guessed) 1 else 0)
-                sql.setInt(5, if (completed) 1 else 0)
-                sql.setString(6, review.book); sql.setString(7, review.lesson); sql.setString(8, review.mode.name)
-                check(sql.executeUpdate() == 1) { "无法保存复习作答。" }
-            }
+            db.autoCommit = false
+            try {
+                val day = reviewDay()
+                val current = db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                    sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
+                    sql.executeQuery().use { row -> check(row.next()); row.asReview(day) }
+                }
+                val assessed = answer.revealed && when (review.mode) {
+                    QuestionMode.CHOICE -> answer.text.isNotBlank()
+                    QuestionMode.SHORT_ANSWER -> answer.understood != null
+                    QuestionMode.NONE -> false
+                }
+                // Draft/reveal writes and an identical saved response are not additional assessments.
+                if (assessed && (!current.answer.revealed || current.answer != answer)) {
+                    val result = if (completed) "PASS" else if (review.mode == QuestionMode.CHOICE && answer.text == review.practice.answer) "NEEDS_WORK" else "FAIL"
+                    val next = nextReview(schedule(db, review) ?: initialReview(day), day, result)
+                    db.prepareStatement("UPDATE book_reviews SET due_day=?,interval=?,ease=?,anchor=? WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                        sql.setLong(1, next.dueDay); sql.setInt(2, next.intervalDays); sql.setDouble(3, next.ease)
+                        if (next.lastReviewDay == null) sql.setNull(4, java.sql.Types.INTEGER) else sql.setLong(4, next.lastReviewDay!!)
+                        sql.setString(5, review.book); sql.setString(6, review.lesson); sql.setString(7, review.mode.name); sql.executeUpdate()
+                    }
+                }
+                db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,answer_guessed=?,completed=?
+                    WHERE book=? AND lesson=? AND mode=?""").use { sql ->
+                    sql.setString(1, answer.text); sql.setInt(2, if (answer.revealed) 1 else 0)
+                    if (answer.understood == null) sql.setNull(3, java.sql.Types.INTEGER) else sql.setInt(3, if (answer.understood) 1 else 0)
+                    sql.setInt(4, if (answer.guessed) 1 else 0)
+                    sql.setInt(5, if (completed) 1 else 0)
+                    sql.setString(6, review.book); sql.setString(7, review.lesson); sql.setString(8, review.mode.name)
+                    check(sql.executeUpdate() == 1) { "无法保存复习作答。" }
+                }
+                db.commit()
+            } catch (failure: Exception) { db.rollback(); throw failure }
         }
     }
 

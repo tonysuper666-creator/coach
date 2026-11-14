@@ -10,7 +10,7 @@ import kotlin.test.*
 
 /**
  * 只做一件事（TON-1431 IME 门的最后一刀）：在 Coach 自己的 UI 线程（承载真实 TextbookWorkspace 的 ComposeWindow 的 AWT 事件线程）里
- * 为该线程选择微软拼音输入法（ActivateKeyboardLayout flags=0，线程级；不用 KLF_SETFORPROCESS，不动注册表/系统默认），
+ * 调 TSF ActivateProfile 选择微软拼音（标志 TF_IPPMF_FORPROCESS：**进程级**，不是线程级、也不是全局；不写注册表/系统默认），
  * 并带回身份回执：pid/会话/线程 id/窗口 HWND 及其所属线程 id/线程前后键盘布局/其它线程与系统级未被改变的对照。
  * 不跑中文输入探针。JNA 不在测试依赖里，这里从 Gradle 缓存按路径动态加载并只用反射调用（不改构建文件）。
  */
@@ -71,7 +71,7 @@ class ImeThreadSelectTest {
 
     @Test fun selectMicrosoftPinyinInCoachUiThreadAndReturnIdentityReceipt() {
         assumeTrue(System.getenv("COACH_IME_SELECT") == "1")
-        System.setProperty("skiko.renderApi", "SOFTWARE_FAST")
+        // 渲染后端不在这里写死：需要隔离时由调用方传 -Dskiko.renderApi=...；默认用 Skiko 自己的选择。
         val n = Native(jnaLoader())
         val k = "kernel32"; val u = "user32"; val imm = "imm32"
         fun preload() = ProcessBuilder("reg", "query", "HKCU\\Keyboard Layout\\Preload").start().inputStream.bufferedReader().readText().lines().filter { it.isNotBlank() }.joinToString(" | ") { it.trim() }

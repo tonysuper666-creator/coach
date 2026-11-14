@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.input.TextFieldValue
 import com.coach.domain.*
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.launch
@@ -193,11 +194,22 @@ internal fun LocalExamPane(controller: LocalExamController) {
                 TextButton({ controller.answer(key, json("choice" to null)) }, enabled = editable,
                     modifier = Modifier.testTag("local-clear-$key")) { Text("清空作答") }
             } else if (!submitted) {
-                OutlinedTextField(answer.str("text"), { controller.answer(key, json("text" to it)) },
+                val answerText = answer.str("text")
+                var editor by remember(attempt.str("mockId"), key) { mutableStateOf(TextFieldValue(answerText)) }
+                // Keep selection and IME composition while following externally reloaded or cleared drafts.
+                val currentEditor = editor.copy(text = answerText)
+                SideEffect { if (editor != currentEditor) editor = currentEditor }
+                OutlinedTextField(currentEditor, { next ->
+                    editor = next
+                    if (next.text != answerText) controller.answer(key, json("text" to next.text))
+                },
                     label = { Text("写下你的回答") }, enabled = !ui.busy, readOnly = ui.conflict || timeUp, minLines = 3,
                     modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
                         if (event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
-                            focusManager.moveFocus(if (event.isShiftPressed) FocusDirection.Previous else FocusDirection.Next)
+                            // Do not move focus or insert a literal tab during composition.
+                            if (currentEditor.composition == null) {
+                                focusManager.moveFocus(if (event.isShiftPressed) FocusDirection.Previous else FocusDirection.Next)
+                            }
                             true
                         } else false
                     }.testTag("local-text-$key"))

@@ -8,6 +8,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputInterceptor
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.text.input.*
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.test.*
@@ -23,8 +28,76 @@ import java.nio.file.Path
 import javax.imageio.ImageIO
 import kotlin.test.*
 
-@OptIn(ExperimentalTestApi::class)
+@OptIn(ExperimentalTestApi::class, ExperimentalComposeUiApi::class)
 class WindowsLocalExamUiTest {
+    @Suppress("DEPRECATION", "DEPRECATION_ERROR", "OVERRIDE_DEPRECATION")
+    @Test fun composingEssayTabKeepsFocusAndTextThenKeyboardCanSubmit() {
+        val root = Files.createTempDirectory("coach-essay-ime-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+        val lesson = book.lessons.first()
+        val source = json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to 1,
+            "quote" to lesson.blocks.first { !it.heading }.text)
+        val paper = LocalExamPaper(json("id" to "ime-paper", "bookId" to book.id, "title" to "Synthetic essay",
+            "kind" to "paper", "origin" to "AUTHORED", "key_state" to "UNREVIEWED",
+            "sections" to JsonArray(listOf(json("title" to "Synthetic", "items" to JsonArray(listOf(
+                json("id" to "essay", "type" to "essay", "stem" to "请说明学习过程。", "marks" to 3, "source" to source)
+            )))))))
+        val store = LocalExamStore(library)
+        store.register(paper)
+        val controller = TextbookController(library)
+        val draft = "学习需要观察和练习。".repeat(45)
+        fun hash(s: String) = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        var request: PlatformTextInputMethodRequest? = null
+        val interceptor = PlatformTextInputInterceptor { input, next ->
+            request = input
+            try { next.startInputMethod(input) } finally { request = null }
+        }
+        runSkikoComposeUiTest(size = Size(1044f, 528f), density = Density(1f)) {
+            setContent { InterceptPlatformTextInput(interceptor) {
+                WindowsTextbookHost(controller) { null }
+            } }
+            ready(controller)
+            nav("课程").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-paper-start-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("local-paper-start-0").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { store.active(book.id) != null }
+            val id = store.active(book.id)!!.str("mockId")
+            onNodeWithTag("local-text-essay").performScrollTo().performClick().performTextReplacement(draft)
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == draft }
+            runOnIdle { checkNotNull(request).onEditCommand(listOf(SetComposingTextCommand("候选", 1))) }
+            waitForIdle()
+            assertNotNull(request?.value?.invoke()?.composition, "IME must have an active composition in the actual text field")
+            val composed = draft + "候选"
+            onNodeWithTag("local-text-essay").assertTextContains(composed)
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-text-essay").assertIsFocused()
+            assertEquals(hash(composed), hash(checkNotNull(request).value().text))
+            onNodeWithTag("local-text-essay").performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }
+            onNodeWithTag("local-text-essay").assertIsFocused()
+            assertEquals(hash(composed), hash(checkNotNull(request).value().text))
+            onNodeWithTag("local-text-essay").assertTextContains(composed)
+            assertNotNull(request?.value?.invoke()?.composition)
+            runOnIdle { checkNotNull(request).onEditCommand(listOf(FinishComposingTextCommand())) }
+            waitForIdle()
+            assertNull(request?.value?.invoke()?.composition)
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-clear-essay").assertIsFocused()
+            onNodeWithTag("local-clear-essay").performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }
+            onNodeWithTag("local-text-essay").assertIsFocused()
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == composed }
+            println("IME_ESSAY_HASH=${hash(composed)} attempt=$id")
+            onNodeWithTag("local-text-essay").performKeyInput { pressKey(Key.Enter); pressKey(Key.Tab) }
+            onNodeWithTag("local-clear-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-source-essay").performKeyInput { pressKey(Key.Tab) }
+            onNodeWithTag("local-submit").assertIsFocused().assertIsDisplayed().performKeyInput { pressKey(Key.Enter) }
+            onNodeWithTag("local-confirm-submit").performClick()
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id).str("status") == "submitted" }
+            assertTrue(store.get(book.id, id)["answers"]!!.jsonObject["essay"]!!.jsonObject.str("text").contains('\n'))
+            assertEquals(1, store.get(book.id, id)["result"]!!.jsonObject.num("pending"))
+        }
+    }
     @Test fun essayKeyboardTabPreservesDraftAndReachesSubmitInShortWindow() {
         val root = Files.createTempDirectory("coach-essay-keyboard-")
         val library = TextbookLibrary(root.resolve("library"))

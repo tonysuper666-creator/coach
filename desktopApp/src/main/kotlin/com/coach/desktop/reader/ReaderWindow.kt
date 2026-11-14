@@ -959,9 +959,10 @@ internal fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Re
                 if (session.drafts != null && session.persistFailed) Text("本机草稿没能写入磁盘，文字只在这个编辑区里，关闭后会丢", Modifier.testTag("note-draft-io-failed"), fontSize = 11.sp, color = Color(0xFFA33B2D))
                 if (session.draftsKept()) Text("放弃草稿", Modifier.testTag("note-discard").clickable { session.discardDraft() }.padding(top = 2.dp), fontSize = 11.sp, color = Accent)
                 val status = session.noteStatus()
-                SideEffect { session.uiNoteStatus = status?.text }
+                val statusText = status?.let { NoteStatusRules.statusText(it, session.draftsKept()) }
+                SideEffect { session.uiNoteStatus = statusText }
                 if (status != null) Text(
-                    status.text, Modifier.testTag("note-status"), fontSize = 12.sp,
+                    statusText!!, Modifier.testTag("note-status"), fontSize = 12.sp,
                     color = when (status) {
                         NoteStatus.Saved -> Color(0xFF2F6B3A)
                         NoteStatus.Dirty, NoteStatus.Offline, NoteStatus.Saving, NoteStatus.NotSaved -> Color(0xFF8A6D1F)

@@ -12,6 +12,10 @@ enum class NoteStatus(val text: String) {
 }
 
 object NoteStatusRules {
+    /** 没有真实落盘时，只能承诺当前窗口中的草稿仍在。 */
+    fun statusText(status: NoteStatus, persisted: Boolean): String =
+        if (status == NoteStatus.Conflict && !persisted) "这条批注有冲突，没有覆盖对方；仅此窗口保留，关闭前请复制" else status.text
+
     /** 编辑区里展示的保存失败原因。 */
     fun failureText(f: ReaderFailure, persisted: Boolean = false): String =
         // 501 = 这个来源明确不支持保存：草稿只在编辑区开着时还在，关闭后不会保留，要如实告诉用户。

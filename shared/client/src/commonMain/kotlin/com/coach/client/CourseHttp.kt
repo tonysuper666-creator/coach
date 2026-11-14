@@ -24,6 +24,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.content.TextContent
 import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
 import com.coach.domain.reviewqueue.QueueAvailability
@@ -115,9 +116,9 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
         mockCall("mocks/${mockId.encodeURLPathPart()}/submit", buildJsonObject { put("answers", answers); put("auto", auto) })
 
     /** 选择题主线：各周的题数与覆盖面板。 */
-    suspend fun mainline(): MockReply = mockCall("mainline", null)
+    suspend fun mainline(agentRunId: String? = null): MockReply = mockCall("mainline" + (agentRunId?.let { "?agentRunId=${it.encodeURLParameter()}" } ?: ""), null)
     /** 一周的题，按铺垫 → 细节 → 桥接排好；不含答案和讲解。 */
-    suspend fun mainlineWeek(week: Int): MockReply = mockCall("mainline/$week?layout=shuffled-v1&learning=v1", null)
+    suspend fun mainlineWeek(week: Int, agentRunId: String? = null): MockReply = mockCall("mainline/$week?layout=shuffled-v1&learning=v1" + (agentRunId?.let { "&agentRunId=${it.encodeURLParameter()}" } ?: ""), null)
     suspend fun explainSelection(week: Int, input: JsonObject): MockReply = try {
         val response = http.post("$base/v1/courses/${course.encodeURLPathPart()}/mainline/$week/explain") {
             // Includes server processing and its final JSON response; coordinate with COACH_READER_TOTAL_TIMEOUT_MS.
@@ -137,11 +138,11 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
      * 一道题答一次：返回对错、全部讲解、复习安排和新的覆盖数。同一个 [submissionId] 重发只算一次。
      * [choice] 是屏幕上的第几个选项，[layout] 原样带回这道题读下来时的 `layout`，Mac 据此认出是哪一种打乱顺序。
      */
-    suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String, layout: Int?, dontKnow: Boolean = false, learning: Boolean = false, assisted: Boolean = false): MockReply =
+    suspend fun answerMainline(week: Int, itemId: String, choice: Int, guessed: Boolean, submissionId: String, layout: Int?, dontKnow: Boolean = false, learning: Boolean = false, assisted: Boolean = false, agentRunId: String? = null): MockReply =
         mockCall("mainline/$week/answer", buildJsonObject {
             put("itemId", itemId); put("choice", choice); put("guessed", guessed); put("submissionId", submissionId); layout?.let { put("layout", it) }
             put("dontKnow", dontKnow); put("learning", learning)
-            put("assisted", assisted)
+            put("assisted", assisted); agentRunId?.let { put("agentRunId", it) }
         }, submissionId)
 
     /** Always fetched with this paired account; a cached answer never authorizes an asset read. */

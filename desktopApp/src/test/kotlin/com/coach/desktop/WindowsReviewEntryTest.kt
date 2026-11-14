@@ -83,7 +83,7 @@ class WindowsReviewEntryTest {
             val builder = ProcessBuilder(java.path, "-Duser.home=$root", "-Dcoach.autoExitSeconds=6",
                 "-Dcoach.captures=$captureName@3", "-Dcoach.captureDir=$captures",
                 "-cp", classpath, "com.coach.desktop.MainKt")
-                .redirectOutput(output).redirectError(File("build/windows-review-native.stderr.log"))
+                .redirectOutput(output).redirectError(File("build/$captureName.stderr.log"))
             builder.environment().apply {
                 for (key in keys.filter { it.startsWith("COACH_") }.toList()) remove(key)
                 putAll(mapOf("COACH_MODE" to "coach", "COACH_URL" to base,
@@ -95,7 +95,7 @@ class WindowsReviewEntryTest {
             val process = builder.start()
             val exit = process.waitFor() // The owned runCoach window exits via its existing six-second hook.
             println("NATIVE_MAIN argv=MainKt COACH_COURSE=${if (configured) "C" else "<none>"} isolatedLoopback=true autoExit=6 pid=${process.pid()} exit=$exit")
-            assertEquals(0, exit, File("build/windows-review-native.stderr.log").readText())
+            assertEquals(0, exit, File("build/$captureName.stderr.log").readText())
             assertTrue(output.readText().contains("COACH captured $captureName"))
             assertTrue(File(captures, "$captureName.png").length() > 0)
         }
@@ -103,8 +103,9 @@ class WindowsReviewEntryTest {
     }
 
     private fun ComposeUiTest.openReview() {
-        waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("复习").fetchSemanticsNodes().isNotEmpty() }
-        onNode(hasText("复习") and hasClickAction()).performClick()
+        // 188 removes the review navigation tab. The same queue is reached from Today.
+        waitUntil(timeoutMillis = 15_000) { onAllNodesWithText("到期复习").fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithText("到期复习").performScrollTo().performClick()
     }
 
     @Test fun combinedMainlineKeepsTextbookAndExactReviewSeparateAcrossMigrationAndAgentRestart() = Fixture().use { f ->

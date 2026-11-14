@@ -601,7 +601,8 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-reviews"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 ${ui.reviews.size} 题", style = MaterialTheme.typography.headlineMedium)
-            Text("答错和自检时选择还需复习的题都在这里，保留原题和原文。")
+            Text("答错、标为猜的题，以及自检时选择还需复习的题都在这里，保留原题和原文。")
+            Text("课时里取消猜答标记，不会自动移出已加入的复习题。")
             if (ui.reviews.isEmpty()) Text("暂时没有需要复习的题。")
             ui.reviews.forEachIndexed { index, review ->
                 OutlinedCard(onClick = { onOpen(review) }, enabled = !ui.busy,
@@ -610,7 +611,9 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
                         Text(review.bookTitle, style = MaterialTheme.typography.titleMedium)
                         Text("${review.lessonTitle} · ${review.mode.label}")
                         Text(review.practice.prompt)
-                        Text("上次作答：${review.originalAnswer}")
+                        Text("原题作答：${review.originalAnswer}")
+                        if (review.originalGuessed) Text("原题加入复习时标为猜的")
+                        if (review.answer.guessed) Text("本轮复习标为猜的")
                     }
                 }
             }
@@ -633,7 +636,9 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-review-question"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 · ${review.lessonTitle}", style = MaterialTheme.typography.headlineMedium)
-            Text("上次作答：${review.originalAnswer}")
+            Text("原题作答：${review.originalAnswer}")
+            if (review.originalGuessed) Text("原题加入复习时标为猜的")
+            if (review.answer.guessed) Text("本轮复习标为猜的")
             SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
             if (review.completed) Text("这题已复习。", modifier = Modifier.testTag("local-review-completed"))
             else Text("这题保留在复习里；再答一次，或打开原文对照。")

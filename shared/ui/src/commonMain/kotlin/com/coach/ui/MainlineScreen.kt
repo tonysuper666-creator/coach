@@ -46,15 +46,15 @@ import kotlin.random.Random
 @Composable
 fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onOpenSteps: () -> Unit, onOpenEssay: () -> Unit, onReviewWeek: (Int) -> Unit, directEntry: Boolean = false, parentLabel: String = "复习", initialWeek: Int? = null, browseOnly: Boolean = false, onBrowseWeek: ((Int) -> Unit)? = null, onStartWeek: ((Int) -> Unit)? = null, onNextSection: ((String) -> Unit)? = null) {
     val http = c.course
-    var week by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(if (browseOnly) null else initialWeek ?: (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.intOrNull) }
-    var entry by remember { mutableStateOf(c.sync.mainlineState(c.courseId).str("entry").ifBlank { null }) }
+    var week by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(if (browseOnly) null else initialWeek ?: (c.mainlineState()["week"] as? JsonPrimitive)?.intOrNull) }
+    var entry by remember { mutableStateOf(c.mainlineState().str("entry").ifBlank { null }) }
     fun openWeek(n: Int, quiz: Boolean) {
         entry = if (quiz) "quiz" else "notes"; week = n
-        c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(n), "entry" to JsonPrimitive(entry))))
+        c.saveMainlineState(JsonObject(c.mainlineState() + mapOf("week" to JsonPrimitive(n), "entry" to JsonPrimitive(entry))))
     }
     val closeWeek: () -> Unit = {
         if (directEntry) onBack()
-        else { week = null; c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "week")) }
+        else { week = null; c.saveMainlineState(JsonObject(c.mainlineState() - "week")) }
     }
     AppBackHandler(week != null) { closeWeek() }
     when {
@@ -69,7 +69,7 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
                 else openWeek(n, quiz)
             } }
         }
-        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek, directEntry = directEntry, parentLabel = parentLabel, targetKpId = if (directEntry) c.sync.mainlineState(c.courseId).str("targetKp").ifBlank { null } else null, onBrowseWeek = onBrowseWeek, onNextSection = onNextSection) }
+        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek, directEntry = directEntry, parentLabel = parentLabel, targetKpId = if (directEntry) c.mainlineState().str("targetKp").ifBlank { null } else null, onBrowseWeek = onBrowseWeek, onNextSection = onNextSection) }
     }
 }
 
@@ -161,7 +161,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // resumes on, and a snapshot read there can still see the page as it was before the target moved. That stale
     // whole page then wrote the previous item back over the new one. A flow hands every save the latest merged
     // document whatever thread it runs on, so a scroll or body save can never revert the item on its own.
-    val page = remember { MutableStateFlow(c.sync.mainlineState(c.courseId, stateKey)) }
+    val page = remember { MutableStateFlow(c.mainlineState(stateKey)) }
     // Merge and write are one critical section: merges happen on whatever thread produced them, and a save that
     // merged an older page must finish writing before a later one starts, or its slow write would land last and
     // put the previous item back. Ordered writes also let the target check below trust what it reads.
@@ -169,7 +169,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     fun save(vararg fields: Pair<String, JsonElement>) {
         synchronized(pageLock) {
             val merged = page.updateAndGet { JsonObject(it + fields) }
-            c.sync.saveMainlineState(c.courseId, merged, stateKey)
+            c.saveMainlineState(merged, stateKey)
         }
     }
     var ladderSession by remember { mutableStateOf((page.value["ladderSession"] as? JsonObject)?.let {
@@ -264,7 +264,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     // A target may only be shown once the stored page really holds it: the next launch comes back to this item,
     // so presenting a question the store never accepted would show a place the learner cannot return to.
     fun targetStored(id: String): Boolean =
-        synchronized(pageLock) { c.sync.mainlineState(c.courseId, stateKey).str("item") == id }
+        synchronized(pageLock) { c.mainlineState(stateKey).str("item") == id }
     LaunchedEffect(body != null, pending) {
         if (body != null && targetKpId != null && entry in setOf("quiz", "notes")) {
             // An unacknowledged answer owns its question and must finish before switching targets.
@@ -310,12 +310,12 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
     }
     LaunchedEffect(Unit) {
-        if (only == null) c.sync.saveMainlineState(c.courseId, json("kind" to "mainline", "week" to number), "learning")
+        if (only == null) c.saveMainlineState(json("kind" to "mainline", "week" to number), "learning")
         save("mode" to JsonPrimitive(if (reading) "notes" else "quiz"), "quizStarted" to JsonPrimitive(quizStarted), "filter" to JsonPrimitive(filter))
     }
     LaunchedEffect(pending, targetReady) {
         // Keep the entry until its target is persisted, including while a prior answer is retrying.
-        if (only == null && pending == null && targetReady) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) - "entry"))
+        if (only == null && pending == null && targetReady) c.saveMainlineState(JsonObject(c.mainlineState() - "entry"))
     }
     LaunchedEffect(item?.str("id"), reading) { if (!reading && item != null && itemId != item.str("id")) position(false, item.str("id")) }
     LaunchedEffect(pending, retry) {

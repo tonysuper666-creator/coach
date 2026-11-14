@@ -47,26 +47,37 @@ fun parseIsoDay(text: String?): Long? {
 }
 
 /**
- * Exam compression is a date-dependent overlay, never a destructive change to the normal schedule.
+ * Checked priority and exam compression are overlays, never destructive changes to the ease schedule.
+ * baseDueDay/baseIntervalDays retain the reference schedule for replay, priority correction and
+ * stable legacy due identity. Reapplying either overlay is idempotent, not another interval cut.
+ * A look-again or snooze changes the due date independently of the interval's origin.
  * During days 7..0, cap the interval at max(1, floor((daysToExam - 1) / 2)) and
  * bring the due date forward from the normal interval's anchor, no earlier than entry into
  * the window unless the normal schedule was already due before then.
- * Outside that window (including after exam), restore the normal schedule. Reapplying is idempotent.
+ * Outside that window (including after exam), restore the priority-adjusted schedule.
  */
-fun Review.onDay(day: Long, examDay: Long?): Review {
+fun Review.onDay(day: Long, examDay: Long?, targetRetention: Double = this.targetRetention): Review {
     val normalDue = baseDueDay ?: dueDay
     val normalInterval = baseIntervalDays ?: intervalDays
+    val anchor = intervalAnchorDay ?: (normalDue - normalInterval)
+    val priorityInterval = ReviewRetentionPolicy.interval(normalInterval, targetRetention)
+    val priorityDue = minOf(normalDue, anchor + priorityInterval)
     val days = examDay?.minus(day)
-    if (days == null || days !in 0L..7L) return copy(
-        dueDay = normalDue, intervalDays = normalInterval, baseDueDay = null, baseIntervalDays = null)
-    val interval = normalInterval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1))
+    if (days == null || days !in 0L..7L) return if (targetRetention == ReviewRetentionPolicy.BASELINE) copy(
+        dueDay = normalDue, intervalDays = normalInterval,
+        baseDueDay = null, baseIntervalDays = null, targetRetention = targetRetention)
+    else copy(dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE, priorityDue), intervalDays = priorityInterval,
+        baseDueDay = normalDue, baseIntervalDays = normalInterval, targetRetention = targetRetention)
+    val interval = priorityInterval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1))
     return copy(dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE,
-        minOf(normalDue, maxOf(examDay - 7, minOf(normalDue - normalInterval + interval, examDay - 1)))),
-        intervalDays = interval, baseDueDay = normalDue, baseIntervalDays = normalInterval)
+        minOf(priorityDue, maxOf(examDay - 7, minOf(anchor + interval, examDay - 1)))),
+        intervalDays = interval, baseDueDay = normalDue, baseIntervalDays = normalInterval, targetRetention = targetRetention)
 }
 
 /** The actionable queue for a course day, shared by chat, UI and offline selection; a point to look at again joins it on its due day. */
-fun Projection.reviewsOn(day: Long): Map<String, Review> = (revisit.filterKeys { it !in review }.mapValues { Review(it.value, lastResult = REVISIT) } + review)
+fun Projection.reviewsOn(day: Long): Map<String, Review> = (revisit.filterKeys { it !in review }.mapValues { (kp, due) ->
+    Review(due, lastResult = REVISIT, targetRetention = ReviewRetentionPolicy.target(reviewStars[kp]))
+} + review)
     .filterKeys { it in (activeKpIds ?: kpTitles.keys) }
     .mapValues { it.value.onDay(day, examDay) }
     .filterValues { it.dueDay <= day && it.lastReviewDay != day }

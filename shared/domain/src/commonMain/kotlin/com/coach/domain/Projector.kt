@@ -34,6 +34,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     require(rawEvents.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
     val events = learnerEvidence(rawEvents, includeAgentRun)
     val effectiveZone = zone ?: courseTimeZone(events)
+    val configuredReviewStars = courseReviewStars(events)
     val quickThreads = events.filter { it.type == "quick_ask_opened" }.mapNotNull { it.threadId }.toSet()
     val kpTitles = mutableMapOf<String,String>()
     val quickAsks = mutableMapOf<Long, QuickAskThread>()
@@ -86,7 +87,8 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         val ease = round((when(result) { "PASS" -> (old.ease + .1).coerceAtMost(3.0); "NEEDS_WORK" -> (old.ease - .15).coerceAtLeast(1.3); else -> (old.ease - .2).coerceAtLeast(1.3) }) * 1000) / 1000
         val n = interval
         review[kp] = old.copy(dueDay = due(day,n), intervalDays = n, ease = ease,
-            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day, snoozedUntilDay = null)
+            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day,
+            snoozedUntilDay = null, intervalAnchorDay = null)
         updateJournal(day) { j -> when(result) { "PASS" -> j.copy(reviewPass = j.reviewPass + 1); "NEEDS_WORK" -> j.copy(reviewNeedsWork = j.reviewNeedsWork + 1); else -> j.copy(reviewFail = j.reviewFail + 1) } }
         mastery[kp] = (mastery[kp] ?: Mastery()).copy(needsRepair = result != "PASS")
     }
@@ -176,14 +178,21 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
         if (!old.solid && solid) {
             updateJournal(day) { it.copy(newlySolid = (it.newlySolid + kp).distinct()) }
             val n = 3
-            review[kp]?.let { review[kp] = it.copy(dueDay = due(day,n), intervalDays = n) }
+            review[kp]?.let { review[kp] = it.copy(dueDay = due(day,n), intervalDays = n,
+                snoozedUntilDay = null, intervalAnchorDay = null) }
         }
         if (!passed) review.remove(kp)
         if (changed != null && graded(changed) && !changed.voided && passed) {
             val isReview = changed.posed.payload.flag("review")
             // An unchecked mainline key only asks for another look; it cannot pass or fail a spaced review.
             if (!isReview || unverifiedMainline(changed)) {
-                if (!reviewPass(changed)) review[kp]?.let { review[kp] = it.copy(dueDay = minOf(it.dueDay, due(lookAgainDay(changed, event),1))) }
+                if (!reviewPass(changed)) review[kp]?.let {
+                    val nextDue = minOf(it.dueDay, due(lookAgainDay(changed, event),1))
+                    if (nextDue < it.dueDay) review[kp] = it.copy(dueDay = nextDue,
+                        intervalAnchorDay = it.intervalAnchorDay ?: (it.dueDay - it.intervalDays),
+                        // Unconfigured legacy data keeps its explicit snooze in the exam overlay.
+                        snoozedUntilDay = if (kp in configuredReviewStars) null else it.snoozedUntilDay)
+                }
             } else if (firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
                 schedule(kp, changed.day, if (changed.pass) "PASS" else if (changed.ratio >= .5) "NEEDS_WORK" else "FAIL")
             }
@@ -354,7 +363,8 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             }
             "review_snoozed" -> {
                 val until = maxOf(day + 1, p.num("untilDay"))
-                review[p.str("kpId")]?.let { review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until) }
+                review[p.str("kpId")]?.let { review[p.str("kpId")] = it.copy(dueDay = until, snoozedUntilDay = until,
+                    intervalAnchorDay = it.intervalAnchorDay ?: (it.dueDay - it.intervalDays)) }
                 if (revisit.containsKey(p.str("kpId"))) revisit[p.str("kpId")] = until
             }
             // exam_set only changes the overlay; normal intervals must survive postponement/removal.
@@ -375,9 +385,12 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") && !it.posed.payload.flag("drill") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
+    val reviewStars = configuredReviewStars.filterKeys { it in activeKpIds }
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
     return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = rawEvents.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
-        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
+        mastery = mastery.ordered(), review = review.mapValues { (kp, r) ->
+            r.onDay(asOfDay, exam, ReviewRetentionPolicy.target(reviewStars[kp]))
+        }.ordered(), reviewStars = reviewStars.ordered(),
         revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds, startedKpIds = startedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum(), weightsScope),

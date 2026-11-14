@@ -878,6 +878,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "set_exam" -> emit("exam_set",p)
                 "configure_course" -> {
                     if (runCatching { java.time.ZoneId.of(p.str("timeZone")) }.isFailure) { status="REJECTED"; error="INVALID_TIME_ZONE" }
+                    else if (!validReviewPriorities(p["reviewPriorities"])) { status="REJECTED"; error="INVALID_REVIEW_PRIORITIES" }
                     else emit("course_configured",p)
                 }
                 "set_exam_weights" -> {

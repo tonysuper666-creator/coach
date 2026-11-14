@@ -136,7 +136,8 @@ fun reviewBoard(
     val allocated = candidate.allocateVariants(variants).queue
     val weights = examWeights(view.events)
     // 权重与考前窗口都来自账本/课程配置：排序是真实排程，不是只把权重写在行里。
-    val due = scheduleOrder(allocated.dueEntries(day), day, weights, view.projection.examDay)
+    val due = scheduleOrder(allocated.dueEntries(day), day, weights, view.projection.examDay,
+        reviewStars = view.projection.reviewStars)
     val items = due.map { entry ->
         val kp = view.kp(entry.kpId) ?: KpRow(
             entry.kpId, view.projection.kpTitles[entry.kpId].orEmpty(), KpStatus.NEW, false, listOf(entry.kpId))

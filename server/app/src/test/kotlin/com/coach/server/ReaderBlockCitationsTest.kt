@@ -40,6 +40,10 @@ class ReaderBlockCitationsTest {
                 "size" to listOf(600, 800), "blocks" to JsonArray(listOf(json("id" to "b1", "kind" to "text",
                     "bbox" to listOf(20, 20, 500, 60), "reading_order" to 0, "column" to 0,
                     "status" to "ok", "in_reading_flow" to true, "text" to "Synthetic pears grow here.")))).toString())
+            // A bridged import page is confirmed against every page of the pinned version.
+            Files.writeString(version.resolve("pages/00001.json"), json("schema_version" to 1,
+                "doc_sha256" to pdfHash, "page_number" to 1, "blocks" to JsonArray(listOf(json("id" to "b1",
+                    "kind" to "text", "text" to "An unrelated synthetic preface.")))).toString())
             fun bind(sourceHash: String) = Files.writeString(root.resolve("source-bindings.json"),
                 json("schema_version" to 1, "bindings" to JsonArray(listOf(json("source_doc_id" to imported.docId,
                     "source_sha256" to sourceHash, "pdf_sha256" to pdfHash)))).toString())
@@ -223,6 +227,9 @@ class ReaderBlockCitationsTest {
                     "reading_order_status" to "single_column", "columns" to 1, "size" to listOf(600, 800),
                     "blocks" to JsonArray(listOf(json("id" to "b1", "kind" to "text", "bbox" to listOf(20,20,500,60),
                         "reading_order" to 0, "column" to 0, "status" to "ok", "in_reading_flow" to true, "text" to "Synthetic pears grow here.")))).toString())
+                Files.writeString(dir.resolve("pages/00001.json"), json("schema_version" to 1, "doc_sha256" to hash,
+                    "page_number" to 1, "blocks" to JsonArray(listOf(json("id" to "b1", "kind" to "text",
+                        "text" to "An unrelated synthetic preface.")))).toString())
             }
             val cache = ReaderCitationLayout(root)
             assertNull(cache.page(page))
@@ -251,6 +258,56 @@ class ReaderBlockCitationsTest {
             assertEquals("block", card.str("mode"))
             assertEquals(imported.sourceSha256, card.str("version"))
             assertEquals(page.sourceSha256, card.str("pdfVersion"))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun bridgedImportPageNeedsTextUniqueToThatPdfPageElseWholePageFallback() {
+        val root = Files.createTempDirectory("synthetic-bridged-page-")
+        try {
+            val pdfHash = "f".repeat(64)
+            val dir = Files.createDirectories(root.resolve("cache/v1/pages")).parent
+            Files.writeString(dir.parent.resolve("latest.json"), json("version" to "v1").toString())
+            fun pages(vararg texts: String, skip: Int = 0) {
+                dir.resolve("pages").toFile().listFiles()!!.forEach { it.delete() }
+                Files.writeString(dir.resolve("manifest.json"), json("schema_version" to 1,
+                    "doc_sha256" to pdfHash, "pages_total" to texts.size).toString())
+                texts.forEachIndexed { i, text -> if (i + 1 != skip) Files.writeString(dir.resolve("pages/%05d.json".format(i + 1)),
+                    json("schema_version" to 1, "doc_sha256" to pdfHash, "page_number" to i + 1, "page_index" to i,
+                        "page_base" to 1, "status" to "ok", "reading_order_status" to "single_column", "columns" to 1,
+                        "size" to listOf(600, 800), "blocks" to JsonArray(listOf(json("id" to "b1", "kind" to "text",
+                            "bbox" to listOf(20, 20, 500, 60), "reading_order" to 0, "column" to 0, "status" to "ok",
+                            "text" to text)))).toString()) }
+            }
+            val part = "Part One Synthetic Foundations"
+            val short = SourcePage("synthetic-book", 2, part, sourceSha256 = "d".repeat(64))
+            Files.writeString(root.resolve("source-bindings.json"), json("schema_version" to 1, "bindings" to JsonArray(
+                listOf(json("source_doc_id" to short.docId, "source_sha256" to short.sourceSha256, "pdf_sha256" to pdfHash)))).toString())
+            val cache = ReaderCitationLayout(root)
+            // I13-like counterexample: the whole short page equals text printed on other PDF pages too.
+            pages("Preface text for synthetic readers.", part, "Running notes. $part", part)
+            assertNull(cache.page(short))
+            val fallback = ReaderBlockCitations(SourcePack(listOf(short)), cache::page)
+            assertFalse(fallback.render().contains("S1B"))
+            val card = fallback.check(payload("S1Bguessed"))!!.second.single().jsonObject
+            assertEquals("page", card.str("mode"))
+            assertEquals(part, card.str("text"))
+            assertTrue(card.str("notice").contains("整页"))
+            // The same import page is accepted once its text occurs on this PDF page only.
+            pages("Preface text for synthetic readers.", part, "Running notes only.", "Closing synthetic remarks.")
+            assertEquals(pdfHash, cache.page(short)!!.pdfSha256)
+            val unique = ReaderBlockCitations(SourcePack(listOf(short)), cache::page)
+            assertEquals("block", unique.check(payload(token(unique)))!!.second.single().jsonObject.str("mode"))
+            // Misaligned import: most of its distinctive text is on another PDF page.
+            val shifted = short.copy(text = "$part. Pears ripen slowly in cold synthetic orchards every year.")
+            pages("Preface text for synthetic readers.", part,
+                "Pears ripen slowly in cold synthetic orchards every year.", "Closing synthetic remarks.")
+            assertNull(cache.page(shifted))
+            // Uniqueness cannot be proven when any page of the pinned version is absent.
+            pages("Preface text for synthetic readers.", part, "Running notes only.", "Closing synthetic remarks.", skip = 4)
+            assertNull(cache.page(short))
+            // Unbridged layout (the PDF itself) keeps its intrinsic page number; this gate only covers bridges.
+            pages("Preface text for synthetic readers.", part, "Running notes. $part", part)
+            assertNotNull(cache.page(short.copy(docId = "pdf-itself", sourceSha256 = pdfHash)))
         } finally { root.toFile().deleteRecursively() }
     }
 }

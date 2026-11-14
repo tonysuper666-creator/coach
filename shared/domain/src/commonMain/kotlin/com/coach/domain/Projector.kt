@@ -34,6 +34,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     require(rawEvents.zipWithNext().none { (a,b) -> a.seq == b.seq && a.id != b.id }) { "Conflicting ledger seq" }
     val events = learnerEvidence(rawEvents, includeAgentRun)
     val effectiveZone = zone ?: courseTimeZone(events)
+    val configuredReviewStars = courseReviewStars(events)
     val quickThreads = events.filter { it.type == "quick_ask_opened" }.mapNotNull { it.threadId }.toSet()
     val kpTitles = mutableMapOf<String,String>()
     val quickAsks = mutableMapOf<Long, QuickAskThread>()
@@ -189,7 +190,8 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
                     val nextDue = minOf(it.dueDay, due(lookAgainDay(changed, event),1))
                     if (nextDue < it.dueDay) review[kp] = it.copy(dueDay = nextDue,
                         intervalAnchorDay = it.intervalAnchorDay ?: (it.dueDay - it.intervalDays),
-                        snoozedUntilDay = null)
+                        // Unconfigured legacy data keeps its explicit snooze in the exam overlay.
+                        snoozedUntilDay = if (kp in configuredReviewStars) null else it.snoozedUntilDay)
                 }
             } else if (firstReview[kp to changed.day] == changed.id && changed.scheduled.add(kp)) {
                 schedule(kp, changed.day, if (changed.pass) "PASS" else if (changed.ratio >= .5) "NEEDS_WORK" else "FAIL")
@@ -383,7 +385,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") && !it.posed.payload.flag("drill") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
-    val reviewStars = courseReviewStars(events).filterKeys { it in activeKpIds }
+    val reviewStars = configuredReviewStars.filterKeys { it in activeKpIds }
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
     return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = rawEvents.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
         mastery = mastery.ordered(), review = review.mapValues { (kp, r) ->

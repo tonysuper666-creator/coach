@@ -24,11 +24,15 @@ priority/exam overlays, so repeated replay, serialization and clock changes do
 not cut the interval again. Postponing an exam restores the priority-adjusted
 schedule. Removing checked priority restores the reference schedule. A due-only
 look-again or snooze retains `intervalAnchorDay` before moving the deadline;
-neither can invent an earlier interval origin. A later miss that advances the
-deadline supersedes the earlier snooze; a later explicit snooze still wins.
+neither can invent an earlier interval origin. For configured topics a later
+miss that advances the deadline supersedes the earlier snooze; a later explicit
+snooze still wins.
 A real spaced-review result starts a new interval. Unconfigured schedules keep
 their existing due date outside the exam overlay, including look-again after
-snoozing. Original legacy due identities use the reference due date.
+snoozing. Inside the exam window, unconfigured legacy topics retain their
+explicit snooze after a miss, matching main; without a snooze the corrected
+interval origin still keeps a new look-again due the next day, not overdue.
+Original legacy due identities use the reference due date.
 
 Input is an optional, explicit map in the existing authenticated
 `configure_course` command / `course_configured` fact:

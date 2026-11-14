@@ -17,7 +17,7 @@ SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
                '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3']
 
 
-def portable_args(command, root):
+def portable_args(command, root, desktop=False):
     """Only explicit portable projects; ambiguous selectors stay on the Mac."""
     args = list(command)
     if args and args[0] in ('bash', 'sh'):
@@ -41,7 +41,7 @@ def portable_args(command, root):
             if ('/' in arg or '\\' in arg
                     or re.search(r'user\.home|org\.gradle\.(?:java\.home|jvmargs)', arg)):
                 return None
-        elif arg in ('--offline', '--rerun-tasks', '--stacktrace', '--info', '--debug',
+        elif arg in ('--offline', '--rerun', '--rerun-tasks', '--stacktrace', '--info', '--debug',
                      '--no-daemon', '--daemon', '--no-configuration-cache',
                      '--configuration-cache', '--no-build-cache', '--build-cache',
                      '--continue', '--dry-run', '-q', '--quiet'):
@@ -52,6 +52,9 @@ def portable_args(command, root):
             return None
         else:
             task = arg if arg.startswith(':') else ':' + arg
+            if desktop and task == ':desktopApp:test':
+                tasks.append(task)
+                continue
             if not re.fullmatch(r':(?:androidApp|shared:(?:domain|protocol|client|ui)):[A-Za-z0-9]+', task):
                 return None
             if re.search(r'connected|device|managed|install|uninstall|run|ios|macos|native|xcode|publish', task, re.I):
@@ -65,6 +68,27 @@ def portable_args(command, root):
                 return None
             tasks.append(task)
     return args if tasks and not value_next else None
+
+
+def session_option(command):
+    """Explicit desktop transport; --interactive=ID also pins the console session.
+
+    tools/dev/heavy --local python3 tools/dev/winbox.py --interactive ./gradlew :desktopApp:test
+    Use --ssh instead for the Session 0 diagnostic. Without either, routing is unchanged.
+    """
+    command = list(command)
+    option = command[0] if command else ''
+    if option == '--ssh':
+        return command[1:], True, False, None
+    if option == '--interactive' or option.startswith('--interactive='):
+        expected = None
+        if '=' in option:
+            value = option.partition('=')[2]
+            if not value.isdecimal() or not 1 <= int(value) < 0xFFFFFFFF:
+                raise ValueError('--interactive=SESSION_ID requires a positive console session ID')
+            expected = int(value)
+        return command[1:], True, True, expected
+    return command, False, False, None
 
 
 def runner_args(args):
@@ -138,15 +162,22 @@ def restore(archive, root):
 
 
 def main(command):
+    command, explicit, interactive, expected_session = session_option(command)
     executable = command[1] if command and command[0] in ('bash', 'sh') and len(command) > 1 else (command[0] if command else '')
     if Path(executable).name != 'gradlew':
+        if explicit:
+            raise ValueError('explicit Windows transport requires ./gradlew at the repository root')
         return 76
     root = Path(git(Path.cwd(), 'rev-parse', '--show-toplevel')).resolve()
-    args = portable_args(command, root)
+    args = portable_args(command, root, desktop=explicit)
     if args is None or Path.cwd().resolve() != root:
+        if explicit:
+            raise ValueError('unsupported explicit Windows command; desktop transport supports :desktopApp:test')
         return 76
     # These can alter user.home/Gradle configuration on the caller only.
     if any(os.environ.get(key) for key in ('JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS')):
+        if explicit:
+            raise ValueError('explicit Windows transport cannot carry local JVM environment overrides')
         return 76
     host = os.environ.get('COACH_WINBOX_HOST', 'winbox')
     if not re.fullmatch(r'[A-Za-z0-9_.@-]+', host) or host.startswith('-'):
@@ -179,17 +210,21 @@ def main(command):
         # Probe first, so an offline winbox costs no bundle write on the Mac.
         probe = ssh(f'-Command "New-Item -ItemType Directory -Force {remote} | Out-Null"')
         if probe.returncode:
+            if explicit:
+                return 70  # An explicitly requested Windows session must never fall back to Mac.
             return 255 if probe.returncode == 255 else 75
         try:
             android_config = android_config_fingerprint() if any(
                 arg.lstrip(':').startswith('androidApp:') for arg in args) else None
         except (OSError, ValueError) as error:
-            print(f'Coach heavy: {error}; using Mac configuration', file=sys.stderr)
-            return 75
+            print(f'Coach heavy: {error}', file=sys.stderr)
+            return 70 if explicit else 75
         with tempfile.TemporaryDirectory(prefix='coach-winbox-') as scratch:
             tmp = Path(scratch)
             sha = snapshot(root, tmp, ref)
             config = dict(job=job, sha=sha, args=runner_args(args), originalArgs=args, mode=mode,
+                          interactive=interactive, consoleSessionId=expected_session,
+                          interactiveSeconds=int(os.environ.get('COACH_WINBOX_INTERACTIVE_SECONDS', '900')),
                           androidConfig=android_config,
                           queueSeconds=int(os.environ.get('COACH_WINBOX_QUEUE_SECONDS', '900')))
             (out / 'request.json').write_text(json.dumps(config, indent=2) + '\n')
@@ -211,13 +246,16 @@ def main(command):
                 process.terminate()
                 process.wait()
                 raise
-        if remote_code in (75, 255, 70):
-            return remote_code
+        if remote_code in (75, 255) or (remote_code == 70 and not explicit):
+            return 70 if explicit else remote_code
         scp(f'{host}:{remote}/result.json', str(out / 'result.json'))
         report = json.loads((out / 'result.json').read_text(encoding='utf-8-sig'))
         if remote_code != report['exit']:
             raise ValueError('remote process and result exit codes disagree')
         scp(f'{host}:{remote}/gradle.log', str(out / 'gradle.log'))
+        if report.get('logs'):
+            for name in ('stdout.log', 'stderr.log'):
+                scp(f'{host}:{remote}/{name}', str(out / name))
         if report.get('artifacts'):
             scp(f'{host}:{remote}/artifacts.zip', str(out / 'artifacts.zip'))
             restore(out / 'artifacts.zip', root)
@@ -226,7 +264,7 @@ def main(command):
         return int(report['exit'])
     except ConnectionError as error:
         print(f'Coach heavy: transport failed: {error}', file=sys.stderr)
-        return 255
+        return 70 if explicit else 255
     finally:
         git(root, 'update-ref', '-d', ref)
 

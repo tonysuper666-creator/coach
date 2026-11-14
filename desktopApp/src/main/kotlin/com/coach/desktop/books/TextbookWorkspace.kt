@@ -45,6 +45,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
+import java.time.LocalDate
 
 /**
  * Answer writes that outlive the bookshelf composition.
@@ -595,6 +596,9 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
 }
 
 
+private fun LocalBookReview.dueLabel(): String =
+    dueDay?.let { "到期日：${LocalDate.ofEpochDay(it)}" } ?: "暂无到期日"
+
 @Composable
 private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {
     Desk(crumb = "复习", onBack = onBack, backLabel = "返回书架", showNavigation = false) {
@@ -602,6 +606,7 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 ${ui.reviews.size} 题", style = MaterialTheme.typography.headlineMedium)
             Text("答错、标为猜的题，以及自检时选择还需复习的题都在这里，保留原题和原文。")
+            Text("到期的题也会在这里。")
             Text("课时里取消猜答标记，不会自动移出已加入的复习题。")
             Text("上次作答是加入复习时的原题作答。")
             if (ui.reviews.isEmpty()) Text("暂时没有需要复习的题。")
@@ -612,6 +617,7 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
                         Text(review.bookTitle, style = MaterialTheme.typography.titleMedium)
                         Text("${review.lessonTitle} · ${review.mode.label}")
                         Text(review.practice.prompt)
+                        Text(review.dueLabel())
                         Text("上次作答：${review.originalAnswer}")
                         if (review.originalGuessed) Text("原题加入复习时标为猜的")
                         if (review.answer.guessed) Text("本轮复习标为猜的")
@@ -637,6 +643,7 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-review-question"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 · ${review.lessonTitle}", style = MaterialTheme.typography.headlineMedium)
+            Text(review.dueLabel())
             Text("上次作答：${review.originalAnswer}")
             Text("上次作答是加入复习时的原题作答。")
             if (review.originalGuessed) Text("原题加入复习时标为猜的")

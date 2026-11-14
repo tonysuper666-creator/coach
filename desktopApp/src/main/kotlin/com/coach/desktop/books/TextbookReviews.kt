@@ -11,6 +11,7 @@ internal data class LocalBookReview(
     val bookTitle: String, val lessonTitle: String, val practice: Practice,
     val originalAnswer: String, val originalGuessed: Boolean = false,
     val answer: PracticeAnswer = PracticeAnswer(), val completed: Boolean = false,
+    val dueDay: Long? = null,
 )
 
 internal fun Practice.needsReview(mode: QuestionMode, answer: PracticeAnswer): Boolean =

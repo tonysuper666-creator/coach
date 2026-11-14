@@ -244,10 +244,11 @@ internal class TextbookLibrary(val directory: Path,
             getInt("understood").let { if (wasNull()) null else it == 1 }, getInt("answer_guessed") == 1), getInt("completed") == 1,
         )
         val due = getLong("due_day").let { if (wasNull()) null else it }
+        val projected = stored.copy(dueDay = due)
         // Keep the prior response on disk until a new response is saved. Read-only projection
         // reopens a completed original only when due, with a fresh response rather than its old key.
         return if (stored.completed && due != null && due <= day)
-            stored.copy(answer = PracticeAnswer(), completed = false) else stored
+            projected.copy(answer = PracticeAnswer(), completed = false) else projected
     }
 
     @Synchronized fun reviews(): List<LocalBookReview> = database().use { db ->

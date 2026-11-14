@@ -4,6 +4,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.*
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
+import androidx.compose.ui.graphics.toAwtImage
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.*
 import com.coach.client.db.ClientDatabase
@@ -12,6 +13,7 @@ import com.coach.protocol.*
 import kotlinx.serialization.json.*
 import java.io.File
 import java.security.MessageDigest
+import javax.imageio.ImageIO
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -30,6 +32,74 @@ class WeeklyReaderTest {
         for (status in listOf("guessed", "pending", "missed", "new"))
             assertFalse(factMastered("F1", listOf(json("factIds" to listOf("F1"), "status" to status))))
         assertTrue(factMastered("F1", listOf(json("factIds" to listOf("F1"), "status" to "mastered"))))
+    }
+    @Test fun selectionAnswerOpensBoundBlockAndExplicitPageFallbackWithoutFetchingAnotherPage() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        ClientDatabase.Schema.create(driver)
+        val transport = object : LedgerTransport {
+            override suspend fun hello(epoch: String?): Hello = error("unused")
+            override suspend fun snapshot(course: String): Snapshot = error("unused")
+            override suspend fun events(course: String, after: Long): EventsPage = error("unused")
+            override suspend fun command(command: WireCommand): Receipt = error("unused")
+            override suspend fun watch(onLedger: suspend () -> Unit) = error("unused")
+        }
+        val engine = SyncEngine(ClientDatabase(driver), "synthetic", transport, listOf("C"), { "id" },
+            { bytes -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } })
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val blockText = "Synthetic pears grow here."
+        val pageText = "Synthetic fallback page. The block position is uncertain."
+        val answer = json("text" to "Synthetic explanation【S1B1】【S2】", "sources" to JsonArray(listOf(
+            json("anchor" to "S1B1", "docId" to "internal-doc-id", "pdfPage" to 7, "mode" to "block",
+                "text" to blockText, "version" to "a".repeat(64), "pdfVersion" to "b".repeat(64),
+                "blockId" to "internal-block-id", "startUtf16" to 7, "endUtf16" to 33),
+            json("anchor" to "S2", "docId" to "internal-doc-id", "pdfPage" to 8, "mode" to "page",
+                "text" to pageText, "notice" to "这一段的位置无法确认，显示已核对的整页。"))))
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            requests += exchange.requestURI.path
+            val response = (if (exchange.requestURI.path.endsWith("/explain")) answer.toString() else "{}").toByteArray()
+            exchange.sendResponseHeaders(200, response.size.toLong())
+            exchange.responseBody.use { it.write(response) }
+        }
+        server.start()
+        try {
+            val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account", "C")
+            val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+            val c = CoachController("C", engine, tutor, formatClock = { "" }, course = http)
+            val readingState = json("dark" to true, "focus" to true, "marks" to JsonArray(listOf(mark)))
+            var state = readingState
+            runDesktopComposeUiTest(900, 700) {
+                setContent {
+                    WeeklyReader(c, 1, listOf(section), section, emptyList(), listOf(mark), state,
+                        rememberScrollState(), "", { transform -> state = transform(state) }, {}, { _, _ -> }, {}, {}, {})
+                }
+                onNodeWithTag("reader-text").performScrollTo().performSemanticsAction(SemanticsActions.SetSelection) { it(0, 9, false) }
+                onNodeWithText("再讲一遍").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("reader-source-S1B1").fetchSemanticsNodes().isNotEmpty() }
+                for ((id, text, label) in listOf(Triple("S1B1", blockText, "对应原文段落"),
+                    Triple("S2", pageText, "这一段的位置无法确认，显示已核对的整页。"))) {
+                    onNodeWithTag("reader-source-$id").performClick()
+                    onNodeWithText(label).assertIsDisplayed()
+                    onNodeWithTag("reader-source-content").assertTextEquals(text).assertIsDisplayed()
+                    onNodeWithText("internal-doc-id", substring = true).assertDoesNotExist()
+                    onNodeWithText("internal-block-id", substring = true).assertDoesNotExist()
+                    val out = File("build/screens/weekly-reader-citation-$id.png").also { it.parentFile.mkdirs() }
+                    ImageIO.write(onNode(isDialog() and hasAnyDescendant(hasTestTag("reader-source-content")))
+                        .captureToImage().toAwtImage(), "png", out)
+                    onNodeWithText("返回追问").performClick()
+                    onNodeWithText(answer.str("text")).assertIsDisplayed()
+                }
+                onNodeWithText("返回阅读").performClick()
+                onNodeWithTag("reader-text").performScrollTo().assertIsDisplayed()
+                onNode(hasText(section.str("body")) and hasAnyAncestor(hasTestTag("reader-text")),
+                    useUnmergedTree = true).assertIsDisplayed()
+                onNodeWithText("浅色阅读").assertIsDisplayed()
+                onNodeWithText("退出专心读").assertIsDisplayed()
+                assertEquals(readingState, state)
+            }
+            assertEquals(1, requests.count { it.endsWith("/explain") })
+            assertFalse(requests.any { it.contains("/sources/") }, "verified snapshots must not be replaced by a page GET")
+        } finally { server.stop(0); driver.close() }
     }
     @Test fun realSelectionAutosavesNoteAndSurvivesDatabaseReopenWithoutCrossAccountOrWeekLeakage() {
         val file = File.createTempFile("reader-synthetic", ".db")

@@ -1406,6 +1406,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
 
+    /** Recheck the exact evidence snapshot before releasing a delayed reader answer. */
+    fun readerSourceCurrent(course: String, page: SourcePage, scope: com.coach.domain.scope.VisibleScope): Boolean {
+        if (!page.learnerVisible || page.pdfPage <= 0 || !scope.permits(page.docId, page.pdfPage, page.learnerVisible)) return false
+        val visible = browsablePage(course, page.docId, page.pdfPage) ?: return false
+        if (visible.str("text") != page.text) return false
+        return query("SELECT blob_sha256 FROM source_docs WHERE course_id=? AND doc_id=? AND tutor_visible=1",
+            course, page.docId) { it.getString(1) == page.sourceSha256 }.singleOrNull() == true
+    }
+
     /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */
     fun constructedSupply(course: String): Map<String,Int> = query(
         """SELECT k.kp_id,count(*) FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)
@@ -1423,9 +1432,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         for (table in listOf("fts_en","fts_zh")) {
             val expression = terms.filter { table == "fts_en" || it.length >= 3 }.joinToString(" OR ") { "\"$it\"" }
             if (expression.isBlank()) continue
-            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
+            found += query("SELECT p.doc_id,p.pdf_page,p.text,bm25($table),d.title,d.kind,d.learner_visible,d.blob_sha256 FROM $table JOIN source_pages p ON p.doc_id=$table.doc_id AND p.pdf_page=$table.pdf_page JOIN source_docs d ON d.doc_id=p.doc_id WHERE $table MATCH ? AND d.course_id=? AND d.tutor_visible=1 ORDER BY bm25($table)",expression,course) {
                 SourcePage(it.getString(1),it.getInt(2),it.getString(3),-it.getDouble(4),
-                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()))
+                    it.getInt(7) == 1 && tutorSourceAllowed(it.getString(1),it.getString(5).orEmpty(),it.getString(6).orEmpty()), it.getString(8))
             }
         }
         val unique = found.groupBy { it.key }.values.map { it.maxBy { page -> page.score } }

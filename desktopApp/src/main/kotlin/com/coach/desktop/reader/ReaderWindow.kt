@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
@@ -901,6 +902,14 @@ private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: Reade
     if (session.noteLine >= 0) Text(if (session.draftsKept()) "上下键选一行，回车确认，Esc 关闭" else "上下键选一行，回车确认，Esc 放弃", Modifier.testTag("note-pick-hint").padding(top = 4.dp), fontSize = 12.sp, color = Accent)
     session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
     NotesSection(session, remote, view)
+    if (session.noteDraft != null) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { session.requestNoteSave() }, enabled = !session.noteSaving,
+                modifier = Modifier.testTag("reader-note-save")) { Text("保存批注") }
+            TextButton(onClick = { session.cancelNote() },
+                modifier = Modifier.testTag("reader-note-close")) { Text("关闭编辑区") }
+        }
+    }
 }
 
 @Composable

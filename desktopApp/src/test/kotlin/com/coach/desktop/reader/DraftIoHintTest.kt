@@ -74,9 +74,8 @@ class DraftIoHintTest {
         env.store.failPuts = true; s.editNote("已保存的文字+"); assertTrue(s.persistFailed)
         s.cancelNote()                                               // 关闭
         env.store.failPuts = false
-        val (s2, _) = env.session()
-        openLine(s2, 0)                                              // 重新打开已保存的批注
-        assertEquals("已保存的文字", s2.noteText); assertFalse(s2.persistFailed, "重开已保存的编辑器：没有未落盘的新文字，不该再警示"); assertTrue(s2.draftsKept())
+        openLine(s, 0)                                               // 同一会话里重新打开已保存的批注
+        assertEquals("已保存的文字", s.noteText); assertFalse(s.persistFailed, "重开已保存的编辑器：没有未落盘的新文字，不该再警示"); assertTrue(s.draftsKept())
     }
 
     @Test fun aLateAckFromAnEarlierEditorNeverClearsTheCurrentEditorsFailureWarning() = withEnv { env ->

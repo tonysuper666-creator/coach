@@ -174,6 +174,42 @@ class ReaderBlockCitationsTest {
         assertNull(uniqueReaderRange("aaaa", "aaa"))
     }
 
+    @Test fun schemaOneImplicitTextFlowStillRequiresTrustedOrderAndHonorsExplicitExclusion() {
+        val root = Files.createTempDirectory("synthetic-schema-one-flow-")
+        try {
+            val dir = Files.createDirectories(root.resolve("cache/v1/pages")).parent
+            Files.writeString(dir.parent.resolve("latest.json"), json("version" to "v1").toString())
+            Files.writeString(dir.resolve("manifest.json"), json("schema_version" to 1,
+                "doc_sha256" to page.sourceSha256, "pages_total" to 2).toString())
+            fun write(flow: JsonElement? = null, reversed: Boolean = false) {
+                fun block(id: String, order: Int, top: Int, text: String) = JsonObject(
+                    json("id" to id, "kind" to "text", "bbox" to listOf(20, top, 500, top + 20),
+                        "reading_order" to order, "column" to 0, "status" to "ok", "text" to text) +
+                        (flow?.let { mapOf("in_reading_flow" to it) } ?: emptyMap()))
+                val blocks = if (reversed) listOf(block("b1", 0, 100, "Synthetic pears grow here."),
+                    block("b2", 1, 20, "Other text.")) else listOf(block("b1", 0, 20, "Synthetic pears grow here."))
+                Files.writeString(dir.resolve("pages/00002.json"), json("schema_version" to 1,
+                    "doc_sha256" to page.sourceSha256, "page_number" to 2, "page_index" to 1,
+                    "page_base" to 1, "status" to "ok", "reading_order_status" to "single_column",
+                    "columns" to 1, "size" to listOf(600, 800), "blocks" to JsonArray(blocks)).toString())
+            }
+            val cache = ReaderCitationLayout(root)
+            // schema1's producer omits this field for flowing text, and writes false for exclusions.
+            write()
+            assertTrue(cache.page(page)!!.page.blocks.single().inReadingFlow)
+            val implicit = ReaderBlockCitations(SourcePack(listOf(page)), cache::page)
+            assertEquals("block", implicit.check(payload(token(implicit)))!!.second.single().jsonObject.str("mode"))
+            write(JsonPrimitive(false))
+            val excluded = ReaderBlockCitations(SourcePack(listOf(page)), cache::page)
+            assertFalse(excluded.render().contains("S1B"))
+            assertEquals("page", excluded.check(payload("S1"))!!.second.single().jsonObject.str("mode"))
+            write(JsonNull)
+            assertNull(cache.page(page)) // Explicit malformed metadata does not inherit the default.
+            write(reversed = true)
+            assertNull(cache.page(page)) // Implicit flow also participates in the independent order check.
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun completeCacheMustMatchFullHashAndPhysicalPageAndBeUnique() {
         val root = Files.createTempDirectory("synthetic-citation-layout-")
         try {

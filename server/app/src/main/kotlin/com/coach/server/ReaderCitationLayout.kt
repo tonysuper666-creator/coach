@@ -55,7 +55,9 @@ internal class ReaderCitationLayout(private val root: Path) {
             val b = value.jsonObject
             LayoutBlock(s(b, "id")!!, s(b, "kind")!!, nums(b["bbox"]).orEmpty(), b.getValue("reading_order").jsonPrimitive.int,
                 b["column"]?.jsonPrimitive?.int ?: 0, s(b, "status") ?: "unknown", s(b, "text"),
-                b["in_reading_flow"]?.jsonPrimitive?.boolean ?: false, s(b, "fallback"), s(b, "raw_label"))
+                // schema1 omits this flag for flowing text; tables/figures explicitly opt out.
+                // Match LayoutCache's producer contract, including its independent order check.
+                b["in_reading_flow"]?.jsonPrimitive?.boolean ?: true, s(b, "fallback"), s(b, "raw_label"))
         }
         if (blocks.map { it.id }.distinct().size != blocks.size ||
             blocks.map { it.readingOrder }.distinct().size != blocks.size ||

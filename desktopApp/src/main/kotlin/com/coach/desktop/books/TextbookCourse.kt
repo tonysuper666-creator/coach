@@ -32,6 +32,23 @@ internal data class PracticeAnswer(val text: String = "", val revealed: Boolean 
 internal object StudyCoachCourse {
     private val heading = Regex("^(?:#{1,6}\\s+|第[一二三四五六七八九十百0-9]+[章节篇]|(?:Chapter|Section)\\s+\\d|\\d+(?:\\.\\d+)+\\s+).+", RegexOption.IGNORE_CASE)
 
+    // Source-only recognition must not re-plan existing lessons or change saved answer keys.
+    private val wordedSourceHeading = Regex(
+        "^(?:Chapter|Section)\\s+(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve)" +
+            "(?:\\s*[-–—:]\\s*\\S.*)?$",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Only quote body text on the requested physical page; a title alone supplies no quote. */
+    fun sourceQuote(lesson: BookLesson, pdfPage: Int): String? = lesson.blocks.asSequence()
+        .filter { it.page == pdfPage && !it.heading }
+        .map { block ->
+            block.text.lineSequence()
+                .filterNot { it.length <= 150 && wordedSourceHeading.matches(it.trim()) }
+                .joinToString("\n").trim()
+        }
+        .firstOrNull { it.isNotEmpty() }
+
     fun blocks(bookId: String, pages: List<BookPage>): List<SourceBlock> = buildList {
         for (page in pages) {
             // Keep offsets in the original extracted page. Normalize only fingerprints:

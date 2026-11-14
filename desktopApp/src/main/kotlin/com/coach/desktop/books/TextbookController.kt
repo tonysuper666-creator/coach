@@ -152,10 +152,17 @@ internal class TextbookController(val library: TextbookLibrary) {
             prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
     }
 
-    suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer): Boolean {
+    suspend fun startReviewVariant() = action {
+        val current = mutable.value.review ?: return@action
+        val review = library.startReviewVariant(current)
+        mutable.update { it.copy(review = review, answer = review.answer, reviews = library.reviews()) }
+    }
+
+    suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer, variantAttemptId: String? = null): Boolean {
         var saved = false
         action(showBusy = false) {
             val review = library.review(book, lesson, mode)
+            require(review.variant?.allocation?.attemptId == variantAttemptId) { "这道复习题已变更，请重新打开。" }
             library.saveReviewAnswer(review, answer)
             val updated = library.review(book, lesson, mode)
             val open = mutable.value.review

@@ -57,7 +57,7 @@ import java.time.LocalDate
  * it came from instead of the one that happens to be open when it finally runs.
  */
 internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
-    private data class Key(val book: String, val lesson: String, val mode: QuestionMode, val review: Boolean = false)
+    private data class Key(val book: String, val lesson: String, val mode: QuestionMode, val review: Boolean = false, val variantAttempt: String? = null)
 
     private val pending = mutableStateMapOf<Key, PracticeAnswer>()
     private var writer: Job? = null
@@ -71,12 +71,12 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
         pending[Key(book, lesson, mode)] ?: saved
 
     fun saveReview(entry: LocalBookReview, answer: PracticeAnswer) {
-        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] = answer
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true, variantAttempt = entry.variant?.allocation?.attemptId)] = answer
         startWriter()
     }
 
     fun currentReview(entry: LocalBookReview): PracticeAnswer =
-        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] ?: entry.answer
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true, variantAttempt = entry.variant?.allocation?.attemptId)] ?: entry.answer
 
     /** A failed write remains queued for an explicit retry, including when closing the window. */
     suspend fun flush(): Boolean {
@@ -97,7 +97,7 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
             val (key, answer) = pending.entries.firstOrNull()?.toPair() ?: break
             // The controller checks the identity and writes under the same lock, so a lesson switch that is
             // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
-            val saved = if (key.review) controller.saveReviewDraft(key.book, key.lesson, key.mode, answer)
+            val saved = if (key.review) controller.saveReviewDraft(key.book, key.lesson, key.mode, answer, key.variantAttempt)
                 else controller.saveDraft(key.book, key.lesson, key.mode, answer)
             if (!saved) return
             if (pending[key] == answer) pending.remove(key)
@@ -198,7 +198,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                             onSource = { openPracticeSource(review.practice) },
-                            onAnswer = { drafts.saveReview(review, it) })
+                            onAnswer = { drafts.saveReview(review, it) },
+                            onVariant = { run { if (drafts.flush()) controller.startReviewVariant() } })
                     }
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
@@ -631,7 +632,8 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
 @Composable
 private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, sourceFocus: FocusRequester,
     returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit,
-    onAnswer: (PracticeAnswer) -> Unit) {
+    onAnswer: (PracticeAnswer) -> Unit, onVariant: () -> Unit) {
+    var showOriginal by remember(review.variant?.allocation?.attemptId) { mutableStateOf(false) }
     LaunchedEffect(returnFocus, enabled) {
         if (enabled && returnFocus != null) {
             withFrameNanos { }
@@ -648,7 +650,25 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
             Text("上次作答是加入复习时的原题作答。")
             if (review.originalGuessed) Text("原题加入复习时标为猜的")
             if (review.answer.guessed) Text("本轮复习标为猜的")
-            SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
+            Text(review.variantMessage, modifier = Modifier.testTag("review-variant-state"))
+            if (review.canStartVariant) OutlinedButton(onClick = onVariant, enabled = enabled,
+                modifier = Modifier.testTag("review-start-variant")) { Text("练一道新变式") }
+            if (review.variant != null) {
+                OutlinedButton(onClick = { showOriginal = !showOriginal },
+                    modifier = Modifier.testTag("review-view-original")) { Text(if (showOriginal) "返回变式" else "查看原题与原答") }
+                Text("原题：${review.variant.origin.question.id} · 版本 ${review.variant.origin.question.version}")
+                Text("原作答记录：${review.variant.origin.attemptId}")
+            }
+            if (showOriginal) {
+                Text(review.originalPractice.prompt, modifier = Modifier.testTag("review-original-prompt"))
+                Text("原答：${review.originalAnswer}")
+                Text("原题依据：${review.originalPractice.reference}")
+            } else if (review.canAnswer) SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
+            else {
+                Text(review.originalPractice.prompt)
+                Text("原答：${review.originalAnswer}")
+                Text("原题依据：${review.originalPractice.reference}")
+            }
             if (review.completed) Text("这题已复习。", modifier = Modifier.testTag("local-review-completed"))
             else Text("这题保留在复习里；再答一次，或打开原文对照。")
         }

@@ -29,7 +29,11 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(val directory: Path,
+    variantPort: BookReviewVariantPort = BookReviewVariantPort { null },
     private val reviewDay: () -> Long = { logicalDay(System.currentTimeMillis(), ZoneId.systemDefault().id) }) {
+    private val variants = BookReviewVariants(variantPort) { review ->
+        book(review.book).lessons.single { it.id == review.lesson }.text
+    }
     init {
         Files.createDirectories(directory)
         database().use { db ->
@@ -46,6 +50,7 @@ internal class TextbookLibrary(val directory: Path,
                     completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
                 sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
             }
+            variants.initialize(db)
             // Older libraries already have these tables; CREATE IF NOT EXISTS never adds a column to them.
             ensureColumn(db, "answers", "guessed", "INTEGER NOT NULL DEFAULT 0")
             ensureColumn(db, "book_reviews", "wrong_guessed", "INTEGER NOT NULL DEFAULT 0")
@@ -256,7 +261,7 @@ internal class TextbookLibrary(val directory: Path,
         db.prepareStatement("SELECT * FROM book_reviews WHERE completed=0 OR due_day<=? ORDER BY rowid").use { sql ->
             sql.setLong(1, day)
             sql.executeQuery().use { rows ->
-                buildList { while (rows.next()) add(rows.asReview(day)) }
+                buildList { while (rows.next()) add(variants.project(db, rows.asReview(day))) }
             }
         }
     }
@@ -264,7 +269,7 @@ internal class TextbookLibrary(val directory: Path,
     @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
         db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
             sql.setString(1, book); sql.setString(2, lesson); sql.setString(3, mode.name)
-            sql.executeQuery().use { rows -> check(rows.next()) { "这道复习题已不在书架中。" }; rows.asReview() }
+            sql.executeQuery().use { rows -> check(rows.next()) { "这道复习题已不在书架中。" }; variants.project(db, rows.asReview()) }
         }
     }
 
@@ -296,6 +301,7 @@ internal class TextbookLibrary(val directory: Path,
         database().use { db ->
             db.autoCommit = false
             try {
+                variants.save(db, review, answer)
                 val day = reviewDay()
                 val current = db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
                     sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
@@ -330,10 +336,24 @@ internal class TextbookLibrary(val directory: Path,
         }
     }
 
+    @Synchronized fun startReviewVariant(review: LocalBookReview): LocalBookReview = database().use { db ->
+        db.autoCommit = false
+        try {
+            val current = db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
+                sql.executeQuery().use { row -> check(row.next()); row.asReview() }
+            }
+            require(!current.completed) { "这题已复习。" }
+            val result = variants.start(db, current)
+            db.commit()
+            result
+        } catch (failure: Exception) { db.rollback(); throw failure }
+    }
+
     @Synchronized fun activeReview(): LocalBookReview? = database().use { db ->
         db.createStatement().use { sql -> sql.executeQuery("""SELECT r.* FROM book_reviews r JOIN book_review_position p
             ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode WHERE p.slot=1""").use { rows ->
-            if (rows.next()) rows.asReview() else null
+            if (rows.next()) variants.project(db, rows.asReview()) else null
         } }
     }
 

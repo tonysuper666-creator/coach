@@ -22,6 +22,14 @@ import java.net.URLClassLoader
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.*
 
+/** Exercise the Windows textbook host on non-Windows test machines without spoofing the JVM OS. */
+internal object NativeWindowsTextbooksFixture {
+    @JvmStatic fun main(args: Array<String>) {
+        check(desktopUsesTextbooks("Windows 11", System.getenv("COACH_COURSE"), System.getProperty("coach.course")))
+        runWindowsTextbooks()
+    }
+}
+
 /** Actual desktop session/host with owned loopback HTTP and on-disk SQLite. No learner corpus. */
 @OptIn(ExperimentalTestApi::class)
 class WindowsReviewEntryTest {
@@ -81,9 +89,12 @@ class WindowsReviewEntryTest {
                 .filterIsInstance<URLClassLoader>().flatMap { it.urLs.asSequence() }
                 .map { File(it.toURI()).path }.toList()
             val classpath = (paths + System.getProperty("java.class.path").split(File.pathSeparator)).distinct().joinToString(File.pathSeparator)
+            // MainKt dispatches by the real OS. On Mac/Linux, an unconfigured MainKt is not
+            // the Windows book entry, so launch that exact host explicitly; never fake os.name.
+            val entry = if (!windows && !configured) NativeWindowsTextbooksFixture::class.java.name else "com.coach.desktop.MainKt"
             val builder = ProcessBuilder(java.path, "-Duser.home=$root", "-Dcoach.autoExitSeconds=6",
                 "-Dcoach.captures=$captureName@3", "-Dcoach.captureDir=$captures",
-                "-cp", classpath, "com.coach.desktop.MainKt")
+                "-cp", classpath, entry)
                 .redirectOutput(output).redirectError(errors)
             builder.environment().apply {
                 for (key in keys.filter { it.startsWith("COACH_") }.toList()) remove(key)
@@ -95,7 +106,7 @@ class WindowsReviewEntryTest {
             }
             val process = builder.start()
             val exit = process.waitFor() // The owned runCoach window exits via its existing six-second hook.
-            println("NATIVE_MAIN argv=MainKt COACH_COURSE=${if (configured) "C" else "<none>"} isolatedLoopback=true autoExit=6 pid=${process.pid()} exit=$exit")
+            println("NATIVE_MAIN argv=$entry COACH_COURSE=${if (configured) "C" else "<none>"} isolatedLoopback=true autoExit=6 pid=${process.pid()} exit=$exit")
             val stdout = output.readText()
             val nativeLog = stdout + "\n" + errors.readText()
             assertEquals(0, exit, nativeLog)

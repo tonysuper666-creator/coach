@@ -597,7 +597,7 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
 
 
 private fun LocalBookReview.dueLabel(): String =
-    dueDay?.let { "到期日：${LocalDate.ofEpochDay(it)}" } ?: "暂无到期日"
+    dueDay?.let { "已在复习队列 · 计划下次：${LocalDate.ofEpochDay(it)}" } ?: "暂无到期日"
 
 @Composable
 private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {

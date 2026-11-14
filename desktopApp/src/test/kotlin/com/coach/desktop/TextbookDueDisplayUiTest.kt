@@ -51,12 +51,12 @@ class TextbookDueDisplayUiTest {
         runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
             setContent { WindowsTextbookHost(c) { null } }
             today(c)
-            onNodeWithText("到期日：$date").assertExists()
+            onNodeWithText("已在复习队列 · 计划下次：$date").assertExists()
             onNodeWithText("上次作答：$wrong").assertExists()
             capture("01-list.png")
             onNodeWithTag("local-review-item-0").performClick()
             ready(c) { it.screen == BookScreen.REVIEWING }
-            onNodeWithText("到期日：$date").assertExists()
+            onNodeWithText("已在复习队列 · 计划下次：$date").assertExists()
             onNodeWithText(practice.prompt).assertExists()
             onNodeWithText("上次作答：$wrong").assertExists()
             capture("02-question.png")
@@ -78,18 +78,48 @@ class TextbookDueDisplayUiTest {
         runSkikoComposeUiTest(size = Size(1440f, 900f), density = Density(1f)) {
             setContent { WindowsTextbookHost(reopened) { null } }
             ready(reopened) { it.screen == BookScreen.REVIEWING }
-            onNodeWithText("到期日：$nextDate").assertExists()
+            onNodeWithText("已在复习队列 · 计划下次：$nextDate").assertExists()
             onNodeWithText("上次作答：$wrong").assertExists()
             onNodeWithText(practice.prompt).assertExists()
             capture("03-reopened.png")
             today(reopened)
-            onNodeWithText("到期日：$nextDate").assertExists()
+            onNodeWithText("已在复习队列 · 计划下次：$nextDate").assertExists()
             assertEquals(1, reopenedLibrary.reviews().size)
         }
         DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
             db.createStatement().use { sql -> sql.executeQuery("SELECT count(*) FROM book_reviews").use { rows ->
                 assertTrue(rows.next()); assertEquals(1, rows.getInt(1))
             } }
+        }
+    }
+
+    @Test fun freshlyWrongQuestionIsAvailableBeforeItsPlannedNextDate() {
+        val root = Files.createTempDirectory("due-next-date-host-")
+        val day = 21000L
+        val library = TextbookLibrary(root.resolve("library")) { day }
+        val book = library.importBook(syntheticTextbook(root.resolve("synthetic")))
+        val lesson = book.lessons.first()
+        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)!!
+        val wrong = practice.options.first { it != practice.answer }
+        library.saveAnswer(book.id, lesson.id, QuestionMode.CHOICE, PracticeAnswer(wrong, true))
+        val review = library.reviews().single()
+        assertEquals(day + 1, review.dueDay)
+        assertFalse(review.completed)
+        val label = "已在复习队列 · 计划下次：${LocalDate.ofEpochDay(day + 1)}"
+        val c = TextbookController(library)
+        runSkikoComposeUiTest(size = Size(946f, 690f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(c) { null } }
+            today(c)
+            onNodeWithText(label).performScrollTo().assertIsDisplayed()
+            capture("06-fresh-wrong-list.png")
+            onNodeWithTag("local-review-item-0").performClick()
+            ready(c) { it.screen == BookScreen.REVIEWING }
+            onNodeWithText(label).assertIsDisplayed()
+            onNodeWithText(practice.prompt).assertExists()
+            onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
+            ready(c) { it.answer.revealed }
+            waitUntil(timeoutMillis = 20_000) { library.reviews().isEmpty() }
+            assertEquals(day + 2, library.reviewDueDay(review))
         }
     }
 

@@ -169,11 +169,25 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onSource = { practiceSource = null; run { controller.source() } },
                         onPracticeSource = { practice ->
                             val lesson = book.lessons[book.lessonIndex]
-                            val matches = lesson.blocks.filterNot { it.heading }.flatMap { block ->
-                                Regex(Regex.escape(practice.reference)).findAll(block.text).map { block.page }.toList()
+                            // 本题依据取自整节正文（lesson.text 以 "\n\n" 拼接各正文块），
+                            // 所以整段查找后再回落到命中的那个块，才能定位到块所在页。
+                            val body = lesson.blocks.filterNot { it.heading }
+                            val spans = ArrayList<Triple<SourceBlock, Int, Int>>(body.size)
+                            var cursor = 0
+                            for (block in body) {
+                                if (spans.isNotEmpty()) cursor += 2 // lesson.text 用 "\n\n" 拼接正文块
+                                spans += Triple(block, cursor, cursor + block.text.length)
+                                cursor += block.text.length
                             }
-                            val anchor = when (matches.size) {
-                                1 -> PracticeSource(matches.single(), practice.reference, null)
+                            val hits = Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
+                            val anchor = when (hits.size) {
+                                1 -> {
+                                    val start = hits.single().range.first
+                                    val owner = spans.firstOrNull { start >= it.second && start < it.third }
+                                        ?: spans.lastOrNull { start >= it.second }
+                                    if (owner == null) PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+                                    else PracticeSource(owner.first.page, practice.reference, null)
+                                }
                                 0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
                                 else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
                             }

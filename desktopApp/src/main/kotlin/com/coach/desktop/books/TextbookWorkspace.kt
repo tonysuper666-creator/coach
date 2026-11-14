@@ -559,7 +559,9 @@ private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFoc
 
 @Composable
 private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester) {
+    // draft = 已上屏的文字（写进答案/落盘的只有它）；field 带输入法的组合状态。组合中（如 ni'hao 还在选词）不写草稿，上屏后才写。
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
+    var field by remember(lesson, mode) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(answer.text, androidx.compose.ui.text.TextRange(answer.text.length))) }
     var typing by remember(lesson, mode) { mutableStateOf(false) }
     // Coming back from 今天/课程 rebuilds this screen with the answer the queue has already saved.
     // While the learner is typing the field owns the text, so a slower echo cannot overwrite keystrokes.
@@ -578,7 +580,10 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
             TextButton({ draft = ""; onAnswer(PracticeAnswer()) }) { Text("重新作答") }
         }
     } else {
-        OutlinedTextField(draft, { draft = it; onAnswer(PracticeAnswer(it)) }, label = { Text("写下你的理解") },
+        OutlinedTextField(field, { v ->
+            field = v
+            if (v.composition == null) { draft = v.text; onAnswer(PracticeAnswer(v.text)) }
+        }, label = { Text("写下你的理解") },
             minLines = 3, modifier = Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }.testTag("short-answer"))
         TextButton({ onAnswer(PracticeAnswer(draft, revealed = true)) }, enabled = draft.isNotBlank(),
             modifier = Modifier.testTag("reveal-reference")) { Text("对照原文自检") }

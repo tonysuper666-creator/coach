@@ -65,7 +65,7 @@ class ReaderRefusedSaveTest {
         val req = lb.seen.last { it.method == "POST" && it.rawPath.endsWith("/notes") }
         val body = Json.parseToJsonElement(req.body).jsonObject
         assertEquals(JsonPrimitive("va1"), body["version"]); assertEquals(JsonPrimitive(draft.id), body["id"]); assertEquals(JsonPrimitive("我的草稿"), body["note"])
-        // 504 不是 501：这种"不支持保存"要明确告诉用户关闭编辑区后不会保留
+        // 501 = 来源明确不支持保存：要告诉用户关闭编辑区后草稿不会保留
         assertTrue(NoteStatusRules.failureText(failed.failure).contains("关闭编辑区后"), "501 要明说草稿关闭后不保留")
     }
 

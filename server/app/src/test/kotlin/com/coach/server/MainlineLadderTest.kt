@@ -63,6 +63,60 @@ class MainlineLadderTest {
         assertEquals(1, one.priorityStar); assertEquals("verified", one.priorityStarState); assertEquals(1, one.priority)
     }
 
+    @Test fun citationPointsBelongToTheValidatedQuestionOrTextSelection() {
+        val dir = Files.createTempDirectory("synthetic-selection-points")
+        try {
+            val root = Files.createDirectories(dir.resolve("papers/mcq-mainline"))
+            var learning = approved(candidate())
+            fun write() {
+                val raw = json("id" to "fruit1", "type" to "mcq", "kp" to "fruit", "kp_week" to 1, "marks" to 1,
+                    "tier" to "detail", "key_state" to "VERIFIED", "stem" to candidate().str("stem"), "options" to listOf("One", "Two", "Three"),
+                    "answer" to 1, "source" to "Synthetic book p.1", "fact_ids" to listOf("F1"), "explanation" to "正确：Two.", "learning" to learning)
+                Files.writeString(root.resolve("W01.json"), json("id" to "synthetic-week", "course" to "SYNTHETIC", "kind" to "pack", "minutes" to 10,
+                    "sections" to JsonArray(listOf(json("title" to "Synthetic orchard", "items" to JsonArray(listOf(raw)))))).toString())
+            }
+            write()
+            Files.writeString(root.resolve("W01-facts.md"), """
+                ```jsonl
+                {"fact_id":"F1","fact":"Count pears.","type":"detail","source":"Synthetic p.1","kp":"fruit"}
+                {"fact_id":"F2","fact":"Later material.","type":"detail","source":"Synthetic p.9","kp":"later"}
+                ```
+            """.trimIndent())
+            Files.writeString(root.resolve("W01-notes.json"), json("schema_version" to 1, "week" to 1, "sections" to JsonArray(listOf(
+                json("section_id" to "orchard", "title" to "Orchard", "body" to "Count pears.", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic p.1")),
+                json("section_id" to "later", "title" to "Later", "body" to "Later material.", "fact_ids" to listOf("F2"), "sources" to listOf("Synthetic p.9"))
+            ))).toString())
+            LedgerStore(Files.createDirectories(dir.resolve("db"))).use { store ->
+                val mainline = Mainline(MockLibrary(dir.resolve("papers")))
+                val question = json("itemId" to "fruit1", "question" to "How many pears?")
+                val expected = mainline.selection(store, "SYNTHETIC", 1, question)
+                assertEquals(setOf("fruit"), expected.currentKps)
+                assertEquals("当前题：${candidate().str("stem")}\n学习提问：How many pears?", expected.quote)
+                for (section in listOf("orchard", "later", "unknown")) {
+                    assertEquals(expected, mainline.selection(store, "SYNTHETIC", 1, JsonObject(question + json(
+                        "sectionId" to section, "kpId" to "later", "currentKps" to listOf("later"), "quote" to "Substituted evidence"))))
+                }
+                assertEquals(io.ktor.http.HttpStatusCode.Conflict, assertFailsWith<MockError> {
+                    mainline.selection(store, "SYNTHETIC", 1, JsonObject(question + json("itemId" to "unknown", "sectionId" to "later")))
+                }.status)
+                val sections = mainline.week(store, "SYNTHETIC", 1)["notes"]!!.jsonArray
+                assertEquals(2, sections.size)
+                for (section in sections.map { it.jsonObject }) {
+                    val wire = json("sectionId" to section.str("section_id"), "version" to section.str("content_version"),
+                        "start" to 0, "end" to section.str("body").length, "quote" to section.str("body"))
+                    val selected = mainline.selection(store, "SYNTHETIC", 1, wire)
+                    assertEquals(setOf(if (section.str("section_id") == "orchard") "fruit" else "later"), selected.currentKps)
+                    assertEquals(section.str("body"), selected.quote)
+                    assertFailsWith<MockError> { mainline.selection(store, "SYNTHETIC", 1, JsonObject(wire + json("version" to "stale"))) }
+                }
+                // A changed approved candidate cannot leave behind a usable point or quote.
+                learning = JsonObject(learning + json("kp_id" to "later"))
+                write()
+                assertFailsWith<MockError> { mainline.selection(store, "SYNTHETIC", 1, question) }
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun runtimeFeedWithholdsRemovedContentButOriginalRecordsAndDontKnowRetriesSurvive() {
         val dir = Files.createTempDirectory("synthetic-ladder")
         try {

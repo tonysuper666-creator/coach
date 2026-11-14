@@ -1,7 +1,9 @@
 package com.coach.desktop.reader
 
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.material3.Text
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -31,10 +33,17 @@ fun main() {
         System.setProperty("skiko.renderApi", System.getenv("SKIKO_RENDER_API") ?: "SOFTWARE_FAST")
     }
     application {
+        val item = System.getProperty("coach.reader.item") ?: System.getenv("COACH_READER_ITEM")
+        val explanation = remember(item) { runCatching {
+            if (item == null) null else {
+                explanationConnection(item)
+            }
+        } }
+        DisposableEffect(explanation) { onDispose { explanation.getOrNull()?.first?.close() } }
         val libraryDir = System.getenv("COACH_LIBRARY_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
             ?: System.getProperty("coach.library.dir")?.takeIf(String::isNotBlank)?.let(Path::of)
-        val source = remember { ReaderSourceResolver.resolveInternal(libraryDirectory = libraryDir) }
-        val remote = remember(source) { ReaderRemote(source) }
+        val source = remember(item) { if (item == null) ReaderSourceResolver.resolveInternal(libraryDirectory = libraryDir) else null }
+        val remote = remember(source) { source?.let(::ReaderRemote) }
         val explicitDoc = System.getProperty("coach.reader.doc") ?: System.getenv("COACH_READER_DOC")
         val targetPage = System.getProperty("coach.reader.page")?.toIntOrNull() ?: System.getenv("COACH_READER_PAGE")?.toIntOrNull()
         val targetAnchor = System.getProperty("coach.reader.anchor") ?: System.getenv("COACH_READER_ANCHOR")
@@ -44,6 +53,7 @@ fun main() {
         }
 
         LaunchedEffect(remote) {
+            if (item != null || remote == null) return@LaunchedEffect
             remote.loadCatalog()
             val targetDoc = explicitDoc ?: remote.documents.firstOrNull()?.id ?: "orchard-text"
             if (targetPage != null) {
@@ -59,7 +69,11 @@ fun main() {
             title = "Coach 阅读器 · $docTitle",
             state = rememberWindowState(width = 1200.dp, height = 760.dp),
         ) {
-            ReaderWindow(session)
+            if (item == null) ReaderWindow(session)
+            else explanation.fold(
+                onSuccess = { configured -> configured?.let { ReaderExplanationWorkspace(it.second) } },
+                onFailure = { Text(it.message ?: "讲解窗口配置无效") },
+            )
             LaunchedEffect(window) {
                 delay(500)
                 val layer = window.skiaLayers().firstOrNull()

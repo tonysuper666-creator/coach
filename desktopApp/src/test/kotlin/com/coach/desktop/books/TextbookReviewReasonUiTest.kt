@@ -38,11 +38,13 @@ class TextbookReviewReasonUiTest {
             onNodeWithText("原题加入复习时标为猜的").assertExists()
             onNodeWithText("答错、标为猜的题，以及自检时选择还需复习的题都在这里，保留原题和原文。").assertExists()
             onNodeWithText("课时里取消猜答标记，不会自动移出已加入的复习题。").assertExists()
-            onNodeWithText("原题作答：${practice.answer}").assertExists()
+            onNodeWithText("上次作答：${practice.answer}").assertExists()
+            onNodeWithText("上次作答是加入复习时的原题作答。").assertExists()
             onAllNodesWithText("本轮复习标为猜的").assertCountEquals(0)
             onNodeWithTag("local-review-item-0").performClick()
             ready(controller) { it.screen == BookScreen.REVIEWING }
-            onNodeWithText("原题作答：${practice.answer}").assertExists()
+            onNodeWithText("上次作答：${practice.answer}").assertExists()
+            onNodeWithText("上次作答是加入复习时的原题作答。").assertExists()
             onNodeWithText("原题加入复习时标为猜的").assertExists()
             onNodeWithTag("guess-mark").performScrollTo().performClick()
             ready(controller) { it.review?.answer?.guessed == true }
@@ -77,12 +79,12 @@ class TextbookReviewReasonUiTest {
             onNodeWithTag("choice-${practice.options.indexOf(practice.answer)}").performScrollTo().performClick()
             ready(controller) { it.review?.answer?.revealed == true }
             assertFalse(TextbookLibrary(library.directory).reviews().single().completed)
-            onNodeWithText("原题作答：$wrong").assertExists()
+            onNodeWithText("上次作答：$wrong").assertExists()
             onAllNodesWithText("原题加入复习时标为猜的").assertCountEquals(0)
             onNodeWithText("本轮复习标为猜的").assertExists()
             onNodeWithText("返回复习列表").performClick()
             ready(controller) { it.screen == BookScreen.REVIEWS }
-            onNodeWithText("原题作答：$wrong").assertExists()
+            onNodeWithText("上次作答：$wrong").assertExists()
             onAllNodesWithText("原题加入复习时标为猜的").assertCountEquals(0)
             onNodeWithText("本轮复习标为猜的").assertExists()
         }
@@ -117,7 +119,7 @@ class TextbookReviewReasonUiTest {
             ready(controller) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("open-local-reviews").performScrollTo().performClick()
             ready(controller) { it.screen == BookScreen.REVIEWS }
-            onNodeWithText("原题作答：$wrong").assertExists()
+            onNodeWithText("上次作答：$wrong").assertExists()
             onAllNodesWithText("原题加入复习时标为猜的").assertCountEquals(0)
             onAllNodesWithText("本轮复习标为猜的").assertCountEquals(0)
         }

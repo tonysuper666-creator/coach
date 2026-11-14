@@ -154,7 +154,7 @@ internal class BookReviewVariants(private val port: BookReviewVariantPort,
             return
         }
         val current = project(db, review.copy(practice = review.originalPractice))
-        require(current.variant == v && current.practice == review.practice) { "这道变式已变更，请重新打开复习。" }
+        require(current.canAnswer && current.variant == v && current.practice == review.practice) { "这道变式已变更，请重新打开复习。" }
         db.prepareStatement("UPDATE book_review_variant_attempts SET answer=? WHERE book=? AND lesson=? AND mode=? AND attempt=?").use { sql ->
             sql.setString(1, answerJson(answer).toString()); sql.setString(2, review.book)
             sql.setString(3, review.lesson); sql.setString(4, review.mode.name); sql.setString(5, v.allocation.attemptId)

@@ -96,6 +96,7 @@ class BookReviewVariantTest {
         val due = f.reopen().reviews().single()
         assertFalse(due.completed); assertEquals(PracticeAnswer(), due.answer)
         assertFalse(due.canAnswer); assertTrue(due.canStartVariant)
+        assertFailsWith<IllegalArgumentException> { f.library.saveReviewAnswer(first, PracticeAnswer("Supported", true)) }
         val next = f.reopen().startReviewVariant(due)
         assertNotEquals(first.variant!!.allocation.question, next.variant!!.allocation.question)
         assertEquals(PracticeAnswer(), next.answer); assertTrue(next.canAnswer)

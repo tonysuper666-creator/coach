@@ -163,7 +163,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
             atBaseline -> null
             else -> text
         }
-        if (effective == null) { clearStored(d); return }
+        if (effective == null) { clearStored(d); persistFailed = false; return } // 没有需要落盘的未保存文字：不警示
         val base = if (fromStash) stashBase ?: d.baseRevision else d.baseRevision
         persistFailed = !st.put(StoredDraft(id, d.id, d.quote, effective, base, cleared = effective.isEmpty()))
         draftTick++
@@ -180,6 +180,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val base = sd.baseRevision ?: if (serverNote != null) { message = "这份本机草稿缺少原修订号，不能安全带回"; return false } else 0L
         noteDraft = NoteDraft(sd.noteId, doc.id, doc.version, v.pdfPage, v.textSha256, sd.identity.start, sd.identity.end, sd.quote, sd.note, base)
         noteText = sd.note; noteLine = -1; noteBaseline = serverNote?.note; noteAttempt = null; noteStash = null; stashBase = null; editGen++
+        persistFailed = false // 刚从本机读出来的，就是已落盘的
         return true
     }
 
@@ -190,7 +191,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         noteDraft = toSave.copy(baseRevision = revision)
         highlightNoteId = d.id
         clearStored(d)
-        if (noteText != noteBaseline) persistDraft(noteDraft!!, noteText)
+        if (noteText != noteBaseline) persistDraft(noteDraft!!, noteText) else persistFailed = false // 当前内容已被真实 ack，没有未落盘的文字
     }
 
     /** 已被关闭/换掉的编辑器收到迟到的 ack：服务端确实收下了这段文字，只清掉与之完全一致的本机草稿，不碰当前编辑器。 */
@@ -229,7 +230,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     /** 普通关闭编辑区/关书：未保存的文字留在本机，不等于放弃。 */
     fun cancelNote() { noteDraft?.let { persistDraft(it, noteText) }; clearEditor() }
 
-    private fun clearEditor() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null; stashBase = null; editGen++ }
+    private fun clearEditor() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null; stashBase = null; editGen++; persistFailed = false }
 
     private fun confirmLine() {
         val r = remote ?: return; val v = currentView() ?: return
@@ -242,7 +243,7 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
             range.first, end, quote, existing?.note.orEmpty(), existing?.revision ?: 0L)
         val local = identityOf(base)?.let { drafts?.get(it) }?.takeIf { it.quote == quote } // 同一锚点上本机留着的草稿
         if (local != null) { if (!takeStored(local, doc, v)) noteLine = -1; return } // 被拒绝的本机稿：不开基线编辑器，稿原样保留
-        editGen++
+        editGen++; persistFailed = false // 新打开的编辑器还没有未落盘的新文字
         noteDraft = base
         noteText = existing?.note.orEmpty(); noteLine = -1
         noteBaseline = existing?.note; noteAttempt = null; noteStash = null

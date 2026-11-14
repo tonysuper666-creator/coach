@@ -123,19 +123,19 @@ internal fun WeeklyReader(
                     TextButton(onClick = { onQuiz("", null) }, modifier = Modifier.testTag("mainline-skip")) { Text("跳过要点，直接做题") }
                     if (section != null) TextButton(onClick = { onQuiz(section.str("section_id"), null) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
                 }
-                Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 20.dp, vertical = 12.dp),
+                Column(Modifier.fillMaxSize().testTag("mainline-reading-scroll").verticalScroll(scroll).padding(horizontal = 20.dp, vertical = 12.dp),
                     horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Column(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         if (!focus) {
                             Text("本周要点", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("mainline-notes"))
                             TextButton(onClick = onRefresh) { Text("重新读取本周内容") }
                             for (s in sections) TextButton(onClick = { onSection(s.str("section_id")) }, modifier = Modifier.fillMaxWidth()) {
-                                Text((if (s.flag("mastered")) "✓ " else "○ ") + s.str("title"), Modifier.fillMaxWidth())
+                                Text((if (s.flag("mastered")) "✓ " else "○ ") + com.coach.client.displayTitle(s.str("title")), Modifier.fillMaxWidth())
                             }
                         }
                         if (section == null) Text(error.ifBlank { "本周要点尚未提供，可以直接做题。" })
                         else key(section.str("section_id")) {
-                            Text(section.str("title"), style = MaterialTheme.typography.titleLarge)
+                            Text(com.coach.client.displayTitle(section.str("title")), style = MaterialTheme.typography.titleLarge)
                             emphasis(section.strings("fact_ids"))
                             val text = section.str("body")
                             if (formatted) TextButton(onClick = { selectOriginal = !selectOriginal; selected = TextRange.Zero }) {
@@ -212,18 +212,19 @@ internal fun WeeklyReader(
                                 Text(if (map) "收起本周脉络" else "本周脉络：节 → 考点 → 题")
                             }
                             if (map) for (s in sections) {
-                                TextButton(onClick = { onSection(s.str("section_id")) }) { Text("要点：" + s.str("title")) }
-                                for (fact in s.strings("fact_ids")) {
+                                TextButton(onClick = { onSection(s.str("section_id")) }) { Text("要点：" + com.coach.client.displayTitle(s.str("title"))) }
+                                for ((index, fact) in s.strings("fact_ids").withIndex()) {
                                     val mastered = factMastered(fact, items)
                                     TextButton(onClick = { onSection(s.str("section_id")) }) {
-                                        Text((if (mastered) "✓ 已掌握 " else "○ 待练 ") + fact,
+                                        Text((if (mastered) "✓ 考点 ${index + 1} · 相关题均答对 · " else "○ 考点 ${index + 1} · ") + com.coach.client.displayTitle(s.str("title")),
                                             color = if (mastered) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     emphasis(listOf(fact))
                                     for (q in items.filter { fact in it.strings("factIds") })
                                         TextButton(onClick = { onQuiz(s.str("section_id"), q.str("id")) }, modifier = Modifier.padding(start = 16.dp)) {
-                                            Text("题 " + q.str("id") + " · " + when (q.str("status")) {
-                                                "mastered" -> "已掌握"; "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
+                                            val stem = q.str("stem").trim()
+                                            Text((if (stem.isEmpty()) "这一题" else "题：${stem.take(40)}") + " · " + when (q.str("status")) {
+                                                "mastered" -> com.coach.client.latestCorrectAttemptLabel(); "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
                                             })
                                         }
                                 }
@@ -251,7 +252,7 @@ internal fun WeeklyReader(
                         Text(answer!!.str("text").ifBlank { "这一段对不上课件或教材，暂时没法确认。" })
                         for (p in (answer!!["sources"] as? JsonArray).orEmpty().map { it.jsonObject }) {
                             TextButton(onClick = { page = p.str("docId") to p.num("pdfPage").toInt() }) {
-                                Text("【${p.str("anchor")}】${p.str("docId")} · PDF 第 ${p.num("pdfPage")} 页")
+                                Text("PDF 第 ${p.num("pdfPage")} 页")
                             }
                         }
                     }
@@ -265,7 +266,7 @@ internal fun WeeklyReader(
         }, confirmButton = { TextButton(onClick = { action = null }) { Text(if (answer == null && failure == null) "取消，返回阅读" else "返回阅读") } })
         page?.let { key ->
             val source by produceState<com.coach.client.SourcePage?>(null, key) { value = http.page(key.first, key.second) }
-            AlertDialog(onDismissRequest = { page = null }, title = { Text("${key.first} · PDF 第 ${key.second} 页") },
+            AlertDialog(onDismissRequest = { page = null }, title = { Text("PDF 第 ${key.second} 页") },
                 text = { Text(source?.text ?: "暂时取不到原文页。", Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) },
                 confirmButton = { TextButton(onClick = { page = null }) { Text("返回追问") } })
         }

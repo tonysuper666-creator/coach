@@ -36,6 +36,13 @@ getProjection:
 SELECT projection_json FROM projection_cache WHERE course_id=? AND version=? AND last_seq=? AND epoch=?;
 putProjection:
 INSERT INTO projection_cache VALUES(?,?,?,?,?) ON CONFLICT(course_id) DO UPDATE SET version=excluded.version,last_seq=excluded.last_seq,epoch=excluded.epoch,projection_json=excluded.projection_json;
+putProjectionIfCurrent:
+INSERT INTO projection_cache(course_id,version,last_seq,epoch,projection_json)
+SELECT :course, :version, :lastSeq, :epoch, :projectionJson
+WHERE coalesce((SELECT value FROM sync_meta WHERE key='epoch'),'') = :epoch
+  AND (SELECT coalesce(max(seq),0) FROM replica WHERE course_id=:course) = :lastSeq
+  AND (SELECT value FROM sync_meta WHERE key='serverProjection:' || :course) IS :snapshot
+ON CONFLICT(course_id) DO UPDATE SET version=excluded.version,last_seq=excluded.last_seq,epoch=excluded.epoch,projection_json=excluded.projection_json;
 clearProjections:
 DELETE FROM projection_cache;
 
@@ -51,6 +58,8 @@ putOfflineKey:
 INSERT OR IGNORE INTO offline_keys VALUES(?,?);
 offlineKeyAfterLock:
 SELECT k.correct_option_id FROM offline_keys k JOIN offline_items i USING(attempt_id) WHERE i.attempt_id=? AND i.command_id IS NOT NULL;
+lockOfflineSubmission:
+UPDATE offline_items SET answer=answer WHERE 0;
 lockOfflineAnswer:
 UPDATE offline_items SET answer=?,command_id=? WHERE attempt_id=? AND command_id IS NULL;
 putLocalGrade:

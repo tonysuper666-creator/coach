@@ -1,0 +1,94 @@
+{
+  "schema": "synthetic-runtime-contract-v1",
+  "synthetic": true,
+  "applicable_kps": [
+    "SYN-K1",
+    "SYN-K2",
+    "SYN-K3"
+  ],
+  "prerequisite_aliases": [
+    {
+      "from": "SYN-Q1@v1",
+      "to": "SYN-Q1@v2"
+    }
+  ],
+  "questions": [
+    {
+      "required_capabilities": [],
+      "prerequisite_refs": [],
+      "options": [
+        "1",
+        "2"
+      ],
+      "answer": 1,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q1",
+      "version": "v1",
+      "ref": "SYN-Q1@v1",
+      "kp": "SYN-K1",
+      "capability": "SYN-add",
+      "format": "mcq",
+      "stem": "What is one plus one?"
+    },
+    {
+      "required_capabilities": [],
+      "prerequisite_refs": [],
+      "options": [
+        "1",
+        "2"
+      ],
+      "answer": 1,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q1",
+      "version": "v2",
+      "ref": "SYN-Q1@v2",
+      "kp": "SYN-K1",
+      "capability": "SYN-add",
+      "format": "mcq",
+      "stem": "How many objects are one and one?"
+    },
+    {
+      "required_capabilities": [
+        "SYN-add"
+      ],
+      "prerequisite_refs": [
+        "SYN-Q1@v1"
+      ],
+      "options": null,
+      "answer": null,
+      "model_answer": "Two objects form a pair.",
+      "rubric": [
+        "States the number.",
+        "Explains the grouping."
+      ],
+      "teaching_kind": "concept",
+      "id": "SYN-Q2",
+      "version": "v1",
+      "ref": "SYN-Q2@v1",
+      "kp": "SYN-K2",
+      "capability": "SYN-explain",
+      "format": "essay",
+      "stem": "Explain how one object and another make a pair."
+    },
+    {
+      "required_capabilities": null,
+      "prerequisite_refs": null,
+      "options": null,
+      "answer": null,
+      "model_answer": null,
+      "rubric": null,
+      "teaching_kind": "concept",
+      "id": "SYN-Q3",
+      "version": "v1",
+      "ref": "SYN-Q3@v1",
+      "kp": "SYN-K3",
+      "capability": "SYN-review",
+      "format": "essay",
+      "stem": "Explain another grouping."
+    }
+  ]
+}

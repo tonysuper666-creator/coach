@@ -15,7 +15,7 @@ import java.nio.file.Path
 import kotlin.math.roundToLong
 
 internal data class MainlineFact(val id: String, val text: String, val type: String, val source: String, val kp: String, val anchor: String = "")
-internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String, val anchor: String = "") {
+internal data class MainlineItem(val unit: MockUnit, val tier: String, val factIds: List<String>, val source: String, val anchor: String = "", val learning: JsonObject? = null) {
     val verified get() = unit.keyState == "VERIFIED"
     val options get() = unit.options.mapIndexed { i, t -> Option("o$i", t) }
     val fingerprint get() = questionFingerprint(unit.stem, options)
@@ -54,7 +54,7 @@ internal fun explanationParts(text: String): JsonObject {
 
 /** One latest answer per question, matched by fingerprint so practice of the same question elsewhere also counts. */
 private class ChoiceHistory(events: List<Event>) {
-    data class Latest(val chosen: String, val guessed: Boolean, val day: Long)
+    data class Latest(val chosen: String, val guessed: Boolean, val day: Long, val dontKnow: Boolean = false)
     val latest = mutableMapOf<String, Latest>()
     init {
         val answers = events.filter { it.type == "answer_submitted" }.associateBy { it.payload.str("attemptId") }
@@ -66,9 +66,11 @@ private class ChoiceHistory(events: List<Event>) {
             if (attempt in voided || attempt !in graded) continue
             val letters = (posed.payload["letterMap"] as? JsonObject).orEmpty().mapValues { (it.value as? JsonPrimitive)?.contentOrNull.orEmpty() }
             val letter = answer.payload.str("answer").trim().uppercase()
+            if (posed.payload.flag("tryFirst")) continue
             val chosen = (posed.payload["options"] as? JsonArray).orEmpty().map { it.jsonObject }
-                .firstOrNull { letters[it.str("optionId")] == letter }?.str("text") ?: continue
-            latest[posed.payload.str("fingerprint")] = Latest(normalizeChoiceText(chosen), answer.payload.flag("guessed"), answer.occurredAt / 86_400_000)
+                .firstOrNull { letters[it.str("optionId")] == letter }?.str("text")
+            if (chosen == null && !answer.payload.flag("dontKnow")) continue
+            latest[posed.payload.str("fingerprint")] = Latest(normalizeChoiceText(chosen.orEmpty()), answer.payload.flag("guessed"), answer.occurredAt / 86_400_000, answer.payload.flag("dontKnow"))
         }
     }
     /** Mastered: the latest answer picks the current key, was not a guess, and someone has checked that key. */
@@ -77,6 +79,7 @@ private class ChoiceHistory(events: List<Event>) {
         val right = last.chosen == normalizeChoiceText(item.unit.options[item.unit.answer])
         return when {
             !item.verified -> "pending"
+            last.dontKnow -> "missed"
             right && last.guessed -> "guessed"
             right -> "mastered"
             else -> "missed"
@@ -86,8 +89,17 @@ private class ChoiceHistory(events: List<Event>) {
 
 /** Weekly choice mainline: packs and fact lists live under `mcq-mainline/` in the private generated directory, never in the repository. */
 class Mainline(private val library: MockLibrary, private val clock: () -> Long = System::currentTimeMillis,
-    private val random: java.util.Random = java.security.SecureRandom()) {
+    private val random: java.util.Random = java.security.SecureRandom(),
+    private val syntheticRuntime: SyntheticLadderRuntime? = null,
+    private val syntheticCapabilities: Set<String> = emptySet(),
+    private val syntheticRuntimeProvider: ((String) -> SyntheticLadderRuntime?)? = null) {
     private val dir: Path? get() = library.directory?.resolve("mcq-mainline")
+    private val syntheticReceipts = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, SyntheticMainlineReceipt>()
+    private fun syntheticFor(course: String, week: Int): SyntheticLadderRuntime? {
+        if (week != 1) return null
+        val runtime = if (syntheticRuntimeProvider != null) syntheticRuntimeProvider.invoke(course) else syntheticRuntime
+        return runtime?.takeIf { course == (it.courseId ?: "SYNTHETIC") }
+    }
 
     /** Packs are labelled with the course code, the ledger with its own id; the code is the first word of the course name. */
     private fun courseNames(events: List<Event>, course: String): Set<String> {
@@ -117,7 +129,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             val item = items.first { it.str("id") == unit.itemId }
             require(unit.type == "mcq") { "${unit.itemId} 不是选择题" }
             require(item.str("tier") in tiers) { "${unit.itemId} tier 只能是 setup、detail 或 bridge" }
-            MainlineItem(unit, item.str("tier"), item.strings("fact_ids"), item.str("source"), item.str("anchor"))
+            MainlineItem(unit, item.str("tier"), item.strings("fact_ids"), item.str("source"), item.str("anchor"), item["learning"] as? JsonObject)
         }.sortedBy { tiers.indexOf(it.tier) }
         val facts = if (!Files.isRegularFile(factsFile)) emptyList() else {
             val block = Regex("```jsonl\\s*\\n(.*?)```", RegexOption.DOT_MATCHES_ALL).find(Files.readString(factsFile))?.groupValues?.get(1).orEmpty()
@@ -159,7 +171,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
      * as `unlocated` for the whole course and never guessed onto a page, so the reader can say the index is incomplete.
      */
     internal fun pageStudy(store: LedgerStore, course: String, documentId: String, page: Int, locate: (String) -> Pair<String, Int>?): JsonObject {
-        val events = store.events(course)
+        val events = learnerEvidence(store.events(course))
         val (weeks, _) = weeks(courseNames(events, course))
         val history = ChoiceHistory(events)
         fun onPage(source: String) = refs(source).any { locate(it) == documentId to page }
@@ -191,7 +203,7 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
      */
     internal fun documentMap(store: LedgerStore, course: String, documentId: String, pages: Int, outline: List<OutlineNode>,
                              locate: (String) -> Pair<String, Int>?): JsonObject {
-        val events = store.events(course)
+        val events = learnerEvidence(store.events(course))
         val (weeks, _) = weeks(courseNames(events, course))
         val history = ChoiceHistory(events)
         var unlocated = 0; var ambiguous = 0; var outside = 0
@@ -249,7 +261,23 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
 
     /** The client cannot supply its own evidence or ask about an obsolete/forged selection. */
     internal fun selection(store: LedgerStore, course: String, number: Int, input: JsonObject): String {
+        syntheticFor(course, number)?.let { runtime ->
+            val q = runtime.questions.singleOrNull { it.ref == input.str("itemId") && runtime.ladder(it).eligible }
+                ?: throw MockError(HttpStatusCode.Conflict, "题目身份已改变，请返回后重试。")
+            val question = input.str("question").trim()
+            if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
+            return "当前题：${q.stem}\n学习提问：$question"
+        }
         val week = find(courseNames(store.events(course), course), number)
+        if (input.str("itemId").isNotBlank()) {
+            val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") && it.eligibleForLearning(courseNames(store.events(course), course), number,
+                weekPoints(store.events(course)).map { it.id }.toSet().takeIf { it.isNotEmpty() }) }
+                ?: throw MockError(HttpStatusCode.Conflict, "题目已更新或尚未通过核验，请刷新后再问。")
+            val question = input.str("question").trim()
+            if (question.isBlank() || question.length > 500) throw MockError(HttpStatusCode.BadRequest, "请写下要问的一句话。")
+            // The server supplies the current frozen stem, never a caller's substituted quote or key.
+            return "当前题：${item.unit.stem}\n学习提问：$question"
+        }
         val section = week.notes.firstOrNull { it.str("section_id") == input.str("sectionId") }
             ?: throw MockError(HttpStatusCode.Conflict, "要点已更新，请重新读取后再选中。")
         val text = section.str("body")
@@ -260,8 +288,8 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         return input.str("quote")
     }
 
-    fun home(store: LedgerStore, course: String): JsonObject {
-        val events = store.events(course)
+    fun home(store: LedgerStore, course: String, run: String? = null): JsonObject {
+        val events = learnerEvidence(store.events(course), run)
         val (weeks, invalid) = weeks(courseNames(events, course))
         val history = ChoiceHistory(events)
         return json("weeks" to JsonArray(weeks.map { w -> json("week" to w.week, "title" to w.title, "coverage" to coverage(w, history)) }),
@@ -269,18 +297,26 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
     }
 
     /** Questions in setup → detail → bridge order, without keys or explanations. */
-    fun week(store: LedgerStore, course: String, number: Int, shuffled: Boolean = false): JsonObject {
-        val events = store.events(course)
-        val week = find(courseNames(events, course), number)
+    fun week(store: LedgerStore, course: String, number: Int, shuffled: Boolean = false, learning: Boolean = false, run: String? = null): JsonObject {
+        syntheticFor(course, number)?.let { return it.mainlineWeek(syntheticCapabilities) }
+        val events = learnerEvidence(store.events(course), run)
+        val kpIds = weekPoints(events).map { it.id }.toSet().takeIf { it.isNotEmpty() }
+        val names = courseNames(events, course)
+        val week = find(names, number)
         val history = ChoiceHistory(events)
         return json("week" to week.week, "title" to week.title, "coverage" to coverage(week, history),
             "notes" to notes(week, history), "notesError" to week.notesError, "emphasis" to JsonArray(week.emphasis),
-            "items" to JsonArray(week.items.map { item ->
+            "learning" to learning, "runtime" to LedgerJson.encodeToJsonElement(LadderRuntimeContext()),
+            "withheldReasons" to JsonObject(week.items.flatMap { it.ladder(kpIds)?.contractIssues.orEmpty() }
+                .groupingBy { it }.eachCount().mapValues { JsonPrimitive(it.value) }),
+            "withheld" to if (learning) week.items.count { !it.eligibleForLearning(names, number, kpIds) } else 0,
+            "items" to JsonArray(week.items.filter { !learning || it.eligibleForLearning(names, number, kpIds) }.map { item ->
                 val layout = round(events, item)
                 val order = if (shuffled) optionOrder(item.fingerprint, layout, item.unit.options.size) else item.unit.options.indices.toList()
                 json("id" to item.unit.itemId, "tier" to item.tier, "stem" to item.unit.stem, "factIds" to item.factIds,
                     "options" to order.map { item.unit.options[it] }, "layout" to if (shuffled) layout else null,
-                    "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" })
+                    "status" to history.status(item), "keyState" to item.unit.keyState.ifBlank { "UNREVIEWED" },
+                    "ladder" to item.ladder(kpIds)?.let { LedgerJson.encodeToJsonElement(it) })
             }))
     }
 
@@ -290,11 +326,23 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
      * that sends none showed the pack order.
      */
     fun answer(store: LedgerStore, course: String, number: Int, input: JsonObject): JsonObject = store.tutorTransaction {
+        val run = input.str("agentRunId").ifBlank { null }
+        val metadata = validatedRun(run)
+        syntheticFor(course, number)?.let { runtime ->
+            val response = runtime.mainlineAnswer(input, syntheticCapabilities)
+            val essay = runtime.linkedEssay(input.str("itemId"))
+            val key = course to response.str("attemptId")
+            val source = runtime.questions.single { it.ref == input.str("itemId") }
+            val receipt = syntheticReceipts.putIfAbsent(key, SyntheticMainlineReceipt(source, essay?.ref, essay?.essayDigest(), response))
+            if (receipt != null && receipt.itemId != input.str("itemId")) throw MockError(HttpStatusCode.Conflict, "这次提交已用于另一道题。")
+            return@tutorTransaction receipt?.response ?: response
+        }
         val events = events(course)
         val week = find(courseNames(events, course), number)
         val item = week.items.firstOrNull { it.unit.itemId == input.str("itemId") } ?: throw MockError(HttpStatusCode.NotFound, "找不到这道题")
         val unit = item.unit
-        var choice = (input["choice"] as? JsonPrimitive)?.intOrNull?.takeIf { it in unit.options.indices } ?: throw MockError(HttpStatusCode.BadRequest, "请选一个选项")
+        var dontKnow = input.flag("dontKnow")
+        var choice = if (dontKnow) -1 else (input["choice"] as? JsonPrimitive)?.intOrNull?.takeIf { it in unit.options.indices } ?: throw MockError(HttpStatusCode.BadRequest, "请选一个选项")
         var guessed = input.flag("guessed")
         val submission = input.str("submissionId").filter { it.isLetterOrDigit() || it == '-' }.take(64)
         val attempt = "mainline-" + submission.ifBlank { ulid(clock(), ByteArray(10).also(random::nextBytes)).lowercase() }
@@ -304,6 +352,13 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         val qid = "mock-" + fingerprint.take(24)
         val letters = optionLetters(options.size)
         val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == attempt }
+        if (posed != null && (agentRunId(posed.threadId) ?: posed.payload.str("agentRunId").ifBlank { null }) != run)
+            throw MockError(HttpStatusCode.Conflict, "这次提交属于不同的作答来源。")
+        if (posed == null && input.flag("learning") && !item.eligibleForLearning(courseNames(events, course), number,
+                weekPoints(events).map { it.id }.toSet().takeIf { it.isNotEmpty() }))
+            throw MockError(HttpStatusCode.Conflict, "这道题尚未通过内容核验，请刷新题路。原作答仍保留。")
+        val tryFirst = if (posed != null) posed.payload.flag("tryFirst") else input.flag("learning") && item.ladder()?.kind == "try_first"
+        val assisted = posed?.payload?.flag("assisted") ?: input.flag("assisted")
         if (posed != null && (!posed.payload.flag("mainline") || posed.payload.num("mainlineWeek") != week.week.toLong() ||
                 posed.payload.str("mainlineItem") != unit.itemId || posed.payload.str("questionId") != qid)) {
             throw MockError(HttpStatusCode.Conflict, "这次提交已用于另一道题，请重新打开这一题")
@@ -313,10 +368,10 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
             val shown = (posed.payload["letterMap"] as? JsonObject).orEmpty().mapValues { (it.value as? JsonPrimitive)?.contentOrNull.orEmpty() }
             letters.map { l -> shown.entries.first { it.value == l }.key.drop(1).toInt() }.also {
                 val sent = events.first { it.type == "answer_submitted" && it.payload.str("attemptId") == attempt }.payload
-                choice = letters.indexOf(sent.str("answer")); guessed = sent.flag("guessed")
+                choice = letters.indexOf(sent.str("answer")); guessed = sent.flag("guessed"); dontKnow = sent.flag("dontKnow")
             }
         } else (input["layout"] as? JsonPrimitive)?.intOrNull?.let { optionOrder(fingerprint, it, options.size) } ?: options.indices.toList()
-        val picked = order[choice]
+        val picked = order.getOrNull(choice)
         val shownAnswer = order.indexOf(unit.answer)
         val points = weekPoints(events)
         val kpIds = points.filter { it.id == unit.kp }.ifEmpty {
@@ -325,46 +380,105 @@ class Mainline(private val library: MockLibrary, private val clock: () -> Long =
         if (posed == null) {
             if (!questionRegistered(qid)) registerQuestion(qid, course, fingerprint, "SINGLE_CHOICE", unit.stem, keyState, "o${unit.answer}", options)
             // The checked key in the pack is the source of truth; the ledger follows it so retries and mastery see the same state.
-            val ledgerKey = events.lastOrNull { it.type == "question_key_changed" && it.payload.str("questionId") == qid }?.payload?.str("keyState")
-                ?: events.firstOrNull { it.type == "question_posed" && it.payload.str("questionId") == qid }?.payload?.str("keyState")
-            if (ledgerKey != null && ledgerKey != keyState) append(course, "question_key_changed", json("questionId" to qid, "keyState" to keyState, "reason" to "MAINLINE_PACK"), "mainline:$attempt:key")
+            val visibleEvents = learnerEvidence(events, run)
+            val ledgerKey = visibleEvents.lastOrNull { it.type == "question_key_changed" && it.payload.str("questionId") == qid }?.payload?.str("keyState")
+                ?: visibleEvents.firstOrNull { it.type == "question_posed" && it.payload.str("questionId") == qid }?.payload?.str("keyState")
+            if (ledgerKey != null && ledgerKey != keyState) append(course, "question_key_changed", JsonObject(json("questionId" to qid, "keyState" to keyState, "reason" to "MAINLINE_PACK") + metadata), "mainline:$attempt:key")
             val now = clock()
-            append(course, "question_posed", json("attemptId" to attempt, "kpIds" to kpIds, "purpose" to "RECALL", "keyState" to keyState, "policyVersion" to 1,
+            append(course, "question_posed", JsonObject(json("attemptId" to attempt, "kpIds" to kpIds, "purpose" to "RECALL", "keyState" to keyState, "policyVersion" to 1,
                 "posedAt" to now, "origin" to "COACH", "groupId" to attempt, "mainline" to true, "mainlineWeek" to week.week, "mainlineItem" to unit.itemId,
-                "tier" to item.tier, "marks" to unit.marks, "stem" to unit.stem, "questionId" to qid, "format" to "SINGLE_CHOICE", "fingerprint" to fingerprint,
-                "options" to LedgerJson.encodeToJsonElement(options), "letterMap" to JsonObject(order.withIndex().associate { (shown, i) -> "o$i" to JsonPrimitive(letters[shown]) })),
+                "tier" to item.tier, "tryFirst" to tryFirst, "assisted" to assisted, "variantGroupId" to item.ladder()?.variantGroupId,
+                "candidateId" to item.learning?.str("id"), "candidateHash" to (item.learning?.get("runtime_approval") as? JsonObject)?.str("candidate_sha256"),
+                "calculation" to item.learning?.get("calculation"), "essay" to item.learning?.get("essay"),
+                "marks" to unit.marks, "stem" to unit.stem, "questionId" to qid, "format" to "SINGLE_CHOICE", "fingerprint" to fingerprint,
+                "options" to LedgerJson.encodeToJsonElement(options), "letterMap" to JsonObject(order.withIndex().associate { (shown, i) -> "o$i" to JsonPrimitive(letters[shown]) })) + metadata),
                 "attempt:$attempt", occurredAt = now)
-            append(course, "answer_submitted", json("attemptId" to attempt, "answer" to letters[choice], "finalAnswer" to "", "guessed" to guessed), "attempt:$attempt:answer", occurredAt = now)
+            append(course, "answer_submitted", json("attemptId" to attempt, "answer" to if (dontKnow) "" else letters[choice], "finalAnswer" to "", "guessed" to guessed, "dontKnow" to dontKnow), "attempt:$attempt:answer", occurredAt = now)
+            if (assisted) append(course, "hint_revealed", json("attemptId" to attempt, "cause" to "FOLLOWUP"), "attempt:$attempt:followup")
             val right = picked == unit.answer
             val key = "正确答案 ${letters[shownAnswer]}：${unit.options[unit.answer]}"
             // The pack numbers distractors by pack position; the record names them by the letter that was on screen.
             val explanation = unit.explanation.replace(Regex("(?m)^(\\s*)错项\\s*(\\d+)")) { m ->
                 m.groupValues[2].toInt().takeIf { it in order.indices }?.let { "${m.groupValues[1]}错项 ${letters[order.indexOf(it)]}" } ?: m.value
             }
-            val feedback = (if (!item.verified) "答案键待核对，这次不记对错。" else if (right) "正确。" else "你选 ${letters[choice]}，$key") + (if (guessed) "（标记为猜的）" else "") +
+            val feedback = (if (dontKnow) "这次先看讲解，已记录学习，不算答对。" else if (!item.verified) "答案键待核对，这次不记对错。" else if (right) "正确。" else "你选 ${letters[choice]}，$key") + (if (guessed) "（标记为猜的）" else "") +
                 explanation.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
             val max = (unit.marks * 100).roundToLong()
             append(course, "attempt_graded", json("attemptId" to attempt, "score" to if (right) max else 0, "max" to max, "status" to "EXACT", "feedback" to feedback),
                 "attempt:$attempt:grade:exact")
         }
-        val projection = snapshot(course).projection
-        val after = events(course)
+        val rawAfter = events(course)
+        val projection = if (run == null) snapshot(course).projection else project(rawAfter, includeAgentRun = run)
+        val after = learnerEvidence(rawAfter, run)
         val history = ChoiceHistory(after)
         val kp = kpIds.firstOrNull()
         val due = kp?.let { projection.revisit[it] ?: projection.review[it]?.dueDay }
         val status = history.status(item)
-        val book = (status == "missed" || status == "guessed") && kp != null && weekMistakes(after, unit.week ?: number).any { it.payload.str("questionId") == qid }
+        val book = (status == "missed" || status == "guessed") && kp != null && weekMistakes(if (run == null) after else after.map { it.copy(threadId = null, payload = JsonObject(it.payload - "agentRunId" - "sampleOrigin")) }, unit.week ?: number).any { it.payload.str("questionId") == qid }
         val index = week.items.indexOf(item)
-        val parts = explanationParts(unit.explanation)
+        val parts = if (input.flag("learning")) item.ladderExplanation() else explanationParts(unit.explanation)
+        val frozen = after.first { it.type == "question_posed" && it.payload.str("attemptId") == attempt }.payload
         val reasons = (parts["options"] as JsonObject).mapNotNull { (i, why) -> i.toIntOrNull()?.takeIf { it in order.indices }?.let { "${order.indexOf(it)}" to why } }.toMap()
-        json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed,
+        json("itemId" to unit.itemId, "attemptId" to attempt, "choice" to choice, "answer" to shownAnswer, "guessed" to guessed, "dontKnow" to dontKnow,
+            "independentCorrect" to (picked == unit.answer && !guessed && !dontKnow && !tryFirst && !assisted && item.verified), "tryFirst" to tryFirst,
+            "remember" to item.learning?.str("remember"), "tryFirstRefs" to item.learning?.get("try_first_refs"),
+            "calculation" to frozen["calculation"], "essay" to frozen["essay"],
             "keyState" to keyState, "status" to status, "tier" to item.tier, "explanation" to JsonObject(parts + ("options" to JsonObject(reasons))),
             "source" to item.source, "anchor" to item.anchor.take(300), "kpId" to kp, "dueDay" to due, "mistakeWeek" to if (book) (unit.week ?: number) else null,
             "next" to week.items.getOrNull(index + 1)?.unit?.itemId, "coverage" to coverage(week, history), "notes" to notes(week, history))
     }
+
+    fun essay(store: LedgerStore, course: String, week: Int, identity: MainlineEssayIdentity): MainlineEssayDocument {
+        if (!identity.valid) throw MockError(HttpStatusCode.BadRequest, "论述关联资料待核。")
+        val receipt = syntheticReceipts[course to identity.attemptId]
+        val runtime = syntheticFor(course, week)
+        if (receipt != null) {
+            if (runtime == null) throw MockError(HttpStatusCode.Forbidden, "这份示范的读取权限已撤销。")
+            val expected = (receipt.response["essay"] as? JsonObject)?.let {
+                MainlineEssayIdentity(receipt.itemId, identity.attemptId, it.str("model_answer_id"), it.strings("rubric_point_ids"))
+            }
+            if (identity != expected || receipt.essayRef == null) throw MockError(HttpStatusCode.Conflict, "示范资料身份与当前提交不一致。")
+            if (runtime.questions.singleOrNull { it.ref == identity.itemId } != receipt.question || runtime.resolve(identity.itemId) != identity.itemId)
+                throw MockError(HttpStatusCode.Conflict, "关联题身份或版本已改变。")
+            val q = runCatching { runtime.readEssay(course, receipt.essayRef, syntheticCapabilities, submitted = true) }.getOrNull()
+                ?: throw MockError(HttpStatusCode.ServiceUnavailable, "示范全文与评分点仍待接通。")
+            val linked = runtime.linkedEssay(identity.itemId)
+            if (linked?.ref != receipt.essayRef || q.essayDigest() != receipt.resourceDigest)
+                throw MockError(HttpStatusCode.Conflict, "示范资料版本已改变，请返回题目后重试。")
+            val resource = q.essayIdentity!!
+            val ids = resource.rubricPointIds
+            if (resource.modelAnswerId != identity.modelAnswerId || ids != identity.rubricPointIds)
+                throw MockError(HttpStatusCode.Conflict, "示范资料身份已改变。")
+            return MainlineEssayDocument(course, identity, q.version, q.modelAnswer!!,
+                ids.zip(q.rubric!!).map { (id, text) -> MainlineRubricPoint(id, text) }, syntheticOnly = true)
+        }
+        if (runtime != null) throw MockError(HttpStatusCode.Conflict, "请先提交当前题目，再读取示范。")
+        val events = store.events(course)
+        val posed = events.firstOrNull { it.type == "question_posed" && it.payload.str("attemptId") == identity.attemptId }?.payload
+            ?: throw MockError(HttpStatusCode.Conflict, "找不到当前课程的提交记录。")
+        val metadata = posed["essay"] as? JsonObject
+        if (!posed.flag("mainline") || posed.num("mainlineWeek") != week.toLong() || posed.str("mainlineItem") != identity.itemId ||
+            events.none { it.type == "answer_submitted" && it.payload.str("attemptId") == identity.attemptId } || metadata == null ||
+            metadata.str("model_answer_id") != identity.modelAnswerId || metadata.strings("rubric_point_ids") != identity.rubricPointIds)
+            throw MockError(HttpStatusCode.Conflict, "示范资料身份与原提交不一致。")
+        val current = find(courseNames(events, course), week).items.singleOrNull { it.unit.itemId == identity.itemId }
+            ?: throw MockError(HttpStatusCode.Forbidden, "这份示范的关联题已撤回。")
+        if (!current.eligibleForLearning(courseNames(events, course), week, weekPoints(events).map { it.id }.toSet()))
+            throw MockError(HttpStatusCode.Forbidden, "这份示范尚未通过当前内容核验。")
+        val currentHash = (current.learning?.get("runtime_approval") as? JsonObject)?.str("candidate_sha256")
+        if (posed.str("candidateHash").isBlank() || posed.str("candidateHash") != currentHash)
+            throw MockError(HttpStatusCode.Conflict, "关联题版本已改变，请返回题目后重试。")
+        // The producer has supplied no authorized production text/reader contract yet.
+        throw MockError(HttpStatusCode.NotImplemented, "全文读取尚未接通，示范全文与评分点仍待核。")
+    }
+}
+
+private fun validatedRun(run: String?): JsonObject = try { agentRunMetadata(run) } catch (_: IllegalArgumentException) {
+    throw MockError(HttpStatusCode.BadRequest, "作答来源格式不对。")
 }
 
 fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, mainline: Mainline, reader: ReaderExplanation? = null) {
+    mainlineEssayRoutes(actor, mainline)
     suspend fun ApplicationCall.answer(course: String, block: LedgerStore.(JsonObject) -> JsonObject) {
         try {
             val text = if (request.httpMethod == HttpMethod.Post) receiveText() else ""
@@ -378,15 +492,15 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
     }
     fun ApplicationCall.week() = parameters["week"]?.toIntOrNull() ?: throw MockError(HttpStatusCode.BadRequest, "周数不对")
     routing {
-        get("/v1/courses/{course}/mainline") { val c = call.parameters["course"]!!; call.answer(c) { mainline.home(this, c) } }
+        get("/v1/courses/{course}/mainline") { val c = call.parameters["course"]!!; call.answer(c) { mainline.home(this, c, call.request.queryParameters["agentRunId"].also { validatedRun(it) }) } }
         get("/v1/courses/{course}/mainline/{week}") {
             val c = call.parameters["course"]!!
             // Older clients submit only a displayed index, so only capable clients receive a shuffled layout.
             val shuffled = call.request.queryParameters["layout"] == "shuffled-v1"
-            call.answer(c) { mainline.week(this, c, call.week(), shuffled) }
+            call.answer(c) { mainline.week(this, c, call.week(), shuffled, call.request.queryParameters["learning"] == "v1", call.request.queryParameters["agentRunId"].also { validatedRun(it) }) }
         }
         post("/v1/courses/{course}/mainline/{week}/answer") { val c = call.parameters["course"]!!; call.answer(c) { mainline.answer(this, c, call.week(), it) } }
-        post("/v1/courses/{course}/mainline/{week}/explain") {
+        post("/v1/courses/{course}/mainline/{week}/explain") { call.withReaderConnection {
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
@@ -405,7 +519,7 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             } catch (e: IllegalArgumentException) {
                 call.respondText(json("error" to "选中追问格式不对。").toString(), ContentType.Application.Json, HttpStatusCode.BadRequest)
             }
-        }
+        } }
         post("/v1/courses/{course}/mainline/{week}/explain/cancel") {
             val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
             reader?.cancel(call.attributes[observedDevice], call.parameters["course"]!!, input?.str("requestId").orEmpty())

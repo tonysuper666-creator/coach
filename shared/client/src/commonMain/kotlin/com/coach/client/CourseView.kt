@@ -8,6 +8,8 @@ import com.coach.domain.weekPoints
 import com.coach.domain.Event
 import com.coach.domain.Projection
 import com.coach.domain.logicalDay
+import com.coach.domain.reader.KnowledgeSourceReferences
+import com.coach.domain.reader.readKnowledgeSources
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -21,8 +23,11 @@ import kotlinx.serialization.json.jsonObject
  * 定义：未学 = 没打开过；在学 = 打开过或做过题、还没会；会了 = 最近 3 道不同题答对且不含猜对；
  * 稳了 = 会了之后在不同两天用简答/论述/限时题答对；要补 = 会了之后又答错，已排进复习。
  */
-enum class KpStatus(val label: String, val symbol: String) {
-    NEW("未学", "○"), IN_PROGRESS("在学", "◐"), PASSED("会了", "✓"), SOLID("稳了", "✓✓"), NEEDS_REPAIR("要补", "!")
+enum class KpStatus(val state: com.coach.domain.KpState, val symbol: String) {
+    NEW(com.coach.domain.KpState.NEW, "○"), IN_PROGRESS(com.coach.domain.KpState.IN_PROGRESS, "◐"),
+    PASSED(com.coach.domain.KpState.PASSED, "✓"), SOLID(com.coach.domain.KpState.SOLID, "✓✓"),
+    NEEDS_REPAIR(com.coach.domain.KpState.NEEDS_REPAIR, "!");
+    val label: String get() = state.label
 }
 
 data class KpRow(
@@ -39,6 +44,10 @@ data class KpRow(
     val prereqs: List<String> = emptyList(),
     /** 备课教材页的文档与起止页（PDF 页），资料页用它跳到「本次参考」。 */
     val anchorDoc: String = "", val anchorPdfPage: Int = 0, val anchorBookPage: Int = 0,
+    /** Claim-specific references keep documents/ranges separate; the legacy jump is blank for this wire format. */
+    val sourceReferences: KnowledgeSourceReferences = KnowledgeSourceReferences(),
+    /** Provenance of these outline references; a reader from another course must not consume them. */
+    val sourceCourseId: String? = null,
 )
 
 data class QuizCard(
@@ -61,16 +70,18 @@ data class QuizGroup(val groupId: String, val cards: List<QuizCard>) {
 }
 
 /** 账本回放出的课程视图：知识点列表、掌握状态、某个 KP 线程里的题组与判分。纯函数，重启/断线后结果不变。 */
-class CourseView(val events: List<Event>, val projection: Projection) {
+class CourseView(events: List<Event>, val projection: Projection, private val agentRun: String? = null) {
+    val events: List<Event> = com.coach.domain.learnerEvidence(events, agentRun)
+    private fun lessonThread(thread: String) = agentRun?.let { com.coach.domain.agentThreadId(it, thread) } ?: thread
 
     /** Reopen the persisted tutor thread for a KP; new KPs get the stable client-side ID. */
-    fun tutorThreadId(kpId: String): String = events.lastOrNull {
+    fun tutorThreadId(kpId: String): String = lessonThread(events.lastOrNull {
         it.type == "kp_opened" && it.payload.s("via") != "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }?.threadId ?: "kp:$kpId"
+    }?.threadId ?: "kp:$kpId")
 
-    fun reviewThreadId(kpId: String): String = events.filter {
+    fun reviewThreadId(kpId: String): String = lessonThread(events.filter {
         it.type == "kp_opened" && it.payload.s("via") == "REVIEW" && it.payload.s("kpId") == kpId && !it.threadId.isNullOrBlank()
-    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId"
+    }.maxByOrNull { it.seq }?.threadId ?: "review:${events.firstOrNull()?.courseId.orEmpty()}:$kpId")
 
     val kps: List<KpRow> by lazy {
         val titles = LinkedHashMap<String, String>()
@@ -80,6 +91,8 @@ class CourseView(val events: List<Event>, val projection: Projection) {
         val references = HashMap<String, String>()
         val prereqs = HashMap<String, List<String>>()
         val anchorDocs = HashMap<String, Triple<String, Int, Int>>()
+        val sourceReferences = HashMap<String, KnowledgeSourceReferences>()
+        val sourceCourses = HashMap<String, String>()
         for (e in events) when (e.type) {
             "outline_revised" -> {
             // 课程内容装载（TON-1127）把整份 CourseContent 放在事件里：知识点名、模块、概念、教材页锚点。
@@ -87,33 +100,39 @@ class CourseView(val events: List<Event>, val projection: Projection) {
             for (k in (e.payload["knowledgePoints"] as? JsonArray).orEmpty()) {
                 val o = k as? JsonObject ?: continue
                 val id = o.s("id"); if (id.isBlank()) continue
-                titles[id] = o.s("title").ifBlank { o.s("name") }.ifBlank { id }
+                titles[id] = o.s("title").ifBlank { o.s("name") }
                 moduleOf[id] = o.s("moduleId")
                 (o["conceptIds"] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { concepts[id] = it }
                 for (key in listOf("prereqs", "prerequisites", "prerequisiteIds")) (o[key] as? JsonArray)?.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotEmpty() }?.let { prereqs[id] = it }
+                val sources = readKnowledgeSources(o)
+                sourceReferences[id] = sources
+                sourceCourses[id] = e.courseId
                 // 课程内容装载写的是单个 `sourceAnchor`（旧形态是 `anchors` 数组），两种都认。
                 // 「看原文」选页与备课选页同口径：先看 `anchors[]` 里第一个有文档和页码的，没有再用 `sourceAnchor`。
                 val anchorObjects = (o["anchors"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject } + listOfNotNull(o["sourceAnchor"] as? JsonObject)
                 val openable = { a: JsonObject -> a.s("docId").isNotBlank() && ((a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0) > 0 }
-                anchorObjects.firstOrNull(openable)?.let { a ->
+                if (sources.structured) {
+                    anchorDocs.remove(id)
+                    references.remove(id)
+                } else anchorObjects.firstOrNull(openable)?.let { a ->
                     anchorDocs[id] = Triple(a.s("docId"), (a["pdfPage"] as? JsonPrimitive)?.intOrNull ?: 0, (a["bookPage"] as? JsonPrimitive)?.intOrNull ?: 0)
                 }
                 val pages = anchorObjects.mapNotNull { a -> (a["bookPage"] as? JsonPrimitive)?.intOrNull }
-                if (pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
+                if (!sources.structured && pages.isNotEmpty()) references[id] = if (pages.min() == pages.max()) "教材 p.${pages.min()}" else "教材 p.${pages.min()}–${pages.max()}"
             }
             for (op in (e.payload["ops"] as? JsonArray).orEmpty()) {
                 val o = op as? JsonObject ?: continue
                 val id = o.s("kpId").ifBlank { o.s("id") }
                 if (id.isBlank()) continue
                 val title = o.s("title").ifBlank { o.s("name") }
-                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, id)
+                if (title.isNotBlank()) titles[id] = title else titles.putIfAbsent(id, "")
                 (o["conceptIds"] as? JsonArray)?.let { concepts[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
                 (o["prereqs"] as? JsonArray)?.let { prereqs[id] = it.mapNotNull { c -> (c as? JsonPrimitive)?.contentOrNull } }
             }
             }
             "kp_opened" -> e.payload.s("title").takeIf { it.isNotBlank() }?.let { titles.putIfAbsent(e.payload.s("kpId"), it) }
         }
-        projection.mastery.keys.forEach { titles.putIfAbsent(it, it) }
+        projection.mastery.keys.forEach { titles.putIfAbsent(it, "") }
         // The outline owns display order; serialized mastery maps may sort their keys.
         val order = (titles.keys + projection.mastery.keys).distinct()
         order.filter { it in titles }.map { id ->
@@ -126,11 +145,12 @@ class CourseView(val events: List<Event>, val projection: Projection) {
                 com.coach.domain.KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS
                 com.coach.domain.KpState.NEW -> KpStatus.NEW
             }
-            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "稳了进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
+            val progress = m?.solidProgress?.takeIf { it.count > 0 }?.let { "${KpStatus.SOLID.label}进度 ${it.count}/2 次 · 简答 ${it.constructed} · ${it.days} 天 · 均分 ${(kotlin.math.round(it.average * 100) / 100.0)}" }.orEmpty()
             val anchor = anchorDocs[id]
             KpRow(id, titles.getValue(id), status, id in projection.explainedKpIds, concepts[id] ?: listOf(id), modules[moduleOf[id]].orEmpty(), references[id].orEmpty(),
                 formerlySolid = m?.formerlySolid == true && m.solid.not(), solidProgress = progress, prereqs = prereqs[id].orEmpty(),
-                anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0)
+                anchorDoc = anchor?.first.orEmpty(), anchorPdfPage = anchor?.second ?: 0, anchorBookPage = anchor?.third ?: 0,
+                sourceReferences = sourceReferences[id] ?: KnowledgeSourceReferences(), sourceCourseId = sourceCourses[id])
         }
     }
 

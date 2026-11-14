@@ -19,6 +19,7 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }
 application { mainClass = "com.coach.server.MainKt" }
+sourceSets.test { resources.srcDir(rootProject.file("testdata")) }
 tasks.test {
     // Resolve after Kotlin has finished wiring test dependencies, including for opt-in replay tasks.
     doFirst { systemProperty("coach.coverageTestClasspath", sourceSets.test.get().runtimeClasspath.asPath) }
@@ -74,6 +75,16 @@ tasks.register<JavaExec>("sourceReplay") {
     dependsOn(tasks.named("testClasses"))
     classpath = sourceSets["test"].runtimeClasspath
     mainClass.set("com.coach.server.SourceLookupReplayKt")
+}
+
+// Explicit §12 replay: private outputs, isolated ledger, real CLI only when opted in.
+tasks.register<JavaExec>("acceptanceReplay") {
+    group = "verification"
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.coach.server.ReplayAcceptanceKt")
+    workingDir(rootProject.projectDir)
+    environment("COACH_TRAFFIC", "test")
 }
 
 // Explicit SQLite backup replay over the real WebSocket routes; no AI or production writes.

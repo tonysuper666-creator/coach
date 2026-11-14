@@ -331,11 +331,11 @@ class PrivateReaderScreenTest {
                 waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-book-synthetic").fetchSemanticsNodes().isNotEmpty() }
                 onNodeWithTag("private-book-synthetic").performClick()
                 waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-study-summary").fetchSemanticsNodes().isNotEmpty() }
-                onNodeWithTag("private-study-summary").assertTextContains("本页考点 1 个 · 已掌握 ${if (mastered) 1 else 0}", substring = true)
+                onNodeWithTag("private-study-summary").assertTextContains("本页考点 1 个 · 相关题均答对 ${if (mastered) 1 else 0}", substring = true)
                 if (unlocated > 0) onNodeWithTag("private-study-unlocated").assertTextContains("另有 3 条", substring = true) else onAllNodesWithTag("private-study-unlocated").assertCountEquals(0)
                 onNodeWithTag("private-study-toggle").performClick()
                 onNodeWithTag("private-study-fact-f-$course").assertExists()
-                onNodeWithTag("private-study-question-q-$course").assertExists()
+                onNodeWithTag("private-study-question-q-$course").assertTextContains(if (mastered) "最近答对（非猜）" else "做错过", substring = true)
                 onAllNodesWithTag("private-study-fact-f-${if (course == "C") "OTHER" else "C"}").assertCountEquals(0)
             }
         }
@@ -395,7 +395,7 @@ class PrivateReaderScreenTest {
 
     private fun mapBody(tag: String, hasOutline: Boolean = true, unplaced: Int = 0) = if (!hasOutline) """{"hasOutline":false,"chapters":[],"unlocated":0,"ambiguous":0,"outsideOutline":0}""" else
         """{"hasOutline":true,"unlocated":$unplaced,"ambiguous":0,"outsideOutline":0,"chapters":[
-            {"title":"Chapter $tag","pdfPage":1,"endPage":4,"facts":[],"questions":[],"factsMastered":0,"questionsMastered":0,"sections":[
+            {"title":"【W3·slides】Chapter $tag","pdfPage":1,"endPage":4,"facts":[],"questions":[],"factsMastered":0,"questionsMastered":0,"sections":[
               {"title":"Section $tag","pdfPage":3,"endPage":4,"facts":[{"id":"f-$tag","week":1,"text":"Point $tag","pdfPage":3,"mastered":false}],
                "questions":[{"id":"q-$tag","week":1,"tier":"setup","stem":"Stem $tag","status":"new","pdfPage":3}],"sections":[]}]}]}"""
 
@@ -413,6 +413,8 @@ class PrivateReaderScreenTest {
                 onNodeWithTag("private-open-map").performClick()
                 waitUntil(timeoutMillis = 10000) { onAllNodesWithTag("private-map-fact-f-$tag").fetchSemanticsNodes().isNotEmpty() }
                 onAllNodesWithTag("private-map-fact-f-${if (tag == "C") "OTHER" else "C"}").assertCountEquals(0)
+                onNodeWithText("Chapter $tag", substring = true).assertExists()
+                onNodeWithText("【W3·slides】", substring = true).assertDoesNotExist()
                 onNodeWithTag("private-map-unplaced").assertTextContains("有 2 条", substring = true)
                 // A question opens the existing practice over the map; closing it returns to the map, not to another page.
                 onNodeWithTag("private-map-question-q-$tag").performClick()

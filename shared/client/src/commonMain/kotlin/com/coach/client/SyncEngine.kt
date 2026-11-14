@@ -30,7 +30,8 @@ interface LedgerTransport {
 class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
     private val newId: () -> String, private val hash: (ByteArray) -> String,
-    private val retentionTimeSource: TimeSource = TimeSource.Monotonic) {
+    private val retentionTimeSource: TimeSource = TimeSource.Monotonic,
+    private val agentRunId: String? = null) {
     companion object {
         // Server retention: 14 daily days + the preceding 8 weekly weeks.
         const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000
@@ -51,20 +52,50 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     fun saveMainlineState(course: String, state: JsonObject, page: String = "active") {
         q.putMeta("mainline:v1:$course:$page", state.toString())
     }
-    /** Pairing identity scopes personal marks; they are never uploaded as course evidence. */
-    internal fun readerState(course: String, week: Int, identity: String): JsonObject =
-        mainlineState(course, "reader:${hash(identity.encodeToByteArray())}:$week")
-    internal fun saveReaderState(course: String, week: Int, identity: String, state: JsonObject) =
-        saveMainlineState(course, state, "reader:${hash(identity.encodeToByteArray())}:$week")
+    /**
+     * Pairing identity scopes personal marks; they are never uploaded as course evidence.
+     * An assistant run gets its own page: its marks, theme and focus stay out of the learner's reader.
+     */
+    internal fun readerState(course: String, week: Int, identity: String, run: String? = agentRunId): JsonObject =
+        mainlineState(course, readerPage(week, identity, run))
+    internal fun saveReaderState(course: String, week: Int, identity: String, state: JsonObject, run: String? = agentRunId) =
+        saveMainlineState(course, state, readerPage(week, identity, run))
+    /** The learner keeps the historical key; a run adds a length-prefixed segment, as in mainlinePage(). */
+    private fun readerPage(week: Int, identity: String, run: String?): String {
+        val owner = hash(identity.encodeToByteArray())
+        return run?.let { "reader:agent:${it.length}:$it:$owner:$week" } ?: "reader:$owner:$week"
+    }
     fun enqueue(body: CommandBody): WireCommand {
-        val bytes = canonicalJson(LedgerJson.encodeToJsonElement(body))
+        val marked = body.copy(payload = JsonObject(body.payload + agentRunMetadata(agentRunId)))
+        val bytes = canonicalJson(LedgerJson.encodeToJsonElement(marked))
         val c = WireCommand(deviceId,newId(),bytes,hash(bytes.encodeToByteArray()))
         // Serialize/hash exactly once, before acknowledging the tap to the UI.
         q.putCommand(c.commandId,c.deviceId,c.payloadBytes,c.payloadSha256)
         return c
     }
+
+    /** Commit the immutable outbox command and local answer lock together, including across process death. */
+    fun enqueueReviewAnswer(target: ReviewPracticeTarget, posed: Event, choice: String, now: Long): String = db.transactionWithResult {
+        require(target.deviceId == deviceId && target.agentRunId == agentRunId &&
+            reviewPracticeTarget(this@SyncEngine, target.courseId, agentRunId) == target)
+        require(posed.courseId == target.courseId && posed.payload.str("attemptId") == target.attemptId &&
+            posed.payload.str("questionId") == target.question.id && posed.payload.strings("kpIds") == listOf(target.kpId))
+        val letters = posed.payload["letterMap"] as? JsonObject ?: error("Missing frozen options")
+        require(letters.values.any { (it as? JsonPrimitive)?.contentOrNull == choice })
+        val page = "review-answer:${target.attemptId}"
+        val previous = mainlineState(target.courseId, page)
+        previous.str("commandId").takeIf { it.isNotBlank() }?.let {
+            require(previous.str("choice") == choice) { "Answer is already locked" }
+            return@transactionWithResult it
+        }
+        val cmd = enqueue(CommandBody("submit_answer",target.courseId,now,
+            json("attemptId" to target.attemptId,"answer" to choice,"posedSnapshot" to posed.payload)))
+        saveMainlineState(target.courseId,json("choice" to choice,"commandId" to cmd.commandId),page)
+        cmd.commandId
+    }
     /** The UI receives cards only. Keys stay private and SQL only returns one after durable lock. */
     suspend fun downloadOfflinePack(course: String, size: Int = 10) = mutex.withLock {
+        check(agentRunId == null) { "Agent acceptance runs require online, isolated tutor threads" }
         val pack = transport.offlinePack(course,size)
         require(pack.deviceId == deviceId && pack.courseId == course)
         db.transaction {
@@ -109,6 +140,8 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     /** All members lock with their immutable outbox bytes in one transaction, before reading any key. */
     fun submitOfflineGroup(course: String, groupId: String, answers: Map<String,String>, now: Long) {
         db.transaction {
+            // Lock before validation so two submitters cannot both read an unlocked group.
+            q.lockOfflineSubmission()
             val rows = q.offlineItems(course).executeAsList().filter { it.group_id == groupId }
             require(rows.isNotEmpty() && rows.all { it.command_id == null && it.expires_at > now && it.epoch == epoch }) { "题组已提交或已过期" }
             require(answers.keys == rows.map { it.attempt_id }.toSet())
@@ -131,16 +164,24 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
 
     fun retainedCommands(): List<WireCommand> = q.allCommands().executeAsList().map { WireCommand(it.device_id,it.command_id,it.payload_bytes,it.payload_sha256) }
     fun localEvents(course: String): List<Event> = q.allEvents(course).executeAsList().map { LedgerJson.decodeFromString(it) }
-    fun projection(course: String): Projection = db.transactionWithResult {
-        val epoch=meta("epoch").orEmpty()
-        val seq=q.replicaSeq(course).executeAsOne()
-        cache.get(course,epoch,seq)?.let { return@transactionWithResult it }
-        val local=project(localEvents(course))
-        val snapshot=if(local.requiresServerSnapshot) meta("serverProjection:$course")?.let { LedgerJson.decodeFromString<Projection>(it) } else null
-        val state=snapshot?.copy(lastSeq=seq,requiresServerSnapshot=true,unsupportedTypes=local.unsupportedTypes) ?: local
-        cache.put(course,epoch,seq,state)
-        state
+    fun projection(course: String): Projection {
+        val read = db.transactionWithResult {
+            val epoch = meta("epoch").orEmpty()
+            val seq = q.replicaSeq(course).executeAsOne()
+            val cached = cache.get(course, epoch, seq)
+            if (cached != null) return@transactionWithResult ProjectionRead(epoch, seq, null, cached, true)
+            val local = project(localEvents(course))
+            val snapshotBytes = meta("serverProjection:$course")
+            val snapshot = if (local.requiresServerSnapshot) snapshotBytes?.let { LedgerJson.decodeFromString<Projection>(it) } else null
+            val state = snapshot?.copy(lastSeq=seq,requiresServerSnapshot=true,unsupportedTypes=local.unsupportedTypes) ?: local
+            ProjectionRead(epoch, seq, snapshotBytes, state, false)
+        }
+        // Never upgrade a read transaction to a write. The conditional write prevents
+        // an old computation from overwriting a newer epoch, cursor or server snapshot.
+        if (!read.cached) cache.putIfCurrent(course, read.epoch, read.seq, read.snapshot, read.state)
+        return read.state
     }
+    private data class ProjectionRead(val epoch: String, val seq: Long, val snapshot: String?, val state: Projection, val cached: Boolean)
     fun receipt(commandId: String): Receipt? = meta("receipt:$commandId")?.let { LedgerJson.decodeFromString(it) }
     private fun meta(key: String) = q.getMeta(key).executeAsOneOrNull()
     private fun save(events: List<Event>) { for(e in events) q.putEvent(e.seq,e.courseId,LedgerJson.encodeToString(e)) }
@@ -178,6 +219,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     suspend fun syncOnce() = mutex.withLock {
         val previousEpoch = meta("epoch")
         val hello = transport.hello(previousEpoch)
+        check(agentRunId == null || hello.agentRunsSupported) { "Server cannot isolate agent evidence" }
         if(previousEpoch != hello.epoch) {
             // Fetch every snapshot before committing epoch, so interruption cannot mark an incomplete reset as done.
             val snapshots = courses.map { transport.snapshot(it) }

@@ -106,14 +106,14 @@ internal fun ChapterMapDialog(reader: ReaderHttp, documentId: String, pages: Int
                                 items(flat.size) { index ->
                                     when (val row = flat[index]) {
                                         is MapRow.Node -> TextButton(onClick = { onJump(row.node.pdfPage) }, modifier = Modifier.padding(start = (row.depth * 16).dp).heightIn(min = 48.dp).testTag("private-map-node-${row.node.pdfPage}-${row.node.title}")) {
-                                            Text("${row.node.title}  ·  PDF ${row.node.pdfPage}–${row.node.endPage}  ·  考点 ${row.node.facts.size}（已掌握 ${row.node.facts.count { it.mastered }}）题 ${row.node.questions.size}", style = MaterialTheme.typography.titleSmall)
+                                            Text("${com.coach.client.displayTitle(row.node.title)}  ·  PDF ${row.node.pdfPage}–${row.node.endPage}  ·  考点 ${row.node.facts.size}（相关题均答对 ${row.node.facts.count { it.mastered }}）题 ${row.node.questions.size}", style = MaterialTheme.typography.titleSmall)
                                         }
                                         is MapRow.Fact -> TextButton(onClick = { onJump(row.fact.pdfPage) }, modifier = Modifier.padding(start = (row.depth * 16).dp).heightIn(min = 48.dp).testTag("private-map-fact-${row.fact.id}")) {
-                                            Text("• ${row.fact.text}（PDF ${row.fact.pdfPage}）" + if (row.fact.mastered) "（已掌握）" else "", style = MaterialTheme.typography.bodyMedium)
+                                            Text("• ${row.fact.text}（PDF ${row.fact.pdfPage}）" + if (row.fact.mastered) "（相关题均答对）" else "", style = MaterialTheme.typography.bodyMedium)
                                         }
                                         is MapRow.Question -> TextButton(onClick = { practicing = row.question.week to setOf(row.question.id) }, enabled = practice != null,
                                             modifier = Modifier.padding(start = (row.depth * 16).dp).heightIn(min = 48.dp).testTag("private-map-question-${row.question.id}")) {
-                                            Text("题 W${row.question.week} ${row.question.id}：${row.question.stem}", style = MaterialTheme.typography.bodyMedium)
+                                            Text("第 ${row.question.week} 周 · 题：${row.question.stem}", style = MaterialTheme.typography.bodyMedium)
                                         }
                                     }
                                 }

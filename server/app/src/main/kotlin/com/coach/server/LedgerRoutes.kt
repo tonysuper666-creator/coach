@@ -3,6 +3,8 @@ package com.coach.server
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.protocol.*
+import com.coach.store.ReviewVariantRejected
+import com.coach.domain.reviewqueue.QueueQuestion
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -86,6 +88,33 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             observer.accept(call.attributes[observedDevice], events)
             call.respond(HttpStatusCode.NoContent)
         }
+        post("/v1/courses/{course}/review-practice") {
+            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val course = call.parameters["course"]!!
+            val device = call.attributes[observedDevice]
+            if (input.str("courseId") != course || input.str("deviceId") != device)
+                return@post call.respondText(json("error" to "REVIEW_SCOPE_MISMATCH").toString(),ContentType.Application.Json,HttpStatusCode.Forbidden)
+            val q = input["question"] as? JsonObject ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
+            try {
+                val facts = actor.execute {
+                    if (!authorize(device,credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
+                    takeReviewVariant(course,device,input.str("agentRunId").ifBlank { null },
+                    input.str("kpId"),input.str("entryId"),input.str("attemptId"),
+                    QueueQuestion(q.str("id"),q.str("version").ifBlank { null },q.str("fingerprint").ifBlank { null })) }
+                pushes.tryEmit(course)
+                call.respondText(json("events" to JsonArray(facts.map { LedgerJson.encodeToJsonElement(agentEvidenceForWire(it)) })).toString(),ContentType.Application.Json)
+            } catch (e: ReviewVariantRejected) {
+                val status = when(e.code) {
+                    "REVIEW_DEVICE_UNAUTHORIZED" -> HttpStatusCode.Unauthorized
+                    "REVIEW_SCOPE_MISMATCH" -> HttpStatusCode.Forbidden
+                    "INVALID_REVIEW_REQUEST" -> HttpStatusCode.BadRequest
+                    else -> HttpStatusCode.Conflict
+                }
+                call.respondText(json("error" to e.code).toString(),ContentType.Application.Json,status)
+            }
+        }
         post("/v1/courses/{course}/constructed") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
             val course=call.parameters["course"]!!
@@ -111,8 +140,19 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             call.respondText(actor.execute { essayPrompts(call.parameters["course"]!!) }.toString(),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/pool") {
-            val supply=actor.execute { constructedSupply(call.parameters["course"]!!) }
-            call.respondText(json("constructed" to JsonObject(supply.mapValues { JsonPrimitive(it.value) })).toString(),ContentType.Application.Json)
+            val course=call.parameters["course"]!!
+            val supply=actor.execute { constructedSupply(course) }
+            // 题级候选只在点名考点时给出：题库不是可以按 course 整包枚举的语料，别的考点的题不在这里倾倒。
+            val kp=call.request.queryParameters["kp"]?.takeIf { it.isNotBlank() }
+            val variants=if(kp==null) emptyList() else actor.execute { reviewVariantCandidates(course,kp) }
+            val rows=variants.map { candidate ->
+                json("questionId" to candidate.question.id,"kpId" to candidate.kpId,
+                    "fingerprint" to candidate.question.fingerprint,
+                    "keyState" to if(candidate.keyVerified) "VERIFIED" else "UNREVIEWED",
+                    "availability" to candidate.availability.name)
+            }
+            call.respondText(json("constructed" to JsonObject(supply.mapValues { JsonPrimitive(it.value) }),
+                "kpId" to kp,"variants" to JsonArray(rows)).toString(),ContentType.Application.Json)
         }
         post("/v1/prewarm") {
             val input=LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
@@ -172,10 +212,12 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val course=call.parameters["course"]!!
             val after=call.request.queryParameters["after"]?.toLongOrNull() ?: 0
             val limit=call.request.queryParameters["limit"]?.toIntOrNull() ?: 500
-            call.respondText(LedgerJson.encodeToString(actor.execute { page(course,after,limit) }),ContentType.Application.Json)
+            val page = actor.execute { page(course,after,limit) }
+            call.respondText(LedgerJson.encodeToString(page.copy(events=page.events.map(::agentEvidenceForWire))),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/snapshot") {
-            call.respondText(LedgerJson.encodeToString(actor.execute { snapshot(call.parameters["course"]!!) }),ContentType.Application.Json)
+            val snapshot = actor.execute { snapshot(call.parameters["course"]!!) }
+            call.respondText(LedgerJson.encodeToString(snapshot.copy(events=snapshot.events.map(::agentEvidenceForWire))),ContentType.Application.Json)
         }
         get("/v1/courses/{course}/today") {
             call.respondText(LedgerJson.encodeToString(actor.execute { todayProgress(call.parameters["course"]!!) }),ContentType.Application.Json)
@@ -287,7 +329,7 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                             return true
                         }
                         for(event in es) {
-                            val text=LedgerJson.encodeToString(event)
+                            val text=LedgerJson.encodeToString(agentEvidenceForWire(event))
                             val size=text.toByteArray(Charsets.UTF_8).size
                             if(bytes+size+(if(encoded.isEmpty()) 0 else 1) > LEDGER_FRAME_BYTES && !flush()) return
                             if(envelopeBytes+size > LEDGER_FRAME_BYTES) {

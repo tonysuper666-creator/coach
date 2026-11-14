@@ -51,10 +51,13 @@ fun deskWindow(width: Float, height: Float): DeskWindow = when {
 }
 
 @Immutable
-data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val topPadding: Dp, val optionHeight: Dp) {
+data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val topPadding: Dp, val optionHeight: Dp,
+    val statusInBar: Boolean = false) {
     val inner get() = window == DeskWindow.Inner || window == DeskWindow.Medium
 }
 val LocalDeskMetrics = staticCompositionLocalOf { DeskMetrics(DeskWindow.Inner, CoachV7.Layout.mainPx, CoachV7.Layout.mainPt, CoachV7.Layout.optH) }
+/** Whether the companion column is actually composed in the current layout. */
+val LocalDeskMarginVisible = staticCompositionLocalOf { false }
 
 /** The page stays in the same composition when the directory/margin collapse or focus mode changes. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,13 +118,14 @@ fun Desk(
         val windowWidth = maxWidth
         val sheetHeight = maxHeight * .7f
         val inner = window == DeskWindow.Inner || window == DeskWindow.Medium
-        val threeColumns = window == DeskWindow.Inner && !managed
         val landscape = window == DeskWindow.OuterLandscape
+        val marginWidth = if (inner && !focused && !marginCollapsed) (windowWidth * .30f).coerceIn(260.dp, 280.dp) else 0.dp
         val metrics = DeskMetrics(window,
             if (inner) 24.dp else 16.dp,
             if (landscape) 12.dp else 20.dp,
             48.dp)
-        CompositionLocalProvider(LocalDeskMetrics provides metrics, LocalReadingFocus provides focused) {
+        CompositionLocalProvider(LocalDeskMetrics provides metrics, LocalReadingFocus provides focused,
+            LocalDeskMarginVisible provides (marginWidth > 0.dp)) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.fillMaxWidth().height(if (inner) 48.dp else 72.dp).padding(horizontal = 16.dp)) {
                     Row(Modifier.align(if (inner) Alignment.CenterStart else Alignment.TopStart).height(48.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -135,9 +139,7 @@ fun Desk(
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
                         }
-                        if (!threeColumns) {
-                            TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
-                        }
+                        TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
                         if (onBack != null) {
                             TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }
@@ -151,7 +153,7 @@ fun Desk(
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
-                        if (threeColumns && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                        if (metrics.statusInBar && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         var typeMenu by remember { mutableStateOf(false) }
                         Box {
                             val textScale = LocalV7TextScale.current
@@ -170,14 +172,7 @@ fun Desk(
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)) {
-                    // Keep all three containers in place so a fold never recreates the reading composition.
-                    val tocWidth = if (threeColumns && !focused) 160.dp else 0.dp
-                    val marginWidth = if (inner && !focused && !marginCollapsed) (windowWidth * .30f).coerceIn(260.dp, 280.dp) else 0.dp
-                    Box(Modifier.width(tocWidth).fillMaxHeight()) {
-                        if (tocWidth > 0.dp) Column(Modifier.padding(start = 8.dp, end = 0.dp, top = 24.dp).verticalScroll(rememberScrollState()).testTag("v7-directory")) {
-                            directory()
-                        }
-                    }
+                    // Keep the paper in place so a resize never recreates the reading composition.
                     Box(Modifier.weight(1f).fillMaxHeight().padding(top = if (inner && !focused) 4.dp else 0.dp)
                         .then(if (inner && !focused) Modifier.paperShadow("sheet", colors.dark) else Modifier)
                         .clip(if (focused) RoundedCornerShape(0.dp) else if (!inner) RoundedCornerShape(bottomStart = CoachV7.Radius.sheet, bottomEnd = CoachV7.Radius.sheet) else RoundedCornerShape(CoachV7.Radius.sheet))

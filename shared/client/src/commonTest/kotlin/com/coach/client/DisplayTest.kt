@@ -8,6 +8,11 @@ class DisplayTest {
     private fun row(id: String, status: KpStatus, title: String = "【W3·Ch6】$id", module: String = "03 医院与医生") =
         KpRow(id, title, status, explained = false, conceptIds = listOf(id), module = module)
 
+    @Test fun latestCorrectAttemptDoesNotClaimSectionMastery() {
+        assertEquals("最近答对（非猜）", latestCorrectAttemptLabel())
+        assertTrue(KpStatus.entries.none { it.label == latestCorrectAttemptLabel() })
+    }
+
     @Test fun oneVocabularyForEveryStatus() {
         assertEquals(listOf("未学", "在学", "会了", "稳了", "要补"), KpStatus.entries.map { it.label })
         val banned = listOf("已读", "未读", "在读", "还缺", "要回炉", "需修复", "需回炉", "学习中", "稳固", "已掌握", "已通过", "未开始")
@@ -21,7 +26,9 @@ class DisplayTest {
         assertEquals("医院市场结构：差异化寡头", titleMain("【W3·Ch6】医院市场结构：【Essay】差异化寡头 ｜ 【W4·Ch8】另一个"))
         assertEquals("没有标签的标题", titleMain("没有标签的标题"))
         assertEquals("P(A | B)", titleMain("P(A | B)"))
-        assertEquals("W3·Ch6", displayTitle("【W3·Ch6】"), "a title that is only a marker never renders empty")
+        assertEquals("未命名的一节", displayTitle("【W3·Ch6】"))
+        assertEquals("未命名的一节", displayTitle("【KP-123】【W3·slides】"))
+        assertEquals("未命名的一节", displayTitle(""))
         for (t in listOf("【W3·slides】【Essay】x", "x【Essay】", "【a】【b】【c】d")) assertFalse(Regex("[【】]").containsMatchIn(titleMain(t)), t)
     }
 
@@ -30,6 +37,8 @@ class DisplayTest {
         assertEquals("第 4 周 · 教材第 8 章", titleSource("【W4·Ch8】X"))
         assertEquals("第 1 周 · 教材第 1–2 章 · 论述常考", titleSource("【W1·Ch1–2】【Essay】X"))
         assertEquals("", titleSource("X"))
+        assertEquals("第 3 周 · 课件", titleSource("【KP-123】【W3·slides】"))
+        assertEquals("", titleSource("【未知标记】X"))
     }
 
     @Test fun moduleNamesHideMetadataAndNumberingWithoutChangingTheSubject() {
@@ -38,6 +47,8 @@ class DisplayTest {
         assertEquals("3D 建模", moduleDisplayName("3D 建模"))
         assertEquals("2026年政策", moduleDisplayName("2026年政策"))
         assertEquals("", moduleDisplayName("03"))
+        assertEquals("", moduleDisplayName(""))
+        assertEquals("合成节", weekName(listOf(row("id", KpStatus.NEW, "合成节", ""))))
     }
 
     @Test fun countsAreShownAsLearnedOverTotal() {
@@ -73,6 +84,14 @@ class DisplayTest {
         assertEquals(KpStatus.NEW, view.kp("C")!!.status)
     }
 
+    @Test fun missingTitleKeepsItsIdentityButDisplaysAFallback() {
+        val outline = ev("outline_revised", json("knowledgePoints" to JsonArray(listOf(json("id" to "internal-id")))))
+        val view = CourseView(listOf(outline), project(listOf(outline)))
+        val point = view.kp("internal-id")!!
+        assertEquals("internal-id", point.id)
+        assertEquals("未命名的一节", displayTitle(point.title))
+    }
+
     @Test fun chatAnswerUsesTheListsPriorityAndCleanTitles() {
         val titles = mapOf("A" to "【W3·slides】合成甲", "B" to "【W3·slides】合成乙", "C" to "【W3·slides】合成丙", "D" to "合成丁")
         val state = Projection(kpTitles = titles, position = Position(current = "B"), startedKpIds = setOf("B"),
@@ -83,11 +102,13 @@ class DisplayTest {
         assertEquals("合成丙：会了，还没稳。", say("C"))
         assertEquals("合成丁：稳了。", say("D"))
         for (id in titles.keys) assertFalse(Regex("[【】]").containsMatchIn(say(id)))
+        val outline = ev("outline_revised", json("knowledgePoints" to JsonArray(titles.map { (id, title) ->
+            json("id" to id, "title" to title)
+        })))
+        val view = CourseView(listOf(outline), state)
         for (id in titles.keys) {
-            val row = CourseView(emptyList(), state).let { KpRow(id, titles.getValue(id), when (kpState(state.mastery[id], id == "B")) {
-                KpState.NEEDS_REPAIR -> KpStatus.NEEDS_REPAIR; KpState.SOLID -> KpStatus.SOLID; KpState.PASSED -> KpStatus.PASSED
-                KpState.IN_PROGRESS -> KpStatus.IN_PROGRESS; KpState.NEW -> KpStatus.NEW }, false, listOf(id)) }
-            assertTrue(say(id).contains("：${row.status.label}"), "${say(id)} vs ${row.status.label}")
+            val status = view.kp(id)!!.status.label
+            assertTrue(say(id).contains("：$status"), "${say(id)} vs $status")
         }
     }
 }

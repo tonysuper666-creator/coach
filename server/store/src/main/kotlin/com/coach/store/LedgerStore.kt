@@ -1,6 +1,10 @@
 package com.coach.store
 
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.QueueAvailability
+import com.coach.domain.reviewqueue.QueueQuestion
+import com.coach.domain.reviewqueue.VariantCandidate
+import com.coach.domain.reviewqueue.ledgerQueueCandidate
 import com.coach.protocol.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -21,6 +25,12 @@ data class PairedDevice(val id: String, val name: String, val createdAt: Long, v
 // Deliberately no generated toString: credentials must never reach logs.
 class DeviceCredential(val deviceId: String, val token: String)
 class PairingCode(val code: String, val expiresAt: Long)
+
+class ReviewVariantRejected(val code: String) : IllegalArgumentException(code)
+
+/** Fields only the server-side review allocation writes; an offline pack never carries any of them. */
+private val REVIEW_RESERVED_FIELDS = setOf("exactReview","reviewIdentity","reviewEntryId","availability")
+private fun JsonObject.hasReviewReservedField(): Boolean = REVIEW_RESERVED_FIELDS.any { containsKey(it) }
 
 class LedgerStore(val directory: Path, private val clock: () -> Long = System::currentTimeMillis) : AutoCloseable {
     private val dbFile = directory.resolve("coach.sqlite")
@@ -181,9 +191,12 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** A KP has exactly one course-bound thread; reopening cannot move it to another course or KP. */
     fun bindTutorThread(course: String, thread: String, kp: String) {
         require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
+        val run = agentRunId(thread)
+        val kind = if (run == null) "KP" else "AGENT_KP"
+        val anchor = if (run == null) kp else "$course:$run:$kp"
         val boundThread = query(
-            "SELECT thread_id FROM threads WHERE course_id=? AND kind='KP' AND anchor_type='KP' AND anchor_id=?",
-            course,kp
+            "SELECT thread_id FROM threads WHERE course_id=? AND kind=? AND anchor_type='KP' AND anchor_id=?",
+            course,kind,anchor
         ) { it.getString(1) }.singleOrNull()
         require(boundThread == null || boundThread == thread) {
             "KP $kp in course $course is already bound to thread $boundThread; requested $thread"
@@ -191,20 +204,22 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val row = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?", thread) {
             Triple(it.getString(1), it.getString(2), it.getString(3))
         }.singleOrNull()
-        if (row == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'KP','KP',?)", thread,course,kp)
-        else if (row == Triple(course,"CHAT",thread)) sql("UPDATE threads SET kind='KP',anchor_type='KP',anchor_id=? WHERE thread_id=?",kp,thread)
-        else require(row == Triple(course,"KP",kp)) { "Thread binding mismatch" }
+        if (row == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,?,'KP',?)", thread,course,kind,anchor)
+        else if (row == Triple(course,"CHAT",thread)) sql("UPDATE threads SET kind=?,anchor_type='KP',anchor_id=? WHERE thread_id=?",kind,anchor,thread)
+        else require(row == Triple(course,kind,anchor)) { "Thread binding mismatch" }
     }
 
     /** A separate course-bound review thread preserves the ordinary KP/Continue binding. */
     fun bindReviewThread(course: String, thread: String, kp: String) {
         require(course.isNotBlank() && course != "__system__" && thread.isNotBlank() && kp.isNotBlank())
-        val anchor = "$course:$kp"
+        val run = agentRunId(thread)
+        val kind = if (run == null) "REVIEW" else "AGENT_REVIEW"
+        val anchor = if (run == null) "$course:$kp" else "$course:$run:$kp"
         val old = query("SELECT course_id,kind,anchor_id FROM threads WHERE thread_id=?",thread) {
             Triple(it.getString(1),it.getString(2),it.getString(3))
         }.singleOrNull()
-        if (old == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,'REVIEW','COURSE_KP',?)",thread,course,anchor)
-        else require(old == Triple(course,"REVIEW",anchor)) { "Review thread binding mismatch" }
+        if (old == null) sql("INSERT INTO threads(thread_id,course_id,kind,anchor_type,anchor_id) VALUES(?,?,?,'COURSE_KP',?)",thread,course,kind,anchor)
+        else require(old == Triple(course,kind,anchor)) { "Review thread binding mismatch" }
     }
 
     fun todayProgress(course: String, thread: String? = null): TodayProgress {
@@ -276,7 +291,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun chatInputFrame(message: String): JsonObject = query(
         "SELECT m.thread_id,m.content_md,m.created_at,i.client_message_id,i.device_id FROM messages m JOIN chat_inputs i USING(message_id) WHERE m.message_id=?",message) {
         json("t" to "msg.user","msg" to message,"role" to "user","status" to "complete","threadId" to it.getString(1),
-            "text" to it.getString(2),"createdAt" to it.getLong(3),"clientMsgId" to it.getString(4),"deviceId" to it.getString(5))
+            "text" to it.getString(2),"createdAt" to it.getLong(3),"clientMsgId" to it.getString(4),"deviceId" to it.getString(5)).let { frame ->
+                JsonObject(frame + agentRunMetadata(agentRunId(it.getString(1))))
+            }
     }.single()
 
     /** The authenticated device and immutable client ID identify a send, including after a restart. */
@@ -309,7 +326,9 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             json("t" to if (it.getString(2)=="user") "msg.user" else "msg.snapshot",
                 "msg" to it.getString(1),"role" to it.getString(2),"status" to it.getString(3),"text" to it.getString(4),
                 "createdAt" to it.getLong(5),"model" to it.getString(6),"i" to it.getInt(7),"reason" to it.getString(8),
-                "clientMsgId" to it.getString(9),"deviceId" to it.getString(10),"threadId" to thread)
+                "clientMsgId" to it.getString(9),"deviceId" to it.getString(10),"threadId" to thread).let { frame ->
+                    JsonObject(frame + agentRunMetadata(agentRunId(thread)))
+                }
         }
         return json("t" to "msg.history","courseId" to course,"threadId" to thread,"messages" to JsonArray(messages),
             "userTextCoverageSince" to coverageSince,"legacyHistoryUncovered" to legacy)
@@ -369,7 +388,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
 
 
     fun hello(): Hello = query("SELECT epoch,backed_up_through_seq,last_seq_before FROM ledger_meta") {
-        Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock())
+        Hello(it.getString(1),lastSeq(),it.getLong(2),it.getLong(3),serverTime=clock(),agentRunsSupported=true)
     }.single()
     private fun lastSeq(): Long = query("SELECT coalesce(max(seq),0) FROM events") { it.getLong(1) }.single()
     fun events(course: String, after: Long = 0, limit: Int = Int.MAX_VALUE, through: Long = Long.MAX_VALUE): List<Event> = query("SELECT event_json FROM events WHERE course_id=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?",course,after,through,limit) { LedgerJson.decodeFromString<Event>(it.getString(1)) }
@@ -461,10 +480,24 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         val at = clock()
         val seq = lastSeq() + 1
+        // The posed attempt is authoritative for late/asynchronous grades, even without a thread.
+        val posed = payload.str("attemptId").takeIf { it.isNotBlank() }?.let { attempt ->
+            query("SELECT event_json FROM events WHERE course_id=? AND type='question_posed' AND json_extract(payload,'$.attemptId')=? ORDER BY seq LIMIT 1",course,attempt) {
+                LedgerJson.decodeFromString<Event>(it.getString(1))
+            }.singleOrNull()
+        }
+        val inheritedRun = posed?.let { agentRunId(it.threadId) ?: it.payload.str("agentRunId").ifBlank { null } }
+        val threadRun = agentRunId(thread)
+        val payloadRun = payload.str("agentRunId").ifBlank { null }
+        require(threadRun == null || payloadRun == null || threadRun == payloadRun) { "Agent run mismatch" }
+        val explicitRun = threadRun ?: payloadRun
+        require(posed == null || explicitRun == null || explicitRun == inheritedRun) { "Cannot move an attempt between evidence origins" }
+        val run = explicitRun ?: inheritedRun
+        val markedPayload = JsonObject(payload + agentRunMetadata(run))
         val e = Event(seq,uid(),course,type,recordedAt=at,occurredAt=occurredAt.coerceAtMost(at),
-            deviceId=device,actor=actor,commandId=command?.commandId,effectIndex=effect,threadId=thread,idemKey=idem,payload=payload)
+            deviceId=device,actor=actor,commandId=command?.commandId,effectIndex=effect,threadId=thread,idemKey=idem,payload=markedPayload)
         sql("INSERT INTO events(seq,id,course_id,type,schema,recorded_at,occurred_at,device_id,actor,command_id,effect_index,idem_key,payload_sha256,thread_id,payload,event_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            e.seq,e.id,e.courseId,e.type,e.schema,e.recordedAt,e.occurredAt,e.deviceId,e.actor,e.commandId,e.effectIndex,e.idemKey,command?.payloadSha256,e.threadId,payload.toString(),LedgerJson.encodeToString(e))
+            e.seq,e.id,e.courseId,e.type,e.schema,e.recordedAt,e.occurredAt,e.deviceId,e.actor,e.commandId,e.effectIndex,e.idemKey,command?.payloadSha256,e.threadId,markedPayload.toString(),LedgerJson.encodeToString(e))
         if(type=="question_key_changed") sql("UPDATE questions SET key_state=? WHERE question_id=? AND course_id=?",payload.str("keyState"),payload.str("questionId"),course)
         sql("DELETE FROM projection_cache WHERE course_id=?",course)
         if (type in setOf("attempt_graded","grade_reviewed","legacy_passed","kp_overridden")) {
@@ -667,11 +700,25 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         }
         val body = try { LedgerJson.decodeFromString<CommandBody>(c.payloadBytes) } catch(e: Exception) { return receipt("REJECTED",error="INVALID_COMMAND") }
         if (body.courseId.isBlank() || body.courseId == "__system__") return receipt("REJECTED",error="INVALID_COURSE")
+        val requestedRun = body.payload.str("agentRunId").ifBlank { null }
+        val validOrigin = runCatching {
+            agentRunMetadata(requestedRun)
+            val threadRun = agentRunId(body.payload.str("threadId"))
+            require(threadRun == null || threadRun == requestedRun)
+            val attempt = body.payload.str("attemptId")
+            val posed = if (attempt.isBlank()) null else events(body.courseId).firstOrNull {
+                it.type == "question_posed" && it.payload.str("attemptId") == attempt
+            }
+            if (posed != null && requestedRun != null) require(requestedRun ==
+                (agentRunId(posed.threadId) ?: posed.payload.str("agentRunId").ifBlank { null }))
+        }.isSuccess
+        if (!validOrigin) return receipt("REJECTED",error="INVALID_AGENT_RUN")
         return transaction {
             val effects = mutableListOf<Long>()
             fun emit(type: String, payload: JsonObject, idem: String? = null) {
                 val actor=if(type in setOf("answer_submitted","kp_opened","hint_revealed","followup_asked","review_snoozed","kp_overridden","override_cleared","exam_set","note_saved","journal_edited","study_scope_set","study_scope_advanced")) "LEARNER" else "SYSTEM"
-                effects.add(append(body.courseId,type,payload,idem ?: "cmd:${c.deviceId}:${c.commandId}:${effects.size}",c.deviceId,actor,c,effects.size,body.clientTime,body.payload.str("threadId").ifBlank { null }).seq)
+                val marked = JsonObject(payload + agentRunMetadata(body.payload.str("agentRunId").ifBlank { null }))
+                effects.add(append(body.courseId,type,marked,idem ?: "cmd:${c.deviceId}:${c.commandId}:${effects.size}",c.deviceId,actor,c,effects.size,body.clientTime,body.payload.str("threadId").ifBlank { null }).seq)
             }
             val p = body.payload
             var result = json()
@@ -684,7 +731,21 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                 "submit_answer" -> {
                     val posedSnapshot = p["posedSnapshot"] as? JsonObject
                     val attemptId = p.str("attemptId")
-                    if (attemptId.isBlank() || posedSnapshot == null || posedSnapshot.str("attemptId") != attemptId || posedSnapshot.strings("kpIds").isEmpty() || posedSnapshot.str("questionId").isBlank() || posedSnapshot.str("fingerprint").isBlank() || posedSnapshot.str("purpose").isBlank() || posedSnapshot.num("policyVersion")<1) {
+                    val posedFacts = events(body.courseId).filter { it.type == "question_posed" && it.payload.str("attemptId") == attemptId }
+                    // Exact review exists only as a fact this store posed inside takeReviewVariant. A snapshot
+                    // that merely says exactReview proves nothing: submit_answer emits through the command path,
+                    // so any pose it creates carries a command id and can never satisfy provenExactPose.
+                    val exactReview = posedFacts.firstOrNull { provenExactPose(it, body.courseId, attemptId) }
+                    val unprovenReviewPose = posedFacts.firstOrNull { it.payload.hasReviewReservedField() }
+                    val reviewKey = exactReview?.let { pose -> query("SELECT fingerprint,key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, pose.payload.str("questionId")) { it.getString(1) to it.getString(2) }.singleOrNull() }
+                    if (exactReview != null && (exactReview.deviceId != c.deviceId ||
+                            exactReview.payload.str("agentRunId").ifBlank { null } != requestedRun || posedSnapshot != exactReview.payload ||
+                            reviewKey?.first != exactReview.payload.str("fingerprint") || reviewKey?.second != "VERIFIED")) {
+                        status="REJECTED"; error="REVIEW_SCOPE_OR_QUESTION_CHANGED"
+                    } else if (exactReview == null && (unprovenReviewPose != null || posedSnapshot?.hasReviewReservedField() == true)) {
+                        // Reserved allocation fields without a server allocation are a forgery, not an offline answer.
+                        status="REJECTED"; error="REVIEW_RESERVED_FIELDS"
+                    } else if (attemptId.isBlank() || posedSnapshot == null || posedSnapshot.str("attemptId") != attemptId || posedSnapshot.strings("kpIds").isEmpty() || posedSnapshot.str("questionId").isBlank() || posedSnapshot.str("fingerprint").isBlank() || posedSnapshot.str("purpose").isBlank() || posedSnapshot.num("policyVersion")<1) {
                         status="REJECTED"; error="INVALID_POSED_SNAPSHOT"
                     } else {
                         val existing = query("SELECT event_json FROM events WHERE course_id=? AND idem_key=?",body.courseId,"attempt:$attemptId:answer") { LedgerJson.decodeFromString<Event>(it.getString(1)) }.singleOrNull()
@@ -725,6 +786,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                             } else {
                                 if (posed == null) {
                                     // Key state and format come from authoritative storage, never the client snapshot.
+                                    // Reserved allocation fields were already refused above, so this pose stays a plain fact.
                                     val snapshot = JsonObject(posedSnapshot + mapOf("format" to JsonPrimitive(question.first),"keyState" to JsonPrimitive(question.third)))
                                     emit("question_posed",snapshot,"attempt:$attemptId")
                                 }
@@ -879,7 +941,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             Files.list(directory.resolve("blobs")).use { files -> files.forEach { Files.createLink(blobDir.resolve(it.fileName),it) } }
             Files.newBufferedWriter(target.resolve("events.jsonl"),Charsets.UTF_8).use { out ->
                 query("SELECT event_json FROM events ORDER BY seq") { it.getString(1) }.forEach { out.write(it);out.newLine() }
-                query("SELECT thread_id,mseq,message_id,role,model,status,content_md,reason,mode,citations,created_at FROM messages ORDER BY thread_id,mseq") { rs -> json("recordType" to "message","threadId" to rs.getString(1),"mseq" to rs.getLong(2),"messageId" to rs.getString(3),"role" to rs.getString(4),"model" to rs.getString(5),"status" to rs.getString(6),"contentMd" to rs.getString(7),"reason" to rs.getString(8),"mode" to rs.getString(9),"citations" to rs.getString(10),"createdAt" to rs.getLong(11)).toString() }.forEach { out.write(it);out.newLine() }
+                query("SELECT thread_id,mseq,message_id,role,model,status,content_md,reason,mode,citations,created_at FROM messages ORDER BY thread_id,mseq") { rs -> json("recordType" to "message","threadId" to rs.getString(1),"mseq" to rs.getLong(2),"messageId" to rs.getString(3),"role" to rs.getString(4),"model" to rs.getString(5),"status" to rs.getString(6),"contentMd" to rs.getString(7),"reason" to rs.getString(8),"mode" to rs.getString(9),"citations" to rs.getString(10),"createdAt" to rs.getLong(11)).let { JsonObject(it + agentRunMetadata(agentRunId(rs.getString(1)))) }.toString() }.forEach { out.write(it);out.newLine() }
             }
             // Publish the watermark only after DB + blobs + export all succeeded.
             DriverManager.getConnection("jdbc:sqlite:${target.resolve("coach.sqlite")}").use { backup -> backup.prepareStatement("UPDATE ledger_meta SET backed_up_through_seq=?,last_backup_at=?").use { ps -> ps.setLong(1,seq);ps.setLong(2,clock());ps.execute(); ps.updateCount.coerceAtLeast(0) } }
@@ -1154,6 +1216,80 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun poolStems(course: String, kp: String): List<String> = query(
         "SELECT stem_md FROM questions JOIN question_kp USING(question_id) WHERE course_id=? AND kp_id=?",course,kp) { it.getString(1) }
 
+    /**
+     * 复习变式的候选：就是主线选题用的那条池子（同课程、同考点、单选、已核键、还没出过题）。
+     * 池子里没有就返回空，由队列保持「缺题」；这里绝不补题、不改出题状态。
+     */
+    fun reviewVariantCandidates(course: String, kp: String): List<VariantCandidate> =
+        unseenPoolIds(course, kp).mapNotNull { id ->
+            query("SELECT fingerprint FROM questions WHERE course_id=? AND question_id=?", course, id) { it.getString(1) }
+                .singleOrNull()?.let { fingerprint ->
+                    VariantCandidate(course, kp, QueueQuestion(id, null, fingerprint.ifBlank { null }),
+                        QueueAvailability.VALID, keyVerified = true)
+                }
+        }
+
+    /**
+     * The only client-uncopyable proof that a posed fact came from [takeReviewVariant]: this store poses it
+     * inside its own transaction, so it has no command id, owns the exact review thread and group, and its
+     * review identity recomputes to itself. A client-written snapshot cannot produce any of that, because
+     * every command-path emit carries a command id.
+     */
+    private fun provenExactPose(e: Event, course: String, attempt: String): Boolean {
+        if (e.type != "question_posed" || e.commandId != null) return false
+        if (e.idemKey != "attempt:$attempt" || e.threadId != "review-practice:$course:$attempt") return false
+        if (e.payload.str("groupId") != "review:$attempt" || !e.payload.flag("exactReview")) return false
+        val identity = e.payload.str("reviewIdentity")
+        if (identity.isBlank()) return false
+        val kp = e.payload.strings("kpIds").singleOrNull() ?: return false
+        val recomputed = canonicalJson(json("course" to course,"device" to e.deviceId,"run" to null,"kp" to kp,
+            "entry" to e.payload.str("reviewEntryId"),"attempt" to attempt,"question" to e.payload.str("questionId"),
+            "fingerprint" to e.payload.str("fingerprint")))
+        return recomputed == identity
+    }
+
+    /** Exact selection, consumption and one frozen posed fact share the actor-owned transaction. */
+    fun takeReviewVariant(course: String, device: String, run: String?, kp: String, entryId: String,
+        attemptId: String, expected: QueueQuestion): List<Event> = transaction {
+        fun refuse(code: String): Nothing = throw ReviewVariantRejected(code)
+        if (course.isBlank() || course == "__system__" || kp.isBlank() || entryId.isBlank() || attemptId.isBlank()) refuse("INVALID_REVIEW_REQUEST")
+        if (query("SELECT 1 FROM devices WHERE device_id=? AND revoked_at IS NULL", device) { true }.isEmpty()) refuse("REVIEW_DEVICE_UNAUTHORIZED")
+        // The current board is learner-only; never relabel its entries as agent evidence.
+        if (run != null) refuse("REVIEW_SCOPE_MISMATCH")
+        val question = query("SELECT fingerprint,key_state FROM questions q JOIN question_kp k USING(question_id) WHERE q.course_id=? AND q.question_id=? AND k.kp_id=? AND q.format='SINGLE_CHOICE'",course,expected.id,kp) {
+            it.getString(1) to it.getString(2)
+        }.firstOrNull() ?: refuse("REVIEW_QUESTION_UNAVAILABLE")
+        if (question.second != "VERIFIED") refuse("REVIEW_QUESTION_UNAVAILABLE")
+        // This pool's authoritative revision is the fingerprint; it has no semantic version column.
+        if (expected.version != null || expected.fingerprint.isNullOrBlank() || expected.fingerprint != question.first) refuse("REVIEW_QUESTION_CHANGED")
+        val identity = canonicalJson(json("course" to course,"device" to device,"run" to run,"kp" to kp,
+            "entry" to entryId,"attempt" to attemptId,"question" to expected.id,"fingerprint" to expected.fingerprint))
+        val facts = events(course)
+        val previous = facts.filter { it.type == "question_posed" && it.payload.str("attemptId") == attemptId }
+        if (previous.isNotEmpty()) {
+            val pose = previous.singleOrNull() ?: refuse("REVIEW_IDENTITY_CONFLICT")
+            if (pose.deviceId != device) refuse("REVIEW_SCOPE_MISMATCH")
+            // A replay may only land on a pose this store allocated; a client-written exactReview is not proof.
+            if (!provenExactPose(pose, course, attemptId) || pose.payload.str("reviewIdentity") != identity) refuse("REVIEW_IDENTITY_CONFLICT")
+            if (facts.any { it.type == "attempt_voided" && it.payload.str("attemptId") == attemptId }) refuse("REVIEW_QUESTION_UNAVAILABLE")
+            return@transaction previous
+        }
+        // Another attempt already owns this review group; refuse as a conflict instead of failing inside pose allocation.
+        if (facts.any { it.type == "question_posed" && it.payload.str("groupId") == "review:$attemptId" }) refuse("REVIEW_IDENTITY_CONFLICT")
+        val state = projection(course)
+        if (state.requiresServerSnapshot) refuse("REVIEW_SNAPSHOT_REQUIRED")
+        val day = logicalDay(clock(), state.timeZone)
+        val entry = ledgerQueueCandidate(course, facts, day).dueEntries(day).find { it.id == entryId && it.kpId == kp }
+            ?: refuse("REVIEW_ENTRY_UNAVAILABLE")
+        if (entry.originalQuestion?.id == expected.id || expected.id !in unseenPoolIds(course, kp)) refuse("REVIEW_QUESTION_UNAVAILABLE")
+        val request = json("attemptId" to attemptId,"questionId" to expected.id,"kpIds" to listOf(kp),
+            "purpose" to "RECALL","policyVersion" to 1,"review" to true,"posedAt" to clock(),
+            "availability" to "VALID","exactReview" to true,"reviewEntryId" to entryId,"reviewIdentity" to identity)
+        // The posed fact itself consumes this question for every selector, atomically.
+        poseChoiceGroupInTransaction(course, "review:$attemptId", listOf(request), Random.Default, device,
+            offline = false, thread = "review-practice:$course:$attemptId")
+    }
+
     /** No model output can produce a card. Selection, consumption and question_posed are atomic. */
     fun takePoolGroup(course: String, kp: String, groupId: String, size: Int = 3,
         purpose: String = "PRACTICE", untaught: Boolean = false, thread: String? = null, review: Boolean = false): PoolTake = transaction {
@@ -1175,7 +1311,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.course_id=? AND e.idem_key='fallback-job:'||j.job_id)
             ORDER BY j.updated_at DESC,j.rowid DESC LIMIT 1""",course,kp,course) { it.getString(1) to it.getString(2) }.singleOrNull()
         if (failure != null) append(course,"fallback_used",json("groupId" to groupId,"kpId" to kp,
-            "jobId" to failure.first,"from" to "TASK","reason" to failure.second),"fallback-job:${failure.first}")
+            "jobId" to failure.first,"from" to "TASK","reason" to failure.second),"fallback-job:${failure.first}",thread=thread)
         val requests=ids.take(size).map { id -> json("questionId" to id,"attemptId" to uid(),
             "kpIds" to listOf(kp),"purpose" to purpose,"policyVersion" to 1,"untaught" to untaught,"review" to review) }
         val posed=poseChoiceGroupInTransaction(course,groupId,requests,Random.Default,"server",false,thread)
@@ -1197,13 +1333,17 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE state='running'",clock())
         sql("DELETE FROM turn_leases")
     }
-    fun startMessage(thread: String, message: String, content: String = "") { sql("INSERT INTO messages(thread_id,mseq,message_id,status,content_md,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,'streaming',?,?)",thread,thread,message,content,clock()) }
+    fun startMessage(thread: String, message: String, content: String = "") {
+        beginStreamingMessage(thread,message,"")
+        updateStreamingMessage(message,content,0)
+    }
     fun messageStatus(id: String): Pair<String,String?>? = query("SELECT status,reason FROM messages WHERE message_id=?",id) { it.getString(1) to it.getString(2) }.singleOrNull()
 
     /** 流式消息的一生：streaming 立即可见（§4.2），每秒把已可见正文与 `(msg, i)` 计数一起落库。 */
     fun beginStreamingMessage(thread: String, message: String, model: String, role: String = "assistant") {
-        sql("INSERT INTO messages(thread_id,mseq,message_id,role,model,status,content_md,delta_index,created_at) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,?,?,'streaming','',0,?)",
-            thread,thread,message,role,model,clock())
+        // The immutable namespaced thread persists the run ID; mode persists the readable label.
+        sql("INSERT INTO messages(thread_id,mseq,message_id,role,model,status,content_md,delta_index,created_at,mode) VALUES(?,coalesce((SELECT max(mseq)+1 FROM messages WHERE thread_id=?),1),?,?,?,'streaming','',0,?,?)",
+            thread,thread,message,role,model,clock(),if (agentRunId(thread) == null) null else AGENT_RUN_LABEL)
     }
 
     fun updateStreamingMessage(message: String, content: String, index: Int) {

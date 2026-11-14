@@ -3,6 +3,7 @@ package com.coach.android
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.*
@@ -138,7 +139,9 @@ class NavigationFlowTest {
         // Start at question two as if returning from an earlier, locally saved session.
         controller.sync.saveMainlineState(controller.courseId, json("item" to "Q2", "mode" to "quiz"), "week:3")
         val restore = StateRestorationTester(compose)
-        restore.setContent { Box(Modifier.requiredSize(dimensions.first.dp, dimensions.second.dp)) { CoachApp(controller, initialTab = AppTab.REVIEW) } }
+        restore.setContent { Box(Modifier.requiredSize(dimensions.first.dp, dimensions.second.dp)) {
+            CoachApp(controller, initialTab = AppTab.REVIEW, settings = { Text("每日提醒 08:00") })
+        } }
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-continue").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("mainline-continue").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("mainline-option-1").fetchSemanticsNodes().isNotEmpty() }
@@ -171,8 +174,7 @@ class NavigationFlowTest {
         compose.onNodeWithTag("mainline-week-3").assertExists()
         back()
         compose.onNodeWithTag("open-mainline").assertExists()
-        compose.onNodeWithText("设置", useUnmergedTree = true).performClick()
-        back()
+        compose.onNodeWithText("每日提醒 08:00").assertIsDisplayed()
         compose.onNodeWithTag("open-mainline").assertExists()
     }
 

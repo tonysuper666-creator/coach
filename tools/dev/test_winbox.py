@@ -58,6 +58,61 @@ class Transport(unittest.TestCase):
         return subprocess.run([str(self.root / 'tools/dev/heavy'), *args], env=self.env,
                               cwd=self.root, capture_output=True, text=True, timeout=20)
 
+    def run_winbox(self, *args):
+        return subprocess.run(['python3', str(self.root / 'tools/dev/winbox.py'), *args],
+                              env=self.env, cwd=self.root, capture_output=True, text=True, timeout=20)
+
+    def test_desktop_transport_requires_explicit_session_selection(self):
+        original = Path.cwd()
+        os.chdir(self.root)
+        try:
+            command = ['./gradlew', ':desktopApp:test', '--rerun', '--tests', 'sample.*']
+            self.assertIsNone(winbox.portable_args(command, self.root))
+            self.assertEqual(winbox.portable_args(command, self.root, desktop=True), command[1:])
+            for task in (':desktopApp:run', ':desktopApp:packageMsi', ':desktopApp:check', ':server:app:test'):
+                self.assertIsNone(winbox.portable_args(['./gradlew', task], self.root, desktop=True))
+            self.assertEqual(winbox.session_option(['--interactive', *command]), (command, True, True, None))
+            self.assertEqual(winbox.session_option(['--interactive=12', *command]), (command, True, True, 12))
+            self.assertEqual(winbox.session_option(['--ssh', *command]), (command, True, False, None))
+            for option in ('--interactive=0', '--interactive=-1', '--interactive=bad', '--interactive=4294967295'):
+                with self.assertRaises(ValueError):
+                    winbox.session_option([option, *command])
+        finally:
+            os.chdir(original)
+
+    def test_unavailable_console_returns_logs_and_never_falls_back(self):
+        self.executable(self.bin / 'ssh', '#!/bin/sh\ncase "$*" in *-File*) exit 69;; esac\nexit 0\n')
+        self.executable(self.bin / 'scp', '''#!/usr/bin/env python3
+import json, pathlib, shutil, sys
+source, dest = sys.argv[-2:]
+if source.endswith('/result.json'):
+    pathlib.Path(dest).write_text(json.dumps({'exit':69, 'seconds':0, 'artifacts':False, 'logs':True}))
+elif source.endswith('/stdout.log'): pathlib.Path(dest).write_text('')
+elif source.endswith('/gradle.log') or source.endswith('/stderr.log'):
+    pathlib.Path(dest).write_text('INTERACTIVE_UNAVAILABLE: no active console')
+elif source.endswith('request.json'): shutil.copyfile(source, 'captured-request.json')
+''')
+        result = self.run_heavy('--local', 'python3', 'tools/dev/winbox.py', '--interactive=12',
+                                './gradlew', ':desktopApp:test', '--tests', 'sample.*')
+        self.assertEqual(result.returncode, 69, result.stdout + result.stderr)
+        self.assertNotIn('LOCAL :desktopApp:test', result.stdout)
+        request = json.loads((self.root / 'captured-request.json').read_text())
+        self.assertTrue(request['interactive'])
+        self.assertEqual(request['consoleSessionId'], 12)
+        output = next((self.root / '.coach-winbox').iterdir())
+        self.assertIn('INTERACTIVE_UNAVAILABLE', (output / 'stderr.log').read_text())
+        self.assertEqual((output / 'stdout.log').read_text(), '')
+
+    def test_explicit_windows_offline_and_unsupported_commands_cannot_fall_back(self):
+        self.executable(self.bin / 'ssh', '#!/bin/sh\nexit 255\n')
+        for option in ('--interactive', '--ssh'):
+            result = self.run_winbox(option, './gradlew', ':desktopApp:test')
+            self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+            self.assertNotIn('LOCAL', result.stdout)
+        result = self.run_winbox('--interactive', './gradlew', ':desktopApp:packageMsi')
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        self.assertIn('unsupported explicit Windows command', result.stderr)
+
     def test_remote_routes_only_portable_explicit_tasks(self):
         original = Path.cwd()
         os.chdir(self.root)

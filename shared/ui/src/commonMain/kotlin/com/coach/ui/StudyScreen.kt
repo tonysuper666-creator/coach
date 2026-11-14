@@ -43,6 +43,12 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     var draft by rememberSaveable(kp.id, stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(initialDraft.orEmpty())) }
     val enterGate = remember(kp.id) { EnterGate() }
     val focus = LocalFocusManager.current
+    var claimReferenceOpen by remember(c, kp) { mutableStateOf(false) }
+    val openReference: ((KpRow) -> Unit)? = if (kp.sourceReferences.structured) ({
+        focus.clearFocus()
+        claimReferenceOpen = true
+    }) else onOpenReference
+    if (claimReferenceOpen) ClaimSourceDialog(c.course?.reader, kp, "学习") { claimReferenceOpen = false }
     var opened by remember(kp.id) { mutableStateOf(false) }
     var started by rememberSaveable(kp.id) { mutableStateOf(false) }
     var pinned by remember(kp.id) { mutableStateOf(false) }
@@ -95,17 +101,17 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
 
     var readingFocus by rememberSaveable(kp.id) { mutableStateOf(initialFocus) }
-    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.sync.mainlineState(c.courseId, "learning").str("kind") == "tutor") }
+    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.mainlineState("learning").str("kind") == "tutor") }
     val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
     if (!reviewMode && !conversation && completed != null && pending == null && !tv.busy) {
         com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
             onAsk = { conversation = true }, onQuiz = { conversation = true; next(true) },
-            onSource = { onOpenReference?.invoke(kp) }, weekActions = weekActions,
+            onSource = { openReference?.invoke(kp) }, weekActions = weekActions,
             onSelectionAsk = { draft = TextFieldValue(it); conversation = true }, backLabel = backLabel)
         return
     }
     LaunchedEffect(kp.id, reviewMode) {
-        if (!reviewMode) c.sync.saveMainlineState(c.courseId, json("kind" to "tutor", "kpId" to kp.id), "learning")
+        if (!reviewMode) c.saveMainlineState(json("kind" to "tutor", "kpId" to kp.id), "learning")
     }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
     val notes = remember(tv.items, kp.reference) {
@@ -119,7 +125,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
             if (kp.reference.isNotBlank()) com.coach.ui.v7.PaperCard {
                 Text("出处", style = MaterialTheme.typography.labelMedium)
                 Text(kp.reference, style = MaterialTheme.typography.bodyMedium)
-                if (onOpenReference != null && kp.anchorDoc.isNotBlank()) TextButton(onClick = { onOpenReference(kp) }) { Text("看原文") }
+                if (openReference != null && (kp.anchorDoc.isNotBlank() || kp.sourceReferences.structured)) TextButton(onClick = { openReference(kp) }) { Text("看原文") }
             }
         } }) {
     Column(Modifier.fillMaxSize().padding(horizontal = com.coach.ui.v7.LocalDeskMetrics.current.horizontalPadding).padding(top = if (pending != null) 8.dp else com.coach.ui.v7.LocalDeskMetrics.current.topPadding), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -141,8 +147,8 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
                         TextButton(onClick = { c.tutor.telemetry?.record("tap", "scope"); showScope = !showScope }, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 0.dp)) {
                             Text(if (showScope) "收起出处" else sourceLine(tag).ifBlank { "出处" } + if (additionalScope.isNotEmpty()) " · 另 ${additionalScope.size} 处 ▾" else " ▾", style = MaterialTheme.typography.labelMedium)
                         }
-                        if (onOpenReference != null && kp.anchorDoc.isNotBlank()) com.coach.ui.v7.PaperButton(onClick = { onOpenReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
-                            Text("看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
+                        if (openReference != null && (kp.anchorDoc.isNotBlank() || kp.sourceReferences.structured)) com.coach.ui.v7.PaperButton(onClick = { openReference(kp) }, modifier = Modifier.heightIn(min = 48.dp).testTag("open-source"), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                            Text(if (kp.sourceReferences.structured) "查看主张出处" else "看原文 · ${kp.reference.ifBlank { "教材" }}", style = MaterialTheme.typography.labelLarge)
                         } else if (kp.reference.isNotBlank()) Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { Text("本次参考：${kp.reference}", style = MaterialTheme.typography.labelMedium) }
                         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) { StatusChip(kp.status.label, statusColor(kp.status)) }
                     }
@@ -270,7 +276,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
     if (askOpen && pending != null && !readingFocus) AlertDialog(onDismissRequest = { askOpen = false },
         title = { Text("问一句") }, text = {
-            Column { Text("现在问，这题不算进「稳了」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column { Text("现在问，这题不算进「${com.coach.client.KpStatus.SOLID.label}」", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ComposerField(value = draft, onValueChange = { draft = it }, onSend = { text -> send(text).also { if (it) askOpen = false } },
                 gate = enterGate, placeholder = "问一句…", maxLines = 4, canSend = ui.connected && !tv.busy) }
         }, confirmButton = { TextButton(onClick = { askOpen = false }) { Text("继续答题") } })

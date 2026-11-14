@@ -214,11 +214,11 @@ private fun MarkedParagraph(raw: String, d: V7PageDetails, index: Int, onSelecti
 internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: String, focus: Boolean, onFocus: () -> Unit,
     onBack: (() -> Unit)?, onAsk: () -> Unit, onQuiz: () -> Unit, onSource: () -> Unit, weekActions: WeekActions?, onSelectionAsk: (String) -> Unit, backLabel: String? = null) {
     val railAnchors = remember(kp.id) { MarginAnchors() }
-    val readingScroll = rememberScrollState(c.sync.mainlineState(c.courseId, "reading:${kp.id}").num("offset").toInt())
+    val readingScroll = rememberScrollState(c.mainlineState("reading:${kp.id}").num("offset").toInt())
     LaunchedEffect(kp.id) {
-        c.sync.saveMainlineState(c.courseId, json("kind" to "reading", "kpId" to kp.id), "learning")
+        c.saveMainlineState(json("kind" to "reading", "kpId" to kp.id), "learning")
         snapshotFlow { readingScroll.value }.collect { offset ->
-            c.sync.saveMainlineState(c.courseId, json("offset" to offset), "reading:${kp.id}")
+            c.saveMainlineState(json("offset" to offset), "reading:${kp.id}")
         }
     }
     val scoped = view.projection.studyScope?.week
@@ -267,11 +267,12 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
         status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = backLabel ?: week?.let { "← 第 $it 周" } ?: "← 今天",
         directory = { WeekDirectory(view, week, weekActions?.let { it::select }) },
         margin = {
-            if (d.lecture.isNotBlank() || d.personalNote.isNotBlank() || d.sourceLabel.isNotBlank() || d.question != null || d.selection.isNotBlank()) AlignedRail(listOf("p0", "p1", "p1", "p3", "end")) {
+            if (d.lecture.isNotBlank() || d.personalNote.isNotBlank() || d.sourceLabel.isNotBlank() || kp.sourceReferences.structured || d.question != null || d.selection.isNotBlank()) AlignedRail(listOf("p0", "p1", "p1", "p3", "end")) {
                 if (d.lecture.isNotBlank()) NoteCard("${d.lectureLabel} · 1", d.lecture)
                 if (d.selection.isNotBlank()) SelectionMenu(d.selection, onSelectionAsk,
                     onHighlight = { saveNote("> ${d.selection}") }, onNote = { noteQuote = d.selection }, enabled = !saving)
-                if (d.sourceLabel.isNotBlank()) SourceThumbnail(d, onSource)
+                if (kp.sourceReferences.structured) PaperButton(onClick = onSource, modifier = Modifier.testTag("reading-claim-source")) { Text("查看主张出处") }
+                else if (d.sourceLabel.isNotBlank()) SourceThumbnail(d, onSource)
                 if (d.personalNote.isNotBlank()) NoteCard("3  我的批注", d.personalNote, personal = true)
                 d.question?.let { MarginQuestion(it, onQuiz) }
             } else {

@@ -12,7 +12,7 @@ kotlin {
     }
     sourceSets.commonMain.dependencies { api(libs.serialization.json) }
     sourceSets.commonTest.dependencies { implementation(kotlin("test")) }
-    sourceSets.jvmTest { kotlin.srcDir("src/benchmark/kotlin") }
+    sourceSets.jvmTest { kotlin.srcDir("src/benchmark/kotlin"); resources.srcDir(rootProject.file("testdata")) }
     jvmToolchain(17)
     sourceSets.getByName("jvmTest").dependencies {
         implementation(kotlin("test"))

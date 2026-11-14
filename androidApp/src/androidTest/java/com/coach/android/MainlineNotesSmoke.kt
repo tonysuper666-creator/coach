@@ -254,7 +254,7 @@ class MainlineNotesSmoke {
             waitFor("跳过要点，直接做题")
             notesClicks = clicks - notesStart
             screenshot("reading-route")
-            click(show("★ 课上强调"))
+            click(show("课上强调"))
             waitFor("01:38:00", contains = true)
             show("Synthetic pears were emphasized.")
             screenshot("reading-emphasis")
@@ -273,7 +273,9 @@ class MainlineNotesSmoke {
             target("导航：复习").assertDoesNotExist()
             compose.onNodeWithTag("mainline-notes").assertDoesNotExist()
             screenshot("focus-reading")
-            click(waitFor("退出专心读"))
+            // Both the shell and the reader expose this label; the shell control overlaps the reader toolbar.
+            // Select the reader control so the injected touch lands on its own visible button.
+            click(compose.onAllNodes(hasText("退出专心读")).onLast())
             // The V7 shell contains the existing weekly reader. Its heading and back control return
             // when focus ends; the desk's app navigation belongs to the question screen.
             waitFor("第 1 周 · 本周要点")
@@ -285,7 +287,8 @@ class MainlineNotesSmoke {
             click(show("本周脉络：节 → 考点 → 题"))
             waitFor("收起本周脉络")
             screenshot("weekly-map-open")
-            show("○ 待练 F1")
+            show("○ 考点 1 · Synthetic basics")
+            show("○ 考点 2 · Synthetic basics")
             screenshot("weekly-map")
             // Keep the selection-only tutor evidence check and subsequent map navigation in the same run.
             selectPassage()
@@ -293,7 +296,7 @@ class MainlineNotesSmoke {
             waitFor("缺少可定位的课件或教材页依据", contains = true)
             screenshot("ai-no-evidence")
             click(waitFor("返回阅读"))
-            click(show("题 S1 · 待练"))
+            click(show("题：Synthetic orchard question S1: which sta · 待练"))
         }
         // Notes route can select a section and expose only its linked questions.
         click(show("本周要点"))
@@ -305,8 +308,19 @@ class MainlineNotesSmoke {
         screenshot("filtered")
         click(show("本周要点"))
         click(show("跳过要点，直接做题"))
+        // Returning to the full set keeps the current B1 selection. Choose S1 explicitly
+        // through the reader map before exercising the remaining answer sequence.
+        waitForQuestion(3)
+        click(show("本周要点"))
+        if (compose.onAllNodes(hasText("本周脉络：节 → 考点 → 题")).fetchSemanticsNodes().isNotEmpty()) {
+            click(show("本周脉络：节 → 考点 → 题"))
+        }
+        click(show("题：Synthetic orchard question S1: which sta · ${if (fault) "做错，待练" else "待练"}"))
+        waitForQuestion(1, total = 2)
+        click(show("本周要点"))
+        click(show("跳过要点，直接做题"))
         waitForQuestion(1)
-        click(show("★ 课上强调"))
+        click(show("课上强调"))
         waitFor("01:38:00", contains = true)
         screenshot("question-emphasis")
         click(waitFor("关闭"))

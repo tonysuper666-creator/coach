@@ -17,12 +17,12 @@ fun displayTitle(raw: String): String = com.coach.domain.cleanTitle(raw)
 fun titleSource(raw: String): String {
     val parts = BRACKETED.findAll(raw).flatMap { it.value.removeSurrounding("【", "】").split('·', '・') }
         .map { it.trim() }.filter { it.isNotEmpty() }
-        .map { part ->
+        .mapNotNull { part ->
             Regex("^[Ww](\\d+)$").matchEntire(part)?.let { "第 ${it.groupValues[1]} 周" }
                 ?: Regex("^Ch\\.?(\\d+)(?:[–-](\\d+))?$", RegexOption.IGNORE_CASE).matchEntire(part)?.let { m ->
                     "教材第 ${m.groupValues[1]}${m.groupValues[2].takeIf { it.isNotEmpty() }?.let { e -> "–$e" }.orEmpty()} 章"
                 }
-                ?: when (part.lowercase()) { "slides", "slide" -> "课件"; "essay" -> "论述常考"; else -> part }
+                ?: when (part.lowercase()) { "slides", "slide" -> "课件"; "essay" -> "论述常考"; else -> null }
         }
     return parts.distinct().joinToString(" · ")
 }
@@ -42,7 +42,7 @@ fun statusSummary(rows: List<KpRow>): String = buildList {
 }.joinToString(" · ")
 
 /** Learner-facing module name; the numbered raw value stays available for grouping and association. */
-fun moduleDisplayName(raw: String): String = displayTitle(raw).replace(Regex("^\\s*\\d+(?:[.\\s、:：-]+|$)"), "").trim()
+fun moduleDisplayName(raw: String): String = if (raw.isBlank()) "" else displayTitle(raw).replace(Regex("^\\s*\\d+(?:[.\\s、:：-]+|$)"), "").trim()
 
 /** Week name from the course, not the module number: 「02 工具：基础计算」 → 「工具：基础计算」. */
 fun weekName(rows: List<KpRow>): String =
@@ -62,3 +62,9 @@ fun CourseView.examCountdownText(nowMillis: Long): String = when {
     daysToExam(nowMillis) == null -> "期末已结束"
     else -> "距期末 ${daysToExam(nowMillis)} 天"
 }
+
+/**
+ * One question's latest graded answer was correct and was not a guess.
+ * That is not 「会了」: section mastery still needs the ledger's own evidence.
+ */
+fun latestCorrectAttemptLabel(): String = "最近答对（非猜）"

@@ -9,7 +9,7 @@ private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only 
     [--seed-manifest FILE [--proposal FILE [--confirmation FILE]]]
        migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
        migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
-       migrate-deeptutor add-outline --input FILE --database OFFLINE_DIR
+       migrate-deeptutor add-outline --input FILE --database OFFLINE_DIR [--preflight | --expect FILE --backup NEW_DIR]
        migrate-deeptutor rehearse --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE [--confirmation FILE] --out NEW_DIR
        migrate-deeptutor rehearse-incremental --snapshot DIR --next-snapshot DIR --second-snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
        migrate-deeptutor apply-confirmed --database DIR --backup NEW_DIR --snapshot DIR --seed-manifest FILE --proposal FILE --confirmation FILE --confirmation-sha256 SHA

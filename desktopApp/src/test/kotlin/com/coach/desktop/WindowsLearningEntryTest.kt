@@ -62,7 +62,7 @@ class WindowsLearningEntryTest {
     private fun ComposeUiTest.capture(name: String) {
         val directory = Path.of("build/screens/windows-learning-entry").toFile().also { it.mkdirs() }
         val output = directory.resolve("$name.png")
-        assertTrue(ImageIO.write(onNodeWithTag("windows-textbooks").captureToImage().toAwtImage(), "png", output))
+        assertTrue(ImageIO.write(onNodeWithTag("windows-host").captureToImage().toAwtImage(), "png", output))
         val image = assertNotNull(ImageIO.read(output))
         assertEquals(1100, image.width)
         assertEquals(800, image.height)

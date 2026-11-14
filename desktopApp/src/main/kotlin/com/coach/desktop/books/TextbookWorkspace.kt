@@ -35,15 +35,74 @@ import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
 
+/**
+ * Answer writes that outlive the bookshelf composition.
+ *
+ * The workspace is removed from composition whenever the learner switches to 今天 or 课程, so a save
+ * launched from its `rememberCoroutineScope` was cancelled while it was still waiting on SQLite. This
+ * queue belongs to the host window instead, and every entry carries the book, lesson and question mode
+ * it was typed in: a write that waits long enough for the learner to move on still lands on the lesson
+ * it came from instead of the one that happens to be open when it finally runs.
+ */
+internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
+    private data class Key(val book: String, val lesson: String, val mode: QuestionMode)
+
+    private val pending = mutableStateMapOf<Key, PracticeAnswer>()
+    private var writer: Job? = null
+
+    fun save(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
+        pending[Key(book, lesson, mode)] = answer
+        startWriter()
+    }
+
+    fun current(book: String, lesson: String, mode: QuestionMode, saved: PracticeAnswer): PracticeAnswer =
+        pending[Key(book, lesson, mode)] ?: saved
+
+    /** A failed write remains queued for an explicit retry, including when closing the window. */
+    suspend fun flush(): Boolean {
+        if (writer?.isActive != true && pending.isNotEmpty()) startWriter()
+        writer?.join()
+        return pending.isEmpty()
+    }
+
+    private fun startWriter() {
+        if (writer?.isActive != true) {
+            // Start before the owning composition can disappear; finish accepted writes even if it does.
+            writer = scope.launch(start = CoroutineStart.UNDISPATCHED) { withContext(NonCancellable) { drain() } }
+        }
+    }
+
+    private suspend fun drain() {
+        while (true) {
+            val (key, answer) = pending.entries.firstOrNull()?.toPair() ?: break
+            // The controller checks the identity and writes under the same lock, so a lesson switch that is
+            // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
+            if (!controller.saveDraft(key.book, key.lesson, key.mode, answer)) return
+            if (pending[key] == answer) pending.remove(key)
+        }
+    }
+}
+
+/** A workspace-local queue, for callers that own the whole screen and never unmount it mid-answer. */
 @Composable
-internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
+internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts {
+    val scope = rememberCoroutineScope()
+    return remember(controller) { AnswerDrafts(controller, scope) }
+}
+
+@Composable
+internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
@@ -53,7 +112,10 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
-    LaunchedEffect(controller) { controller.load() }
+    LaunchedEffect(controller) {
+        val current = controller.state.value
+        if (loadOnMount && current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
+    }
     LaunchedEffect(ui.screen, ui.source) {
         if (ui.screen == BookScreen.READER && ui.source != null) readerFocus.requestFocus()
     }
@@ -80,7 +142,7 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                     ui.screen == BookScreen.HOME || book == null -> LibraryHome(ui,
                         onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
                         onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
-                        onLearn = { run { controller.learn() } })
+                        onLearn = { run { drafts.flush(); controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
                         onPage = { page ->
@@ -97,8 +159,12 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                                 }
                             }
                         }, onBack = { returnFromReader() },
-                        onLearn = { run { controller.learn() } })
-                    else -> TextbookLearning(ui, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
+                        onLearn = { run { drafts.flush(); controller.learn() } })
+                    else -> {
+                        val lesson = book.lessons.getOrNull(book.lessonIndex)
+                        val displayed = if (lesson == null) ui else ui.copy(
+                            answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
+                        TextbookLearning(displayed, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; run { controller.source() } },
                         onPracticeSource = { practice ->
@@ -113,8 +179,15 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                             }
                             practiceSource = anchor
                             run { controller.source(); anchor.page?.let { controller.page(it) } }
-                        }, onLesson = { run { controller.lesson(it) } },
-                        onSettings = { run { controller.questionSettings() } }, onAnswer = { run { controller.answer(it) } })
+                        }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
+                        onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                            ui.book?.let { current ->
+                                current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
+                                    drafts.save(current.id, lesson.id, current.questionMode, answer)
+                                }
+                            }
+                        })
+                    }
                 }
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
@@ -133,7 +206,7 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 1000.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(36.dp),
             verticalArrangement = Arrangement.spacedBy(22.dp)) {
-            Text("我的书桌", style = MaterialTheme.typography.headlineLarge)
+            Text("书架", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("library-title"))
             Text("带来一本教材，从想读的地方开始。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
             Text("PDF、EPUB、Markdown 或文本 · 教材和进度保存在这台电脑", style = MaterialTheme.typography.bodySmall)
@@ -151,7 +224,7 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
                     }, "home-learn", !ui.busy, Modifier.weight(1f), onLearn)
                 }
                 HorizontalDivider()
-                Text("书架", style = MaterialTheme.typography.titleMedium)
+                Text("全部教材", style = MaterialTheme.typography.titleMedium)
                 for (item in ui.catalog) {
                     OutlinedButton(onClick = { onSelect(item.id) }, enabled = !ui.busy,
                         modifier = Modifier.fillMaxWidth().testTag("book-${item.id}")) {
@@ -302,7 +375,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
         }
     }
 
-    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书桌", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书架", showNavigation = false,
         status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -394,7 +467,7 @@ private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFoc
         }
         onFocusRestored()
     }
-    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书桌", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
@@ -437,6 +510,10 @@ private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFoc
 @Composable
 private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
+    var typing by remember(lesson, mode) { mutableStateOf(false) }
+    // Coming back from 今天/课程 rebuilds this screen with the answer the queue has already saved.
+    // While the learner is typing the field owns the text, so a slower echo cannot overwrite keystrokes.
+    LaunchedEffect(answer.text, typing) { if (!typing) draft = answer.text }
     Text(if (mode == QuestionMode.CHOICE) "原文填空" else "简答自检", style = MaterialTheme.typography.titleMedium)
     Text(practice.prompt)
     TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
@@ -452,7 +529,7 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
         }
     } else {
         OutlinedTextField(draft, { draft = it; onAnswer(PracticeAnswer(it)) }, label = { Text("写下你的理解") },
-            minLines = 3, modifier = Modifier.fillMaxWidth().testTag("short-answer"))
+            minLines = 3, modifier = Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }.testTag("short-answer"))
         TextButton({ onAnswer(PracticeAnswer(draft, revealed = true)) }, enabled = draft.isNotBlank(),
             modifier = Modifier.testTag("reveal-reference")) { Text("对照原文自检") }
         if (answer.revealed) {

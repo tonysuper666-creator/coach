@@ -619,14 +619,30 @@ class MainlineScreenTest {
     @Test fun innerSubmissionShowsCompleteInlineActionsAndCitationWithoutManualScroll() = FakeMac(today, includeNotes = true, setupEmphasis = true).use { mac ->
         val c = controller(mac)
         c.sync.saveMainlineState("C", json("week" to 1, "entry" to "quiz"))
-        val view = CourseView(emptyList(), project(emptyList()))
+        val events = listOf(Event(1, "synthetic-outline", "C", "outline_revised", recordedAt = now, occurredAt = now,
+            deviceId = "synthetic", actor = "SYSTEM", payload = json("knowledgePoints" to JsonArray(listOf(
+                json("id" to "K", "title" to "Synthetic orchard point a", "week" to 1))))))
+        val view = CourseView(events, project(events))
         // QA's inner capture: top system/banner 146px, bottom navigation 64px, paper y=266..1680.
         runSkikoComposeUiTest(size = Size(2448f, 1848f), density = Density(2f)) {
             setContent { CoachTheme(false) { Surface { Box(Modifier.fillMaxSize().padding(top = 73.dp, bottom = 32.dp)) {
                 MainlineScreen(c, view, {}, {}, {}, {})
             } } } }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("mainline-option-0").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithTag("v7-directory").assertIsDisplayed()
+            // Two columns keep the paper and the source margin; the week directory lives in the drawer,
+            // so the answer itself starts without a resident directory column.
+            onNodeWithTag("v7-paper").assertIsDisplayed()
+            onAllNodesWithTag("v7-directory-drawer").assertCountEquals(0)
+            onNodeWithTag("v7-directory-toggle").assertIsDisplayed().performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("v7-directory-drawer").assertIsDisplayed()
+            onNode(hasAnyAncestor(hasTestTag("v7-directory-drawer")) and hasText("各周")).assertIsDisplayed()
+            onNode(hasAnyAncestor(hasTestTag("v7-directory-drawer")) and hasText("第 1 周", substring = true)).assertIsDisplayed()
+            capture("inner-directory-drawer-2448x1848")
+            onNodeWithText("收起目录").performClick()
+            waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isEmpty() }
+            waitForIdle()
+            onNodeWithTag("mainline-option-0").assertIsDisplayed()
             onNodeWithTag("mainline-option-0").performClick()
             onNodeWithTag("mainline-submit").assertIsDisplayed().performClick()
             waitUntil(timeoutMillis = 15_000) { onNodeWithText("为什么对", substring = true).isDisplayed() }

@@ -44,7 +44,7 @@ class ExpertReaderCandidateTest {
                 onNodeWithTag("next-page").performClick()
                 ready(c) { state -> state.page == it + 2 }
             }
-            onNodeWithText("返回书桌").performClick()
+            onNodeWithText("返回书架").performClick()
             ready(c) { it.screen == BookScreen.HOME }
             onNodeWithTag("home-learn").performClick()
             ready(c) { it.prompt == BookPrompt.START }

@@ -50,6 +50,7 @@ fun parseIsoDay(text: String?): Long? {
  * Checked priority and exam compression are overlays, never destructive changes to the ease schedule.
  * baseDueDay/baseIntervalDays retain the reference schedule for replay, priority correction and
  * stable legacy due identity. Reapplying either overlay is idempotent, not another interval cut.
+ * A look-again or snooze changes the due date independently of the interval's origin.
  * During days 7..0, cap the interval at max(1, floor((daysToExam - 1) / 2)) and
  * bring the due date forward from the normal interval's anchor, no earlier than entry into
  * the window unless the normal schedule was already due before then.
@@ -58,17 +59,18 @@ fun parseIsoDay(text: String?): Long? {
 fun Review.onDay(day: Long, examDay: Long?, targetRetention: Double = this.targetRetention): Review {
     val normalDue = baseDueDay ?: dueDay
     val normalInterval = baseIntervalDays ?: intervalDays
+    val anchor = intervalAnchorDay ?: (normalDue - normalInterval)
     val priorityInterval = ReviewRetentionPolicy.interval(normalInterval, targetRetention)
-    val priorityDue = minOf(normalDue, normalDue - normalInterval + priorityInterval)
+    val priorityDue = minOf(normalDue, anchor + priorityInterval)
     val days = examDay?.minus(day)
     if (days == null || days !in 0L..7L) return if (targetRetention == ReviewRetentionPolicy.BASELINE) copy(
-        dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE, normalDue), intervalDays = normalInterval,
+        dueDay = normalDue, intervalDays = normalInterval,
         baseDueDay = null, baseIntervalDays = null, targetRetention = targetRetention)
     else copy(dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE, priorityDue), intervalDays = priorityInterval,
         baseDueDay = normalDue, baseIntervalDays = normalInterval, targetRetention = targetRetention)
     val interval = priorityInterval.coerceAtMost(((days - 1) / 2).toInt().coerceAtLeast(1))
     return copy(dueDay = maxOf(snoozedUntilDay ?: Long.MIN_VALUE,
-        minOf(priorityDue, maxOf(examDay - 7, minOf(normalDue - normalInterval + interval, examDay - 1)))),
+        minOf(priorityDue, maxOf(examDay - 7, minOf(anchor + interval, examDay - 1)))),
         intervalDays = interval, baseDueDay = normalDue, baseIntervalDays = normalInterval, targetRetention = targetRetention)
 }
 

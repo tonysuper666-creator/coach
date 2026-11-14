@@ -22,8 +22,13 @@ The actual `Projection.review` due date and interval change. Existing
 `baseDueDay` and `baseIntervalDays` preserve the ease-based reference before
 priority/exam overlays, so repeated replay, serialization and clock changes do
 not cut the interval again. Postponing an exam restores the priority-adjusted
-schedule. Removing checked priority restores the reference schedule. Explicit
-snoozes still win, and original legacy due identities use the reference anchor.
+schedule. Removing checked priority restores the reference schedule. A due-only
+look-again or snooze retains `intervalAnchorDay` before moving the deadline;
+neither can invent an earlier interval origin. A later miss that advances the
+deadline supersedes the earlier snooze; a later explicit snooze still wins.
+A real spaced-review result starts a new interval. Unconfigured schedules keep
+their existing due date outside the exam overlay, including look-again after
+snoozing. Original legacy due identities use the reference due date.
 
 Input is an optional, explicit map in the existing authenticated
 `configure_course` command / `course_configured` fact:
@@ -62,5 +67,6 @@ navigation flag, content file or deployment is introduced.
 
 Synthetic checks are in `CheckedReviewDueRegressionTest` (also runnable against
 the old public API as an old-due counterexample), `ReviewRetentionPolicyTest`,
+`XvRetentionAnchorTest`, `ReviewAnchorTransitionsTest`,
 `ReviewPriorityQueueTest`, and `ReviewPriorityScheduleTest`. Execution results
 must be reported separately; source assertions alone are not a passing run.

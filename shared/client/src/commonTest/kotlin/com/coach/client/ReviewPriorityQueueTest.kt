@@ -76,4 +76,25 @@ class ReviewPriorityQueueTest {
         }
         assertTrue(servedLow && servedMiddle, "Both lower-priority topics must be reached with one slot/day")
     }
+
+    @Test fun mainlineMissCannotInventStarvationAheadOfAnOlderLowPriorityDeadline() {
+        val rows = mutableListOf(outline(), config())
+        for ((kp, due) in listOf("K1" to day - 5, "K3" to day + 20)) {
+            rows += "legacy_passed" to json("kpId" to kp)
+            rows += "legacy_schedule" to json("kpId" to kp, "dueDay" to due, "interval" to 20)
+        }
+        rows += "question_posed" to json("attemptId" to "new-miss", "questionId" to "new-miss",
+            "kpIds" to listOf("K3"), "fingerprint" to "new-miss", "keyState" to "VERIFIED",
+            "format" to "SINGLE_CHOICE", "origin" to "COACH", "mainline" to true, "policyVersion" to 1)
+        rows += "answer_submitted" to json("attemptId" to "new-miss", "answer" to "synthetic")
+        rows += "attempt_graded" to json("attemptId" to "new-miss", "score" to 0, "max" to 10, "status" to "EXACT")
+        val events = facts(rows)
+        val p = project(events)
+        fun board(on: Long) = reviewBoard("C", CourseView(events, p), on, port)
+        assertEquals(listOf("K1"), board(day).items.map { it.kp.id }.distinct())
+        assertEquals(listOf("K1", "K3"), board(day + 1).items.map { it.kp.id }.distinct())
+        assertEquals(day + 1, p.review.getValue("K3").dueDay)
+        assertEquals(day - 5, p.review.getValue("K1").dueDay)
+        println("SYNTHETIC_ANCHOR_ORDER today=${board(day).items.map { it.kp.id }} nextDay=${board(day + 1).items.map { it.kp.id }}")
+    }
 }

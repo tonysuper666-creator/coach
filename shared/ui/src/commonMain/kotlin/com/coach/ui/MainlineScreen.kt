@@ -85,13 +85,13 @@ private fun Header(title: String, back: String, onBack: () -> Unit) {
 @Composable
 private fun MainlineHome(c: CoachController, http: CourseHttp, view: CourseView, onBack: () -> Unit, onOpen: (Int, Boolean) -> Unit) {
     val revision by c.sync.revision.collectAsState()
-    val cached = c.sync.mainlineState(c.courseId, "home")["body"] as? JsonObject
+    val cached = c.mainlineState("home")["body"] as? JsonObject
     val knownWeeks = json("weeks" to JsonArray(view.weeks.map { n -> json("week" to n, "title" to weekName(view.weekKps(n))) }))
     val reply by produceState<MockReply?>(MockReply(cached ?: knownWeeks, null), revision) {
         // Blocking endpoint: fetch off the composition dispatcher so the screen can keep drawing while it waits.
         do {
             val r = withContext(Dispatchers.IO) { http.mainline() }
-            if (r.body != null) { value = r; c.sync.saveMainlineState(c.courseId, json("body" to r.body), "home") }
+            if (r.body != null) { value = r; c.saveMainlineState(json("body" to r.body), "home") }
             if (!r.retryable) break
             delay(1500)
         } while (true)

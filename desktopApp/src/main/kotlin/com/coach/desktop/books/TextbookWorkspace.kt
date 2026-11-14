@@ -34,6 +34,10 @@ import com.coach.ui.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
+import com.coach.desktop.reader.ReaderSession
+import com.coach.desktop.reader.ReaderDraftScope
+import com.coach.desktop.reader.NotesSection
+import com.coach.desktop.reader.toReaderInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -118,6 +122,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
     var returnFocus by remember { mutableStateOf<SourceFocus?>(null) }
     var readerHasFocus by remember { mutableStateOf(false) }
+    var noteReader by remember { mutableStateOf<ReaderSession?>(null) }
     val readerFocus = remember { FocusRequester() }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
@@ -171,7 +176,10 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     CoachTheme {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
-            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
+            val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
+            val noteKey = event.toReaderInput()
+            if (editing != null && noteKey != null && editing.onKey(noteKey.first, noteKey.second)) true
+            else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
                 ui.source != null && ui.prompt == null && !ui.busy) {
                 returnFromReader(); true
             } else false
@@ -201,6 +209,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                     }
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
+                        onNoteSession = { noteReader = it },
                         onPage = { page ->
                             val restoreFocus = ui.source != null && readerHasFocus
                             run {
@@ -350,22 +359,32 @@ private sealed interface PageImage {
 }
 
 @Composable
-private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.pages[ui.page - 1]
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
+    var notesOpen by remember(book.id) { mutableStateOf(false) }
     val source = ui.source
 
     val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
-    val remote = remember(readerSource) { com.coach.desktop.reader.ReaderRemote(readerSource) }
+    val remote = remember(readerSource, book.id) { com.coach.desktop.reader.ReaderRemote(readerSource) }
     val session = remember(remote) {
         com.coach.desktop.reader.ReaderSession(
             com.coach.desktop.reader.ReaderFixture(book.title, emptyList(), emptyList()),
             1200,
             remote,
+            ReaderDraftScope.forSource(readerSource, library.directory),
         )
+    }
+    DisposableEffect(session) {
+        onNoteSession(session)
+        onDispose { session.cancelNote(); onNoteSession(null) }
+    }
+    // Only explicit saves trigger this effect. Panel hide/show and draft restore never send a write.
+    LaunchedEffect(session, session.noteSaveTick) {
+        if (session.noteSaveTick > 0) session.commitNote()
     }
 
     val quoteAnchor = remember(ui.page, source, practiceSource) {
@@ -428,6 +447,12 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (book.format == "pdf") TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
+                TextButton(onClick = {
+                    if (notesOpen) session.cancelNote()
+                    notesOpen = !notesOpen
+                }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle")) {
+                    Text(if (notesOpen) "收起批注" else "批注")
+                }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开启 learning") }
             }
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
@@ -477,6 +502,26 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
                                 }
                             }
                         }
+                    }
+                }
+            }
+            if (notesOpen && samePage && view != null) {
+                Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState())
+                    .testTag("books-notes"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (!session.noting) TextButton(onClick = { session.beginNote() }, modifier = Modifier.testTag("books-note-new")) { Text("写批注") }
+                    if (session.noteLine >= 0) {
+                        Text("选一句原文写批注", style = MaterialTheme.typography.bodySmall)
+                        session.pageLines().forEachIndexed { index, range ->
+                            TextButton(onClick = { session.chooseNoteLine(index) }, modifier = Modifier.fillMaxWidth().testTag("books-note-line-$index"),
+                                colors = ButtonDefaults.textButtonColors(containerColor = if (session.noteLine == index) MaterialTheme.colorScheme.secondaryContainer else androidx.compose.ui.graphics.Color.Transparent)) {
+                                Text(view.text.substring(range), modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                    }
+                    NotesSection(session, remote, view, textColor = MaterialTheme.colorScheme.onSurface, keyboardHint = false)
+                    if (session.noteDraft != null) Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        TextButton(onClick = { session.requestNoteSave() }, enabled = !session.noteSaving, modifier = Modifier.testTag("books-note-save")) { Text("保存批注") }
+                        TextButton(onClick = { session.cancelNote() }, modifier = Modifier.testTag("books-note-close")) { Text("关闭编辑区") }
                     }
                 }
             }

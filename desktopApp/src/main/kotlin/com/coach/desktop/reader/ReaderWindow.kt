@@ -114,6 +114,13 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         noteDraft = null; noteLine = 0
     }
 
+    /** Mouse/touch hosts select the same page line as the keyboard picker. */
+    fun chooseNoteLine(index: Int) {
+        if (noteLine < 0 || index !in pageLines().indices) return
+        noteLine = index
+        confirmLine()
+    }
+
     /** 服务端已确认保存的文字；新建且从未保存成功为 null。 */
     private var noteBaseline by mutableStateOf<String?>(null)
     private var noteAttempt by mutableStateOf<String?>(null)
@@ -897,10 +904,10 @@ private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: Reade
 }
 
 @Composable
-private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView) {
+internal fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView, textColor: Color = Ink, keyboardHint: Boolean = true) {
     val mine = remote.notes.filter { it.pdfPage == view.pdfPage || it.stale || it.version != remote.current?.version }
     Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-        Text("批注（按 N 为一行写批注）", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Text(if (keyboardHint) "批注（按 N 为一行写批注）" else "批注", fontWeight = FontWeight.Bold, fontSize = 13.sp)
         if (mine.isEmpty()) Text("这一页还没有批注", Modifier.testTag("notes-empty"), fontSize = 12.sp, color = Color(0xFF666666))
         for (n in mine) {
             val valid = remote.noteValid(n, view)
@@ -936,7 +943,8 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                 androidx.compose.foundation.text.BasicTextField(
                     value = field, onValueChange = { field = it; session.editNote(it.text) },
                     modifier = Modifier.testTag("note-input").focusRequester(inputFocus).fillMaxWidth().padding(vertical = 6.dp),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = textColor),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(textColor),
                 )
                 Text(if (session.draftsKept()) "Ctrl+回车保存；Esc 关闭，没保存的文字会留在本机" else "Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))
                 if (session.drafts != null && session.persistFailed) Text("本机草稿没能写入磁盘，文字只在这个编辑区里，关闭后会丢", Modifier.testTag("note-draft-io-failed"), fontSize = 11.sp, color = Color(0xFFA33B2D))

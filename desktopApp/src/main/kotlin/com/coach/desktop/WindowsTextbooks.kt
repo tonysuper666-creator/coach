@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
@@ -55,10 +56,6 @@ internal fun windowsLibraryDirectory(
     return target
 }
 
-/** Desktop windows keep the two-column desk: the rail takes its width first, the paper and margin share the rest. */
-private const val WINDOWS_WINDOW_WIDTH = 1440
-private const val WINDOWS_WINDOW_HEIGHT = 900
-
 /** An optional per-process override; without it the existing system preference remains authoritative. */
 internal fun windowsThemeOverride(value: String?): Boolean? = when {
     value.equals("dark", ignoreCase = true) -> true
@@ -69,6 +66,7 @@ internal fun windowsThemeOverride(value: String?): Boolean? = when {
 /** Windows mainline: a new learner can bring a book without a preconfigured course or Mac pairing. */
 internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
+    val initialBounds = windowsInitialWindowBounds()
     application {
         val controller = remember { TextbookController(TextbookLibrary(directory)) }
         val drafts = rememberAnswerDrafts(controller)
@@ -78,7 +76,10 @@ internal fun runWindowsTextbooks() {
             TextbookCloseGuard({ drafts.flush() && exams.flush() }, scope, ::exitApplication)
         }
         Window(onCloseRequest = closeGuard::requestClose, title = "Coach",
-            state = rememberWindowState(width = WINDOWS_WINDOW_WIDTH.dp, height = WINDOWS_WINDOW_HEIGHT.dp)) {
+            state = rememberWindowState(
+                width = initialBounds.width.dp, height = initialBounds.height.dp,
+                position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
+            )) {
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)

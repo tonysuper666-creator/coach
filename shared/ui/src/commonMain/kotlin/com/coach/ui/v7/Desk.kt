@@ -157,7 +157,7 @@ fun Desk(
                         var typeMenu by remember { mutableStateOf(false) }
                         Box {
                             val textScale = LocalV7TextScale.current
-                            Text("Aa", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                            Text("字号", Modifier.clickable { typeMenu = true }.testTag("v7-type-menu"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                             DropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
                                 listOf("小" to .9f, "中" to 1f, "大" to 1.15f).forEach { (label, scale) ->
                                     DropdownMenuItem(text = { Text(label + if (textScale.value == scale) " ✓" else "") },

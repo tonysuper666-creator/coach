@@ -73,6 +73,7 @@ class WindowsReviewEntryTest {
         fun reopenNativeWindow(configured: Boolean = true, library: Path? = null) {
             val captureName = if (configured) "windows-review-native" else "combined-books-native"
             val output = File("build/$captureName.log")
+            val errors = File("build/$captureName.stderr.log")
             val captures = File("build/screens").absoluteFile.also { it.mkdirs() }
             val windows = System.getProperty("os.name").startsWith("Windows")
             val java = File(System.getProperty("java.home"), "bin/${if (windows) "javaw.exe" else "java"}")
@@ -83,7 +84,7 @@ class WindowsReviewEntryTest {
             val builder = ProcessBuilder(java.path, "-Duser.home=$root", "-Dcoach.autoExitSeconds=6",
                 "-Dcoach.captures=$captureName@3", "-Dcoach.captureDir=$captures",
                 "-cp", classpath, "com.coach.desktop.MainKt")
-                .redirectOutput(output).redirectError(File("build/$captureName.stderr.log"))
+                .redirectOutput(output).redirectError(errors)
             builder.environment().apply {
                 for (key in keys.filter { it.startsWith("COACH_") }.toList()) remove(key)
                 putAll(mapOf("COACH_MODE" to "coach", "COACH_URL" to base,
@@ -95,8 +96,16 @@ class WindowsReviewEntryTest {
             val process = builder.start()
             val exit = process.waitFor() // The owned runCoach window exits via its existing six-second hook.
             println("NATIVE_MAIN argv=MainKt COACH_COURSE=${if (configured) "C" else "<none>"} isolatedLoopback=true autoExit=6 pid=${process.pid()} exit=$exit")
-            assertEquals(0, exit, File("build/$captureName.stderr.log").readText())
-            assertTrue(output.readText().contains("COACH captured $captureName"))
+            val stdout = output.readText()
+            val nativeLog = stdout + "\n" + errors.readText()
+            assertEquals(0, exit, nativeLog)
+            // Skiko can catch a native fault, switch renderers, capture a frame and still exit 0.
+            val renderFailures = nativeLog.lineSequence().filter {
+                "[SKIKO] error:" in it || "org.jetbrains.skiko.RenderException" in it ||
+                    "EXCEPTION_ACCESS_VIOLATION" in it
+            }.toList()
+            assertTrue(renderFailures.isEmpty(), "Native rendering failed despite exit 0:\n${renderFailures.joinToString("\n")}")
+            assertTrue(stdout.contains("COACH captured $captureName"))
             assertTrue(File(captures, "$captureName.png").length() > 0)
         }
         override fun close() { server.stop(0, 0); runBlocking { actor.close() }; scope.cancel() }

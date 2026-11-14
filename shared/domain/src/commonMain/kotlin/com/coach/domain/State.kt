@@ -11,7 +11,8 @@ import kotlinx.serialization.Serializable
 )
 @Serializable data class Review(val dueDay: Long, val intervalDays: Int = 1, val ease: Double = 2.3,
     val lapses: Int = 0, val lastResult: String? = null, val lastReviewDay: Long? = null,
-    val baseDueDay: Long? = null, val baseIntervalDays: Int? = null, val snoozedUntilDay: Long? = null)
+    val baseDueDay: Long? = null, val baseIntervalDays: Int? = null, val snoozedUntilDay: Long? = null,
+    val targetRetention: Double = ReviewRetentionPolicy.BASELINE)
 @Serializable data class Journal(val answers: Int = 0, val correct: Int = 0, val orphaned: Int = 0,
     val followups: Int = 0, val notes: Int = 0, val minutes: Double = 0.0,
     val opened: List<String> = emptyList(), val delivered: List<String> = emptyList(),
@@ -45,7 +46,9 @@ typealias JournalDay = Journal
     /** Points not yet passed that a missed or guessed answer put back into the due queue, by due day. */
     val revisit: Map<String, Long> = emptyMap(), val journal: Map<Long, Journal> = emptyMap(),
     val coverage: Coverage = Coverage(), val orphanedAttempts: List<String> = emptyList(),
-    val unsupportedTypes: List<String> = emptyList(), val requiresServerSnapshot: Boolean = false
+    val unsupportedTypes: List<String> = emptyList(), val requiresServerSnapshot: Boolean = false,
+    /** Explicit checked 1..3 stars, independent of exam point weights. */
+    val reviewStars: Map<String, Int> = emptyMap()
 ) {
     val examCoverage: ExamCoverage get() = coverage
     fun bytes(): String = canonicalJson(LedgerJson.encodeToJsonElement(serializer(), this))

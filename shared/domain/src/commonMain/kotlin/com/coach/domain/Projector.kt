@@ -375,9 +375,12 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     val pendingTarget = pending.values.lastOrNull { it.posed.payload.str("purpose") != "RECALL" && !it.posed.payload.flag("review") && !it.posed.payload.flag("offlinePack") && !it.posed.payload.flag("drill") }?.kps?.firstOrNull()
     val target = pendingTarget ?: current?.takeIf { mastery[it]?.passed != true } ?: next?.id
     val exam = courseExamDay(events, effectiveZone)
+    val reviewStars = courseReviewStars(events).filterKeys { it in activeKpIds }
     val asOfDay = events.lastOrNull()?.let { logicalDay(it.recordedAt, effectiveZone) } ?: 0
     return Projection(studyScope = studyScope, timeZone = effectiveZone, kpTitles = kpTitles.ordered(), activeKpIds = activeKpIds, examDay = exam, quickAsks = quickAsks.ordered(), lastSeq = rawEvents.lastOrNull()?.seq ?: 0, position = Position(current,pending.mapValues { it.value.id }.ordered(),target),
-        mastery = mastery.ordered(), review = review.mapValues { (_, r) -> r.onDay(asOfDay, exam) }.ordered(),
+        mastery = mastery.ordered(), review = review.mapValues { (kp, r) ->
+            r.onDay(asOfDay, exam, ReviewRetentionPolicy.target(reviewStars[kp]))
+        }.ordered(), reviewStars = reviewStars.ordered(),
         revisit = revisit.filterKeys { it !in review && mastery[it]?.passed != true }.ordered(), journal = journal.ordered(),
         taughtConceptIds = taughtConceptIds, explainedKpIds = explainedKpIds, startedKpIds = startedKpIds,
         coverage = Coverage(weights.filterKeys { mastery[it]?.passed == true }.values.sum(), weights.filterKeys { mastery[it]?.solid == true }.values.sum(),weights.values.sum(), weightsScope),

@@ -828,7 +828,7 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                         else -> Color(0xFFA33B2D)
                     },
                 )
-                (remote.noteSave as? NoteSaveState.Failed)?.let { if (status == NoteStatus.Failed) Text(it.failure.text, fontSize = 12.sp, color = Color(0xFFA33B2D)) }
+                (remote.noteSave as? NoteSaveState.Failed)?.let { if (status == NoteStatus.Failed) Text(NoteStatusRules.failureText(it.failure), Modifier.testTag("note-failure-reason"), fontSize = 12.sp, color = Color(0xFFA33B2D)) }
                 val conflict = remote.noteSave as? NoteSaveState.Conflict
                 if (status == NoteStatus.Conflict && conflict != null) ConflictPanel(session, conflict)
                 if (session.noteStash != null) Text("找回我的草稿", Modifier.testTag("note-restore-stash").clickable { session.restoreStashedDraft() }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)

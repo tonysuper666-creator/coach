@@ -127,7 +127,7 @@ class SourceLookupTest {
             store.registerSourcePage("c","answers","答案",1,"Adverse selection")
             store.registerSourcePage("c","Answers/book","Solutions",1,"Adverse selection")
             store.registerSourcePage("c","answer-keys/book","Solutions",1,"Adverse selection")
-            val hits = store.searchSourcePages("c","adverse selection")
+            val hits = store.searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal())
             assertEquals("book",hits.first().docId)
             assertTrue(hits.drop(1).isNotEmpty())
             assertTrue(hits.drop(1).all { !it.learnerVisible && it.docId.contains("answer",ignoreCase=true) })
@@ -135,11 +135,11 @@ class SourceLookupTest {
             val pack = SourcePack.prepare("",hits)
             assertEquals(mapOf("S1" to hits.first().text),pack.anchors)
             hits.drop(1).forEach { assertNull(store.browsablePage("c",it.docId,it.pdfPage)) }
-            assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么").map { it.docId })
+            assertEquals(listOf("book"),store.searchSourcePages("c","逆向选择是什么",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
             store.registerSourcePage("c","book","Book",1,"Moral hazard is different.")
-            assertTrue(store.searchSourcePages("c","adverse selection").all { !it.learnerVisible })
-            assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard").map { it.docId })
-            assertEquals(emptyList(),store.searchSourcePages("c","\" OR * : ( )"))
+            assertTrue(store.searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal()).all { !it.learnerVisible })
+            assertEquals(listOf("book"),store.searchSourcePages("c","moral hazard",com.coach.domain.scope.VisibleScope.tutorInternal()).map { it.docId })
+            assertEquals(emptyList(),store.searchSourcePages("c","\" OR * : ( )",com.coach.domain.scope.VisibleScope.tutorInternal()))
         }
     }
 
@@ -178,6 +178,14 @@ class SourceLookupTest {
             it.registerSourcePage("c","book","Synthetic book",1,"Adverse selection means hidden risk before contracting.")
         }
         val actor = LedgerActor(scope,store)
+        init {
+            // Real precondition of a learner in the middle of a course: an outline point anchored on the page, opened as the current point.
+            DriverManager.getConnection("jdbc:sqlite:${store.directory.resolve("coach.sqlite")}").use { db ->
+                db.prepareStatement("INSERT INTO outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired,legacy_id) VALUES('k1','c','m',1,'k1','x','[]','[]',?,0,NULL)").use {
+                    it.setString(1,"""[{"docId":"book","pdfPage":1}]"""); it.executeUpdate() }
+            }
+            runBlocking { actor.execute { append("c","kp_opened",json("kpId" to "k1"),thread="t") } }
+        }
         val stub = StubTutor()
         val logs = Collections.synchronizedList(mutableListOf<String>())
         val frames = Collections.synchronizedList(mutableListOf<JsonObject>())
@@ -228,7 +236,127 @@ class SourceLookupTest {
             assertTrue(result.contains("hidden risk before contracting"))
             assertFalse(h.frames.any { it.toString().contains(secret) })
             assertFalse(h.chat.snapshot(id).toString().contains(secret))
-            assertTrue(h.stub.requestBodies.last().contains(secret))
+            // Protected text must never be part of the model input; the output guard still knows it and blocks an echo.
+            assertFalse(h.stub.requestBodies.any { it.contains(secret) })
+        }
+    }
+
+    /** Platform-independent proof of what the lookup entries compute: legal learned page allowed, protected text kept out of the pack but known to the guard, unknown/empty point closed. */
+    @Test fun lookupScopeAllowsLearnedPageKeepsProtectedTextOutOfPackAndClosesWithoutPoint() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute { registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false) }
+            val learner = com.coach.domain.scope.VisibleScope.learner()
+            val (open, none, guard) = h.actor.execute {
+                Triple(searchSourcePages("c","adverse selection",learnedThrough("c",learner,todayProgress("c","t").currentKpId)),
+                    searchSourcePages("c","adverse selection",learnedThrough("c",learner,null as String?)), restrictedForGuard("c","adverse selection"))
+            }
+            assertEquals(listOf("book"),open.map { it.docId })
+            assertTrue(open.none { it.text.contains(secret) })
+            assertEquals(emptyList(),none)
+            assertEquals(listOf(secret),guard)
+        }
+    }
+
+    /** More than six public hits must not crowd the protected page out of the output guard, on all three paths (initial, lookup supplement, fallback share the guard source). */
+    @Test fun sixOrMorePublicHitsDoNotCrowdProtectedPageOutOfGuard() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute {
+                registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false)
+                for (i in 2..9) registerSourcePage("c","book","Synthetic book",i,"Adverse selection public page $i adverse selection adverse selection")
+            }
+            val (pack, guard) = h.actor.execute {
+                searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.tutorInternal()) to restrictedForGuard("c","adverse selection")
+            }
+            assertEquals(6,pack.size)
+            assertTrue(pack.none { it.text == secret })            // the budgeted pack really is full of public pages
+            assertEquals(listOf(secret),guard)                     // yet the guard still knows the protected text
+            // course isolation is kept
+            h.actor.execute { registerSourcePage("other","other-private","Other",1,"Adverse selection secret of another course",learnerVisible=false) }
+            assertEquals(listOf(secret),h.actor.execute { restrictedForGuard("c","adverse selection") })
+        }
+    }
+
+    /** End to end on the initial-answer path: an echoed protected sentence is not published or persisted even with a full public pack. */
+    @Test fun initialAnswerEchoOfProtectedPageIsBlockedWithFullPublicPack() = runBlocking {
+        Harness().use { h ->
+            val secret = "Adverse selection reveals a synthetic confidential sequence of silver umbrellas"
+            h.actor.execute {
+                registerSourcePage("c","private-ref","Private reference",1,secret,learnerVisible=false)
+                for (i in 2..9) registerSourcePage("c","book","Synthetic book",i,"Adverse selection public page $i adverse selection adverse selection")
+            }
+            h.stub.stream(1,"Intro. $secret and more.",StubTutor.terminal("complete"),StubTutor.DONE)
+            val id = h.chat.ask("t","c","Explain adverse selection")
+            val result = h.awaitEnd(id)
+            assertFalse(result.contains(secret))
+            assertFalse(h.frames.any { it.toString().contains(secret) })
+            assertFalse(h.chat.snapshot(id).toString().contains(secret))
+            assertFalse(h.stub.requestBodies.any { it.contains(secret) })
+        }
+    }
+
+    // Pairwise unrelated sentences: no two share a 24-character window, so each page can only be caught by its own guard entry.
+    private fun ninthSecrets() = listOf(
+        "Quartz lanterns hover above the frozen orchard while velvet moths negotiate treaties",
+        "Gentle copper whales compose marching songs for retired lighthouse keepers nightly",
+        "Seventeen amber clocks argue about tomorrow inside the abandoned violin factory",
+        "Cobalt foxes translate whispered recipes into dialects spoken by migrating glaciers",
+        "Jade librarians polish invisible staircases before the carnival of sleeping kettles",
+        "Onyx sparrows ferry yesterday's thunder across the marmalade harbour at midnight",
+        "Ruby cartographers sketch rivers that forget their way home during winter markets",
+        "Topaz blacksmiths forge tiny umbrellas for pensive clouds visiting the seaside inn",
+        "Pearl astronomers catalogue the hiccups of distant planets over lukewarm chestnut tea")
+
+    private suspend fun Harness.seedNine(): List<String> {
+        val secrets = ninthSecrets()
+        actor.execute {
+            // Frequency of the query term falls with i, so page 9 is the weakest match: the one a capped guard would drop.
+            secrets.forEachIndexed { i, text -> registerSourcePage("c","priv-${i+1}","Private ${i+1}",1,text + " adverse selection".repeat(9 - i),learnerVisible=false) }
+        }
+        return secrets
+    }
+
+    /** The ninth (weakest) protected match is in the guard: store level, no cap. */
+    @Test fun everyMatchedProtectedPageIsInTheGuardIncludingTheNinth() = runBlocking {
+        Harness().use { h ->
+            val secrets = h.seedNine()
+            val guard = h.actor.execute { restrictedForGuard("c","adverse selection") }
+            assertEquals(9,guard.size)
+            assertTrue(secrets.all { s -> guard.any { it.startsWith(s) } })
+            val pack = h.actor.execute { searchSourcePages("c","adverse selection",com.coach.domain.scope.VisibleScope.learner().let { learnedThrough("c",it,"k1") }) }
+            assertTrue(pack.none { p -> secrets.any { p.text.contains(it) } })   // still never in the learner pack / model input
+        }
+    }
+
+    private suspend fun Harness.assertNinthBlocked(id: String, secrets: List<String>) {
+        val result = awaitEnd(id)
+        assertTrue(result.contains("Legit public sentence"))
+        for (s in secrets) assertFalse(result.contains(s.take(60)))
+        assertFalse(frames.any { f -> secrets.any { f.toString().contains(it.take(60)) } })
+        assertFalse(chat.snapshot(id).toString().let { snap -> secrets.any { snap.contains(it.take(60)) } })
+        assertFalse(stub.requestBodies.any { b -> secrets.any { b.contains(it.take(60)) } })
+    }
+
+    /** Initial answer echoing all nine protected pages (whichever one a capped guard would drop) is cleared; the legal public sentence stays. */
+    @Test fun initialAnswerEchoOfNinthProtectedPageIsBlocked() = runBlocking {
+        Harness().use { h ->
+            val secrets = h.seedNine()
+            h.stub.stream(1,"Legit public sentence about hidden risk. ${secrets.joinToString(". ")}.",StubTutor.terminal("complete"),StubTutor.DONE)
+            h.assertNinthBlocked(h.chat.ask("t","c","Explain adverse selection"),secrets)
+        }
+    }
+
+    /** The official-429 fallback replaces the answer under a new message id and inherits the guard, so the ninth page is blocked there too. */
+    @Test fun fallbackAfter429EchoOfNinthProtectedPageIsBlocked() = runBlocking {
+        Harness().use { h ->
+            val secrets = h.seedNine()
+            h.stub.stream(1,"Partial answer.",StubTutor.terminal("truncated","rate_limited"),StubTutor.DONE)
+            h.stub.completion("Legit public sentence about hidden risk. ${secrets.joinToString(". ")}.",BridgeClient.CODEX)
+            h.chat.ask("t","c","Explain adverse selection")
+            withTimeout(8_000) { while (h.frames.count { it.str("t") == "msg.end" } < 2) delay(10) }
+            val fallbackId = h.frames.filter { it.str("t") == "msg.start" }.map { it.str("msg") }.distinct().last()
+            h.assertNinthBlocked(fallbackId,secrets)
         }
     }
 

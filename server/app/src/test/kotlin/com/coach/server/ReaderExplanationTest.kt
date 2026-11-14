@@ -73,29 +73,33 @@ class ReaderExplanationTest {
         Harness().use { h ->
             val request = json("requestId" to "aa", "kind" to "explain")
             val private = SourcePage("sealed", 1, "Synthetic confidential key", learnerVisible = false)
-            assertTrue(h.reader.explain("d", "c", request, "Synthetic", listOf(private)).str("text").contains("无法确认"))
+            assertTrue(h.reader.explain("d", "c", request, "Synthetic", listOf(private), com.coach.domain.scope.VisibleScope.learner()).str("text").contains("无法确认"))
+            assertEquals(0, h.stub.requests)
+            // A page outside the (narrowed) scope is refused even though the page itself is learner-visible.
+            val outside = com.coach.domain.scope.VisibleScope.learner().narrowToPages(pack.pages.first().docId, 900..999)
+            assertTrue(h.reader.explain("d", "c", request, "Synthetic", pack.pages, outside).str("text").contains("无法确认"))
             assertEquals(0, h.stub.requests)
             h.stub.stream(1, payload("“Synthetic pears”是课件中的例子。"), StubTutor.terminal("complete"), StubTutor.DONE)
-            val answer = h.reader.explain("d", "c", request, "Synthetic pears", pack.pages + private)
+            val answer = h.reader.explain("d", "c", request, "Synthetic pears", pack.pages + private, com.coach.domain.scope.VisibleScope.learner())
             assertTrue(answer.str("text").contains("Synthetic pears"))
             assertEquals(4, answer["sources"]!!.jsonArray.single().jsonObject.num("pdfPage"))
             assertEquals(1, h.stub.requests)
             assertFalse(h.stub.requestBodies.single().contains("confidential"))
             h.stub.httpError(503)
-            assertTrue(h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "example"), "Synthetic", pack.pages).str("text").contains("无法确认"))
+            assertTrue(h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "example"), "Synthetic", pack.pages, com.coach.domain.scope.VisibleScope.learner()).str("text").contains("无法确认"))
             h.stub.stream(1, payload("恢复后返回的解释。"), StubTutor.terminal("complete"), StubTutor.DONE)
-            assertTrue(h.reader.explain("d", "c", json("requestId" to "ac", "kind" to "example"), "Synthetic", pack.pages).str("text").contains("恢复后"))
+            assertTrue(h.reader.explain("d", "c", json("requestId" to "ac", "kind" to "example"), "Synthetic", pack.pages, com.coach.domain.scope.VisibleScope.learner()).str("text").contains("恢复后"))
             assertTrue(h.actor.execute { events("c") }.isEmpty(), "AI must not change quiz or mastery state")
         }
     }
     @Test fun cancellationIsDeviceScopedAndAlsoWorksBeforeTheRequestArrives() = runBlocking {
         Harness().use { h ->
             h.reader.cancel("d", "c", "aa")
-            assertEquals("追问已取消。", h.reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", pack.pages).str("text"))
+            assertEquals("追问已取消。", h.reader.explain("d", "c", json("requestId" to "aa", "kind" to "explain"), "Synthetic", pack.pages, com.coach.domain.scope.VisibleScope.learner()).str("text"))
             assertEquals(0, h.stub.requests)
             h.stub.stream(200, "{\"paragraphs\":[{\"text\":\"", *Array(30) { "Partial synthetic paragraph " }, StubTutor.terminal("complete"), StubTutor.DONE)
             val pending = async(Dispatchers.Default) {
-                h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic", pack.pages)
+                h.reader.explain("d", "c", json("requestId" to "ab", "kind" to "explain"), "Synthetic", pack.pages, com.coach.domain.scope.VisibleScope.learner())
             }
             withTimeout(5_000) { while (h.stub.framesWritten == 0) delay(10) }
             h.reader.cancel("other-device", "c", "ab")

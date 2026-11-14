@@ -83,7 +83,7 @@ class ImeRealCompositionTest {
     private class Abort(msg: String) : RuntimeException(msg)
 
     private fun readProfile(): String {
-        val script = File("desktopApp/src/test/kotlin/com/coach/desktop/books/ime_active_profile.py").absolutePath
+        val script = listOf("desktopApp/src/test/kotlin/com/coach/desktop/books/ime_active_profile.py", "src/test/kotlin/com/coach/desktop/books/ime_active_profile.py").map { File(it) }.first { it.exists() }.absolutePath
         val p = ProcessBuilder("python", script).redirectErrorStream(true).start()
         val out = p.inputStream.bufferedReader().readText().trim(); val code = p.waitFor()
         return "$out (exit=$code)"

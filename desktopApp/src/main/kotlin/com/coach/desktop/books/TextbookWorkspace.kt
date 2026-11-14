@@ -56,7 +56,7 @@ import java.nio.file.Path
  * it came from instead of the one that happens to be open when it finally runs.
  */
 internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
-    private data class Key(val book: String, val lesson: String, val mode: QuestionMode)
+    private data class Key(val book: String, val lesson: String, val mode: QuestionMode, val review: Boolean = false)
 
     private val pending = mutableStateMapOf<Key, PracticeAnswer>()
     private var writer: Job? = null
@@ -68,6 +68,14 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
 
     fun current(book: String, lesson: String, mode: QuestionMode, saved: PracticeAnswer): PracticeAnswer =
         pending[Key(book, lesson, mode)] ?: saved
+
+    fun saveReview(entry: LocalBookReview, answer: PracticeAnswer) {
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] = answer
+        startWriter()
+    }
+
+    fun currentReview(entry: LocalBookReview): PracticeAnswer =
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] ?: entry.answer
 
     /** A failed write remains queued for an explicit retry, including when closing the window. */
     suspend fun flush(): Boolean {
@@ -88,7 +96,9 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
             val (key, answer) = pending.entries.firstOrNull()?.toPair() ?: break
             // The controller checks the identity and writes under the same lock, so a lesson switch that is
             // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
-            if (!controller.saveDraft(key.book, key.lesson, key.mode, answer)) return
+            val saved = if (key.review) controller.saveReviewDraft(key.book, key.lesson, key.mode, answer)
+                else controller.saveDraft(key.book, key.lesson, key.mode, answer)
+            if (!saved) return
             if (pending[key] == answer) pending.remove(key)
         }
     }
@@ -124,6 +134,41 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         if (ui.source != null) returnFocus = if (practiceSource == null) SourceFocus.LESSON else SourceFocus.PRACTICE
         run { controller.back() }
     }
+    fun openPracticeSource(practice: Practice) {
+        val book = ui.book ?: return
+        val lesson = ui.review?.let { review -> book.lessons.find { it.id == review.lesson } }
+            ?: book.lessons.getOrNull(book.lessonIndex) ?: return
+        // 本题依据取自整节正文（lesson.text 以 "\n\n" 拼接各正文块），
+        // 所以整段查找后再回落到命中的那个块，才能定位到块所在页。
+        val body = lesson.blocks.filterNot { it.heading }
+        val spans = ArrayList<Triple<SourceBlock, Int, Int>>(body.size)
+        var cursor = 0
+        for (block in body) {
+            if (spans.isNotEmpty()) cursor += 2 // lesson.text 用 "\n\n" 拼接正文块
+            spans += Triple(block, cursor, cursor + block.text.length)
+            cursor += block.text.length
+        }
+        val hits = Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
+        val anchor = when (hits.size) {
+            1 -> {
+                // 依据可能跨多个正文块；只有命中覆盖的块同属一页时，页锚点才是确定的。
+                val hit = hits.single()
+                val covered = spans.filter { it.third > hit.range.first && it.second <= hit.range.last }
+                val pages = covered.map { it.first.page }.distinct()
+                when {
+                    covered.isEmpty() ->
+                        PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+                    pages.size > 1 ->
+                        PracticeSource(null, null, "无法确认原句：本题依据跨越多页，无法定位到单一页面。")
+                    else -> PracticeSource(pages.single(), practice.reference, null)
+                }
+            }
+            0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+            else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
+        }
+        practiceSource = anchor
+        run { controller.source(); anchor.page?.let { controller.page(it) } }
+    }
     CoachTheme {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
@@ -143,6 +188,17 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
                         onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
                         onLearn = { run { drafts.flush(); controller.learn() } })
+                    ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
+                        onBack = { run { controller.back() } },
+                        onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
+                    ui.screen == BookScreen.REVIEWING && ui.review != null -> {
+                        val storedReview = checkNotNull(ui.review)
+                        val review = storedReview.copy(answer = drafts.currentReview(storedReview))
+                        LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
+                            onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
+                            onSource = { openPracticeSource(review.practice) },
+                            onAnswer = { drafts.saveReview(review, it) })
+                    }
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
                         practiceSource = practiceSource,
                         onPage = { page ->
@@ -167,46 +223,14 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         TextbookLearning(displayed, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; run { controller.source() } },
-                        onPracticeSource = { practice ->
-                            val lesson = book.lessons[book.lessonIndex]
-                            // 本题依据取自整节正文（lesson.text 以 "\n\n" 拼接各正文块），
-                            // 所以整段查找后再回落到命中的那个块，才能定位到块所在页。
-                            val body = lesson.blocks.filterNot { it.heading }
-                            val spans = ArrayList<Triple<SourceBlock, Int, Int>>(body.size)
-                            var cursor = 0
-                            for (block in body) {
-                                if (spans.isNotEmpty()) cursor += 2 // lesson.text 用 "\n\n" 拼接正文块
-                                spans += Triple(block, cursor, cursor + block.text.length)
-                                cursor += block.text.length
-                            }
-                            val hits = Regex(Regex.escape(practice.reference)).findAll(lesson.text).toList()
-                            val anchor = when (hits.size) {
-                                1 -> {
-                                    // 依据可能跨多个正文块；只有命中覆盖的块同属一页时，页锚点才是确定的。
-                                    val hit = hits.single()
-                                    val covered = spans.filter { it.third > hit.range.first && it.second <= hit.range.last }
-                                    val pages = covered.map { it.first.page }.distinct()
-                                    when {
-                                        covered.isEmpty() ->
-                                            PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
-                                        pages.size > 1 ->
-                                            PracticeSource(null, null, "无法确认原句：本题依据跨越多页，无法定位到单一页面。")
-                                        else -> PracticeSource(pages.single(), practice.reference, null)
-                                    }
-                                }
-                                0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
-                                else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
-                            }
-                            practiceSource = anchor
-                            run { controller.source(); anchor.page?.let { controller.page(it) } }
-                        }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
+                        onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
                         onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
                             ui.book?.let { current ->
                                 current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
                                     drafts.save(current.id, lesson.id, current.questionMode, answer)
                                 }
                             }
-                        })
+                        }, onReviews = { run { if (drafts.flush()) controller.showReviews() } })
                     }
                 }
             }
@@ -395,7 +419,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
         }
     }
 
-    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) "返回学习" else "返回书架", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false,
         status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -473,7 +497,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
 @Composable
 private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
     returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
-    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit) {
+    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -510,7 +534,13 @@ private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFoc
                 val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                 if (book.questionMode != QuestionMode.NONE) {
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus)
+                    else {
+                        SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus)
+                        if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
+                            Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"))
+                            TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
+                        }
+                    }
                 }
                 if (practice == null || (book.questionMode == QuestionMode.CHOICE && ui.answer.revealed)) {
                     SelectionContainer { Text(lesson.text, fontSize = 19.sp, lineHeight = 31.sp) }
@@ -559,6 +589,53 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
                 FilterChip(answer.understood == false, { onAnswer(PracticeAnswer(draft, true, false)) }, label = { Text("还需复习") })
                 FilterChip(answer.understood == true, { onAnswer(PracticeAnswer(draft, true, true)) }, label = { Text("我已理解") })
             }
+        }
+    }
+}
+
+
+@Composable
+private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {
+    Desk(crumb = "复习", onBack = onBack, backLabel = "返回书架", showNavigation = false) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-reviews"),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("复习 ${ui.reviews.size} 题", style = MaterialTheme.typography.headlineMedium)
+            Text("答错和自检时选择还需复习的题都在这里，保留原题和原文。")
+            if (ui.reviews.isEmpty()) Text("暂时没有需要复习的题。")
+            ui.reviews.forEachIndexed { index, review ->
+                OutlinedCard(onClick = { onOpen(review) }, enabled = !ui.busy,
+                    modifier = Modifier.fillMaxWidth().testTag("local-review-item-$index")) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(review.bookTitle, style = MaterialTheme.typography.titleMedium)
+                        Text("${review.lessonTitle} · ${review.mode.label}")
+                        Text(review.practice.prompt)
+                        Text("上次作答：${review.originalAnswer}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, sourceFocus: FocusRequester,
+    returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit,
+    onAnswer: (PracticeAnswer) -> Unit) {
+    LaunchedEffect(returnFocus, enabled) {
+        if (enabled && returnFocus != null) {
+            withFrameNanos { }
+            sourceFocus.requestFocus()
+            onFocusRestored()
+        }
+    }
+    Desk(crumb = review.bookTitle, onBack = onBack, backLabel = "返回复习列表", showNavigation = false) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-review-question"),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("复习 · ${review.lessonTitle}", style = MaterialTheme.typography.headlineMedium)
+            Text("上次作答：${review.originalAnswer}")
+            SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
+            if (review.completed) Text("这题已复习。", modifier = Modifier.testTag("local-review-completed"))
+            else Text("这题保留在复习里；再答一次，或打开原文对照。")
         }
     }
 }

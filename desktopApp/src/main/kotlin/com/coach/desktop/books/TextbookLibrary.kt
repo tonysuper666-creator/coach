@@ -1,5 +1,7 @@
 package com.coach.desktop.books
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.apache.pdfbox.text.PDFTextStripper
@@ -28,7 +30,14 @@ internal class TextbookLibrary(val directory: Path) {
             sql.execute("CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS pages(book TEXT NOT NULL,page INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(book,page))")
             sql.execute("CREATE TABLE IF NOT EXISTS answers(book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,text TEXT NOT NULL,revealed INTEGER NOT NULL,understood INTEGER,PRIMARY KEY(book,lesson,mode))")
+            sql.execute("""CREATE TABLE IF NOT EXISTS book_reviews(
+                book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,book_title TEXT NOT NULL,lesson_title TEXT NOT NULL,
+                prompt TEXT NOT NULL,reference TEXT NOT NULL,solution TEXT NOT NULL,options TEXT NOT NULL,wrong_text TEXT NOT NULL,
+                answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,
+                completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
         } }
+        backfillReviews()
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
         createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
@@ -125,12 +134,121 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     @Synchronized fun saveAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
-        database().use { db -> db.prepareStatement("INSERT OR REPLACE INTO answers(book,lesson,mode,text,revealed,understood) VALUES(?,?,?,?,?,?)").use { sql ->
-            sql.setString(1, book); sql.setString(2, lesson); sql.setString(3, mode.name); sql.setString(4, answer.text)
-            sql.setInt(5, if (answer.revealed) 1 else 0)
-            if (answer.understood == null) sql.setNull(6, java.sql.Types.INTEGER) else sql.setInt(6, if (answer.understood) 1 else 0)
+        val candidate = answer.revealed && (mode == QuestionMode.CHOICE && answer.text.isNotBlank() ||
+            mode == QuestionMode.SHORT_ANSWER && answer.understood == false)
+        val source = if (candidate) book(book) else null
+        val section = source?.lessons?.find { it.id == lesson }
+        val practice = section?.let { StudyCoachCourse.practice(checkNotNull(source), it, mode) }
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                db.prepareStatement("INSERT OR REPLACE INTO answers(book,lesson,mode,text,revealed,understood) VALUES(?,?,?,?,?,?)").use { sql ->
+                    sql.setString(1, book); sql.setString(2, lesson); sql.setString(3, mode.name); sql.setString(4, answer.text)
+                    sql.setInt(5, if (answer.revealed) 1 else 0)
+                    if (answer.understood == null) sql.setNull(6, java.sql.Types.INTEGER) else sql.setInt(6, if (answer.understood) 1 else 0)
+                    sql.executeUpdate()
+                }
+                if (practice != null && practice.needsReview(mode, answer)) {
+                    recordReview(db, checkNotNull(source), checkNotNull(section), mode, practice, answer, reopen = true)
+                }
+                db.commit()
+            } catch (failure: Exception) { db.rollback(); throw failure }
+        }
+    }
+
+    /** Upgrade existing wrong answers too; completed review rows remain completed on every reopen. */
+    private fun backfillReviews() {
+        val old = database().use { db -> db.createStatement().use { sql ->
+            sql.executeQuery("""SELECT book,lesson,mode FROM answers a WHERE revealed=1
+                AND (mode='CHOICE' OR (mode='SHORT_ANSWER' AND understood=0))
+                AND NOT EXISTS(SELECT 1 FROM book_reviews r WHERE r.book=a.book AND r.lesson=a.lesson AND r.mode=a.mode)""").use { rows -> buildList {
+                while (rows.next()) add(Triple(rows.getString(1), rows.getString(2), QuestionMode.valueOf(rows.getString(3))))
+            } }
+        } }
+        for ((id, lessonId, mode) in old) {
+            val book = book(id)
+            val lesson = book.lessons.find { it.id == lessonId } ?: continue
+            val practice = StudyCoachCourse.practice(book, lesson, mode) ?: continue
+            val answer = answer(id, lessonId, mode)
+            if (practice.needsReview(mode, answer)) database().use { db ->
+                recordReview(db, book, lesson, mode, practice, answer, reopen = false)
+            }
+        }
+    }
+
+    private fun recordReview(db: Connection, book: Textbook, lesson: BookLesson, mode: QuestionMode,
+        practice: Practice, answer: PracticeAnswer, reopen: Boolean) {
+        val conflict = if (reopen) """DO UPDATE SET wrong_text=excluded.wrong_text,
+            prompt=excluded.prompt,reference=excluded.reference,solution=excluded.solution,options=excluded.options,
+            answer_text='',revealed=0,understood=NULL,completed=0 WHERE book_reviews.completed=1""" else "DO NOTHING"
+        db.prepareStatement("""INSERT INTO book_reviews(book,lesson,mode,book_title,lesson_title,prompt,reference,solution,options,wrong_text)
+            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(book,lesson,mode) $conflict""").use { sql ->
+            sql.setString(1, book.id); sql.setString(2, lesson.id); sql.setString(3, mode.name)
+            sql.setString(4, book.title); sql.setString(5, lesson.title); sql.setString(6, practice.prompt)
+            sql.setString(7, practice.reference); sql.setString(8, practice.answer)
+            sql.setString(9, Json.encodeToString(practice.options)); sql.setString(10, answer.text)
+            sql.executeUpdate()
+        }
+    }
+
+    private fun java.sql.ResultSet.asReview(): LocalBookReview = LocalBookReview(
+        getString("book"), getString("lesson"), QuestionMode.valueOf(getString("mode")),
+        getString("book_title"), getString("lesson_title"),
+        Practice(getString("prompt"), getString("reference"), getString("solution"), Json.decodeFromString(getString("options"))),
+        getString("wrong_text"),
+        PracticeAnswer(getString("answer_text"), getInt("revealed") == 1,
+            getInt("understood").let { if (wasNull()) null else it == 1 }), getInt("completed") == 1,
+    )
+
+    @Synchronized fun reviews(): List<LocalBookReview> = database().use { db ->
+        db.createStatement().use { sql ->
+            sql.executeQuery("SELECT * FROM book_reviews WHERE completed=0 ORDER BY rowid").use { rows ->
+                buildList { while (rows.next()) add(rows.asReview()) }
+            }
+        }
+    }
+
+    @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
+        db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+            sql.setString(1, book); sql.setString(2, lesson); sql.setString(3, mode.name)
+            sql.executeQuery().use { rows -> check(rows.next()) { "这道复习题已不在书架中。" }; rows.asReview() }
+        }
+    }
+
+    @Synchronized fun saveReviewAnswer(review: LocalBookReview, answer: PracticeAnswer) {
+        val completed = answer.revealed && when (review.mode) {
+            QuestionMode.CHOICE -> answer.text == review.practice.answer
+            QuestionMode.SHORT_ANSWER -> answer.understood == true
+            QuestionMode.NONE -> false
+        }
+        database().use { db ->
+            db.prepareStatement("""UPDATE book_reviews SET answer_text=?,revealed=?,understood=?,completed=?
+                WHERE book=? AND lesson=? AND mode=?""").use { sql ->
+                sql.setString(1, answer.text); sql.setInt(2, if (answer.revealed) 1 else 0)
+                if (answer.understood == null) sql.setNull(3, java.sql.Types.INTEGER) else sql.setInt(3, if (answer.understood) 1 else 0)
+                sql.setInt(4, if (completed) 1 else 0)
+                sql.setString(5, review.book); sql.setString(6, review.lesson); sql.setString(7, review.mode.name)
+                check(sql.executeUpdate() == 1) { "无法保存复习作答。" }
+            }
+        }
+    }
+
+    @Synchronized fun activeReview(): LocalBookReview? = database().use { db ->
+        db.createStatement().use { sql -> sql.executeQuery("""SELECT r.* FROM book_reviews r JOIN book_review_position p
+            ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode WHERE p.slot=1""").use { rows ->
+            if (rows.next()) rows.asReview() else null
+        } }
+    }
+
+    @Synchronized fun openReview(review: LocalBookReview) {
+        database().use { db -> db.prepareStatement("INSERT OR REPLACE INTO book_review_position(slot,book,lesson,mode) VALUES(1,?,?,?)").use { sql ->
+            sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
             sql.executeUpdate()
         } }
+    }
+
+    @Synchronized fun closeReview() {
+        database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_review_position") } }
     }
 
     fun renderPdf(book: Textbook, page: Int): BufferedImage {

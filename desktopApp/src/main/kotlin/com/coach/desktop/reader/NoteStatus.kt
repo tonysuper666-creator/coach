@@ -13,9 +13,9 @@ enum class NoteStatus(val text: String) {
 
 object NoteStatusRules {
     /** 编辑区里展示的保存失败原因。 */
-    fun failureText(f: ReaderFailure): String =
+    fun failureText(f: ReaderFailure, persisted: Boolean = false): String =
         // 501 = 这个来源明确不支持保存：草稿只在编辑区开着时还在，关闭后不会保留，要如实告诉用户。
-        if (f is ReaderFailure.Server && f.status == 501) f.text + "；关闭编辑区后这条草稿不会保留" else f.text
+        if (f is ReaderFailure.Server && f.status == 501) f.text + (if (persisted) "；这条草稿已留在本机，关闭后可以从“本页有未保存的草稿”继续" else "；关闭编辑区后这条草稿不会保留") else f.text
 
     /**
      * @param baseline 服务端已确认保存的文字（新建且从未保存成功为 null）

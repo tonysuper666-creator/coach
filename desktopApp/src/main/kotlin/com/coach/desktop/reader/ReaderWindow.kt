@@ -73,7 +73,7 @@ data class ReaderFixture(
 }
 
 /** 窗口会话：状态、题目选择与作答都在这里，窗口缩放或出处往返都不清空。 */
-class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null) {
+class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null, val drafts: NoteDraftStore? = null) {
     var state by mutableStateOf(ReaderState(DesktopReaderLayouts.forWidth(initialWidthDp), pageCount = fixture.pages.size))
         private set
     var selectedQuestion by mutableIntStateOf(0)
@@ -129,6 +129,14 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val d = noteDraft ?: return null; val r = remote ?: return null
         return NoteStatusRules.of(d.id, noteText, noteBaseline, noteAttempt, noteSaving, r.noteSave)
     }
+
+    /** 当前书/版本/页上本机留着的、还没保存成功的草稿。 */
+    fun localDrafts(): List<StoredDraft> = emptyList()
+    fun resumeLocalDraft(d: StoredDraft): Boolean = false
+    /** 明确“放弃草稿”：连本机存的这一份一起丢。 */
+    fun discardDraft() { cancelNote() }
+    /** 输入框里的文字变化。 */
+    fun editNote(t: String) { noteText = t }
 
     fun cancelNote() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null }
 

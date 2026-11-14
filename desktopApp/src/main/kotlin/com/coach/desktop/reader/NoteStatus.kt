@@ -12,6 +12,9 @@ enum class NoteStatus(val text: String) {
 }
 
 object NoteStatusRules {
+    /** 编辑区里展示的保存失败原因。 */
+    fun failureText(f: ReaderFailure): String = f.text
+
     /**
      * @param baseline 服务端已确认保存的文字（新建且从未保存成功为 null）
      * @param attempt 最近一次发出去的文字（没发过为 null）

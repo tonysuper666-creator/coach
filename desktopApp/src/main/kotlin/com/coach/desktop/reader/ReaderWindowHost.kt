@@ -39,14 +39,8 @@ fun main() {
         val targetPage = System.getProperty("coach.reader.page")?.toIntOrNull() ?: System.getenv("COACH_READER_PAGE")?.toIntOrNull()
         val targetAnchor = System.getProperty("coach.reader.anchor") ?: System.getenv("COACH_READER_ANCHOR")
 
-        // 本机草稿存储：只在宿主真实持有书库目录时启用（身份 = 该书库目录的哈希）；没有目录就不假装保留
-        val drafts = remember(libraryDir) {
-            libraryDir?.let { dir ->
-                val abs = dir.toAbsolutePath().normalize().toString()
-                val id = java.security.MessageDigest.getInstance("SHA-256").digest(abs.toByteArray()).joinToString("") { "%02x".format(it) }.take(32)
-                FileNoteDraftStore(dir.resolve("reader-drafts"), "local-library:$id")
-            }
-        }
+        // 本机草稿存储：只对真实本地书库启用；HTTP/合成来源没有可信的拥有者/课程/来源身份，停用（不拿本地路径代替）
+        val drafts = remember(source, libraryDir) { ReaderDraftScope.forSource(source, libraryDir) }
         val session = remember(remote) {
             ReaderSession(ReaderFixture("资料", emptyList(), emptyList()), 1200, remote, drafts)
         }

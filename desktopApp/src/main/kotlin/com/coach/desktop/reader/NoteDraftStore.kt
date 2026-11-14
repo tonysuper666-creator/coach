@@ -5,7 +5,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.nio.file.Files
@@ -21,12 +23,17 @@ import java.security.MessageDigest
  */
 data class DraftIdentity(val scope: String, val doc: String, val version: String, val pdfPage: Int, val start: Int, val end: Int, val textSha256: String)
 
-data class StoredDraft(val identity: DraftIdentity, val noteId: String, val quote: String, val note: String)
+/**
+ * @param baseRevision 用户编辑时依据的远端修订号；旧文件没有这个字段时为 null——此时不能猜成"最新修订"去覆盖，只有确认服务端没有这条批注才可当新建。
+ * @param cleared 用户把既有非空批注改成了空（不是新的空白草稿），文字为空但这是一次真实的未提交修改。
+ */
+data class StoredDraft(val identity: DraftIdentity, val noteId: String, val quote: String, val note: String, val baseRevision: Long? = null, val cleared: Boolean = false)
 
 interface NoteDraftStore {
     /** 宿主给的拥有者/课程/书库身份；空白表示没有可靠身份，存储停用。 */
     val scope: String
-    fun put(draft: StoredDraft)
+    /** 返回是否真的写入了存储；I/O 失败只返回 false，不抛异常。 */
+    fun put(draft: StoredDraft): Boolean
     fun get(identity: DraftIdentity): StoredDraft?
     /** 这本书这个版本这一页上的草稿（身份必须全部匹配）。 */
     fun listFor(doc: String, version: String, pdfPage: Int): List<StoredDraft>
@@ -43,18 +50,23 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
     }
     private fun file(i: DraftIdentity) = directory.resolve(key(i) + ".json")
 
-    override fun put(draft: StoredDraft) {
-        if (!enabled || draft.identity.scope != scope || draft.note.isEmpty()) return
-        Files.createDirectories(directory)
-        val i = draft.identity
-        val body = buildJsonObject {
-            put("schema", 1); put("scope", i.scope); put("doc", i.doc); put("version", i.version); put("pdfPage", i.pdfPage)
-            put("start", i.start); put("end", i.end); put("textSha256", i.textSha256)
-            put("noteId", draft.noteId); put("quote", draft.quote); put("note", draft.note)
-        }
-        val tmp = Files.createTempFile(directory, "draft-", ".tmp")
-        Files.writeString(tmp, body.toString())
-        Files.move(tmp, file(i), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+    override fun put(draft: StoredDraft): Boolean {
+        if (!enabled || draft.identity.scope != scope || (draft.note.isEmpty() && !draft.cleared)) return false
+        return try {
+            Files.createDirectories(directory)
+            val i = draft.identity
+            val body = buildJsonObject {
+                put("schema", 1); put("scope", i.scope); put("doc", i.doc); put("version", i.version); put("pdfPage", i.pdfPage)
+                put("start", i.start); put("end", i.end); put("textSha256", i.textSha256)
+                put("noteId", draft.noteId); put("quote", draft.quote); put("note", draft.note)
+                draft.baseRevision?.let { put("baseRevision", it) }
+                if (draft.cleared) put("cleared", true)
+            }
+            val tmp = Files.createTempFile(directory, "draft-", ".tmp")
+            Files.writeString(tmp, body.toString())
+            Files.move(tmp, file(i), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            true
+        } catch (_: java.io.IOException) { false } catch (_: SecurityException) { false } catch (_: UnsupportedOperationException) { false }
     }
 
     private fun parse(path: Path): StoredDraft? {
@@ -64,7 +76,9 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
         fun n(k: String): Int? = (o[k] as? JsonPrimitive)?.intOrNull
         val identity = DraftIdentity(s("scope") ?: return null, s("doc") ?: return null, s("version") ?: return null, n("pdfPage") ?: return null,
             n("start") ?: return null, n("end") ?: return null, s("textSha256") ?: return null)
-        return StoredDraft(identity, s("noteId") ?: return null, s("quote") ?: return null, s("note") ?: return null)
+        val base = (o["baseRevision"] as? JsonPrimitive)?.longOrNull
+        val cleared = (o["cleared"] as? JsonPrimitive)?.booleanOrNull == true
+        return StoredDraft(identity, s("noteId") ?: return null, s("quote") ?: return null, s("note") ?: return null, base, cleared)
     }
 
     override fun get(identity: DraftIdentity): StoredDraft? {
@@ -83,6 +97,16 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
 
     override fun remove(identity: DraftIdentity) {
         if (!enabled || identity.scope != scope) return
-        Files.deleteIfExists(file(identity)) // 只删这一个身份对应的文件
+        runCatching { Files.deleteIfExists(file(identity)) } // 只删这一个身份对应的文件；失败不抛
+    }
+}
+
+/** 本机草稿存储只给"真实本地书库"启用：身份 = 该书库目录的哈希。HTTP/合成来源没有可信的拥有者/课程/来源身份，一律不启用。 */
+object ReaderDraftScope {
+    fun forSource(source: ReaderSource, libraryDir: Path?): FileNoteDraftStore? {
+        if (source !is LocalBooksReaderSource || libraryDir == null) return null
+        val abs = libraryDir.toAbsolutePath().normalize().toString()
+        val id = MessageDigest.getInstance("SHA-256").digest(abs.toByteArray()).joinToString("") { "%02x".format(it) }.take(32)
+        return FileNoteDraftStore(libraryDir.resolve("reader-drafts"), "local-library:$id")
     }
 }

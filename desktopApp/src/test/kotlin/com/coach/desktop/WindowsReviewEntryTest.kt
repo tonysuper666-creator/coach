@@ -104,7 +104,8 @@ class WindowsReviewEntryTest {
                 "[SKIKO] error:" in it || "org.jetbrains.skiko.RenderException" in it ||
                     "EXCEPTION_ACCESS_VIOLATION" in it
             }.toList()
-            assertTrue(renderFailures.isEmpty(), "Native rendering failed despite exit 0:\n${renderFailures.joinToString("\n")}")
+            assertTrue(renderFailures.isEmpty(), "Native rendering failed despite exit 0:\n${renderFailures.joinToString("\n")}\n" +
+                "For an active Windows console session use: tools/dev/heavy --local python3 tools/dev/winbox.py --interactive ./gradlew :desktopApp:test --tests 'com.coach.desktop.WindowsReviewEntryTest'")
             assertTrue(stdout.contains("COACH captured $captureName"))
             assertTrue(File(captures, "$captureName.png").length() > 0)
         }

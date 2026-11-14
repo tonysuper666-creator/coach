@@ -1,7 +1,9 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -10,6 +12,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -26,18 +36,41 @@ import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
+    var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
+    var returnFocus by remember { mutableStateOf<SourceFocus?>(null) }
+    var readerHasFocus by remember { mutableStateOf(false) }
+    val readerFocus = remember { FocusRequester() }
+    val lessonSourceFocus = remember { FocusRequester() }
+    val practiceSourceFocus = remember { FocusRequester() }
+    val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) { controller.load() }
+    LaunchedEffect(ui.screen, ui.source) {
+        if (ui.screen == BookScreen.READER && ui.source != null) readerFocus.requestFocus()
+    }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
+    fun returnFromReader() {
+        if (ui.source != null) returnFocus = if (practiceSource == null) SourceFocus.LESSON else SourceFocus.PRACTICE
+        run { controller.back() }
+    }
     CoachTheme {
-        Surface(Modifier.fillMaxSize().testTag("windows-textbooks"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
+        Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
+            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
+                ui.source != null && ui.prompt == null && !ui.busy) {
+                returnFromReader(); true
+            } else false
+        }.onFocusChanged { readerHasFocus = it.hasFocus }
+            .focusRequester(readerFocus).focusable(enabled = ui.screen == BookScreen.READER && ui.source != null),
+            color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column {
                 if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
@@ -49,10 +82,38 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
                         onSelect = { run { controller.select(it) } }, onRead = { run { controller.read() } },
                         onLearn = { run { controller.learn() } })
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
-                        onPage = { run { controller.page(it) } }, onBack = { run { controller.back() } },
+                        practiceSource = practiceSource,
+                        onPage = { page ->
+                            val restoreFocus = ui.source != null && readerHasFocus
+                            run {
+                                controller.page(page)
+                                if (restoreFocus) {
+                                    val lostFocus = withTimeoutOrNull(1_000) {
+                                        snapshotFlow { !readerHasFocus }.first { it }
+                                    } == true
+                                    val current = controller.state.value
+                                    if (lostFocus && !readerHasFocus && current.screen == BookScreen.READER &&
+                                        current.source != null && current.prompt == null) readerFocus.requestFocus()
+                                }
+                            }
+                        }, onBack = { returnFromReader() },
                         onLearn = { run { controller.learn() } })
-                    else -> TextbookLearning(ui, onBack = { run { controller.back() } },
-                        onSource = { run { controller.source() } }, onLesson = { run { controller.lesson(it) } },
+                    else -> TextbookLearning(ui, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
+                        onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
+                        onSource = { practiceSource = null; run { controller.source() } },
+                        onPracticeSource = { practice ->
+                            val lesson = book.lessons[book.lessonIndex]
+                            val matches = lesson.blocks.filterNot { it.heading }.flatMap { block ->
+                                Regex(Regex.escape(practice.reference)).findAll(block.text).map { block.page }.toList()
+                            }
+                            val anchor = when (matches.size) {
+                                1 -> PracticeSource(matches.single(), practice.reference, null)
+                                0 -> PracticeSource(null, null, "无法确认原句：未找到本题依据所在的位置。")
+                                else -> PracticeSource(null, null, "无法确认原句：本题依据出现多次。")
+                            }
+                            practiceSource = anchor
+                            run { controller.source(); anchor.page?.let { controller.page(it) } }
+                        }, onLesson = { run { controller.lesson(it) } },
                         onSettings = { run { controller.questionSettings() } }, onAnswer = { run { controller.answer(it) } })
                 }
             }
@@ -62,6 +123,9 @@ internal fun TextbookWorkspace(controller: TextbookController, chooseBook: suspe
         }
     }
 }
+
+private data class PracticeSource(val page: Int?, val quote: String?, val warning: String?)
+private enum class SourceFocus { LESSON, PRACTICE }
 
 @Composable
 private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit) {
@@ -169,7 +233,7 @@ private sealed interface PageImage {
 }
 
 @Composable
-private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.pages[ui.page - 1]
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
@@ -187,8 +251,41 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
         )
     }
 
-    val quoteAnchor = remember(ui.page, source) {
-        source?.let { StudyCoachCourse.sourceQuote(it, ui.page) }
+    val quoteAnchor = remember(ui.page, source, practiceSource) {
+        if (source == null) null
+        else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
+        else StudyCoachCourse.sourceQuote(source, ui.page)
+    }
+    val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
+        value = PageImage.Loading
+        if (book.format == "pdf") {
+            value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderPdf(book, page.number).toComposeImageBitmap()) } }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { PageImage.Failed }
+        }
+    }
+    val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
+    val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
+        view?.document == book.id && view.pdfPage == ui.page
+    val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
+    val located = if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor) else null
+    val loadedImage = (image as? PageImage.Ready)?.image
+    val aspectOk = boxes != null && loadedImage != null &&
+        kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
+    val sourceWarning = if (source == null) null else when {
+        practiceSource?.warning != null -> practiceSource.warning
+        practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
+        book.format != "pdf" -> null
+        image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
+        remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
+        remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
+        samePage && remote.boxes is com.coach.desktop.reader.BoxesState.Failed -> "无法确认原句：无法读取这一页的文字位置。"
+        samePage && quoteAnchor.isNullOrBlank() -> "无法确认原句：没有可定位的原文。"
+        located == com.coach.desktop.reader.Located.NoTextLayer -> "无法确认原句：这一页没有可定位的文字。"
+        located == com.coach.desktop.reader.Located.NotFound -> "无法确认原句：这一页没有找到对应内容。"
+        located == com.coach.desktop.reader.Located.Ambiguous -> "无法确认原句：这一页有多处相同内容。"
+        located is com.coach.desktop.reader.Located.Found && loadedImage != null && !aspectOk -> "无法确认原句：页面图像与文字位置不一致。"
+        else -> null
     }
 
     LaunchedEffect(book.id, ui.page, quoteAnchor) {
@@ -217,24 +314,30 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开启 learning") }
             }
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
+            sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
                 if (textView) {
                     val highlight = MaterialTheme.colorScheme.secondaryContainer
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
-                        for (block in source?.blocks.orEmpty().filter { it.page == ui.page }) {
+                        val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
+                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
+                            blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
+                        } else emptyList()
+                        for (block in confirmedBlocks) {
                             if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
+                        }
+                        if (practiceSource != null && quoteAnchor != null &&
+                            (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
+                            val start = page.text.indexOf(quoteAnchor)
+                            if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0)
+                                addStyle(SpanStyle(background = highlight), start, start + quoteAnchor.length)
                         }
                     }
                     SelectionContainer { Text(marked, fontSize = 19.sp, lineHeight = 31.sp,
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp).testTag("reader-text")) }
                 } else {
-                    val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
-                        value = PageImage.Loading
-                        value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderPdf(book, page.number).toComposeImageBitmap()) } }
-                        catch (cancel: CancellationException) { throw cancel }
-                        catch (_: Exception) { PageImage.Failed }
-                    }
                     when (val loaded = image) {
                         PageImage.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
                         PageImage.Failed -> Column(Modifier.align(Alignment.Center)) {
@@ -242,14 +345,6 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
                             TextButton(onClick = { retry++ }) { Text("重试") }
                         }
                         is PageImage.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
-                            val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
-                                view?.document == book.id && view.pdfPage == ui.page
-                            val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
-                            val located = if (boxes != null && quoteAnchor != null) {
-                                com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor)
-                            } else null
-                            val aspectOk = boxes != null && kotlin.math.abs(loaded.image.width.toDouble() / loaded.image.height - boxes.width / boxes.height) < 0.05
                             Box(Modifier.fillMaxWidth()) {
                                 Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
                                     modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
@@ -283,16 +378,28 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, onPage: (Int
 }
 
 @Composable
-private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> Unit, onLesson: (Int) -> Unit,
+private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
+    returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
+    LaunchedEffect(returnFocus, ui.busy) {
+        if (ui.busy) return@LaunchedEffect
+        // The restored button needs a layout frame before it can accept focus.
+        if (returnFocus != null) withFrameNanos { }
+        when (returnFocus) {
+            SourceFocus.LESSON -> lessonSourceFocus.requestFocus()
+            SourceFocus.PRACTICE -> practiceSourceFocus.requestFocus()
+            null -> return@LaunchedEffect
+        }
+        onFocusRestored()
+    }
     Desk(crumb = book.title, onBack = onBack, backLabel = "返回书桌", showNavigation = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
         }) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("textbook-learning"),
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp).testTag("textbook-learning"),
             verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (lesson == null) "这一遍学完了" else "理解 → 回忆 → 继续", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -305,13 +412,13 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
             } else {
                 Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
                 Text("先理解这一节在说什么，再尝试用自己的话说明。")
-                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
+                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 SelectionContainer { Text(lesson.text, fontSize = 19.sp, lineHeight = 31.sp) }
                 HorizontalDivider()
                 if (book.questionMode != QuestionMode.NONE) {
                     val practice = remember(book.id, lesson.id, book.questionMode) { StudyCoachCourse.practice(book, lesson, book.questionMode) }
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
-                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer)
+                    else SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,
@@ -326,15 +433,17 @@ private fun TextbookLearning(ui: LibraryUi, onBack: () -> Unit, onSource: () -> 
 }
 
 @Composable
-private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit) {
+private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
     Text(if (mode == QuestionMode.CHOICE) "原文填空" else "简答自检", style = MaterialTheme.typography.titleMedium)
     Text(practice.prompt)
+    TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
         for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
             draft = option; onAnswer(PracticeAnswer(option, revealed = true))
         }, enabled = !answer.revealed, modifier = Modifier.fillMaxWidth().testTag("choice-$index")) { Text(option) }
         if (answer.revealed) {
+            Text("你选择：${answer.text}")
             Text(if (answer.text == practice.answer) "与原文一致。" else "再对照一下原文：${practice.answer}")
             Text("原文：${practice.reference}")
             TextButton({ draft = ""; onAnswer(PracticeAnswer()) }) { Text("重新作答") }

@@ -11,6 +11,9 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.coach.client.*
 import com.coach.client.db.ClientDatabase
 import com.coach.domain.*
+import com.coach.domain.reviewqueue.QueueQuestion
+import com.coach.domain.reviewqueue.VariantCandidate
+import com.coach.domain.reviewqueue.VariantCandidatePort
 import com.coach.protocol.*
 import kotlinx.serialization.json.JsonArray
 import java.io.File
@@ -61,7 +64,11 @@ class ReviewLayoutTest {
             db.ledgerQueries.putOfflineItem("offline", "pack", "group", 0, LedgerJson.encodeToString(Event.serializer(), posed))
         }
         val view = CourseView(events, project(events))
-        val opened = mutableListOf<Pair<String, Boolean>>()
+        // 每行一道已核键的合成变式：开始前必须先备好题，点开的必须是这一行的题。
+        val port = VariantCandidatePort { _, _, kp ->
+            listOf(VariantCandidate("C", kp, QueueQuestion("synthetic-variant-$kp"), keyVerified = true))
+        }
+        val opened = mutableListOf<Pair<String, String>>()
         val mainline = mutableListOf<Pair<Int?, Boolean>>()
         var mocks = 0
         var essays = 0
@@ -71,10 +78,13 @@ class ReviewLayoutTest {
             assertEquals(count, view.dueReviews(now).size)
             runSkikoComposeUiTest(size = Size(width, height), density = Density(2f)) {
                 setContent { CoachTheme(false) { Surface {
-                    ReviewScreen(c, view, { id, start -> opened += id to start }, { backs++ },
+                    ReviewScreen(c, view,
+                        { id, start -> fail("Legacy KP route started review for $id (startNow=$start)") }, { backs++ },
                         onOpenMock = { mocks++ }, onOpenEssay = { essays++ },
                         onOpenMainline = { week, quiz -> mainline += week to quiz },
-                        reminderSettings = { Button(onClick = { reminders++ }) { Text("每日提醒 08:00") } })
+                        reminderSettings = { Button(onClick = { reminders++ }) { Text("每日提醒 08:00") } },
+                        variantCandidates = port,
+                        onOpenPractice = { target -> opened += target.kpId to target.question.id })
                 } } }
                 onNodeWithText("每日提醒 08:00").assertIsDisplayed()
                 capture("$name-top")
@@ -116,7 +126,11 @@ class ReviewLayoutTest {
                         onNode(hasText(label) and row).assertIsDisplayed()
                         onNode(hasText("开始", substring = false) and row).assertIsDisplayed().performClick()
                     }
-                    assertEquals(view.dueReviews(now).map { it.kp.id to true }, opened)
+                    val expectedStarts = view.dueReviews(now).map { it.kp.id to "synthetic-variant-${it.kp.id}" }.sortedBy { it.first }
+                    assertEquals(expectedStarts, opened.sortedBy { it.first },
+                        "Every reachable due row must start its own prepared variant, not an arbitrary KP question")
+                    assertEquals(count, opened.map { it.second }.distinct().size,
+                        "One row must not reuse another row's variant")
                     assertEquals(count, view.dueReviews(now).size, "Navigation must not alter the due ledger")
                 }
                 // Fixed actions remain usable even after scrolling to the very last due row.

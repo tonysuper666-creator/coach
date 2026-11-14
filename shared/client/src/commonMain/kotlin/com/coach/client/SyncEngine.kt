@@ -65,6 +65,26 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
         q.putCommand(c.commandId,c.deviceId,c.payloadBytes,c.payloadSha256)
         return c
     }
+
+    /** Commit the immutable outbox command and local answer lock together, including across process death. */
+    fun enqueueReviewAnswer(target: ReviewPracticeTarget, posed: Event, choice: String, now: Long): String = db.transactionWithResult {
+        require(target.deviceId == deviceId && target.agentRunId == agentRunId &&
+            reviewPracticeTarget(this@SyncEngine, target.courseId, agentRunId) == target)
+        require(posed.courseId == target.courseId && posed.payload.str("attemptId") == target.attemptId &&
+            posed.payload.str("questionId") == target.question.id && posed.payload.strings("kpIds") == listOf(target.kpId))
+        val letters = posed.payload["letterMap"] as? JsonObject ?: error("Missing frozen options")
+        require(letters.values.any { (it as? JsonPrimitive)?.contentOrNull == choice })
+        val page = "review-answer:${target.attemptId}"
+        val previous = mainlineState(target.courseId, page)
+        previous.str("commandId").takeIf { it.isNotBlank() }?.let {
+            require(previous.str("choice") == choice) { "Answer is already locked" }
+            return@transactionWithResult it
+        }
+        val cmd = enqueue(CommandBody("submit_answer",target.courseId,now,
+            json("attemptId" to target.attemptId,"answer" to choice,"posedSnapshot" to posed.payload)))
+        saveMainlineState(target.courseId,json("choice" to choice,"commandId" to cmd.commandId),page)
+        cmd.commandId
+    }
     /** The UI receives cards only. Keys stay private and SQL only returns one after durable lock. */
     suspend fun downloadOfflinePack(course: String, size: Int = 10) = mutex.withLock {
         check(agentRunId == null) { "Agent acceptance runs require online, isolated tutor threads" }

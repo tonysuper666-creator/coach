@@ -26,6 +26,9 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.client.statement.bodyAsBytes
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
+import com.coach.domain.reviewqueue.QueueAvailability
+import com.coach.domain.reviewqueue.QueueQuestion
+import com.coach.domain.reviewqueue.VariantCandidate
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -159,6 +162,14 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** 提交过的作答的完整记录（冻结题、评分标准、批改与复核）。 */
     suspend fun attemptRecord(attemptId: String): JsonObject? = getObject("attempts/${attemptId.encodeURLPathPart()}")
 
+    /** Reserve/pose exactly this selected identity; retries reuse its attempt and never request a KP fallback. */
+    suspend fun takeReviewVariant(target: ReviewPracticeTarget): MockReply {
+        if (target.courseId != course || target.deviceId != deviceId) return MockReply(null, "REVIEW_SCOPE_MISMATCH")
+        return mockCall("review-practice", com.coach.domain.json("courseId" to target.courseId,"deviceId" to target.deviceId,
+            "agentRunId" to target.agentRunId,"kpId" to target.kpId,"entryId" to target.entryId,"attemptId" to target.attemptId,
+            "question" to com.coach.domain.json("id" to target.question.id,"version" to target.question.version,"fingerprint" to target.question.fingerprint)))
+    }
+
     suspend fun sources(): List<SourceDoc>? = getObject("sources")?.let { root ->
         (root["docs"] as? JsonArray)?.mapNotNull { v ->
             val o = v as? JsonObject ?: return@mapNotNull null
@@ -174,6 +185,31 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     suspend fun constructedSupply(): Map<String, Int>? = getObject("pool")?.let { root ->
         (root["constructed"] as? JsonObject)?.mapValues { (it.value as? JsonPrimitive)?.intOrNull ?: 0 }
     }
+
+    /**
+     * 复习变式的题级候选：按考点向 Mac 要「同课程、同考点、已核键、还没出过题」的真实题。
+     * 返回 null 表示这次拿不到（离线，或服务端还没有这个字段）；空列表表示题库如实没有多余的题。
+     * 解析这一步不把没见过的状态当成可练：未知 availability 的行直接丢掉，未核键的照实标成
+     * [VariantCandidate.keyVerified] = false，选择器还会再复核一遍；这里不补题、不改版本。
+     */
+    suspend fun reviewVariantCandidates(kpId: String): List<VariantCandidate>? =
+        getObject("pool?kp=${kpId.encodeURLPathPart()}")?.let { root ->
+            val rows = root["variants"] as? JsonArray ?: return@let null
+            rows.mapNotNull { row ->
+                val o = row as? JsonObject ?: return@mapNotNull null
+                val questionId = o.s("questionId")
+                val availability = QueueAvailability.entries.firstOrNull { it.name == o.s("availability") }
+                    ?: return@mapNotNull null
+                if (questionId.isBlank() || kpId.isBlank() || o.s("kpId") != kpId) return@mapNotNull null
+                VariantCandidate(
+                    courseId = course,
+                    kpId = o.s("kpId"),
+                    question = QueueQuestion(questionId, null, o.s("fingerprint").ifBlank { null }),
+                    availability = availability,
+                    keyVerified = o.s("keyState") == "VERIFIED",
+                )
+            }
+        }
 
     /** 期末押题权重（服务端私有配置）；没有配置或接口不通时返回 null，面板就只按掌握度排。 */
     suspend fun examFocus(): ExamFocus? = ExamFocus.parse(getObject("exam-focus"))

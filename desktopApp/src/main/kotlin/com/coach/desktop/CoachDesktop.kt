@@ -16,7 +16,6 @@ import com.coach.client.TtftSample
 import com.coach.client.TutorClient
 import com.coach.client.TutorModel
 import com.coach.client.db.ClientDatabase
-import com.coach.ui.CoachApp
 import com.coach.ui.CoachController
 import com.coach.ui.MathAssets
 import java.io.File
@@ -40,7 +39,7 @@ internal fun resolveCourse(environment: String?, packaged: String?): String =
 
 /** Installed clients resolve their Mac locally and enter learning only with their own identity. */
 fun runCoach() {
-    if (System.getProperty("os.name").startsWith("Windows")) { runWindowsTextbooks(); return }
+    if (desktopUsesTextbooks(System.getProperty("os.name"), System.getenv("COACH_COURSE"), System.getProperty("coach.course"))) { runWindowsTextbooks(); return }
     refuseProductionDefaults(System::getenv, System::getProperty)?.let { error(it) }
     val settings = DesktopConnectionSettings()
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
@@ -53,8 +52,7 @@ fun runCoach() {
                     session.start()
                     onDispose { session.close() }
                 }
-                CoachApp(session.controller, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", initialSource = System.getenv("COACH_OPEN_SOURCE") == "1",
-                    courseActions = { view -> NotesExportAction(view, session.controller, session.mathHttp) })
+                DesktopCourseContent(session, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", System.getenv("COACH_OPEN_SOURCE") == "1")
                 LaunchedEffect(session) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(session.controller, it) } }
             }
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }

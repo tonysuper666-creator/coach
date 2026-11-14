@@ -113,4 +113,56 @@ class DraftReviewFixesTest {
         val (s4, _) = env.session(); openLine(s4, 1); s4.cancelNote()
         assertEquals(1, env.stored().size)
     }
+
+    private fun stripBaseRevision(dir: Path) = Files.list(dir).use { st -> st.toList() }.filter { it.toString().endsWith(".json") }
+        .forEach { Files.writeString(it, Files.readString(it).replace(Regex(",\"baseRevision\":-?[0-9]+"), "")) }
+
+    @Test fun aRejectedOldSchemaDraftIsNotDeletedByOpeningAndClosingTheBaselineEditor() = withEnv { env ->
+        val (s, _) = env.session()
+        openLine(s, 0); s.editNote("v1"); runBlocking { s.commitNote() }
+        env.refuse = true; s.editNote("v1 本地改"); runBlocking { s.commitNote() }; s.cancelNote()
+        stripBaseRevision(env.dir)                                    // 旧 schema：没有 baseRevision
+        assertEquals(1, env.stored().size)
+        val (s2, _) = env.session()
+        assertFalse(s2.resumeLocalDraft(s2.localDrafts().single()))
+        openLine(s2, 0)                                               // 同一行 N/Enter：被拒绝的稿不能被基线编辑器吃掉
+        s2.cancelNote()                                               // Esc
+        assertEquals(listOf("v1 本地改"), env.stored().map { it.note }, "没有 ack、没有显式放弃，本地稿必须还在")
+        val (s3, _) = env.session(); openLine(s3, 0); s3.cancelNote()
+        assertEquals(1, env.stored().size)
+    }
+
+    @Test fun adoptingTheServerVersionAfterClearingKeepsTheClearedEditWithItsOriginalIdentityAndRevision() = withEnv { env ->
+        val (s, r) = env.session()
+        openLine(s, 0); s.editNote("原文"); runBlocking { s.commitNote() }
+        val id = s.noteDraft!!.id; val r1 = s.noteDraft!!.baseRevision
+        env.fake.otherDeviceEditsNote("a", id, "对方改的")                // 远端到 r2，这个会话还不知道
+        s.editNote(""); runBlocking { s.commitNote() }                // 把既有批注清空 → 409
+        assertEquals(NoteStatus.Conflict, s.noteStatus())
+        s.adoptServerVersion()                                        // 采用服务端版本
+        s.cancelNote()                                                // Esc
+        val d = env.stored().single(); assertEquals("", d.note); assertEquals(id, d.noteId); assertEquals(r1, d.baseRevision)
+        val (s2, _) = env.session()
+        assertTrue(s2.resumeLocalDraft(s2.localDrafts().single()))
+        assertEquals("", s2.noteText); assertEquals(id, s2.noteDraft!!.id); assertEquals(r1, s2.noteDraft!!.baseRevision)
+        assertEquals(NoteStatus.Dirty, s2.noteStatus())
+    }
+
+    @Test fun aLateAckFromAClosedEditorCannotTakeOverTheEditorThatReplacedIt() = withEnv { env ->
+        val (s, _) = env.session()
+        openLine(s, 0); s.editNote("A")
+        val entered = CompletableDeferred<Unit>(); val gate = CompletableDeferred<Unit>()
+        env.fake.noteHold = entered to gate
+        runBlocking {
+            val job = launch(Dispatchers.IO) { s.commitNote() }          // A 的请求在途
+            entered.await()
+            s.cancelNote(); openLine(s, 0); s.editNote("B")              // 关闭后在同一锚点重新打开并编辑 B
+            val bBase = s.noteDraft!!.baseRevision
+            env.fake.noteHold = null; gate.complete(Unit); job.join()    // A 迟到的 ack
+            assertEquals("B", s.noteText); assertEquals(bBase, s.noteDraft!!.baseRevision, "旧 ack 不能改写当前编辑器的 baseRevision")
+            assertEquals(listOf("B"), env.stored().map { it.note }, "B 的草稿还在")
+            runBlocking { s.commitNote() }                                   // B 用自己看到的修订号保存：服务端已有 A，必须冲突
+            assertEquals(NoteStatus.Conflict, s.noteStatus())
+        }
+    }
 }

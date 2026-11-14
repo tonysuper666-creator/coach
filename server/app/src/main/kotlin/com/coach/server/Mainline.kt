@@ -508,14 +508,20 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
-                val (quote, found) = actor.execute {
-                    val selected = mainline.selection(this, course, call.week(), input)
+                val week = call.week()
+                val (selected, found) = actor.execute {
+                    val selected = mainline.selection(this, course, week, input)
                     // Trusted ceiling: learner-visible documents, only up to the validated selection's knowledge points in outline order (fail-closed).
                     val scope = learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), selected.currentKps)
-                    selected.quote to (scope to searchSourcePages(course, selected.quote, scope))
+                    selected to (scope to searchSourcePages(course, selected.quote, scope))
                 }
                 val (scope, pages) = found
-                val body = reader?.explain(call.attributes[observedDevice], course, input, quote, pages, scope)
+                val body = reader?.explain(call.attributes[observedDevice], course, input, selected.quote, pages, scope) {
+                    val now = mainline.selection(this, course, week, input)
+                    // A changed selection cannot authorize an answer generated for the old one.
+                    if (now != selected) com.coach.domain.scope.VisibleScope.NONE
+                    else learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), now.currentKps)
+                }
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

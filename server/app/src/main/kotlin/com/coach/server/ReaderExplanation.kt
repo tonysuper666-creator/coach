@@ -4,6 +4,8 @@ import com.coach.ai.*
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.SourcePage
+import com.coach.store.LedgerStore
+import com.coach.domain.scope.VisibleScope
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import java.util.concurrent.ConcurrentHashMap
@@ -29,7 +31,8 @@ class ReaderExplanation(private val actor: LedgerActor, private val bridge: Brid
         cancelled.entries.removeIf { System.nanoTime() - it.value > 120_000_000_000L }
         if (cancelled.size > 256) cancelled.entries.minByOrNull { it.value }?.let { cancelled.remove(it.key, it.value) }
     }
-    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>, scope: com.coach.domain.scope.VisibleScope): JsonObject {
+    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>, scope: VisibleScope,
+        current: (LedgerStore.() -> VisibleScope?)? = null): JsonObject {
         val id = input.str("requestId")
         require(id.matches(Regex("[a-f0-9]{1,32}")) && input.str("kind") in setOf("explain", "example"))
         val started = System.nanoTime()
@@ -73,7 +76,15 @@ class ReaderExplanation(private val actor: LedgerActor, private val bridge: Brid
             if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
             if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
             val checked = citations.check(result.text) ?: throw ReaderFormat()
-            if (!actor.execute { safePack.browsable.all { readerSourceCurrent(course, it, scope) } }) {
+            if (!actor.execute {
+                // Revalidate selection and its ceiling in the same ledger turn as the snapshots.
+                val now = try { if (current == null) scope else current.invoke(this) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                now != null && now != VisibleScope.NONE && safePack.browsable.all {
+                    readerSourceCurrent(course, it, scope) && readerSourceCurrent(course, it, now)
+                }
+            }) {
                 outcome = "source_changed"
                 return reply("依据已更新或当前不可见，暂时无法确认。请返回阅读后重新追问。")
             }

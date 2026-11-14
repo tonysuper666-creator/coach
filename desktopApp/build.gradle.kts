@@ -169,15 +169,19 @@ tasks.register<JavaExec>("citationWindowSmoke") {
     }
 }
 
-// Only synthetic connection values are loaded by this replay; never read the user's pairing config.
+// Replays use only a complete, explicit synthetic identity, never the parent shell's COACH_* values.
+fun JavaExec.syntheticCitationEnvironment() {
+    val name = providers.gradleProperty("coach.citation.environment").orNull
+        ?: error("An explicit synthetic citation environment file is required")
+    val connection = Properties().apply { file(name).inputStream().use { load(it) } }
+    val allowed = setOf("COACH_URL", "COACH_COURSE", "COACH_DEVICE_ID", "COACH_TOKEN_FILE", "COACH_READER_ITEM", "COACH_READER_WEEK")
+    require(connection.stringPropertyNames() == allowed && allowed.all { !connection.getProperty(it).isNullOrBlank() })
+    require(connection.getProperty("COACH_COURSE") == "SYNTHETIC")
+    setEnvironment(environment.filterKeys { !it.startsWith("COACH_", ignoreCase = true) })
+    connection.forEach { key, value -> environment(key.toString(), value.toString()) }
+}
 tasks.named<JavaExec>("citationWindowSmoke") {
-    providers.gradleProperty("coach.citation.environment").orNull?.let { name ->
-        val connection = Properties().apply { file(name).inputStream().use { load(it) } }
-        val allowed = setOf("COACH_URL", "COACH_COURSE", "COACH_DEVICE_ID", "COACH_TOKEN_FILE", "COACH_READER_ITEM", "COACH_READER_WEEK")
-        require(connection.stringPropertyNames().all { it in allowed })
-        require(connection.getProperty("COACH_COURSE") == "SYNTHETIC")
-        connection.forEach { key, value -> environment(key.toString(), value.toString()) }
-    }
+    syntheticCitationEnvironment()
 }
 tasks.register<JavaExec>("citationFixtureServer") {
     group = "verification"
@@ -185,7 +189,19 @@ tasks.register<JavaExec>("citationFixtureServer") {
     dependsOn(tasks.testClasses)
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("com.coach.desktop.reader.CitationFixtureHost")
-    for (key in listOf("coach.citation.control", "coach.citation.bind", "coach.pdf.bin")) {
+    for (key in listOf("coach.citation.control", "coach.citation.bind", "coach.pdf.bin", "coach.citation.fallbackThenChangedPdf")) {
         providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
     }
+}
+
+tasks.register<JavaExec>("citationFallbackWindowSmoke") {
+    group = "verification"
+    description = "Check a synthetic authorized page fallback and a changed-PDF refusal in one native window"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("com.coach.desktop.reader.CitationFallbackWindowSmoke")
+    for (key in listOf("coach.citation.auto", "coach.autoExitSeconds")) {
+        providers.gradleProperty(key).orNull?.let { systemProperty(key, it) }
+    }
+    syntheticCitationEnvironment()
 }

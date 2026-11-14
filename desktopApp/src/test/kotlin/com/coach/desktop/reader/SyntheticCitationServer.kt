@@ -22,7 +22,7 @@ import com.sun.net.httpserver.HttpServer
 
 /** Synthetic-only real product HTTP fixture. Pack/outline adapted from MainlineQuestionCitationsTest.
  * The bridge emits deterministic SSE; no model process or production configuration is consulted. */
-internal class SyntheticCitationServer(bindHost: String = "127.0.0.1") : AutoCloseable {
+internal class SyntheticCitationServer(bindHost: String = "127.0.0.1", private val fallbackThenChangedPdf: Boolean = false) : AutoCloseable {
     val dir = Files.createTempDirectory("synthetic-citation-window-")
     val jobs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val store = LedgerStore(Files.createDirectories(dir.resolve("db")))
@@ -91,8 +91,11 @@ internal class SyntheticCitationServer(bindHost: String = "127.0.0.1") : AutoClo
         }
         bridge.executor = bridgeExecutor
         bridge.createContext("/v1/chat/completions") { e ->
-            e.requestBody.readBytes(); bridgeRequests.incrementAndGet()
-            val id = if (fallback) "S1Bmissing" else token()
+            e.requestBody.readBytes(); val request = bridgeRequests.incrementAndGet()
+            val id = if (fallback || (fallbackThenChangedPdf && request == 1)) "S1Bmissing" else token()
+            if (fallbackThenChangedPdf && request == 2) {
+                Files.writeString(file, "\nSYNTHETIC VERSION CHANGE", java.nio.file.StandardOpenOption.APPEND)
+            }
             val answer = json("paragraphs" to JsonArray(listOf(json("text" to "每个梨只计一次。", "anchors" to listOf(id))))).toString()
             val delta = json("model" to "claude-sonnet-5-5", "choices" to JsonArray(listOf(json("index" to 0, "delta" to json("content" to answer)))))
             val end = json("choices" to JsonArray(emptyList()), "model" to "claude-sonnet-5-5", "x_coach" to json("status" to "complete", "reason" to null, "finish_reason" to "stop", "served_by" to "claude-sonnet-5-5", "fallback" to false, "physical_calls" to 1, "request_id" to "synthetic", "queue_ms" to 0, "ttft_ms" to 1, "elapsed_ms" to 1))

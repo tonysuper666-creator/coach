@@ -12,6 +12,25 @@ import kotlin.test.*
 
 @OptIn(ExperimentalComposeUiApi::class, androidx.compose.ui.InternalComposeUiApi::class)
 class ReaderExplanationNavigationTest {
+    @Test fun syntheticSequenceFallbackThenChangedPdf(): Unit = runBlocking {
+        SyntheticCitationServer(fallbackThenChangedPdf = true).use { h ->
+            val s = h.session(); s.load(); s.choose(1); s.edit("synthetic draft"); s.explain()
+            assertNull(s.error)
+            val first = s.citations.single()
+            assertFalse(first.isBlock); assertEquals("synthetic-book", first.document)
+            assertEquals("a".repeat(64), first.sourceVersion); assertEquals(1, first.pdfPage)
+            s.open(first); assertNull(s.error)
+            assertEquals(h.text, (s.opened!!.remote!!.page as PageState.Ready).view.text)
+            s.back(); s.explain(); assertNull(s.error)
+            val second = s.citations.single(); assertTrue(second.isBlock)
+            s.open(second); assertNull(s.opened); assertNotNull(s.error)
+            val refusal = h.reader.page(second.document, second.pdfPage)
+            assertFalse(refusal.ok); println("SYNTHETIC_CHANGED_PDF_HTTP_STATUS=${refusal.status}")
+            assertEquals(ExplanationOwner("SYNTHETIC", 1, "fruit1"), s.owner)
+            assertEquals(1, s.choice); assertEquals("synthetic draft", s.draft)
+            assertEquals(2, h.bridgeRequests.get())
+        }
+    }
     private class Rig(val session: DesktopExplanationSession) : AutoCloseable {
         private var time = 0L
         val scene = ImageComposeScene(1200, 900, Density(1f)) { ReaderExplanationWorkspace(session) }

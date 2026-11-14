@@ -10,7 +10,8 @@ object CitationFixtureHost {
         val control = Path.of(System.getProperty("coach.citation.control") ?: error("Explicit control directory required"))
         Files.createDirectories(control)
         check(!Files.exists(control.resolve("ready.properties"))) { "Use a fresh control directory" }
-        SyntheticCitationServer(System.getProperty("coach.citation.bind", "127.0.0.1")).use { fixture ->
+        SyntheticCitationServer(System.getProperty("coach.citation.bind", "127.0.0.1"),
+            java.lang.Boolean.getBoolean("coach.citation.fallbackThenChangedPdf")).use { fixture ->
             val port = java.net.URI(fixture.base).port
             Files.writeString(control.resolve("ready.properties"), "port=$port\npdfSha256=${fixture.pdfHash}\n")
             println("SYNTHETIC_MAC_READY port=$port physicalPages=3")

@@ -12,6 +12,14 @@ internal fun developmentLaunch(env: (String) -> String?, property: (String) -> S
     return property("jpackage.app-path") == null || devSwitches.any(::set) || devProperties.any { !property(it).isNullOrBlank() }
 }
 
+/** Shared address guard for development clients which do not own a local ledger. */
+internal fun refuseProductionPort(address: String): String? {
+    val port = runCatching { java.net.URI(desktopServerUrl(address)).port }.getOrNull()
+        ?: return "Refusing development run: COACH_URL is not a valid URL."
+    if (port in productionPorts) return "Refusing development run: COACH_URL uses production port $port; start an isolated test server on its own port."
+    return null
+}
+
 /**
  * The packaged app (jpackage sets `jpackage.app-path`) is the user's real client and keeps its defaults. Any other launch — `:desktopApp:run`, or anything
  * carrying a replay/measurement switch — must name its own server, token file and ledger directory; with the defaults it would sync into the real
@@ -22,8 +30,5 @@ internal fun refuseProductionDefaults(env: (String) -> String?, property: (Strin
     fun set(name: String) = !env(name).isNullOrBlank()
     val missing = listOf("COACH_URL", "COACH_TOKEN_FILE", "COACH_CLIENT_DIR").filterNot(::set)
     if (missing.isNotEmpty()) return "Refusing production defaults for a development run: set ${missing.joinToString()} to an isolated test server, token file and ledger directory."
-    val port = runCatching { java.net.URI(desktopServerUrl(env("COACH_URL")!!)).port }.getOrNull()
-        ?: return "Refusing development run: COACH_URL is not a valid URL."
-    if (port in productionPorts) return "Refusing development run: COACH_URL uses production port $port; start an isolated test server on its own port."
-    return null
+    return refuseProductionPort(env("COACH_URL")!!)
 }

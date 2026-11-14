@@ -101,7 +101,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
     }
 
     var readingFocus by rememberSaveable(kp.id) { mutableStateOf(initialFocus) }
-    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.sync.mainlineState(c.courseId, "learning").str("kind") == "tutor") }
+    var conversation by rememberSaveable(kp.id) { mutableStateOf(initialDraft != null || c.mainlineState("learning").str("kind") == "tutor") }
     val completed = tv.items.filterIsInstance<ChatItem.Tutor>().lastOrNull { it.message.status == "complete" }
     if (!reviewMode && !conversation && completed != null && pending == null && !tv.busy) {
         com.coach.ui.v7.ReadingPage(c, kp, view, completed.message.text, readingFocus, { readingFocus = !readingFocus }, onBack,
@@ -111,7 +111,7 @@ fun StudyScreen(c: CoachController, kp: KpRow, view: CourseView, ui: TutorUiStat
         return
     }
     LaunchedEffect(kp.id, reviewMode) {
-        if (!reviewMode) c.sync.saveMainlineState(c.courseId, json("kind" to "tutor", "kpId" to kp.id), "learning")
+        if (!reviewMode) c.saveMainlineState(json("kind" to "tutor", "kpId" to kp.id), "learning")
     }
     val marginAnchors = remember(kp.id) { com.coach.ui.v7.MarginAnchors() }
     val notes = remember(tv.items, kp.reference) {

@@ -74,8 +74,8 @@ class CoachController(
     internal val startRequests = mutableStateMapOf<String, Boolean>()
     /** 模拟考里还没存到 Mac 的作答（按 mockId）：离页、断线都留着，回来续考先用它，存上了才删。 */
     internal val mockDrafts = kotlinx.coroutines.flow.MutableStateFlow<Map<String, kotlinx.serialization.json.JsonObject>>(
-        sync.mainlineState(courseId, "mock-drafts").mapNotNull { (key, value) -> (value as? JsonObject)?.let { key to it } }.toMap())
-    internal fun persistMockDrafts() { sync.saveMainlineState(courseId, JsonObject(mockDrafts.value), "mock-drafts") }
+        mainlineState("mock-drafts").mapNotNull { (key, value) -> (value as? JsonObject)?.let { key to it } }.toMap())
+    internal fun persistMockDrafts() { saveMainlineState(JsonObject(mockDrafts.value), "mock-drafts") }
     /** 模拟考的保存和续考时读卷都排这一把锁：同一时刻只有一个请求在路上，旧答案不会后到覆盖新答案，续考读到的也是最后存上的。 */
     internal val mockSaving = kotlinx.coroutines.sync.Mutex()
     /** 每场考试最后发出的保存序号，只增不减（锁内读写）。 */
@@ -86,7 +86,7 @@ class CoachController(
         private set
 
     init {
-        val saved = sync.mainlineState(courseId, "essay-draft")
+        val saved = mainlineState("essay-draft")
         val posed = saved["posed"] as? JsonObject
         val attempt = (saved["attempt"] as? JsonPrimitive)?.content.orEmpty()
         val deadline = (saved["deadline"] as? JsonPrimitive)?.content?.toLongOrNull()
@@ -98,7 +98,7 @@ class CoachController(
 
     internal fun persistEssay() {
         val s = essay
-        sync.saveMainlineState(courseId, if (s == null) com.coach.domain.json() else com.coach.domain.json(
+        saveMainlineState(if (s == null) com.coach.domain.json() else com.coach.domain.json(
             "attempt" to s.attemptId, "posed" to s.posed, "deadline" to s.deadline, "text" to s.text, "handedIn" to s.handedIn), "essay-draft")
     }
 
@@ -230,8 +230,8 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     }
     fun startLearning(target: LearningTarget) {
         if (target.legacy || target.week == null) { openStudy(target.kp.id, true); return }
-        val saved = c.sync.mainlineState(c.courseId)
-        c.sync.saveMainlineState(c.courseId, JsonObject(saved + mapOf("week" to JsonPrimitive(target.week), "targetKp" to JsonPrimitive(target.kp.id),
+        val saved = c.mainlineState()
+        c.saveMainlineState(JsonObject(saved + mapOf("week" to JsonPrimitive(target.week), "targetKp" to JsonPrimitive(target.kp.id),
             "entry" to JsonPrimitive(target.entry))))
         navigation.push(AppEntry(AppPage.MAINLINE, id = "continue", week = target.week, label = "第 ${target.week} 周"))
     }
@@ -255,7 +255,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
     val openReview: () -> Unit = { navigation.push(AppEntry(tab = AppTab.REVIEW, label = "复习")) }
     fun openTask(page: AppPage, label: String, id: String = "") {
         if (navigation.current.page == AppPage.MAINLINE) {
-            (c.sync.mainlineState(c.courseId)["week"] as? JsonPrimitive)?.content?.toIntOrNull()?.let { navigation.rename("第 $it 周") }
+            (c.mainlineState()["week"] as? JsonPrimitive)?.content?.toIntOrNull()?.let { navigation.rename("第 $it 周") }
         }
         navigation.push(AppEntry(page, id = id, label = label))
     }
@@ -285,11 +285,11 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
         }
         weekActions.onOpen = { id -> if (id != null) openKp(id, true) else navigation.back() }
         weekActions.onPractice = { week ->
-            c.sync.saveMainlineState(c.courseId, JsonObject((c.sync.mainlineState(c.courseId) - "targetKp") + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive("resume-quiz"))))
-            val weekly = c.sync.mainlineState(c.courseId, "week:$week")
+            c.saveMainlineState(JsonObject((c.mainlineState() - "targetKp") + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive("resume-quiz"))))
+            val weekly = c.mainlineState("week:$week")
             val session = JsonObject(((weekly["ladderSession"] as? JsonObject) ?: json()) + ("complete" to JsonPrimitive(false)))
             val updated = JsonObject(weekly + mapOf("mode" to JsonPrimitive("quiz"), "filter" to JsonPrimitive(""), "ladderSession" to session))
-            c.sync.saveMainlineState(c.courseId, updated, "week:$week")
+            c.saveMainlineState(updated, "week:$week")
             navigation.push(AppEntry(AppPage.MAINLINE, id = "week-practice", week = week, label = "第 $week 周"))
         }
         weekActions.onReview = { week -> navigation.push(AppEntry(AppPage.WEEK_REVIEW, week = week, label = "第 $week 周错题")) }
@@ -339,7 +339,7 @@ fun CoachApp(c: CoachController, initialKp: String? = null, initialAutoStart: Bo
                                             onOpenMock = { navigation.push(AppEntry(AppPage.MOCK, label = "模拟考")) }, onOpenEssay = openEssay,
                                             onOpenMainline = { week, direct ->
                                                 val decision = current.let { c.learningTarget(it) }
-                                                if (week != null) c.sync.saveMainlineState(c.courseId, JsonObject(c.sync.mainlineState(c.courseId) + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
+                                                if (week != null) c.saveMainlineState(JsonObject(c.mainlineState() + mapOf("week" to JsonPrimitive(week), "entry" to JsonPrimitive(if (!direct) "notes" else decision?.entry ?: "quiz"))))
                                                 navigation.push(AppEntry(AppPage.MAINLINE, id = if (week == null) "catalog" else "", week = week, label = "选择题主线"))
                                             }, variantCandidates = reviewCandidates,
                                             onOpenPractice = { target ->

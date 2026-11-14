@@ -4,6 +4,16 @@ import com.coach.client.*
 import com.coach.domain.*
 import kotlinx.serialization.json.*
 
+/** Learner pages retain their historical keys; each agent run owns separate mainline pages. */
+internal fun CoachController.mainlinePage(page: String = "active"): String =
+    tutor.agentRunId?.let { "mainline:agent:${it.length}:$it:$page" } ?: page
+
+internal fun CoachController.mainlineState(page: String = "active"): JsonObject =
+    sync.mainlineState(courseId, mainlinePage(page))
+
+internal fun CoachController.saveMainlineState(state: JsonObject, page: String = "active") =
+    sync.saveMainlineState(courseId, state, mainlinePage(page))
+
 /** One decision for Today, the course browser and the exam panel. Local session state is not a ledger write. */
 internal data class LearningTarget(val kp: KpRow, val week: Int?, val resume: Boolean, val legacy: Boolean = false, val reading: Boolean = false)
 
@@ -18,14 +28,14 @@ internal fun CoachController.learningTarget(view: CourseView, browseWeek: Int? =
     val pending = unfinished.firstOrNull { it.id == view.projection.position.continueTarget && view.pendingGroup(view.tutorThreadId(it.id)) != null }
         ?: unfinished.lastOrNull { view.pendingGroup(view.tutorThreadId(it.id)) != null }
     if (pending != null) return LearningTarget(pending, browseWeek ?: view.weeks.firstOrNull { n -> view.weekKps(n).any { it.id == pending.id } }, true, legacy = true)
-    val session = sync.mainlineState(courseId, "learning")
+    val session = mainlineState("learning")
     val tutorKp = session.str("kpId").takeIf { session.str("kind") == "tutor" }?.let(view::kp)?.takeIf { it in unfinished && view.isResume(it) }
     if (tutorKp != null) return LearningTarget(tutorKp, browseWeek ?: view.weeks.firstOrNull { n -> view.weekKps(n).any { it.id == tutorKp.id } }, true, legacy = true)
     val readingKp = session.str("kpId").takeIf { session.str("kind") == "reading" }?.let(view::kp)?.takeIf { it in unfinished }
     if (readingKp != null) return LearningTarget(readingKp, browseWeek ?: view.weeks.firstOrNull { n -> view.weekKps(n).any { it.id == readingKp.id } }, true, legacy = true, reading = true)
-    val previous = browseWeek ?: (if (session.str("kind") == "mainline") session else sync.mainlineState(courseId)).num("week").toInt().takeIf { it in view.weeks }
+    val previous = browseWeek ?: (if (session.str("kind") == "mainline") session else mainlineState()).num("week").toInt().takeIf { it in view.weeks }
     if (previous != null) {
-        val saved = sync.mainlineState(courseId, "week:$previous")
+        val saved = mainlineState("week:$previous")
         val body = saved["body"] as? JsonObject
         val items = (body?.get("items") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         val active = saved.str("item").isNotBlank() && items.any { it.str("status") != "mastered" }
@@ -59,8 +69,8 @@ internal fun CoachController.mainlineContinuationWeek(view: CourseView, overview
     if (view.kps.isNotEmpty()) return null
     val weeks = (overview?.get("weeks") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
         .filter { it.num("week") > 0 }
-    val session = sync.mainlineState(courseId, "learning")
-    val previous = (if (session.str("kind") == "mainline") session else sync.mainlineState(courseId)).num("week").toInt()
+    val session = mainlineState("learning")
+    val previous = (if (session.str("kind") == "mainline") session else mainlineState()).num("week").toInt()
     val target = weeks.firstOrNull { it.num("week").toInt() == previous }
         ?: weeks.firstOrNull { val coverage = it["coverage"] as? JsonObject
             coverage != null && coverage.num("factsMastered") < coverage.num("facts") }

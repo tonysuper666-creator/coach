@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.coach.ui.CoachTheme
 import com.coach.ui.v7.Desk
+import com.coach.ui.v7.AnswerOption
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import com.coach.desktop.reader.ReaderSession
@@ -728,7 +729,7 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
 }
 
 @Composable
-private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester,
+internal fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester,
     showReference: Boolean = true) {
     var draft by remember(lesson, mode) { mutableStateOf(answer.text) }
     var typing by remember(lesson, mode) { mutableStateOf(false) }
@@ -739,9 +740,18 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
     Text(practice.prompt)
     TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
-        for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
-            draft = option; onAnswer(PracticeAnswer(option, revealed = true))
-        }, enabled = !answer.revealed, modifier = Modifier.fillMaxWidth().testTag("choice-$index")) { Text(option) }
+        val colors = com.coach.ui.theme.CoachTheme.colors
+        for ((index, option) in practice.options.withIndex()) {
+            val selected = answer.revealed && answer.text == option
+            val correct = if (selected) option == practice.answer else null
+            AnswerOption(
+                letter = ('A' + index).toString(), selected = selected, correct = correct,
+                enabled = !answer.revealed, modifier = Modifier.testTag("choice-$index"),
+                onClick = { draft = option; onAnswer(PracticeAnswer(option, revealed = true)) },
+            ) {
+                Text(option, color = when (correct) { true -> colors.successFg; false -> colors.dangerFg; null -> colors.fgPrimary })
+            }
+        }
         if (answer.revealed) {
             Text("你选择：${answer.text}")
             Text(if (answer.text == practice.answer) "与原文一致。" else "再对照一下原文：${practice.answer}")

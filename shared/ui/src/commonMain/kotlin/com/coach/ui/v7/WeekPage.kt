@@ -96,8 +96,8 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
     if (choosingWeek) AlertDialog(onDismissRequest = { choosingWeek = false }, title = { Text("换周") },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { view.weeks.forEach { n ->
-            TextButton(onClick = { choosingWeek = false; selectWeek(n) }, enabled = canSelect) { Text(view.weekLabel(n)) }
-        } } }, confirmButton = { TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
+            V7TextButton(onClick = { choosingWeek = false; selectWeek(n) }, enabled = canSelect) { Text(view.weekLabel(n)) }
+        } } }, confirmButton = { V7TextButton(onClick = { choosingWeek = false }) { Text("关闭") } })
     Desk(crumb = "${d.course.ifBlank { c.courseId }} · 第 $week 周", status = examCountdown,
         compactFooter = true, onCrumbClick = if (canSelect) ({ choosingWeek = true }) else null,
         backLabel = "← 路线", onBack = if (LocalAppManagedNavigation.current) null else ({ select(AppTab.ROUTE) }), directory = { WeekDirectory(view, week, if (canSelect) ::selectWeek else null) },
@@ -110,7 +110,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
             }
             if (d.shelf.isNotEmpty()) PaperCard {
                 Text("资料", style = MaterialTheme.typography.labelMedium)
-                d.shelf.forEach { title -> TextButton(onClick = { select(AppTab.RESOURCES) }) { Text(title) } }
+                d.shelf.forEach { title -> V7TextButton(onClick = { select(AppTab.RESOURCES) }) { Text(title) } }
             }
             }
         }, footer = {

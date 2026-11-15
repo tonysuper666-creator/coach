@@ -8,6 +8,7 @@ import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 import com.coach.domain.*
 import com.coach.protocol.CommandBody
+import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
 
@@ -92,7 +93,7 @@ fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
 internal fun WeekBrowseSummary(view: CourseView, week: Int, actions: WeekActions) {
     val points = view.weekKps(week)
     Text(if (points.isEmpty()) "这一周没有新课。" else "${com.coach.client.KpStatus.PASSED.label} ${points.count { it.status in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }} / ${points.size} 节", style = MaterialTheme.typography.bodyMedium)
-    TextButton(onClick = { actions.onReview(week) }) { Text("再练这一周错题") }
-    view.weeks.firstOrNull { it > week }?.let { next -> TextButton(onClick = { actions.select(next) }) { Text("浏览下一周") } }
+    V7TextButton(onClick = { actions.onReview(week) }) { Text("再练这一周错题") }
+    view.weeks.firstOrNull { it > week }?.let { next -> V7TextButton(onClick = { actions.select(next) }) { Text("浏览下一周") } }
     actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 }

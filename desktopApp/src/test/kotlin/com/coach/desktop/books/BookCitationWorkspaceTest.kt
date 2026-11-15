@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -10,6 +11,9 @@ import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -82,6 +86,38 @@ class BookCitationWorkspaceTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             onNodeWithTag("book-source-stale-0").assertExists()
             onNodeWithTag("open-lesson-source").assertIsFocused()
+        }
+    }
+
+    @Test fun focusReturnsAfterSlowCitationVerification() {
+        val (controller, support) = setup()
+        val delayReturn = AtomicBoolean(false)
+        val release = CountDownLatch(1)
+        val resolver = object : BookSourceResolver(controller.library) {
+            override fun resolveAll(requests: List<Pair<OwnedBookCitation, String?>>): List<BookSourceResolution> {
+                if (delayReturn.get()) check(release.await(10, TimeUnit.SECONDS))
+                return super.resolveAll(requests)
+            }
+        }
+        try {
+            runComposeUiTest {
+                setContent { TextbookWorkspace(controller, loadOnMount = false, support = support, sourceResolver = resolver) { null } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("book-source-0").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 2 && !controller.state.value.busy }
+                delayReturn.set(true)
+                onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
+                waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+                onNodeWithTag("book-source-pending-0").assertExists()
+                release.countDown()
+                waitUntil(timeoutMillis = 5_000) {
+                    onAllNodes(hasTestTag("book-source-0") and SemanticsMatcher.expectValue(SemanticsProperties.Focused, true))
+                        .fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("book-explanation-text").assertTextEquals("A synthetic explanation (1)")
+            }
+        } finally {
+            release.countDown()
         }
     }
 }

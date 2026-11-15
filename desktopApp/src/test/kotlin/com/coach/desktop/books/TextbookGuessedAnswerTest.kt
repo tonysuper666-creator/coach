@@ -36,6 +36,7 @@ class TextbookGuessedAnswerTest {
         val afterRestart = reopened.state.value.reviews.single()
         assertEquals(correct, afterRestart.originalAnswer)
         assertTrue(afterRestart.originalGuessed)
+        reopened.chooseLearningPath(LearningPath.READ_AND_LEARN)
         reopened.enableLearning()
         assertEquals(guessed, reopened.state.value.answer)
 

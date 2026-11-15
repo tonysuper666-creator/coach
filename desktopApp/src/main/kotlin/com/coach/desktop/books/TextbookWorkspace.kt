@@ -119,7 +119,8 @@ internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts 
 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
-    support: BookLearningSupport = UnconnectedBookLearningSupport, chooseBook: suspend () -> Path?) {
+    support: BookLearningSupport = UnconnectedBookLearningSupport,
+    sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
@@ -148,7 +149,6 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     var removingBook by remember(ui.book?.id) { mutableStateOf(false) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
-    val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
     var askSession by remember(ui.book?.id) { mutableStateOf<BookPassageAskState?>(null) }
     var askVisible by remember(ui.book?.id) { mutableStateOf(false) }
     var askTarget by remember(ui.book?.id) { mutableStateOf<BookSourceTarget?>(null) }
@@ -676,7 +676,8 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
     onSettings: () -> Unit, onRetrySync: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
-    LaunchedEffect(returnFocus, ui.busy) {
+    var lessonSourceHasFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(returnFocus, ui.busy, lesson?.id) {
         if (ui.busy) return@LaunchedEffect
         // The restored button needs a layout frame before it can accept focus.
         if (returnFocus != null) withFrameNanos { }
@@ -684,9 +685,19 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
             SourceFocus.LESSON -> lessonSourceFocus.requestFocus()
             SourceFocus.PRACTICE -> practiceSourceFocus.requestFocus()
             SourceFocus.CITATION -> {
-                // A changed file may turn the old button into read-only text while away.
-                if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false).not())
+                if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false).not()) {
+                    // Verification is asynchronous; keep a useful fallback while the row is checked.
                     lessonSourceFocus.requestFocus()
+                    repeat(100) {
+                        delay(50)
+                        // Do not steal focus if the reader has already moved elsewhere.
+                        if (!lessonSourceHasFocus) { onFocusRestored(); return@LaunchedEffect }
+                        if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false)) {
+                            onFocusRestored()
+                            return@LaunchedEffect
+                        }
+                    }
+                }
             }
             null -> return@LaunchedEffect
         }
@@ -710,7 +721,7 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
             } else {
                 Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
                 Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。")
-                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
+                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).onFocusChanged { lessonSourceHasFocus = it.isFocused }.testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 HorizontalDivider()
                 if (ui.learningPath == LearningPath.READ_AND_LEARN || ui.answer.revealed) BookLessonExplanation(
                     book, lesson, support, reply = explanationReply, replyEpoch = explanationEpoch,

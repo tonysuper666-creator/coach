@@ -305,8 +305,11 @@ private fun HostSettings(controller: TextbookController, connection: WindowsBook
                 TextButton({ pairing = true }, Modifier.testTag("book-practice-connect")) { Text("连接或检查 Mac 配对") }
                 if (book != null) {
                     Text("《${book.title}》的原题同步", style = MaterialTheme.typography.titleSmall)
-                    OutlinedTextField(course, { course = it; message = null }, label = { Text("课程标识") },
-                        singleLine = true, enabled = !saving, modifier = Modifier.testTag("book-practice-course"))
+                    // Keep the existing editable-field tag; the public input id locates this same field.
+                    Box(Modifier.testTag("course.id")) {
+                        OutlinedTextField(course, { course = it; message = null }, label = { Text("课程标识") },
+                            singleLine = true, enabled = !saving, modifier = Modifier.testTag("book-practice-course"))
+                    }
                     Text("课程标识只用于查找。课程必须已核准这本书的具体原题；未登记时仍显示未备好。",
                         style = MaterialTheme.typography.bodySmall)
                     TextButton(enabled = course.isNotBlank() && !saving, modifier = Modifier.testTag("book-practice-save-course"), onClick = {

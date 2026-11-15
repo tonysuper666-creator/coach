@@ -5,6 +5,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -54,9 +55,10 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
                 Text("先打开 Tailscale，确认 Mac 上的 Coach 服务已运行，再输入 Mac 地址和 6 位配对码。")
                 OutlinedTextField(value = address, onValueChange = { address = it; error = null },
                     label = { Text("Mac 地址") }, placeholder = { Text("http://你的Mac地址:18791") },
-                    singleLine = true, enabled = !busy)
+                    singleLine = true, enabled = !busy, modifier = Modifier.testTag("pairing.mac"))
                 OutlinedTextField(value = code, onValueChange = { code = it.filter { c -> c in '0'..'9' }.take(6); error = null },
                     label = { Text("配对码") }, singleLine = true, enabled = !busy,
+                    modifier = Modifier.testTag("pairing.code"),
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
                 Button(enabled = code.length == 6 && address.isNotBlank() && !busy, onClick = {

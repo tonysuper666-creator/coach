@@ -44,6 +44,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -134,6 +135,24 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val explanationReply = remember(ui.book?.id, lessonId, activeLesson?.blocks, support) { mutableStateOf<BookLearningReply?>(null) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
+    var askSession by remember(ui.book?.id) { mutableStateOf<BookPassageAskState?>(null) }
+    var askVisible by remember(ui.book?.id) { mutableStateOf(false) }
+    var askTarget by remember(ui.book?.id) { mutableStateOf<BookSourceTarget?>(null) }
+    var askPage by remember(ui.book?.id) { mutableIntStateOf(1) }
+    var askReturnKey by remember(ui.book?.id) { mutableStateOf<BookPassage?>(null) }
+    var askError by remember(ui.book?.id) { mutableStateOf<String?>(null) }
+    val askFocus = remember(ui.book?.id, askSession) { mutableMapOf<BookPassage, FocusRequester>() }
+    LaunchedEffect(askVisible, askReturnKey) {
+        val key = askReturnKey ?: return@LaunchedEffect
+        if (!askVisible) return@LaunchedEffect
+        repeat(100) {
+            if (runCatching { askFocus[key]?.requestFocus() == true }.getOrDefault(false)) {
+                askReturnKey = null
+                return@LaunchedEffect
+            }
+            delay(50)
+        }
+    }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) {
         val current = controller.state.value
@@ -143,6 +162,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         if (ui.screen == BookScreen.READER && ui.source != null) readerFocus.requestFocus()
     }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
+    fun returnToAsk() { askTarget = null; askVisible = true }
     fun returnFromReader() {
         if (ui.source != null) returnFocus = sourceOrigin
         run { controller.back() }
@@ -188,7 +208,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
             val noteKey = event.toReaderInput()
             if (editing != null && noteKey != null && editing.onKey(noteKey.first, noteKey.second)) true
-            else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
+            else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER && askTarget != null) {
+                returnToAsk(); true
+            } else if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
                 ui.source != null && ui.prompt == null && !ui.busy) {
                 returnFromReader(); true
             } else false
@@ -217,10 +239,13 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onSource = { openPracticeSource(review.practice) },
                             onAnswer = { drafts.saveReview(review, it) })
                     }
-                    ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, support,
-                        practiceSource = practiceSource,
+                    ui.screen == BookScreen.READER -> TextbookReader(if (askTarget == null) ui else ui.copy(page = askPage), controller.library,
+                        practiceSource = practiceSource, askTarget = askTarget,
+                        onAsk = { page -> askSession = BookPassageAskState(page); askError = null; askVisible = true },
+                        onReturnToAsk = { returnToAsk() },
                         onNoteSession = { noteReader = it },
                         onPage = { page ->
+                            if (askTarget != null) { askPage = page; return@TextbookReader }
                             val restoreFocus = ui.source != null && readerHasFocus
                             run {
                                 controller.page(page)
@@ -233,7 +258,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                         current.source != null && current.prompt == null) readerFocus.requestFocus()
                                 }
                             }
-                        }, onBack = { returnFromReader() },
+                        }, onBack = { if (askTarget != null) returnToAsk() else returnFromReader() },
                         onLearn = { run { if (drafts.flush()) controller.learn(LearningPath.QUESTION_FIRST) } })
                     else -> {
                         val lesson = book.lessons.getOrNull(book.lessonIndex)
@@ -260,6 +285,33 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onQuestions = { run { controller.beginQuestions() } })
                     }
                 }
+            }
+            val activeAsk = askSession
+            if (askVisible && activeAsk != null && ui.book != null && ui.screen == BookScreen.READER) {
+                val currentBook = ui.book!!
+                BookPassageAsk(currentBook, activeAsk, support, sources = { sources ->
+                    BookSourceRow(sources, currentBook, sourceResolver,
+                        focus = { i -> askFocus.getOrPut(sources[i]) { FocusRequester() } },
+                        onOpen = { i, target ->
+                            val key = sources[i]
+                            val origin = activeAsk.request?.passage
+                            run {
+                                val valid = withContext(Dispatchers.IO) { sourceResolver.stillValid(target) }
+                                val current = controller.state.value
+                                if (valid && askSession === activeAsk && askVisible && current.screen == BookScreen.READER &&
+                                    current.book?.id == currentBook.id && current.page == activeAsk.page.number && origin != null && target.book == origin.book &&
+                                    target.pdfPage == origin.page && target.start >= origin.start && target.end <= origin.end) {
+                                    askReturnKey = key
+                                    askPage = target.pdfPage
+                                    askTarget = target
+                                    askVisible = false
+                                } else if (askSession === activeAsk && askVisible) {
+                                    askError = "无法确认这条出处，请重新提问。"
+                                }
+                            }
+                        })
+                    askError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }) { askVisible = false; askSession = null; askReturnKey = null }
             }
             if (ui.prompt != null && ui.book != null) BookEntryPrompt(ui,
                 onDismiss = { run { controller.dismissPrompt() } }, onRead = { run { controller.read() } },
@@ -392,7 +444,9 @@ private sealed interface PageImage {
 }
 
 @Composable
-private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: BookLearningSupport, practiceSource: PracticeSource?, onNoteSession: (ReaderSession?) -> Unit, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
+private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, askTarget: BookSourceTarget?,
+    onAsk: (BookPage) -> Unit, onReturnToAsk: () -> Unit, onNoteSession: (ReaderSession?) -> Unit,
+    onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
     val page = book.pages[ui.page - 1]
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
@@ -400,7 +454,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
     val source = ui.source
-    var asking by remember(book.id, ui.page) { mutableStateOf(false) }
+    val activePracticeSource = askTarget?.let { PracticeSource(it.pdfPage, it.quote, null) } ?: practiceSource
 
     val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
     val remote = remember(readerSource, book.id) { com.coach.desktop.reader.ReaderRemote(readerSource) }
@@ -421,8 +475,9 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
         if (session.noteSaveTick > 0) session.commitNote()
     }
 
-    val quoteAnchor = remember(ui.page, source, practiceSource) {
-        if (source == null) null
+    val quoteAnchor = remember(ui.page, source, practiceSource, askTarget) {
+        if (askTarget != null) askTarget.quote.takeIf { askTarget.pdfPage == ui.page }
+        else if (source == null) null
         else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
         else StudyCoachCourse.sourceQuote(source, ui.page)
     }
@@ -442,9 +497,10 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
     val loadedImage = (image as? PageImage.Ready)?.image
     val aspectOk = boxes != null && loadedImage != null &&
         kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
-    val sourceWarning = if (source == null) null else when {
-        practiceSource?.warning != null -> practiceSource.warning
-        practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
+    val sourceWarning = if (source == null && askTarget == null) null else when {
+        activePracticeSource?.warning != null -> activePracticeSource.warning
+        activePracticeSource?.page != null && activePracticeSource.page != ui.page ->
+            "无法确认原句：${if (askTarget == null) "本题依据" else "依据"}在第 ${activePracticeSource.page} 页。"
         book.format != "pdf" -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
@@ -481,7 +537,8 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (book.format == "pdf") TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
-                TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                if (askTarget == null) TextButton(onClick = { onAsk(page) }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                else TextButton(onClick = onReturnToAsk, modifier = Modifier.testTag("return-to-passage-question")) { Text("返回提问") }
                 TextButton(onClick = {
                     if (notesOpen) session.cancelNote()
                     notesOpen = !notesOpen
@@ -490,7 +547,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开启 learning") }
             }
-            if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
+            if (source != null && askTarget == null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
@@ -499,13 +556,13 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
-                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
+                        val confirmedBlocks = if (activePracticeSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
                             blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
                         } else emptyList()
                         for (block in confirmedBlocks) {
                             if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
                         }
-                        if (practiceSource != null && quoteAnchor != null &&
+                        if (activePracticeSource != null && quoteAnchor != null &&
                             (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
                             val start = page.text.indexOf(quoteAnchor)
                             if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0)
@@ -572,7 +629,6 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
             Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
         }
     }
-    if (asking) BookPassageAsk(book, page, support) { asking = false }
 }
 
 @Composable

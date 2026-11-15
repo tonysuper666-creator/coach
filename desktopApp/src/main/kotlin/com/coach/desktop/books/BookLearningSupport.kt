@@ -79,16 +79,27 @@ internal fun BookLessonExplanation(
 }
 
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
+internal class BookPassageAskState(val page: BookPage) {
+    var selected by mutableStateOf<SourceBlock?>(null)
+    var question by mutableStateOf("")
+    var request by mutableStateOf<BookPassageQuestion?>(null)
+    var reply by mutableStateOf<BookLearningReply?>(null)
+    var revision by mutableIntStateOf(0)
+}
+
 @Composable
-internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support: BookLearningSupport,
+    sources: @Composable (List<BookPassage>) -> Unit = {}, onClose: () -> Unit) {
+    val page = state.page
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
-    var selected by remember(book.id, page.number) { mutableStateOf<SourceBlock?>(null) }
-    var question by remember(book.id, page.number) { mutableStateOf("") }
-    var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
-    var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
-    var revision by remember(book.id, page.number) { mutableIntStateOf(0) }
+    var selected by state::selected
+    var question by state::question
+    var request by state::request
+    var reply by state::reply
+    var revision by state::revision
     LaunchedEffect(request, revision) {
         val input = request ?: return@LaunchedEffect
+        if (reply != null) return@LaunchedEffect
         reply = try {
             val result = support.ask(input)
             coroutineContext.ensureActive()
@@ -124,7 +135,10 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                 }, enabled = question.isNotBlank() && (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…")
-                    is BookLearningReply.Text -> Text(result.text)
+                    is BookLearningReply.Text -> {
+                        Text(result.text)
+                        sources(result.sources)
+                    }
                     is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-passage-unavailable"))
                 }
             }

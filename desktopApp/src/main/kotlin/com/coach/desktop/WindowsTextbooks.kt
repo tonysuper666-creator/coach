@@ -18,8 +18,9 @@ import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.BookLearningSupport
-import com.coach.desktop.books.UnconnectedBookLearningSupport
-import com.coach.desktop.books.localWindowsBookLearningSupport
+import com.coach.desktop.books.WindowsBookRuntime
+import com.coach.desktop.books.WindowsBookRuntimeEvidence
+import com.coach.desktop.books.isolatedWindowsBookLearningSupport
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
@@ -73,7 +74,6 @@ internal fun runWindowsTextbooks() {
     application {
         val connectionSettings = remember { DesktopConnectionSettings() }
         val (controller, connection) = rememberPairedBookController(directory, connectionSettings)
-        val learningSupport = remember(controller.library) { localWindowsBookLearningSupport(controller.library) }
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
@@ -85,7 +85,7 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
-            WindowsTextbookHost(controller, drafts, exams, connection = connection, support = learningSupport, chooseBook = {
+            WindowsTextbookHost(controller, drafts, exams, connection = connection, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "选择教材或变式来源文件", FileDialog.LOAD)
                     try {
@@ -156,7 +156,18 @@ private val AppTab.hostDestination: AppTab
 @Composable
 internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
     exams: LocalExamController = rememberLocalExamController(controller.library),
-    connection: WindowsBookPracticeConnection? = null, support: BookLearningSupport = UnconnectedBookLearningSupport, chooseBook: suspend () -> Path?) {
+    connection: WindowsBookPracticeConnection? = null, support: BookLearningSupport? = null,
+    runtime: WindowsBookRuntime? = null,
+    runtimeAuthSource: (() -> Path)? = null, runtimeEvidence: WindowsBookRuntimeEvidence = remember { WindowsBookRuntimeEvidence() },
+    chooseBook: suspend () -> Path?) {
+    val installedRuntime by produceState<WindowsBookRuntime?>(null, runtime, support) {
+        if (runtime == null && support == null) value = withContext(Dispatchers.IO) { WindowsBookRuntime.installed() }
+    }
+    val resolvedRuntime = runtime ?: installedRuntime
+    val learningSupport = support ?: remember(controller.library, resolvedRuntime, runtimeAuthSource, runtimeEvidence) {
+        if (runtimeAuthSource == null) isolatedWindowsBookLearningSupport(controller.library, resolvedRuntime, evidence = runtimeEvidence)
+        else isolatedWindowsBookLearningSupport(controller.library, resolvedRuntime, runtimeAuthSource, runtimeEvidence)
+    }
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
@@ -210,7 +221,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                         Text("正在读取本书练习…")
                                     }
                                 })
-                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, support = support, chooseBook = chooseBook)
+                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, support = learningSupport, chooseBook = chooseBook)
                         }
                     }
                     if (rail) Row(Modifier.fillMaxSize()) {
@@ -347,6 +358,5 @@ private fun rememberPairedBookController(directory: Path, settings: DesktopConne
 internal fun WindowsTextbooksContent(directory: Path,
     connectionSettings: DesktopConnectionSettings = remember { DesktopConnectionSettings() }, chooseBook: suspend () -> Path?) {
     val (controller, connection) = rememberPairedBookController(directory, connectionSettings)
-    val learningSupport = remember(controller.library) { localWindowsBookLearningSupport(controller.library) }
-    WindowsTextbookHost(controller, connection = connection, support = learningSupport, chooseBook = chooseBook)
+    WindowsTextbookHost(controller, connection = connection, chooseBook = chooseBook)
 }

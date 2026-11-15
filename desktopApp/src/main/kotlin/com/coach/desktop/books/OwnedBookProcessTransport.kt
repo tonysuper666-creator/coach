@@ -11,7 +11,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** One request per process. Installation and authorization remain the caller's responsibility. */
+/**
+ * One request per process. Installation and authorization remain the caller's responsibility.
+ * Descendant cleanup is best effort; it is not process containment. A child can escape if its
+ * parent exits or forks during cleanup. Do not use for production CLI execution until a
+ * launch-time operating-system containment mechanism covers the entire process lifetime.
+ */
 internal class OwnedBookProcessTransport(
     private val command: List<String>,
     private val timeoutMillis: Long = 180_000,
@@ -42,16 +47,29 @@ internal class OwnedBookProcessTransport(
             }
             result ?: error("Book CLI transport timed out")
         } finally {
-            if (process.isAlive) {
-                // Give the adapter a chance to cancel and reap the existing CLI process.
-                process.destroy()
-                if (!process.waitFor(2, TimeUnit.SECONDS)) {
-                    process.descendants().forEach { it.destroyForcibly() }
-                    process.destroyForcibly()
-                    process.waitFor(2, TimeUnit.SECONDS)
-                }
-            }
+            terminateTree(process)
         }
+    }
+
+    private fun terminateTree(process: Process) = synchronized(process) {
+        // Snapshot while the parent is still alive: killing it first can orphan its CLI.
+        // This cannot recover a descendant already orphaned by an earlier parent exit.
+        val descendants = process.descendants().use { it.toList() }
+        val byPid = descendants.associateBy { it.pid() }
+        fun depth(handle: ProcessHandle): Int {
+            var parent = handle.parent().orElse(null)
+            var depth = 0
+            while (parent != null && byPid.containsKey(parent.pid())) {
+                depth++
+                parent = parent.parent().orElse(null)
+            }
+            return depth
+        }
+        descendants.sortedByDescending(::depth).forEach { it.destroyForcibly() }
+        if (process.isAlive) process.destroyForcibly()
+        descendants.forEach { runCatching { it.onExit().get(2, TimeUnit.SECONDS) } }
+        if (process.isAlive) process.waitFor(2, TimeUnit.SECONDS)
+        Unit
     }
 
     private suspend fun awaitExit(process: Process): Int = suspendCancellableCoroutine { continuation ->
@@ -59,6 +77,7 @@ internal class OwnedBookProcessTransport(
             if (error != null) continuation.resumeWithException(error)
             else continuation.resume(finished.exitValue())
         }
-        continuation.invokeOnCancellation { process.destroy() }
+        // Unblock pipe readers on cancellation, but snapshot descendants before killing the parent.
+        continuation.invokeOnCancellation { terminateTree(process) }
     }
 }

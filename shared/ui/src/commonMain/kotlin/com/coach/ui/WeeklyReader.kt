@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.coach.domain.*
+import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
@@ -184,12 +185,15 @@ internal fun WeeklyReader(
                             }
                             if (!selected.collapsed) {
                                 Text("选中文本", style = MaterialTheme.typography.labelMedium)
+                                // This row scrolls horizontally and clips its own bounds, so a ring drawn outside the pill would
+                                // lose the whole side at either end. Draw it just inside the pill's edge instead: complete on
+                                // all four sides wherever the row is scrolled, with the same 2dp width.
                                 Row(Modifier.horizontalScroll(rememberScrollState())) {
-                                    TextButton(onClick = { addMark(false) }) { Text("划线") }
-                                    TextButton(onClick = { addMark(true) }) { Text("一句批注") }
-                                    TextButton(onClick = { ask("explain") }) { Text("再讲一遍") }
-                                    TextButton(onClick = { ask("example") }) { Text("举个例子") }
-                                    TextButton(onClick = { selected = TextRange.Zero }) { Text("取消选择") }
+                                    V7TextButton(onClick = { addMark(false) }, ringInside = true) { Text("划线") }
+                                    V7TextButton(onClick = { addMark(true) }, ringInside = true) { Text("一句批注") }
+                                    V7TextButton(onClick = { ask("explain") }, ringInside = true) { Text("再讲一遍") }
+                                    V7TextButton(onClick = { ask("example") }, ringInside = true) { Text("举个例子") }
+                                    V7TextButton(onClick = { selected = TextRange.Zero }, ringInside = true) { Text("取消选择") }
                                 }
                             }
                             Text(section.strings("sources").joinToString("\n"), style = MaterialTheme.typography.labelMedium)

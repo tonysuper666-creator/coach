@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Modifier
@@ -73,7 +74,7 @@ data class ReaderFixture(
 }
 
 /** 窗口会话：状态、题目选择与作答都在这里，窗口缩放或出处往返都不清空。 */
-class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null) {
+class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote: ReaderRemote? = null, val drafts: NoteDraftStore? = null) {
     var state by mutableStateOf(ReaderState(DesktopReaderLayouts.forWidth(initialWidthDp), pageCount = fixture.pages.size))
         private set
     var selectedQuestion by mutableIntStateOf(0)
@@ -114,6 +115,13 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         noteDraft = null; noteLine = 0
     }
 
+    /** Mouse/touch hosts select the same page line as the keyboard picker. */
+    fun chooseNoteLine(index: Int) {
+        if (noteLine < 0 || index !in pageLines().indices) return
+        noteLine = index
+        confirmLine()
+    }
+
     /** 服务端已确认保存的文字；新建且从未保存成功为 null。 */
     private var noteBaseline by mutableStateOf<String?>(null)
     private var noteAttempt by mutableStateOf<String?>(null)
@@ -130,7 +138,107 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         return NoteStatusRules.of(d.id, noteText, noteBaseline, noteAttempt, noteSaving, r.noteSave)
     }
 
-    fun cancelNote() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null }
+    // ---- 本机草稿：失败/关闭/重开后不丢；远端 ack 之后才清；绝不自动补发 ----
+    /** 草稿存储变化的计数，让界面里的“本页有未保存的草稿”列表跟着刷新。 */
+    var draftTick by mutableIntStateOf(0)
+        private set
+
+    private fun identityOf(d: NoteDraft): DraftIdentity? {
+        val st = drafts ?: return null
+        if (st.scope.isBlank()) return null
+        return DraftIdentity(st.scope, d.doc, d.version, d.pdfPage, d.start, d.end, d.textSha256)
+    }
+
+    private fun clearStored(d: NoteDraft) { identityOf(d)?.let { drafts?.remove(it); draftTick++ } }
+
+    /** 本机草稿是否真的在用：有存储、有可信身份、且最近一次写盘没失败（界面承诺只跟这个走）。 */
+    var persistFailed by mutableStateOf(false)
+        private set
+    fun draftsKept(): Boolean = drafts?.scope?.isNotBlank() == true && !persistFailed
+
+    /**
+     * 把还没保存成功的文字存到本机：和已保存文字一致或没有内容则清掉这一份；既有非空批注被清空是一次真实修改（cleared），要留着；
+     * 采用服务端版本后被换下的本地文字也要留着。写盘失败只记状态，不抛异常、不丢内存里的文字。
+     */
+    private fun persistDraft(d: NoteDraft, text: String) {
+        val st = drafts ?: return; val id = identityOf(d) ?: return
+        val atBaseline = text.isEmpty() || text == noteBaseline
+        val fromStash = noteStash != null && atBaseline                  // 采用服务端版本后被换下的本地文字（可能是“清空”）
+        val clearing = !fromStash && text.isEmpty() && !noteBaseline.isNullOrEmpty()
+        val effective: String? = when {
+            fromStash -> noteStash
+            clearing -> ""
+            atBaseline -> null
+            else -> text
+        }
+        if (effective == null) { clearStored(d); persistFailed = false; return } // 没有需要落盘的未保存文字：不警示
+        val base = if (fromStash) stashBase ?: d.baseRevision else d.baseRevision
+        persistFailed = !st.put(StoredDraft(id, d.id, d.quote, effective, base, cleared = effective.isEmpty()))
+        draftTick++
+    }
+
+    /** 编辑代次：每次打开/关闭编辑区都 +1；在途请求的回执只能收尾它自己那一代的编辑器。 */
+    private var editGen = 0
+    private var stashBase: Long? = null
+
+    /** 采用本机草稿：身份/修订号原样保留（不接管同一行别的批注，不用最新远端修订号覆盖）；缺修订号且服务端已有这条就拒绝猜测。 */
+    private fun takeStored(sd: StoredDraft, doc: ReaderDocInfo, v: ReaderPageView): Boolean {
+        val r = remote ?: return false
+        val serverNote = r.notes.firstOrNull { it.id == sd.noteId }
+        val base = sd.baseRevision ?: if (serverNote != null) { message = "这份本机草稿缺少原修订号，不能安全带回"; return false } else 0L
+        noteDraft = NoteDraft(sd.noteId, doc.id, doc.version, v.pdfPage, v.textSha256, sd.identity.start, sd.identity.end, sd.quote, sd.note, base)
+        noteText = sd.note; noteLine = -1; noteBaseline = serverNote?.note; noteAttempt = null; noteStash = null; stashBase = null; editGen++
+        persistFailed = false // 刚从本机读出来的，就是已落盘的
+        return true
+    }
+
+    /** 保存被远端真实 ack 之后的统一收尾：只清匹配的这一份；ack 等待期间新输入的文字要重新留下。 */
+    private fun finishAck(d: NoteDraft, toSave: NoteDraft, revision: Long) {
+        noteStash = null
+        noteBaseline = toSave.note
+        noteDraft = toSave.copy(baseRevision = revision)
+        highlightNoteId = d.id
+        clearStored(d)
+        if (noteText != noteBaseline) persistDraft(noteDraft!!, noteText) else persistFailed = false // 当前内容已被真实 ack，没有未落盘的文字
+    }
+
+    /** 已被关闭/换掉的编辑器收到迟到的 ack：服务端确实收下了这段文字，只清掉与之完全一致的本机草稿，不碰当前编辑器。 */
+    private fun lateAck(d: NoteDraft, acknowledgedText: String) {
+        val sid = identityOf(d) ?: return
+        val cur = drafts?.get(sid) ?: return
+        if (cur.noteId == d.id && cur.note == acknowledgedText) clearStored(d)
+    }
+
+    /** 当前书/版本/页上本机留着的、还没保存成功的草稿（身份必须全部匹配）。 */
+    fun localDrafts(): List<StoredDraft> {
+        @Suppress("UNUSED_EXPRESSION") draftTick
+        val st = drafts ?: return emptyList()
+        val doc = remote?.current ?: return emptyList(); val v = currentView() ?: return emptyList()
+        return st.listFor(doc.id, doc.version, v.pdfPage)
+    }
+
+    /** 用户选择“继续编辑”：只在文档/版本/页/锚点文字都对得上时才带回，不然拒绝。 */
+    fun resumeLocalDraft(sd: StoredDraft): Boolean {
+        val r = remote ?: return false; val v = currentView() ?: return false; val doc = r.current ?: return false; val st = drafts ?: return false
+        val i = sd.identity
+        if (i.scope.isBlank() || i.scope != st.scope || i.doc != doc.id || i.version != doc.version || i.pdfPage != v.pdfPage || i.textSha256 != v.textSha256 ||
+            i.start !in 0 until i.end || i.end > v.text.length || v.text.substring(i.start, i.end) != sd.quote) return false
+        return takeStored(sd, doc, v)
+    }
+
+    /** 用户在列表里明确丢弃某一份本机草稿（例如缺修订号、不能安全带回的旧稿）。 */
+    fun discardLocalDraft(sd: StoredDraft) { drafts?.remove(sd.identity); draftTick++ }
+
+    /** 明确“放弃草稿”：连本机存的这一份一起丢。 */
+    fun discardDraft() { noteDraft?.let { clearStored(it) }; clearEditor() }
+
+    /** 输入框里的文字变化：随手存到本机，应用被关掉也不丢。 */
+    fun editNote(t: String) { noteText = t; noteDraft?.let { persistDraft(it, t) } }
+
+    /** 普通关闭编辑区/关书：未保存的文字留在本机，不等于放弃。 */
+    fun cancelNote() { noteDraft?.let { persistDraft(it, noteText) }; clearEditor() }
+
+    private fun clearEditor() { noteLine = -1; noteDraft = null; noteText = ""; noteBaseline = null; noteAttempt = null; noteStash = null; stashBase = null; editGen++; persistFailed = false }
 
     private fun confirmLine() {
         val r = remote ?: return; val v = currentView() ?: return
@@ -138,8 +246,13 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val end = range.last + 1
         val existing = r.notes.firstOrNull { it.pdfPage == v.pdfPage && it.start == range.first && it.end == end && r.noteValid(it, v) }
         val doc = r.current ?: return
-        noteDraft = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
-            range.first, end, v.text.substring(range.first, end), existing?.note.orEmpty(), existing?.revision ?: 0L)
+        val quote = v.text.substring(range.first, end)
+        val base = NoteDraft(existing?.id ?: java.util.UUID.randomUUID().toString(), doc.id, doc.version, v.pdfPage, v.textSha256,
+            range.first, end, quote, existing?.note.orEmpty(), existing?.revision ?: 0L)
+        val local = identityOf(base)?.let { drafts?.get(it) }?.takeIf { it.quote == quote } // 同一锚点上本机留着的草稿
+        if (local != null) { if (!takeStored(local, doc, v)) noteLine = -1; return } // 被拒绝的本机稿：不开基线编辑器，稿原样保留
+        editGen++; persistFailed = false // 新打开的编辑器还没有未落盘的新文字
+        noteDraft = base
         noteText = existing?.note.orEmpty(); noteLine = -1
         noteBaseline = existing?.note; noteAttempt = null; noteStash = null
     }
@@ -155,14 +268,15 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     suspend fun commitNote() {
         val r = remote ?: return; val d = noteDraft ?: return
         val toSave = d.copy(note = noteText)
+        val gen = editGen
         noteSaving = true; noteAttempt = toSave.note
         try { r.saveNote(toSave) } finally { noteSaving = false }
         val st = r.noteSave
-        if (st is NoteSaveState.Saved && st.id == d.id && noteDraft?.id == d.id) {
-            noteStash = null // 保存成功后不再挂着旧草稿的“找回”入口
-            noteBaseline = toSave.note // 只把“实际发出去的文字”记为已保存；保存期间继续输入的内容仍算未保存
-            noteDraft = toSave.copy(baseRevision = st.revision)
-            highlightNoteId = d.id // 刚保存的批注立刻在页上标出（若能定位）
+        val mine = gen == editGen && noteDraft?.id == d.id           // 这份回执是否属于现在还开着的这个编辑器
+        if (st is NoteSaveState.Saved && st.id == d.id) {
+            if (mine) finishAck(d, toSave, st.revision) else lateAck(d, toSave.note) // 只把“实际发出去的文字”记为已保存；真实 ack 之后才清除匹配的草稿
+        } else if (mine) {
+            persistDraft(d, noteText) // 失败/断网/冲突：草稿留在本机
         }
     }
 
@@ -181,6 +295,8 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         val r = remote ?: return; val d = noteDraft ?: return
         val server = r.adoptServerNote() ?: return
         noteStash = noteText
+        stashBase = d.baseRevision // 被换下的本地文字依据的是原修订号
+        persistDraft(d, noteText) // 被换下的本地文字先落盘
         noteDraft = d.copy(note = server.note, baseRevision = server.revision)
         noteText = server.note; noteBaseline = server.note; noteAttempt = null
     }
@@ -191,11 +307,12 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
     suspend fun overwriteWithMine() {
         val r = remote ?: return; val d = noteDraft ?: return
         val toSave = d.copy(note = noteText)
+        val gen = editGen
         noteSaving = true; noteAttempt = toSave.note
         try {
             if (r.overwriteWithMine(toSave)) {
                 val st = r.noteSave as NoteSaveState.Saved
-                noteBaseline = toSave.note; noteDraft = toSave.copy(baseRevision = st.revision); noteStash = null; highlightNoteId = d.id
+                if (gen == editGen && noteDraft?.id == d.id) finishAck(d, toSave, st.revision) else lateAck(d, toSave.note)
             }
         } finally { noteSaving = false }
     }
@@ -782,16 +899,24 @@ private fun RemotePage(session: ReaderSession, remote: ReaderRemote, view: Reade
         )
         offset += line.length + 1
     }
-    if (session.noteLine >= 0) Text("上下键选一行，回车确认，Esc 放弃", Modifier.testTag("note-pick-hint").padding(top = 4.dp), fontSize = 12.sp, color = Accent)
+    if (session.noteLine >= 0) Text(if (session.draftsKept()) "上下键选一行，回车确认，Esc 关闭" else "上下键选一行，回车确认，Esc 放弃", Modifier.testTag("note-pick-hint").padding(top = 4.dp), fontSize = 12.sp, color = Accent)
     session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }
     NotesSection(session, remote, view)
+    if (session.noteDraft != null) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { session.requestNoteSave() }, enabled = !session.noteSaving,
+                modifier = Modifier.testTag("reader-note-save")) { Text("保存批注") }
+            TextButton(onClick = { session.cancelNote() },
+                modifier = Modifier.testTag("reader-note-close")) { Text("关闭编辑区") }
+        }
+    }
 }
 
 @Composable
-private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView) {
+internal fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: ReaderPageView, textColor: Color = Ink, keyboardHint: Boolean = true) {
     val mine = remote.notes.filter { it.pdfPage == view.pdfPage || it.stale || it.version != remote.current?.version }
     Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-        Text("批注（按 N 为一行写批注）", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Text(if (keyboardHint) "批注（按 N 为一行写批注）" else "批注", fontWeight = FontWeight.Bold, fontSize = 13.sp)
         if (mine.isEmpty()) Text("这一页还没有批注", Modifier.testTag("notes-empty"), fontSize = 12.sp, color = Color(0xFF666666))
         for (n in mine) {
             val valid = remote.noteValid(n, view)
@@ -800,6 +925,18 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                 Text("我的原句：${n.quote}", fontSize = 12.sp)
                 if (n.note.isNotEmpty()) Text("我的批注：${n.note}", fontSize = 12.sp)
                 if (valid) Text("在页上标出", Modifier.testTag("note-show-${n.id}").clickable { session.highlightNoteId = n.id }, fontSize = 12.sp, color = Accent)
+            }
+        }
+        val local = session.localDrafts()
+        if (local.isNotEmpty() && session.noteDraft == null) {
+            Column(Modifier.testTag("local-drafts").padding(top = 8.dp)) {
+                Text("本页有未保存的草稿（只在本机）", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF8A6D1F))
+                local.forEachIndexed { i, sd ->
+                    Row {
+                        Text("继续编辑：" + sd.quote.take(24), Modifier.testTag("local-draft-$i").clickable { session.resumeLocalDraft(sd) }.padding(top = 2.dp), fontSize = 12.sp, color = Accent)
+                        Text("　丢弃", Modifier.testTag("local-draft-discard-$i").clickable { session.discardLocalDraft(sd) }.padding(top = 2.dp), fontSize = 12.sp, color = Color(0xFFA33B2D))
+                    }
+                }
             }
         }
         val d = session.noteDraft
@@ -813,22 +950,26 @@ private fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Rea
                 var field by remember(d.id) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(session.noteText, androidx.compose.ui.text.TextRange(session.noteText.length))) }
                 if (field.text != session.noteText) field = androidx.compose.ui.text.input.TextFieldValue(session.noteText, androidx.compose.ui.text.TextRange(session.noteText.length))
                 androidx.compose.foundation.text.BasicTextField(
-                    value = field, onValueChange = { field = it; session.noteText = it.text },
+                    value = field, onValueChange = { field = it; session.editNote(it.text) },
                     modifier = Modifier.testTag("note-input").focusRequester(inputFocus).fillMaxWidth().padding(vertical = 6.dp),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = Ink),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = textColor),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(textColor),
                 )
-                Text("Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))
+                Text(if (session.draftsKept()) "Ctrl+回车保存；Esc 关闭，没保存的文字会留在本机" else "Ctrl+回车保存，Esc 放弃", fontSize = 11.sp, color = Color(0xFF666666))
+                if (session.drafts != null && session.persistFailed) Text("本机草稿没能写入磁盘，文字只在这个编辑区里，关闭后会丢", Modifier.testTag("note-draft-io-failed"), fontSize = 11.sp, color = Color(0xFFA33B2D))
+                if (session.draftsKept()) Text("放弃草稿", Modifier.testTag("note-discard").clickable { session.discardDraft() }.padding(top = 2.dp), fontSize = 11.sp, color = Accent)
                 val status = session.noteStatus()
-                SideEffect { session.uiNoteStatus = status?.text }
+                val statusText = status?.let { NoteStatusRules.statusText(it, session.draftsKept()) }
+                SideEffect { session.uiNoteStatus = statusText }
                 if (status != null) Text(
-                    status.text, Modifier.testTag("note-status"), fontSize = 12.sp,
+                    statusText!!, Modifier.testTag("note-status"), fontSize = 12.sp,
                     color = when (status) {
                         NoteStatus.Saved -> Color(0xFF2F6B3A)
                         NoteStatus.Dirty, NoteStatus.Offline, NoteStatus.Saving, NoteStatus.NotSaved -> Color(0xFF8A6D1F)
                         else -> Color(0xFFA33B2D)
                     },
                 )
-                (remote.noteSave as? NoteSaveState.Failed)?.let { if (status == NoteStatus.Failed) Text(it.failure.text, fontSize = 12.sp, color = Color(0xFFA33B2D)) }
+                (remote.noteSave as? NoteSaveState.Failed)?.let { if (status == NoteStatus.Failed) Text(NoteStatusRules.failureText(it.failure, session.draftsKept()), Modifier.testTag("note-failure-reason"), fontSize = 12.sp, color = Color(0xFFA33B2D)) }
                 val conflict = remote.noteSave as? NoteSaveState.Conflict
                 if (status == NoteStatus.Conflict && conflict != null) ConflictPanel(session, conflict)
                 if (session.noteStash != null) Text("找回我的草稿", Modifier.testTag("note-restore-stash").clickable { session.restoreStashedDraft() }.padding(top = 4.dp), fontSize = 12.sp, color = Accent)

@@ -205,6 +205,48 @@ class OwnedBookProcessTreeTest {
         }
     }
 
+    @Test fun immediateParentExitMustNotLeaveInheritedPipeDescendantAlive() = runBlocking {
+        val root = Files.createTempDirectory("owned-book-immediate-")
+        val script = root.resolve("immediate.py")
+        val sentinel = ProcessBuilder(python, "-c", "import time; time.sleep(30)").start()
+        var descendant: ProcessHandle? = null
+        try {
+            Files.writeString(script, """
+                import os, signal, subprocess, sys, time
+                from pathlib import Path
+                role, root = sys.argv[1:]
+                if role == 'parent':
+                    subprocess.Popen([sys.executable, __file__, 'child', root], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    os._exit(0)
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                Path(root, 'child.pid').write_text(str(os.getpid()))
+                time.sleep(8)
+                """.trimIndent())
+            val started = System.nanoTime()
+            val result = async(Dispatchers.Default) {
+                assertFailsWith<IllegalStateException> {
+                    OwnedBookProcessTransport(listOf(python, script.toString(), "parent", root.toString()), 1500).complete("synthetic")
+                }
+            }
+            val pidFile = root.resolve("child.pid")
+            withTimeout(10_000) { while (!Files.exists(pidFile)) delay(5) }
+            descendant = ProcessHandle.of(Files.readString(pidFile).trim().toLong()).orElseThrow()
+            println("IMMEDIATE started child_pid=${descendant.pid()} sentinel_pid=${sentinel.pid()}")
+            withTimeout(15_000) { result.await() }
+            val elapsed = (System.nanoTime() - started) / 1_000_000
+            println("IMMEDIATE elapsed_ms=$elapsed child_pid=${descendant.pid()} child_alive_at_return=${descendant.isAlive} sentinel_alive=${sentinel.isAlive}")
+            assertTrue(elapsed < 2500, "returned after ${elapsed}ms")
+            assertTrue(sentinel.isAlive, "unrelated sentinel was killed")
+            assertFalse(descendant.isAlive, "immediately orphaned child survived")
+        } finally {
+            descendant?.let { if (it.isAlive) it.destroyForcibly(); runCatching { it.onExit().get(5, TimeUnit.SECONDS) }; println("IMMEDIATE cleanup child_pid=${it.pid()} alive=${it.isAlive}") }
+            sentinel.destroyForcibly()
+            sentinel.waitFor(5, TimeUnit.SECONDS)
+            println("IMMEDIATE cleanup sentinel_pid=${sentinel.pid()} alive=${sentinel.isAlive}")
+            Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
+        }
+    }
+
     private suspend fun withTree(mode: String, block: suspend (Tree) -> Unit) {
         val tree = Tree(mode)
         try {

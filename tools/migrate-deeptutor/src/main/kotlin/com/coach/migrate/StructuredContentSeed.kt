@@ -146,7 +146,7 @@ fun seedReport(seed: ContentSeed): String = buildString {
 }
 
 fun seedContentCommand(args: Array<String>) {
-    val allowed = setOf("--source", "--staging", "--snapshot", "--out", "--weights", "--database")
+    val allowed = setOf("--source", "--staging", "--snapshot", "--out", "--weights", "--database", "--book-practice-mappings")
     require(args.size % 2 == 0) { "seed-content options require values" }
     val pairs = args.toList().chunked(2)
     require(pairs.all { it[0] in allowed } && pairs.map { it[0] }.distinct().size == pairs.size) { "Unknown or repeated seed-content option" }
@@ -163,7 +163,11 @@ fun seedContentCommand(args: Array<String>) {
         option("--weights", home.resolve("dev/coach/docs/background/期中分值覆盖表.md")))
     requirePrivateDestination(snap, protected)
     require(!database.startsWith(snap) && !out.startsWith(snap)) { "Snapshot must remain read-only" }
-    val seed = contentSeed(snap, options["--weights"]?.let(Path::of) ?: snap.resolve("exam-weights.md"))
+    val baseSeed = contentSeed(snap, options["--weights"]?.let(Path::of) ?: snap.resolve("exam-weights.md"))
+    // Explicit local owner input; this cannot approve a key or import a book from a paired device.
+    val seed = options["--book-practice-mappings"]?.let { file ->
+        baseSeed.copy(bookPracticeMappings = LedgerJson.decodeFromString<List<BookPracticeMapping>>(Path.of(file).readText()))
+    } ?: baseSeed
     val encoded = canonical(LedgerJson.encodeToJsonElement(ContentSeed.serializer(), seed))
     privateDir(out)
     out.resolve("content.json").writeText(encoded)

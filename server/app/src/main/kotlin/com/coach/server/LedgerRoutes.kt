@@ -83,6 +83,28 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
         return runCatching { LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject }.getOrNull()
     }
     routing {
+        post("/v1/courses/{course}/book-practice-pose") {
+            val input = call.bookSourceBody() ?: return@post call.respond(HttpStatusCode.BadRequest)
+            // In particular, never accept client question/key/KP, device, agent scope or approval fields.
+            if (input.keys != setOf("bookSha256", "lessonId", "pdfPage", "start", "end", "reference"))
+                return@post call.respond(HttpStatusCode.BadRequest)
+            val source = runCatching { LedgerJson.decodeFromJsonElement<BookPracticeSource>(input) }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val device = call.attributes[observedDevice]
+            val course = call.parameters["course"]!!
+            val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
+            try {
+                val pose = actor.execute {
+                    if (!authorize(device, credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
+                    poseBookPractice(course, device, source)
+                }
+                pushes.tryEmit(course)
+                call.respondText(json("events" to JsonArray(listOf(LedgerJson.encodeToJsonElement(pose)))).toString(), ContentType.Application.Json)
+            } catch (e: ReviewVariantRejected) {
+                call.respondText(json("error" to e.code).toString(), ContentType.Application.Json,
+                    if (e.code == "REVIEW_DEVICE_UNAUTHORIZED") HttpStatusCode.Unauthorized else HttpStatusCode.Conflict)
+            }
+        }
         get("/v1/courses/{course}/book-review-coverage") {
             val coverage = actor.execute { bookLedgerCoverage(call.parameters["course"]!!) }
             call.respondText(LedgerJson.encodeToString(coverage), ContentType.Application.Json)

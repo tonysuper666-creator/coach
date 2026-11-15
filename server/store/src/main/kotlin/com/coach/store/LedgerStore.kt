@@ -400,6 +400,28 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     // Initialize outside request transactions: a rejected first claim must not roll back the schema
     // while leaving a cached adapter pointing at tables that no longer exist.
     private val bookLedgerSources = BookLedgerSourceStore(connection)
+    private val bookPractices = BookPracticeStore(connection, directory.resolve("blobs"))
+
+    /** Authenticated route calls this inside the single writer, using the paired device identity. */
+    fun poseBookPractice(course: String, device: String, source: BookPracticeSource): Event = transaction {
+        val mapping = bookPractices.mapping(course, source, courseContent(course))
+        val prior = bookPractices.prior(course, device, mapping)
+        if (prior != null) {
+            if (events(course).none { it == prior } || events(course).any {
+                it.type == "attempt_voided" && it.payload.str("attemptId") == prior.payload.str("attemptId")
+            }) throw ReviewVariantRejected("BOOK_ATTEMPT_MISMATCH")
+            return@transaction prior
+        }
+        val attempt = uid()
+        val link = JsonObject(LedgerJson.encodeToJsonElement(source).jsonObject +
+            ("blockId" to JsonPrimitive("${source.bookSha256}:p${source.pdfPage}:${source.start}")))
+        val pose = poseChoiceGroupInTransaction(course, "book-practice:$attempt", listOf(json(
+            "attemptId" to attempt, "questionId" to mapping.questionId, "kpIds" to listOf(mapping.kpId),
+            "purpose" to "PRACTICE", "policyVersion" to 1, "posedAt" to clock(), "bookPractice" to link)),
+            Random.Default, device, offline = false).single()
+        bookPractices.remember(course, device, mapping, pose)
+        pose
+    }
 
     /** Content-owner import API; deliberately not exposed to paired learner HTTP clients. */
     fun approveBookLedgerSource(identity: BookLedgerIdentity, originalBytes: ByteArray) = transaction {
@@ -511,7 +533,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** Offline CLI or server actor only: one transaction installs content and its two events. */
     fun seedContent(seed: ContentSeed): Boolean {
         val content = contentStore
-        return transaction { content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob) }
+        return transaction {
+            val changed = content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob)
+            if (changed) bookPractices.install(seed.content.course.id, seed.bookPracticeMappings, seed.content)
+            changed
+        }
     }
     /** Offline CLI or actor only. New points, metadata and their replay event commit together. */
     fun addOutline(payload: JsonObject): Boolean {
@@ -800,13 +826,18 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     val posedSnapshot = p["posedSnapshot"] as? JsonObject
                     val attemptId = p.str("attemptId")
                     val posedFacts = events(body.courseId).filter { it.type == "question_posed" && it.payload.str("attemptId") == attemptId }
+                    val bookAttempt = posedSnapshot?.containsKey("bookPractice") == true ||
+                        posedFacts.any { it.payload.containsKey("bookPractice") }
                     // Exact review exists only as a fact this store posed inside takeReviewVariant. A snapshot
                     // that merely says exactReview proves nothing: submit_answer emits through the command path,
                     // so any pose it creates carries a command id and can never satisfy provenExactPose.
                     val exactReview = posedFacts.firstOrNull { provenExactPose(it, body.courseId, attemptId) }
                     val unprovenReviewPose = posedFacts.firstOrNull { it.payload.hasReviewReservedField() }
                     val reviewKey = exactReview?.let { pose -> query("SELECT fingerprint,key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, pose.payload.str("questionId")) { it.getString(1) to it.getString(2) }.singleOrNull() }
-                    if (exactReview != null && (exactReview.deviceId != c.deviceId ||
+                    if (bookAttempt && !bookPractices.acceptsAnswer(body.courseId, c.deviceId, attemptId,
+                            posedSnapshot, p, events(body.courseId), courseContent(body.courseId))) {
+                        status="REJECTED"; error="BOOK_PRACTICE_SCOPE_MISMATCH"
+                    } else if (exactReview != null && (exactReview.deviceId != c.deviceId ||
                             exactReview.payload.str("agentRunId").ifBlank { null } != requestedRun || posedSnapshot != exactReview.payload ||
                             reviewKey?.first != exactReview.payload.str("fingerprint") || reviewKey?.second != "VERIFIED")) {
                         status="REJECTED"; error="REVIEW_SCOPE_OR_QUESTION_CHANGED"

@@ -24,7 +24,7 @@ internal class ConsentedBookLearningSupport(
     override fun consentOffer(book: String) = store.offer(book, identity)
     override suspend fun grant(offer: NeedsConsent, actions: Set<OwnedBookAction>) {
         require(offer.identity == identity)
-        withContext(Dispatchers.IO) { store.replace(offer, actions) }.joinAll()
+        withContext(Dispatchers.IO) { store.grant(offer, actions) }.joinAll()
     }
     override suspend fun decline(book: String) { withContext(Dispatchers.IO) { store.revoke(book, identity) }.joinAll() }
     /** An explicit "关掉讲解" is remembered like a decline, so the notice does not reopen by itself. */

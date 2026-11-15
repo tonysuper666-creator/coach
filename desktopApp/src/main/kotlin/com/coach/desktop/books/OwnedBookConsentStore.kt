@@ -66,11 +66,11 @@ internal class OwnedBookConsentStore(private val library: TextbookLibrary) {
     }.getOrNull()
 
     /**
-     * Replaces any previous consent (and its outstanding leases) with [actions] under one lock and
-     * one revision bump, so a single affirmative click is one change for every observer.
+     * Grants [actions] by replacing any previous consent (and its outstanding leases) under one lock
+     * and one revision bump, so a single affirmative click is one change for every observer.
      * Caller awaits the returned jobs before reporting the grant complete.
      */
-    @Synchronized fun replace(offer: NeedsConsent, actions: Set<OwnedBookAction>): List<Job> {
+    @Synchronized fun grant(offer: NeedsConsent, actions: Set<OwnedBookAction>): List<Job> {
         require(actions.isNotEmpty())
         library.book(offer.book)
         generation[offer.book] = (generation[offer.book] ?: 0) + 1

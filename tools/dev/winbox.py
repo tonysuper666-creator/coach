@@ -161,21 +161,41 @@ def restore(archive, root):
         bundle.extractall(root)
 
 
+def default_desktop(command):
+    """Without an explicit option, :desktopApp:test runs in winbox's console session by default.
+
+    The Windows client is the product; its tests belong on Windows, and the Mac stays free for the
+    server and the user's own work. COACH_DESKTOP_HOST=local keeps it on the Mac.
+    """
+    if os.environ.get('COACH_DESKTOP_HOST', 'winbox') == 'local':
+        return False
+    return any(a in (':desktopApp:test', 'desktopApp:test') for a in command)
+
+
 def main(command):
     command, explicit, interactive, expected_session = session_option(command)
+    defaulted = False
+    if not explicit and default_desktop(command):
+        explicit, interactive, defaulted = True, True, True
     executable = command[1] if command and command[0] in ('bash', 'sh') and len(command) > 1 else (command[0] if command else '')
     if Path(executable).name != 'gradlew':
+        if defaulted:
+            return 76
         if explicit:
             raise ValueError('explicit Windows transport requires ./gradlew at the repository root')
         return 76
     root = Path(git(Path.cwd(), 'rev-parse', '--show-toplevel')).resolve()
     args = portable_args(command, root, desktop=explicit)
     if args is None or Path.cwd().resolve() != root:
+        if defaulted:
+            return 76
         if explicit:
             raise ValueError('unsupported explicit Windows command; desktop transport supports :desktopApp:test')
         return 76
     # These can alter user.home/Gradle configuration on the caller only.
     if any(os.environ.get(key) for key in ('JAVA_OPTS', 'GRADLE_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS')):
+        if defaulted:
+            return 76
         if explicit:
             raise ValueError('explicit Windows transport cannot carry local JVM environment overrides')
         return 76

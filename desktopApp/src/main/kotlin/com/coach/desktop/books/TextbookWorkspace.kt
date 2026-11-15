@@ -50,6 +50,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.file.Path
+import java.time.LocalDate
 
 /**
  * Answer writes that outlive the bookshelf composition.
@@ -61,7 +62,7 @@ import java.nio.file.Path
  * it came from instead of the one that happens to be open when it finally runs.
  */
 internal class AnswerDrafts(private val controller: TextbookController, private val scope: CoroutineScope) {
-    private data class Key(val book: String, val lesson: String, val mode: QuestionMode, val review: Boolean = false)
+    private data class Key(val book: String, val lesson: String, val mode: QuestionMode, val review: Boolean = false, val variantAttempt: String? = null)
 
     private val pending = mutableStateMapOf<Key, PracticeAnswer>()
     private var writer: Job? = null
@@ -75,12 +76,12 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
         pending[Key(book, lesson, mode)] ?: saved
 
     fun saveReview(entry: LocalBookReview, answer: PracticeAnswer) {
-        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] = answer
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true, variantAttempt = entry.variant?.allocation?.attemptId)] = answer
         startWriter()
     }
 
     fun currentReview(entry: LocalBookReview): PracticeAnswer =
-        pending[Key(entry.book, entry.lesson, entry.mode, review = true)] ?: entry.answer
+        pending[Key(entry.book, entry.lesson, entry.mode, review = true, variantAttempt = entry.variant?.allocation?.attemptId)] ?: entry.answer
 
     /** A failed write remains queued for an explicit retry, including when closing the window. */
     suspend fun flush(): Boolean {
@@ -101,7 +102,7 @@ internal class AnswerDrafts(private val controller: TextbookController, private 
             val (key, answer) = pending.entries.firstOrNull()?.toPair() ?: break
             // The controller checks the identity and writes under the same lock, so a lesson switch that is
             // still waiting on SQLite cannot make this draft land on the lesson it finally opens.
-            val saved = if (key.review) controller.saveReviewDraft(key.book, key.lesson, key.mode, answer)
+            val saved = if (key.review) controller.saveReviewDraft(key.book, key.lesson, key.mode, answer, key.variantAttempt)
                 else controller.saveDraft(key.book, key.lesson, key.mode, answer)
             if (!saved) return
             if (pending[key] == answer) pending.remove(key)
@@ -216,7 +217,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         sourceOrigin = SourceFocus.PRACTICE
         run { controller.source(); anchor.page?.let { controller.page(it) } }
     }
-    CoachTheme {
+    // 外壳（WindowsTextbookHost）已经按系统或 coach.windows.theme 选好明暗；正文沿用同一个选择，
+    // 不再让内层按系统重选，否则外壳浅、正文深。
+    CoachTheme(com.coach.ui.theme.CoachTheme.colors.dark) {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
             val noteKey = event.toReaderInput()
@@ -251,7 +254,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         LocalBookReviewQuestion(review, !ui.busy, practiceSourceFocus, returnFocus,
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                             onSource = { openPracticeSource(review.practice) },
-                            onAnswer = { drafts.saveReview(review, it) })
+                            onAnswer = { drafts.saveReview(review, it) },
+                            onImportSource = { run { if (drafts.flush()) chooseBook()?.let { controller.importReviewSource(it) } } },
+                            onVariant = { run { if (drafts.flush()) controller.startReviewVariant() } })
                     }
                     ui.screen == BookScreen.READER -> TextbookReader(if (askTarget == null) ui else ui.copy(page = askPage), controller.library,
                         practiceSource = practiceSource, askTarget = askTarget,
@@ -289,7 +294,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             run { controller.source(); controller.page(target.pdfPage) }
                         },
                         onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
-                        onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                        onSettings = { run { controller.questionSettings() } }, onRetrySync = { run { if (drafts.flush()) controller.retryPracticeSync() } }, onAnswer = { answer ->
                             ui.book?.let { current ->
                                 current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
                                     drafts.save(current.id, lesson.id, current.questionMode, answer)
@@ -473,7 +478,14 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
     onAsk: (BookPage) -> Unit, onReturnToAsk: () -> Unit, onNoteSession: (ReaderSession?) -> Unit,
     onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
-    val page = book.pages[ui.page - 1]
+    val page = book.page(ui.page)
+    if (page == null) {
+        LaunchedEffect(book.id, ui.page) { onPage(book.pages.first().number) }
+        return
+    }
+    val lastPage = book.pages.maxOf { it.number }
+    val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
+    val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
@@ -554,7 +566,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
     }
 
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false,
-        status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
+        status = "第 ${ui.page} / $lastPage 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
@@ -643,13 +655,13 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton({ onPage(ui.page - 1); session.prevPage() }, enabled = !ui.busy && ui.page > 1, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                Text("${ui.page} / ${book.pages.size}", modifier = Modifier.testTag("reader-page-number"))
-                OutlinedButton({ onPage(ui.page + 1); session.nextPage() }, enabled = !ui.busy && ui.page < book.pages.size, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                OutlinedButton({ previousPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
+                Text("${ui.page} / $lastPage", modifier = Modifier.testTag("reader-page-number"))
+                OutlinedButton({ nextPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 Spacer(Modifier.weight(1f))
                 OutlinedTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, label = { Text("页码") }, singleLine = true,
                     modifier = Modifier.width(80.dp).testTag("page-jump"))
-                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { it in 1..book.pages.size } == true) { Text("前往") }
+                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
             }
             Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
         }
@@ -661,7 +673,7 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
     returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, explanationEpoch: MutableState<Long>, sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
-    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
+    onSettings: () -> Unit, onRetrySync: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -716,6 +728,10 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
                     else {
                         SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
+                        if (book.questionMode == QuestionMode.CHOICE) {
+                            Text(ui.practiceSync, modifier = Modifier.testTag("practice-sync-status"))
+                            TextButton(onRetrySync, enabled = !ui.busy, modifier = Modifier.testTag("practice-sync-retry")) { Text("重试同步") }
+                        }
                         if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
                             Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"))
                             TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
@@ -746,8 +762,9 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
     Text(practice.prompt)
     TextButton(onSource, enabled = sourceEnabled, modifier = Modifier.focusRequester(sourceFocus).testTag("open-practice-source")) { Text("查看对应原文") }
     if (mode == QuestionMode.CHOICE) {
+        GuessMark(guessed = answer.guessed, enabled = true, onGuessed = { onAnswer(answer.copy(guessed = it)) })
         for ((index, option) in practice.options.withIndex()) OutlinedButton(onClick = {
-            draft = option; onAnswer(PracticeAnswer(option, revealed = true))
+            draft = option; onAnswer(answer.copy(text = option, revealed = true))
         }, enabled = !answer.revealed, modifier = Modifier.fillMaxWidth().testTag("choice-$index")) { Text(option) }
         if (answer.revealed) {
             Text("你选择：${answer.text}")
@@ -772,13 +789,19 @@ private fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practic
 }
 
 
+private fun LocalBookReview.dueLabel(): String =
+    dueDay?.let { "已在复习队列 · 计划下次：${LocalDate.ofEpochDay(it)}" } ?: "暂无到期日"
+
 @Composable
 private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBookReview) -> Unit) {
     Desk(crumb = "复习", onBack = onBack, backLabel = "返回书架", showNavigation = false) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-reviews"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 ${ui.reviews.size} 题", style = MaterialTheme.typography.headlineMedium)
-            Text("答错和自检时选择还需复习的题都在这里，保留原题和原文。")
+            Text("答错、标为猜的题，以及自检时选择还需复习的题都在这里，保留原题和原文。")
+            Text("到期的题也会在这里。")
+            Text("课时里取消猜答标记，不会自动移出已加入的复习题。")
+            Text("上次作答是加入复习时的原题作答。")
             if (ui.reviews.isEmpty()) Text("暂时没有需要复习的题。")
             ui.reviews.forEachIndexed { index, review ->
                 OutlinedCard(onClick = { onOpen(review) }, enabled = !ui.busy,
@@ -787,7 +810,10 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
                         Text(review.bookTitle, style = MaterialTheme.typography.titleMedium)
                         Text("${review.lessonTitle} · ${review.mode.label}")
                         Text(review.practice.prompt)
+                        Text(review.dueLabel())
                         Text("上次作答：${review.originalAnswer}")
+                        if (review.originalGuessed) Text("原题加入复习时标为猜的")
+                        if (review.answer.guessed) Text("本轮复习标为猜的")
                     }
                 }
             }
@@ -798,7 +824,8 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
 @Composable
 private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, sourceFocus: FocusRequester,
     returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit,
-    onAnswer: (PracticeAnswer) -> Unit) {
+    onAnswer: (PracticeAnswer) -> Unit, onImportSource: () -> Unit, onVariant: () -> Unit) {
+    var showOriginal by remember(review.variant?.allocation?.attemptId) { mutableStateOf(false) }
     LaunchedEffect(returnFocus, enabled) {
         if (enabled && returnFocus != null) {
             withFrameNanos { }
@@ -810,8 +837,32 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp).testTag("local-review-question"),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("复习 · ${review.lessonTitle}", style = MaterialTheme.typography.headlineMedium)
+            Text(review.dueLabel())
             Text("上次作答：${review.originalAnswer}")
-            SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
+            Text("上次作答是加入复习时的原题作答。")
+            if (review.originalGuessed) Text("原题加入复习时标为猜的")
+            if (review.answer.guessed) Text("本轮复习标为猜的")
+            Text(review.variantMessage, modifier = Modifier.testTag("review-variant-state"))
+            OutlinedButton(onClick = onImportSource, enabled = enabled,
+                modifier = Modifier.testTag("review-import-source")) { Text("登记变式来源") }
+            if (review.canStartVariant) OutlinedButton(onClick = onVariant, enabled = enabled,
+                modifier = Modifier.testTag("review-start-variant")) { Text("练一道新变式") }
+            if (review.variant != null) {
+                OutlinedButton(onClick = { showOriginal = !showOriginal },
+                    modifier = Modifier.testTag("review-view-original")) { Text(if (showOriginal) "返回变式" else "查看原题与原答") }
+                Text("原题：${review.variant.origin.question.id} · 版本 ${review.variant.origin.question.version}")
+                Text("原作答记录：${review.variant.origin.attemptId}")
+            }
+            if (showOriginal) {
+                Text(review.originalPractice.prompt, modifier = Modifier.testTag("review-original-prompt"))
+                Text("原答：${review.originalAnswer}")
+                Text("原题依据：${review.originalPractice.reference}")
+            } else if (review.canAnswer) SourcePractice(review.lesson, review.mode, review.practice, review.answer, onAnswer, onSource, enabled, sourceFocus)
+            else {
+                Text(review.originalPractice.prompt)
+                Text("原答：${review.originalAnswer}")
+                Text("原题依据：${review.originalPractice.reference}")
+            }
             if (review.completed) Text("这题已复习。", modifier = Modifier.testTag("local-review-completed"))
             else Text("这题保留在复习里；再答一次，或打开原文对照。")
         }

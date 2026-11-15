@@ -6,6 +6,8 @@ import com.coach.domain.reviewqueue.QueueReadiness
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
 
 /** Exact practice-host input. A bare KP callback cannot represent this request. */
 data class ReviewPracticeTarget(
@@ -16,7 +18,24 @@ data class ReviewPracticeTarget(
     val entryId: String,
     val attemptId: String,
     val question: QueueQuestion,
+    val bookSource: BookLedgerRegistration? = null,
 )
+
+/** Persist the server-verified book bridge as the exact existing review host target. */
+fun prepareBookReviewPractice(sync: SyncEngine, source: BookLedgerRegistration, day: Long): ReviewPracticeTarget? {
+    val identity = source.identity
+    if (source.coverage.courseId != identity.courseId || identity.courseId.isBlank() || identity.kpId.isBlank() ||
+        source.entryId.isBlank() || source.attemptId.isBlank() || source.candidate.version != null ||
+        source.candidate.fingerprint.isNullOrBlank()) return null
+    val target = ReviewPracticeTarget(identity.courseId, sync.deviceId, null, identity.kpId, source.entryId,
+        source.attemptId, source.candidate, source)
+    sync.saveMainlineState(identity.courseId, JsonObject(json("courseId" to target.courseId,"deviceId" to target.deviceId,
+        "agentRunId" to null,"kpId" to target.kpId,"entryId" to target.entryId,"attemptId" to target.attemptId,
+        "question" to json("id" to target.question.id,"version" to null,"fingerprint" to target.question.fingerprint)) +
+        ("bookSource" to LedgerJson.encodeToJsonElement(source))), targetPage(null))
+    saveReviewCursor(sync, identity.courseId, source.entryId, day, source.attemptId, null)
+    return reviewPracticeTarget(sync, identity.courseId)
+}
 
 /** Persist selection only. This does not claim the server has posed/reserved a question. */
 fun prepareReviewPractice(sync: SyncEngine, courseId: String, run: String?, item: ReviewItem, day: Long): ReviewPracticeTarget? {
@@ -37,11 +56,15 @@ fun reviewPracticeTarget(sync: SyncEngine, courseId: String, run: String? = null
     val question = saved["question"] as? JsonObject ?: return null
     val target = ReviewPracticeTarget(saved.str("courseId"), saved.str("deviceId"), saved.str("agentRunId").ifBlank { null },
         saved.str("kpId"), saved.str("entryId"), saved.str("attemptId"),
-        QueueQuestion(question.str("id"), question.str("version").ifBlank { null }, question.str("fingerprint").ifBlank { null }))
+        QueueQuestion(question.str("id"), question.str("version").ifBlank { null }, question.str("fingerprint").ifBlank { null }),
+        saved["bookSource"]?.let { runCatching { LedgerJson.decodeFromJsonElement<BookLedgerRegistration>(it) }.getOrNull() ?: return null })
     return target.takeIf {
         it.courseId == courseId && it.deviceId == sync.deviceId && it.agentRunId == run &&
             it.kpId.isNotBlank() && it.entryId.isNotBlank() && it.attemptId.isNotBlank() && it.question.id.isNotBlank() &&
-            it.entryId == reviewCursor(sync, courseId, run) && it.attemptId == reviewCursorAttempt(sync, courseId, run)
+            it.entryId == reviewCursor(sync, courseId, run) && it.attemptId == reviewCursorAttempt(sync, courseId, run) &&
+            (it.bookSource == null || (run == null && it.bookSource.identity.courseId == courseId &&
+                it.bookSource.identity.kpId == it.kpId && it.bookSource.entryId == it.entryId &&
+                it.bookSource.attemptId == it.attemptId && it.bookSource.candidate == it.question))
     }
 }
 

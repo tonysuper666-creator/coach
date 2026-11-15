@@ -5,6 +5,7 @@ import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.domain.reviewqueue.ledgerQueueCandidate
+import com.coach.domain.reviewqueue.allocateVariants
 import com.coach.protocol.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -396,6 +397,95 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
+    // Initialize outside request transactions: a rejected first claim must not roll back the schema
+    // while leaving a cached adapter pointing at tables that no longer exist.
+    private val bookLedgerSources = BookLedgerSourceStore(connection)
+    private val bookPractices = BookPracticeStore(connection, directory.resolve("blobs"))
+
+    /** Authenticated route calls this inside the single writer, using the paired device identity. */
+    fun poseBookPractice(course: String, device: String, source: BookPracticeSource): Event = transaction {
+        val mapping = bookPractices.mapping(course, source, courseContent(course))
+        val prior = bookPractices.prior(course, device, mapping)
+        if (prior != null) {
+            if (events(course).none { it == prior } || events(course).any {
+                it.type == "attempt_voided" && it.payload.str("attemptId") == prior.payload.str("attemptId")
+            }) throw ReviewVariantRejected("BOOK_ATTEMPT_MISMATCH")
+            return@transaction prior
+        }
+        val attempt = uid()
+        val link = JsonObject(LedgerJson.encodeToJsonElement(source).jsonObject +
+            ("blockId" to JsonPrimitive("${source.bookSha256}:p${source.pdfPage}:${source.start}")))
+        val pose = poseChoiceGroupInTransaction(course, "book-practice:$attempt", listOf(json(
+            "attemptId" to attempt, "questionId" to mapping.questionId, "kpIds" to listOf(mapping.kpId),
+            "purpose" to "PRACTICE", "policyVersion" to 1, "posedAt" to clock(), "bookPractice" to link)),
+            Random.Default, device, offline = false).single()
+        bookPractices.remember(course, device, mapping, pose)
+        pose
+    }
+
+    /** Content-owner import API; deliberately not exposed to paired learner HTTP clients. */
+    fun approveBookLedgerSource(identity: BookLedgerIdentity, originalBytes: ByteArray) = transaction {
+        bookLedgerSources.approve(identity, originalBytes, events(identity.courseId), courseContent(identity.courseId))
+    }
+    private val bookLedgerProducer = BookLedgerSourceProducer(connection, directory.resolve("blobs"))
+    /**
+     * Content-owner producer candidate: every edge is read from server facts (seeded textbook blob,
+     * server pose, the same device's authenticated answer, key, KP anchor) and then approved through
+     * the same validation. Deliberately not routed to paired learner HTTP clients.
+     */
+    fun publishBookLedgerSourceFromServerFacts(locator: BookSourceLocator): BookLedgerIdentity = transaction {
+        val facts = events(locator.courseId)
+        val content = courseContent(locator.courseId)
+        val (identity, bytes) = bookLedgerProducer.identity(locator, facts, content)
+        bookLedgerSources.approve(identity, bytes, facts, content)
+        identity
+    }
+    fun withdrawBookLedgerSource(book: String, course: String, originalAttempt: String) = transaction {
+        bookLedgerSources.withdraw(book, course, originalAttempt)
+    }
+    fun bookLedgerCoverage(course: String): BookLedgerCoverage = bookLedgerSources.coverage(course, events(course))
+
+    fun registerBookLedgerSource(identity: BookLedgerIdentity, coverage: BookLedgerCoverage): BookLedgerRegistration = transaction {
+        val course = identity.courseId
+        val facts = events(course)
+        bookLedgerSources.verify(identity, facts, courseContent(course))
+        bookLedgerSources.checkCoverage(coverage, course, facts)
+        val state = projection(course)
+        if (state.requiresServerSnapshot) throw ReviewVariantRejected("REVIEW_SNAPSHOT_REQUIRED")
+        val day = logicalDay(clock(), state.timeZone)
+        val queue = ledgerQueueCandidate(course, facts, day)
+        val original = queue.dueEntries(day).singleOrNull { it.kpId == identity.kpId &&
+            it.originalQuestion == identity.question && it.originalAttempts.any { a -> a.id == identity.originalAttemptId } }
+            ?: throw ReviewVariantRejected("REVIEW_ENTRY_UNAVAILABLE")
+        // This request names a proven original entry. Allocate for it first, retaining all other
+        // entries for occupied/answered-question exclusion; an unrelated unknown-due row cannot
+        // consume its only candidate or be silently relabelled as this book's original attempt.
+        val allocated = queue.copy(entries = listOf(original) + queue.entries.filterNot { it.id == original.id }).allocateVariants(
+            com.coach.domain.reviewqueue.VariantCandidatePort { c, run, kp ->
+                if (c == course && run == null) reviewVariantCandidates(course, kp) else emptyList()
+            }).queue
+        val entry = allocated.entries.single { it.id == original.id }
+        val variant = entry.variants.singleOrNull { it.attemptId == entry.currentAttemptId }
+            ?: throw ReviewVariantRejected("REVIEW_QUESTION_UNAVAILABLE")
+        BookLedgerRegistration(identity, coverage, entry.id, variant.attemptId, variant.question)
+    }
+
+    /** Verify all source edges and complete coverage in the SAME transaction as exact pool consumption. */
+    fun takeBookReviewVariant(course: String, device: String, run: String?, kp: String, entryId: String,
+        attempt: String, question: QueueQuestion, source: BookLedgerRegistration): List<Event> = transaction {
+        if (source.identity.courseId != course || source.identity.kpId != kp || source.entryId != entryId ||
+            source.attemptId != attempt || source.candidate != question) throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        bookLedgerSources.verify(source.identity, events(course), courseContent(course))
+        val previous = bookLedgerSources.priorTake(course, device, attempt)
+        if (previous != null) {
+            if (previous != bookLedgerSources.takeJson(source)) throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        } else if (registerBookLedgerSource(source.identity, source.coverage) != source) {
+            throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        }
+        val posed = takeReviewVariant(course, device, run, kp, entryId, attempt, question)
+        bookLedgerSources.rememberTake(device, source)
+        posed
+    }
     /** Private generated essay prompts; Main points this at the materials directory, tests at a fixture. */
     var essays: EssayBank = EssayBank(null)
     /** Later revisions (the DeepTutor migration's prerequisite ops) carry no `course`; the name is the latest one any revision gave. */
@@ -443,7 +533,11 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     /** Offline CLI or server actor only: one transaction installs content and its two events. */
     fun seedContent(seed: ContentSeed): Boolean {
         val content = contentStore
-        return transaction { content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob) }
+        return transaction {
+            val changed = content.install(seed, { course, type, payload, idem -> append(course, type, payload, idem, actor="MIGRATION") }, ::putBlob)
+            if (changed) bookPractices.install(seed.content.course.id, seed.bookPracticeMappings, seed.content)
+            changed
+        }
     }
     /** Offline CLI or actor only. New points, metadata and their replay event commit together. */
     fun addOutline(payload: JsonObject): Boolean {
@@ -732,13 +826,18 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                     val posedSnapshot = p["posedSnapshot"] as? JsonObject
                     val attemptId = p.str("attemptId")
                     val posedFacts = events(body.courseId).filter { it.type == "question_posed" && it.payload.str("attemptId") == attemptId }
+                    val bookAttempt = posedSnapshot?.containsKey("bookPractice") == true ||
+                        posedFacts.any { it.payload.containsKey("bookPractice") }
                     // Exact review exists only as a fact this store posed inside takeReviewVariant. A snapshot
                     // that merely says exactReview proves nothing: submit_answer emits through the command path,
                     // so any pose it creates carries a command id and can never satisfy provenExactPose.
                     val exactReview = posedFacts.firstOrNull { provenExactPose(it, body.courseId, attemptId) }
                     val unprovenReviewPose = posedFacts.firstOrNull { it.payload.hasReviewReservedField() }
                     val reviewKey = exactReview?.let { pose -> query("SELECT fingerprint,key_state FROM questions WHERE course_id=? AND question_id=?", body.courseId, pose.payload.str("questionId")) { it.getString(1) to it.getString(2) }.singleOrNull() }
-                    if (exactReview != null && (exactReview.deviceId != c.deviceId ||
+                    if (bookAttempt && !bookPractices.acceptsAnswer(body.courseId, c.deviceId, attemptId,
+                            posedSnapshot, p, events(body.courseId), courseContent(body.courseId))) {
+                        status="REJECTED"; error="BOOK_PRACTICE_SCOPE_MISMATCH"
+                    } else if (exactReview != null && (exactReview.deviceId != c.deviceId ||
                             exactReview.payload.str("agentRunId").ifBlank { null } != requestedRun || posedSnapshot != exactReview.payload ||
                             reviewKey?.first != exactReview.payload.str("fingerprint") || reviewKey?.second != "VERIFIED")) {
                         status="REJECTED"; error="REVIEW_SCOPE_OR_QUESTION_CHANGED"
@@ -793,7 +892,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                 // A timed attempt handed in after its limit is kept and graded, but never counts as timed evidence.
                                 val limit = posed?.payload?.num("timeLimitSec") ?: 0
                                 val overtime = limit > 0 && clock() - posed!!.payload.num("posedAt") > (limit + Essay.GRACE_SEC) * 1000
-                                emit("answer_submitted",JsonObject(json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer")) +
+                                emit("answer_submitted",JsonObject(json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer"),"guessed" to p.flag("guessed")) +
                                     if (overtime) json("overtime" to true) else json()),"attempt:$attemptId:answer")
                                 if (question.first == "SINGLE_CHOICE") {
                                     val correct = choiceId(qid)

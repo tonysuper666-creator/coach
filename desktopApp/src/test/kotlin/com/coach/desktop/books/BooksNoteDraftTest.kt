@@ -66,7 +66,8 @@ class BooksNoteDraftTest {
             uploadAndRead(first)
             repeat(2) { onNodeWithTag("next-page").performClick(); ready(first) { ui -> ui.page == it + 2 } }
             onNodeWithText("返回书架").performClick(); ready(first) { it.screen == BookScreen.HOME }
-            onNodeWithTag("home-learn").performClick(); ready(first) { it.prompt == BookPrompt.START }
+            // Reading now persists its own walk; explicitly start studying before testing notes.
+            onNodeWithTag("home-question").performClick(); ready(first) { it.prompt == BookPrompt.START }
             onNodeWithTag("question-mode-SHORT_ANSWER").performClick(); ready(first) { it.book?.questionMode == QuestionMode.SHORT_ANSWER }
             onNodeWithTag("enable-learning").performClick(); ready(first) { it.screen == BookScreen.LEARNING }
             onNodeWithTag("short-answer").performScrollTo().performTextInput(answer)

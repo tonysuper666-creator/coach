@@ -50,12 +50,18 @@ class WindowsLearningEntryTest {
             capture("question")
             onNodeWithTag("choice-${question.options.indexOf(question.answer)}").performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("与原文一致。").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithText("原文：${question.reference}").performScrollTo().assertIsDisplayed()
+            onNodeWithText("原文：${question.reference}").assertDoesNotExist()
+            onNodeWithTag("open-practice-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("reader-text").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("reader-text").assertTextContains(question.reference, substring = true)
+            onNodeWithText("返回学习").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithText("与原文一致。").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("原文：${question.reference}").assertDoesNotExist()
             val saved = library.answer(book.id, lesson.id, QuestionMode.CHOICE)
             assertEquals(question.answer, saved.text)
             assertTrue(saved.revealed)
             capture("feedback")
-            println("WINDOWS_LEARNING_TRACE upload:synthetic-md -> enable-learning -> source-choice:answerable -> answer:Orbit -> cited-feedback -> SQLite:same-book/same-lesson")
+            println("WINDOWS_LEARNING_TRACE upload:synthetic-md -> enable-learning -> source-choice:answerable -> answer:Orbit -> explicit-source -> return:same-answer -> SQLite:same-book/same-lesson")
         }
     }
 

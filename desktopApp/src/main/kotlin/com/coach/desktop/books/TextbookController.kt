@@ -31,6 +31,7 @@ internal data class LibraryUi(
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
     val practiceSync: String = "同步未备好：尚未连接配对课程。",
+    val sourceRegistration: String? = null,
 )
 
 /** Supplied only by an already paired learning session; never derive course or device from a book. */
@@ -39,6 +40,7 @@ internal class BookPracticeSession(val sync: SyncEngine, val courseId: String,
 
 internal class TextbookController(val library: TextbookLibrary, private val practiceSession: BookPracticeSession? = null,
     private val connectPractice: (suspend (Textbook, BookLesson, Practice) -> BookPracticeSession?)? = null,
+    private val sourceRegistration: BookSourceRegistrationPort = UnconnectedBookSourceRegistration,
 ) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
@@ -96,6 +98,32 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
     private fun persist(book: Textbook) {
         library.save(book)
         mutable.update { it.copy(book = book, catalog = library.catalog()) }
+    }
+
+    /** Explicit request from the current book's settings. No answer or approval is written here. */
+    suspend fun registerPracticeSource(expectedBook: String, course: String, confirmed: Boolean) = action {
+        mutable.update { it.copy(sourceRegistration = null) }
+        val book = mutable.value.book
+        if (!confirmed || book == null || book.id != expectedBook || course.isBlank() ||
+            course.trim().length > 128 || course.any(Char::isISOControl)) {
+            mutable.update { it.copy(sourceRegistration = "尚未登记：请确认当前教材、课程和发送范围。") }
+            return@action
+        }
+        val lesson = book.lessons.getOrNull(book.lessonIndex)
+        val practice = lesson?.let { StudyCoachCourse.practice(book, it, QuestionMode.CHOICE) }
+        if (book.questionMode != QuestionMode.CHOICE || lesson == null || practice == null) {
+            mutable.update { it.copy(sourceRegistration = "尚未登记：当前课时没有可核对的选择题。") }
+            return@action
+        }
+        val ready = try {
+            val session = sourceRegistration.prepare(BookSourceRegistrationRequest(course.trim(), book, lesson, practice))
+            val binding = session?.let { BookPracticeOutbox(it.sync).bind(it.courseId, book, lesson, practice) }
+            session?.courseId == course.trim() && binding is BookPracticeBinding.Ready && validPracticeFingerprint(binding.posed.payload)
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { false }
+        mutable.update { it.copy(sourceRegistration = if (ready)
+            "已核对课程中确认过的原题，可以返回学习继续作答。"
+        else "尚未登记：配对身份或课程原题关联未确认；本地阅读和作答仍保留。") }
     }
 
     private fun restoredPath(book: Textbook) = LearningPath.restore(library.learningPath(book.id), book.learning)

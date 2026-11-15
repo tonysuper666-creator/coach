@@ -224,7 +224,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     }
                 }
             }
-            if (settings) HostSettings(controller.library.directory, connection, book) { settings = false }
+            if (settings) HostSettings(controller, connection, book, ui.sourceRegistration) { settings = false }
         }
     }
 }
@@ -286,9 +286,13 @@ private fun HostEmptyState(tag: String, title: String, text: String) {
 }
 
 @Composable
-private fun HostSettings(directory: Path, connection: WindowsBookPracticeConnection?, book: Textbook?, onClose: () -> Unit) {
+private fun HostSettings(controller: TextbookController, connection: WindowsBookPracticeConnection?, book: Textbook?,
+    registration: String?, onClose: () -> Unit) {
+    val directory = controller.library.directory
     var pairing by remember { mutableStateOf(false) }
     var course by remember(book?.id) { mutableStateOf("") }
+    var confirmed by remember(book?.id, course) { mutableStateOf(false) }
+    var registrationCourse by remember(book?.id) { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -317,6 +321,29 @@ private fun HostSettings(directory: Path, connection: WindowsBookPracticeConnect
                         }
                     }) { Text("保存课程查找位置") }
                     message?.let { Text(it, Modifier.testTag("book-practice-course-result")) }
+                    HorizontalDivider()
+                    Text("登记并核对练习来源", style = MaterialTheme.typography.titleSmall)
+                    Text("课程需要已有确认过的教材和原题关联。这里只核对这条关联，不会批准新题；缺少关联时仍不能同步。",
+                        style = MaterialTheme.typography.bodySmall)
+                    Row {
+                        Checkbox(confirmed, { confirmed = it }, enabled = !saving,
+                            modifier = Modifier.testTag("book-source-confirm"))
+                        Text("允许把本题的出处位置、这段原文和教材标识发给已配对的 Mac 核对；不发送整本书。",
+                            modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    }
+                    Button(enabled = confirmed && course.isNotBlank() && !saving,
+                        modifier = Modifier.testTag("book-source-register"), onClick = {
+                            val requestedCourse = course
+                            val requestedConfirmation = confirmed
+                            registrationCourse = requestedCourse.trim()
+                            saving = true
+                            scope.launch {
+                                try { controller.registerPracticeSource(book.id, requestedCourse, requestedConfirmation) }
+                                finally { saving = false }
+                            }
+                        }) { Text("核对并登记本题") }
+                    if (!saving && registrationCourse == course.trim())
+                        registration?.let { Text(it, Modifier.testTag("book-source-registration-result")) }
                 }
             }
         }
@@ -337,7 +364,8 @@ private fun HostSettings(directory: Path, connection: WindowsBookPracticeConnect
 private fun rememberPairedBookController(directory: Path, settings: DesktopConnectionSettings): Pair<TextbookController, WindowsBookPracticeConnection> {
     val library = remember(directory) { TextbookLibrary(directory) }
     val connection = remember(library, settings) { WindowsBookPracticeConnection(settings, library) }
-    val controller = remember(library, connection) { TextbookController(library, connectPractice = connection::prepare) }
+    val controller = remember(library, connection) { TextbookController(library, connectPractice = connection::prepare,
+        sourceRegistration = pairedBookSourceRegistration(connection)) }
     DisposableEffect(connection) { onDispose { connection.close() } }
     return controller to connection
 }

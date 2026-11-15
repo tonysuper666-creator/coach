@@ -161,6 +161,16 @@ internal class TextbookController(val library: TextbookLibrary) {
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = lesson.firstPage, prompt = null) }
     }
 
+    /** A verified citation can arrive after the reader has changed books or lessons. */
+    suspend fun citationSource(bookId: String, lessonId: String, page: Int) = action {
+        val current = mutable.value
+        val book = current.book ?: return@action
+        val lesson = book.lessons.getOrNull(book.lessonIndex) ?: return@action
+        if (current.screen != BookScreen.LEARNING || book.id != bookId || lesson.id != lessonId) return@action
+        require(page in 1..book.pages.size) { "页码超出了这本教材的范围。" }
+        mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = page, prompt = null) }
+    }
+
     suspend fun back() = action {
         if (mutable.value.source != null) mutable.update {
             it.copy(screen = if (it.review == null) BookScreen.LEARNING else BookScreen.REVIEWING, source = null)

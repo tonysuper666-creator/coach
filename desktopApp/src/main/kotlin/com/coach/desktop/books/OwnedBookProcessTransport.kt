@@ -2,9 +2,13 @@ package com.coach.desktop.books
 
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -30,6 +34,20 @@ internal class OwnedBookProcessTransport(
         try {
             val result = withTimeoutOrNull(timeoutMillis) {
                 coroutineScope {
+                    // Record descendants while the adapter lives: one that exits first must not hide its tree.
+                    // Cancellation of this scope (timeout, caller cancel, failure) starts the off-thread reaper,
+                    // which also releases a pipe reader pinned by a descendant that inherited stdout.
+                    val tracker = launch {
+                        try {
+                            while (process.isAlive) {
+                                ownedTree.track()
+                                delay(100)
+                            }
+                            awaitCancellation()
+                        } finally {
+                            ownedTree.stopAsync()
+                        }
+                    }
                     val output = async {
                         runInterruptible {
                             process.inputStream.use { it.readNBytes(1_048_577) }
@@ -43,6 +61,7 @@ internal class OwnedBookProcessTransport(
                     val exit = awaitExit(process, ownedTree)
                     input.await()
                     val bytes = output.await()
+                    tracker.cancel()
                     require(exit == 0 && bytes.size <= 1_048_576) { "Book CLI transport failed" }
                     bytes.toString(Charsets.UTF_8)
                 }
@@ -58,13 +77,38 @@ internal class OwnedBookProcessTransport(
             if (error != null) continuation.resumeWithException(error)
             else continuation.resume(finished.exitValue())
         }
-        continuation.invokeOnCancellation { ownedTree.stop() }
+        // Cancellation handlers run on the cancelling thread (UI, timeout timer): never block there.
+        continuation.invokeOnCancellation { ownedTree.stopAsync() }
     }
 
     private class OwnedProcessTree(private val process: Process) {
+        private val tracked = LinkedHashSet<ProcessHandle>() // handles carry start time: PID reuse is not matched
+        private val reaping = AtomicBoolean(false)
+
+        @Synchronized fun track() {
+            process.descendants().use { stream -> stream.forEach { tracked.add(it) } }
+        }
+
+        fun stopAsync() {
+            if (reaping.compareAndSet(false, true)) {
+                Thread(::stop, "owned-book-reaper").apply { isDaemon = true }.start()
+            }
+        }
+
         // Cancellation and finally can race. Neither may destroy the parent before the other's snapshot.
         @Synchronized fun stop() {
-            val descendants = process.descendants().use { it.toList() }
+            try {
+                reap()
+            } finally {
+                // A descendant that escaped tracking may still hold our stdout; closing our end
+                // releases the blocked reader so timeout/cancel return on time.
+                runCatching { process.inputStream.close() }
+            }
+        }
+
+        private fun reap() {
+            track()
+            val descendants = tracked.toList()
             if (!process.isAlive && descendants.none { it.isAlive }) return
             var interrupted = Thread.interrupted()
             try {

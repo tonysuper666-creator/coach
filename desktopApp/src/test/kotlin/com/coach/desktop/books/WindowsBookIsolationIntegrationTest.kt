@@ -14,7 +14,9 @@ class WindowsBookIsolationIntegrationTest {
     }
     @Test fun helperReceiptRequiresVerifiedContainerChildAndCleanup() {
         val good = """
+            COACH_ISO_SID S-1-15-2-1-2-3-4-5-6-7
             COACH_ISO_VERIFIED pid=123 appcontainer=1
+            COACH_ISO_RESUMED pid=123
             COACH_ISO_CHILD_EXIT 0
             COACH_ISO_ACL_REVOKED 3
             COACH_ISO_PROFILE_DELETED hr=0x0
@@ -23,6 +25,8 @@ class WindowsBookIsolationIntegrationTest {
         for (line in good.lines()) assertFalse(validIsolationReceipt(good.lines().filter { it != line }.joinToString("\n")))
         assertFalse(validIsolationReceipt(good + "\nCOACH_ISO_REFUSED code=128 reason=cleanup_failed"))
         assertFalse(validIsolationReceipt(good.replace("CHILD_EXIT 0", "CHILD_EXIT 1")))
+        assertFalse(validIsolationReceipt(good.replace("RESUMED pid=123", "RESUMED pid=124")))
+        assertFalse(validIsolationReceipt(good.replace("hr=0x0", "hr=0x01")))
     }
 
     @Test fun absentIsolationNeverStartsTheGivenExecutable() = runBlocking {

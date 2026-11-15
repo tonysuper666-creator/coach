@@ -59,8 +59,11 @@ internal data class WindowsBookRun(val work: Path, val home: Path)
 /** The helper is trusted code; a partial child output is never a success receipt. */
 internal fun validIsolationReceipt(log: String): Boolean {
     val lines = log.lineSequence().map { it.trim() }.toList()
+    val pid = lines.singleOrNull { Regex("COACH_ISO_VERIFIED pid=[0-9]+ appcontainer=1").matches(it) }
+        ?.substringAfter("pid=")?.substringBefore(' ') ?: return false
     return lines.none { it.startsWith("COACH_ISO_REFUSED") } &&
-        lines.any { Regex("COACH_ISO_VERIFIED pid=[0-9]+ appcontainer=1").matches(it) } &&
+        lines.any { Regex("COACH_ISO_SID S-1-15-2-[0-9-]+").matches(it) } &&
+        lines.any { it == "COACH_ISO_RESUMED pid=$pid" } &&
         lines.any { it == "COACH_ISO_CHILD_EXIT 0" } &&
         lines.any { it == "COACH_ISO_ACL_REVOKED 3" } &&
         lines.any { it == "COACH_ISO_PROFILE_DELETED hr=0x0" }
@@ -173,12 +176,13 @@ internal class LocalCodexBookTransport(
         val reported = AtomicBoolean()
         fun report(exit: Int, log: String) {
             if (!reported.compareAndSet(false, true)) return
+            val lines = log.lineSequence().map { it.trim() }.toSet()
             receipt(argv, exit)
             isolationReceipt(WindowsBookIsolationReceipt(phase, exit,
                 Regex("(?m)^COACH_ISO_VERIFIED pid=([0-9]+) appcontainer=1\\s*$").find(log)?.groupValues?.get(1)?.toLongOrNull(),
                 Regex("(?m)^COACH_ISO_SID (S-1-15-2-[0-9-]+)\\s*$").find(log)?.groupValues?.get(1),
                 log.lineSequence().any { it.trim().matches(Regex("COACH_ISO_VERIFIED pid=[0-9]+ appcontainer=1")) },
-                "COACH_ISO_ACL_REVOKED 3" in log && "COACH_ISO_PROFILE_DELETED hr=0x0" in log,
+                "COACH_ISO_ACL_REVOKED 3" in lines && "COACH_ISO_PROFILE_DELETED hr=0x0" in lines,
                 Regex("create_process err=([0-9]+)").find(log)?.groupValues?.get(1)?.toIntOrNull()))
         }
         try {
@@ -205,9 +209,10 @@ internal class LocalCodexBookTransport(
                         // A verified child failure may supply a diagnostic, never an answer or
                         // stdout. Helper refusals/cleanup failures remain generic failures.
                         val childExit = Regex("(?m)^COACH_ISO_CHILD_EXIT ([0-9]+)\\s*$").find(log)?.groupValues?.get(1)?.toIntOrNull()
+                        val lines = log.lineSequence().map { it.trim() }.toSet()
                         if (exit != 0 && childExit == exit && !log.contains("COACH_ISO_REFUSED") &&
-                            log.contains(" appcontainer=1") && log.contains("COACH_ISO_PROFILE_DELETED hr=0x0") &&
-                            log.contains("COACH_ISO_ACL_REVOKED 3") && Files.isRegularFile(stderr)) {
+                            log.contains(" appcontainer=1") && "COACH_ISO_PROFILE_DELETED hr=0x0" in lines &&
+                            "COACH_ISO_ACL_REVOKED 3" in lines && Files.isRegularFile(stderr)) {
                             val diagnostic = Files.newInputStream(stderr).use { boundedDiagnostic(it, rejectTools = input != null) }
                             throw LocalCodexFailure(classifyCodexFailure(diagnostic))
                         }

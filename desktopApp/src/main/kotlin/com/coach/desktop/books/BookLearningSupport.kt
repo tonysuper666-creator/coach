@@ -28,7 +28,7 @@ internal data class BookPassage(val book: String, val page: Int, val start: Int,
 }
 internal data class BookPassageQuestion(val passage: BookPassage, val question: String)
 internal sealed interface BookLearningReply {
-    data class Text(val text: String) : BookLearningReply
+    data class Text(val text: String, val sources: List<BookPassage> = emptyList()) : BookLearningReply
     data class Unavailable(val message: String) : BookLearningReply
 }
 
@@ -46,10 +46,17 @@ internal object UnconnectedBookLearningSupport : BookLearningSupport {
 }
 
 @Composable
-internal fun BookLessonExplanation(book: Textbook, lesson: BookLesson, support: BookLearningSupport) {
-    val reply by produceState<BookLearningReply?>(null, book.id, lesson.id, support) {
-        value = null
-        value = try {
+internal fun BookLessonExplanation(
+    book: Textbook,
+    lesson: BookLesson,
+    support: BookLearningSupport,
+    reply: MutableState<BookLearningReply?> = remember(book.id, lesson.id, support) { mutableStateOf(null) },
+    sources: @Composable (List<BookPassage>) -> Unit = {},
+) {
+    // A caller may hold this across a screen switch so returning does not re-ask the provider.
+    LaunchedEffect(book.id, lesson.id, support) {
+        if (reply.value != null) return@LaunchedEffect
+        reply.value = try {
             val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
             coroutineContext.ensureActive()
             if (result is BookLearningReply.Text && (result.text.isBlank() || result.text.trim() == lesson.text.trim()))
@@ -60,9 +67,12 @@ internal fun BookLessonExplanation(book: Textbook, lesson: BookLesson, support: 
     }
     Column(Modifier.fillMaxWidth().testTag("book-lesson-explanation"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("讲解", style = MaterialTheme.typography.titleMedium)
-        when (val result = reply) {
+        when (val result = reply.value) {
             null -> Text("正在读取这节的讲解…")
-            is BookLearningReply.Text -> Text(result.text, Modifier.testTag("book-explanation-text"))
+            is BookLearningReply.Text -> {
+                Text(result.text, Modifier.testTag("book-explanation-text"))
+                sources(result.sources)
+            }
             is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-explanation-unavailable"))
         }
     }

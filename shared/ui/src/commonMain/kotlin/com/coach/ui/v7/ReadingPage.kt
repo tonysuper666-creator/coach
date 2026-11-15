@@ -13,6 +13,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
@@ -261,10 +264,16 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
     fun label(at: Int) = points.getOrNull(at)?.let { "${week?.let { n -> "$n." }.orEmpty()}${at + 1} ${splitTitle(it.title).second}" }.orEmpty()
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
     if (noteQuote != null) AlertDialog(onDismissRequest = { noteQuote = null }, title = { Text("一句批注") },
-        text = { Column { Text(noteQuote.orEmpty()); OutlinedTextField(noteText, { noteText = it }, label = { Text("批注") }, modifier = Modifier.testTag("v7-note-input")) } },
-        confirmButton = { TextButton(enabled = noteText.isNotBlank() && !saving, onClick = {
+        text = { val focus = LocalFocusManager.current; Column { Text(noteQuote.orEmpty()); OutlinedTextField(noteText, { noteText = it }, label = { Text("批注") },
+        // A one-line note never wants a tab character: Tab / Shift+Tab leave the field for 取消 / 保存 instead of typing one.
+        modifier = Modifier.testTag("v7-note-input").onPreviewKeyEvent { e ->
+            if ((e.key != Key.Tab && e.utf16CodePoint != 9) || e.isCtrlPressed || e.isAltPressed || e.isMetaPressed) return@onPreviewKeyEvent false
+            if (e.type == KeyEventType.KeyDown) focus.moveFocus(if (e.isShiftPressed) FocusDirection.Previous else FocusDirection.Next)
+            true
+        }) } },
+        confirmButton = { V7TextButton(enabled = noteText.isNotBlank() && !saving, onClick = {
             saveNote("> ${noteQuote.orEmpty()}\n\n${noteText.trim()}"); noteQuote = null; noteText = ""
-        }) { Text("保存") } }, dismissButton = { TextButton(onClick = { noteQuote = null }) { Text("取消") } })
+        }) { Text("保存") } }, dismissButton = { V7TextButton(onClick = { noteQuote = null }) { Text("取消") } })
     Desk(crumb = d.course.ifBlank { kp.module.ifBlank { c.courseId } } + week?.let { " · 第 $it 周" }.orEmpty(), focus = focus, onFocus = onFocus,
         status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = backLabel ?: week?.let { "← 第 $it 周" } ?: "← 今天",
         directory = { WeekDirectory(view, week, weekActions?.let { it::select }) },

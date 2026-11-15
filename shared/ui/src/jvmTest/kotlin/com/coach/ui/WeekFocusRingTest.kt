@@ -56,7 +56,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances and its footer ‹ 上一节 / 下一节 › steps.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances, its footer ‹ 上一节 / 下一节 › steps and its 一句批注 dialog's 取消 / 保存.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -857,6 +857,144 @@ class WeekFocusRingTest {
                 println("TON-1603 week $mode footer opened=$opened")
             }
         }
+    }
+
+    /**
+     * Reading page 一句批注 dialog: 取消 and 保存 carry the V7 ring outside their pills.
+     * Blank note: 保存 is disabled and a whole Tab cycle never stops on it. Tab in the field moves on instead of typing a tab
+     * character (Shift+Tab goes back to 取消), so a typed note can reach 保存 by keyboard. With text: each shows the ring on Tab on all four
+     * sides (nothing clipped by the dialog), ≥3:1 against the dialog surface and the pill's focused fill, focusing moves
+     * nothing, blur restores the pixels. Enter or a click on 取消 closes without saving; on 保存 it saves the quoted note once.
+     * Offscreen Skiko at 1224 / 700 / 699dp, not a native window.
+     */
+    @Test fun readingNoteDialogSaveAndCancelShowRingAndKeepTheirActions() {
+        val view = threeWeeks()
+        val kp = view.kp("c")!!
+        val text = "合成正文第一段，讲一个要点。\n\n合成正文第二段。"
+        val quote = "合成选中的一句"
+        val details = V7PageDetails(course = "合成课", selection = quote)
+        val entry = hasText("一句批注") and hasClickAction()
+        val save = hasText("保存") and hasClickAction() and hasAnyAncestor(isDialog())
+        val cancel = hasText("取消") and hasClickAction() and hasAnyAncestor(isDialog())
+        val input = hasTestTag("v7-note-input")
+        withController { controller ->
+            fun notes() = controller.sync.retainedCommands().map { kotlinx.serialization.json.Json.parseToJsonElement(it.payloadBytes).toString() }
+                .filter { "save_note" in it }
+            for (dark in listOf(false, true)) for (w in listOf(1224f, 700f, 699f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val saved0 = notes().size
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalV7PageDetails provides details) {
+                    ReadingPage(controller, kp, view, text, false, {}, null,
+                        onAsk = {}, onQuiz = {}, onSource = {}, weekActions = null, onSelectionAsk = {})
+                } } } }
+                waitForIdle()
+                fun dialogs() = onAllNodes(isDialog()).fetchSemanticsNodes().size
+                fun open() {
+                    waitUntil(timeoutMillis = 10_000) { !first(entry).config.contains(SemanticsProperties.Disabled) }
+                    onAllNodes(entry).onFirst().performClick(); waitForIdle()
+                    assertEquals(1, dialogs(), "$mode 一句批注 opens the dialog")
+                }
+                fun focusedName(): String? = onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Focused, true)).fetchSemanticsNodes().lastOrNull()?.let { n ->
+                    n.config.getOrElseNullable(SemanticsProperties.TestTag) { null }
+                        ?: n.config.getOrElseNullable(SemanticsProperties.Text) { null }?.joinToString()
+                        ?: n.config.getOrElseNullable(SemanticsProperties.EditableText) { null }?.let { "input" } ?: "node@${n.boundsInRoot}"
+                }
+                /** Tab from 取消 until focus comes back to it: the dialog's whole cycle. */
+                fun cycle(): List<String?> {
+                    onNode(cancel).requestFocus(); waitForIdle(); assertTrue(focused(cancel), "$mode 取消 takes focus")
+                    val stops = mutableListOf(focusedName())
+                    while (stops.size < 10) { tabFromFocused(); if (focused(cancel)) break; stops += focusedName() }
+                    assertTrue(focused(cancel), "$mode Tab cycle must come back to 取消: $stops")
+                    return stops
+                }
+
+                // Blank note: 保存 disabled and no Tab stop.
+                open()
+                onNode(input).requestFocus(); waitForIdle()
+                val blank = shot("$mode-note-blank-unfocused", dialog = true)
+                onNode(save).assertIsNotEnabled()
+                val blankStops = cycle()
+                println("TON-1603 week $mode note blank tab-stops=$blankStops size=${blank.width}x${blank.height}")
+                assertEquals(listOf("取消", "v7-note-input"), blankStops, "$mode blank note: Tab stops only on 取消 and the field")
+                onNode(save).performClick(); waitForIdle()
+                assertEquals(1, dialogs(), "$mode clicking the disabled 保存 keeps the dialog open")
+                assertEquals(saved0, notes().size, "$mode the disabled 保存 saves nothing")
+
+                // With text: ring on each button, four sides, blur restores.
+                onNode(input).performTextInput("合成批注"); waitForIdle()
+                val before = shot("$mode-note-filled-unfocused", dialog = true)
+                val b0 = listOf(cancel, save).map { first(it).boundsInRoot }
+                val buttons = Rect(b0[0].left, b0[0].top, b0[1].right, b0[1].bottom).inflate(6 * scale)
+                println("TON-1603 week $mode note bounds 取消@${b0[0].left / scale},${b0[0].top / scale} ${b0[0].width / scale}x${b0[0].height / scale}dp 保存@${b0[1].left / scale},${b0[1].top / scale} ${b0[1].width / scale}x${b0[1].height / scale}dp")
+                // Tab typed in the field leaves it for 保存 and types nothing; Shift+Tab leaves it for 取消.
+                fun noteText() = first(input).config.getOrElseNullable(SemanticsProperties.EditableText) { null }?.text
+                onNode(input).requestFocus(); waitForIdle()
+                onNode(input).performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                assertTrue(focused(save), "$mode Tab in the note field moves to 保存")
+                onNode(input).requestFocus(); waitForIdle()
+                onNode(input).performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }; waitForIdle()
+                assertTrue(focused(cancel), "$mode Shift+Tab in the note field moves to 取消")
+                assertEquals("合成批注", noteText(), "$mode Tab must not type a tab character into the note")
+                val filledStops = cycle()
+                println("TON-1603 week $mode note filled tab-stops=$filledStops")
+                assertEquals(listOf("取消", "v7-note-input", "保存"), filledStops, "$mode filled note: Tab reaches the field, 保存 and 取消")
+                for ((i, nm) in listOf("取消" to cancel, "保存" to save).withIndex()) {
+                    val (n, m) = nm
+                    onNode(m).requestFocus(); waitForIdle(); assertTrue(focused(m), "$mode $n focused")
+                    assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize $n")
+                    measure(mode, "批注-$n", m, before, pageDx = 6f, dialog = true)
+                    ringOnFourSides(mode, "批注-$n", first(m).boundsInRoot, shot("$mode-批注-$n-focused", dialog = true), before)
+                }
+                onNode(input).requestFocus(); waitForIdle()
+                assertRegionEqual(before, shot("$mode-note-blurred", dialog = true), buttons, "$mode note buttons after blur")
+
+                // Enter on 取消 closes, nothing saved; Enter on 保存 saves the quoted note once and closes.
+                enter(cancel)
+                assertEquals(0, dialogs(), "$mode Enter on 取消 closes the dialog")
+                assertEquals(saved0, notes().size, "$mode 取消 saves nothing")
+                open()
+                onNode(save).assertIsEnabled()
+                enter(save)
+                assertEquals(0, dialogs(), "$mode Enter on 保存 closes the dialog")
+                waitUntil(timeoutMillis = 10_000) { notes().size == saved0 + 1 }
+                val note = notes().last()
+                assertTrue(quote in note && "合成批注" in note && "\\t" !in note, "$mode 保存 saves the quote and the note, no tab: $note")
+                // Mouse: 取消 closes without saving, 保存 saves once.
+                open()
+                onNode(input).performTextInput("合成第二条"); waitForIdle()
+                onNode(cancel).performClick(); waitForIdle()
+                assertEquals(0, dialogs(), "$mode click on 取消 closes the dialog")
+                assertEquals(saved0 + 1, notes().size, "$mode click on 取消 saves nothing")
+                open()
+                onNode(save).performClick(); waitForIdle()
+                assertEquals(0, dialogs(), "$mode click on 保存 closes the dialog")
+                waitUntil(timeoutMillis = 10_000) { notes().size == saved0 + 2 }
+                assertTrue("合成第二条" in notes().last(), "$mode click on 保存 saves the note")
+                Thread.sleep(200); waitForIdle()
+                assertEquals(saved0 + 2, notes().size, "$mode each 保存 saves exactly once")
+                println("TON-1603 week $mode note tab-in-field=保存 shift-tab=取消 enter+click saved=${notes().size - saved0}")
+            }
+        }
+    }
+
+    /**
+     * On each centre line, gap+width/2 outside the pill edge must be ring (≥3:1 to the surface, same ink as the left side),
+     * and one ring width further out must be the surface again: a ring cut by the dialog edge would fail on that side.
+     */
+    private fun ringOnFourSides(mode: String, label: String, b: Rect, shot: PixelMap, before: PixelMap) {
+        val mid = (V7FocusRingGap + V7FocusRingWidth / 2).value * scale
+        val past = (V7FocusRingGap + V7FocusRingWidth * 2).value * scale
+        val cx = b.center.x; val cy = b.center.y
+        val sides = listOf("left" to Pair(Offset(b.left - mid, cy), Offset(b.left - past, cy)), "right" to Pair(Offset(b.right - 1 + mid, cy), Offset(b.right - 1 + past, cy)),
+            "top" to Pair(Offset(cx, b.top - mid), Offset(cx, b.top - past)), "bottom" to Pair(Offset(cx, b.bottom - 1 + mid), Offset(cx, b.bottom - 1 + past)))
+        val got = sides.map { (n, p) ->
+            val (r, o) = p
+            val ring = shot[r.x.roundToInt(), r.y.roundToInt()]; val surface = before[r.x.roundToInt(), r.y.roundToInt()]; val out = shot[o.x.roundToInt(), o.y.roundToInt()]
+            assertTrue(contrast(ring, surface) >= 3f, "$mode $label $n ring ${hex(ring)} vs surface ${hex(surface)}")
+            assertTrue(contrast(out, surface) < 1.08f, "$mode $label $n beyond the ring must be surface, got ${hex(out)}")
+            "$n=${hex(ring)}:${"%.2f".format(contrast(ring, surface))}"
+        }
+        println("TON-1603 week $mode $label four-sides ${got.joinToString(" ")}")
     }
 
     /**

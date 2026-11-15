@@ -10,12 +10,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 private const val BOOK_EXPLANATION_OFF = "这本书没开讲解，可以直接读原文或先做题。"
+private enum class BookConsentPhase { READY, CHANGING, STOPPED }
 
 /** UI intent is separate from authorization: only the affirmative notice button grants anything. */
 private class BookConsentUi(val book: String, val support: ConsentingBookLearningSupport, val clear: () -> Unit) {
+    val phase = MutableStateFlow(BookConsentPhase.READY)
     var notice by mutableStateOf<NeedsConsent?>(null)
     var offered by mutableStateOf(false)
     var busy by mutableStateOf(false)
@@ -32,6 +40,7 @@ private class BookConsentUi(val book: String, val support: ConsentingBookLearnin
 
     suspend fun change(enable: Boolean, operation: suspend () -> Unit) {
         if (busy) return
+        phase.value = BookConsentPhase.CHANGING
         busy = true
         stopped = true
         notice = null
@@ -40,9 +49,25 @@ private class BookConsentUi(val book: String, val support: ConsentingBookLearnin
         try { operation(); stopped = !enable }
         catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { error = "没能保存讲解设置，请重试；原文和做题不受影响。" }
-        finally { busy = false }
+        finally {
+            busy = false
+            phase.value = if (stopped) BookConsentPhase.STOPPED else BookConsentPhase.READY
+        }
     }
 }
+
+private data class BookRequestState(val epoch: Long, val busy: Boolean, val stopped: Boolean)
+
+private fun currentRequestState(support: ConsentingBookLearningSupport?, consent: BookConsentUi?): BookRequestState =
+    if (consent?.phase?.value == BookConsentPhase.CHANGING) BookRequestState(0, busy = true, stopped = true)
+    else BookRequestState(support?.changes?.value ?: 0L, busy = false, stopped = consent?.phase?.value == BookConsentPhase.STOPPED)
+
+/** Normalize delayed notifications to the current state before deciding whether to restart a request. */
+private fun bookRequestStates(support: ConsentingBookLearningSupport?, consent: BookConsentUi?): Flow<BookRequestState> =
+    if (support == null) flowOf(currentRequestState(null, null))
+    else combine(support.changes, consent?.phase ?: flowOf(BookConsentPhase.READY)) { _, _ ->
+        currentRequestState(support, consent)
+    }.distinctUntilChanged()
 
 @Composable
 private fun BookConsentPanel(state: BookConsentUi?, reply: BookLearningReply?) {
@@ -115,34 +140,39 @@ internal fun BookLessonExplanation(
     lesson: BookLesson,
     support: BookLearningSupport,
     reply: MutableState<BookLearningReply?> = remember(book.id, lesson.id, support) { mutableStateOf(null) },
+    replyEpoch: MutableState<Long> = remember(reply, support) {
+        mutableStateOf((support as? ConsentingBookLearningSupport)?.changes?.value ?: 0L)
+    },
     sources: @Composable (List<BookPassage>) -> Unit = {},
 ) {
     val consenting = support as? ConsentingBookLearningSupport
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
     val consent = remember(book.id, support, reply) { consenting?.let { BookConsentUi(book.id, it) { reply.value = null } } }
-    var replyEpoch by remember(reply, support) { mutableLongStateOf(epoch) }
     // A caller may hold this across a screen switch so returning does not re-ask the provider.
-    LaunchedEffect(book.id, lesson.id, support, epoch, consent?.busy, consent?.stopped) {
-        if (replyEpoch != epoch) { reply.value = null; replyEpoch = epoch }
-        if (consent?.busy == true) return@LaunchedEffect
-        if (consent?.stopped == true) {
-            reply.value = BookLearningReply.Unavailable(BOOK_EXPLANATION_OFF, consenting?.consentOffer(book.id))
-            return@LaunchedEffect
+    LaunchedEffect(book.id, lesson.id, support, reply, replyEpoch, consent) {
+        bookRequestStates(consenting, consent).collectLatest { state ->
+            if (state != currentRequestState(consenting, consent) || state.busy) return@collectLatest
+            if (replyEpoch.value != state.epoch) { reply.value = null; replyEpoch.value = state.epoch }
+            if (state.stopped) {
+                reply.value = BookLearningReply.Unavailable(BOOK_EXPLANATION_OFF, consenting?.consentOffer(book.id))
+                return@collectLatest
+            }
+            if (reply.value != null) return@collectLatest
+            val answer = try {
+                val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
+                coroutineContext.ensureActive()
+                if (result is BookLearningReply.Text && (result.text.isBlank() || result.text.trim() == lesson.text.trim()))
+                    BookLearningReply.Unavailable("这节还没有可用的讲解，可以主动打开对应原文。")
+                else result
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { BookLearningReply.Unavailable("讲解暂时读不到，原有作答和位置已保留。") }
+            if (state == currentRequestState(consenting, consent) && replyEpoch.value == state.epoch) reply.value = answer
         }
-        if (reply.value != null) return@LaunchedEffect
-        reply.value = try {
-            val result = support.explain(BookExplanationRequest(book.id, lesson.id, lesson.blocks))
-            coroutineContext.ensureActive()
-            if (result is BookLearningReply.Text && (result.text.isBlank() || result.text.trim() == lesson.text.trim()))
-                BookLearningReply.Unavailable("这节还没有可用的讲解，可以主动打开对应原文。")
-            else result
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { BookLearningReply.Unavailable("讲解暂时读不到，原有作答和位置已保留。") }
     }
     Column(Modifier.fillMaxWidth().testTag("book-lesson-explanation"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("讲解", style = MaterialTheme.typography.titleMedium)
         val current = if (consent?.stopped == true) BookLearningReply.Unavailable(BOOK_EXPLANATION_OFF)
-            else reply.value.takeIf { replyEpoch == epoch && consent?.busy != true }
+            else reply.value.takeIf { replyEpoch.value == (consenting?.changes?.value ?: epoch) && consent?.busy != true }
         BookConsentPanel(consent, current)
         when (val result = current) {
             null -> Text("正在读取这节的讲解…")
@@ -168,21 +198,26 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
     var replyEpoch by remember(book.id, page.number, support) { mutableLongStateOf(epoch) }
     val consent = remember(book.id, page.number, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
-    LaunchedEffect(request, revision, epoch, consent?.busy, consent?.stopped) {
-        if (replyEpoch != epoch) { reply = null; replyEpoch = epoch }
-        if (consent?.busy == true || consent?.stopped == true) return@LaunchedEffect
-        val input = request ?: return@LaunchedEffect
-        reply = try {
-            val result = support.ask(input)
-            coroutineContext.ensureActive()
-            result
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { BookLearningReply.Unavailable("暂时读不到回答，可以保留阅读位置后再试。") }
+    LaunchedEffect(book.id, page.number, support, consent) {
+        combine(bookRequestStates(consenting, consent), snapshotFlow { request to revision }) { _, _ ->
+            Triple(currentRequestState(consenting, consent), request, revision)
+        }.distinctUntilChanged().collectLatest { (state, input, attempt) ->
+            if (state != currentRequestState(consenting, consent) || state.busy) return@collectLatest
+            if (replyEpoch != state.epoch) { reply = null; replyEpoch = state.epoch }
+            if (state.stopped || input == null) return@collectLatest
+            val answer = try {
+                val result = support.ask(input)
+                coroutineContext.ensureActive()
+                result
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { BookLearningReply.Unavailable("暂时读不到回答，可以保留阅读位置后再试。") }
+            if (state == currentRequestState(consenting, consent) && request == input && revision == attempt) reply = answer
+        }
     }
     AlertDialog(onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()).testTag("book-passage-ask"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            val current = reply.takeIf { replyEpoch == epoch && consent?.busy != true && consent?.stopped != true }
+            val current = reply.takeIf { replyEpoch == (consenting?.changes?.value ?: epoch) && consent?.busy != true && consent?.stopped != true }
             BookConsentPanel(consent, current)
             if (consent?.stopped == true) Text(BOOK_EXPLANATION_OFF)
             if (selected == null) {

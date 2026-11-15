@@ -10,6 +10,8 @@ import java.io.File
 import javax.imageio.ImageIO
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -69,6 +71,8 @@ class BookConsentUiTest {
             onNodeWithTag("book-consent-grant").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(1, f.calls.get())
+            waitForIdle()
+            assertEquals(1, f.calls.get(), "The same consent click must remain one request after idle")
             assertEquals(setOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK), f.store.read(f.book.id)!!.actions)
             onNodeWithTag("open-lesson-source").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { f.controller.state.value.screen == BookScreen.READER && !f.controller.state.value.busy }
@@ -78,6 +82,8 @@ class BookConsentUiTest {
             onNodeWithTag("book-passage-send").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-answer").fetchSemanticsNodes().isNotEmpty() }
             assertEquals(2, f.calls.get())
+            waitForIdle()
+            assertEquals(2, f.calls.get(), "The passage send must remain one request after idle")
             onNodeWithTag("book-consent-revoke").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-passage-answer").assertDoesNotExist()
@@ -172,5 +178,58 @@ class BookConsentUiTest {
         assertTrue(Files.exists(f.library.directory.resolve("${restored.id}.txt")))
         assertEquals(f.book.id, restored.id)
         assertNull(f.store.read(restored.id))
+    }
+
+    @OptIn(InternalCoroutinesApi::class)
+    @Test fun delayedConsentNotificationsDoNotResendAnExplanationAfterGrant() {
+        val f = Fixture()
+        // A StateFlow value can already be current while a slow collector still sees an older emission.
+        val support = object : ConsentingBookLearningSupport by f.support {
+            override val changes = object : StateFlow<Long> by f.support.changes {
+                override suspend fun collect(collector: FlowCollector<Long>): Nothing =
+                    f.support.changes.collect(object : FlowCollector<Long> {
+                        override suspend fun emit(value: Long) {
+                            delay(100)
+                            collector.emit(value)
+                        }
+                    })
+            }
+        }
+        runSkikoComposeUiTest(size = Size(1100f, 1000f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(f.controller, support = support) { null } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-grant").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-consent-grant").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+            repeat(4) { mainClock.advanceTimeBy(100); waitForIdle() }
+            onNodeWithTag("book-explanation-text").assertExists()
+            assertEquals(1, f.calls.get(), "Late grant epochs must not resend the same excerpt")
+        }
+    }
+
+    @Test fun anUnfinishedGrantDoesNotStartExplanationEvenAfterTheRecordIsWritten() {
+        val f = Fixture()
+        val written = CompletableDeferred<Unit>()
+        val finishGrant = CompletableDeferred<Unit>()
+        val support = object : ConsentingBookLearningSupport by f.support {
+            override suspend fun grant(offer: NeedsConsent, actions: Set<OwnedBookAction>) {
+                f.support.grant(offer, actions)
+                written.complete(Unit)
+                finishGrant.await()
+            }
+        }
+        try {
+            runSkikoComposeUiTest(size = Size(1100f, 1000f), density = Density(1f)) {
+                setContent { WindowsTextbookHost(f.controller, support = support) { null } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-grant").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("book-consent-grant").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { written.isCompleted }
+                repeat(4) { mainClock.advanceTimeBy(100); waitForIdle() }
+                assertEquals(0, f.calls.get(), "A stored record must not start a request before grant finishes")
+                finishGrant.complete(Unit)
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+                waitForIdle()
+                assertEquals(1, f.calls.get())
+            }
+        } finally { finishGrant.complete(Unit) }
     }
 }

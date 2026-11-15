@@ -277,7 +277,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 }
                             }
                         }, onReviews = { run { if (drafts.flush()) controller.showReviews() } },
-                        onQuestions = { run { controller.beginQuestions() } })
+                        onQuestions = { run { controller.beginQuestions() } },
+                        onRecapContinue = { run { controller.recapContinue() } })
                     }
                 }
             }
@@ -653,7 +654,8 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
     sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
-    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
+    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit,
+    onRecapContinue: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -697,6 +699,10 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                 Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。")
                 PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 HorizontalDivider()
+                // 做题学：累计到六题就在这里先读一遍知识小结，读完再接着做题；作答和走法都不动。
+                if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen) {
+                    KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
+                }
                 val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
                     if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
                 }

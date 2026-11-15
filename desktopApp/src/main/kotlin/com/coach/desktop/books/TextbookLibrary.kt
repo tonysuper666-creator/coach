@@ -1,5 +1,9 @@
 package com.coach.desktop.books
 
+import com.coach.domain.LadderQuestion
+import com.coach.domain.LadderSession
+import com.coach.domain.LedgerJson
+import com.coach.domain.QuestionLadder
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
@@ -38,6 +42,7 @@ internal class TextbookLibrary(val directory: Path) {
                 completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
             sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
         } }
         backfillReviews()
     }
@@ -65,6 +70,28 @@ internal class TextbookLibrary(val directory: Path) {
                 sql.setString(1, path); sql.setString(2, book)
                 require(sql.executeUpdate() == 1) { "这本教材已不在书架中。" }
             }
+        }
+    }
+
+    /** 教材入口和主线共用同一个题梯会话；一行 JSON 按书保存在本机。 */
+    @Synchronized fun ladder(book: String): LadderSession = database().use { db ->
+        db.prepareStatement("SELECT session FROM book_ladders WHERE book=?").use { sql ->
+            sql.setString(1, book)
+            sql.executeQuery().use { row ->
+                if (!row.next()) LadderSession()
+                else runCatching { LedgerJson.decodeFromString(LadderSession.serializer(), row.getString(1)) }.getOrNull() ?: LadderSession()
+            }
+        }
+    }
+
+    @Synchronized fun saveLadder(book: String, session: LadderSession) {
+        database().use { db -> saveLadderRow(db, book, session) }
+    }
+
+    private fun saveLadderRow(db: Connection, book: String, session: LadderSession) {
+        db.prepareStatement("INSERT INTO book_ladders(book,session) VALUES(?,?) ON CONFLICT(book) DO UPDATE SET session=excluded.session").use { sql ->
+            sql.setString(1, book); sql.setString(2, LedgerJson.encodeToString(LadderSession.serializer(), session))
+            sql.executeUpdate()
         }
     }
 
@@ -158,6 +185,10 @@ internal class TextbookLibrary(val directory: Path) {
         val source = if (candidate) book(book) else null
         val section = source?.lessons?.find { it.id == lesson }
         val practice = section?.let { StudyCoachCourse.practice(checkNotNull(source), it, mode) }
+        // 题梯会话和作答写在同一个事务里：读到一半的会话不会和刚保存的答案对不上。
+        // 会话按「这本书 + 当前走法」累计，只在「做题学」里记，别的走法不改这张表。
+        val ladder = if (source != null && section != null && practice != null && answer.revealed)
+            nextLadderSession(checkNotNull(source), section, mode, practice, answer) else null
         database().use { db ->
             db.autoCommit = false
             try {
@@ -170,9 +201,34 @@ internal class TextbookLibrary(val directory: Path) {
                 if (practice != null && practice.needsReview(mode, answer)) {
                     recordReview(db, checkNotNull(source), checkNotNull(section), mode, practice, answer, reopen = true)
                 }
+                if (ladder != null) saveLadderRow(db, book, ladder)
                 db.commit()
             } catch (failure: Exception) { db.rollback(); throw failure }
         }
+    }
+
+    /**
+     * 教材这一节就是一道题：题的编号带上书、节和出题方式，重答同一节不会重复累计。
+     * 小结的内容取本节原文里出题用的那一句，所以「记住的」是知识，不是你选了什么。
+     */
+    private fun nextLadderSession(book: Textbook, lesson: BookLesson, mode: QuestionMode,
+        practice: Practice, answer: PracticeAnswer): LadderSession? {
+        if (learningPath(book.id) != LearningPath.QUESTION_FIRST.name) return null
+        val session = ladder(book.id)
+        val question = LadderQuestion(
+            id = "${book.id}:${lesson.id}:${mode.name}", kpId = lesson.id, sectionId = lesson.id,
+            kind = "concept", difficulty = 1, variantGroupId = lesson.id,
+            fingerprint = "${book.id}:${lesson.id}:${mode.name}", eligible = true,
+        )
+        if (session.responses.any { it.id == question.id }) return null
+        val correct = if (mode == QuestionMode.SHORT_ANSWER) answer.understood == true else answer.text.trim() == practice.answer
+        return QuestionLadder.record(session, question, correct, knowledgeLine(lesson, practice))
+    }
+
+    private fun knowledgeLine(lesson: BookLesson, practice: Practice): String {
+        val sentence = practice.reference.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: lesson.title
+        val capped = if (sentence.length > 90) sentence.take(88).trimEnd('，', ',', '；', ';', '、', ' ') + "…" else sentence
+        return "${lesson.title}：$capped"
     }
 
     /** Upgrade existing wrong answers too; completed review rows remain completed on every reopen. */

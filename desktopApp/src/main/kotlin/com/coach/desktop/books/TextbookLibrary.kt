@@ -297,8 +297,9 @@ internal class TextbookLibrary(val directory: Path) {
                 val bounds = pdf.getPage(page - 1).cropBox
                 val scale = minOf(1.5f, 1800f / maxOf(bounds.width, bounds.height)).coerceAtLeast(.05f)
                 val t2 = System.nanoTime()
-                val img = PDFRenderer(pdf).renderImage(page - 1, scale)
+                val img = StallWatch.watch("renderImage page=$page") { PDFRenderer(pdf).renderImage(page - 1, scale) }
                 val t3 = System.nanoTime()
+                if (TRACE) println("COACH_RENDER_STAGES page=$page thread=${Thread.currentThread().name} enterNano=$t2 exitNano=$t3")
                 record(RenderTrace(book.id, page, "render", (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t3 - started) / 1_000_000.0, Thread.currentThread().name))
                 img
             }
@@ -321,28 +322,70 @@ internal class TextbookLibrary(val directory: Path) {
 internal object PdfWarmup {
     val done = java.util.concurrent.CompletableFuture<Long>()
     private val started = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** 预热各阶段的单调时钟戳（纳秒），只用于归因；与 RenderTrace 里的 enter/exit 戳同一时钟。 */
+    val stages = java.util.concurrent.CopyOnWriteArrayList<String>()
+    private fun mark(name: String) {
+        val line = "$name nano=${System.nanoTime()} thread=${Thread.currentThread().name}"
+        stages += line
+        if (TRACE) println("COACH_WARMUP_STAGE $line")
+    }
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
         Thread({
             val t0 = System.nanoTime()
+            mark("begin")
             val ms = try {
                 val out = java.io.ByteArrayOutputStream()
                 org.apache.pdfbox.pdmodel.PDDocument().use { doc ->
                     val page = org.apache.pdfbox.pdmodel.PDPage(); doc.addPage(page)
                     org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page).use { cs ->
                         cs.beginText()
-                        cs.setFont(org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 14f)
+                        mark("font-ctor-enter")
+                        val font = StallWatch.watch("warmup PDType1Font") { org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA) }
+                        mark("font-ctor-exit")
+                        cs.setFont(font, 14f)
                         cs.newLineAtOffset(72f, 700f); cs.showText("Warm up 0123456789"); cs.endText()
                     }
-                    doc.save(out)
+                    mark("save-enter"); doc.save(out); mark("save-exit")
                 }
-                Loader.loadPDF(out.toByteArray()).use { pdf -> PDFRenderer(pdf).renderImage(0, 1.5f) }
+                mark("loadPDF-enter")
+                Loader.loadPDF(out.toByteArray()).use { pdf ->
+                    mark("loadPDF-exit"); mark("renderImage-enter")
+                    StallWatch.watch("warmup renderImage") { PDFRenderer(pdf).renderImage(0, 1.5f) }
+                    mark("renderImage-exit")
+                }
                 (System.nanoTime() - t0) / 1_000_000
             } catch (_: Throwable) { -1L }
-            if (java.lang.Boolean.getBoolean("coach.render.trace")) println("COACH_RENDER_WARMUP ms=$ms")
+            if (TRACE) println("COACH_RENDER_WARMUP ms=$ms")
             done.complete(ms)
         }, "pdf-warmup").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }.start()
+    }
+}
+
+private val TRACE = java.lang.Boolean.getBoolean("coach.render.trace")
+
+/**
+ * 只在 -Dcoach.render.trace=true 时生效的卡顿观察：被包住的调用超过 [thresholdMs] 还没返回，就把"正在被调用的线程"
+ * 和所有栈里带 pdfbox 的线程的栈（前 [frames] 帧）打印一次，用来看清它们在等什么锁。不改变被调用代码的任何行为。
+ */
+internal object StallWatch {
+    fun <T> watch(label: String, thresholdMs: Long = 3_000, frames: Int = 14, block: () -> T): T {
+        if (!TRACE) return block()
+        val caller = Thread.currentThread()
+        val watcher = Thread({
+            try { Thread.sleep(thresholdMs) } catch (_: InterruptedException) { return@Thread }
+            val dump = StringBuilder("COACH_STALL label=$label afterMs=$thresholdMs nano=${System.nanoTime()}\n")
+            for ((thread, stack) in Thread.getAllStackTraces()) {
+                if (thread === Thread.currentThread()) continue
+                if (thread !== caller && thread.name != "pdf-warmup" && stack.none { it.className.startsWith("org.apache.pdfbox") }) continue
+                dump.append("  thread=${thread.name} state=${thread.state}\n")
+                stack.take(frames).forEach { dump.append("    at $it\n") }
+            }
+            println(dump)
+        }, "stall-watch").apply { isDaemon = true }
+        watcher.start()
+        try { return block() } finally { watcher.interrupt() }
     }
 }
 

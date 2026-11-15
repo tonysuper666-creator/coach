@@ -7,7 +7,6 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.FileVisitResult
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.attribute.DosFileAttributeView
 import java.nio.file.AccessDeniedException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -267,16 +266,15 @@ internal fun discardIsolatedBookRun(root: Path, expectedRoot: Path) {
     fun delete(path: Path, attrs: BasicFileAttributes) {
         try { Files.delete(path) }
         catch (denied: AccessDeniedException) {
-            // Windows refuses deletion of a readonly file. Clear only that DOS bit on a
-            // regular file still at its pinned location; never change a link or its target.
+            // Readonly is shared by every hardlink. Delete the verified opened name without
+            // changing attributes, including when this is a readonly directory.
             val current = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
             val expected = expectedRoot.resolve(root.relativize(path)).normalize()
-            if (!attrs.isRegularFile || !current.isRegularFile || current.isOther || current.isSymbolicLink || path.toRealPath() != expected)
+            if (attrs.isOther || attrs.isSymbolicLink || current.isOther || current.isSymbolicLink ||
+                (!current.isRegularFile && !current.isDirectory) || attrs.isDirectory != current.isDirectory || path.toRealPath() != expected)
                 throw denied
-            val dos = Files.getFileAttributeView(path, DosFileAttributeView::class.java, NOFOLLOW_LINKS) ?: throw denied
-            if (!dos.readAttributes().isReadOnly) throw denied
-            dos.setReadOnly(false)
-            Files.delete(path)
+            try { WindowsReadonlyBookEntry.delete(path, expected, current.isDirectory) }
+            catch (unavailable: LinkageError) { throw IOException("Native readonly cleanup unavailable", unavailable) }
         }
     }
     Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
@@ -298,7 +296,8 @@ internal fun discardIsolatedBookRun(root: Path, expectedRoot: Path) {
         }
         override fun postVisitDirectory(dir: Path, error: java.io.IOException?): FileVisitResult {
             error?.let(::failed)
-            try { Files.delete(dir) } catch (error: IOException) { failed(error) }
+            try { delete(dir, Files.readAttributes(dir, BasicFileAttributes::class.java, NOFOLLOW_LINKS)) }
+            catch (error: IOException) { failed(error) }
             return FileVisitResult.CONTINUE
         }
     })

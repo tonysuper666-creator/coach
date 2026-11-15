@@ -118,10 +118,16 @@ internal class BookOriginalStore(private val db: Connection, private val blobs: 
             "BOOK_BLOCK_MISMATCH")
         return local.first
     }
-    fun withdraw(course: String, original: String) {
+    /**
+     * Removes one registered import. The registration is the authority: a mistyped course or an
+     * unknown SHA must be refused rather than reported as a withdrawal that never happened, and it
+     * must not reach a seed-installed ledger source that carries the same hash.
+     */
+    fun withdraw(course: String, original: String): Pair<Int, Int> {
+        need(importedPages(course, original) != null, "BOOK_ORIGINAL_UNREGISTERED")
+        val pages = sql("DELETE FROM book_original_pages WHERE course=? AND original_sha256=?", course, original)
         sql("DELETE FROM book_original_sha WHERE course=? AND original_sha256=?", course, original)
-        sql("DELETE FROM book_original_pages WHERE course=? AND original_sha256=?", course, original)
         sql("DELETE FROM book_original_imports WHERE course=? AND original_sha256=?", course, original)
-        sql("DELETE FROM book_ledger_sources WHERE course=? AND book=?", course, original)
+        return pages to sql("DELETE FROM book_ledger_sources WHERE course=? AND book=?", course, original)
     }
 }

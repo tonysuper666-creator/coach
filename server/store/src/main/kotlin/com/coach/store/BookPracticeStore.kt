@@ -69,12 +69,14 @@ internal class BookPracticeStore(private val db: Connection, private val blobs: 
         }
         return changed
     }
-    fun withdrawOriginal(course: String, original: String) {
+    fun withdrawOriginal(course: String, original: String): BookOriginalWithdrawal {
+        // Refuses before deleting anything unless this exact (course, SHA) was registered by the owner.
+        val (pages, sources) = originals.withdraw(course, original)
         val keys = rows("SELECT source_key,mapping_json FROM book_practice_mappings WHERE course=?", course) {
             it.getString(1) to LedgerJson.decodeFromString<BookPracticeMapping>(it.getString(2))
         }.filter { it.second.source.bookSha256 == original }.map { it.first }
         keys.forEach { sql("DELETE FROM book_practice_mappings WHERE course=? AND source_key=?", course, it) }
-        originals.withdraw(course, original)
+        return BookOriginalWithdrawal(keys.size, pages, sources)
     }
     fun mapping(course: String, s: BookPracticeSource, content: CourseContent?): BookPracticeMapping {
         need(content?.course?.id == course, "BOOK_COURSE_UNKNOWN")

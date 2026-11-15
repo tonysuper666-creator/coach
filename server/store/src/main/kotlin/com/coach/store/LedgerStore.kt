@@ -29,6 +29,9 @@ class PairingCode(val code: String, val expiresAt: Long)
 
 class ReviewVariantRejected(val code: String) : IllegalArgumentException(code)
 
+/** What an owner withdrawal really removed, so the offline CLI can print facts instead of intent. */
+data class BookOriginalWithdrawal(val mappings: Int, val pages: Int, val sources: Int)
+
 /** Fields only the server-side review allocation writes; an offline pack never carries any of them. */
 private val REVIEW_RESERVED_FIELDS = setOf("exactReview","reviewIdentity","reviewEntryId","availability")
 private fun JsonObject.hasReviewReservedField(): Boolean = REVIEW_RESERVED_FIELDS.any { containsKey(it) }
@@ -411,7 +414,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         check(putBlob(actualPdf, "application/pdf") == original)
         bookPractices.addOriginalMappings(course, original, mappings, content) || changed
     }
-    fun withdrawBookOriginal(course: String, original: String) = transaction {
+    fun withdrawBookOriginal(course: String, original: String): BookOriginalWithdrawal = transaction {
         bookPractices.withdrawOriginal(course, original)
     }
 

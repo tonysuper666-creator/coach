@@ -3,6 +3,7 @@ package com.coach.migrate
 import com.coach.domain.BookPracticeMapping
 import com.coach.domain.LedgerJson
 import com.coach.store.LedgerStore
+import com.coach.store.ReviewVariantRejected
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
@@ -39,8 +40,18 @@ fun bookOriginalCommand(command: String, args: List<String>) {
                     val changed = store.registerBookOriginal(course, original, options.getValue("--canonical-sha256"), Files.readAllBytes(pdf), mappings)
                     println("register-book-original ${if (changed) "installed" else "unchanged"}: course=$course original=$original mappings=${mappings.size} learningRecords=0")
                 } else {
-                    store.withdrawBookOriginal(course, original)
-                    println("withdraw-book-original: course=$course original=$original learningRecords=0")
+                    val withdrawn = try {
+                        store.withdrawBookOriginal(course, original)
+                    } catch (refused: ReviewVariantRejected) {
+                        // Nothing matched this (course, SHA). Say so and fail: the owner must never be
+                        // told a withdrawal happened while the same pose keeps answering.
+                        if (refused.code == "BOOK_ORIGINAL_UNREGISTERED") println(
+                            "withdraw-book-original refused: course=$course original=$original " +
+                                "noRegisteredImport=true mappings=0 pages=0 sources=0 learningRecords=0")
+                        throw refused
+                    }
+                    println("withdraw-book-original: course=$course original=$original " +
+                        "mappings=${withdrawn.mappings} pages=${withdrawn.pages} sources=${withdrawn.sources} learningRecords=0")
                 }
             }
         }

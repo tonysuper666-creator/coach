@@ -156,7 +156,7 @@ class ReaderRemoteNotesWindowTest {
             s.otherDeviceEditsNote("a", id, "对方改的")
             r.session.noteText = "我改的"; r.key(Key.Enter, ctrl = true)
             assertEquals(id, (r.session.remote!!.noteSave as NoteSaveState.Conflict).id)
-            assertEquals("这条批注有冲突，草稿保留在本机，没有覆盖对方", r.session.uiNoteStatus)
+            assertEquals("这条批注有冲突，没有覆盖对方；仅此窗口保留，关闭前请复制", r.session.uiNoteStatus)
             assertEquals("我改的", r.session.noteText); assertNotNull(r.session.noteDraft)
             assertEquals(JsonPrimitive("对方改的"), s.serverNote("a", id)!!["note"])
             val calls = s.noteCalls.size
@@ -268,7 +268,7 @@ class ReaderRemoteNotesWindowTest {
             val id = r.session.noteDraft!!.id
             s.otherDeviceEditsNote("a", id, "对方改的")
             r.session.noteText = "我改的"; r.key(Key.Enter, ctrl = true)
-            assertEquals("这条批注有冲突，草稿保留在本机，没有覆盖对方", r.session.uiNoteStatus)
+            assertEquals("这条批注有冲突，没有覆盖对方；仅此窗口保留，关闭前请复制", r.session.uiNoteStatus)
             r.key(Key.Enter, ctrl = true) // 冲突时再按保存：不发请求
             assertEquals(2, s.noteCalls.size); assertEquals("这条批注有冲突，先选一种处理方式", r.session.message)
             r.shot("notes-conflict-panel")

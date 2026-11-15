@@ -1,6 +1,13 @@
 package com.coach.desktop
 
 import kotlinx.coroutines.cancel
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import com.coach.desktop.reader.PairedHttpReader
 
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
@@ -45,6 +52,7 @@ fun runCoach() {
     val course = resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course"))
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
+        var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
         Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
@@ -52,12 +60,22 @@ fun runCoach() {
                     session.start()
                     onDispose { session.close() }
                 }
-                DesktopCourseContent(session, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", System.getenv("COACH_OPEN_SOURCE") == "1")
+                Column {
+                    TextButton(onClick = { readerIdentity = identity }) { Text("阅读教材") }
+                    DesktopCourseContent(session, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", System.getenv("COACH_OPEN_SOURCE") == "1")
+                }
                 LaunchedEffect(session) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(session.controller, it) } }
             }
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
                 System.getProperty("coach.autoExitSeconds")?.toLongOrNull()?.let { kotlinx.coroutines.delay(it * 1000); exitApplication() }
+            }
+        }
+        // Keep the course controller mounted; closing this window returns to its original state.
+        readerIdentity?.let { identity ->
+            Window(onCloseRequest = { readerIdentity = null }, title = "教材原文",
+                state = rememberWindowState(width = 1200.dp, height = 760.dp)) {
+                PairedHttpReader(settings, identity, course)
             }
         }
     }

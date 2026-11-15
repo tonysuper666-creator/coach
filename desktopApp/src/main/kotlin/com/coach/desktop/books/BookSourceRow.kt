@@ -2,6 +2,8 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,7 +78,7 @@ internal fun BookSourceRow(
         }
         sources.forEachIndexed { i, p ->
             when (val state = states?.getOrNull(i)) {
-                null -> Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-source-pending-$i"))
+                null -> Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-pending-$i"))
                 BookSourceState.Ready -> TextButton(
                     onClick = {
                         scope.launch {
@@ -87,12 +89,12 @@ internal fun BookSourceRow(
                     },
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
                         .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p)}" },
-                ) { Text(bookSourceLabel(p)) }
-                is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i")) {
+                ) { Text("打开原文 · " + bookSourceLabel(p)) }
+                is BookSourceState.Stale -> Column(Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-stale-$i")) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
-                is BookSourceState.WrongBook -> Column(Modifier.testTag("book-source-wrong-$i")) {
+                is BookSourceState.WrongBook -> Column(Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-wrong-$i")) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }

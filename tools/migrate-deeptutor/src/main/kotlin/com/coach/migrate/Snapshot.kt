@@ -38,7 +38,21 @@ private fun setPrivatePermissions(path: Path, directory: Boolean) {
 
 fun privateDir(p: Path): Path {
     Files.createDirectories(p)
-    setPrivatePermissions(p, directory = true)
+    // Existing files can carry explicit or inherited ACLs that survive changing their parent.
+    // Protect them before any caller can overwrite them; never follow links outside this tree.
+    Files.walkFileTree(p, object : SimpleFileVisitor<Path>() {
+        override fun preVisitDirectory(dir: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
+            require(attrs.isDirectory && !attrs.isSymbolicLink) { "Refusing non-directory private path" }
+            setPrivatePermissions(dir, directory = true)
+            return FileVisitResult.CONTINUE
+        }
+
+        override fun visitFile(file: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
+            require(attrs.isRegularFile && !attrs.isSymbolicLink) { "Refusing link or special file in private path" }
+            setPrivatePermissions(file, directory = false)
+            return FileVisitResult.CONTINUE
+        }
+    })
     return p
 }
 fun safeFiles(root: Path): List<Path> {

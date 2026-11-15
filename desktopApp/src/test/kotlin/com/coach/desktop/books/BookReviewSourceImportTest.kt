@@ -10,7 +10,13 @@ import kotlin.test.*
 /** Files contain explicit synthetic source identities. No registration API is called by this fixture. */
 internal class SourceReceiptFixture {
     val data = VariantFixture()
-    val library get() = TextbookLibrary(data.library.directory) { data.day }
+    // The synthetic local adapter now needs an independent authority, just like any explicit port.
+    // The submitted file is never the authority for its own coverage or original answer.
+    private val authority = BookReviewSourceAuthority { submitted ->
+        require(submitted.origin == input.origin)
+        require(submitted.usedQuestions == input.usedQuestions)
+    }
+    val library get() = TextbookLibrary(data.library.directory, sourceAuthority = authority) { data.day }
     val input get() = data.input!!.let { it.copy(usedQuestions = setOf(it.offers.first().candidate.question)) }
     fun review() = library.reviews().single()
     fun receipt(input: BookReviewVariantInput? = this.input, revision: Long = 1) = buildJsonObject {

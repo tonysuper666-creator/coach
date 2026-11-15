@@ -1,5 +1,9 @@
 # Local book ↔ course ledger identity audit (TON-1448)
 
+Historical audit at PR221. The subsequent [explicit identity bridge](local-book-ledger-bridge.md)
+implements the server-owned identity and coverage checks; the observations and
+red diagnostic below describe the original audit revision.
+
 Audited local-registration baseline: PR218 `c51d35de511671fc0275ae3d307107a075afee2a`.
 Ledger/content contracts also checked against fetched main
 `bc88b3a08ebf43029b8c7de8a7be2047df31efbf`; the cited ledger, content seed,

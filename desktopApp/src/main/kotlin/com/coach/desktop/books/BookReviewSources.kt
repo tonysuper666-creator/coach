@@ -12,8 +12,14 @@ internal data class BookReviewSourceUpdate(
     val approvalId: String, val revision: Long, val input: BookReviewVariantInput?,
 )
 
+/** Separate trusted local source integration. A v1 file/approval flag cannot implement this port.
+ * Fingerprint-only course-ledger sources use BookLedgerBridge instead of this local Practice allocator.
+ */
+internal fun interface BookReviewSourceAuthority { fun verify(input: BookReviewVariantInput) }
+
 /** Durable adapter used by the ordinary library/Windows host, without a test-only injected port. */
-internal class BookReviewSources(private val database: () -> Connection) : BookReviewVariantPort {
+internal class BookReviewSources(private val authority: BookReviewSourceAuthority? = null,
+    private val database: () -> Connection) : BookReviewVariantPort {
     fun initialize(db: Connection) = db.createStatement().use { sql ->
         sql.execute("""CREATE TABLE IF NOT EXISTS book_review_sources(
             book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL,approval TEXT NOT NULL,
@@ -30,6 +36,8 @@ internal class BookReviewSources(private val database: () -> Connection) : BookR
             sql.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
         } ?: return null
         val source = BookReviewSourceJson.decode(Json.parseToJsonElement(payload).jsonObject)
+        val verifier = authority ?: return null
+        if (runCatching { verifier.verify(source) }.isFailure) return null
         val origin = source.origin
         val used = db.prepareStatement("SELECT question,version,fingerprint FROM book_review_source_posed WHERE course=?").use { sql ->
             sql.setString(1, origin.courseId)

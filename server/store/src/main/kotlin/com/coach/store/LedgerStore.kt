@@ -5,6 +5,7 @@ import com.coach.domain.reviewqueue.QueueAvailability
 import com.coach.domain.reviewqueue.QueueQuestion
 import com.coach.domain.reviewqueue.VariantCandidate
 import com.coach.domain.reviewqueue.ledgerQueueCandidate
+import com.coach.domain.reviewqueue.allocateVariants
 import com.coach.protocol.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -396,6 +397,60 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun courseHeads(): Map<String, Long> = query("SELECT course_id,max(seq) FROM events WHERE course_id<>'__system__' GROUP BY course_id ORDER BY course_id") { it.getString(1) to it.getLong(2) }.toMap()
     fun courses(): List<String> = query("SELECT DISTINCT course_id FROM events WHERE course_id<>'__system__' ORDER BY course_id") { it.getString(1) }
     private val contentStore by lazy { CourseContentStore(connection) }
+    // Initialize outside request transactions: a rejected first claim must not roll back the schema
+    // while leaving a cached adapter pointing at tables that no longer exist.
+    private val bookLedgerSources = BookLedgerSourceStore(connection)
+
+    /** Content-owner import API; deliberately not exposed to paired learner HTTP clients. */
+    fun approveBookLedgerSource(identity: BookLedgerIdentity, originalBytes: ByteArray) = transaction {
+        bookLedgerSources.approve(identity, originalBytes, events(identity.courseId), courseContent(identity.courseId))
+    }
+    fun withdrawBookLedgerSource(book: String, course: String, originalAttempt: String) = transaction {
+        bookLedgerSources.withdraw(book, course, originalAttempt)
+    }
+    fun bookLedgerCoverage(course: String): BookLedgerCoverage = bookLedgerSources.coverage(course, events(course))
+
+    fun registerBookLedgerSource(identity: BookLedgerIdentity, coverage: BookLedgerCoverage): BookLedgerRegistration = transaction {
+        val course = identity.courseId
+        val facts = events(course)
+        bookLedgerSources.verify(identity, facts, courseContent(course))
+        bookLedgerSources.checkCoverage(coverage, course, facts)
+        val state = projection(course)
+        if (state.requiresServerSnapshot) throw ReviewVariantRejected("REVIEW_SNAPSHOT_REQUIRED")
+        val day = logicalDay(clock(), state.timeZone)
+        val queue = ledgerQueueCandidate(course, facts, day)
+        val original = queue.dueEntries(day).singleOrNull { it.kpId == identity.kpId &&
+            it.originalQuestion == identity.question && it.originalAttempts.any { a -> a.id == identity.originalAttemptId } }
+            ?: throw ReviewVariantRejected("REVIEW_ENTRY_UNAVAILABLE")
+        // This request names a proven original entry. Allocate for it first, retaining all other
+        // entries for occupied/answered-question exclusion; an unrelated unknown-due row cannot
+        // consume its only candidate or be silently relabelled as this book's original attempt.
+        val allocated = queue.copy(entries = listOf(original) + queue.entries.filterNot { it.id == original.id }).allocateVariants(
+            com.coach.domain.reviewqueue.VariantCandidatePort { c, run, kp ->
+                if (c == course && run == null) reviewVariantCandidates(course, kp) else emptyList()
+            }).queue
+        val entry = allocated.entries.single { it.id == original.id }
+        val variant = entry.variants.singleOrNull { it.attemptId == entry.currentAttemptId }
+            ?: throw ReviewVariantRejected("REVIEW_QUESTION_UNAVAILABLE")
+        BookLedgerRegistration(identity, coverage, entry.id, variant.attemptId, variant.question)
+    }
+
+    /** Verify all source edges and complete coverage in the SAME transaction as exact pool consumption. */
+    fun takeBookReviewVariant(course: String, device: String, run: String?, kp: String, entryId: String,
+        attempt: String, question: QueueQuestion, source: BookLedgerRegistration): List<Event> = transaction {
+        if (source.identity.courseId != course || source.identity.kpId != kp || source.entryId != entryId ||
+            source.attemptId != attempt || source.candidate != question) throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        bookLedgerSources.verify(source.identity, events(course), courseContent(course))
+        val previous = bookLedgerSources.priorTake(course, device, attempt)
+        if (previous != null) {
+            if (previous != bookLedgerSources.takeJson(source)) throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        } else if (registerBookLedgerSource(source.identity, source.coverage) != source) {
+            throw ReviewVariantRejected("BOOK_TARGET_MISMATCH")
+        }
+        val posed = takeReviewVariant(course, device, run, kp, entryId, attempt, question)
+        bookLedgerSources.rememberTake(device, source)
+        posed
+    }
     /** Private generated essay prompts; Main points this at the materials directory, tests at a fixture. */
     var essays: EssayBank = EssayBank(null)
     /** Later revisions (the DeepTutor migration's prerequisite ops) carry no `course`; the name is the latest one any revision gave. */

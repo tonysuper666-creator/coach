@@ -70,7 +70,43 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
         respondText("Forbidden", status=HttpStatusCode.Forbidden)
         return false
     }
+    suspend fun ApplicationCall.bookSourceBody(): JsonObject? {
+        val bytes = ByteArray(1_048_577)
+        val channel = receiveChannel()
+        var size = 0
+        while (size < bytes.size) {
+            val n = channel.readAvailable(bytes, size, bytes.size - size)
+            if (n == -1) break
+            size += n
+        }
+        if (size == bytes.size) return null
+        return runCatching { LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject }.getOrNull()
+    }
     routing {
+        get("/v1/courses/{course}/book-review-coverage") {
+            val coverage = actor.execute { bookLedgerCoverage(call.parameters["course"]!!) }
+            call.respondText(LedgerJson.encodeToString(coverage), ContentType.Application.Json)
+        }
+        post("/v1/courses/{course}/book-review-source") {
+            val input = call.bookSourceBody() ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val identity = runCatching { LedgerJson.decodeFromJsonElement<BookLedgerIdentity>(input.getValue("identity")) }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val coverage = runCatching { LedgerJson.decodeFromJsonElement<BookLedgerCoverage>(input.getValue("coverage")) }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            if (identity.courseId != call.parameters["course"]) return@post call.respond(HttpStatusCode.Forbidden)
+            val device = call.attributes[observedDevice]
+            val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
+            try {
+                val registered = actor.execute {
+                    if (!authorize(device, credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
+                    registerBookLedgerSource(identity, coverage)
+                }
+                call.respondText(LedgerJson.encodeToString(registered), ContentType.Application.Json)
+            } catch (e: ReviewVariantRejected) {
+                call.respondText(json("error" to e.code).toString(), ContentType.Application.Json,
+                    if (e.code == "REVIEW_DEVICE_UNAUTHORIZED") HttpStatusCode.Unauthorized else HttpStatusCode.Conflict)
+            }
+        }
         post("/v1/usage") {
             val observer = observation ?: return@post call.respond(HttpStatusCode.ServiceUnavailable)
             // Bound streamed/chunked bodies as well as Content-Length before parsing.
@@ -89,20 +125,25 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             call.respond(HttpStatusCode.NoContent)
         }
         post("/v1/courses/{course}/review-practice") {
-            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            val input = call.bookSourceBody()
                 ?: return@post call.respond(HttpStatusCode.BadRequest)
             val course = call.parameters["course"]!!
             val device = call.attributes[observedDevice]
             if (input.str("courseId") != course || input.str("deviceId") != device)
                 return@post call.respondText(json("error" to "REVIEW_SCOPE_MISMATCH").toString(),ContentType.Application.Json,HttpStatusCode.Forbidden)
             val q = input["question"] as? JsonObject ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val source = if ("bookSource" !in input || input["bookSource"] == JsonNull) null else
+                runCatching { LedgerJson.decodeFromJsonElement<BookLedgerRegistration>(input.getValue("bookSource")) }.getOrNull()
+                    ?: return@post call.respond(HttpStatusCode.BadRequest)
             val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
             try {
                 val facts = actor.execute {
                     if (!authorize(device,credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
-                    takeReviewVariant(course,device,input.str("agentRunId").ifBlank { null },
-                    input.str("kpId"),input.str("entryId"),input.str("attemptId"),
-                    QueueQuestion(q.str("id"),q.str("version").ifBlank { null },q.str("fingerprint").ifBlank { null })) }
+                    val expected = QueueQuestion(q.str("id"),q.str("version").ifBlank { null },q.str("fingerprint").ifBlank { null })
+                    if (source == null) takeReviewVariant(course,device,input.str("agentRunId").ifBlank { null },
+                        input.str("kpId"),input.str("entryId"),input.str("attemptId"),expected)
+                    else takeBookReviewVariant(course,device,input.str("agentRunId").ifBlank { null },
+                        input.str("kpId"),input.str("entryId"),input.str("attemptId"),expected,source) }
                 pushes.tryEmit(course)
                 call.respondText(json("events" to JsonArray(facts.map { LedgerJson.encodeToJsonElement(agentEvidenceForWire(it)) })).toString(),ContentType.Application.Json)
             } catch (e: ReviewVariantRejected) {

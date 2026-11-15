@@ -30,8 +30,9 @@ import javax.xml.parsers.DocumentBuilderFactory
 /** All state belongs to this Windows library. No server, token or external user corpus is opened. */
 internal class TextbookLibrary(val directory: Path,
     variantPort: BookReviewVariantPort? = null,
+    private val sourceAuthority: BookReviewSourceAuthority? = null,
     private val reviewDay: () -> Long = { logicalDay(System.currentTimeMillis(), ZoneId.systemDefault().id) }) {
-    private val sources = BookReviewSources(::database)
+    private val sources = BookReviewSources(sourceAuthority, ::database)
     private val variants = BookReviewVariants(variantPort ?: sources) { review ->
         book(review.book).lessons.single { it.id == review.lesson }.text
     }
@@ -361,7 +362,10 @@ internal class TextbookLibrary(val directory: Path,
                     sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
                     sql.executeQuery().use { row -> check(row.next()); row.asReview() }
                 }
-                update.input?.let { variants.validateSource(db, current, it) }
+                update.input?.let {
+                    requireNotNull(sourceAuthority) { "来源身份未核验，新变式未备好。" }.verify(it)
+                    variants.validateSource(db, current, it)
+                }
                 sources.update(db, current, update)
                 db.commit()
             } catch (failure: Exception) { db.rollback(); throw failure }

@@ -11,7 +11,8 @@ import kotlin.test.*
 /** Uses the existing approved synthetic payload, but never its injected library for consumption. */
 internal class PersistedSourceFixture {
     val data = VariantFixture()
-    val library get() = TextbookLibrary(data.library.directory) { data.day }
+    val authority = BookReviewSourceAuthority { submitted -> require(submitted.origin == data.input!!.origin) }
+    val library get() = TextbookLibrary(data.library.directory, sourceAuthority = authority) { data.day }
     val input get() = data.input!!
     fun review() = library.reviews().single()
     fun publish(revision: Long = 1, input: BookReviewVariantInput? = this.input, approval: String = "synthetic-approval") {
@@ -36,7 +37,7 @@ class BookReviewSourceTest {
         f.publish(input = input) // exact revision replay is idempotent
         f.snapshot("ready-library.sqlite") // produced by the real import/answer/registration APIs
         assertEquals(input.usedQuestions + input.origin.question,
-            BookReviewSources { DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}") }
+            BookReviewSources(f.authority) { DriverManager.getConnection("jdbc:sqlite:${f.library.directory.resolve("library.sqlite")}") }
                 .input(f.review())!!.usedQuestions)
         val selected = f.library.startReviewVariant(f.review())
         assertEquals("variant-b", selected.variant!!.allocation.question.id)

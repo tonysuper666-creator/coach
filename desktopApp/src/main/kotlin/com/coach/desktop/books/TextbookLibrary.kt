@@ -4,6 +4,7 @@ import com.coach.domain.Review
 import com.coach.domain.initialReview
 import com.coach.domain.logicalDay
 import com.coach.domain.nextReview
+import com.coach.domain.textbookPagesFromMarkers
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.apache.pdfbox.Loader
@@ -80,8 +81,8 @@ internal class TextbookLibrary(val directory: Path,
     }
 
     @Synchronized fun catalog(): List<BookSummary> = database().use { db ->
-        db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
-            while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
+        db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count, (SELECT max(p.page) FROM pages p WHERE p.book=b.id) AS last_page FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
+            while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("last_page"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
         } } }
     }
 
@@ -94,7 +95,11 @@ internal class TextbookLibrary(val directory: Path,
                     query.setString(1, id)
                     query.executeQuery().use { p -> buildList { while (p.next()) add(BookPage(p.getInt(1), p.getString(2))) } }
                 }
-                Textbook(id, row.getString("title"), row.getString("format"), pages, row.getInt("reading_page"),
+                // Reading progress is a physical PDF page; a stored number this book no longer has
+                // (a page-marked export that starts at page 5) resumes at its first real page.
+                val stored = row.getInt("reading_page")
+                Textbook(id, row.getString("title"), row.getString("format"), pages,
+                    if (pages.any { it.number == stored }) stored else pages.first().number,
                     row.getInt("lesson_index"), row.getInt("learning") == 1, row.getInt("prompt_seen") == 1,
                     QuestionMode.valueOf(row.getString("mode")))
             }
@@ -124,10 +129,10 @@ internal class TextbookLibrary(val directory: Path,
             database().use { db ->
                 db.autoCommit = false
                 try {
-                    db.prepareStatement("INSERT INTO books(id,title,format,mode,touched) VALUES(?,?,?,?,?)").use { sql ->
+                    db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
                         sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, format)
                         sql.setString(4, QuestionMode.CHOICE.name)
-                        sql.setLong(5, System.currentTimeMillis()); sql.executeUpdate()
+                        sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
                     }
                     db.prepareStatement("INSERT INTO pages(book,page,text) VALUES(?,?,?)").use { sql ->
                         for (page in extracted.pages) {
@@ -148,7 +153,7 @@ internal class TextbookLibrary(val directory: Path,
     }
 
     @Synchronized fun save(book: Textbook) {
-        require(book.readingPage in 1..book.pages.size && book.lessonIndex in 0..book.lessons.size)
+        require(book.page(book.readingPage) != null && book.lessonIndex in 0..book.lessons.size)
         database().use { db -> db.prepareStatement("UPDATE books SET reading_page=?,lesson_index=?,learning=?,prompt_seen=?,mode=?,touched=? WHERE id=?").use { sql ->
             sql.setInt(1, book.readingPage); sql.setInt(2, book.lessonIndex); sql.setInt(3, if (book.learning) 1 else 0)
             sql.setInt(4, if (book.promptSeen) 1 else 0); sql.setString(5, book.questionMode.name)
@@ -403,6 +408,12 @@ internal class TextbookLibrary(val directory: Path,
 internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
 
 internal object TextbookExtraction {
+    /**
+     * A textbook export already carries its true PDF pages. Those marker numbers are the only page
+     * identity a ledger source can name, so the page text and its UTF-16 offsets come from the one
+     * contract the server seeds with: `com.coach.domain.textbookPagesFromMarkers`. A length-based
+     * re-chunk of the same file would invent page numbers the server does not have.
+     */
     fun extract(path: Path, format: String, title: String): ExtractedBook = when (format) {
         "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
@@ -418,9 +429,12 @@ internal object TextbookExtraction {
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-            val text = clean(decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF"))
+            val text = decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF")
             require(text.isNotBlank()) { "教材中没有文字。" }
-            ExtractedBook(title, paginate(text))
+            // Pages come from the export's own markers, byte-for-byte, so the page number and
+            // UTF-16 offsets a question cites are the server's, not a local chunk's.
+            val marked = textbookPagesFromMarkers(text)
+            ExtractedBook(title, marked.map { BookPage(it.pdfPage, it.text) }.ifEmpty { paginate(clean(text)) })
         }
     }
 

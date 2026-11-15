@@ -108,7 +108,8 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun page(number: Int) = action {
         val book = mutable.value.book ?: return@action
-        require(number in 1..book.pages.size) { "页码超出了这本教材的范围。" }
+        // Page numbers are the book's own PDF pages, which need not start at 1 or run without gaps.
+        require(book.page(number) != null) { "页码超出了这本教材的范围。" }
         if (mutable.value.source == null) persist(book.copy(readingPage = number))
         mutable.update { it.copy(page = number) }
     }

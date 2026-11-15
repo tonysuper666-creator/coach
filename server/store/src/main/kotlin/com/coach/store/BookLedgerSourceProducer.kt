@@ -48,6 +48,9 @@ internal class BookLedgerSourceProducer(private val db: Connection, private val 
         val page = rows("SELECT text FROM source_pages WHERE doc_id=? AND pdf_page=?", docId, l.pdfPage) { it.getString(1) }
             .singleOrNull() ?: refuse("BOOK_BLOCK_MISMATCH")
         if (l.start < 0 || l.end <= l.start || l.end > page.length) refuse("BOOK_BLOCK_MISMATCH")
+        // Offsets are UTF-16 code units into this exact page: a range that starts or ends between
+        // the two halves of a surrogate pair names half a character, not a source block.
+        if (Character.isLowSurrogate(page[l.start]) || Character.isHighSurrogate(page[l.end - 1])) refuse("BOOK_BLOCK_MISMATCH")
         val anchored = content?.takeIf { it.course.id == l.courseId }?.knowledgePoints.orEmpty()
             .filter { !it.retired && it.id in p.strings("kpIds") && it.anchors.any { a -> a.docId == docId && a.pdfPage == l.pdfPage } }
         val kp = anchored.singleOrNull()?.id ?: refuse("BOOK_KP_SOURCE_MISMATCH")

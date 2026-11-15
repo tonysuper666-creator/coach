@@ -170,7 +170,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         practiceSource = anchor
         run { controller.source(); anchor.page?.let { controller.page(it) } }
     }
-    CoachTheme {
+    // 外壳（WindowsTextbookHost）已经按系统或 coach.windows.theme 选好明暗；正文沿用同一个选择，
+    // 不再让内层按系统重选，否则外壳浅、正文深。
+    CoachTheme(com.coach.ui.theme.CoachTheme.colors.dark) {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             if (event.key == Key.Escape && event.type == KeyEventType.KeyDown && ui.screen == BookScreen.READER &&
                 ui.source != null && ui.prompt == null && !ui.busy) {
@@ -355,7 +357,14 @@ private sealed interface PageImage {
 @Composable
 private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSource: PracticeSource?, onPage: (Int) -> Unit, onBack: () -> Unit, onLearn: () -> Unit) {
     val book = checkNotNull(ui.book)
-    val page = book.pages[ui.page - 1]
+    val page = book.page(ui.page)
+    if (page == null) {
+        LaunchedEffect(book.id, ui.page) { onPage(book.pages.first().number) }
+        return
+    }
+    val lastPage = book.pages.maxOf { it.number }
+    val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
+    val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
     var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
@@ -423,7 +432,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
     }
 
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false,
-        status = "第 ${ui.page} / ${book.pages.size} 页", directory = {
+        status = "第 ${ui.page} / $lastPage 页", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
@@ -484,13 +493,13 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton({ onPage(ui.page - 1); session.prevPage() }, enabled = !ui.busy && ui.page > 1, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                Text("${ui.page} / ${book.pages.size}", modifier = Modifier.testTag("reader-page-number"))
-                OutlinedButton({ onPage(ui.page + 1); session.nextPage() }, enabled = !ui.busy && ui.page < book.pages.size, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                OutlinedButton({ previousPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
+                Text("${ui.page} / $lastPage", modifier = Modifier.testTag("reader-page-number"))
+                OutlinedButton({ nextPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 Spacer(Modifier.weight(1f))
                 OutlinedTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, label = { Text("页码") }, singleLine = true,
                     modifier = Modifier.width(80.dp).testTag("page-jump"))
-                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { it in 1..book.pages.size } == true) { Text("前往") }
+                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
             }
             Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
         }

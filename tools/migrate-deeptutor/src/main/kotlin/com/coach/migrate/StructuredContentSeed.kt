@@ -13,16 +13,12 @@ import kotlinx.serialization.json.*
 
 private data class Book(val chapter: Int, val sourceName: String, val document: TextbookDocument)
 
-/** Parse only explicit PDF page markers; never synthesize page numbers from text position. */
-fun textbookPages(markdown: String): List<DomainTextbookPage> {
-    val markers = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").findAll(markdown).toList()
-    val pages = markers.mapIndexed { i, m ->
-        DomainTextbookPage(m.groupValues[1].toInt(), m.groupValues[2].toIntOrNull(),
-            markdown.substring(m.range.first, markers.getOrNull(i + 1)?.range?.first ?: markdown.length))
-    }
-    require(pages.map { it.pdfPage }.distinct().size == pages.size && pages.all { it.pdfPage > 0 && it.text.isNotBlank() })
-    return pages
-}
+/**
+ * Parse only explicit PDF page markers; never synthesize page numbers from text position.
+ * The single page contract lives in `:shared:domain` so the app's own import reads the same
+ * bytes and offsets this seed writes to `source_pages`.
+ */
+fun textbookPages(markdown: String): List<DomainTextbookPage> = textbookPagesFromMarkers(markdown)
 
 /** Only course metadata, the selected outline and textbook text cross this boundary. */
 fun contentSeed(snapshot: Path, weights: Path = snapshot.resolve("exam-weights.md")): ContentSeed {

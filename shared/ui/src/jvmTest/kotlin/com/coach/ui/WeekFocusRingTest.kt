@@ -1,13 +1,17 @@
 package com.coach.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -1289,6 +1293,127 @@ class WeekFocusRingTest {
                             println("TON-1603 week $mode sel enter+mouse asks=${asks()} marks=${marks().size}")
                         }
                     }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+
+    /**
+     * The reader's own 深色阅读 / 浅色阅读 button flips only the page, never the app theme that used to supply the ring ink.
+     * Both mismatches are reached through that button — outer light + page dark, outer dark + page light — and the five
+     * selection rings must still be ≥3:1 to the surface really under the pill, with the same ring-inside edge, Tab walk,
+     * callbacks and blur restore. A small probe in the app theme's ink, painted outside the reader, proves the outer
+     * theme did not flip with the page.
+     */
+    @Test fun weeklyReaderOwnDarkToggleKeepsSelectionRingsReadable() {
+        val body = "Synthetic pears grow in an orchard."
+        val quote = body.substring(0, 9)
+        val section = json("section_id" to "S1", "body" to body, "title" to "【W3·slides】Synthetic section",
+            "content_version" to "v1", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic slide 4"))
+        val names = listOf("划线", "一句批注", "再讲一遍", "举个例子", "取消选择")
+        val actions = names.map { it to (hasText(it) and hasClickAction()) }
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = """{"text":"Synthetic explanation","sources":[]}""".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    // (outer theme, page dark before the click): the click lands on the opposite page darkness.
+                    for ((outerDark, pageDarkBefore) in listOf(false to false, true to true))
+                        runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                            // Named for the mismatched state the click produces: the page flips, the app theme does not.
+                            val mode = "outer-${if (outerDark) "dark" else "light"}-page-${if (pageDarkBefore) "light" else "dark"}"
+                            var latest = json("marks" to JsonArray(emptyList()), "dark" to pageDarkBefore)
+                            lateinit var focus: FocusManager
+                            setContent {
+                                var state by remember { mutableStateOf(latest) }
+                                focus = LocalFocusManager.current
+                                CoachTheme(outerDark) {
+                                    Box(Modifier.fillMaxSize()) {
+                                        WeeklyReader(c, 1, listOf(section), section, emptyList(),
+                                            (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
+                                            { transform -> state = transform(state); latest = state }, {}, { _, _ -> }, {}, {}, {})
+                                        // The app theme's ink, drawn outside the reader: it must not follow the page's toggle.
+                                        Box(Modifier.align(Alignment.BottomEnd).size(10.dp)
+                                            .background(com.coach.ui.theme.CoachTheme.colors.focusRing).testTag("outer-ink"))
+                                    }
+                                }
+                            }
+                            waitForIdle()
+                            fun select() {
+                                onNodeWithTag("reader-text").performScrollTo().performSemanticsAction(SemanticsActions.SetSelection) { it(0, 9, false) }
+                                waitForIdle()
+                            }
+                            fun marks() = (latest["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
+                            fun pageDarkNow() = (latest["dark"] as JsonPrimitive).content.toBoolean()
+                            select()
+                            val paperAt = (8 * scale).roundToInt() to (300 * scale).roundToInt()
+                            val probeAt = (1224 * scale).roundToInt() - (5 * scale).roundToInt() to
+                                (900 * scale).roundToInt() - (5 * scale).roundToInt()
+                            val beforeFlip = shot("$mode-before-flip")
+                            println("TON-1603 mismatch $mode before flip paper ${hex(beforeFlip[paperAt.first, paperAt.second])} " +
+                                "outer-ink ${hex(beforeFlip[probeAt.first, probeAt.second])} pageDark=${pageDarkNow()}")
+                            assertEquals(pageDarkBefore, pageDarkNow(), "$mode page starts ${if (pageDarkBefore) "dark" else "light"}")
+                            if (pageDarkBefore) assertTrue(beforeFlip[paperAt.first, paperAt.second].luminance() < 0.1f,
+                                "$mode page paper must be dark before the click, got ${hex(beforeFlip[paperAt.first, paperAt.second])}")
+                            else assertTrue(beforeFlip[paperAt.first, paperAt.second].luminance() > 0.8f,
+                                "$mode page paper must be light before the click, got ${hex(beforeFlip[paperAt.first, paperAt.second])}")
+                            assertTrue(contrast(beforeFlip[probeAt.first, probeAt.second], beforeFlip[paperAt.first, paperAt.second]) > 1f,
+                                "$mode the app-theme ink probe is painted")
+                            assertEquals(if (outerDark) "#E6E0D5" else "#24211C", hex(beforeFlip[probeAt.first, probeAt.second]),
+                                "$mode the app theme's ink is ${if (outerDark) "dark" else "light"} before the click")
+
+                            // Only the page's own button is used: the app theme stays as it was.
+                            onNode(hasText(if (pageDarkBefore) "浅色阅读" else "深色阅读") and hasClickAction()).performClick()
+                            waitForIdle()
+                            val afterFlip = shot("$mode-after-flip")
+                            println("TON-1603 mismatch $mode after flip paper ${hex(afterFlip[paperAt.first, paperAt.second])} " +
+                                "outer-ink ${hex(afterFlip[probeAt.first, probeAt.second])} pageDark=${pageDarkNow()}")
+                            assertEquals(!pageDarkBefore, pageDarkNow(), "$mode the page's own button flipped the page")
+                            if (pageDarkBefore) assertTrue(afterFlip[paperAt.first, paperAt.second].luminance() > 0.8f,
+                                "$mode page paper must be light after 浅色阅读, got ${hex(afterFlip[paperAt.first, paperAt.second])}")
+                            else assertTrue(afterFlip[paperAt.first, paperAt.second].luminance() < 0.1f,
+                                "$mode page paper must be dark after 深色阅读, got ${hex(afterFlip[paperAt.first, paperAt.second])}")
+                            assertEquals(if (outerDark) "#E6E0D5" else "#24211C", hex(afterFlip[probeAt.first, probeAt.second]),
+                                "$mode the app theme's ink must not follow the page's toggle")
+
+                            select()
+                            for ((n, m) in actions) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode $n is offered once text is selected")
+                            val before = shot("$mode-selrow-unfocused")
+                            val b0 = actions.map { first(it.second).boundsInRoot }
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                            val stops = mutableListOf<String>()
+                            for ((i, nm) in actions.withIndex()) {
+                                stops += "${nm.first}=${tabUntil(nm.second)}"
+                                assertTrue(focused(nm.second), "$mode Tab never reached ${nm.first}")
+                                assertEquals(b0[i], first(nm.second).boundsInRoot, "$mode focusing must not move or resize ${nm.first}")
+                                measurePillInside(mode, "选区行-${nm.first}", nm.second, before)
+                            }
+                            assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the five actions are consecutive Tab stops: $stops")
+                            println("TON-1603 mismatch $mode sel tab-stops ${stops.joinToString(" ")}")
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            val all = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                            assertRegionEqual(before, shot("$mode-selrow-blurred"), all, "$mode selection actions after blur")
+
+                            select()
+                            val saved = marks().size
+                            enter(actions[0].second); waitForIdle()
+                            assertEquals(1, marks().count { it.str("quote") == quote }, "$mode Enter on 划线 saves the selected quote once")
+                            assertEquals(saved + 1, marks().size, "$mode Enter on 划线 saves exactly one mark")
+                            select()
+                            onNode(actions[4].second).performMouseInput { click() }; waitForIdle()
+                            assertTrue(onAllNodes(actions[0].second).fetchSemanticsNodes().isEmpty(), "$mode mouse on 取消选择 clears the selection and hides the row")
+                            println("TON-1603 mismatch $mode enter+mouse marks=${marks().size}")
+                        }
                 } finally { tutor.close() }
             }
         } finally { http.close(); server.stop(0) }

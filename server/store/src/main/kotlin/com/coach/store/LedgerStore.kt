@@ -861,7 +861,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
                                 // A timed attempt handed in after its limit is kept and graded, but never counts as timed evidence.
                                 val limit = posed?.payload?.num("timeLimitSec") ?: 0
                                 val overtime = limit > 0 && clock() - posed!!.payload.num("posedAt") > (limit + Essay.GRACE_SEC) * 1000
-                                emit("answer_submitted",JsonObject(json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer")) +
+                                emit("answer_submitted",JsonObject(json("attemptId" to attemptId,"answer" to p.str("answer"),"offline" to p.flag("offline"),"finalAnswer" to p.str("finalAnswer"),"guessed" to p.flag("guessed")) +
                                     if (overtime) json("overtime" to true) else json()),"attempt:$attemptId:answer")
                                 if (question.first == "SINGLE_CHOICE") {
                                     val correct = choiceId(qid)

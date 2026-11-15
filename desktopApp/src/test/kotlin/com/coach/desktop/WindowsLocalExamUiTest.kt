@@ -63,6 +63,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-paper-start-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-paper-start-0").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { store.active(book.id) != null }
+            // The attempt is stored before the paper pane recomposes; wait for the essay field itself.
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-text-essay").fetchSemanticsNodes().isNotEmpty() }
             val id = store.active(book.id)!!.str("mockId")
             onNodeWithTag("local-text-essay").performScrollTo().performClick().performTextReplacement(draft)
             waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == draft }
@@ -123,6 +125,8 @@ class WindowsLocalExamUiTest {
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-paper-start-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-paper-start-0").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { store.active(book.id) != null }
+            // The attempt is stored before the paper pane recomposes; wait for the essay field itself.
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-text-essay").fetchSemanticsNodes().isNotEmpty() }
             val id = store.active(book.id)!!.str("mockId")
             onNodeWithTag("local-text-essay").performScrollTo().performClick().performTextReplacement(draft)
             waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == draft }

@@ -57,7 +57,7 @@ class TextbookLibraryTest {
         c.dismissPrompt(); c.page(3)
         assertFalse(library.book(imported.id).learning)
         assertTrue(library.book(imported.id).promptSeen)
-        c.back(); c.learn(); c.mode(QuestionMode.CHOICE); c.enableLearning()
+        c.back(); c.learn(LearningPath.QUESTION_FIRST); c.mode(QuestionMode.CHOICE); c.enableLearning()
         assertEquals(BookScreen.LEARNING, c.state.value.screen)
         c.lesson(1)
         val lesson = c.state.value.book!!.lessons[1]
@@ -118,7 +118,7 @@ class TextbookLibraryTest {
         val scan = root.resolve("scan.pdf")
         PDDocument().use { it.addPage(PDPage()); it.save(scan.toFile()) }
         val c = TextbookController(TextbookLibrary(root.resolve("library")))
-        c.importBook(scan); c.read(); c.dismissPrompt(); c.learn(); c.enableLearning()
+        c.importBook(scan); c.read(); c.dismissPrompt(); c.learn(LearningPath.QUESTION_FIRST); c.enableLearning()
         assertFalse(c.state.value.book!!.learning)
         assertTrue(c.state.value.error!!.contains("没有可提取"))
         c.dismissPrompt(); c.read()

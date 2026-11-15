@@ -54,7 +54,7 @@ class SourceRoundTripTest {
             // constrained viewport so this still tests a real, nonzero scroll position.
             setContent { Box(Modifier.size(900.dp, 450.dp)) { TextbookWorkspace(controller) { null } } }
             waitUntil(timeoutMillis = 20_000) { !controller.state.value.busy && controller.state.value.book != null }
-            onNodeWithTag("home-learn").performClick()
+            onNodeWithTag("home-learn").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val book = controller.state.value.book!!
             val lesson = book.lessons[book.lessonIndex]

@@ -4,6 +4,16 @@ import java.text.Normalizer
 import kotlin.random.Random
 
 internal enum class QuestionMode(val label: String) { NONE("不出"), CHOICE("选择"), SHORT_ANSWER("简答") }
+internal enum class LearningPath(val label: String) {
+    READ("看书"), READ_AND_LEARN("边看边学"), QUESTION_FIRST("做题学");
+
+    companion object {
+        fun restore(saved: String?, learning: Boolean): LearningPath =
+            if (saved == null) { if (learning) QUESTION_FIRST else READ }
+            else entries.firstOrNull { it.name == saved }
+                ?: throw IllegalArgumentException("保存的学习方式无法识别，原有进度和作答已保留。")
+    }
+}
 internal data class BookPage(val number: Int, val text: String)
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
 internal data class BookLesson(val id: String, val title: String, val blocks: List<SourceBlock>) {

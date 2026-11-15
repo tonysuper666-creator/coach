@@ -10,7 +10,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.platform.LocalFocusManager
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
@@ -48,6 +52,7 @@ import com.coach.ui.v7.ReadingPage
 import com.coach.ui.v7.coursePageDetails
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.io.File
 import java.time.Instant
 import javax.imageio.ImageIO
@@ -1145,6 +1150,122 @@ class WeekFocusRingTest {
     }
 
     /**
+     * WeeklyReader's own selection row — 划线 / 一句批注 / 再讲一遍 / 举个例子 / 取消选择 — sits in a Row that scrolls
+     * sideways and clips its own bounds. Every pill must carry the V7 ring just inside its edge: complete on all four sides
+     * at 1224dp, and still starting at the pill's own edge for the pill flush against the clip after the row is scrolled to
+     * either end at 360dp. ≥3:1 against the paper under the pill and against the pill's own fill, light and dark. Tab walks
+     * the five in order, Enter on 划线 saves exactly one mark for the selected quote, a real mouse click on 取消选择 clears
+     * the row, and blur restores the pixels. Offscreen Skiko, not a native window.
+     */
+    @Test fun weeklyReaderSelectionRowKeepsItsInsideRingWhenTheRowScrolls() {
+        val body = "Synthetic pears grow in an orchard."
+        val quote = body.substring(0, 9)
+        val section = json("section_id" to "S1", "body" to body, "title" to "【W3·slides】Synthetic section",
+            "content_version" to "v1", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic slide 4"))
+        val names = listOf("划线", "一句批注", "再讲一遍", "举个例子", "取消选择")
+        val actions = names.map { it to (hasText(it) and hasClickAction()) }
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = (if (exchange.requestURI.path.endsWith("/explain/cancel")) "{}"
+                else """{"text":"Synthetic explanation","sources":[]}""").toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val narrow = w < 700f
+                        var latest = json("marks" to JsonArray(emptyList()), "dark" to dark)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            var state by remember { mutableStateOf(latest) }
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 1, listOf(section), section, emptyList(),
+                                    (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
+                                    { transform -> state = transform(state); latest = state }, {}, { _, _ -> }, {}, {}, {})
+                            }
+                        }
+                        waitForIdle()
+                        fun select() {
+                            onNodeWithTag("reader-text").performScrollTo().performSemanticsAction(SemanticsActions.SetSelection) { it(0, 9, false) }
+                            waitForIdle()
+                        }
+                        fun marks() = (latest["marks"] as? JsonArray).orEmpty().map { it.jsonObject }
+                        select()
+                        for ((n, m) in actions) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode $n is offered once text is selected")
+                        if (!narrow) {
+                            val before = shot("$mode-selrow-unfocused")
+                            val b0 = actions.map { first(it.second).boundsInRoot }
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                            val stops = mutableListOf<String>()
+                            for ((i, nm) in actions.withIndex()) {
+                                stops += "${nm.first}=${tabUntil(nm.second)}"
+                                assertTrue(focused(nm.second), "$mode Tab never reached ${nm.first}")
+                                assertEquals(b0[i], first(nm.second).boundsInRoot, "$mode focusing must not move or resize ${nm.first}")
+                                measurePillInside(mode, "选区行-${nm.first}", nm.second, before)
+                            }
+                            assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the five actions are consecutive Tab stops: $stops")
+                            println("TON-1603 week $mode selrow tab-stops ${stops.joinToString(" ")}")
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            val all = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                            assertRegionEqual(before, shot("$mode-selrow-blurred"), all, "$mode the selection row after blur")
+                            // Enter keeps 划线's own action: exactly one mark for the quote the user selected, nothing else.
+                            select()
+                            onNode(actions[0].second).requestFocus(); waitForIdle()
+                            enter(actions[0].second)
+                            assertEquals(1, marks().count { it.str("quote") == quote }, "$mode Enter on 划线 saves the selected quote once: ${marks()}")
+                            println("TON-1603 week $mode selrow enter marks=${marks().size}")
+                            select()
+                        } else {
+                            // Scroll the row to its far end, then to its start: each time one pill is flush against the clip,
+                            // and its ring must still start at that pill's own edge — complete, not cut by the row.
+                            // 划线 itself is clipped away once the row is at its end, so read the offset from a pill that stays whole.
+                            val startLeft = first(actions[1].second).boundsInRoot.left
+                            onNode(actions[4].second).performScrollTo(); waitForIdle()
+                            val atEnd = first(actions[4].second).boundsInRoot
+                            val moved = (startLeft - first(actions[1].second).boundsInRoot.left) / scale
+                            println("TON-1603 week $mode selrow right-edge=${atEnd.right / scale}dp viewport=${w}dp scrolled=${moved}dp")
+                            assertTrue(moved > 8f, "$mode the row really scrolls: 一句批注 moved $moved dp")
+                            assertTrue(atEnd.right >= w * scale - 30 * scale, "$mode 取消选择 sits against the clipped right edge: ${atEnd.right / scale}dp of ${w}dp")
+                            val beforeEnd = shot("$mode-selrow-end-unfocused")
+                            onNode(actions[4].second).requestFocus(); waitForIdle()
+                            assertTrue(focused(actions[4].second), "$mode 取消选择 takes focus at the clipped right edge")
+                            assertEquals(atEnd, first(actions[4].second).boundsInRoot, "$mode focusing must not move or resize 取消选择 at the right edge")
+                            measurePillInside(mode, "取消选择-右端", actions[4].second, beforeEnd)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertRegionEqual(beforeEnd, shot("$mode-selrow-end-blurred"), atEnd.inflate(10 * scale), "$mode 取消选择 at the right edge after blur")
+                            onNode(actions[0].second).performScrollTo(); waitForIdle()
+                            val backLeft = first(actions[0].second).boundsInRoot
+                            println("TON-1603 week $mode selrow left-edge=${backLeft.left / scale}dp viewport=${w}dp")
+                            assertTrue(backLeft.left <= 30 * scale, "$mode 划线 sits against the clipped left edge: ${backLeft.left / scale}dp")
+                            val beforeStart = shot("$mode-selrow-start-unfocused")
+                            onNode(actions[0].second).requestFocus(); waitForIdle()
+                            assertTrue(focused(actions[0].second), "$mode 划线 takes focus at the clipped left edge")
+                            assertEquals(backLeft, first(actions[0].second).boundsInRoot, "$mode focusing must not move or resize 划线 at the left edge")
+                            measurePillInside(mode, "划线-左端", actions[0].second, beforeStart)
+                            // A real mouse click on 取消选择 clears the row and saves nothing.
+                            onNode(actions[4].second).performMouseInput { click() }; waitForIdle()
+                            waitUntil(timeoutMillis = 5_000) { onAllNodes(actions[4].second).fetchSemanticsNodes().isEmpty() }
+                            for ((n, m) in actions) assertEquals(0, onAllNodes(m).fetchSemanticsNodes().size, "$mode mouse click on 取消选择 clears $n")
+                            assertEquals(0, marks().size, "$mode 取消选择 saves nothing")
+                            println("TON-1603 week $mode selrow mouse-clear nodes=${onAllNodes(actions[4].second).fetchSemanticsNodes().size} marks=${marks().size}")
+                        }
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { server.stop(0) }
+    }
+
+    /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
      * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.
@@ -1211,10 +1332,12 @@ class WeekFocusRingTest {
         val fill = shot[l + ringPx + 2, cy]
         fun isFill(c: Color) = contrast(c, fill) < 1.08f
         fun walk(step: (Int) -> Color): Pair<Int, Int> {
+            // Bounded: with no ring and no focus fill there is nothing to find, and the assertion below should say so
+            // instead of walking off the image.
             var i = 0
-            while (isFill(step(i))) i++
+            while (i < 200 && isFill(step(i))) i++
             val margin = i
-            while (!isFill(step(i))) i++
+            while (i < 200 && !isFill(step(i))) i++
             return margin to i - margin
         }
         val sides = listOf("left" to walk { shot[l + it, cy] }, "right" to walk { shot[r - it, cy] },

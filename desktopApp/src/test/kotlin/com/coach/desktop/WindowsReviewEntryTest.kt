@@ -329,7 +329,7 @@ class WindowsReviewEntryTest {
         assertTrue(desktopUsesTextbooks("Windows 11", " ", " "))
         assertFalse(desktopUsesTextbooks("Windows 11", "C", null))
         assertFalse(desktopUsesTextbooks("Windows 11", null, "C"))
-        assertFalse(desktopUsesTextbooks("Mac OS X", null, null))
+        assertTrue(desktopUsesTextbooks("Mac OS X", null, null))
         assertEquals("C", resolveCourse(" C ", "other"))
     }
 

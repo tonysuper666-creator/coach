@@ -36,6 +36,7 @@ internal class TextbookLibrary(val directory: Path) {
                 answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,
                 completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
             sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
         } }
         backfillReviews()
     }
@@ -47,6 +48,23 @@ internal class TextbookLibrary(val directory: Path) {
         db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
             while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
         } } }
+    }
+
+    @Synchronized fun learningPath(book: String): String? = database().use { db ->
+        db.prepareStatement("SELECT path FROM book_learning_paths WHERE book=?").use { sql ->
+            sql.setString(1, book)
+            sql.executeQuery().use { row -> if (row.next()) row.getString(1) else null }
+        }
+    }
+
+    @Synchronized fun saveLearningPath(book: String, path: String) {
+        require(path in setOf("READ", "READ_AND_LEARN", "QUESTION_FIRST")) { "未知的学习走法。" }
+        database().use { db ->
+            db.prepareStatement("INSERT INTO book_learning_paths(book,path) SELECT id,? FROM books WHERE id=? ON CONFLICT(book) DO UPDATE SET path=excluded.path").use { sql ->
+                sql.setString(1, path); sql.setString(2, book)
+                require(sql.executeUpdate() == 1) { "这本教材已不在书架中。" }
+            }
+        }
     }
 
     @Synchronized fun book(id: String): Textbook = database().use { db ->

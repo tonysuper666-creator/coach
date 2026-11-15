@@ -52,7 +52,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows and the top-bar week name.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name and the Desk 目录 / 收起目录 buttons.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -466,6 +466,115 @@ class WeekFocusRingTest {
         }
     }
 
+    /**
+     * Desk 目录 / 收起目录 on the real WeekPage. First, for both modes, the never-focused frames: the page, and the drawer opened by mouse
+ * (Material focuses 收起目录 then, which must stay as invisible as in Material).
+     * Then by keyboard: Tab reaches 目录, its ring sits inside the pill (the pill starts right where "Coach" ends and 4dp
+     * below the window top) ≥3:1, blur restores, Enter opens the drawer;
+     * Tab reaches 收起目录, whose ring is likewise inside its pill (the drawer clips at its left edge) and complete on all four sides,
+     * blur restores the open drawer, Enter closes it.
+     */
+    @Test fun deskDirectoryToggleAndCloseShowRingAndKeepTheirActions() {
+        val view = threeWeeks()
+        val toggle = hasTestTag("v7-directory-toggle")
+        val close = hasText("收起目录") and hasClickAction()
+        val drawer = hasTestTag("v7-directory-drawer")
+        withController { controller ->
+            val baseline = mutableMapOf<String, Pair<PixelMap, Rect>>()
+            for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                val mode = if (dark) "dark" else "light"
+                setContent { CoachTheme(dark) { Surface { WeekPage(controller, view, TutorUiState(), WeekActions(controller, rememberCoroutineScope()), { _, _ -> }, 2) } } }
+                waitForIdle()
+                baseline["$mode-page"] = shot("$mode-directory-unfocused") to first(toggle).boundsInRoot
+                assertEquals(0, onAllNodes(drawer).fetchSemanticsNodes().size, "$mode drawer starts closed")
+                onNode(toggle).performClick(); waitForIdle()
+                assertEquals(1, onAllNodes(drawer).fetchSemanticsNodes().size, "$mode a click on 目录 opens the drawer")
+                baseline["$mode-drawer"] = shot("$mode-drawer-unfocused") to first(close).boundsInRoot
+                println("TON-1603 week $mode 目录 mouse-open 收起目录 focused=${focused(close)} (Material moves focus there; no ring while input is pointer)")
+                println("TON-1603 week $mode 目录 bounds=${baseline.getValue("$mode-page").second.let { "${it.left / scale},${it.top / scale} ${it.width / scale}x${it.height / scale}dp" }} " +
+                    "收起目录 bounds=${baseline.getValue("$mode-drawer").second.let { "${it.left / scale},${it.top / scale} ${it.width / scale}x${it.height / scale}dp" }}")
+            }
+            for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                val mode = if (dark) "dark" else "light"
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface {
+                    focus = LocalFocusManager.current
+                    WeekPage(controller, view, TutorUiState(), WeekActions(controller, rememberCoroutineScope()), { _, _ -> }, 2)
+                } } }
+                waitForIdle()
+                val (page, toggleBounds) = baseline.getValue("$mode-page")
+                assertRegionEqual(page, shot("$mode-directory-again"), Rect(0f, 0f, 1224f * scale, 900f * scale), "$mode page renders the same twice")
+                onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                val n = 1 + tabUntil(toggle)
+                assertTrue(focused(toggle), "$mode Tab never reached 目录")
+                assertEquals(toggleBounds, first(toggle).boundsInRoot, "$mode focusing must not move or resize 目录")
+                measurePillInside(mode, "目录", toggle, page)
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                assertRegionEqual(page, shot("$mode-directory-blurred"), toggleBounds.inflate(10 * scale), "$mode 目录 after blur")
+
+                onNode(toggle).requestFocus(); waitForIdle()
+                enter(toggle)
+                assertEquals(1, onAllNodes(drawer).fetchSemanticsNodes().size, "$mode Enter on 目录 opens the drawer")
+                val (open, closeBounds) = baseline.getValue("$mode-drawer")
+                assertEquals(closeBounds, first(close).boundsInRoot, "$mode 收起目录 keeps its size and place")
+                var m = 0
+                while (!focused(close) && m < 40 && tabOnce()) m++
+                assertTrue(focused(close), "$mode Tab never reached 收起目录")
+                val inside = measurePillInside(mode, "收起目录", close, open)
+                println("TON-1603 week $mode 目录 tab-stops start→目录=$n 目录→收起目录=$m")
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                assertRegionEqual(open, shot("$mode-drawer-blurred"), closeBounds.inflate(10 * scale).intersect(Rect(0f, 0f, 300f * scale, 900f * scale)), "$mode 收起目录 after blur")
+                assertTrue(countDiff(open, inside, closeBounds) > 0, "$mode the focused frame shows a ring")
+                onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                var k = 1
+                while (!focused(close) && k < 40 && tabOnce()) k++
+                assertTrue(focused(close), "$mode Tab from a blurred page never reached 收起目录")
+                assertRegionEqual(inside, shot("$mode-收起目录-tabbed"), closeBounds.inflate(10 * scale).intersect(Rect(0f, 0f, 300f * scale, 900f * scale)), "$mode Tab-reached 收起目录 shows the same ring")
+                println("TON-1603 week $mode 目录 tab-stops blurred→收起目录=$k")
+
+                onNode(close).requestFocus(); waitForIdle()
+                enter(close)
+                assertEquals(0, onAllNodes(drawer).fetchSemanticsNodes().size, "$mode Enter on 收起目录 closes the drawer")
+                println("TON-1603 week $mode 目录 enter opened=1 closed=1")
+            }
+        }
+    }
+
+    /**
+     * Ring drawn inside a text-button pill that sits on a clipping edge: from each pill edge walk inward on the centre lines.
+     * The ring must start at the edge (no clipped part) and be V7FocusRingWidth wide on all four sides, ≥3:1 against the
+     * surface the pill sits on and against the pill's own focused fill.
+     */
+    private fun ComposeUiTest.measurePillInside(mode: String, label: String, m: SemanticsMatcher, before: PixelMap): PixelMap {
+        val shot = shot("$mode-$label-focused")
+        val b = first(m).boundsInRoot
+        val cx = b.center.x.roundToInt(); val cy = b.center.y.roundToInt()
+        val l = b.left.roundToInt(); val t = b.top.roundToInt(); val r = b.right.roundToInt() - 1; val bo = b.bottom.roundToInt() - 1
+        val ringPx = (V7FocusRingWidth.value * scale).roundToInt()
+        val fill = shot[l + ringPx + 2, cy]
+        fun isFill(c: Color) = contrast(c, fill) < 1.08f
+        fun walk(step: (Int) -> Color): Pair<Int, Int> {
+            var i = 0
+            while (isFill(step(i))) i++
+            val margin = i
+            while (!isFill(step(i))) i++
+            return margin to i - margin
+        }
+        val sides = listOf("left" to walk { shot[l + it, cy] }, "right" to walk { shot[r - it, cy] },
+            "top" to walk { shot[cx, t + it] }, "bottom" to walk { shot[cx, bo - it] })
+        val ring = shot[l + 1, cy]
+        val surface = before[l + 1, cy]
+        println("TON-1603 week $mode $label ring=${hex(ring)} surface=${hex(surface)} fill=${hex(fill)} ring:surface=${"%.2f".format(contrast(ring, surface))} ring:fill=${"%.2f".format(contrast(ring, fill))} " +
+            "pill=${l / scale},${t / scale} ${b.width / scale}x${b.height / scale}dp " + sides.joinToString(" ") { (n, v) -> "$n=${v.first}/${v.second}px" })
+        assertTrue(contrast(ring, surface) >= 3f, "$mode $label ring vs the surface under the pill")
+        assertTrue(contrast(ring, fill) >= 3f, "$mode $label ring vs the pill's focused fill")
+        for ((n, v) in sides) {
+            assertTrue(v.first <= 1, "$mode $label $n ring starts ${v.first}px inside the edge, want 0–1 (complete, not clipped)")
+            assertTrue(abs(v.second - V7FocusRingWidth.value * scale) <= 1.5f, "$mode $label $n ring ${v.second}px")
+        }
+        return shot
+    }
+
     private data class Edge(val week: Int, val dead: SemanticsMatcher, val live: SemanticsMatcher, val lands: Int)
 
     private fun threeWeeks(scope: Int? = null): CourseView {
@@ -521,6 +630,36 @@ class WeekFocusRingTest {
             for (x in m3.left.toInt() until m3.right.toInt()) for (y in m3.top.toInt() - 4 until m3.bottom.toInt() + 4)
                 if (px[x, y] != px[x, y + dy]) diff++
             assertEquals(0, diff, "unfocused V7TextButton pixels differ from Material TextButton")
+        }
+    }
+
+    /** The Desk variants: custom contentPadding and the ring drawn inside the pill keep Material's size, slot and unfocused pixels. */
+    @Test fun v7TextButtonWithPaddingOrInsideRingLooksExactlyLikeMaterialWhenUnfocused() {
+        val padding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+        for (dark in listOf(false, true)) for (custom in listOf(true, false)) runSkikoComposeUiTest(size = Size(300f * scale, 200f * scale), density = Density(scale)) {
+            val mode = if (dark) "dark" else "light"
+            var clicks = 0
+            setContent { CoachTheme(dark) { Surface { Column {
+                if (custom) TextButton({}, Modifier.testTag("m3"), contentPadding = padding) { Text("目录") }
+                else TextButton({}, Modifier.testTag("m3")) { Text("收起目录") }
+                if (custom) V7TextButton({ clicks++ }, Modifier.testTag("v7"), contentPadding = padding, ringInside = true) { Text("目录") }
+                else V7TextButton({ clicks++ }, Modifier.testTag("v7"), ringInside = true) { Text("收起目录") }
+            } } } }
+            waitForIdle()
+            val m3 = onNodeWithTag("m3").fetchSemanticsNode().boundsInRoot
+            val v7 = onNodeWithTag("v7").fetchSemanticsNode().boundsInRoot
+            println("TON-1603 week $mode padding=${if (custom) "8dp" else "default"} inside material=${m3.width / scale}x${m3.height / scale}dp v7=${v7.width / scale}x${v7.height / scale}dp slot=${(v7.top - m3.top) / scale}dp")
+            assertEquals(m3.size, v7.size, "$mode same visible size")
+            assertEquals(48f * scale, v7.top - m3.top, 0.5f, "$mode same 48dp touch slot")
+            assertEquals(m3.left, v7.left)
+            val px = shot("$mode-material-vs-v7-inside-${if (custom) "padding" else "default"}")
+            val dy = (v7.top - m3.top).roundToInt()
+            var diff = 0
+            for (x in m3.left.toInt() until m3.right.toInt()) for (y in m3.top.toInt() - 4 until m3.bottom.toInt() + 4)
+                if (px[x, y] != px[x, y + dy]) diff++
+            assertEquals(0, diff, "$mode unfocused inside-ring V7TextButton pixels differ from Material TextButton")
+            onNodeWithTag("v7").performMouseInput { click(Offset(2 * scale, v7.height / 2)) }; waitForIdle()
+            assertEquals(1, clicks, "$mode a click 2dp inside the pill's edge still reaches the button")
         }
     }
 

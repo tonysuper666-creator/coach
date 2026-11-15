@@ -107,7 +107,7 @@ fun Desk(
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(Modifier.width(300.dp)) {
-                TextButton(onClick = { scope.launch { drawerState.close() } }) { Text("收起目录") }
+                V7TextButton(onClick = { scope.launch { drawerState.close() } }, ringInside = true) { Text("收起目录") }
                 if (drawerState.isOpen) Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).testTag("v7-directory-drawer")) { directory() }
             }
         }) {
@@ -139,7 +139,7 @@ fun Desk(
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
                         }
-                        TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
+                        V7TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp), ringInside = true) { Text("目录") }
                         if (onBack != null) {
                             TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }

@@ -8,6 +8,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -24,10 +29,18 @@ internal sealed interface BookSourceState {
 }
 
 /** Passage must belong to the explicitly passed current book AND resolve in the real library (same file version, page, range, quote). */
-internal fun bookSourceState(p: BookPassage, book: Textbook, resolver: BookSourceResolver): BookSourceState {
-    if (p.book != book.id) return BookSourceState.WrongBook("这条出处对不上当前这本书。")
-    val r = resolver.resolve(OwnedBookCitation(p.book, p.page, p.start, p.end), p.text)
-    return if (r is BookSourceResolution.Resolved) BookSourceState.Ready else BookSourceState.Stale("书的内容变了，这条出处已过期。")
+internal fun bookSourceState(p: BookPassage, book: Textbook, resolver: BookSourceResolver): BookSourceState =
+    bookSourceStates(listOf(p), book, resolver).single()
+
+/** Batch check, blocking: call off the UI thread. The book file is hashed once for the whole batch. */
+internal fun bookSourceStates(sources: List<BookPassage>, book: Textbook, resolver: BookSourceResolver): List<BookSourceState> {
+    val mine = sources.filter { it.book == book.id }
+    val results = resolver.resolveAll(mine.map { OwnedBookCitation(it.book, it.page, it.start, it.end) to it.text }).iterator()
+    return sources.map { p ->
+        if (p.book != book.id) BookSourceState.WrongBook("这条出处对不上当前这本书。")
+        else if (results.next() is BookSourceResolution.Resolved) BookSourceState.Ready
+        else BookSourceState.Stale("书的内容变了，这条出处已过期。")
+    }
 }
 
 /** 「第 12 页 · “前 16 字…”」: no SHA, no offsets. Counts by code point so a surrogate pair is never split. */
@@ -39,31 +52,41 @@ internal fun bookSourceLabel(p: BookPassage): String {
 }
 
 /**
- * Typed-source row. Only [BookSourceState.Ready] rows are buttons (focusable, in Tab order); stale / other-book rows
- * are read-only text. [onOpen] receives the freshly re-resolved [BookSourceTarget] (physical page, quote, UTF-16 range).
- * Click re-resolves, so a file changed since composition is refused and the row turns stale instead of opening.
+ * Typed-source row. Verification never runs during composition: rows show as plain labels until a background
+ * batch check ([Dispatchers.IO], one file hash per batch) finishes. Only [BookSourceState.Ready] rows are buttons
+ * (focusable, in Tab order); stale / other-book rows are read-only text. A click re-verifies off the UI thread;
+ * on success [onOpen] gets the fresh [BookSourceTarget] (physical page, quote, UTF-16 range), on refusal the row
+ * turns stale and [onRefused] fires so the caller can move focus off the button that vanished.
  */
 @Composable
 internal fun BookSourceRow(
     sources: List<BookPassage>, book: Textbook, resolver: BookSourceResolver,
     focus: (Int) -> FocusRequester, onOpen: (index: Int, target: BookSourceTarget) -> Unit, modifier: Modifier = Modifier,
+    onRefused: (index: Int) -> Unit = {},
 ) {
     var refreshed by remember(sources, book.id) { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val states by produceState<List<BookSourceState>?>(null, sources, book.id, refreshed) {
+        value = withContext(Dispatchers.IO) { bookSourceStates(sources, book, resolver) }
+    }
     Column(modifier.fillMaxWidth()) {
         if (sources.isEmpty()) {
             Text("这段讲解没有可核对的出处。", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-source-none"))
             return@Column
         }
         sources.forEachIndexed { i, p ->
-            val state = remember(p, book.id, refreshed) { bookSourceState(p, book, resolver) }
-            when (state) {
+            when (val state = states?.getOrNull(i)) {
+                null -> Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-source-pending-$i"))
                 BookSourceState.Ready -> TextButton(
                     onClick = {
-                        val again = resolver.resolve(OwnedBookCitation(p.book, p.page, p.start, p.end), p.text)
-                        if (p.book == book.id && again is BookSourceResolution.Resolved) onOpen(i, again.target) else refreshed++
+                        scope.launch {
+                            val again = withContext(Dispatchers.IO) { resolver.resolve(OwnedBookCitation(p.book, p.page, p.start, p.end), p.text) }
+                            if (p.book == book.id && again is BookSourceResolution.Resolved) onOpen(i, again.target)
+                            else { refreshed++; onRefused(i) }
+                        }
                     },
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
-                        .semantics { contentDescription = "打开出处：《${book.title}》第 ${p.page} 页" },
+                        .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p)}" },
                 ) { Text(bookSourceLabel(p)) }
                 is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i")) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall)

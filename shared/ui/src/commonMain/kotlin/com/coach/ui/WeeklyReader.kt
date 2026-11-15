@@ -136,8 +136,10 @@ internal fun WeeklyReader(
                         Column(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             if (!focus) {
                                 Text("本周要点", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("mainline-notes"))
-                                TextButton(onClick = onRefresh) { Text("重新读取本周内容") }
-                                for (s in sections) TextButton(onClick = { onSection(s.str("section_id")) }, modifier = Modifier.fillMaxWidth()) {
+                                // The column below scrolls and clips at its own bounds as well, so these keep the ring inside
+                                // the pill too: the section rows stay full width, and the ring is whole wherever the page is scrolled.
+                                V7TextButton(onClick = onRefresh, ringInside = true) { Text("重新读取本周内容") }
+                                for (s in sections) V7TextButton(onClick = { onSection(s.str("section_id")) }, modifier = Modifier.fillMaxWidth(), ringInside = true) {
                                     Text((if (s.flag("mastered")) "✓ " else "○ ") + com.coach.client.displayTitle(s.str("title")), Modifier.fillMaxWidth())
                                 }
                             }

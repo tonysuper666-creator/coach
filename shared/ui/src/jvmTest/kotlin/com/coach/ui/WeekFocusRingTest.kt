@@ -1557,6 +1557,95 @@ class WeekFocusRingTest {
             }
         } finally { http.close(); server.stop(0) }
     }
+
+    /**
+     * The reader's table of contents — 重新读取本周内容 and one row per section — sits inside the vertically scrolling
+     * column, which clips at its own bounds too, so each pill draws the same ring just inside its edge. At both widths
+     * and both page lightnesses: the three section rows keep the content column's full click width and stay left-aligned,
+     * 重新读取 keeps its own hug width, Tab walks the four in order with the ring complete on all four sides (≥3:1 to
+     * whatever is under it), blur restores the pixels, and Enter plus a real mouse click fire the original callback for
+     * that row and nothing else.
+     */
+    @Test fun weeklyReaderTocShowsRingInsideOnRefreshAndSectionRows() {
+        val titles = listOf("第1节要点", "第2节要点", "第3节要点")
+        val sections = titles.mapIndexed { i, title ->
+            json("section_id" to "S${i + 1}", "body" to "Synthetic section ${i + 1} body.", "title" to "【W2】$title",
+                "content_version" to "v1", "fact_ids" to listOf("F$i"), "sources" to listOf("Synthetic slide $i"))
+        }
+        val names = listOf("重新读取") + titles.map { it.take(2) }
+        val targets = listOf(hasText("重新读取本周内容")) + titles.map { hasText(it, substring = true) }
+        val all = targets.map { it and hasClickAction() }
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = "{}".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val events = mutableListOf<String>()
+                        var latest = json("marks" to JsonArray(emptyList()), "dark" to dark)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            var state by remember { mutableStateOf(latest) }
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 2, sections, null, emptyList(), emptyList(), state, rememberScrollState(), "",
+                                    { transform -> state = transform(state); latest = state }, { events += "section:$it" },
+                                    { s, q -> events += "quiz:$s:$q" }, { events += "refresh" }, { on -> events += "focus:$on" }, {})
+                            }
+                        }
+                        waitForIdle()
+                        for ((i, m) in all.withIndex()) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode ${names[i]} is offered once")
+                        val before = shot("$mode-toc-unfocused")
+                        val b0 = all.map { first(it).boundsInRoot }
+                        println("TON-1603 week $mode toc bounds=" + names.indices.joinToString(" ") { i -> val r = b0[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                        // The section rows must keep the whole content column as their click area, not shrink to their label.
+                        val column = minOf(720f, w - 40f) * scale
+                        for (i in 1..3) {
+                            assertEquals(column, b0[i].width, 1.5f, "$mode ${names[i]} keeps the full-width click area")
+                            assertEquals(b0[1].left, b0[i].left, 0.5f, "$mode ${names[i]} stays left-aligned with the list")
+                        }
+                        assertTrue(b0[0].width < b0[1].width, "$mode 重新读取 keeps its own hug width, not the column's")
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        val stops = mutableListOf<String>()
+                        for ((i, m) in all.withIndex()) {
+                            stops += "${names[i]}=${tabUntil(m)}"
+                            assertTrue(focused(m), "$mode Tab never reached ${names[i]}")
+                            assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize ${names[i]}")
+                            measurePillInside(mode, "目录-${names[i]}", m, before)
+                        }
+                        println("TON-1603 week $mode toc tab-stops ${stops.joinToString(" ")}")
+                        assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode 重新读取 and the three rows are consecutive Tab stops: $stops")
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        val region = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                        assertRegionEqual(before, shot("$mode-toc-blurred"), region, "$mode the table of contents after blur")
+
+                        /** Runs [act] on [i] and checks that pill's own callback fires, once, and nothing else. */
+                        fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                            val n0 = events.size
+                            act(all[i]); waitForIdle()
+                            assertEquals(listOf(if (i == 0) "refresh" else "section:S$i"), events.drop(n0), "$mode $how ${names[i]} runs its own action once")
+                            if (how == "Enter") assertTrue(focused(all[i]), "$mode $how ${names[i]} keeps focus")
+                        }
+                        for (i in names.indices) check("Enter", i) { enter(it) }
+                        for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                        println("TON-1603 week $mode toc enter+mouse events=$events")
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+
     /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be

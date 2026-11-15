@@ -4,10 +4,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.offset
 import androidx.compose.ui.unit.dp
 import com.coach.client.CourseView
 import com.coach.domain.*
 import com.coach.protocol.CommandBody
+import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
 
@@ -58,20 +62,40 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
 fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { expanded = true }, enabled = !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {
+        TextButton(onClick = { expanded = true }, enabled = !actions.busy, modifier = Modifier.heightIn(min = 48.dp).v7FocusRing(ButtonDefaults.textShape)) {
             Text(if (actions.busy) "正在更新…" else view.projection.studyScope?.let { "第 ${it.week} 周 · 换周 ▾" } ?: "浏览各周 ▾")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             view.weeks.forEach { week ->
                 val remaining = view.weekKps(week).count { it.status !in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }
                 val label = view.weekLabel(week)
-                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · 还有 $remaining 节没会") }, onClick = { expanded = false; actions.select(week) })
+                DropdownMenuItem(text = { Text(if (week in view.midtermExemptionWeeks) label else "$label · 还有 $remaining 节没会") }, onClick = { expanded = false; actions.select(week) }, modifier = Modifier.v7FocusRingInside())
             }
-            if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) })
+            if (view.projection.studyScope != null) DropdownMenuItem(text = { Text("全部课程") }, onClick = { expanded = false; actions.select(0) }, modifier = Modifier.v7FocusRingInside())
         }
     }
     actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
 }
+
+/**
+ * The shared V7 focus ring for a full-width menu row. The menu clips its rows (scroll viewport and surface),
+ * so a ring drawn outside the row would lose its edges; here it is drawn [MenuRingInset] inside the row instead.
+ * The row keeps its size, position and click area: only the ring's own frame is inset.
+ */
+private val MenuRingInset = 8.dp
+
+private fun Modifier.v7FocusRingInside(): Modifier = this
+    .layout { measurable, constraints ->
+        val p = MenuRingInset.roundToPx()
+        val inner = measurable.measure(constraints.offset(-2 * p, -2 * p))
+        layout(inner.width + 2 * p, inner.height + 2 * p) { inner.place(p, p) }
+    }
+    .v7FocusRing()
+    .layout { measurable, constraints ->
+        val p = MenuRingInset.roundToPx()
+        val row = measurable.measure(constraints.offset(2 * p, 2 * p))
+        layout(row.width - 2 * p, row.height - 2 * p) { row.place(-p, -p) }
+    }
 
 @Composable
 fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
@@ -92,7 +116,7 @@ fun WeekSummary(view: CourseView, actions: WeekActions, connected: Boolean) {
 internal fun WeekBrowseSummary(view: CourseView, week: Int, actions: WeekActions) {
     val points = view.weekKps(week)
     Text(if (points.isEmpty()) "这一周没有新课。" else "${com.coach.client.KpStatus.PASSED.label} ${points.count { it.status in setOf(com.coach.client.KpStatus.PASSED, com.coach.client.KpStatus.SOLID) }} / ${points.size} 节", style = MaterialTheme.typography.bodyMedium)
-    TextButton(onClick = { actions.onReview(week) }) { Text("再练这一周错题") }
-    view.weeks.firstOrNull { it > week }?.let { next -> TextButton(onClick = { actions.select(next) }) { Text("浏览下一周") } }
+    V7TextButton(onClick = { actions.onReview(week) }) { Text("再练这一周错题") }
+    view.weeks.firstOrNull { it > week }?.let { next -> V7TextButton(onClick = { actions.select(next) }) { Text("浏览下一周") } }
     actions.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 }

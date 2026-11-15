@@ -3,16 +3,19 @@ package com.coach.desktop.books
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
 import java.nio.charset.CodingErrorAction
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardOpenOption.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
@@ -126,6 +129,8 @@ internal class CodexAuthSnapshot private constructor(
     companion object {
         private const val AUTH_FILE = "auth.json"
         private const val MAX_AUTH_BYTES = 1_048_576
+        private val LOCK_WAIT_NANOS = TimeUnit.SECONDS.toNanos(3)
+        private const val LOCK_POLL_MILLIS = 25L
         // No safe conditional-rename primitive exists in portable NIO. Refuse until a verified
         // transaction backend is explicitly supplied; never silently downgrade to check + move.
         private val atomicReplace = AuthAtomicReplace { _, _, _, _, _ -> AuthCommitStatus.ATOMIC_REPLACE_FAILED }
@@ -166,9 +171,32 @@ internal class CodexAuthSnapshot private constructor(
         private fun <T> guarded(source: Path, action: () -> T): T {
             val lockPath = source.resolveSibling(".${source.fileName}.coach-refresh.lock")
             FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-                if (lock == null) throw AuthSnapshotFailure(AuthSnapshotProblem.WRITER_BUSY)
+                val lock = acquireWithin(channel, LOCK_WAIT_NANOS)
+                    ?: throw AuthSnapshotFailure(AuthSnapshotProblem.WRITER_BUSY)
                 lock.use { return action() }
+            }
+        }
+
+        /**
+         * A short commit by another run (including an UNCHANGED one) must not discard this run's
+         * refresh, so wait a bounded time instead of failing on the first contended attempt.
+         * Polling keeps the wait bounded; FileChannel.lock() has no timeout. Interruption stops
+         * waiting, restores the flag and reports WRITER_BUSY without touching the source.
+         */
+        private fun acquireWithin(channel: FileChannel, budgetNanos: Long): FileLock? {
+            val deadline = System.nanoTime() + budgetNanos
+            while (true) {
+                // Another channel in this JVM holding the lock surfaces as OverlappingFileLockException.
+                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
+                if (lock != null) return lock
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return null
+                try {
+                    Thread.sleep(minOf(LOCK_POLL_MILLIS, TimeUnit.NANOSECONDS.toMillis(remaining).coerceAtLeast(1)))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
             }
         }
 
@@ -203,10 +231,34 @@ internal class CodexAuthSnapshot private constructor(
             }
         }
 
-        /** Only the newly allocated home is traversed, without following links made by a child. */
+        /**
+         * Only the newly allocated home is traversed. Links made by a child are unlinked, never
+         * followed: NIO reports a Windows junction (mount-point reparse point) as a directory with
+         * isSymbolicLink=false, so walkFileTree would otherwise enter it and delete its target's
+         * files. Any non-root directory that is a reparse point (isOther) or whose real path leaves
+         * the home is removed as a link entry only and its subtree skipped. Symbolic links are
+         * already reported as files and deleted as links by visitFile.
+         */
         private fun removeHome(home: Path) {
-            if (!Files.exists(home, NOFOLLOW_LINKS)) return
+            val rootAttrs = try {
+                Files.readAttributes(home, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            } catch (_: NoSuchFileException) {
+                return
+            }
+            if (rootAttrs.isSymbolicLink || rootAttrs.isOther || !rootAttrs.isDirectory) {
+                Files.delete(home)
+                return
+            }
+            val realHome = home.toRealPath()
             Files.walkFileTree(home, object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (dir == home) return FileVisitResult.CONTINUE
+                    if (attrs.isOther || attrs.isSymbolicLink || !resolvesInPlace(dir, home, realHome)) {
+                        Files.delete(dir) // Removes the link entry; the target is untouched.
+                        return FileVisitResult.SKIP_SUBTREE
+                    }
+                    return FileVisitResult.CONTINUE
+                }
                 override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                     Files.delete(file)
                     return FileVisitResult.CONTINUE
@@ -217,6 +269,12 @@ internal class CodexAuthSnapshot private constructor(
                     return FileVisitResult.CONTINUE
                 }
             })
+        }
+
+        /** True only when [dir] resolves to exactly its lexical position under the real home. */
+        private fun resolvesInPlace(dir: Path, home: Path, realHome: Path): Boolean {
+            val real = try { dir.toRealPath() } catch (_: IOException) { return false }
+            return real == realHome.resolve(home.relativize(dir).toString())
         }
     }
 }

@@ -277,10 +277,7 @@ class CodexAuthSnapshotTest {
     @Test fun anotherJvmHoldingTheGuardCausesRefusalAndCleanup() = Fixture().use { f ->
         val snapshot = f.snapshot()
         f.refresh(snapshot)
-        val fixture = Path.of("src/test/resources/synthetic-auth/HoldAuthLock.java").toAbsolutePath()
-        val executable = Path.of(System.getProperty("java.home"), "bin", if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")
-        val process = ProcessBuilder(executable.toString(), fixture.toString(), f.originalHome.resolve(".auth.json.coach-refresh.lock").toString())
-            .redirectErrorStream(true).start()
+        val process = holdLock(f, null)
         try {
             val ready = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readLine() }.get(20, TimeUnit.SECONDS)
             assertEquals("SYNTHETIC_LOCK_HELD", ready)
@@ -296,6 +293,50 @@ class CodexAuthSnapshotTest {
         }
     }
 
+    @Test fun briefLockHolderInAnotherJvmIsWaitedOutAndRefreshCommits() = Fixture().use { f ->
+        val snapshot = f.snapshot()
+        f.refresh(snapshot)
+        val process = holdLock(f, 1_000)
+        try {
+            val ready = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readLine() }.get(20, TimeUnit.SECONDS)
+            assertEquals("SYNTHETIC_LOCK_HELD", ready)
+            val started = System.nanoTime()
+            val receipt = snapshot.commit()
+            val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            println("SYNTHETIC_BRIEF_LOCK hold_ms=1000 waited_ms=$waitedMillis status=${receipt.status} cleaned=${receipt.cleaned}")
+            assertEquals(AuthCommitReceipt(AuthCommitStatus.COMMITTED, true), receipt)
+            assertTrue(waitedMillis >= 300, "Commit must have waited for the other JVM's lock")
+            f.intact(auth("REFRESHED"))
+            f.clean()
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+            assertEquals(0, process.exitValue())
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+            assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun junctionMadeInsideRunHomeIsUnlinkedWithoutDeletingItsTarget() = Fixture().use { f ->
+        val victim = Files.createDirectory(f.root.resolve("SYNTHETIC-victim"))
+        val keep = Files.writeString(victim.resolve("KEEP_SYNTHETIC.txt"), "SYNTHETIC_OUTSIDE_HOME")
+        for (finish in listOf("commit", "close")) {
+            val snapshot = f.snapshot()
+            f.refresh(snapshot)
+            // A top-level junction and one nested under an ordinary child directory.
+            junction(snapshot.home.resolve("link"), victim)
+            junction(Files.createDirectory(snapshot.home.resolve("sessions")).resolve("deep"), victim)
+            assertTrue(Files.exists(snapshot.home.resolve("link/KEEP_SYNTHETIC.txt")), "Junction must resolve to the victim")
+            val cleaned = if (finish == "commit") snapshot.commit().cleaned else { snapshot.close(); true }
+            val victimKept = Files.exists(keep) && Files.readString(keep) == "SYNTHETIC_OUTSIDE_HOME"
+            println("SYNTHETIC_JUNCTION finish=$finish cleaned=$cleaned victim_file_exists=$victimKept home_exists=${Files.exists(snapshot.home, java.nio.file.LinkOption.NOFOLLOW_LINKS)}")
+            assertTrue(cleaned)
+            assertTrue(victimKept, "Cleanup must not follow a junction out of the run home")
+            assertFalse(Files.exists(snapshot.home, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            f.clean()
+        }
+        f.intact(auth("REFRESHED")) // Only the commit pass publishes; close() never writes back.
+    }
+
     @Test fun negativeControlShowsUnconditionalCopyLosesConcurrentUpdate() = Fixture().use { f ->
         val unsafeCopy = Files.write(f.runs.resolve("SYNTHETIC-unsafe-auth.json"), auth("STALE_REFRESH"))
         Files.write(f.source, auth("NEW_OTHER_PROCESS"))
@@ -306,6 +347,21 @@ class CodexAuthSnapshotTest {
         Files.delete(unsafeCopy)
         f.clean()
         println("SYNTHETIC_UNGUARDED_COPY lost_updates=1; protected_case=concurrentSourceChangeIsPreservedRatherThanOverwritten")
+    }
+
+    private fun holdLock(f: Fixture, holdMillis: Long?): Process {
+        val fixture = Path.of("src/test/resources/synthetic-auth/HoldAuthLock.java").toAbsolutePath()
+        val executable = Path.of(System.getProperty("java.home"), "bin", if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")
+        val command = mutableListOf(executable.toString(), fixture.toString(), f.originalHome.resolve(".auth.json.coach-refresh.lock").toString())
+        if (holdMillis != null) command += holdMillis.toString()
+        return ProcessBuilder(command).redirectErrorStream(true).start()
+    }
+
+    private fun junction(link: Path, target: Path) {
+        val process = ProcessBuilder("cmd.exe", "/c", "mklink", "/J", link.toString(), target.toString())
+            .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        assertTrue(process.waitFor(10, TimeUnit.SECONDS))
+        assertEquals(0, process.exitValue(), "Synthetic junction creation failed")
     }
 
     private fun race(first: () -> AuthCommitReceipt, second: () -> AuthCommitReceipt): List<AuthCommitReceipt> {

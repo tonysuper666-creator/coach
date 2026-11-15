@@ -65,10 +65,17 @@ internal class OwnedBookConsentStore(private val library: TextbookLibrary) {
         OwnedBookConsent(id, actions, OwnedBookConsentIdentity(string("provider"), string("model"), string("notice")), at)
     }.getOrNull()
 
-    @Synchronized fun grant(offer: NeedsConsent, actions: Set<OwnedBookAction>) {
+    /**
+     * Replaces any previous consent (and its outstanding leases) with [actions] under one lock and
+     * one revision bump, so a single affirmative click is one change for every observer.
+     * Caller awaits the returned jobs before reporting the grant complete.
+     */
+    @Synchronized fun replace(offer: NeedsConsent, actions: Set<OwnedBookAction>): List<Job> {
         require(actions.isNotEmpty())
         library.book(offer.book)
-        check(active[offer.book].isNullOrEmpty()) { "Finish revoking before granting again" }
+        generation[offer.book] = (generation[offer.book] ?: 0) + 1
+        val jobs = active.remove(offer.book).orEmpty().map { it.job }
+        jobs.forEach { it.cancel() }
         val record = buildJsonObject {
             put("book", offer.book)
             putJsonArray("actions") { actions.sortedBy { it.name }.forEach { add(it.name.lowercase()) } }
@@ -84,6 +91,7 @@ internal class OwnedBookConsentStore(private val library: TextbookLibrary) {
             Files.deleteIfExists(path(offer.book, ".declined"))
         } finally { Files.deleteIfExists(temp) }
         revision.value++
+        return jobs
     }
 
     /** Caller awaits the returned jobs before reporting revoke complete; cancellation starts under the lock. */

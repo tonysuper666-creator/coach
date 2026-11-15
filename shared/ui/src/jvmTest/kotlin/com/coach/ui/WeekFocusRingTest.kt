@@ -1647,6 +1647,132 @@ class WeekFocusRingTest {
     }
 
     /**
+     * The 选择原文、划线或追问 / 排版阅读 toggle and each mark's 编辑这一句 / 删除划线 sit in the same vertically scrolling,
+     * clipping column as the table of contents, so they draw the ring just inside the pill too. At both widths and both
+     * page lightnesses: Tab reaches all three (编辑这一句 → 删除划线 consecutively), focusing never resizes a pill and leaves
+     * it fully in view, each ring starts at the pill edge, is 2dp on all four sides and ≥3:1 to the paper and to the focused
+     * fill, and blur restores the pixels at that scroll position. Enter and a real mouse click keep each action's own effect:
+     * the toggle flips its label (Enter keeps focus), 编辑这一句 opens 我的一句话（自动保存） which 返回阅读 closes, 删除划线
+     * removes only this mark (another section's mark stays) — and no reader callback fires.
+     */
+    @Test fun weeklyReaderSelectToggleAndMarkActionsShowRingInsideAndKeepTheirActions() {
+        val body = "Synthetic pears grow.\nThey ripen in *autumn*."
+        val section = json("section_id" to "S1", "body" to body, "title" to "【W3·slides】Synthetic section",
+            "content_version" to "v1", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic slide 4"))
+        val mine = json("id" to "M1", "section" to "S1", "version" to "v1", "original" to body, "start" to 0, "end" to 9,
+            "quote" to body.substring(0, 9), "note" to "")
+        val other = json("id" to "M2", "section" to "S2", "version" to "v1", "original" to "Other body.", "start" to 0, "end" to 5,
+            "quote" to "Other", "note" to "")
+        val names = listOf("选区开关", "编辑这一句", "删除划线")
+        val toggle = hasClickAction() and (hasText("选择原文、划线或追问") or hasText("排版阅读"))
+        val targets = listOf(toggle, hasClickAction() and hasText("编辑这一句"), hasClickAction() and hasText("删除划线"))
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = "{}".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val events = mutableListOf<String>()
+                        val start = json("marks" to JsonArray(listOf(mine, other)), "dark" to dark)
+                        val state = mutableStateOf(start)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 1, listOf(section), section, emptyList(),
+                                    (state.value["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state.value, rememberScrollState(), "",
+                                    { transform -> state.value = transform(state.value) }, { events += "section:$it" },
+                                    { s, q -> events += "quiz:$s:$q" }, { events += "refresh" }, { on -> events += "focus:$on" }, {})
+                            }
+                        }
+                        waitForIdle()
+                        fun ids() = (state.value["marks"] as? JsonArray).orEmpty().map { it.jsonObject.str("id") }
+                        fun dialogs() = onAllNodes(isDialog()).fetchSemanticsNodes().size
+                        fun label() = if (onAllNodes(hasClickAction() and hasText("排版阅读")).fetchSemanticsNodes().isEmpty()) "选择原文、划线或追问" else "排版阅读"
+                        for ((i, m) in targets.withIndex()) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode ${names[i]} is offered once")
+                        assertEquals("选择原文、划线或追问", label(), "$mode a formatted section starts in 排版 view")
+                        /** Where the pill really is, before the scrolling column clips it (boundsInRoot is clipped). */
+                        fun full(m: SemanticsMatcher) = first(m).let { Rect(it.positionInRoot, Size(it.size.width.toFloat(), it.size.height.toFloat())) }
+                        val b0 = targets.map { full(it) }
+                        println("TON-1603 week $mode marks bounds=" + names.indices.joinToString(" ") { i -> val r = b0[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                        /** The column may have scrolled to bring the pill into view, so the paper under it is shot here: blur, shoot, refocus, measure, blur again. */
+                        fun measureHere(label: String, m: SemanticsMatcher) {
+                            val at = full(m)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertEquals(at, full(m), "$mode $label blur must not scroll the column")
+                            val under = shot("$mode-$label-unfocused")
+                            onNode(m).requestFocus(); waitForIdle()
+                            assertTrue(focused(m), "$mode $label takes focus again")
+                            assertEquals(at, full(m), "$mode $label refocus must not scroll the column")
+                            measurePillInside(mode, label, m, under)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertRegionEqual(under, shot("$mode-$label-blurred"), at.inflate(10 * scale), "$mode $label after blur")
+                            onNode(m).requestFocus(); waitForIdle()
+                        }
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        val stops = mutableListOf<String>()
+                        for ((i, m) in targets.withIndex()) {
+                            stops += "${names[i]}=${tabUntil(m)}"
+                            assertTrue(focused(m), "$mode Tab never reached ${names[i]}")
+                            val b = full(m)
+                            assertEquals(b0[i].size, b.size, "$mode focusing must not resize ${names[i]}")
+                            assertEquals(b, first(m).boundsInRoot, "$mode Tab leaves ${names[i]} fully in view")
+                            measureHere("划线区-${names[i]}", m)
+                        }
+                        println("TON-1603 week $mode marks tab-stops ${stops.joinToString(" ")}")
+                        assertTrue(stops[2].endsWith("=1"), "$mode 编辑这一句 and 删除划线 are consecutive Tab stops: $stops")
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+
+                        /** Runs [act] on target [i] and checks that action's own effect, and nothing beyond it. */
+                        fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                            val m = targets[i]; val n0 = events.size; val label0 = label(); val ids0 = ids()
+                            act(m); waitForIdle()
+                            when (i) {
+                                0 -> {
+                                    assertEquals(if (label0 == "排版阅读") "选择原文、划线或追问" else "排版阅读", label(), "$mode $how the toggle flips its label")
+                                    assertEquals(ids0, ids(), "$mode $how the toggle keeps the marks")
+                                    if (how == "Enter") assertTrue(focused(m), "$mode $how the toggle keeps focus")
+                                }
+                                1 -> {
+                                    assertEquals(1, onAllNodes(hasText("我的一句话（自动保存）") and hasAnyAncestor(isDialog())).fetchSemanticsNodes().size, "$mode $how 编辑这一句 opens the note dialog")
+                                    onNode(hasText("返回阅读") and hasAnyAncestor(isDialog())).performClick(); waitForIdle()
+                                    assertEquals(0, dialogs(), "$mode $how 返回阅读 closes the dialog")
+                                    assertEquals(ids0, ids(), "$mode $how 编辑这一句 keeps the marks")
+                                }
+                                else -> {
+                                    assertEquals(listOf("M2"), ids(), "$mode $how 删除划线 removes only this section's mark")
+                                    assertTrue(onAllNodes(targets[1]).fetchSemanticsNodes().isEmpty(), "$mode $how the deleted mark's actions are gone")
+                                    runOnIdle { state.value = start }; waitForIdle()
+                                    assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode the mark is back for the next check")
+                                }
+                            }
+                            assertEquals(dark, (state.value["dark"] as? JsonPrimitive)?.content == "true", "$mode $how ${names[i]} leaves the page lightness alone")
+                            assertEquals(emptyList(), events.drop(n0), "$mode $how ${names[i]} fires no reader callback")
+                        }
+                        for (i in names.indices) check("Enter", i) { enter(it) }
+                        check("Enter", 0) { enter(it) }
+                        for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                        check("mouse", 0) { m -> onNode(m).performMouseInput { click() } }
+                        assertEquals("选择原文、划线或追问", label(), "$mode two flips each way put the 排版 view back")
+                        println("TON-1603 week $mode marks enter+mouse events=$events ids=${ids()}")
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+
+    /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
      * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.

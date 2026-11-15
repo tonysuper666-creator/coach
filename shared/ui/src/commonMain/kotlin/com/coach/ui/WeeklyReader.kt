@@ -148,7 +148,8 @@ internal fun WeeklyReader(
                                 Text(com.coach.client.displayTitle(section.str("title")), style = MaterialTheme.typography.titleLarge)
                                 emphasis(section.strings("fact_ids"))
                                 val text = section.str("body")
-                                if (formatted) TextButton(onClick = { selectOriginal = !selectOriginal; selected = TextRange.Zero }) {
+                                // Same scrolling, clipping column as above: the ring stays just inside the pill's edge.
+                                if (formatted) V7TextButton(onClick = { selectOriginal = !selectOriginal; selected = TextRange.Zero }, ringInside = true) {
                                     Text(if (selectOriginal) "排版阅读" else "选择原文、划线或追问")
                                 }
                                 val annotated = AnnotatedString.Builder(text).apply {
@@ -210,8 +211,8 @@ internal fun WeeklyReader(
                                 for (mark in own) {
                                     PersonalMarks(listOf(mark), sections)
                                     Row {
-                                        TextButton(onClick = { editMark = mark.str("id") }) { Text("编辑这一句") }
-                                        TextButton(onClick = { set("marks", JsonArray(marks.filterNot { it.str("id") == mark.str("id") })) }) { Text("删除划线") }
+                                        V7TextButton(onClick = { editMark = mark.str("id") }, ringInside = true) { Text("编辑这一句") }
+                                        V7TextButton(onClick = { set("marks", JsonArray(marks.filterNot { it.str("id") == mark.str("id") })) }, ringInside = true) { Text("删除划线") }
                                     }
                                 }
                             }

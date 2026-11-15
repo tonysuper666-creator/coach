@@ -190,7 +190,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         sourceOrigin = SourceFocus.PRACTICE
         run { controller.source(); anchor.page?.let { controller.page(it) } }
     }
-    CoachTheme {
+    // 外壳（WindowsTextbookHost）已经按系统或 coach.windows.theme 选好明暗；正文沿用同一个选择，
+    // 不再让内层按系统重选，否则外壳浅、正文深。
+    CoachTheme(com.coach.ui.theme.CoachTheme.colors.dark) {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
             val noteKey = event.toReaderInput()

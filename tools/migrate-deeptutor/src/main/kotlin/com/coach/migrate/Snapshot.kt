@@ -6,6 +6,7 @@ import java.nio.file.attribute.AclEntryFlag
 import java.nio.file.attribute.AclEntryPermission
 import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.*
@@ -36,19 +37,24 @@ private fun setPrivatePermissions(path: Path, directory: Boolean) {
     check(acl.acl == listOf(entry)) { "Private ACL did not retain the current user's exclusive grant" }
 }
 
+/** Only use a dedicated output tree: existing descendants have their permissions changed. */
 fun privateDir(p: Path): Path {
     Files.createDirectories(p)
+    val rootAttrs = Files.readAttributes(p, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    require(rootAttrs.isDirectory && !rootAttrs.isSymbolicLink && !rootAttrs.isOther) {
+        "Refusing link or special private root"
+    }
     // Existing files can carry explicit or inherited ACLs that survive changing their parent.
     // Protect them before any caller can overwrite them; never follow links outside this tree.
     Files.walkFileTree(p, object : SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(dir: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
-            require(attrs.isDirectory && !attrs.isSymbolicLink) { "Refusing non-directory private path" }
+        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+            require(attrs.isDirectory && !attrs.isSymbolicLink && !attrs.isOther) { "Refusing non-directory private path" }
             setPrivatePermissions(dir, directory = true)
             return FileVisitResult.CONTINUE
         }
 
-        override fun visitFile(file: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
-            require(attrs.isRegularFile && !attrs.isSymbolicLink) { "Refusing link or special file in private path" }
+        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+            require(attrs.isRegularFile && !attrs.isSymbolicLink && !attrs.isOther) { "Refusing link or special file in private path" }
             setPrivatePermissions(file, directory = false)
             return FileVisitResult.CONTINUE
         }

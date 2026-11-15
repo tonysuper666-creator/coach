@@ -279,7 +279,10 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
                     EntryCard("做题学", "先试题，答后看讲解；原文按需打开。", "home-question", !ui.busy, Modifier.weight(1f)) { onPath(LearningPath.QUESTION_FIRST) }
                 }
                 PrimaryButton(onLearn, enabled = !ui.busy, modifier = Modifier.testTag("home-learn")) {
-                    Text("继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
+                    // An old book without a chosen walk starts learning here; saying "continue reading" while the
+                    // button opens the start-learning prompt is what this label used to get wrong.
+                    Text(if (!ui.learningPathSaved && !book.learning) "开始学"
+                    else "继续${ui.learningPath.label}" + if (ui.learningPath == LearningPath.READ) " · 第 ${book.readingPage} 页" else " · 第 ${book.lessonIndex + 1} 节")
                 }
                 HorizontalDivider()
                 Text("全部教材", style = MaterialTheme.typography.titleMedium)

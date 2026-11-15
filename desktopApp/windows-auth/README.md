@@ -9,11 +9,16 @@ consumer supplies this home to its isolated child, then stops the whole child
 tree before calling `commit()`. Failed/cancelled execution calls `close()` instead.
 
 The snapshot records SHA256 and file identity/timestamps. Commit validates strict
-UTF-8 JSON objects, takes a stable sidecar file lock, stages on the source volume,
-and checks the source version again. A missing, replaced, damaged or changed
+UTF-8 JSON objects, takes a stable sidecar file lock (waiting up to 3 s for another
+run's commit, then `WRITER_BUSY`), stages on the source volume, and checks the
+source version again. A missing, replaced, damaged or changed
 source is preserved. A duplicate completion cannot publish a second time. The
 empty `.auth.json.coach-refresh.lock` remains intentionally: unlinking a released
 lock file would split the cross-process lock domain. It contains no credentials.
+Run-home cleanup never follows links a child made: a directory junction or other
+reparse point (which NIO reports as a directory, not a symbolic link), or any
+directory whose real path is not its own position under the home, is unlinked
+as an entry and its target is left untouched.
 
 An advisory lock plus `check; Files.move(ATOMIC_MOVE)` is insufficient when another
 process ignores the lock. `CoachAuthCommit.cs` therefore opens the original as a
@@ -59,7 +64,9 @@ The tests compile a real production entry point and a separate transaction fault
 harness into disposable synthetic directories. The production executable accepts
 only five positional transaction arguments; fault/barrier flags are absent. Tests
 cover no refresh, one refresh, changed/replaced/deleted source, late external
-updates after the NIO check, two completion races, another JVM holding the lock,
+updates after the NIO check, two completion races, another JVM holding the lock
+(indefinitely: refusal; for 1 s: waited out and committed), junctions to an
+outside synthetic victim left by the child (victim kept, home removed),
 invalid JSON/UTF-8, unsupported replacement, rollback after comparison/write/handle
 close, preserved ACL/file identity, shorter content, hardlinks, terminal unknown
 outcome, auth-only copy and cleanup. A barrier also verifies old-byte reader

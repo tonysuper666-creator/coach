@@ -11,6 +11,8 @@ import com.coach.store.BookSourceLocator
 import com.coach.store.LedgerStore
 import com.coach.store.ReviewVariantRejected
 import com.coach.store.sha256
+import com.coach.desktop.WindowsTextbookHost
+import androidx.compose.ui.test.*
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import kotlinx.coroutines.*
@@ -133,6 +135,49 @@ class BookPracticeOutboxTest {
             f.lesson.id, f.block.page, f.block.start, f.block.end, f.practice.reference, f.practice.options))
         println("PRACTICE producer attempt=${identity.originalAttemptId} guessed=${identity.guessed} original=${identity.originalAnswer == f.wrong}")
         assertTrue(identity.guessed); assertEquals(f.wrong, identity.originalAnswer); assertEquals(f.practice.prompt, identity.prompt)
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test fun hostSubmitsGuessToOriginalAttemptAndReopensTheSameCommand() = F().use { f ->
+        val library = TextbookLibrary(f.root.resolve("library"))
+        library.save(f.book.copy(learning = true, questionMode = QuestionMode.CHOICE))
+        f.serverPose("host-attempt")
+        runBlocking { f.sync.syncOnce() }
+        val controller = TextbookController(library, BookPracticeSession(f.sync, "C") { f.clock })
+        runComposeUiTest {
+            setContent { WindowsTextbookHost(controller) { null } }
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.book?.id == f.book.id && !controller.state.value.busy }
+            onNodeWithTag("home-learn").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            onNodeWithTag("practice-sync-status").assertTextEquals("原题已备好，可同步本次作答。")
+            onNodeWithTag("guess-mark").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.answer.guessed }
+            onNodeWithTag("choice-${f.practice.options.indexOf(f.practice.answer)}").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.practiceSync == "原作答已保存，等待同步。" }
+            assertEquals(1, f.outbox())
+            // A later local edit cannot silently replace the frozen original command.
+            runBlocking { controller.answer(PracticeAnswer(f.wrong, revealed = true, guessed = true)) }
+            assertEquals("原作答已锁定，当前本机修改未同步。", controller.state.value.practiceSync)
+            assertEquals(1, f.outbox())
+            runBlocking { controller.answer(PracticeAnswer(f.practice.answer, revealed = true, guessed = true)) }
+        }
+        val command = f.sync.retainedCommands().single().commandId
+        f.restartClient()
+        val reopened = TextbookController(TextbookLibrary(f.root.resolve("library")), BookPracticeSession(f.sync, "C") { f.clock })
+        runBlocking { reopened.load(); reopened.learn(); reopened.retryPracticeSync() }
+        assertTrue(reopened.state.value.answer.guessed)
+        assertEquals(command, f.sync.retainedCommands().single().commandId)
+        runBlocking { f.sync.syncOnce() }
+        assertEquals("OK", f.sync.receipt(command)?.status)
+        val submitted = f.serverEvents().single { it.type == "answer_submitted" && it.payload.str("attemptId") == "host-attempt" }
+        assertEquals(command, submitted.commandId)
+        assertEquals("phone", submitted.deviceId)
+        assertTrue(submitted.payload.flag("guessed"))
+        val pose = f.serverEvents().single { it.type == "question_posed" && it.payload.str("attemptId") == "host-attempt" }
+        val correctId = f.options.single { it.text == f.practice.answer }.optionId
+        assertEquals(pose.payload.getValue("letterMap").jsonObject.getValue(correctId).jsonPrimitive.content, submitted.payload.str("answer"))
+        assertFalse(reopened.library.reviews().single().completed)
+        println("PRACTICE_HOST attempt=host-attempt device=phone command=$command guessed=true correct=true receipt=OK reviewCompleted=false")
     }
 
     @Test fun unknownForeignOrUnlinkedIdentitiesStayNotReadyWithZeroIncrements() = F().use { f ->

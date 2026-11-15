@@ -229,7 +229,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; run { controller.source() } },
                         onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
-                        onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
+                        onSettings = { run { controller.questionSettings() } }, onRetrySync = { run { if (drafts.flush()) controller.retryPracticeSync() } }, onAnswer = { answer ->
                             ui.book?.let { current ->
                                 current.lessons.getOrNull(current.lessonIndex)?.let { lesson ->
                                     drafts.save(current.id, lesson.id, current.questionMode, answer)
@@ -509,7 +509,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, practiceSour
 @Composable
 private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
     returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
-    onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit) {
+    onSettings: () -> Unit, onRetrySync: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
     LaunchedEffect(returnFocus, ui.busy) {
@@ -548,6 +548,10 @@ private fun TextbookLearning(ui: LibraryUi, scroll: ScrollState, lessonSourceFoc
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
                     else {
                         SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus)
+                        if (book.questionMode == QuestionMode.CHOICE) {
+                            Text(ui.practiceSync, modifier = Modifier.testTag("practice-sync-status"))
+                            TextButton(onRetrySync, enabled = !ui.busy, modifier = Modifier.testTag("practice-sync-retry")) { Text("重试同步") }
+                        }
                         if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
                             Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"))
                             TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }

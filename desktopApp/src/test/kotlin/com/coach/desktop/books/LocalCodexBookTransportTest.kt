@@ -51,6 +51,11 @@ class LocalCodexBookTransportTest {
             if mode != 'truncated': event('turn.completed', usage={})
             if mode == 'future-event': event('future.tool_started')
             if mode == 'late-tool': event('item.completed', item=dict(type='command_execution'))
+            if mode == 'stderr-collab': print('collab spawn failed: no rollout found', file=sys.stderr)
+            if mode == 'stderr-router': print('codex_core::tools::router: tool invocation', file=sys.stderr)
+            if mode == 'stderr-late-collab': print('x' * 32768 + 'COLLAB spawn failed', file=sys.stderr)
+            if mode == 'stderr-split-router': print('x' * 8180 + 'codex_core::tools::router', file=sys.stderr)
+            if mode == 'stderr-benign': print('synthetic harmless diagnostic', file=sys.stderr)
         """.trimIndent())
         return LocalCodexBookTransport(Path.of(python), timeoutMillis = timeout,
             commandPrefix = listOf(python, script.toString(), mode, f.root.toString()))
@@ -62,8 +67,8 @@ class LocalCodexBookTransportTest {
         support.grant(support.consentOffer(f.a.id), OwnedBookAction.entries.toSet())
         assertIs<BookLearningReply.Text>(support.explain(f.explain()))
         val argv = Files.readString(f.root.resolve("argv.json"))
-        for (flag in listOf("exec", "gpt-6.1-sol", "model_reasoning_effort=low", "--ephemeral", "--skip-git-repo-check", "read-only", "--ignore-user-config", "--json", "-o", "web_search=disabled") +
-            listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use", "in_app_browser", "image_generation", "view_image").map { "features.$it=false" })
+        for (flag in listOf("exec", "gpt-6.1-sol", "model_reasoning_effort=low", "--ephemeral", "--skip-git-repo-check", "read-only", "--ignore-user-config", "--json", "-o", "web_search=disabled", "features.multi_agent_v2.disable_native_tools=true") +
+            listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use", "in_app_browser", "image_generation", "view_image", "multi_agent").map { "features.$it=false" })
             assertTrue(argv.contains(flag), flag)
         assertFalse(Files.exists(Path.of(Files.readString(f.root.resolve("cwd")))))
         val api = ConsentedBookLearningSupport(f.library, f.store, fake(f, "apikey"))
@@ -80,6 +85,18 @@ class LocalCodexBookTransportTest {
             support.grant(support.consentOffer(f.a.id), OwnedBookAction.entries.toSet())
             assertEquals(LocalCodexProblem.FAILED.message,
                 assertIs<BookLearningReply.Unavailable>(support.explain(f.explain()), mode).message, mode)
+            assertFalse(Files.exists(Path.of(Files.readString(f.root.resolve("cwd")))))
+        }
+    }
+
+    @Test fun stderrOnlyToolTracesNeverPublishEvenWithCleanJsonEventsAndValidAnswer() = runBlocking {
+        for (mode in listOf("stderr-collab", "stderr-router", "stderr-late-collab", "stderr-split-router", "stderr-benign")) {
+            val f = OwnedBookConsentTest.Fixture()
+            val support = ConsentedBookLearningSupport(f.library, f.store, fake(f, mode))
+            support.grant(support.consentOffer(f.a.id), OwnedBookAction.entries.toSet())
+            val reply = support.explain(f.explain())
+            if (mode == "stderr-benign") assertIs<BookLearningReply.Text>(reply)
+            else assertEquals(LocalCodexProblem.FAILED.message, assertIs<BookLearningReply.Unavailable>(reply, mode).message, mode)
             assertFalse(Files.exists(Path.of(Files.readString(f.root.resolve("cwd")))))
         }
     }

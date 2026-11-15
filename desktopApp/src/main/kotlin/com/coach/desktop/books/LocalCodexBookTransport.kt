@@ -65,8 +65,10 @@ internal class LocalCodexBookTransport(
             val argv = commandPrefix + listOf("exec", "-m", identity.model, "-c", "model_reasoning_effort=low",
                 "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "--ignore-user-config") +
                 listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
-                    "in_app_browser", "image_generation", "view_image").flatMap { listOf("-c", "features.$it=false") } +
-                listOf("-c", "web_search=disabled", "--json", "-o", output.toString(), "-")
+                    "in_app_browser", "image_generation", "view_image", "multi_agent").flatMap { listOf("-c", "features.$it=false") } +
+                // CLI 0.167 still exposes collaboration tools with multi_agent=false (even v2=false).
+                // Disable the native tools explicitly; stderr/JSONL guards reject observable calls too.
+                listOf("-c", "features.multi_agent_v2.disable_native_tools=true", "-c", "web_search=disabled", "--json", "-o", output.toString(), "-")
             val prompt = "Use only the supplied excerpts. Return only a JSON object with exactly two fields: " +
                 "answer (a useful explanation or answer, not a quotation) and citations (an array of excerpt IDs used). " +
                 "Do not use Markdown.\n\n" + request
@@ -105,7 +107,7 @@ internal class LocalCodexBookTransport(
                         if (input == null) boundedDiagnostic(process.inputStream)
                         else { eventsComplete = readCodexEvents(process.inputStream); "" }
                     } }
-                    val stderr = async { runInterruptible { boundedDiagnostic(process.errorStream) } }
+                    val stderr = async { runInterruptible { boundedDiagnostic(process.errorStream, rejectTools = input != null) } }
                     val writer = async { runInterruptible { process.outputStream.use { if (input != null) it.write(input.toByteArray(Charsets.UTF_8)) } } }
                     val exit = suspendCancellableCoroutine<Int> { continuation ->
                         process.onExit().whenComplete { finished, error ->
@@ -165,12 +167,21 @@ private fun readCodexEvents(stream: InputStream): Boolean {
     return completed && answer && !failed
 }
 
-private fun boundedDiagnostic(stream: InputStream): String = stream.use {
+// Some CLI tool calls (notably collaboration) have no JSONL item. Inspect every stderr byte,
+// including beyond the retained diagnostic limit and across read boundaries; never log it.
+private fun boundedDiagnostic(stream: InputStream, rejectTools: Boolean = false): String = stream.use {
     val kept = java.io.ByteArrayOutputStream()
     val buffer = ByteArray(8192)
+    var tail = ""
     while (true) {
         val count = it.read(buffer)
         if (count < 0) break
+        if (rejectTools) {
+            val scanned = tail + String(buffer, 0, count, Charsets.ISO_8859_1).lowercase()
+            if ("codex_core::tools::router" in scanned || "collab" in scanned)
+                throw LocalCodexFailure(LocalCodexProblem.FAILED)
+            tail = scanned.takeLast(24)
+        }
         if (kept.size() < 16_384) kept.write(buffer, 0, minOf(count, 16_384 - kept.size()))
     }
     kept.toString(Charsets.UTF_8)

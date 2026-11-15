@@ -15,6 +15,9 @@ transport logs and the exact snapshot SHA are in `.coach-winbox/<job>/`.
 Remote preparation/configuration/memory/queue failure (75) or SSH unavailability (255) uses
 the existing Mac heavy lock. A Gradle failure is returned to the caller.
 
+`:desktopApp:test` runs in winbox's console session by default (the Windows client is the product);
+`COACH_DESKTOP_HOST=local` keeps it on the Mac, and an unreachable winbox falls back to the Mac.
+
 Keep server tasks (including mixed server/shared commands), emulator/device
 tasks, desktop packaging, macOS/native tasks, ambiguous aggregate selectors
 such as `test`, scripts and commands needing local paths/environment on Mac.

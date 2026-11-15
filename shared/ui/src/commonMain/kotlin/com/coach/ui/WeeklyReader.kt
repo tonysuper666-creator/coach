@@ -222,11 +222,12 @@ internal fun WeeklyReader(
                                 // the heading, so tapping it left the rows hidden. Lifting it also keeps the reader's
                                 // chosen view across visits, like 深色阅读 and 专心读 below/above.
                                 val map = state.flag("map")
-                                TextButton(onClick = { set("map", JsonPrimitive(!map)); println("TON1394 reader map=${!map}") }) {
+                                // Both sit in the same clipping scroll column, so their rings go inside the pill as well.
+                                V7TextButton(onClick = { set("map", JsonPrimitive(!map)); println("TON1394 reader map=${!map}") }, ringInside = true) {
                                     Text(if (map) "收起本周脉络" else "本周脉络：节 → 考点 → 题")
                                 }
                                 if (map) for (s in sections) {
-                                    TextButton(onClick = { onSection(s.str("section_id")) }) { Text("要点：" + com.coach.client.displayTitle(s.str("title"))) }
+                                    V7TextButton(onClick = { onSection(s.str("section_id")) }, ringInside = true) { Text("要点：" + com.coach.client.displayTitle(s.str("title"))) }
                                     for ((index, fact) in s.strings("fact_ids").withIndex()) {
                                         val mastered = factMastered(fact, items)
                                         TextButton(onClick = { onSection(s.str("section_id")) }) {

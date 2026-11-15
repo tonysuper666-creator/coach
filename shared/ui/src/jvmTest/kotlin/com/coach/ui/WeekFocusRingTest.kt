@@ -65,12 +65,13 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
  * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances, its footer ‹ 上一节 / 下一节 › steps, its 一句批注 dialog's 取消 / 保存, its selection menu / bar actions 划线 / 一句批注 / 再讲一遍 / 举个例子 / 复制, and the
- * reader's own selection row 划线 / 一句批注 / 再讲一遍 / 举个例子 / 取消选择 (ring inside the pill, because that row clips).
+ * reader's own selection row 划线 / 一句批注 / 再讲一遍 / 举个例子 / 取消选择, its 本周脉络 toggle and 要点：… entries (ring inside the pill, because those rows clip).
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -1766,6 +1767,114 @@ class WeekFocusRingTest {
                         check("mouse", 0) { m -> onNode(m).performMouseInput { click() } }
                         assertEquals("选择原文、划线或追问", label(), "$mode two flips each way put the 排版 view back")
                         println("TON-1603 week $mode marks enter+mouse events=$events ids=${ids()}")
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+
+    /**
+     * The 本周脉络 toggle and each 要点：… entry sit in the same vertically scrolling, clipping column as the table of
+     * contents, so both draw the ring just inside the pill. With three sections of real material, at both widths and both
+     * page lightnesses: every pill is offered once, the 要点 rows keep their own hug width at the column's left edge,
+     * focusing moves and resizes nothing, each ring starts at the pill edge and is 2dp on all four sides at ≥3:1 to the
+     * paper and to the focused fill, and blur restores the pixels. With Enter and with a real mouse click the toggle
+     * closes 收起本周脉络 into 本周脉络：节 → 考点 → 题 and takes the entries away, and reopening brings them back; each
+     * 要点：… row calls onSection for its own section once — no other reader callback fires.
+     */
+    @Test fun weeklyReaderMapToggleAndPointEntriesShowRingInsideAndKeepTheirActions() {
+        val titles = listOf("第1节要点", "第2节要点", "第3节要点")
+        val sections = titles.mapIndexed { i, title ->
+            json("section_id" to "S${i + 1}", "body" to "Synthetic section ${i + 1} body.", "title" to "【W5】$title",
+                "content_version" to "v1", "fact_ids" to listOf("F$i"), "sources" to listOf("Synthetic slide $i"))
+        }
+        val names = listOf("脉络开关") + titles.map { it.take(2) }
+        val toggle = hasClickAction() and (hasText("收起本周脉络") or hasText("本周脉络：节 → 考点 → 题"))
+        // The rows print displayTitle(title), which drops the week prefix, so match the 要点： prefix and the title apart.
+        val all = listOf(toggle) + titles.map { hasClickAction() and hasText("要点：", substring = true) and hasText(it, substring = true) }
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = "{}".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val events = mutableListOf<String>()
+                        val start = json("map" to true, "dark" to dark, "marks" to JsonArray(emptyList()))
+                        val state = mutableStateOf(start)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 5, sections, null, emptyList(), emptyList(), state.value, rememberScrollState(), "",
+                                    { transform -> state.value = transform(state.value) }, { events += "section:$it" },
+                                    { s, q -> events += "quiz:$s:$q" }, { events += "refresh" }, { on -> events += "focus:$on" }, {})
+                            }
+                        }
+                        waitForIdle()
+                        fun mapOpen() = (state.value["map"] as? JsonPrimitive)?.content == "true"
+                        for ((i, m) in all.withIndex()) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode ${names[i]} is offered once")
+                        assertTrue(mapOpen(), "$mode the map starts open")
+                        assertEquals(1, onAllNodes(hasText("收起本周脉络")).fetchSemanticsNodes().size, "$mode an open map offers to close it")
+                        val before = shot("$mode-脉络-unfocused")
+                        val b0 = all.map { first(it).boundsInRoot }
+                        println("TON-1603 week $mode map bounds=" + names.indices.joinToString(" ") { i -> val r = b0[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                        val column = minOf(720f, w - 40f) * scale
+                        for (i in 1..3) {
+                            assertEquals(b0[0].left, b0[i].left, 0.5f, "$mode ${names[i]} stays left-aligned with the map toggle")
+                            assertTrue(b0[i].width < column, "$mode ${names[i]} keeps its own hug width, not the column's")
+                        }
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        val stops = mutableListOf<String>()
+                        for ((i, m) in all.withIndex()) {
+                            stops += "${names[i]}=${tabUntil(m)}"
+                            assertTrue(focused(m), "$mode Tab never reached ${names[i]}")
+                            assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize ${names[i]}")
+                            measurePillInside(mode, "脉络-${names[i]}", m, before)
+                        }
+                        println("TON-1603 week $mode map tab-stops ${stops.joinToString(" ")}")
+                        assertTrue(stops[1].endsWith("=1"), "$mode the toggle and the first 要点 row are consecutive Tab stops: $stops")
+                        // A section's 考点 row sits between two 要点 entries, so each later entry is one or two stops on.
+                        assertTrue(stops.drop(2).all { it.endsWith("=1") || it.endsWith("=2") }, "$mode the 要点 rows are the next stops down the map: $stops")
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        val region = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                        assertRegionEqual(before, shot("$mode-脉络-blurred"), region, "$mode the map block after blur")
+
+                        /** Runs [act] on [i] and checks that pill's own effect, once, and nothing else. */
+                        fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                            val n0 = events.size
+                            act(all[i]); waitForIdle()
+                            when (i) {
+                                0 -> {
+                                    assertFalse(mapOpen(), "$mode $how the toggle closes the map")
+                                    assertTrue(onAllNodes(all[1]).fetchSemanticsNodes().isEmpty(), "$mode $how a closed map offers no 要点 row")
+                                    assertEquals(1, onAllNodes(hasText("本周脉络：节 → 考点 → 题")).fetchSemanticsNodes().size, "$mode $how the toggle asks to open the map again")
+                                    if (how == "Enter") assertTrue(focused(all[i]), "$mode $how the toggle keeps focus")
+                                    runOnIdle { state.value = start }; waitForIdle()
+                                    assertTrue(mapOpen(), "$mode the map is open again for the next check")
+                                    assertEquals(1, onAllNodes(all[1]).fetchSemanticsNodes().size, "$mode the 要点 rows are back")
+                                    assertEquals(emptyList(), events.drop(n0), "$mode $how the toggle fires no reader callback")
+                                }
+                                else -> {
+                                    assertEquals(listOf("section:S$i"), events.drop(n0), "$mode $how ${names[i]} opens its own section once")
+                                    if (how == "Enter") assertTrue(focused(all[i]), "$mode $how ${names[i]} keeps focus")
+                                }
+                            }
+                            assertEquals(dark, (state.value["dark"] as? JsonPrimitive)?.content == "true", "$mode $how ${names[i]} leaves the page lightness alone")
+                        }
+                        for (i in names.indices) check("Enter", i) { enter(it) }
+                        for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                        println("TON-1603 week $mode map enter+mouse events=$events")
                     }
                 } finally { tutor.close() }
             }

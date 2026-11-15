@@ -9,6 +9,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -185,6 +190,11 @@ internal fun BookLessonExplanation(
     }
 }
 
+/** Keeps the ask that was actually sent, so a panel leaving the screen cannot send it twice. */
+private class InFlightAsk(
+    val request: BookPassageQuestion, val revision: Int, val epoch: Long, val answer: Deferred<BookLearningReply>,
+)
+
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
 internal class BookPassageAskState(val page: BookPage) {
     var selected by mutableStateOf<SourceBlock?>(null)
@@ -194,6 +204,19 @@ internal class BookPassageAskState(val page: BookPage) {
     var revision by mutableIntStateOf(0)
     // Keep authorization provenance with the reply, including while its dialog is unmounted.
     var replyEpoch by mutableStateOf<Long?>(null)
+    // One question is one outbound even when the dialog is closed and reopened under the same authorization.
+    private val asks = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var inFlight: InFlightAsk? = null
+
+    /** Reuse the ask already sent for this exact request and authorization; only a new send starts another. */
+    internal fun answerTo(request: BookPassageQuestion, revision: Int, epoch: Long,
+        call: suspend (BookPassageQuestion) -> BookLearningReply): Deferred<BookLearningReply> {
+        inFlight?.let { sent ->
+            if (sent.request == request && sent.revision == revision && sent.epoch == epoch) return sent.answer
+            sent.answer.cancel()
+        }
+        return asks.async { call(request) }.also { inFlight = InFlightAsk(request, revision, epoch, it) }
+    }
 }
 
 @Composable
@@ -210,6 +233,7 @@ internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support:
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
     var replyEpoch by state::replyEpoch
     val consent = remember(book.id, state, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
+    val session = state
     LaunchedEffect(book.id, state, support, consent) {
         combine(bookRequestStates(consenting, consent), snapshotFlow { request to revision }) { _, _ ->
             Triple(currentRequestState(consenting, consent), request, revision)
@@ -219,7 +243,7 @@ internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support:
             if (state.stopped || input == null) return@collectLatest
             if (reply != null) return@collectLatest
             val answer = try {
-                val result = support.ask(input)
+                val result = session.answerTo(input, attempt, state.epoch) { support.ask(it) }.await()
                 coroutineContext.ensureActive()
                 result
             } catch (cancel: CancellationException) { throw cancel }

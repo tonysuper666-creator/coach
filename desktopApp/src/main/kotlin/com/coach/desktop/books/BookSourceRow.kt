@@ -2,7 +2,9 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -78,7 +80,9 @@ internal fun BookSourceRow(
         }
         sources.forEachIndexed { i, p ->
             when (val state = states?.getOrNull(i)) {
-                null -> Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-pending-$i"))
+                null -> Column(Modifier.testTag("book-source-pending-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
+                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
+                }
                 BookSourceState.Ready -> TextButton(
                     onClick = {
                         scope.launch {
@@ -90,15 +94,20 @@ internal fun BookSourceRow(
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
                         .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p)}" },
                 ) { Text("打开原文 · " + bookSourceLabel(p)) }
-                is BookSourceState.Stale -> Column(Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-stale-$i")) {
-                    Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall)
+                is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
+                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
-                is BookSourceState.WrongBook -> Column(Modifier.padding(ButtonDefaults.TextButtonContentPadding).testTag("book-source-wrong-$i")) {
-                    Text(bookSourceLabel(p), style = MaterialTheme.typography.bodySmall)
+                is BookSourceState.WrongBook -> Column(Modifier.testTag("book-source-wrong-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
+                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
     }
 }
+
+/** Same height and text edge as a button row, so a row never jumps when it turns into (or out of) a button. */
+@Composable
+private fun Modifier.nonButtonRow(): Modifier =
+    this.fillMaxWidth().minimumInteractiveComponentSize().padding(ButtonDefaults.TextButtonContentPadding)

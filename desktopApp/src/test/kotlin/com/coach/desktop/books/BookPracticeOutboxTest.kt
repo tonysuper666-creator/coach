@@ -220,4 +220,21 @@ class BookPracticeOutboxTest {
         assertEquals(0, DriverManager.getConnection("jdbc:sqlite:${f.root.resolve("server").resolve("coach.sqlite")}").use { c ->
             c.createStatement().use { s -> s.executeQuery("SELECT COUNT(*) FROM book_ledger_sources").use { it.next(); it.getInt(1) } } })
     }
+
+    @Test fun aLearnerReadyHandedToAnAssistantSessionIsRefusedWithoutAnyIncrement() = F().use { f ->
+        f.serverPose("bp-attempt"); runBlocking { f.sync.syncOnce() }
+        val ready = assertIs<BookPracticeBinding.Ready>(f.bind())
+        val agent = SyncEngine(ClientDatabase(f.driver), "phone", f.transport, listOf("C"), { UUID.randomUUID().toString() },
+            ::sha256, agentRunId = "synthetic-agent-run")
+        val before = f.serverEvents()
+        val e = assertFailsWith<IllegalStateException> {
+            BookPracticeOutbox(agent).submit(ready, PracticeAnswer(f.wrong, guessed = true), f.clock) }
+        println("PRACTICE agent handed learner ready=${e.message}")
+        assertEquals("BOOK_PRACTICE_AGENT_SCOPE", e.message)
+        runBlocking { agent.syncOnce(); f.sync.syncOnce() }
+        assertEquals(0, f.outbox()); assertEquals(before, f.serverEvents())
+        // The learner session still owns its attempt.
+        assertEquals("OK", BookPracticeOutbox(f.sync).submit(ready, PracticeAnswer(f.wrong), f.clock)
+            .also { runBlocking { f.sync.syncOnce() } }.let { assertNotNull(f.sync.receipt(it)).status })
+    }
 }

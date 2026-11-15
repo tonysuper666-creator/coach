@@ -29,7 +29,7 @@ internal data class BookPassage(val book: String, val page: Int, val start: Int,
 internal data class BookPassageQuestion(val passage: BookPassage, val question: String)
 internal sealed interface BookLearningReply {
     data class Text(val text: String) : BookLearningReply
-    data class Unavailable(val message: String) : BookLearningReply
+    data class Unavailable(val message: String, val needsConsent: NeedsConsent? = null) : BookLearningReply
 }
 
 /** A real, authorized explanation/answer provider must be supplied here; source text is not a reply. */

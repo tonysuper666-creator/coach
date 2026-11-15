@@ -19,6 +19,7 @@ import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.BookLearningSupport
 import com.coach.desktop.books.UnconnectedBookLearningSupport
+import com.coach.desktop.books.localWindowsBookLearningSupport
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
@@ -71,6 +72,7 @@ internal fun runWindowsTextbooks() {
     val initialBounds = windowsInitialWindowBounds()
     application {
         val controller = remember { TextbookController(TextbookLibrary(directory)) }
+        val learningSupport = remember(controller.library) { localWindowsBookLearningSupport(controller.library) }
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
@@ -82,7 +84,7 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
-            WindowsTextbookHost(controller, drafts, exams, chooseBook = {
+            WindowsTextbookHost(controller, drafts, exams, support = learningSupport, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)
                     try {

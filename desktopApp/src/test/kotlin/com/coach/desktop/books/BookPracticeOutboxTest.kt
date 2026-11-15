@@ -225,6 +225,40 @@ class BookPracticeOutboxTest {
             c.createStatement().use { s -> s.executeQuery("SELECT COUNT(*) FROM book_ledger_sources").use { it.next(); it.getInt(1) } } })
     }
 
+    @Test fun alteredPosedFingerprintCannotQueueTheLocalAnswer() = F().use { f ->
+        val library = TextbookLibrary(f.root.resolve("library"))
+        library.save(f.book.copy(learning = true, questionMode = QuestionMode.CHOICE))
+        f.serverPose("fingerprint-attempt")
+        runBlocking { f.sync.syncOnce() }
+        val original = f.sync.localEvents("C").single { it.type == "question_posed" }
+        val altered = original.copy(payload = JsonObject(original.payload + ("fingerprint" to JsonPrimitive("synthetic-altered-fingerprint"))))
+        // Simulate a changed replica, leaving the authenticated server pose untouched.
+        DriverManager.getConnection("jdbc:sqlite:${f.root.resolve("client.sqlite")}").use { db ->
+            db.prepareStatement("UPDATE replica SET event_json=? WHERE seq=?").use { statement ->
+                statement.setString(1, LedgerJson.encodeToString(Event.serializer(), altered))
+                statement.setLong(2, original.seq)
+                assertEquals(1, statement.executeUpdate())
+            }
+        }
+        val before = f.serverEvents()
+        val controller = TextbookController(library, BookPracticeSession(f.sync, "C") { f.clock })
+        runBlocking {
+            controller.load()
+            controller.learn()
+            controller.answer(PracticeAnswer(f.practice.answer, revealed = true, guessed = true))
+            controller.retryPracticeSync()
+            f.sync.syncOnce()
+        }
+        assertEquals("同步未备好：原题身份尚未确认。", controller.state.value.practiceSync)
+        assertEquals(0, f.outbox())
+        assertEquals(before, f.serverEvents())
+        assertTrue(library.answer(f.book.id, f.lesson.id, QuestionMode.CHOICE).guessed)
+        f.restartClient()
+        assertEquals(0, f.outbox())
+        assertEquals(before, f.serverEvents())
+        println("PRACTICE_FINGERPRINT changed=true outbox=0 serverDelta=0 guessedPreserved=true")
+    }
+
     @Test fun aLearnerReadyHandedToAnAssistantSessionIsRefusedWithoutAnyIncrement() = F().use { f ->
         assertEquals(200, f.actualPose().statusCode()); runBlocking { f.sync.syncOnce() }
         val ready = assertIs<BookPracticeBinding.Ready>(f.bind())

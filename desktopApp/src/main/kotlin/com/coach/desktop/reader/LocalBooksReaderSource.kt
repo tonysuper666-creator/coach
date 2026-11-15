@@ -39,7 +39,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     private fun locationFailure(book: Textbook, pdfPage: Int, version: String = "1"): ReaderReply? = when {
         version != "1" -> refused(409, "资料版本已改变，请重新定位")
-        pdfPage !in 1..book.pages.size -> refused(409, "页码超出了这本教材的范围")
+        book.page(pdfPage) == null -> refused(409, "页码超出了这本教材的范围")
         else -> null
     }
 
@@ -68,7 +68,8 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
                 put("pages", book.pages.size)
             })
             put("progress", buildJsonObject {
-                put("pdfPage", book.readingPage)
+                // Stored progress is a local position; the reader is told the physical page it names.
+                put("pdfPage", book.pages.getOrNull(book.readingPage - 1)?.number ?: book.readingPage)
                 put("version", "1")
                 put("revision", 0L) // 只读投影；不宣称提供 CAS 修订号。
                 put("stale", false)
@@ -81,7 +82,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
     override suspend fun page(document: String, pdfPage: Int): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage)?.let { return it }
-        val p = book.pages[pdfPage - 1]
+        val p = checkNotNull(book.page(pdfPage))
         val sha = MessageDigest.getInstance("SHA-256").digest(p.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         val body = buildJsonObject {
             put("documentId", book.id)
@@ -96,7 +97,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
 
     override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? {
         val book = findBook(document) ?: return null
-        if (version != "1" || pdfPage !in 1..book.pages.size) return null
+        if (version != "1" || book.page(pdfPage) == null) return null
         val bufferedImage = if (book.format == "pdf") {
             runCatching { library.renderPdf(book, pdfPage) }.getOrNull()
         } else {
@@ -116,7 +117,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
             g.fillRect(0, 0, 1200, 1600)
             g.color = java.awt.Color(0x22, 0x22, 0x22)
             g.drawString("${book.title} · 第 $pdfPage 页", 50, 80)
-            val p = book.pages.getOrNull(pdfPage - 1)
+            val p = book.page(pdfPage)
             var y = 140
             for (line in p?.text?.lines().orEmpty().take(40)) {
                 g.drawString(line, 50, y)

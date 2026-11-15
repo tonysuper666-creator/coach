@@ -403,6 +403,14 @@ internal class TextbookLibrary(val directory: Path,
 internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
 
 internal object TextbookExtraction {
+    /**
+     * The server seeds a textbook page from its PDF marker to the next marker, so those marker
+     * numbers are the only page identity a ledger source can name. Mirrors
+     * `tools/migrate-deeptutor` SeedContent.kt exactly; a length-based re-chunk of the same file
+     * would invent page numbers the server does not have.
+     */
+    private val pageMarker = Regex("<!-- PDF 第 (\\d+) 页 · 书第 (\\d+) 页 -->")
+
     fun extract(path: Path, format: String, title: String): ExtractedBook = when (format) {
         "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
@@ -418,9 +426,20 @@ internal object TextbookExtraction {
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-            val text = clean(decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF"))
+            val text = decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF")
             require(text.isNotBlank()) { "教材中没有文字。" }
-            ExtractedBook(title, paginate(text))
+            // A textbook export already carries its true PDF pages. Reuse them byte-for-byte so the
+            // page number and UTF-16 offsets a question cites are the server's, not a local chunk's.
+            ExtractedBook(title, markedPages(text).ifEmpty { paginate(clean(text)) })
+        }
+    }
+
+    private fun markedPages(text: String): List<BookPage> {
+        val marks = pageMarker.findAll(text).toList()
+        if (marks.isEmpty()) return emptyList()
+        return marks.mapIndexed { index, mark ->
+            val end = marks.getOrNull(index + 1)?.range?.first ?: text.length
+            BookPage(mark.groupValues[1].toInt(), text.substring(mark.range.last + 1, end).trim())
         }
     }
 

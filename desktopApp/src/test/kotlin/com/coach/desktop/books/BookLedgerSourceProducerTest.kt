@@ -23,11 +23,22 @@ class BookLedgerSourceProducerTest {
         "Chlorophyll is a green pigment that absorbs light in plant cells.\n\n# Chapter 3 Energy\n\n" +
         "Respiration is the process that releases energy from stored sugars.\n"
 
-    /** Mirrors tools/migrate-deeptutor textbookPages(): a page runs from its PDF marker to the next marker. */
+    private val shared = "The shared sentence repeats on every page of this synthetic book."
+    /** U+20000 U+20001: two surrogate pairs, so a UTF-16 range can be cut in half. */
+    private val rare = "\uD840\uDC00\uD840\uDC01"
+    private val twoPages = "<!-- PDF 第 5 页 · 书第 1 页 -->\n# Chapter 1 Light\n\n" +
+        "Photosynthesis is the process by which plants use light to make sugars.\n\n$shared\n\n" +
+        "<!-- PDF 第 6 页 · 书第 2 页 -->\n# Chapter 2 Cells\n\n" +
+        "Chlorophyll is a green pigment that absorbs light in plant cells.\n\n$shared\n\n" +
+        "$rare Respiration is the process that releases energy from stored sugars.\n"
+
+    /** Mirrors tools/migrate-deeptutor SeedContent.kt: a page runs from just after its PDF marker to the next marker, trimmed. */
     private fun markerPages(md: String): List<TextbookPage> {
-        val m = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").findAll(md).toList()
-        return m.mapIndexed { i, x -> TextbookPage(x.groupValues[1].toInt(), x.groupValues[2].toIntOrNull(),
-            md.substring(x.range.first, m.getOrNull(i + 1)?.range?.first ?: md.length)) }
+        val m = Regex("<!-- PDF 第 (\\d+) 页 · 书第 (\\d+) 页 -->").findAll(md).toList()
+        return m.mapIndexed { i, x ->
+            val end = m.getOrNull(i + 1)?.range?.first ?: md.length
+            TextbookPage(x.groupValues[1].toInt(), x.groupValues[2].toIntOrNull(), md.substring(x.range.last + 1, end).trim())
+        }
     }
 
     private inner class F(md: String = oneMarker, localBytes: ByteArray? = null, poseDevice: String = "phone") : AutoCloseable {
@@ -52,8 +63,9 @@ class BookLedgerSourceProducerTest {
             store.enroll("phone", "synthetic-producer-private-token-32-chars")
             store.enroll("tablet", "synthetic-producer-tablet-token-32-chars!")
             // Same path as the content-owner seed (CourseContentStore stores the markdown bytes as the doc blob).
+            // Every imported page is anchored, so each real PDF page can carry its own block.
             store.seedContent(ContentSeed(CourseContent(Course("C", "C", "Synthetic"), listOf(Module("M", 1, "M")),
-                listOf(KnowledgePoint("K", "M", 1, "K", anchors = listOf(SourceAnchor("D", pages.first().pdfPage))))),
+                listOf(KnowledgePoint("K", "M", 1, "K", anchors = pages.map { SourceAnchor("D", it.pdfPage) }))),
                 listOf(TextbookDocument("D", "Synthetic", md, pages))))
             // Stand-in for the missing production edge: nothing in production registers the local practice as a ledger question.
             store.registerQuestion("original", "C", "", "SINGLE_CHOICE", practice.prompt, "VERIFIED", correct, options, listOf("K"))
@@ -68,9 +80,14 @@ class BookLedgerSourceProducerTest {
             clock += 86_400_000
         }
         val block get() = lesson.blocks.first { !it.heading && it.text.contains(practice.reference) }
+        /** The non-heading block on one physical page that carries a given sentence, plus that sentence. */
+        fun blockOn(pdfPage: Int, contains: String): Pair<SourceBlock, String> {
+            val b = book.lessons.flatMap { it.blocks }.first { it.page == pdfPage && !it.heading && it.text.contains(contains) }
+            return b to b.text.lineSequence().first { it.length >= 12 }
+        }
         fun locator(device: String = "phone", attempt: String = "original-attempt", reference: String = practice.reference,
-            page: Int = block.page) = BookSourceLocator("C", device, attempt, book.id, lesson.id, page, block.start, block.end,
-            reference, practice.options)
+            page: Int = block.page, start: Int = block.start, end: Int = block.end) =
+            BookSourceLocator("C", device, attempt, book.id, lesson.id, page, start, end, reference, practice.options)
         fun count(table: String) = DriverManager.getConnection("jdbc:sqlite:${root.resolve("server").resolve("coach.sqlite")}").use { c ->
             c.createStatement().use { s -> s.executeQuery("SELECT COUNT(*) FROM $table").use { it.next(); it.getInt(1) } } }
         fun refused(locator: BookSourceLocator): String {
@@ -119,25 +136,57 @@ class BookLedgerSourceProducerTest {
         F(poseDevice = "tablet").use { f -> assertEquals("BOOK_DEVICE_MISMATCH", f.refused(f.locator())) }
     }
 
-    @Test fun realShapeMultiPageTextbookCannotBeLocatedFromLocalCoordinates() {
-        // Production seeds pages by PDF markers (here PDF 5 and 6); the local Markdown import re-paginates by
-        // length, so the same file's local page/offset coordinates do not exist on the server.
-        val md = "<!-- PDF 第 5 页 · 书第 1 页 -->\n# Chapter 1 Light\n\n" +
-            "Photosynthesis is the process by which plants use light to make sugars.\n\n# Chapter 2 Cells\n\n" +
-            "Chlorophyll is a green pigment that absorbs light in plant cells.\n\n" +
-            "<!-- PDF 第 6 页 · 书第 2 页 -->\n# Chapter 3 Energy\n\n" +
-            "Respiration is the process that releases energy from stored sugars.\n"
-        F(md).use { f ->
-            assertEquals(f.book.id, sha256(md.toByteArray()), "same file as the seeded textbook")
-            println("PRODUCER local pages=${f.book.pages.map { it.number }} block page=${f.block.page} start=${f.block.start}")
-            val local = f.refused(f.locator())
-            println("PRODUCER real-shape local=$local")
-            assertEquals("BOOK_BLOCK_MISMATCH", local)
-            // Re-labelled to the server page the text may pass the server, but it no longer names the local
-            // block, so the desktop bridge's local() comparison still cannot accept it: not ready, not a link.
-            val relabelled = runCatching { f.store.publishBookLedgerSourceFromServerFacts(f.locator(page = 5)) }
-            println("PRODUCER real-shape page5=${relabelled.map { it.block.id }.getOrElse { (it as ReviewVariantRejected).code }} local=${f.block.id}")
-            relabelled.onSuccess { assertNotEquals(f.block.id, it.block.id); assertNotEquals(f.block.page, it.block.pdfPage) }
+    /**
+     * The red-before edge of PR229: the seeded textbook's pages are PDF 5 and 6, so a local import
+     * must keep those page identities and the exact UTF-16 offsets inside them. Re-chunking the same
+     * file by character count invented page 1..N and no offset ever matched the server page.
+     */
+    @Test fun realPdfPagesFromTheActualImportAreAcceptedByTheServerProducer() = F(twoPages).use { f ->
+        assertEquals(sha256(twoPages.toByteArray()), f.book.id, "same file as the seeded textbook")
+        assertEquals(listOf(5, 6), f.book.pages.map { it.number }, "page identity comes from the PDF marker")
+        println("PRODUCER real-shape pages=${f.book.pages.map { it.number }} block page=${f.block.page} start=${f.block.start} end=${f.block.end}")
+        val identity = f.store.publishBookLedgerSourceFromServerFacts(f.locator())
+        assertEquals(5, identity.block.pdfPage)
+        assertEquals(f.block.id, identity.block.id)
+        assertEquals(sha256(f.block.text.toByteArray()), identity.block.textSha256)
+        assertEquals(1, f.count("book_ledger_sources"))
+        val r = f.store.registerBookLedgerSource(identity, f.store.bookLedgerCoverage("C"))
+        val posed = f.store.takeBookReviewVariant("C", "phone", null, "K", r.entryId, r.attemptId, r.candidate, r)
+        assertEquals("variant", posed.single().payload.str("questionId")); assertEquals(1, f.count("book_ledger_takes"))
+    }
+
+    /** The same sentence exists on both pages: page 6 must name page 6's block, not the first match. */
+    @Test fun repeatedSentenceOnAnotherPageKeepsItsOwnPageAndOffsets() = F(twoPages).use { f ->
+        val (block6, quote) = f.blockOn(6, shared)
+        assertEquals(6, block6.page)
+        assertEquals(1, Regex(Regex.escape(shared)).findAll(f.book.page(6)!!.text).count())
+        val identity = f.store.publishBookLedgerSourceFromServerFacts(f.locator(page = 6, start = block6.start, end = block6.end, reference = quote))
+        assertEquals(6, identity.block.pdfPage); assertEquals(block6.id, identity.block.id)
+        assertEquals(block6.start, identity.block.start); assertEquals(block6.end, identity.block.end)
+        assertEquals(sha256(block6.text.toByteArray()), identity.block.textSha256)
+    }
+
+    /** Non-BMP text is addressed in UTF-16 code units; half a surrogate pair is not a source block. */
+    @Test fun rangesThatCutASurrogatePairAreRefused() {
+        F(twoPages).use { f ->
+            val (block6, quote) = f.blockOn(6, rare)
+            assertTrue(block6.text.startsWith(rare), "synthetic block starts with two surrogate pairs")
+            assertEquals("BOOK_BLOCK_MISMATCH", f.refused(f.locator(page = 6, start = block6.start + 1, end = block6.end, reference = quote)))
+            assertEquals("BOOK_BLOCK_MISMATCH", f.refused(f.locator(page = 6, start = block6.start, end = block6.end - 1, reference = quote)))
+            // The whole pair is a legal range boundary; only cutting it is refused.
+            assertNotNull(f.store.publishBookLedgerSourceFromServerFacts(f.locator(page = 6, start = block6.start, end = block6.end, reference = quote)))
+        }
+    }
+
+    @Test fun wrongPageVersionAndUnreadablePagesStayRefused() {
+        F(twoPages).use { f ->
+            // Page 7 has no server page text, and page 5 text is not page 6's text.
+            assertEquals("BOOK_BLOCK_MISMATCH", f.refused(f.locator(page = 7)))
+            assertEquals("BOOK_BLOCK_MISMATCH", f.refused(f.locator(page = 6)))
+        }
+        // A different local file is not this textbook version, even with the same page markers.
+        F(twoPages, localBytes = (twoPages + "\n").toByteArray()).use { f ->
+            assertEquals("BOOK_FILE_UNSEEDED", f.refused(f.locator()))
         }
     }
 }

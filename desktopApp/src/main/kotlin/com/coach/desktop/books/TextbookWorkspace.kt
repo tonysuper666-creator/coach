@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -117,7 +118,7 @@ internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts 
 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
-    support: BookLearningSupport = UnconnectedBookLearningSupport, chooseBook: suspend () -> Path?) {
+    support: BookLearningSupport = UnconnectedBookLearningSupport, dark: Boolean = isSystemInDarkTheme(), chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
@@ -196,7 +197,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
         sourceOrigin = SourceFocus.PRACTICE
         run { controller.source(); anchor.page?.let { controller.page(it) } }
     }
-    CoachTheme {
+    CoachTheme(dark) {
         Surface(Modifier.fillMaxSize().testTag("windows-textbooks").onPreviewKeyEvent { event ->
             val editing = noteReader?.takeIf { ui.screen == BookScreen.READER && it.noting }
             val noteKey = event.toReaderInput()

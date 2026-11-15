@@ -209,7 +209,8 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                         Text("正在读取本书练习…")
                                     }
                                 })
-                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, support = support, chooseBook = chooseBook)
+                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, support = support,
+                                dark = dark ?: systemDark, chooseBook = chooseBook)
                         }
                     }
                     if (rail) Row(Modifier.fillMaxSize()) {

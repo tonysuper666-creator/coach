@@ -405,6 +405,19 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun approveBookLedgerSource(identity: BookLedgerIdentity, originalBytes: ByteArray) = transaction {
         bookLedgerSources.approve(identity, originalBytes, events(identity.courseId), courseContent(identity.courseId))
     }
+    private val bookLedgerProducer = BookLedgerSourceProducer(connection, directory.resolve("blobs"))
+    /**
+     * Content-owner producer candidate: every edge is read from server facts (seeded textbook blob,
+     * server pose, the same device's authenticated answer, key, KP anchor) and then approved through
+     * the same validation. Deliberately not routed to paired learner HTTP clients.
+     */
+    fun publishBookLedgerSourceFromServerFacts(locator: BookSourceLocator): BookLedgerIdentity = transaction {
+        val facts = events(locator.courseId)
+        val content = courseContent(locator.courseId)
+        val (identity, bytes) = bookLedgerProducer.identity(locator, facts, content)
+        bookLedgerSources.approve(identity, bytes, facts, content)
+        identity
+    }
     fun withdrawBookLedgerSource(book: String, course: String, originalAttempt: String) = transaction {
         bookLedgerSources.withdraw(book, course, originalAttempt)
     }

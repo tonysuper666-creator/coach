@@ -41,7 +41,7 @@ class PracticeSyncMountTest {
         }
     }
 
-    @Test fun successfulReceiptUpdatesHostOnRetryAndSurvivesNewController() = ReceiptFixture().use { f ->
+    @Test fun successfulReceiptUpdatesHostOnRetryAndSurvivesNewController() = FormalReceiptFixture().use { f ->
         val controller = f.controller()
         runSkikoComposeUiTest(size = Size(946f, 690f), density = Density(1f)) {
             setContent { WindowsTextbookHost(controller) { null } }
@@ -120,7 +120,31 @@ class PracticeSyncMountTest {
         assertEquals(0, f.events().count { it.type == "answer_submitted" })
     }
 
-    /** Real HTTP/SQLite answer acknowledgement; the initial server pose is a test fixture, not a production route. */
+    /** The successful receipt uses the same reviewed bank, owner mapping and authenticated pose as PR240. */
+    private class FormalReceiptFixture : AutoCloseable {
+        private val source = BookPracticeOutboxTest.F()
+        val practice get() = source.practice
+        val sync get() = source.sync
+        init {
+            try {
+                val library = TextbookLibrary(source.root.resolve("library"))
+                library.save(source.book.copy(learning = true, questionMode = QuestionMode.CHOICE))
+                val response = source.actualPose()
+                assertEquals(200, response.statusCode(), response.body())
+                runBlocking { sync.syncOnce() }
+            } catch (failure: Throwable) {
+                source.close()
+                throw failure
+            }
+        }
+        fun controller() = TextbookController(TextbookLibrary(source.root.resolve("library")),
+            BookPracticeSession(sync, "C") { source.clock })
+        fun restart() = source.restartClient()
+        fun events() = source.serverEvents()
+        override fun close() = source.close()
+    }
+
+    /** Legacy poses remain only for controlled rejection and pending-receipt scenarios. */
     private class ReceiptFixture(val reject: Boolean = false) : AutoCloseable {
         val root = Files.createTempDirectory("practice-receipt-")
         val library = TextbookLibrary(root.resolve("library"))

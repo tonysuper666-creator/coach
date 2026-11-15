@@ -144,7 +144,10 @@ class BookPracticeOutboxTest {
     @Test fun hostSubmitsGuessToOriginalAttemptAndReopensTheSameCommand() = F().use { f ->
         val library = TextbookLibrary(f.root.resolve("library"))
         library.save(f.book.copy(learning = true, questionMode = QuestionMode.CHOICE))
-        f.serverPose("host-attempt")
+        val response = f.actualPose()
+        assertEquals(200, response.statusCode(), response.body())
+        val attempt = LedgerJson.parseToJsonElement(response.body()).jsonObject.getValue("events")
+            .jsonArray.single().jsonObject.getValue("payload").jsonObject.str("attemptId")
         runBlocking { f.sync.syncOnce() }
         val controller = TextbookController(library, BookPracticeSession(f.sync, "C") { f.clock })
         runComposeUiTest {
@@ -172,15 +175,15 @@ class BookPracticeOutboxTest {
         assertEquals(command, f.sync.retainedCommands().single().commandId)
         runBlocking { f.sync.syncOnce() }
         assertEquals("OK", f.sync.receipt(command)?.status)
-        val submitted = f.serverEvents().single { it.type == "answer_submitted" && it.payload.str("attemptId") == "host-attempt" }
+        val submitted = f.serverEvents().single { it.type == "answer_submitted" && it.payload.str("attemptId") == attempt }
         assertEquals(command, submitted.commandId)
         assertEquals("phone", submitted.deviceId)
         assertTrue(submitted.payload.flag("guessed"))
-        val pose = f.serverEvents().single { it.type == "question_posed" && it.payload.str("attemptId") == "host-attempt" }
+        val pose = f.serverEvents().single { it.type == "question_posed" && it.payload.str("attemptId") == attempt }
         val correctId = f.options.single { it.text == f.practice.answer }.optionId
         assertEquals(pose.payload.getValue("letterMap").jsonObject.getValue(correctId).jsonPrimitive.content, submitted.payload.str("answer"))
         assertFalse(reopened.library.reviews().single().completed)
-        println("PRACTICE_HOST attempt=host-attempt device=phone command=$command guessed=true correct=true receipt=OK reviewCompleted=false")
+        println("PRACTICE_HOST attempt=$attempt device=phone command=$command guessed=true correct=true receipt=OK reviewCompleted=false")
     }
 
     @Test fun unknownForeignOrUnlinkedIdentitiesStayNotReadyWithZeroIncrements() = F().use { f ->

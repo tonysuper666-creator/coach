@@ -141,7 +141,7 @@ fun Desk(
                         }
                         V7TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp), ringInside = true) { Text("目录") }
                         if (onBack != null) {
-                            TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
+                            V7TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp), ringInside = true) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }
                     }
                     Text(buildAnnotatedString {
@@ -166,9 +166,9 @@ fun Desk(
                             }
                         }
                         if (!focused) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
-                            Modifier.clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                            Modifier.v7FocusRing().clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         Text(if (focused) "退出专心读" else "专心读",
-                            Modifier.clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                            Modifier.v7FocusRing().clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)) {

@@ -52,7 +52,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name and the Desk 目录 / 收起目录 buttons.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons and the Desk 返回 / 出处与批注 / 专心读 entrances.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -536,6 +536,113 @@ class WeekFocusRingTest {
                 enter(close)
                 assertEquals(0, onAllNodes(drawer).fetchSemanticsNodes().size, "$mode Enter on 收起目录 closes the drawer")
                 println("TON-1603 week $mode 目录 enter opened=1 closed=1")
+            }
+        }
+    }
+
+    /**
+     * Desk 返回路线, 出处与批注／收起 and 专心读／退出专心读 on the real WeekPage, in a wide window (1224dp) and on both sides of
+     * the 700dp split (700dp Medium with the margin column, 699dp compact with the margin sheet).
+     * First the never-focused frames and bounds; then by keyboard each entrance shows the ring ≥3:1, keeps its bounds,
+     * blur restores the pixels and Enter keeps its action. Without onBack the bar has exactly one focus stop fewer.
+     */
+    @Test fun deskBackMarginAndReadingTogglesShowRingAndKeepTheirActions() {
+        val view = threeWeeks()
+        val back = hasText("← 路线") and hasClickAction()
+        val margin = hasTestTag("v7-margin-toggle")
+        val reading = hasTestTag("v7-focus")
+        val widths = listOf(1224f, 700f, 699f)
+        withController { controller ->
+            val baseline = mutableMapOf<String, Pair<PixelMap, List<Rect>>>()
+            for (dark in listOf(false, true)) for (w in widths) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalDeskSelect provides {}) {
+                    WeekPage(controller, view, TutorUiState(), WeekActions(controller, rememberCoroutineScope()), { _, _ -> }, 2)
+                } } } }
+                waitForIdle()
+                val bounds = listOf(back, margin, reading).map { first(it).boundsInRoot }
+                baseline[mode] = shot("$mode-bar-unfocused") to bounds
+                val stops = onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.Focused)).fetchSemanticsNodes().size
+                println("TON-1603 week $mode bar labels=${listOf(back, margin, reading).joinToString("/") { first(it).config[SemanticsProperties.Text].joinToString() }} " +
+                    "bounds=" + bounds.joinToString(" ") { "${it.left / scale},${it.top / scale} ${it.width / scale}x${it.height / scale}dp" } + " stops=$stops")
+                onNode(reading).performClick(); waitForIdle()
+                assertTrue(onAllNodes(hasText("退出专心读")).fetchSemanticsNodes().isNotEmpty(), "$mode a click on 专心读 enters focused reading")
+                println("TON-1603 week $mode bar click 专心读 → focused=${focused(reading)}")
+                onNode(reading).performClick(); waitForIdle()
+                assertTrue(onAllNodes(hasText("专心读")).fetchSemanticsNodes().isNotEmpty(), "$mode a second click leaves focused reading")
+            }
+            for (dark in listOf(false, true)) for (w in widths) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val inner = w >= 700f
+                val picked = mutableListOf<AppTab>()
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalDeskSelect provides { picked += it }) {
+                    focus = LocalFocusManager.current
+                    WeekPage(controller, view, TutorUiState(), WeekActions(controller, rememberCoroutineScope()), { _, _ -> }, 2)
+                } } } }
+                waitForIdle()
+                val (before, bounds) = baseline.getValue(mode)
+                assertRegionEqual(before, shot("$mode-bar-again"), Rect(0f, 0f, w * scale, 900f * scale), "$mode page renders the same twice")
+                fun blurRestores(what: String, b: Rect) {
+                    runOnIdle { focus.clearFocus() }; waitForIdle()
+                    assertRegionEqual(before, shot("$mode-$what-blurred"), b.inflate(10 * scale), "$mode $what after blur")
+                }
+
+                onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                val toBack = 1 + tabUntil(back)
+                assertTrue(focused(back), "$mode Tab never reached 返回路线")
+                assertEquals(bounds[0], first(back).boundsInRoot, "$mode focusing must not move or resize 返回路线")
+                measurePillInside(mode, "返回路线", back, before)
+                val toMargin = tabUntil(margin)
+                assertTrue(focused(margin), "$mode Tab never reached the margin toggle")
+                assertEquals(bounds[1], first(margin).boundsInRoot, "$mode focusing must not move or resize the margin toggle")
+                measure(mode, if (inner) "收起" else "出处与批注", margin, before, pageDx = 8f)
+                val toReading = tabUntil(reading)
+                assertTrue(focused(reading), "$mode Tab never reached 专心读")
+                assertEquals(bounds[2], first(reading).boundsInRoot, "$mode focusing must not move or resize 专心读")
+                measure(mode, "专心读", reading, before, pageDx = 8f)
+                println("TON-1603 week $mode bar tab-stops start→返回=$toBack 返回→出处=$toMargin 出处→专心读=$toReading")
+                blurRestores("返回路线", bounds[0]); blurRestores("出处", bounds[1]); blurRestores("专心读", bounds[2])
+
+                onNode(reading).requestFocus(); waitForIdle()
+                enter(reading)
+                assertTrue(onAllNodes(hasText("退出专心读")).fetchSemanticsNodes().isNotEmpty(), "$mode Enter on 专心读 enters focused reading")
+                assertEquals(0, onAllNodes(margin).fetchSemanticsNodes().size, "$mode focused reading hides the margin toggle")
+                assertTrue(focused(reading), "$mode focus stays on the toggle after Enter")
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                val quiet = shot("$mode-退出专心读-unfocused")
+                onNode(reading).requestFocus(); waitForIdle()
+                measure(mode, "退出专心读", reading, quiet, pageDx = 8f)
+                enter(reading)
+                assertTrue(onAllNodes(hasText("专心读")).fetchSemanticsNodes().isNotEmpty(), "$mode Enter on 退出专心读 leaves focused reading")
+                assertEquals(1, onAllNodes(margin).fetchSemanticsNodes().size, "$mode the margin toggle is back")
+
+                onNode(back).requestFocus(); waitForIdle()
+                enter(back)
+                assertEquals(listOf(AppTab.ROUTE), picked, "$mode Enter on 返回路线 goes to the route")
+
+                onNode(margin).requestFocus(); waitForIdle()
+                enter(margin)
+                if (inner) {
+                    assertTrue(onAllNodes(hasText("出处与批注")).fetchSemanticsNodes().isNotEmpty(), "$mode Enter on 收起 collapses the margin")
+                    assertEquals(0, onAllNodes(hasTestTag("v7-margin")).fetchSemanticsNodes().size, "$mode the margin column is gone")
+                    assertTrue(focused(margin), "$mode focus stays on the toggle after Enter")
+                    enter(margin)
+                    assertTrue(onAllNodes(hasText("收起")).fetchSemanticsNodes().isNotEmpty(), "$mode Enter on 出处与批注 brings the margin back")
+                    assertEquals(1, onAllNodes(hasTestTag("v7-margin")).fetchSemanticsNodes().size, "$mode the margin column is back")
+                } else assertEquals(1, onAllNodes(hasTestTag("v7-margin-sheet")).fetchSemanticsNodes().size, "$mode Enter on 出处与批注 opens the margin sheet")
+                println("TON-1603 week $mode bar enter reading=on/off back=${picked.single()} margin=${if (inner) "collapsed/restored" else "sheet"}")
+            }
+            for (dark in listOf(false, true)) {
+                val stops = mutableMapOf<Boolean, Int>()
+                for (withBack in listOf(true, false)) runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                    setContent { CoachTheme(dark) { Surface { Desk("合成课 · 第 2 周", onBack = if (withBack) ({}) else null) { Text("合成正文") } } } }
+                    waitForIdle()
+                    stops[withBack] = onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.Focused)).fetchSemanticsNodes().size
+                    assertEquals(if (withBack) 1 else 0, onAllNodes(hasText("‹")).fetchSemanticsNodes().size)
+                }
+                println("TON-1603 week ${if (dark) "dark" else "light"} bar back focus-stops with=${stops[true]} without=${stops[false]}")
+                assertEquals(stops.getValue(true) - 1, stops.getValue(false), "without onBack the bar has exactly one focus stop fewer")
             }
         }
     }

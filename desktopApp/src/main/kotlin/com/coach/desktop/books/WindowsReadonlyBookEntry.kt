@@ -20,7 +20,7 @@ internal object WindowsReadonlyBookEntry {
         // DELETE | FILE_READ_ATTRIBUTES; share read/write but pin against concurrent deletion.
         // OPEN_REPARSE_POINT prevents a final-component link being followed. BACKUP_SEMANTICS
         // allows a directory handle without granting backup/restore privileges.
-        val handle = api.CreateFileW(WString(path.toAbsolutePath().toString()), 0x10080, 3, null, 3,
+        val handle = api.CreateFileW(WString(extendedWindowsBookPath(path.toAbsolutePath().normalize().toString())), 0x10080, 3, null, 3,
             0x00200000 or 0x02000000, null)
         if (handle == null || Pointer.nativeValue(handle) == -1L) throw failure("open")
         try {
@@ -54,6 +54,15 @@ internal object WindowsReadonlyBookEntry {
     }
 
     private fun failure(operation: String) = IOException("Native cleanup $operation failed: ${Native.getLastError()}")
+}
+
+/** CreateFileW requires extended-length syntax for long DOS and UNC paths. */
+internal fun extendedWindowsBookPath(absolute: String): String = when {
+    absolute.startsWith("\\\\?\\") -> absolute
+    absolute.startsWith("\\\\.\\") -> throw IOException("Native cleanup device path refused")
+    absolute.startsWith("\\\\") -> "\\\\?\\UNC\\" + absolute.substring(2)
+    absolute.length >= 3 && absolute[0].isLetter() && absolute[1] == ':' && absolute[2] == '\\' -> "\\\\?\\" + absolute
+    else -> throw IOException("Native cleanup absolute path required")
 }
 
 /** Minimal kernel32 ABI; all calls use the same verified handle. */

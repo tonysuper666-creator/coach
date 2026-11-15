@@ -1,6 +1,8 @@
 package com.coach.desktop.books
 
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.*
@@ -146,6 +148,9 @@ class BookSourceRowTest {
         override fun resolveAll(requests: List<Pair<OwnedBookCitation, String?>>): List<BookSourceResolution> { gate.await(); return super.resolveAll(requests) }
     }
 
+    private fun ComposeUiTest.textY(tag: String): Float =
+        onAllNodes((hasTestTag(tag) or hasAnyAncestor(hasTestTag(tag))) and hasText("", substring = true), useUnmergedTree = true).onFirst().fetchSemanticsNode().positionInRoot.y
+
     private fun ComposeUiTest.textX(tag: String): Float =
         onAllNodes((hasTestTag(tag) or hasAnyAncestor(hasTestTag(tag))) and hasText("", substring = true), useUnmergedTree = true).onFirst().fetchSemanticsNode().positionInRoot.x
 
@@ -155,9 +160,28 @@ class BookSourceRowTest {
         setContent { BookSourceRow(sources, a, gated, { FocusRequester() }, { _, _ -> }) }
         val pendingX = (0..2).map { textX("book-source-pending-$it") }
         assertEquals(1, pendingX.toSet().size)
+        val pendingY = (0..2).map { textY("book-source-pending-$it") }
         gated.gate.countDown(); settled(0, 1, 2)
         val readyX = textX("book-source-0"); val staleX = textX("book-source-stale-1"); val wrongX = textX("book-source-wrong-2")
         assertEquals(pendingX[0], readyX, "pending -> button must not move sideways")
         assertEquals(readyX, staleX); assertEquals(readyX, wrongX)
+        // Row 1 text sits at the same y whether pending or button.
+        assertEquals(pendingY[0], textY("book-source-0"))
+    }
+
+    @Test fun resolvingPendingRowsToButtonsDoesNotPushContentBelow() = runComposeUiTest {
+        val gated = Gated(library)
+        setContent {
+            androidx.compose.foundation.layout.Column {
+                BookSourceRow(listOf(p2, p3, p2), a, gated, { FocusRequester() }, { _, _ -> })
+                androidx.compose.material3.Text("below", Modifier.testTag("below"))
+            }
+        }
+        val before = onNodeWithTag("below").fetchSemanticsNode().boundsInRoot.top
+        val textYBefore = textY("book-source-pending-0")
+        gated.gate.countDown(); settled(0, 1, 2)
+        onNodeWithTag("book-source-2").assertExists()
+        assertEquals(before, onNodeWithTag("below").fetchSemanticsNode().boundsInRoot.top, "content below must not move")
+        assertEquals(textYBefore, textY("book-source-0"), "first row text must not sink")
     }
 }

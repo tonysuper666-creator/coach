@@ -26,6 +26,7 @@ import javax.xml.parsers.DocumentBuilderFactory
 internal class TextbookLibrary(val directory: Path) {
     init {
         Files.createDirectories(directory)
+        PdfWarmup.start()
         database().use { db -> db.createStatement().use { sql ->
             sql.execute("CREATE TABLE IF NOT EXISTS books(id TEXT PRIMARY KEY,title TEXT NOT NULL,format TEXT NOT NULL,reading_page INTEGER NOT NULL DEFAULT 1,lesson_index INTEGER NOT NULL DEFAULT 0,learning INTEGER NOT NULL DEFAULT 0,prompt_seen INTEGER NOT NULL DEFAULT 0,mode TEXT NOT NULL DEFAULT 'NONE',touched INTEGER NOT NULL)")
             sql.execute("CREATE TABLE IF NOT EXISTS pages(book TEXT NOT NULL,page INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(book,page))")
@@ -36,6 +37,7 @@ internal class TextbookLibrary(val directory: Path) {
                 answer_text TEXT NOT NULL DEFAULT '',revealed INTEGER NOT NULL DEFAULT 0,understood INTEGER,
                 completed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(book,lesson,mode))""")
             sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
+            sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
         } }
         backfillReviews()
     }
@@ -47,6 +49,23 @@ internal class TextbookLibrary(val directory: Path) {
         db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
             while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
         } } }
+    }
+
+    @Synchronized fun learningPath(book: String): String? = database().use { db ->
+        db.prepareStatement("SELECT path FROM book_learning_paths WHERE book=?").use { sql ->
+            sql.setString(1, book)
+            sql.executeQuery().use { row -> if (row.next()) row.getString(1) else null }
+        }
+    }
+
+    @Synchronized fun saveLearningPath(book: String, path: String) {
+        require(path in setOf("READ", "READ_AND_LEARN", "QUESTION_FIRST")) { "未知的学习走法。" }
+        database().use { db ->
+            db.prepareStatement("INSERT INTO book_learning_paths(book,path) SELECT id,? FROM books WHERE id=? ON CONFLICT(book) DO UPDATE SET path=excluded.path").use { sql ->
+                sql.setString(1, path); sql.setString(2, book)
+                require(sql.executeUpdate() == 1) { "这本教材已不在书架中。" }
+            }
+        }
     }
 
     @Synchronized fun book(id: String): Textbook = database().use { db ->
@@ -251,15 +270,102 @@ internal class TextbookLibrary(val directory: Path) {
         database().use { db -> db.createStatement().use { it.executeUpdate("DELETE FROM book_review_position") } }
     }
 
+    // ---- 页图渲染：同一页只渲染一次（并发调用合并、结果缓存），每次调用留下分段计时 ----
+    private data class RenderKey(val id: String, val page: Int, val stamp: Long)
+    private val renderLock = Any()
+    private val renderCache = object : LinkedHashMap<RenderKey, BufferedImage>(16, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RenderKey, BufferedImage>) = size > 6
+    }
+    private val renderInflight = HashMap<RenderKey, java.util.concurrent.CompletableFuture<BufferedImage>>()
+    private val traces = java.util.concurrent.ConcurrentLinkedQueue<RenderTrace>()
+
+    /** 最近的渲染记录（最多 64 条）：outcome = render（真正渲染）/ joined（并发时等同一次渲染）/ hit（缓存命中）。 */
+    fun renderTraces(): List<RenderTrace> = traces.toList()
+
+    private fun record(t: RenderTrace) {
+        traces.add(t); while (traces.size > 64) traces.poll()
+        if (java.lang.Boolean.getBoolean("coach.render.trace")) println("COACH_RENDER_TRACE " + t)
+    }
+
+    /**
+     * 返回的图片是只读共享的（调用方只转换/编码，不修改）。渲染分三段计时：loadPDF / 取页框 / renderImage，另记总耗时。
+     * 同一本书同一页（文件大小+修改时间一致）并发调用只会真正渲染一次，其余等同一结果；失败不缓存。
+     */
     fun renderPdf(book: Textbook, page: Int): BufferedImage {
         require(book.format == "pdf" && page in 1..book.pages.size)
-        return Loader.loadPDF(original(book.id, book.format).toFile()).use { pdf ->
-            val bounds = pdf.getPage(page - 1).cropBox
-            val scale = minOf(1.5f, 1800f / maxOf(bounds.width, bounds.height)).coerceAtLeast(.05f)
-            PDFRenderer(pdf).renderImage(page - 1, scale)
+        val file = original(book.id, book.format).toFile()
+        val key = RenderKey(book.id, page, file.length() xor file.lastModified())
+        val started = System.nanoTime()
+        var owner = false
+        val future: java.util.concurrent.CompletableFuture<BufferedImage>
+        synchronized(renderLock) {
+            renderCache[key]?.let { record(RenderTrace(book.id, page, "hit", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name)); return it }
+            val running = renderInflight[key]
+            if (running != null) future = running else { future = java.util.concurrent.CompletableFuture(); renderInflight[key] = future; owner = true }
+        }
+        if (!owner) {
+            val img = try { future.get() } catch (e: java.util.concurrent.ExecutionException) { throw (e.cause ?: e) }
+            record(RenderTrace(book.id, page, "joined", 0.0, 0.0, 0.0, (System.nanoTime() - started) / 1_000_000.0, Thread.currentThread().name))
+            return img
+        }
+        try {
+            val t0 = System.nanoTime()
+            val image = Loader.loadPDF(file).use { pdf ->
+                val t1 = System.nanoTime()
+                val bounds = pdf.getPage(page - 1).cropBox
+                val scale = minOf(1.5f, 1800f / maxOf(bounds.width, bounds.height)).coerceAtLeast(.05f)
+                val t2 = System.nanoTime()
+                val img = PDFRenderer(pdf).renderImage(page - 1, scale)
+                val t3 = System.nanoTime()
+                record(RenderTrace(book.id, page, "render", (t1 - t0) / 1_000_000.0, (t2 - t1) / 1_000_000.0, (t3 - t2) / 1_000_000.0, (t3 - started) / 1_000_000.0, Thread.currentThread().name))
+                img
+            }
+            synchronized(renderLock) { renderCache[key] = image; renderInflight.remove(key) }
+            future.complete(image)
+            return image
+        } catch (e: Throwable) {
+            synchronized(renderLock) { renderInflight.remove(key) }
+            future.completeExceptionally(e)
+            throw e
         }
     }
 }
+
+/**
+ * 进程内只做一次的 PDF 渲染预热：用内存里生成的一页带字 PDF 走一遍 loadPDF → renderImage，
+ * 把 PDFBox 类加载、字体缓存和 JIT 的冷启动代价挪到后台（打开书本/阅读器时就开始），不占目标页的首次绘制。
+ * 只在内存里造 PDF，不读用户文件；失败静默（预热不是功能）。[done] 返回预热耗时毫秒，失败为 -1。
+ */
+internal object PdfWarmup {
+    val done = java.util.concurrent.CompletableFuture<Long>()
+    private val started = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun start() {
+        if (!started.compareAndSet(false, true)) return
+        Thread({
+            val t0 = System.nanoTime()
+            val ms = try {
+                val out = java.io.ByteArrayOutputStream()
+                org.apache.pdfbox.pdmodel.PDDocument().use { doc ->
+                    val page = org.apache.pdfbox.pdmodel.PDPage(); doc.addPage(page)
+                    org.apache.pdfbox.pdmodel.PDPageContentStream(doc, page).use { cs ->
+                        cs.beginText()
+                        cs.setFont(org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 14f)
+                        cs.newLineAtOffset(72f, 700f); cs.showText("Warm up 0123456789"); cs.endText()
+                    }
+                    doc.save(out)
+                }
+                Loader.loadPDF(out.toByteArray()).use { pdf -> PDFRenderer(pdf).renderImage(0, 1.5f) }
+                (System.nanoTime() - t0) / 1_000_000
+            } catch (_: Throwable) { -1L }
+            if (java.lang.Boolean.getBoolean("coach.render.trace")) println("COACH_RENDER_WARMUP ms=$ms")
+            done.complete(ms)
+        }, "pdf-warmup").apply { isDaemon = true; priority = Thread.NORM_PRIORITY - 1 }.start()
+    }
+}
+
+/** 一次页图渲染的分段计时（毫秒）。 */
+internal data class RenderTrace(val book: String, val page: Int, val outcome: String, val loadMs: Double, val pageBoxMs: Double, val renderMs: Double, val totalMs: Double, val thread: String)
 
 internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
 

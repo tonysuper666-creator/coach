@@ -24,7 +24,7 @@ internal class ReaderTimeout(val stage: String) : Exception(stage) {
     }
 }
 
-internal class ReaderFormat : Exception("Invalid reader JSON")
+internal class ReaderFormat(val servedBy: String? = null) : Exception("Invalid reader JSON")
 
 /** Prefix lexer: only decoded, non-whitespace characters at paragraphs[*].text count.
  * Stores keys/grammar only, never source or explanation text. Final citation gate is separate.
@@ -109,7 +109,9 @@ internal class ReaderBodyProgress {
 
 internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Long = System.nanoTime()) {
     private val signal = Channel<Unit>(Channel.CONFLATED)
-    private val parser = ReaderBodyProgress()
+    private var parser = ReaderBodyProgress()
+    @Volatile private var attemptStarted = System.nanoTime()
+    @Volatile private var servedBy: String? = null
     @Volatile var first: Long? = null; private set
     @Volatile var last: Long? = null; private set
     @Volatile private var stopped = false
@@ -123,13 +125,22 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
     suspend fun collect(bridge: BridgeClient, prepare: suspend () -> ChatRequest): BridgeResult = coroutineScope {
         val worker = async(Dispatchers.IO) {
             bridge.streamChat(prepare(), object : BridgeStreamSink {
+                override val supportsReset = true
+                override fun onMeta(servedBy: String) { this@ReaderTiming.servedBy = servedBy }
+                override fun onReset() {
+                    parser = ReaderBodyProgress()
+                    invalid = false
+                    last = null
+                    attemptStarted = System.nanoTime()
+                    signal.trySend(Unit)
+                }
                 override fun onDelta(text: String, atMs: Long) {
                     val progress = parser.push(text)
                     if (parser.invalid) { invalid = true; signal.trySend(Unit) }
                     if (progress && !parser.invalid) {
                         val now = System.nanoTime()
                         val previous = last
-                        val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (started + limits.firstMs * 1_000_000)
+                        val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (attemptStarted + limits.firstMs * 1_000_000)
                         val totalDeadline = started + limits.totalMs * 1_000_000
                         if (now >= minOf(bodyDeadline, totalDeadline)) {
                             expired = if (totalDeadline <= bodyDeadline) "total" else if (previous == null) "first" else "gap"
@@ -148,11 +159,11 @@ internal class ReaderTiming(private val limits: ReaderTimeouts, val started: Lon
                 if (stopped) return@coroutineScope worker.await()
                 expired?.let { throw ReaderTimeout(it) }
                 val previous = last
-                val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (started + limits.firstMs * 1_000_000)
+                val bodyDeadline = previous?.let { it + limits.gapMs * 1_000_000 } ?: (attemptStarted + limits.firstMs * 1_000_000)
                 val totalDeadline = started + limits.totalMs * 1_000_000
                 val remaining = minOf(bodyDeadline, totalDeadline) - System.nanoTime()
                 if (remaining <= 0) throw ReaderTimeout(if (totalDeadline <= bodyDeadline) "total" else if (previous == null) "first" else "gap")
-                if (invalid) throw ReaderFormat()
+                if (invalid) throw ReaderFormat(servedBy)
                 if (worker.isCompleted) return@coroutineScope worker.await()
                 withTimeoutOrNull((remaining + 999_999) / 1_000_000) { signal.receive() }
             }

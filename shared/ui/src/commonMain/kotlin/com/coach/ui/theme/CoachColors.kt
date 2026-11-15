@@ -24,12 +24,12 @@ data class CoachColors(
     companion object {
         fun light() = with(CoachV7.Light) { CoachColors(false,
             desk, desk, sheet, card, sheet, ink, sub, faint, sheet,
-            line, sub, zhu, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
+            line, sub, ink, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
             pine, pineWash.compositeOver(optBg), ink, hl.compositeOver(sheet),
             zhu, zhuWash.compositeOver(optBg), pine, pineWash.compositeOver(sheet)) }
         fun dark() = with(CoachV7.Dark) { CoachColors(true,
             desk, desk, sheet, card, sheet, ink, sub, faint, sheet,
-            line, sub, zhu, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
+            line, sub, ink, zhu, pine, selBg.compositeOver(sheet), ink, zhu,
             pine, pineWash.compositeOver(optBg), ink, hl.compositeOver(sheet),
             zhu, zhuWash.compositeOver(optBg), pine, pineWash.compositeOver(sheet)) }
     }

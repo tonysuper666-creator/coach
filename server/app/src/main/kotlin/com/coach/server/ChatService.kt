@@ -514,7 +514,21 @@ class ChatService(
                 scope.launch { actor.execute { updateStreamingMessage(session.messageId, cursor.text, cursor.index) } }
             }
         }
+        fun resetPart() {
+            guard = newGuard()
+            rawAnswer.setLength(0)
+            visible = VisibleStream()
+            visibleText.setLength(0)
+            visibleText.append(completedPrefix)
+            session.cursor = Session.Cursor(completedPrefix, session.cursor.index + 1)
+            session.trace?.visible(completedPrefix)
+            hub.emit(json("t" to "msg.snapshot", "msg" to session.messageId, "threadId" to session.threadId,
+                "i" to session.cursor.index, "text" to completedPrefix, "status" to "streaming"))
+            session.lastDeltaAtMs = elapsedMs()
+        }
         val sink = object : BridgeStreamSink {
+            override val supportsReset = true
+            override fun onReset() = resetPart()
             override fun onDelta(text: String, atMs: Long) = handleDelta(text)
         }
         // The lesson part of a staged reply streams in parallel with part one; its text waits here until part one is done.
@@ -522,6 +536,13 @@ class ChatService(
         val lessonBuffer = StringBuilder()
         var lessonReleased = false
         val lessonSink = object : BridgeStreamSink {
+            override val supportsReset = true
+            override fun onReset() {
+                synchronized(lessonLock) {
+                    lessonBuffer.setLength(0)
+                    if (lessonReleased) resetPart()
+                }
+            }
             override fun onDelta(text: String, atMs: Long) {
                 synchronized(lessonLock) {
                     if (lessonFirstDeltaMs < 0) lessonFirstDeltaMs = elapsedMs()

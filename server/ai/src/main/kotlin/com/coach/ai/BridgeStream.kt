@@ -35,6 +35,9 @@ class BridgeStreamHandle internal constructor() {
  * 首字口径用**第一次 [onDelta]** 的时刻，不含 [onMeta]（served_by 在出正文前就到了）。
  */
 interface BridgeStreamSink {
+    val supportsReset: Boolean get() = false
+    /** Discard this attempt's provisional text before a same-vendor transport retry. */
+    fun onReset() {}
     fun onMeta(servedBy: String) {}
     fun onDelta(text: String, atMs: Long) {}
     fun onTerminal(result: BridgeResult) {}

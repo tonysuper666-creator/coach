@@ -1,6 +1,7 @@
 package com.coach.desktop
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -11,8 +12,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
@@ -53,21 +56,31 @@ internal fun windowsLibraryDirectory(
     return target
 }
 
-/** Desktop windows keep the two-column desk: the rail takes its width first, the paper and margin share the rest. */
-private const val WINDOWS_WINDOW_WIDTH = 1440
-private const val WINDOWS_WINDOW_HEIGHT = 900
+/** An optional per-process override; without it the existing system preference remains authoritative. */
+internal fun windowsThemeOverride(value: String?): Boolean? = when {
+    value.equals("dark", ignoreCase = true) -> true
+    value.equals("light", ignoreCase = true) -> false
+    else -> null
+}
 
 /** Windows mainline: a new learner can bring a book without a preconfigured course or Mac pairing. */
 internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
+    val initialBounds = windowsInitialWindowBounds()
     application {
         val controller = remember { TextbookController(TextbookLibrary(directory)) }
         val drafts = rememberAnswerDrafts(controller)
+        val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
-        val closeGuard = remember(drafts, scope) { TextbookCloseGuard(drafts, scope, ::exitApplication) }
+        val closeGuard = remember(drafts, exams, scope) {
+            TextbookCloseGuard({ drafts.flush() && exams.flush() }, scope, ::exitApplication)
+        }
         Window(onCloseRequest = closeGuard::requestClose, title = "Coach",
-            state = rememberWindowState(width = WINDOWS_WINDOW_WIDTH.dp, height = WINDOWS_WINDOW_HEIGHT.dp)) {
-            WindowsTextbookHost(controller, drafts, chooseBook = {
+            state = rememberWindowState(
+                width = initialBounds.width.dp, height = initialBounds.height.dp,
+                position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
+            )) {
+            WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)
                     try {
@@ -86,10 +99,12 @@ internal fun runWindowsTextbooks() {
 }
 
 internal class TextbookCloseGuard(
-    private val drafts: AnswerDrafts,
+    private val flushDrafts: suspend () -> Boolean,
     private val scope: CoroutineScope,
     private val close: () -> Unit,
 ) {
+    constructor(drafts: AnswerDrafts, scope: CoroutineScope, close: () -> Unit) : this(drafts::flush, scope, close)
+
     var failed by mutableStateOf(false)
         private set
     private var closing = false
@@ -100,7 +115,7 @@ internal class TextbookCloseGuard(
         failed = false
         scope.launch {
             try {
-                if (drafts.flush()) close() else failed = true
+                if (flushDrafts()) close() else failed = true
             } finally { closing = false }
         }
     }
@@ -134,19 +149,24 @@ private val AppTab.hostDestination: AppTab
  * library they stay an honest empty state instead of invented progress.
  */
 @Composable
-internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), chooseBook: suspend () -> Path?) {
+internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
+    exams: LocalExamController = rememberLocalExamController(controller.library), chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
+    val examUi by exams.state.collectAsState()
     val scope = rememberCoroutineScope()
     val book = ui.book
+    LaunchedEffect(book?.id) { book?.let { exams.load(it) } }
     // The library is read once for the whole host, so 今天 and 课程 show existing books before 书架 is opened.
     LaunchedEffect(controller) {
         val current = controller.state.value
         if (current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
     }
     fun openInWorkspace(action: suspend () -> Unit) { tab = AppTab.RESOURCES; scope.launch { action() } }
-    CoachTheme {
+    val systemDark = isSystemInDarkTheme()
+    val dark = remember { windowsThemeOverride(System.getProperty("coach.windows.theme")) }
+    CoachTheme(dark ?: systemDark) {
         Surface(Modifier.fillMaxSize().testTag("windows-host"), color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -173,9 +193,17 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                 onLearn = { openInWorkspace { drafts.flush(); controller.learn() } })
                             AppTab.ROUTE -> if (book == null) HostEmptyState("host-course-empty", "还没有课程",
                                 "课程按书架上的教材分节。书架现在是空的，先去上传一本，再回来按节学。")
+                            else if (examUi.book?.id == book.id && examUi.attempt != null) LocalExamPane(exams)
                             else HostCourseBook(book, busy = ui.busy,
                                 onLearn = { openInWorkspace { drafts.flush(); controller.learn() } },
-                                onRead = { openInWorkspace { controller.read() } })
+                                onRead = { openInWorkspace { controller.read() } },
+                                exams = {
+                                    if (examUi.book?.id == book.id) LocalExamsSummary(exams)
+                                    else {
+                                        examUi.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                                        Text("正在读取本书练习…")
+                                    }
+                                })
                             else -> TextbookWorkspace(controller, drafts, loadOnMount = false, chooseBook = chooseBook)
                         }
                     }
@@ -210,14 +238,15 @@ private fun HostTodayBook(book: Textbook, busy: Boolean, reviews: Int, onReview:
 
 /** 课程: the same book split into lessons; no remote course or knowledge map is invented here. */
 @Composable
-private fun HostCourseBook(book: Textbook, busy: Boolean, onLearn: () -> Unit, onRead: () -> Unit) {
+private fun HostCourseBook(book: Textbook, busy: Boolean, onLearn: () -> Unit, onRead: () -> Unit,
+    exams: @Composable () -> Unit) {
     if (book.lessons.isEmpty()) HostPanel("host-course-book", "这门课还开不了",
         "《${book.title}》没有可提取的文字，按节学需要带文字层的教材。可以先在书架当一本书读。", busy, onRead,
-        "host-course-read", "读这本书的原文", null, null, null)
+        "host-course-read", "读这本书的原文", null, null, null, extra = exams)
     else HostPanel("host-course-book", book.title,
         "这门课就是书架上的这本教材，共 ${book.lessons.size} 节，${book.progressLine()}。", busy, onLearn,
         "host-course-learn", if (book.learning) "继续第 ${book.lessonIndex + 1} 节" else "开始这门课",
-        onRead, "host-course-read", "接着读 · 第 ${book.readingPage} 页")
+        onRead, "host-course-read", "接着读 · 第 ${book.readingPage} 页", extra = exams)
 }
 
 @Composable
@@ -257,7 +286,7 @@ private fun HostSettings(directory: Path, onClose: () -> Unit) {
             Text("教材和进度保存在这台电脑，不经过 Mac。")
             Text(directory.toString(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings-library-directory"))
-            Text("今天和课程读的是这台电脑书架上的教材；考试和 Mac 上的课程数据还没接。",
+            Text("课程里可做本地教材参考练习；Mac 上的课程数据仍独立。",
                 style = MaterialTheme.typography.bodySmall)
         }
     }, confirmButton = {

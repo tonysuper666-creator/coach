@@ -148,10 +148,12 @@ internal fun textbookReferencePaper(book: Textbook): LocalPaperAvailability {
             "source" to json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to page.number, "quote" to practice.reference))
     }
     if (items.isEmpty()) return LocalPaperAvailability(null, gaps.ifEmpty { listOf("教材没有可用于练习的文字和题目。") })
-    return LocalPaperAvailability(LocalExamPaper(json("id" to "reference-${book.id}-v1", "bookId" to book.id,
-        "title" to "${book.title} · 教材参考练习", "kind" to "drill", "origin" to "TEXTBOOK_REFERENCE",
-        "key_state" to "UNREVIEWED", "sections" to JsonArray(listOf(json("title" to "原文选择",
-            "items" to JsonArray(items)))))), gaps)
+    val content = json("bookId" to book.id, "title" to "${book.title} · 教材参考练习",
+        "kind" to "drill", "origin" to "TEXTBOOK_REFERENCE", "key_state" to "UNREVIEWED",
+        "sections" to JsonArray(listOf(json("title" to "原文选择", "items" to JsonArray(items)))))
+    // A changed generated question set is a new paper; old attempts retain their original frozen version.
+    return LocalPaperAvailability(LocalExamPaper(JsonObject(content +
+        ("id" to JsonPrimitive("reference-" + localExamHash(canonicalJson(content)))))), gaps)
 }
 
 internal fun localExamHash(value: String): String =

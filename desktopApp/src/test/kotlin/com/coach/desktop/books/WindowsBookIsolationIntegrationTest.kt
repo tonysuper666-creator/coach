@@ -153,10 +153,24 @@ class WindowsBookIsolationIntegrationTest {
 
     @Test fun brokenRefreshedJsonCannotOverwriteTheOriginalOrPublishAnAnswer() = runBlocking {
         val native = SyntheticIsolatedCodex(OwnedBookConsentTest.Fixture(), "broken-auth")
-        assertIs<BookLearningReply.Unavailable>(support(native).explain(native.fixture.explain()))
+        val result = assertIs<BookLearningReply.Unavailable>(support(native).explain(native.fixture.explain()))
+        assertEquals(LocalCodexProblem.AUTH_REFRESH.message, result.message)
         assertTrue(Files.readAllBytes(native.auth).contentEquals(native.original))
         native.clean()
         println("SYNTHETIC_TRANSPORT_BAD_REFRESH original_preserved=true displayed_answers=0")
+    }
+
+    @Test fun rejectedWritebackRequestsReloginWithoutRetryingTheAdapter() = runBlocking {
+        val native = SyntheticIsolatedCodex(OwnedBookConsentTest.Fixture(), "refresh")
+        val source = Files.writeString(native.root.resolve("SYNTHETIC-FailedCommit.cs"),
+            "class SyntheticFailedCommit { static int Main(string[] args) { return 4; } }")
+        val helper = SyntheticIsolatedCodex.compile(native.root.resolve("SYNTHETIC-failed-commit.exe"), listOf(source))
+        val result = assertIs<BookLearningReply.Unavailable>(support(native, native.transport(commitHelper = helper)).explain(native.fixture.explain()))
+        assertEquals(LocalCodexProblem.AUTH_REFRESH.message, result.message)
+        assertEquals(2, native.argv.size)
+        assertTrue(Files.readAllBytes(native.auth).contentEquals(native.original))
+        native.clean()
+        println("SYNTHETIC_TRANSPORT_REFRESH_FAILURE relogin_required=true adapter_retries=0 original_preserved=true")
     }
 
     @Test fun revokeDuringTheTransactionRollsBackAndCannotPublishTheCompletedAnswer() = runBlocking {

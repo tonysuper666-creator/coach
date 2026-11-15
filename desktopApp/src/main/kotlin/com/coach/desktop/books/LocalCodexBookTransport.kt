@@ -18,6 +18,7 @@ import kotlin.coroutines.resumeWithException
 internal enum class LocalCodexProblem(val message: String) {
     MISSING("这台电脑上没有可用的 Codex，讲解用不了；原文和做题不受影响。"),
     LOGIN("这台电脑上的 Codex 还没有登录订阅账号，请先登录后再试。"),
+    AUTH_REFRESH("Codex 登录状态需要重新确认，讲解已停止。请重新登录 Codex 后再试。"),
     MODEL("当前 Codex 账号用不了这个模型，讲解没有生成；原文和做题不受影响。"),
     TIMEOUT("Codex 讲解超时了，这次请求已停止，可以稍后重试。"),
     FAILED("Codex 这次运行失败，讲解没有生成，可以稍后重试。"),
@@ -125,8 +126,11 @@ internal class LocalCodexBookTransport(
             // the consent store lock across blocking filesystem/transaction work.
             val authSnapshot = checkNotNull(snapshot)
             val committed = runInterruptible { authSnapshot.commit() }
-            if (!committed.cleaned || committed.status !in setOf(AuthCommitStatus.UNCHANGED, AuthCommitStatus.COMMITTED))
+            if (!committed.cleaned) throw LocalCodexFailure(LocalCodexProblem.FAILED)
+            if (committed.status == AuthCommitStatus.SOURCE_CHANGED)
                 throw LocalCodexFailure(LocalCodexProblem.FAILED)
+            if (committed.status !in setOf(AuthCommitStatus.UNCHANGED, AuthCommitStatus.COMMITTED))
+                throw LocalCodexFailure(LocalCodexProblem.AUTH_REFRESH)
             snapshot = null
             currentCoroutineContext().ensureActive()
             lease.checked { answer }

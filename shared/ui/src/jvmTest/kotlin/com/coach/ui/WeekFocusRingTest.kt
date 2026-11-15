@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
@@ -38,6 +39,9 @@ import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalDeskSelect
 import com.coach.ui.v7.LocalV7PageDetails
 import com.coach.ui.v7.WeekPage
+import com.coach.ui.v7.V7MarginQuestion
+import com.coach.ui.v7.V7PageDetails
+import com.coach.ui.v7.ReadingPage
 import com.coach.ui.v7.coursePageDetails
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -52,7 +56,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons and the Desk 返回 / 出处与批注 / 专心读 entrances.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances and the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -648,6 +652,108 @@ class WeekFocusRingTest {
     }
 
     /**
+     * The reading page's 问一句… / 开始做题 → under the text and 打开原页 → / 继续练习 → in the margin cards (SourceThumbnail,
+     * MarginQuestion), in a wide window (1224dp), at 700dp (margin column) and 699dp (the cards live in the 出处与批注 sheet).
+     * Never-focused frames and bounds first; then by keyboard each shows the ring ≥3:1 unclipped, keeps its bounds,
+     * blur restores the pixels and Enter keeps its callback. The card links sit 8dp under the thumbnail / explanation,
+     * so their ring is measured downward into the card's 12dp bottom padding.
+     */
+    @Test fun readingAskQuizSourceAndPracticeShowRingAndKeepTheirActions() {
+        val view = threeWeeks()
+        val kp = view.kp("c")!!
+        val text = "合成正文第一段，讲一个要点。\n\n合成正文第二段。"
+        val details = V7PageDetails(course = "合成课", readStatus = "读到第 1 段", sourceLabel = "合成教材 · 第 3 页",
+            sourceText = "合成教材第 3 页的原文缩略。", thumbnailCaption = "图 1",
+            question = V7MarginQuestion("合成题干：哪一项对？", listOf("合成选项一", "合成选项二"), 0, "为什么：合成解释。", 3, "合成教材 3"))
+        val ask = hasTestTag("v7-reading-ask")
+        val quiz = hasTestTag("v7-reading-quiz")
+        val open = hasText("打开原页 →") and hasClickAction()
+        val practice = hasText("继续练习 →") and hasClickAction()
+        val all = listOf("问一句" to ask, "开始做题" to quiz, "打开原页" to open, "继续练习" to practice)
+        val widths = listOf(1224f, 700f, 699f)
+        fun bounds(t: ComposeUiTest, ms: List<Pair<String, SemanticsMatcher>>) = ms.associate { (n, m) -> n to t.first(m).boundsInRoot }
+        withController { controller ->
+            for (dark in listOf(false, true)) for (w in widths) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val inner = w >= 700f
+                val calls = mutableListOf<String>()
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalV7PageDetails provides details) {
+                    focus = LocalFocusManager.current
+                    val reading = remember { mutableStateOf(false) }
+                    ReadingPage(controller, kp, view, text, reading.value, { reading.value = !reading.value }, null,
+                        onAsk = { calls += "问一句" }, onQuiz = { calls += "做题" }, onSource = { calls += "原页" }, weekActions = null, onSelectionAsk = {})
+                } } } }
+                waitForIdle()
+                // Page entrances (and the margin cards when the window is wide enough to show them).
+                val pageItems = if (inner) all else all.take(2)
+                val before = shot("$mode-read-unfocused")
+                val b0 = bounds(this, pageItems)
+                println("TON-1603 week $mode read bounds=" + b0.entries.joinToString(" ") { (n, r) -> "$n@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                fun blurRestores(shotName: String, ref: PixelMap, r: Rect, dialog: Boolean = false) {
+                    runOnIdle { focus.clearFocus() }; waitForIdle()
+                    assertRegionEqual(ref, shot("$mode-$shotName-blurred", dialog), r.inflate(10 * scale), "$mode $shotName after blur")
+                }
+                onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                val stops = mutableListOf<String>()
+                for ((n, m) in pageItems) {
+                    stops += "$n=${tabUntil(m)}"
+                    assertTrue(focused(m), "$mode Tab never reached $n")
+                    assertEquals(b0.getValue(n), first(m).boundsInRoot, "$mode focusing must not move or resize $n")
+                    measure(mode, n, m, before, pageDx = 8f, walkDown = n == "打开原页" || n == "继续练习")
+                }
+                println("TON-1603 week $mode read tab-stops ${stops.joinToString(" ")}")
+                for ((n, _) in pageItems) blurRestores(n, before, b0.getValue(n))
+                for ((n, m) in pageItems) { onNode(m).requestFocus(); waitForIdle(); enter(m); assertTrue(focused(m), "$mode focus stays on $n after Enter") }
+                assertEquals(if (inner) listOf("问一句", "做题", "原页", "做题") else listOf("问一句", "做题"), calls, "$mode Enter keeps each callback")
+                if (!inner) {
+                    // 699dp: the margin cards sit in the 出处与批注 sheet. Open it by keyboard, then Tab inside it.
+                    val toggle = hasTestTag("v7-margin-toggle")
+                    onNode(toggle).requestFocus(); waitForIdle(); enter(toggle)
+                    assertEquals(1, onAllNodes(hasTestTag("v7-margin-sheet")).fetchSemanticsNodes().size, "$mode the margin sheet is open")
+                    val sheetBefore = shot("$mode-read-sheet-unfocused", dialog = true)
+                    val sheetItems = all.drop(2)
+                    val bs = bounds(this, sheetItems)
+                    println("TON-1603 week $mode read sheet bounds=" + bs.entries.joinToString(" ") { (n, r) -> "$n@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                    val sheetStops = mutableListOf<String>()
+                    for ((n, m) in sheetItems) {
+                        sheetStops += "$n=${tabUntil(m)}"
+                        assertTrue(focused(m), "$mode Tab never reached $n in the sheet")
+                        assertEquals(bs.getValue(n), first(m).boundsInRoot, "$mode focusing must not move or resize $n")
+                        measure(mode, n, m, sheetBefore, pageDx = 8f, dialog = true, walkDown = true)
+                    }
+                    println("TON-1603 week $mode read sheet tab-stops ${sheetStops.joinToString(" ")}")
+                    // The sheet is its own window, so the page's FocusManager can't clear it; blur each card link by moving
+                    // focus to the other one, which leaves the first exactly as it was never focused.
+                    for ((i, nm) in sheetItems.withIndex()) {
+                        val (n, m) = nm
+                        val other = sheetItems[1 - i].second
+                        onNode(m).requestFocus(); waitForIdle(); assertTrue(focused(m), "$mode $n focused in the sheet")
+                        onNode(other).requestFocus(); waitForIdle(); assertTrue(focused(other), "$mode focus moved off $n")
+                        assertRegionEqual(sheetBefore, shot("$mode-$n-blurred", dialog = true), bs.getValue(n).inflate(10 * scale), "$mode $n after blur")
+                    }
+                    for ((n, m) in sheetItems) { onNode(m).requestFocus(); waitForIdle(); enter(m) }
+                    assertEquals(listOf("问一句", "做题", "原页", "做题"), calls, "$mode Enter keeps each callback in the sheet")
+                }
+                println("TON-1603 week $mode read enter calls=$calls")
+            }
+            // A mouse click still runs each callback with the never-focused bounds.
+            for (w in widths) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val calls = mutableListOf<String>()
+                setContent { CoachTheme(false) { Surface { CompositionLocalProvider(LocalV7PageDetails provides details) {
+                    ReadingPage(controller, kp, view, text, false, {}, null,
+                        onAsk = { calls += "问一句" }, onQuiz = { calls += "做题" }, onSource = { calls += "原页" }, weekActions = null, onSelectionAsk = {})
+                } } } }
+                waitForIdle()
+                val items = if (w >= 700f) all else all.take(2)
+                for ((_, m) in items) { onNode(m).performClick(); waitForIdle() }
+                assertEquals(if (w >= 700f) listOf("问一句", "做题", "原页", "做题") else listOf("问一句", "做题"), calls, "${w.toInt()} mouse clicks keep each callback")
+                println("TON-1603 week light-${w.toInt()} read click calls=$calls")
+            }
+        }
+    }
+
+    /**
      * Ring drawn inside a text-button pill that sits on a clipping edge: from each pill edge walk inward on the centre lines.
      * The ring must start at the edge (no clipped part) and be V7FocusRingWidth wide on all four sides, ≥3:1 against the
      * surface the pill sits on and against the pill's own focused fill.
@@ -786,8 +892,9 @@ class WeekFocusRingTest {
      * background. Gap and ring width must match V7FocusRingGap / V7FocusRingWidth on both axes, so the ring hugs the pill.
      * Starting at the edge, not the centre, keeps the label glyphs out of the walk.
      * [pageDx] is where the adjacent background is sampled, left of the pill; [dialog] captures the dialog layer instead of the page.
+     * [walkDown] walks down from the bottom edge instead of up, for a pill with something else just above its ring.
      */
-    private fun ComposeUiTest.measure(mode: String, label: String, m: SemanticsMatcher, before: PixelMap, pageDx: Float = 20f, dialog: Boolean = false) {
+    private fun ComposeUiTest.measure(mode: String, label: String, m: SemanticsMatcher, before: PixelMap, pageDx: Float = 20f, dialog: Boolean = false, walkDown: Boolean = false) {
         val shot = shot("$mode-$label-focused", dialog)
         val b = first(m).boundsInRoot
         val cx = b.center.x.roundToInt(); val cy = b.center.y.roundToInt()
@@ -803,10 +910,11 @@ class WeekFocusRingTest {
             return inner to i - 1
         }
         val (innerL, outerL) = walk { shot[left - it, cy] }
-        val (innerT, outerT) = walk { shot[cx, top - it] }
+        val bottom = b.bottom.roundToInt() - 1
+        val (innerT, outerT) = if (walkDown) walk { shot[cx, bottom + it] } else walk { shot[cx, top - it] }
         val gapL = innerL - 1; val gapT = innerT - 1
         val widthL = outerL - innerL + 1; val widthT = outerT - innerT + 1
-        val ringY = top - (innerT + outerT) / 2
+        val ringY = if (walkDown) bottom + (innerT + outerT) / 2 else top - (innerT + outerT) / 2
         val ring = shot[cx, ringY]
         val fill = shot[cx, top + 3]
         println("TON-1603 week $mode $label ring=${hex(ring)} page=${hex(page)} fill=${hex(fill)} ring:page=${"%.2f".format(contrast(ring, page))} ring:fill=${"%.2f".format(contrast(ring, fill))} gap(side/top)=$gapL/${gapT}px ring(side/top)=$widthL/${widthT}px")

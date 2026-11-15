@@ -112,7 +112,7 @@ internal fun SourceThumbnail(details: V7PageDetails, onOpen: () -> Unit) {
             overflow = androidx.compose.ui.text.style.TextOverflow.Clip)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(details.thumbnailCaption.ifBlank { details.sourceCaption }, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-            Text("打开原页 →", Modifier.clickable(onClick = onOpen), style = MaterialTheme.typography.labelMedium.copy(textDecoration = TextDecoration.Underline), color = CoachTheme.colors.successFg)
+            Text("打开原页 →", Modifier.v7FocusRing().clickable(onClick = onOpen), style = MaterialTheme.typography.labelMedium.copy(textDecoration = TextDecoration.Underline), color = CoachTheme.colors.successFg)
         }
     }
 }
@@ -168,7 +168,7 @@ private fun MarginQuestion(q: V7MarginQuestion, onQuiz: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(q.source, style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.successFg)
-            Text("继续练习 →", Modifier.clickable(onClick = onQuiz), style = MaterialTheme.typography.labelMedium)
+            Text("继续练习 →", Modifier.v7FocusRing().clickable(onClick = onQuiz), style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -303,8 +303,8 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 } else Markdown(text, true, "reading:${kp.id}", c.math)
                 Spacer(Modifier.height(8.7.dp))
                 Row(Modifier.fillMaxWidth().railAnchor("end"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("问一句…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
-                    Text("开始做题 →", Modifier.clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
+                    Text("问一句…", Modifier.v7FocusRing().clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
+                    Text("开始做题 →", Modifier.v7FocusRing().clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
                 }
             }
             if (!m.inner && !focus) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (d.selection.isNotBlank()) 84.dp else 40.dp)

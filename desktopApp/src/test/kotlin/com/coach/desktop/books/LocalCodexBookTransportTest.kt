@@ -16,6 +16,9 @@ class LocalCodexBookTransportTest {
             mode, root = sys.argv[1:3]
             root = Path(root)
             args = sys.argv[3:]
+            if mode == 'environment':
+                phase = 'login' if args == ['login', 'status'] else 'exec'
+                root.joinpath(phase + '-environment.json').write_text(json.dumps({'has_RUST_LOG': 'RUST_LOG' in os.environ}))
             if args == ['login', 'status']:
                 print('Logged in using ' + ('an API key' if mode == 'apikey' else 'ChatGPT'))
                 sys.exit(0)
@@ -75,6 +78,17 @@ class LocalCodexBookTransportTest {
         assertEquals(LocalCodexProblem.LOGIN.message, assertIs<BookLearningReply.Unavailable>(api.explain(f.explain())).message)
         val model = ConsentedBookLearningSupport(f.library, f.store, fake(f, "model"))
         assertEquals(LocalCodexProblem.MODEL.message, assertIs<BookLearningReply.Unavailable>(model.explain(f.explain())).message)
+    }
+
+    @Test fun loginAndExecDoNotInheritRustLogFiltering() = runBlocking {
+        val f = OwnedBookConsentTest.Fixture()
+        val support = ConsentedBookLearningSupport(f.library, f.store, fake(f, "environment"))
+        support.grant(support.consentOffer(f.a.id), OwnedBookAction.entries.toSet())
+        assertIs<BookLearningReply.Text>(support.explain(f.explain()))
+        for (phase in listOf("login", "exec")) {
+            assertEquals("{\"has_RUST_LOG\": false}", Files.readString(f.root.resolve("$phase-environment.json")), phase)
+        }
+        println("SYNTHETIC_ENV parent_rust_log_off=${System.getenv("RUST_LOG") == "off"} login_has_rust_log=false exec_has_rust_log=false")
     }
 
     @Test fun toolUnknownMalformedAndIncompleteEventsNeverPublishTheOtherwiseValidAnswer() = runBlocking {

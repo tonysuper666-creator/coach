@@ -1,5 +1,6 @@
 """Synthetic-only local Codex smoke; --local selects Mac, --interactive the existing Windows console."""
 from pathlib import Path
+import os
 import subprocess
 import sys
 
@@ -29,11 +30,14 @@ try:
         "--tests", "com.coach.desktop.books.OwnedBookProcess*Test",
     ]
     result = subprocess.run(prefix + [
-        "./gradlew", ":desktopApp:test",
+        "./gradlew", "--no-daemon", ":desktopApp:test",
     ] + selectors + [
         "--rerun-tasks", "--console=plain",
     ] + (["--tests", "com.coach.desktop.books.*", "--tests", "com.coach.desktop.Windows*Book*Test",
-          "--tests", "com.coach.desktop.WindowsCitedProviderHostTest"] if local and not security else []), cwd=ROOT)
+          "--tests", "com.coach.desktop.WindowsCitedProviderHostTest"] if local and not security else []), cwd=ROOT,
+        # Exercise inherited log suppression on Mac. The Windows runner deliberately does
+        # not forward caller environment; its child-environment assertion still runs.
+        env=dict(os.environ, RUST_LOG="off") if local else None)
     raise SystemExit(result.returncode)
 finally:
     target.unlink(missing_ok=True)

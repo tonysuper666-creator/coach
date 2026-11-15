@@ -67,7 +67,8 @@ internal class LocalCodexBookTransport(
                 listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
                     "in_app_browser", "image_generation", "view_image", "multi_agent").flatMap { listOf("-c", "features.$it=false") } +
                 // CLI 0.167 still exposes collaboration tools with multi_agent=false (even v2=false).
-                // Disable the native tools explicitly; stderr/JSONL guards reject observable calls too.
+                // The native-tool switch is the primary control. Stderr only reveals failed calls
+                // under the default log filter; it cannot detect every successful tool invocation.
                 listOf("-c", "features.multi_agent_v2.disable_native_tools=true", "-c", "web_search=disabled", "--json", "-o", output.toString(), "-")
             val prompt = "Use only the supplied excerpts. Return only a JSON object with exactly two fields: " +
                 "answer (a useful explanation or answer, not a quotation) and citations (an array of excerpt IDs used). " +
@@ -88,6 +89,7 @@ internal class LocalCodexBookTransport(
     private suspend fun execute(argv: List<String>, cwd: Path, input: String?, lease: BookConsentLease, timeout: Long): Pair<Int, String> {
         val builder = ProcessBuilder(argv).directory(cwd.toFile())
         listOf("OPENAI_API_KEY", "CODEX_API_KEY", "AZURE_OPENAI_API_KEY").forEach { builder.environment().remove(it) }
+        builder.environment().remove("RUST_LOG") // Keep the CLI's default filter, without logging more excerpt content.
         // Serialize the actual spawn with revoke, not just a check before serializing the prompt.
         val process = lease.checked { builder.start() }
         val tree = LocalCodexProcessTree(process)
@@ -167,8 +169,9 @@ private fun readCodexEvents(stream: InputStream): Boolean {
     return completed && answer && !failed
 }
 
-// Some CLI tool calls (notably collaboration) have no JSONL item. Inspect every stderr byte,
-// including beyond the retained diagnostic limit and across read boundaries; never log it.
+// Some failed CLI tool calls (notably collaboration) have no JSONL item. This supplemental
+// guard sees failures logged under the default filter, not every successful call. Inspect every
+// stderr byte, including beyond the retained diagnostic limit and across read boundaries; never log it.
 private fun boundedDiagnostic(stream: InputStream, rejectTools: Boolean = false): String = stream.use {
     val kept = java.io.ByteArrayOutputStream()
     val buffer = ByteArray(8192)

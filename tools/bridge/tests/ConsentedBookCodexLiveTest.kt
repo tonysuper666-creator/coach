@@ -10,6 +10,7 @@ import kotlin.test.*
 /** Explicit synthetic-only live test, copied into the test source set by its runner. No private library. */
 class ConsentedBookCodexLiveTest {
     @Test fun collaborationIsAbsentAndStderrOnlyAttemptIsRejected() = runBlocking {
+        println("SYNTHETIC_COLLAB parent_rust_log_off=${System.getenv("RUST_LOG") == "off"}")
         val root = Files.createTempDirectory("synthetic-codex-collaboration-")
         val executable = assertNotNull(discoverLocalCodex())
         val marker = "SYNTHETIC_CANARY_" + UUID.randomUUID().toString()
@@ -53,6 +54,10 @@ class ConsentedBookCodexLiveTest {
                 }
                 val process = ProcessBuilder(argv).directory(cwd.toFile()).apply {
                     listOf("OPENAI_API_KEY", "CODEX_API_KEY", "AZURE_OPENAI_API_KEY").forEach { environment().remove(it) }
+                    // Match execute's environment policy for this direct argv comparison.
+                    // loginAndExecDoNotInheritRustLogFiltering independently checks execute itself.
+                    environment().remove("RUST_LOG")
+                    assertFalse(environment().containsKey("RUST_LOG"))
                     redirectOutput(stdout.toFile()); redirectError(stderr.toFile())
                 }.start()
                 try {
@@ -70,7 +75,7 @@ class ConsentedBookCodexLiveTest {
                         item != null && item["type"]?.jsonPrimitive?.content !in setOf("agent_message", "reasoning")
                     }
                     println("SYNTHETIC_COLLAB case=$label exit=${process.exitValue()} stderr_collab=$collab " +
-                        "stderr_router=$router stdout_tool_items=$toolItems inventory=$tools canary_hits=${if (marker in result || marker in events) 1 else 0}")
+                        "stderr_router=$router stdout_tool_items=$toolItems child_has_rust_log=false inventory=$tools canary_hits=${if (marker in result || marker in events) 1 else 0}")
                     if (baseline) {
                         assertTrue(collab > 0, "negative control did not invoke the reviewed tool")
                         assertTrue(tools.any { it.startsWith("collaboration.") })
@@ -97,6 +102,7 @@ class ConsentedBookCodexLiveTest {
                 executable, root, args = sys.argv[1], Path(sys.argv[2]), sys.argv[3:]
                 if args == ['login', 'status']:
                     os.execv(executable, [executable] + args)
+                assert 'RUST_LOG' not in os.environ
                 sys.stdin.buffer.read()
                 shutil.copyfile(root / 'native_tools_enabled_control-answer.json', args[args.index('-o') + 1])
                 sys.stdout.buffer.write((root / 'native_tools_enabled_control-events.jsonl').read_bytes())

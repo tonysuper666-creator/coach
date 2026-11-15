@@ -19,6 +19,10 @@ import kotlinx.serialization.json.*
 import java.math.BigDecimal
 
 private fun points(value: Long): String = BigDecimal.valueOf(value, 2).stripTrailingZeros().toPlainString()
+internal fun localExamRemaining(deadline: Long, now: Long): String {
+    val seconds = ((deadline - now).coerceAtLeast(0) + 999) / 1000
+    return "%02d:%02d".format(seconds / 60, seconds % 60)
+}
 private fun paperItems(attempt: JsonObject): List<JsonObject> =
     attempt.getValue("paper").jsonObject.getValue("sections").jsonArray.flatMap { section ->
         section.jsonObject.getValue("items").jsonArray.map { it.jsonObject }
@@ -73,10 +77,25 @@ internal fun LocalExamsSummary(controller: LocalExamController) {
         }
         // Old reference versions remain in attempts/history; only the current generated version is offered for a new start.
         ui.papers.filter { it.str("origin") == "AUTHORED" || it.str("id") == current?.id }.forEachIndexed { index, paper ->
+            var timed by remember(paper.str("id")) { mutableStateOf(false) }
+            var minutes by remember(paper.str("id")) { mutableStateOf("30") }
+            val duration = minutes.toIntOrNull()?.takeIf { it in 1..1440 }
             Text("${paper.str("title")} · ${paper.num("items")} 题",
                 style = MaterialTheme.typography.titleMedium)
-            if (paper.str("origin") == "AUTHORED") Text("自编题卷，参考答案尚未独立核对。", style = MaterialTheme.typography.bodySmall)
-            OutlinedButton({ scope.launch { controller.start(paper.str("id")) } }, enabled = !ui.busy && ui.active == null,
+            if (paper.str("origin") == "AUTHORED") {
+                Text("自编题卷，参考答案尚未独立核对。", style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Checkbox(timed, { timed = it }, enabled = !ui.busy && ui.active == null,
+                        modifier = Modifier.testTag("local-timed-$index"))
+                    Text("计时作答")
+                }
+                if (timed) OutlinedTextField(minutes, { minutes = it }, label = { Text("时长（分钟）") },
+                    supportingText = { Text("1–1440 分钟；离开课程或关闭软件后继续计时。") },
+                    isError = duration == null, singleLine = true, enabled = !ui.busy && ui.active == null,
+                    modifier = Modifier.fillMaxWidth().testTag("local-minutes-$index"))
+            }
+            OutlinedButton({ scope.launch { controller.start(paper.str("id"), if (timed) duration else null) } },
+                enabled = !ui.busy && ui.active == null && (!timed || duration != null),
                 modifier = Modifier.testTag("local-paper-start-$index")) { Text("开始作答") }
         }
         if (ui.history.isNotEmpty()) Text("历次结果", style = MaterialTheme.typography.titleMedium)
@@ -113,6 +132,8 @@ internal fun LocalExamPane(controller: LocalExamController) {
         return
     }
     val submitted = attempt.str("status") == "submitted"
+    val timeUp = !submitted && attempt.str("timing") == "TIMED" && ui.nowMillis >= attempt.num("deadline")
+    val editable = !ui.busy && !ui.conflict && !timeUp
     var confirm by remember(attempt.str("mockId")) { mutableStateOf(false) }
     val scroll = remember(attempt.str("mockId"), submitted) { ScrollState(0) }
     LaunchedEffect(ui.error) { if (ui.error != null) scroll.scrollTo(0) }
@@ -124,7 +145,13 @@ internal fun LocalExamPane(controller: LocalExamController) {
         TextButton({ scope.launch { controller.back() } }, enabled = !ui.busy,
             modifier = Modifier.testTag("local-exam-back")) { Text("返回课程") }
         Text(attempt.getValue("paper").jsonObject.str("title"), style = MaterialTheme.typography.headlineMedium)
-        Text(if (attempt.str("origin") == "TEXTBOOK_REFERENCE") "教材参考练习 · 不计时" else "自编题卷 · 不计时")
+        Text(if (attempt.str("timing") == "TIMED") "自编题卷 · 计时 ${attempt.num("durationMinutes")} 分钟"
+            else if (attempt.str("origin") == "TEXTBOOK_REFERENCE") "教材参考练习 · 不计时" else "自编题卷 · 不计时")
+        if (attempt.str("timing") == "TIMED") {
+            if (!submitted) Text("剩余 ${localExamRemaining(attempt.num("deadline"), ui.nowMillis)}",
+                style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("local-countdown"))
+            else if (attempt.flag("autoSubmitted")) Text("计时结束，已自动交卷。")
+        }
         Text("作答记录：${attempt.str("mockId")}", style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag("local-attempt-id"))
         if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -147,20 +174,20 @@ internal fun LocalExamPane(controller: LocalExamController) {
             if (!submitted && item.str("type") == "mcq") {
                 item.strings("options").forEachIndexed { option, text ->
                     val selected = (answer["choice"] as? JsonPrimitive)?.intOrNull == option
-                    Row(Modifier.fillMaxWidth().selectable(selected, enabled = !ui.busy && !ui.conflict, role = Role.RadioButton,
+                    Row(Modifier.fillMaxWidth().selectable(selected, enabled = editable, role = Role.RadioButton,
                         onClick = { controller.answer(key, json("choice" to option)) })
                         .testTag("local-choice-$key-$option").padding(8.dp)) {
-                        RadioButton(selected, onClick = null, enabled = !ui.busy && !ui.conflict)
+                        RadioButton(selected, onClick = null, enabled = editable)
                         Text(text, Modifier.weight(1f).padding(start = 8.dp))
                     }
                 }
-                TextButton({ controller.answer(key, json("choice" to null)) }, enabled = !ui.busy && !ui.conflict,
+                TextButton({ controller.answer(key, json("choice" to null)) }, enabled = editable,
                     modifier = Modifier.testTag("local-clear-$key")) { Text("清空作答") }
             } else if (!submitted) {
                 OutlinedTextField(answer.str("text"), { controller.answer(key, json("text" to it)) },
-                    label = { Text("写下你的回答") }, enabled = !ui.busy, readOnly = ui.conflict, minLines = 3,
+                    label = { Text("写下你的回答") }, enabled = !ui.busy, readOnly = ui.conflict || timeUp, minLines = 3,
                     modifier = Modifier.fillMaxWidth().testTag("local-text-$key"))
-                TextButton({ controller.answer(key, json("text" to "")) }, enabled = !ui.busy && !ui.conflict,
+                TextButton({ controller.answer(key, json("text" to "")) }, enabled = editable,
                     modifier = Modifier.testTag("local-clear-$key")) { Text("清空作答") }
             } else {
                 val chosen = (answer["choice"] as? JsonPrimitive)?.intOrNull
@@ -179,7 +206,7 @@ internal fun LocalExamPane(controller: LocalExamController) {
         if (!submitted) PrimaryButton({ confirm = true }, enabled = !ui.busy && !ui.conflict,
             modifier = Modifier.testTag("local-submit")) { Text("交卷") }
     }
-    if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("交卷吗？") },
+    if (confirm && !submitted) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("交卷吗？") },
         text = { Text("交卷后不能修改本次作答，仍可查看结果和当时保存的题源。") },
         confirmButton = {
             TextButton({ confirm = false; scope.launch { controller.submit() } },

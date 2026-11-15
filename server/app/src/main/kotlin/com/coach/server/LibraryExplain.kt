@@ -16,15 +16,20 @@ import kotlinx.serialization.json.*
 
 /**
  * A local block id and its text are untrusted claims, including after pairing.
- * The book id must name an existing server-registered learner source. Its stored
+ * A file hash needs an explicit private-catalog binding to a learner source. Its stored
  * course, classification, text and learning record authorize the selection.
  * Unregistered local books fail closed; this endpoint never creates a registration.
  */
 internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope) {
-    fun authorize(store: LedgerStore): AuthorizedLibrarySelection {
+    val bookId: String get() = pages.single().docId.substringBefore(":p")
+    val isLocalBook: Boolean get() = Regex("[0-9a-f]{64}").matches(bookId)
+    fun authorize(store: LedgerStore, binding: ReaderDocument? = null): AuthorizedLibrarySelection {
         val claimed = pages.single()
-        val saved = store.learnerSourcePage(claimed.docId.substringBefore(":p"), claimed.pdfPage)
-        if (saved == null || !containsReaderSelection(saved.page.text, quote) || !saved.inLearnedScope(store))
+        if (isLocalBook && (binding == null || binding.version != bookId || binding.explainSourceId == null || claimed.pdfPage !in 1..binding.pages))
+            throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
+        val saved = store.learnerSourcePage(binding?.explainSourceId ?: bookId, claimed.pdfPage)
+        if (saved == null || (binding != null && saved.course != binding.course) ||
+            !containsReaderSelection(saved.page.text, quote) || !saved.inLearnedScope(store))
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
         // The alias is for the existing local reader's citation navigation only.
         // It is minted after the real document/page passed the trusted ceiling.
@@ -75,14 +80,17 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     return LibraryExplainRequest.selected(quote, selected)
 }
 
-fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?) {
+fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?, library: ReaderLibrary? = null) {
     routing {
         post("/v1/library/explain") { call.withReaderConnection {
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
-                val request = actor.execute { libraryExplainRequest(input).authorize(this) }
+                val parsed = libraryExplainRequest(input)
+                val binding = if (parsed.isLocalBook) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
+                val request = actor.execute { parsed.authorize(this, binding) }
                 val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope) {
-                    actor.execute { request.isCurrent(this) }
+                    (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
+                        actor.execute { request.isCurrent(this) }
                 }
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)

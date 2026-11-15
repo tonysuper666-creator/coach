@@ -1,6 +1,7 @@
 package com.coach.server
 
 import com.coach.domain.*
+import com.coach.store.tutorSourceAllowed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -18,6 +19,7 @@ internal data class ReaderDocument(
     val id: String, val course: String, val title: String, val file: Path,
     val version: String, val pages: Int, val offset: Int?, val kind: String, val week: Int?,
     val outline: List<OutlineNode> = emptyList(),
+    val explainSourceId: String? = null,
 ) {
     fun view() = json("id" to id, "title" to title, "version" to version, "pages" to pages,
         "printedPageOffset" to offset, "kind" to kind, "week" to week)
@@ -72,7 +74,12 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
                 (offset == null || offset in 0 until pages) && kind in setOf("textbook", "slides", "reading") &&
                 (kind != "slides" || week != null && week in 1..100) &&
                 d.str("course").length in 1..128 && d.str("title").length in 1..300) { "Invalid reader metadata" }
-            ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week, parseOutline(d["outline"], pages))
+            val explainSource = d["explainSourceId"]?.let {
+                require(it is JsonPrimitive && it.isString && Regex("[A-Za-z0-9._-]{1,80}").matches(it.content)) { "Invalid explanation source" }
+                it.content
+            }
+            ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week,
+                parseOutline(d["outline"], pages), explainSource)
         }
         require(docs.size <= 500 && docs.map { it.course to it.id }.distinct().size == docs.size) { "Duplicate reader document" }
         return docs
@@ -81,6 +88,25 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
     internal fun list(course: String) = documents.filter { it.course == course }
     internal fun document(course: String, id: String): ReaderDocument = list(course).singleOrNull { it.id == id }
         ?: throw ReaderFailure(io.ktor.http.HttpStatusCode.NotFound, "资料未加入这门课的私有书库")
+
+    /** A local book's byte hash is only an identity, never a permission grant.
+     * Reload the server-owned opt-in and hash the actual file on every authorization
+     * check, including after generation; cached page metadata cannot keep a revoked grant alive.
+     */
+    internal suspend fun explanationSource(version: String, page: Int): ReaderDocument? = withContext(Dispatchers.IO) {
+        try {
+            val d = load().filter { it.version == version && it.explainSourceId != null }.singleOrNull()
+                ?: return@withContext null
+            if (page !in 1..d.pages || !tutorSourceAllowed(d.id, d.title, d.kind, d.explainSourceId!!)) return@withContext null
+            val hash = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(d.file).use { input ->
+                val chunk = ByteArray(65536)
+                while (true) { val n = input.read(chunk); if (n < 0) break; hash.update(chunk, 0, n) }
+            }
+            d.takeIf { hash.digest().joinToString("") { "%02x".format(it) } == version }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (_: Exception) { null } // Missing, malformed, moved or changed registrations fail closed.
+    }
 
     /** Only exact supported citations. Ambiguous and unregistered sources never guess a page. */
     internal fun resolve(course: String, reference: String): JsonObject {

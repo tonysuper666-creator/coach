@@ -21,6 +21,24 @@ For lecture slides use `--kind slides --week N` and omit the offset unless expli
 
 Catalog schema 1 contains `documents`: each entry has `id`, actual ledger `course`, `title`, relative `file`, `sha256`, `pages`, `kind`, optional `printedPageOffset` and `week`. Files must resolve under the catalog root; duplicate `(course,id)` entries fail startup. Updates require a server restart. Old content-addressed files/caches are retained deliberately; remove them only after retaining the versions needed for old annotations. No catalog, book, extracted text, page image, note export, credential or private test artifact belongs in Git or an issue attachment.
 
+Local-book explanation registration (TON-1466)
+--------------------------------------------
+
+The Windows local reader identifies a book by the SHA-256 of its complete file. To let its existing selected-text explanation use an **already registered learner source**, the server operator can explicitly bind that exact PDF to the source's `docId`:
+
+```sh
+python3 tools/reader/import_pdf.py /private/path/to/selected.pdf \
+  --library ~/Coach/reader-development --id textbook \
+  --course ACTUAL_LEDGER_COURSE_ID --title 'Course textbook' \
+  --kind textbook --explain-source-id EXISTING_LEARNER_SOURCE_DOC_ID
+```
+
+This adds optional `explainSourceId` to the private catalog. The ledger source must already have the same course and physical **1-based PDF page numbers**, trusted page text, learner/tutor visibility and an existing learned knowledge-point anchor. The printed-page offset does not translate these anchors. The importer does not create source pages, learning history or permissions, or infer a mapping from a title. No binding is added without this flag; reimporting the same `(course,id)` without it revokes the binding. A hash with multiple opted-in entries is ambiguous and rejected, even across courses.
+
+`/v1/library/explain` uses this server-owned binding for local hash IDs, then checks the selected quote against the stored source and learned scope. Client course, visibility and source claims confer no authority. Only the selection and one local navigation anchor reach the existing explanation path; neighbouring blocks are discarded. The server re-reads the catalog and hashes the file before and after generation, so revocation, file changes or invalid catalogs fail closed without a restart for this endpoint. Reader catalog/page views still reload at restart. A book without a binding, an unread page or a protected source is refused; TXT/EPUB binding is not provided by this PDF importer.
+
+The existing desktop per-book explanation consent still applies. This path sends the authorized selection through the configured tutor bridge, which can invoke external subscription CLIs; it does not establish on-device inference. A catalog registration alone does not call AI or export text. Keep real-material and production acceptance on the controlled acceptance lane.
+
 Transport contract for TON-1394 integration
 -----------------------------------------
 
@@ -52,7 +70,7 @@ Privacy audit
 
 Existing `ChatService` prepares and renders a `SourcePack` containing page extracts, then passes it to `BridgeClient` (`system`/`user` messages). `tools/bridge/subscription_bridge.py` renders those messages into prompts and invokes subscription CLI providers (`call_claude`, `call_codex`, `call_agy`). A loopback bridge and read sandbox therefore do not establish on-Mac inference. Sending private PDF selections through that path would cross this issue's no-third-party boundary.
 
-This reader does not import pages into the tutor's source index, construct a SourcePack, expose an ask endpoint or invoke the bridge. Its catalog/page metadata explicitly report AI disabled. No opt-in environment variable can silently enable it. Selection questions require an approved inference path that keeps material local, or a new explicit content-export authorization; none is presumed here. Existing unrelated tutor behavior is unchanged. Do not run private-source live AI tests for this issue. The requested 30-answer citation gate remains unverified, not passed by disabling the feature.
+The catalog/page routes do not import pages into the tutor's source index or invoke the bridge; their metadata report AI disabled. The separate local-book explanation endpoint above requires both an explicit server binding and the desktop's existing per-book consent. Its authorized selections use the configured tutor bridge and can leave the machine. No opt-in environment variable silently enables catalog-wide AI. Do not run private-source live AI tests on the implementation lane. The requested 30-answer citation gate remains unverified.
 
 Verification
 ------------

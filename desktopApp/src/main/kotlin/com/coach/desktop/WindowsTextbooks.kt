@@ -68,7 +68,8 @@ internal fun runWindowsTextbooks() {
     val directory = windowsLibraryDirectory()
     val initialBounds = windowsInitialWindowBounds()
     application {
-        val controller = remember { TextbookController(TextbookLibrary(directory)) }
+        val connectionSettings = remember { DesktopConnectionSettings() }
+        val (controller, connection) = rememberPairedBookController(directory, connectionSettings)
         val drafts = rememberAnswerDrafts(controller)
         val exams = rememberLocalExamController(controller.library)
         val scope = rememberCoroutineScope()
@@ -80,7 +81,7 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
-            WindowsTextbookHost(controller, drafts, exams, chooseBook = {
+            WindowsTextbookHost(controller, drafts, exams, connection, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "选择教材或变式来源文件", FileDialog.LOAD)
                     try {
@@ -150,7 +151,8 @@ private val AppTab.hostDestination: AppTab
  */
 @Composable
 internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
-    exams: LocalExamController = rememberLocalExamController(controller.library), chooseBook: suspend () -> Path?) {
+    exams: LocalExamController = rememberLocalExamController(controller.library),
+    connection: WindowsBookPracticeConnection? = null, chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
@@ -218,7 +220,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                     }
                 }
             }
-            if (settings) HostSettings(controller.library.directory) { settings = false }
+            if (settings) HostSettings(controller.library.directory, connection, book) { settings = false }
         }
     }
 }
@@ -280,23 +282,66 @@ private fun HostEmptyState(tag: String, title: String, text: String) {
 }
 
 @Composable
-private fun HostSettings(directory: Path, onClose: () -> Unit) {
+private fun HostSettings(directory: Path, connection: WindowsBookPracticeConnection?, book: Textbook?, onClose: () -> Unit) {
+    var pairing by remember { mutableStateOf(false) }
+    var course by remember(book?.id) { mutableStateOf("") }
+    var message by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("教材和进度保存在这台电脑，不经过 Mac。")
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("教材和阅读进度保存在这台电脑，未连接也可以继续读。")
             Text(directory.toString(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings-library-directory"))
-            Text("课程里可做本地教材参考练习；Mac 上的课程数据仍独立。",
-                style = MaterialTheme.typography.bodySmall)
+            if (connection != null) {
+                TextButton({ pairing = true }, Modifier.testTag("book-practice-connect")) { Text("连接或检查 Mac 配对") }
+                if (book != null) {
+                    Text("《${book.title}》的原题同步", style = MaterialTheme.typography.titleSmall)
+                    OutlinedTextField(course, { course = it; message = null }, label = { Text("课程标识") },
+                        singleLine = true, enabled = !saving, modifier = Modifier.testTag("book-practice-course"))
+                    Text("课程标识只用于查找。课程必须已核准这本书的具体原题；未登记时仍显示未备好。",
+                        style = MaterialTheme.typography.bodySmall)
+                    TextButton(enabled = course.isNotBlank() && !saving, modifier = Modifier.testTag("book-practice-save-course"), onClick = {
+                        saving = true
+                        scope.launch {
+                            try {
+                                withContext(Dispatchers.IO) { connection.selectCourse(book.id, course) }
+                                message = "已保存查找位置，开始学习时核对原题。"
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                            catch (_: Exception) { message = "无法保存，请先连接 Mac，并检查课程标识。" }
+                            finally { saving = false }
+                        }
+                    }) { Text("保存课程查找位置") }
+                    message?.let { Text(it, Modifier.testTag("book-practice-course-result")) }
+                }
+            }
         }
     }, confirmButton = {
         TextButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }
     })
+    if (pairing && connection != null) AlertDialog(onDismissRequest = { pairing = false },
+        title = { Text("Mac 配对") }, text = {
+            Box(Modifier.width(480.dp).height(390.dp)) {
+                DesktopPairingGate(connection.settings) {
+                    Text("已连接，可以返回教材。", Modifier.padding(24.dp))
+                }
+            }
+        }, confirmButton = { TextButton({ pairing = false }) { Text("返回教材设置") } })
 }
 
-/** Production host content with an owned library for offscreen tests. */
 @Composable
-internal fun WindowsTextbooksContent(directory: Path, chooseBook: suspend () -> Path?) {
-    val controller = remember(directory) { TextbookController(TextbookLibrary(directory)) }
-    WindowsTextbookHost(controller, chooseBook = chooseBook)
+private fun rememberPairedBookController(directory: Path, settings: DesktopConnectionSettings): Pair<TextbookController, WindowsBookPracticeConnection> {
+    val library = remember(directory) { TextbookLibrary(directory) }
+    val connection = remember(library, settings) { WindowsBookPracticeConnection(settings, library) }
+    val controller = remember(library, connection) { TextbookController(library, connectPractice = connection::prepare) }
+    DisposableEffect(connection) { onDispose { connection.close() } }
+    return controller to connection
+}
+
+/** The ordinary startup composition, also exercised with isolated settings in offscreen tests. */
+@Composable
+internal fun WindowsTextbooksContent(directory: Path,
+    connectionSettings: DesktopConnectionSettings = remember { DesktopConnectionSettings() }, chooseBook: suspend () -> Path?) {
+    val (controller, connection) = rememberPairedBookController(directory, connectionSettings)
+    WindowsTextbookHost(controller, connection = connection, chooseBook = chooseBook)
 }

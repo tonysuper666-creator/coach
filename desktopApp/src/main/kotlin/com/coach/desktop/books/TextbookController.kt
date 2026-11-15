@@ -30,9 +30,12 @@ internal data class LibraryUi(
 )
 
 /** Supplied only by an already paired learning session; never derive course or device from a book. */
-internal class BookPracticeSession(val sync: SyncEngine, val courseId: String, val now: () -> Long = System::currentTimeMillis)
+internal class BookPracticeSession(val sync: SyncEngine, val courseId: String,
+    val synchronize: suspend () -> Unit = {}, val now: () -> Long = System::currentTimeMillis)
 
-internal class TextbookController(val library: TextbookLibrary, private val practiceSession: BookPracticeSession? = null) {
+internal class TextbookController(val library: TextbookLibrary, private val practiceSession: BookPracticeSession? = null,
+    private val connectPractice: (suspend (Textbook, BookLesson, Practice) -> BookPracticeSession?)? = null,
+) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -90,7 +93,7 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
         else openLearning(book)
     }
 
-    private fun openLearning(book: Textbook) {
+    private suspend fun openLearning(book: Textbook) {
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
         mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null) }
@@ -219,7 +222,7 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
         return saved
     }
 
-    private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
+    private suspend fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
         library.saveAnswer(book, lesson, mode, answer)
         mutable.update { it.copy(reviews = library.reviews()) }
         val open = mutable.value.book
@@ -234,9 +237,8 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
         refreshPracticeSync(book, book.lessons.getOrNull(book.lessonIndex), mutable.value.answer, true)
     }
 
-    private fun refreshPracticeSync(book: Textbook, lesson: BookLesson?, answer: PracticeAnswer, submit: Boolean) {
-        val session = practiceSession
-        if (session == null || lesson == null || book.questionMode != QuestionMode.CHOICE) {
+    private suspend fun refreshPracticeSync(book: Textbook, lesson: BookLesson?, answer: PracticeAnswer, submit: Boolean) {
+        if ((practiceSession == null && connectPractice == null) || lesson == null || book.questionMode != QuestionMode.CHOICE) {
             mutable.update { it.copy(practiceSync = "同步未备好：尚未连接配对课程。") }
             return
         }
@@ -246,6 +248,11 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
             return
         }
         try {
+            val session = if (connectPractice == null) practiceSession else connectPractice.invoke(book, lesson, practice)
+            if (session == null) {
+                mutable.update { it.copy(practiceSync = "同步未备好：缺少配对身份或已核准的书课关联。") }
+                return
+            }
             val outbox = BookPracticeOutbox(session.sync)
             val binding = outbox.bind(session.courseId, book, lesson, practice)
             if (binding !is BookPracticeBinding.Ready || !validPracticeFingerprint(binding.posed.payload)) {
@@ -261,6 +268,7 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
             val message = if ((submit || queued) && answer.revealed && answer.text.isNotBlank()) {
                 // The idempotent submit also checks the frozen answer/guessed lock before using its receipt.
                 val commandId = outbox.submit(binding, answer, session.now())
+                session.synchronize()
                 val receipt = session.sync.receipt(commandId)
                 when (receipt?.status) {
                     "OK" -> "原作答已同步。"

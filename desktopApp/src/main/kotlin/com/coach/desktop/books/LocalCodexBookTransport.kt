@@ -43,6 +43,19 @@ internal fun discoverLocalCodex(
     return null
 }
 
+/** Explicit, trusted installation paths. The default is unavailable until the owner wires them. */
+internal data class WindowsBookIsolation(val helper: Path, val authCommitHelper: Path, val authSource: Path)
+
+/** The helper is trusted code; a partial child output is never a success receipt. */
+internal fun validIsolationReceipt(log: String): Boolean {
+    val lines = log.lineSequence().map { it.trim() }.toList()
+    return lines.none { it.startsWith("COACH_ISO_REFUSED") } &&
+        lines.any { Regex("COACH_ISO_VERIFIED pid=[0-9]+ appcontainer=1").matches(it) } &&
+        lines.any { it == "COACH_ISO_CHILD_EXIT 0" } &&
+        lines.any { it == "COACH_ISO_ACL_REVOKED 3" } &&
+        lines.any { it == "COACH_ISO_PROFILE_DELETED hr=0x0" }
+}
+
 /** One local subscription request. No Python bridge, pairing, API key, model switch, or raw diagnostic logging. */
 internal class LocalCodexBookTransport(
     private val executable: Path,
@@ -50,19 +63,30 @@ internal class LocalCodexBookTransport(
     private val timeoutMillis: Long = 180_000,
     private val commandPrefix: List<String> = listOf(executable.toString()),
     private val receipt: (List<String>, Int) -> Unit = { _, _ -> },
+    private val isolation: WindowsBookIsolation? = null,
 ) : OwnedBookCliTransport {
     override suspend fun complete(request: String): String = withContext(Dispatchers.IO) {
         val lease = currentCoroutineContext()[BookConsentLease] ?: throw LocalCodexFailure(LocalCodexProblem.FAILED)
         require(request.toByteArray(Charsets.UTF_8).size <= 1_048_576)
+        val config = isolation ?: throw LocalCodexFailure(LocalCodexProblem.FAILED)
+        if (!System.getProperty("os.name").startsWith("Windows", true)) throw LocalCodexFailure(LocalCodexProblem.FAILED)
+        if (commandPrefix != listOf(executable.toString())) throw LocalCodexFailure(LocalCodexProblem.FAILED)
         val root = Files.createTempDirectory("coach-book-codex-")
         val cwd = Files.createDirectory(root.resolve("work"))
-        val output = root.resolve("answer.txt")
+        val output = cwd.resolve("answer.txt")
+        var snapshot: CodexAuthSnapshot? = null
         try {
-            val login = execute(commandPrefix + listOf("login", "status"), cwd, null, lease, 15_000)
+            val runtime = Files.createDirectory(root.resolve("runtime"))
+            if (!Files.isRegularFile(executable) || !Files.isRegularFile(config.helper) || !Files.isRegularFile(config.authCommitHelper))
+                throw LocalCodexFailure(LocalCodexProblem.MISSING)
+            val isolatedExecutable = Files.copy(executable, runtime.resolve("codex.exe"))
+            snapshot = CodexAuthSnapshot.create(config.authSource, root, WindowsAuthAtomicCommit(config.authCommitHelper))
+            val home = snapshot.home
+            val login = executeIsolated(config, isolatedExecutable, listOf("login", "status"), root, cwd, runtime, home, null, lease, 15_000)
             // API-key sessions must not fall back to paid API usage.
             if (login.first != 0 || !login.second.contains("Logged in using ChatGPT", true))
                 throw LocalCodexFailure(LocalCodexProblem.LOGIN)
-            val argv = commandPrefix + listOf("exec", "-m", identity.model, "-c", "model_reasoning_effort=low",
+            val argv = listOf("exec", "-m", identity.model, "-c", "model_reasoning_effort=low",
                 "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "--ignore-user-config") +
                 listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
                     "in_app_browser", "image_generation", "view_image", "multi_agent").flatMap { listOf("-c", "features.$it=false") } +
@@ -73,60 +97,83 @@ internal class LocalCodexBookTransport(
             val prompt = "Use only the supplied excerpts. Return only a JSON object with exactly two fields: " +
                 "answer (a useful explanation or answer, not a quotation) and citations (an array of excerpt IDs used). " +
                 "Do not use Markdown.\n\n" + request
-            val result = execute(argv, cwd, prompt, lease, timeoutMillis)
+            val result = executeIsolated(config, isolatedExecutable, argv, root, cwd, runtime, home, prompt, lease, timeoutMillis)
             if (result.first != 0) throw LocalCodexFailure(classifyCodexFailure(result.second))
             if (!Files.isRegularFile(output) || Files.size(output) > 1_048_576) throw LocalCodexFailure(LocalCodexProblem.FAILED)
-            lease.checked { Files.readString(output) }
+            val answer = lease.checked { Files.readString(output) }
+            currentCoroutineContext().ensureActive()
+            lease.checked { Unit }
+            val committed = snapshot.commit()
+            if (!committed.cleaned || committed.status !in setOf(AuthCommitStatus.UNCHANGED, AuthCommitStatus.COMMITTED))
+                throw LocalCodexFailure(LocalCodexProblem.FAILED)
+            snapshot = null
+            currentCoroutineContext().ensureActive()
+            lease.checked { answer }
         } catch (cancel: CancellationException) { throw cancel }
         catch (known: LocalCodexFailure) { throw known }
         catch (_: java.io.IOException) { throw LocalCodexFailure(if (!Files.isRegularFile(executable)) LocalCodexProblem.MISSING else LocalCodexProblem.FAILED) }
         finally {
-            // Codex may create scratch files even with an empty cwd. All request scratch is private and ephemeral.
-            Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+            // Snapshot close is terminal, and cleanup failures must prevent an answer.
+            try { snapshot?.close() } finally {
+                Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+            }
         }
     }
 
-    private suspend fun execute(argv: List<String>, cwd: Path, input: String?, lease: BookConsentLease, timeout: Long): Pair<Int, String> {
+    private suspend fun executeIsolated(
+        config: WindowsBookIsolation, executable: Path, args: List<String>, root: Path, cwd: Path,
+        runtime: Path, home: Path, input: String?, lease: BookConsentLease, timeout: Long,
+    ): Pair<Int, String> {
+        val phase = if (input == null) "login" else "exec"
+        val stdin = root.resolve("$phase.in")
+        val stdout = root.resolve("$phase.out")
+        val stderr = root.resolve("$phase.err")
+        if (input != null) Files.writeString(stdin, input)
+        val argv = listOf(config.helper.toAbsolutePath().toString(), "--allow-read", runtime.toString(),
+            "--allow-write", cwd.toString(), "--allow-write", home.toString(),
+            "--capability", "S-1-15-3-1", "--stdout", stdout.toString(), "--stderr", stderr.toString(),
+            "--cwd", cwd.toString(), "--timeout-ms", timeout.toString()) +
+            (if (input == null) emptyList() else listOf("--stdin", stdin.toString())) +
+            listOf("--", executable.toString()) + args
         val builder = ProcessBuilder(argv).directory(cwd.toFile())
-        listOf("OPENAI_API_KEY", "CODEX_API_KEY", "AZURE_OPENAI_API_KEY").forEach { builder.environment().remove(it) }
-        builder.environment().remove("RUST_LOG") // Keep the CLI's default filter, without logging more excerpt content.
-        // Serialize the actual spawn with revoke, not just a check before serializing the prompt.
+        builder.environment().clear()
+        System.getenv("SystemRoot")?.let { builder.environment()["SystemRoot"] = it }
+        builder.environment()["CODEX_HOME"] = home.toString()
         val process = lease.checked { builder.start() }
         val tree = LocalCodexProcessTree(process)
         try {
-            return withTimeoutOrNull(timeout) {
+            return withTimeoutOrNull(timeout + 5_000) {
                 coroutineScope {
-                    // PR226 972c5a94: remember children before their parent exits and never reap
-                    // synchronously on a cancelling UI/timer thread. Finally still awaits cleanup.
                     val tracker = launch {
-                        try {
-                            while (process.isAlive) { tree.track(); delay(100) }
-                            awaitCancellation()
-                        } finally { tree.stopAsync() }
+                        try { while (process.isAlive) { tree.track(); delay(100) }; awaitCancellation() }
+                        finally { tree.stopAsync() }
                     }
-                    var eventsComplete = false
-                    val stdout = async { runInterruptible {
-                        if (input == null) boundedDiagnostic(process.inputStream)
-                        else { eventsComplete = readCodexEvents(process.inputStream); "" }
-                    } }
-                    val stderr = async { runInterruptible { boundedDiagnostic(process.errorStream, rejectTools = input != null) } }
-                    val writer = async { runInterruptible { process.outputStream.use { if (input != null) it.write(input.toByteArray(Charsets.UTF_8)) } } }
+                    val helperOut = async { runInterruptible { boundedDiagnostic(process.inputStream) } }
+                    val helperErr = async { runInterruptible { boundedDiagnostic(process.errorStream) } }
+                    process.outputStream.close()
                     val exit = suspendCancellableCoroutine<Int> { continuation ->
                         process.onExit().whenComplete { finished, error ->
                             if (error != null) continuation.resumeWithException(error) else continuation.resume(finished.exitValue())
                         }
                         continuation.invokeOnCancellation { tree.stopAsync() }
                     }
-                    writer.await()
-                    receipt(argv, exit)
-                    val diagnostic = stdout.await() + "\n" + stderr.await()
+                    val out = helperOut.await()
+                    val log = helperErr.await()
                     tracker.cancel()
-                    if (input != null && exit == 0 && !eventsComplete) throw LocalCodexFailure(LocalCodexProblem.FAILED)
-                    exit to diagnostic
+                    receipt(argv, exit)
+                    if (exit != 0 || out.isNotBlank() || !validIsolationReceipt(log))
+                        throw LocalCodexFailure(LocalCodexProblem.FAILED)
+                    if (!Files.isRegularFile(stdout) || !Files.isRegularFile(stderr))
+                        throw LocalCodexFailure(LocalCodexProblem.FAILED)
+                    val diagnostics = Files.newInputStream(stderr).use { boundedDiagnostic(it, rejectTools = input != null) }
+                    val childOutput = if (input == null) Files.newInputStream(stdout).use { boundedDiagnostic(it) }
+                        else { if (!Files.newInputStream(stdout).use { readCodexEvents(it) }) throw LocalCodexFailure(LocalCodexProblem.FAILED); "" }
+                    0 to (childOutput + "\n" + diagnostics)
                 }
             } ?: throw LocalCodexFailure(LocalCodexProblem.TIMEOUT)
         } finally { tree.stop() }
     }
+
 }
 
 /** Tools are disabled before launch. This is a second, fail-closed check of the entire JSONL stream.

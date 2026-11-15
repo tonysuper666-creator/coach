@@ -1,12 +1,15 @@
 package com.coach.desktop.reader
 
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.VerifyHooks
+import com.coach.desktop.DesktopConnectionSettings
+import com.coach.desktop.resolveCourse
 import kotlinx.coroutines.delay
 import org.jetbrains.skiko.SkiaLayer
 import java.awt.Component
@@ -27,25 +30,37 @@ private fun Component.skiaLayers(): Sequence<SkiaLayer> = sequence {
  * 支持按页翻页、断点书签恢复，并在学到某一处时能按位置直接打开对应页。
  */
 fun main() {
+    com.coach.desktop.books.PdfWarmup.start() // 应用一启动就在后台预热 PDF 渲染，不占打开书本/目标页的关键路径
     if (System.getProperty("os.name")?.startsWith("Windows") == true && System.getProperty("skiko.renderApi") == null) {
         System.setProperty("skiko.renderApi", System.getenv("SKIKO_RENDER_API") ?: "SOFTWARE_FAST")
     }
     application {
+        val httpMode = !System.getenv("COACH_URL").isNullOrBlank() || !System.getProperty("coach.url").isNullOrBlank()
+        val settings = remember {
+            DesktopConnectionSettings(environment = { name ->
+                System.getenv(name) ?: if (name == "COACH_URL") System.getProperty("coach.url") else null
+            })
+        }
+        val course = if (httpMode) resolveCourse(System.getenv("COACH_COURSE"), System.getProperty("coach.course")) else null
         val libraryDir = System.getenv("COACH_LIBRARY_DIR")?.takeIf(String::isNotBlank)?.let(Path::of)
             ?: System.getProperty("coach.library.dir")?.takeIf(String::isNotBlank)?.let(Path::of)
-        val source = remember { ReaderSourceResolver.resolveInternal(libraryDirectory = libraryDir) }
-        val remote = remember(source) { ReaderRemote(source) }
+        val source = remember(httpMode) { if (httpMode) null else ReaderSourceResolver.resolveInternal(libraryDirectory = libraryDir) }
+        val remote = remember(source) { source?.let { ReaderRemote(it) } }
         val explicitDoc = System.getProperty("coach.reader.doc") ?: System.getenv("COACH_READER_DOC")
         val targetPage = System.getProperty("coach.reader.page")?.toIntOrNull() ?: System.getenv("COACH_READER_PAGE")?.toIntOrNull()
         val targetAnchor = System.getProperty("coach.reader.anchor") ?: System.getenv("COACH_READER_ANCHOR")
 
+        // 本机草稿存储：只对真实本地书库启用；HTTP/合成来源没有可信的拥有者/课程/来源身份，停用（不拿本地路径代替）
+        val drafts = remember(source, libraryDir) { source?.let { ReaderDraftScope.forSource(it, libraryDir) } }
         val session = remember(remote) {
-            ReaderSession(ReaderFixture("资料", emptyList(), emptyList()), 1200, remote)
+            remote?.let { ReaderSession(ReaderFixture("资料", emptyList(), emptyList()), 1200, it, drafts) }
         }
+        DisposableEffect(session) { onDispose { session?.cancelNote() } }
 
         LaunchedEffect(remote) {
+            if (remote == null || session == null) return@LaunchedEffect
             remote.loadCatalog()
-            val targetDoc = explicitDoc ?: remote.documents.firstOrNull()?.id ?: "orchard-text"
+            val targetDoc = explicitDoc ?: remote.documents.firstOrNull()?.id ?: return@LaunchedEffect
             if (targetPage != null) {
                 session.openRemoteAt(targetDoc, targetPage, targetAnchor)
             } else {
@@ -53,13 +68,18 @@ fun main() {
             }
         }
 
-        val docTitle = session.remote?.current?.title ?: "资料阅读"
+        val docTitle = session?.remote?.current?.title ?: "资料阅读"
         Window(
             onCloseRequest = ::exitApplication,
             title = "Coach 阅读器 · $docTitle",
             state = rememberWindowState(width = 1200.dp, height = 760.dp),
         ) {
-            ReaderWindow(session)
+            if (httpMode) {
+                val request = explicitDoc?.let {
+                    ReaderOpenRequest(it, System.getProperty("coach.reader.version") ?: System.getenv("COACH_READER_VERSION"), targetPage, targetAnchor)
+                }
+                PairedHttpReader(settings, checkNotNull(course), request)
+            } else if (session != null) ReaderWindow(session)
             LaunchedEffect(window) {
                 delay(500)
                 val layer = window.skiaLayers().firstOrNull()

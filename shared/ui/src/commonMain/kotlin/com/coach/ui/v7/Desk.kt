@@ -107,7 +107,7 @@ fun Desk(
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(Modifier.width(300.dp)) {
-                TextButton(onClick = { scope.launch { drawerState.close() } }) { Text("收起目录") }
+                V7TextButton(onClick = { scope.launch { drawerState.close() } }, ringInside = true) { Text("收起目录") }
                 if (drawerState.isOpen) Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()).testTag("v7-directory-drawer")) { directory() }
             }
         }) {
@@ -139,9 +139,9 @@ fun Desk(
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
                         }
-                        TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp)) { Text("目录") }
+                        V7TextButton(onClick = { scope.launch { drawerState.open() } }, modifier = Modifier.testTag("v7-directory-toggle"), contentPadding = PaddingValues(horizontal = 8.dp), ringInside = true) { Text("目录") }
                         if (onBack != null) {
-                            TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp)) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
+                            V7TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 6.dp), ringInside = true) { Text(backLabel, style = MaterialTheme.typography.labelLarge) }
                         }
                     }
                     Text(buildAnnotatedString {
@@ -149,7 +149,7 @@ fun Desk(
                         val start = crumb.lastIndexOf('·').takeIf { it >= 0 }?.plus(1) ?: 0
                         addStyle(SpanStyle(fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary), start, crumb.length)
                     }, Modifier.align(if (inner) Alignment.Center else Alignment.BottomStart).padding(bottom = if (inner) 0.dp else 4.dp).widthIn(max = if (inner) windowWidth * .30f else windowWidth - 32.dp)
-                        .then(if (onCrumbClick != null) Modifier.clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
+                        .then(if (onCrumbClick != null) Modifier.v7FocusRing().clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
@@ -166,9 +166,9 @@ fun Desk(
                             }
                         }
                         if (!focused) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
-                            Modifier.clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                            Modifier.v7FocusRing().clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         Text(if (focused) "退出专心读" else "专心读",
-                            Modifier.clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
+                            Modifier.v7FocusRing().clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)) {

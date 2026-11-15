@@ -193,4 +193,74 @@ class BookCitationWorkspaceTest {
             }
         } finally { release.countDown() }
     }
+
+    /**
+     * 同一页有两句一模一样的原文：点第二条出处，打开的是被点的那一块。
+     * 回退行 open-lesson-source 只按页打开、没有块编号，因此不会标出这条出处的范围；
+     * 两条路径的标记不同，测试能区分「该块」和「回退行」。
+     */
+    @Test fun citationOpensTheCitedBlockWhenThePageRepeatsTheSameSentence() {
+        val sentence = "Plants use light to make food."
+        val root = Files.createTempDirectory("citation-block-")
+        val file = root.resolve("duplicate-block.pdf")
+        PDDocument().use { pdf ->
+            val page = PDPage(); pdf.addPage(page)
+            PDPageContentStream(pdf, page).use { out ->
+                out.beginText(); out.setFont(PDType1Font(Standard14Fonts.FontName.HELVETICA), 11f)
+                out.newLineAtOffset(50f, 710f); out.showText(sentence)
+                out.newLineAtOffset(0f, -220f); out.showText(sentence)
+                out.endText()
+            }
+            pdf.save(file.toFile())
+        }
+        val library = TextbookLibrary(root.resolve("library"))
+        val imported = library.importBook(file)
+        library.save(imported.copy(learning = true, readingPage = 1, questionMode = QuestionMode.SHORT_ANSWER))
+        val controller = TextbookController(library)
+        runBlocking { controller.load(); controller.learn(LearningPath.READ_AND_LEARN) }
+        val book = controller.state.value.book!!
+        val body = book.lessons.single().blocks.filter { !it.heading }.sortedBy { it.start }
+        assertEquals(2, body.size)
+        assertEquals(sentence, body[0].text)
+        assertEquals(sentence, body[1].text)
+        assertTrue(body[1].start >= body[0].end, "合成页的两处原文必须彼此分开")
+        val cited = body[1]
+        val support = object : BookLearningSupport {
+            override suspend fun explain(request: BookExplanationRequest): BookLearningReply {
+                val current = library.book(request.book)
+                return BookLearningReply.Text("A synthetic explanation", listOf(BookPassage.from(current, cited)))
+            }
+            override suspend fun ask(request: BookPassageQuestion) = BookLearningReply.Unavailable("unused")
+        }
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller, loadOnMount = false, support = support) { null } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-source-0").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 1 && !controller.state.value.busy }
+            // 文字视图标的是被点的第二块，不是这一页第一次出现的同一句。
+            onNodeWithText("看文字").performClick()
+            waitForIdle()
+            val marked = onNodeWithTag("reader-text").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
+            assertEquals(1, marked.spanStyles.size)
+            val span = marked.spanStyles.single()
+            assertEquals(cited.start, span.start)
+            assertEquals(cited.end, span.end)
+            assertEquals(sentence, marked.text.substring(span.start, span.end))
+            assertFalse(span.start <= body[0].start && span.end >= body[0].end, "标记不能落在第一处相同原文上")
+            // 原页视图落在同一处，而不是提示「多处相同内容」或各处都不标。
+            onNodeWithText("看原页").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("remote-highlight").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("remote-highlight").assertContentDescriptionEquals("原句：$sentence")
+            onNodeWithText("无法确认原句：这一页有多处相同内容。").assertDoesNotExist()
+            // 回退行没有块编号：同页打开不替用户猜是哪一处，也就不标任何范围。
+            onNodeWithText("返回学习").performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            onNodeWithTag("open-lesson-source").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 1 && !controller.state.value.busy }
+            onNodeWithText("看文字").performClick()
+            waitForIdle()
+            assertTrue(onNodeWithTag("reader-text").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles.isEmpty())
+        }
+    }
 }

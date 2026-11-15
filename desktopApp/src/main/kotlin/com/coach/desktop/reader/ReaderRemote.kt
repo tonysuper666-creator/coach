@@ -126,14 +126,23 @@ sealed interface Located {
 
 /** 与 shared/ui 的 locateQuote 同一规则：引文按空白切词，必须在词框里恰好出现一次连续序列，不做模糊猜测。 */
 object QuoteLocator {
-    fun locate(boxes: PageBoxes, quote: String): Located {
+    /**
+     * [occurrence] is the index of the intended match among all identical token runs, used when a
+     * verified range already picked one of several identical sentences on the page. Null keeps the
+     * old behavior: a page with more than one match stays [Located.Ambiguous] and nothing is drawn.
+     */
+    fun locate(boxes: PageBoxes, quote: String, occurrence: Int? = null): Located {
         if (boxes.words.isEmpty()) return Located.NoTextLayer
         val tokens = quote.split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (tokens.isEmpty() || tokens.size > boxes.words.size) return Located.NotFound
         val starts = (0..boxes.words.size - tokens.size).filter { i -> tokens.indices.all { boxes.words[i + it].text == tokens[it] } }
         if (starts.isEmpty()) return Located.NotFound
-        if (starts.size > 1) return Located.Ambiguous
-        val run = boxes.words.subList(starts.single(), starts.single() + tokens.size)
+        val chosen = when {
+            starts.size == 1 -> starts.single()
+            occurrence != null && occurrence in starts.indices -> starts[occurrence]
+            else -> return Located.Ambiguous
+        }
+        val run = boxes.words.subList(chosen, chosen + tokens.size)
         val lines = mutableListOf<WordBox>()
         for (w in run) {
             val last = lines.lastOrNull()

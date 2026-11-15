@@ -252,7 +252,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                 current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id && lesson != null) {
                                 citationIndex = index
                                 sourceOrigin = SourceFocus.CITATION
-                                practiceSource = PracticeSource(target.pdfPage, target.quote, null)
+                                practiceSource = PracticeSource(target.pdfPage, target.quote, null, target)
                                 run { controller.citationSource(target.book, lesson.id, target.pdfPage) }
                             }
                         },
@@ -283,7 +283,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
 }
 
-private data class PracticeSource(val page: Int?, val quote: String?, val warning: String?)
+/**
+ * 出处打开后这一页要标什么。练习依据只有页 + 原句；讲解出处还带着解析器核对过的块范围，
+ * 所以同一页出现两句相同原文时，标的是被点的那一块，而不是第一次字符串命中。
+ */
+private data class PracticeSource(val page: Int?, val quote: String?, val warning: String?, val target: BookSourceTarget? = null)
 private enum class SourceFocus { LESSON, PRACTICE, CITATION }
 
 @Composable
@@ -437,6 +441,13 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
         else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
         else StudyCoachCourse.sourceQuote(source, ui.page)
     }
+    // 讲解出处带着解析器核对过的块范围进来。只有这一页的同一偏移仍是同一句原文时才用它；
+    // 对不上就什么都不标，绝不回落到「第一次出现」或别处的句子。
+    val citedRange = remember(practiceSource?.target, ui.page, page.text) {
+        val target = practiceSource?.target?.takeIf { it.pdfPage == ui.page } ?: return@remember null
+        if (target.start >= 0 && target.end > target.start && target.end <= page.text.length &&
+            page.text.substring(target.start, target.end) == target.quote) target.start until target.end else null
+    }
     val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
         value = PageImage.Loading
         if (book.format == "pdf") {
@@ -449,13 +460,23 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
     val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
         view?.document == book.id && view.pdfPage == ui.page
     val boxes = if (samePage) (remote.boxes as? com.coach.desktop.reader.BoxesState.Ready)?.boxes else null
-    val located = if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor) else null
+    // 同一页有多处相同原文时，用块范围在这一页里的序号挑出被点的那一处；序号算不出来就不猜。
+    val citedOccurrence = remember(citedRange, quoteAnchor, page.text) {
+        val range = citedRange ?: return@remember null
+        val quote = quoteAnchor ?: return@remember null
+        var ordinal = 0
+        var at = page.text.indexOf(quote)
+        while (at in 0 until range.first) { ordinal++; at = page.text.indexOf(quote, at + 1) }
+        if (at == range.first) ordinal else null
+    }
+    val located = if (boxes != null && quoteAnchor != null) com.coach.desktop.reader.QuoteLocator.locate(boxes, quoteAnchor, citedOccurrence) else null
     val loadedImage = (image as? PageImage.Ready)?.image
     val aspectOk = boxes != null && loadedImage != null &&
         kotlin.math.abs(loadedImage.width.toDouble() / loadedImage.height - boxes.width / boxes.height) < 0.05
     val sourceWarning = if (source == null) null else when {
         practiceSource?.warning != null -> practiceSource.warning
         practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
+        practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
         book.format != "pdf" -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
@@ -516,11 +537,14 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
                         for (block in confirmedBlocks) {
                             if (block.start >= 0 && block.end <= length) addStyle(SpanStyle(background = highlight), block.start, block.end)
                         }
-                        if (practiceSource != null && quoteAnchor != null &&
-                            (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
-                            val start = page.text.indexOf(quoteAnchor)
-                            if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0)
-                                addStyle(SpanStyle(background = highlight), start, start + quoteAnchor.length)
+                        if (practiceSource != null) {
+                            val markedRange = if (practiceSource.target != null) citedRange else if (quoteAnchor != null &&
+                                (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
+                                val start = page.text.indexOf(quoteAnchor)
+                                if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0) start until start + quoteAnchor.length else null
+                            } else null
+                            if (markedRange != null && markedRange.last + 1 <= length)
+                                addStyle(SpanStyle(background = highlight), markedRange.first, markedRange.last + 1)
                         }
                     }
                     SelectionContainer { Text(marked, fontSize = 19.sp, lineHeight = 31.sp,

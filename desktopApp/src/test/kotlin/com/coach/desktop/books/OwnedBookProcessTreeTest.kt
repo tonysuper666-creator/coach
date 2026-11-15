@@ -58,13 +58,38 @@ class OwnedBookProcessTreeTest {
     }
 
     @Test fun cancellationLetsAdapterRunItsOwnCleanupBeforeReapingSurvivors() = runBlocking {
+        // Calibrate against a real ProcessBuilder process, independently of the transport.
+        // Windows destroy() is forced termination: Python's SIGTERM handler cannot run there.
+        // A missing cleanup marker is not evidence that the process survived cancellation.
+        val normalTermination = withTree("graceful") { tree ->
+            val adapter = ProcessBuilder(tree.command).start()
+            try {
+                tree.awaitReady()
+                val supported = adapter.supportsNormalTermination()
+                adapter.destroy()
+                assertTrue(adapter.waitFor(5, TimeUnit.SECONDS), "direct destroy did not stop the adapter")
+                assertFalse(adapter.isAlive)
+                assertEquals(supported, tree.adapterCleanedUp(), "fixture disagrees with Process.destroy contract")
+                println("TERMINATION probe_pid=${adapter.pid()} normal=$supported cleaned=${tree.adapterCleanedUp()} alive=${adapter.isAlive}")
+                supported
+            } finally {
+                adapter.destroyForcibly()
+                assertTrue(adapter.waitFor(5, TimeUnit.SECONDS))
+            }
+        }
         withTree("graceful") { tree ->
             val result = async { OwnedBookProcessTransport(tree.command, 30_000).complete("synthetic") }
             tree.awaitReady()
             result.cancel()
             withTimeout(8000) { result.join() }
-            assertTrue(tree.adapterCleanedUp(), "adapter SIGTERM cleanup did not finish")
+            // Every platform must reap the parent, child and grandchild before fixture cleanup.
             tree.assertStopped()
+            if (normalTermination) {
+                assertTrue(tree.adapterCleanedUp(), "adapter SIGTERM cleanup did not finish")
+            } else {
+                assertFalse(tree.adapterCleanedUp(), "forced termination unexpectedly ran SIGTERM cleanup")
+            }
+            println("TERMINATION transport_pid=${tree.pid("parent")} normal=$normalTermination cleaned=${tree.adapterCleanedUp()}")
         }
     }
 
@@ -205,10 +230,10 @@ class OwnedBookProcessTreeTest {
         }
     }
 
-    private suspend fun withTree(mode: String, block: suspend (Tree) -> Unit) {
+    private suspend fun <T> withTree(mode: String, block: suspend (Tree) -> T): T {
         val tree = Tree(mode)
         try {
-            block(tree)
+            return block(tree)
         } finally {
             // Red regressions must also collect every process before the foreground test exits.
             tree.cleanup()

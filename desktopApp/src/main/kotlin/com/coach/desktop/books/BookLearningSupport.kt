@@ -192,6 +192,8 @@ internal class BookPassageAskState(val page: BookPage) {
     var request by mutableStateOf<BookPassageQuestion?>(null)
     var reply by mutableStateOf<BookLearningReply?>(null)
     var revision by mutableIntStateOf(0)
+    // Keep authorization provenance with the reply, including while its dialog is unmounted.
+    var replyEpoch by mutableStateOf<Long?>(null)
 }
 
 @Composable
@@ -206,15 +208,16 @@ internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support:
     var revision by state::revision
     val consenting = support as? ConsentingBookLearningSupport
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
-    var replyEpoch by remember(book.id, page.number, support) { mutableLongStateOf(epoch) }
-    val consent = remember(book.id, page.number, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
-    LaunchedEffect(book.id, page.number, support, consent) {
+    var replyEpoch by state::replyEpoch
+    val consent = remember(book.id, state, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
+    LaunchedEffect(book.id, state, support, consent) {
         combine(bookRequestStates(consenting, consent), snapshotFlow { request to revision }) { _, _ ->
             Triple(currentRequestState(consenting, consent), request, revision)
         }.distinctUntilChanged().collectLatest { (state, input, attempt) ->
             if (state != currentRequestState(consenting, consent) || state.busy) return@collectLatest
             if (replyEpoch != state.epoch) { reply = null; replyEpoch = state.epoch }
             if (state.stopped || input == null) return@collectLatest
+            if (reply != null) return@collectLatest
             val answer = try {
                 val result = support.ask(input)
                 coroutineContext.ensureActive()

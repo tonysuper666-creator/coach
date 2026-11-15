@@ -29,26 +29,21 @@ internal class BookReviewSources(private val database: () -> Connection) : BookR
             sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
             sql.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
         } ?: return null
-        val source = Json.parseToJsonElement(payload).jsonObject
-        val origin = origin(source.getValue("origin").jsonObject)
+        val source = BookReviewSourceJson.decode(Json.parseToJsonElement(payload).jsonObject)
+        val origin = source.origin
         val used = db.prepareStatement("SELECT question,version,fingerprint FROM book_review_source_posed WHERE course=?").use { sql ->
             sql.setString(1, origin.courseId)
             sql.executeQuery().use { rows -> buildSet {
                 while (rows.next()) add(QueueQuestion(rows.getString(1), rows.getString(2).ifEmpty { null }, rows.getString(3)))
             } }
         }
-        BookReviewVariantInput(origin, source.getValue("offers").jsonArray.map { offer(it.jsonObject) }, used)
+        source.copy(usedQuestions = used)
     }
 
     /** Caller validates the live original and commits this together with the posed facts. */
     fun update(db: Connection, review: LocalBookReview, update: BookReviewSourceUpdate) {
         require(update.approvalId.isNotBlank() && update.revision > 0) { "来源须有明确批准记录和版本。" }
-        val payload = update.input?.let { input -> buildJsonObject {
-            put("origin", originJson(input.origin))
-            put("offers", JsonArray(input.offers.map(::offerJson)))
-            put("usedQuestions", Json.encodeToJsonElement(input.usedQuestions.sortedWith(
-                compareBy({ q -> q.id }, { q -> q.version.orEmpty() }, { q -> q.fingerprint.orEmpty() }))))
-        }.toString() }
+        val payload = update.input?.let { BookReviewSourceJson.encode(it).toString() }
         db.prepareStatement("SELECT approval,revision,payload FROM book_review_sources WHERE book=? AND lesson=? AND mode=?").use { sql ->
             sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
             sql.executeQuery().use { rows -> if (rows.next()) {
@@ -76,6 +71,20 @@ internal class BookReviewSources(private val database: () -> Connection) : BookR
             }
         }
     }
+
+}
+
+/** One codec for persisted snapshots and explicit source receipts; no inferred/default identities. */
+internal object BookReviewSourceJson {
+    fun encode(input: BookReviewVariantInput) = buildJsonObject {
+        put("origin", originJson(input.origin))
+        put("offers", JsonArray(input.offers.map(::offerJson)))
+        put("usedQuestions", Json.encodeToJsonElement(input.usedQuestions.sortedWith(
+            compareBy({ q -> q.id }, { q -> q.version.orEmpty() }, { q -> q.fingerprint.orEmpty() }))))
+    }
+    fun decode(source: JsonObject) = BookReviewVariantInput(origin(source.getValue("origin").jsonObject),
+        source.getValue("offers").jsonArray.map { offer(it.jsonObject) },
+        Json.decodeFromJsonElement<Set<QueueQuestion>>(source.getValue("usedQuestions")))
 
     // Desktop already uses explicit JSON codecs; shared queue models have generated serializers.
     private fun practiceJson(p: Practice) = buildJsonObject {

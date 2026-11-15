@@ -158,6 +158,13 @@ internal class TextbookController(val library: TextbookLibrary) {
         mutable.update { it.copy(review = review, answer = review.answer, reviews = library.reviews()) }
     }
 
+    suspend fun importReviewSource(path: Path) = action {
+        val current = mutable.value.review ?: return@action
+        library.importReviewVariantSource(current, path)
+        val review = library.review(current.book, current.lesson, current.mode)
+        mutable.update { it.copy(review = review, answer = review.answer, reviews = library.reviews()) }
+    }
+
     suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer, variantAttemptId: String? = null): Boolean {
         var saved = false
         action(showBusy = false) {

@@ -199,6 +199,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                             onSource = { openPracticeSource(review.practice) },
                             onAnswer = { drafts.saveReview(review, it) },
+                            onImportSource = { run { if (drafts.flush()) chooseBook()?.let { controller.importReviewSource(it) } } },
                             onVariant = { run { if (drafts.flush()) controller.startReviewVariant() } })
                     }
                     ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library,
@@ -632,7 +633,7 @@ private fun LocalBookReviews(ui: LibraryUi, onBack: () -> Unit, onOpen: (LocalBo
 @Composable
 private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, sourceFocus: FocusRequester,
     returnFocus: SourceFocus?, onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit,
-    onAnswer: (PracticeAnswer) -> Unit, onVariant: () -> Unit) {
+    onAnswer: (PracticeAnswer) -> Unit, onImportSource: () -> Unit, onVariant: () -> Unit) {
     var showOriginal by remember(review.variant?.allocation?.attemptId) { mutableStateOf(false) }
     LaunchedEffect(returnFocus, enabled) {
         if (enabled && returnFocus != null) {
@@ -651,6 +652,8 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
             if (review.originalGuessed) Text("原题加入复习时标为猜的")
             if (review.answer.guessed) Text("本轮复习标为猜的")
             Text(review.variantMessage, modifier = Modifier.testTag("review-variant-state"))
+            OutlinedButton(onClick = onImportSource, enabled = enabled,
+                modifier = Modifier.testTag("review-import-source")) { Text("登记变式来源") }
             if (review.canStartVariant) OutlinedButton(onClick = onVariant, enabled = enabled,
                 modifier = Modifier.testTag("review-start-variant")) { Text("练一道新变式") }
             if (review.variant != null) {

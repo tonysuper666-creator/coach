@@ -130,7 +130,7 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
             }
             PageHeader("第 $week 周", title, deck = "这一周 ${points.size} 节", week = week,
                 meta = d.weekStats.ifBlank { statusSummary(points) })
-            TextButton(onClick = { actions.onPractice(week) }, modifier = Modifier.testTag("week-practice")) { Text("整周刷题") }
+            V7TextButton(onClick = { actions.onPractice(week) }, modifier = Modifier.testTag("week-practice")) { Text("整周刷题") }
             Spacer(Modifier.height(if (m.inner) 0.dp else 0.dp))
             PaperCard(contentSpacing = 0.dp, contentPadding = PaddingValues(horizontal = 16.dp)) {
                 points.forEachIndexed { index, kp ->
@@ -144,8 +144,8 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
                                 fontWeight = if (kp.status == KpStatus.IN_PROGRESS) FontWeight.SemiBold else FontWeight.Normal))
                             if (m.window == DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Spacer(Modifier.height(2.dp)); Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }
                             Row {
-                                TextButton(onClick = { actions.start(view, decision?.takeIf { it.kp.id == kp.id } ?: LearningTarget(kp, week, false)) }) { Text("开始") }
-                                TextButton(onClick = { actions.read(LearningTarget(kp, week, false, reading = true)) }) { Text("先看要点") }
+                                V7TextButton(onClick = { actions.start(view, decision?.takeIf { it.kp.id == kp.id } ?: LearningTarget(kp, week, false)) }) { Text("开始") }
+                                V7TextButton(onClick = { actions.read(LearningTarget(kp, week, false, reading = true)) }) { Text("先看要点") }
                             }
                         }
                         if (m.window != DeskWindow.Outer) d.types.getOrNull(index)?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary) }

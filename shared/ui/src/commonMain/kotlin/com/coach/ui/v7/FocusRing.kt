@@ -1,6 +1,14 @@
 package com.coach.ui.v7
 
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.geometry.Size
@@ -16,7 +24,9 @@ import androidx.compose.ui.node.currentValueOf
 import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.focus.FocusEventModifierNode
 import androidx.compose.ui.platform.InspectorInfo
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.LocalCoachColors
 
@@ -30,6 +40,22 @@ val V7FocusRingGap = 2.dp
  * Place it before the control's clip and clickable; nothing is drawn and layout is unchanged when unfocused.
  */
 fun Modifier.v7FocusRing(shape: Shape = RoundedCornerShape(CoachV7.Radius.btn)): Modifier = this then V7FocusRingElement(shape)
+
+/**
+ * Material [TextButton] carrying the V7 focus ring on its visible 40dp pill.
+ * Material normally adds the 48dp touch box inside the button, so a ring on the caller's modifier would wrap
+ * that box instead. Here the same centred 48dp box is laid outside the ring; size, touch area and look are unchanged.
+ */
+@Composable
+fun V7TextButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, content: @Composable RowScope.() -> Unit) {
+    val touch: Dp = LocalMinimumInteractiveComponentSize.current
+    val touchBox = if (touch.isSpecified) Modifier.sizeIn(minWidth = touch, minHeight = touch).wrapContentSize() else Modifier
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides Dp.Unspecified) {
+        TextButton(onClick, modifier.then(touchBox).v7FocusRing(ButtonDefaults.textShape), enabled) {
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides touch) { content() }
+        }
+    }
+}
 
 private data class V7FocusRingElement(val shape: Shape) : ModifierNodeElement<V7FocusRingNode>() {
     override fun create() = V7FocusRingNode(shape)

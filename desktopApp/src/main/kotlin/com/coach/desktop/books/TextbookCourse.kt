@@ -28,10 +28,23 @@ internal data class Textbook(
 ) {
     val lessons: List<BookLesson> by lazy { StudyCoachCourse.plan(id, title, pages) }
     val finished get() = learning && lessonIndex >= lessons.size
+    /** A page is addressed by its physical PDF page; the list position is only local storage order. */
+    fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
 }
-internal data class BookSummary(val id: String, val title: String, val pageCount: Int, val readingPage: Int, val learning: Boolean)
+internal data class BookSummary(
+    val id: String, val title: String,
+    /** How many pages the book actually carries, for the shelf. */
+    val pageCount: Int,
+    /** The highest real PDF page: a book may start at page 5, so this is not the same as [pageCount]. */
+    val lastPage: Int,
+    val readingPage: Int, val learning: Boolean,
+)
 internal data class Practice(val prompt: String, val reference: String, val answer: String, val options: List<String>)
-internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null)
+internal data class PracticeAnswer(
+    val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null,
+    /** The learner marked a right choice as a guess: correct is not evidence of mastery. */
+    val guessed: Boolean = false,
+)
 
 /**
  * Kotlin port of the archived StudyCoach deterministic-text-v1 / moduleGroups /

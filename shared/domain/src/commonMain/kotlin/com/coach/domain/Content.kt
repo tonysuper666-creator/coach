@@ -41,4 +41,5 @@ import com.coach.domain.reader.ClaimSourceAnchor
 @Serializable data class TextbookDocument(
     val id: String, val title: String, val markdown: String, val pages: List<TextbookPage>
 )
-@Serializable data class ContentSeed(val content: CourseContent, val documents: List<TextbookDocument>)
+@Serializable data class ContentSeed(val content: CourseContent, val documents: List<TextbookDocument>,
+    val bookPracticeMappings: List<BookPracticeMapping> = emptyList())

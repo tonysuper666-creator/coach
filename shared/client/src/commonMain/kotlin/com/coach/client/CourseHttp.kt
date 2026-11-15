@@ -166,9 +166,29 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     /** Reserve/pose exactly this selected identity; retries reuse its attempt and never request a KP fallback. */
     suspend fun takeReviewVariant(target: ReviewPracticeTarget): MockReply {
         if (target.courseId != course || target.deviceId != deviceId) return MockReply(null, "REVIEW_SCOPE_MISMATCH")
-        return mockCall("review-practice", com.coach.domain.json("courseId" to target.courseId,"deviceId" to target.deviceId,
+        val body = com.coach.domain.json("courseId" to target.courseId,"deviceId" to target.deviceId,
             "agentRunId" to target.agentRunId,"kpId" to target.kpId,"entryId" to target.entryId,"attemptId" to target.attemptId,
-            "question" to com.coach.domain.json("id" to target.question.id,"version" to target.question.version,"fingerprint" to target.question.fingerprint)))
+            "question" to com.coach.domain.json("id" to target.question.id,"version" to target.question.version,"fingerprint" to target.question.fingerprint))
+        return mockCall("review-practice", JsonObject(body + (target.bookSource?.let {
+            mapOf("bookSource" to LedgerJson.encodeToJsonElement(it))
+        } ?: emptyMap())))
+    }
+
+    suspend fun bookLedgerCoverage(): com.coach.domain.BookLedgerCoverage? = getObject("book-review-coverage")?.let {
+        runCatching { LedgerJson.decodeFromJsonElement<com.coach.domain.BookLedgerCoverage>(it) }.getOrNull()
+    }?.takeIf { it.courseId == course }
+
+    /** The source owner must already have installed this exact link; a receipt cannot approve itself. */
+    suspend fun registerBookLedgerSource(identity: com.coach.domain.BookLedgerIdentity,
+        coverage: com.coach.domain.BookLedgerCoverage): com.coach.domain.BookLedgerRegistration? {
+        if (identity.courseId != course || coverage.courseId != course) return null
+        val body = mockCall("book-review-source", buildJsonObject {
+            put("identity", LedgerJson.encodeToJsonElement(identity)); put("coverage", LedgerJson.encodeToJsonElement(coverage))
+        }).body ?: return null
+        return runCatching { LedgerJson.decodeFromJsonElement<com.coach.domain.BookLedgerRegistration>(body) }.getOrNull()
+            ?.takeIf { it.identity == identity && it.coverage == coverage && it.entryId.isNotBlank() &&
+                it.attemptId.isNotBlank() && it.candidate.id.isNotBlank() && it.candidate.version == null &&
+                !it.candidate.fingerprint.isNullOrBlank() }
     }
 
     suspend fun sources(): List<SourceDoc>? = getObject("sources")?.let { root ->

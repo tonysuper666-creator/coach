@@ -67,6 +67,7 @@ tasks.matching { it.name.startsWith("package") || it.name == "createDistributabl
     dependsOn(verifyReleaseVersion)
 }
 dependencies {
+    testImplementation(project(":tools:migrate-deeptutor"))
     implementation(project(":shared:ui"))
     implementation(project(":shared:client"))
     implementation(libs.sqldelight.driver)

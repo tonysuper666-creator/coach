@@ -9,6 +9,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -185,28 +190,60 @@ internal fun BookLessonExplanation(
     }
 }
 
+/** Keeps the ask that was actually sent, so a panel leaving the screen cannot send it twice. */
+private class InFlightAsk(
+    val request: BookPassageQuestion, val revision: Int, val epoch: Long, val answer: Deferred<BookLearningReply>,
+)
+
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
+internal class BookPassageAskState(val page: BookPage) {
+    var selected by mutableStateOf<SourceBlock?>(null)
+    var question by mutableStateOf("")
+    var request by mutableStateOf<BookPassageQuestion?>(null)
+    var reply by mutableStateOf<BookLearningReply?>(null)
+    var revision by mutableIntStateOf(0)
+    // Keep authorization provenance with the reply, including while its dialog is unmounted.
+    var replyEpoch by mutableStateOf<Long?>(null)
+    // One question is one outbound even when the dialog is closed and reopened under the same authorization.
+    private val asks = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var inFlight: InFlightAsk? = null
+
+    /** Reuse the ask already sent for this exact request and authorization; only a new send starts another. */
+    internal fun answerTo(request: BookPassageQuestion, revision: Int, epoch: Long,
+        call: suspend (BookPassageQuestion) -> BookLearningReply): Deferred<BookLearningReply> {
+        inFlight?.let { sent ->
+            if (sent.request == request && sent.revision == revision && sent.epoch == epoch) return sent.answer
+            sent.answer.cancel()
+        }
+        return asks.async { call(request) }.also { inFlight = InFlightAsk(request, revision, epoch, it) }
+    }
+}
+
 @Composable
-internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support: BookLearningSupport,
+    sources: @Composable (List<BookPassage>) -> Unit = {}, onClose: () -> Unit) {
+    val page = state.page
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
-    var selected by remember(book.id, page.number) { mutableStateOf<SourceBlock?>(null) }
-    var question by remember(book.id, page.number) { mutableStateOf("") }
-    var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
-    var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
-    var revision by remember(book.id, page.number) { mutableIntStateOf(0) }
+    var selected by state::selected
+    var question by state::question
+    var request by state::request
+    var reply by state::reply
+    var revision by state::revision
     val consenting = support as? ConsentingBookLearningSupport
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
-    var replyEpoch by remember(book.id, page.number, support) { mutableLongStateOf(epoch) }
-    val consent = remember(book.id, page.number, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
-    LaunchedEffect(book.id, page.number, support, consent) {
+    var replyEpoch by state::replyEpoch
+    val consent = remember(book.id, state, support) { consenting?.let { BookConsentUi(book.id, it) { reply = null } } }
+    val session = state
+    LaunchedEffect(book.id, state, support, consent) {
         combine(bookRequestStates(consenting, consent), snapshotFlow { request to revision }) { _, _ ->
             Triple(currentRequestState(consenting, consent), request, revision)
         }.distinctUntilChanged().collectLatest { (state, input, attempt) ->
             if (state != currentRequestState(consenting, consent) || state.busy) return@collectLatest
             if (replyEpoch != state.epoch) { reply = null; replyEpoch = state.epoch }
             if (state.stopped || input == null) return@collectLatest
+            if (reply != null) return@collectLatest
             val answer = try {
-                val result = support.ask(input)
+                val result = session.answerTo(input, attempt, state.epoch) { support.ask(it) }.await()
                 coroutineContext.ensureActive()
                 result
             } catch (cancel: CancellationException) { throw cancel }
@@ -246,10 +283,20 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                     (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = current) {
                     null -> if (request != null && consent?.stopped != true) Text("正在读这段问题…")
-                    is BookLearningReply.Text -> Text(result.text, Modifier.testTag("book-passage-answer"))
+                    is BookLearningReply.Text -> {
+                        Text(result.text, Modifier.testTag("book-passage-answer"))
+                        sources(result.sources)
+                    }
                     is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-passage-unavailable"))
                 }
             }
         }
     }, confirmButton = { TextButton(onClose) { Text("回到阅读") } })
+}
+
+/** Existing callers that own the dialog can retain their page-based entry point. */
+@Composable
+internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+    val state = remember(book.id, page.number) { BookPassageAskState(page) }
+    BookPassageAsk(book, state, support, onClose = onClose)
 }

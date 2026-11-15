@@ -1,5 +1,13 @@
 package com.coach.desktop.books
 
+import com.coach.client.SyncEngine
+import com.coach.domain.Option
+import com.coach.domain.questionFingerprint
+import com.coach.domain.str
+import com.coach.domain.LedgerJson
+import com.coach.protocol.CommandBody
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,9 +30,16 @@ internal data class LibraryUi(
     val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
+    val practiceSync: String = "同步未备好：尚未连接配对课程。",
 )
 
-internal class TextbookController(val library: TextbookLibrary) {
+/** Supplied only by an already paired learning session; never derive course or device from a book. */
+internal class BookPracticeSession(val sync: SyncEngine, val courseId: String,
+    val synchronize: suspend () -> Unit = {}, val now: () -> Long = System::currentTimeMillis)
+
+internal class TextbookController(val library: TextbookLibrary, private val practiceSession: BookPracticeSession? = null,
+    private val connectPractice: (suspend (Textbook, BookLesson, Practice) -> BookPracticeSession?)? = null,
+) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -115,11 +130,12 @@ internal class TextbookController(val library: TextbookLibrary) {
         }
     }
 
-    private fun openLearning(book: Textbook, path: LearningPath = mutable.value.learningPath) {
+    private suspend fun openLearning(book: Textbook, path: LearningPath = mutable.value.learningPath) {
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
         mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null,
             learningPath = path, questionsOpen = path == LearningPath.QUESTION_FIRST || answer.text.isNotBlank() || answer.revealed) }
+        refreshPracticeSync(book, lesson, answer, false)
     }
 
     suspend fun chooseLearningPath(path: LearningPath) = action(showBusy = false) {
@@ -158,11 +174,13 @@ internal class TextbookController(val library: TextbookLibrary) {
         persist(changed)
         val answer = changed.lessons.getOrNull(changed.lessonIndex)?.let { library.answer(changed.id, it.id, mode) } ?: PracticeAnswer()
         mutable.update { it.copy(answer = answer) }
+        refreshPracticeSync(changed, changed.lessons.getOrNull(changed.lessonIndex), answer, false)
     }
 
     suspend fun page(number: Int) = action {
         val book = mutable.value.book ?: return@action
-        require(number in 1..book.pages.size) { "页码超出了这本教材的范围。" }
+        // Page numbers are the book's own PDF pages, which need not start at 1 or run without gaps.
+        require(book.page(number) != null) { "页码超出了这本教材的范围。" }
         if (mutable.value.source == null) persist(book.copy(readingPage = number))
         mutable.update { it.copy(page = number) }
     }
@@ -206,10 +224,24 @@ internal class TextbookController(val library: TextbookLibrary) {
             prompt = null, review = review, answer = review.answer, reviews = library.reviews()) }
     }
 
-    suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer): Boolean {
+    suspend fun startReviewVariant() = action {
+        val current = mutable.value.review ?: return@action
+        val review = library.startReviewVariant(current)
+        mutable.update { it.copy(review = review, answer = review.answer, reviews = library.reviews()) }
+    }
+
+    suspend fun importReviewSource(path: Path) = action {
+        val current = mutable.value.review ?: return@action
+        library.importReviewVariantSource(current, path)
+        val review = library.review(current.book, current.lesson, current.mode)
+        mutable.update { it.copy(review = review, answer = review.answer, reviews = library.reviews()) }
+    }
+
+    suspend fun saveReviewDraft(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer, variantAttemptId: String? = null): Boolean {
         var saved = false
         action(showBusy = false) {
             val review = library.review(book, lesson, mode)
+            require(review.variant?.allocation?.attemptId == variantAttemptId) { "这道复习题已变更，请重新打开。" }
             library.saveReviewAnswer(review, answer)
             val updated = library.review(book, lesson, mode)
             val open = mutable.value.review
@@ -244,12 +276,71 @@ internal class TextbookController(val library: TextbookLibrary) {
         return saved
     }
 
-    private fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
+    private suspend fun writeAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
         library.saveAnswer(book, lesson, mode, answer)
         mutable.update { it.copy(reviews = library.reviews()) }
         val open = mutable.value.book
         if (mutable.value.review == null && open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
             mutable.update { it.copy(answer = answer) }
+            refreshPracticeSync(open, open.lessons.getOrNull(open.lessonIndex), answer, true)
         }
     }
+
+    suspend fun retryPracticeSync() = action(showBusy = false) {
+        val book = mutable.value.book ?: return@action
+        refreshPracticeSync(book, book.lessons.getOrNull(book.lessonIndex), mutable.value.answer, true)
+    }
+
+    private suspend fun refreshPracticeSync(book: Textbook, lesson: BookLesson?, answer: PracticeAnswer, submit: Boolean) {
+        if ((practiceSession == null && connectPractice == null) || lesson == null || book.questionMode != QuestionMode.CHOICE) {
+            mutable.update { it.copy(practiceSync = "同步未备好：尚未连接配对课程。") }
+            return
+        }
+        val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)
+        if (practice == null) {
+            mutable.update { it.copy(practiceSync = "同步未备好：没有对应练习。") }
+            return
+        }
+        try {
+            val session = if (connectPractice == null) practiceSession else connectPractice.invoke(book, lesson, practice)
+            if (session == null) {
+                mutable.update { it.copy(practiceSync = "同步未备好：缺少配对身份或已核准的书课关联。") }
+                return
+            }
+            val outbox = BookPracticeOutbox(session.sync)
+            val binding = outbox.bind(session.courseId, book, lesson, practice)
+            if (binding !is BookPracticeBinding.Ready || !validPracticeFingerprint(binding.posed.payload)) {
+                mutable.update { it.copy(practiceSync = "同步未备好：原题身份尚未确认。") }
+                return
+            }
+            // Entering learning only reads an existing submission; it must not enqueue an answer.
+            val queued = !submit && session.sync.retainedCommands().any { command ->
+                val body = runCatching { LedgerJson.decodeFromString<CommandBody>(command.payloadBytes) }.getOrNull()
+                body?.type == "submit_answer" && body.courseId == binding.courseId &&
+                    body.payload.str("attemptId") == binding.attemptId
+            }
+            val message = if ((submit || queued) && answer.revealed && answer.text.isNotBlank()) {
+                // The idempotent submit also checks the frozen answer/guessed lock before using its receipt.
+                val commandId = outbox.submit(binding, answer, session.now())
+                session.synchronize()
+                val receipt = session.sync.receipt(commandId)
+                when (receipt?.status) {
+                    "OK" -> "原作答已同步。"
+                    "REJECTED" -> "同步被拒绝：${receipt.error ?: "未知原因"}"
+                    else -> "原作答已保存，等待同步。"
+                }
+            } else "原题已备好，可同步本次作答。"
+            mutable.update { it.copy(practiceSync = message) }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (failure: Exception) {
+            val message = if (failure.message == "Answer is already locked" || failure.message == "Attempt already answered")
+                "原作答已锁定，当前本机修改未同步。" else "原作答已保存在本机，同步未完成；请重试。"
+            mutable.update { it.copy(practiceSync = message) }
+        }
+    }
+
+    private fun validPracticeFingerprint(payload: JsonObject): Boolean = runCatching {
+        val options = LedgerJson.decodeFromJsonElement<List<Option>>(payload.getValue("options"))
+        payload.str("fingerprint").isNotBlank() && payload.str("fingerprint") == questionFingerprint(payload.str("stem"), options)
+    }.getOrDefault(false)
 }

@@ -44,6 +44,7 @@ internal class SyntheticIsolatedCodex(val fixture: OwnedBookConsentTest.Fixture,
     }
     fun clean() {
         assertTrue(runs.all { !Files.exists(it.work) && !Files.exists(it.home) }, "Transport run directories must be gone")
+        assertTrue(runs.all { !Files.exists(it.work.parent) }, "The entire transport run root must be gone")
         assertTrue(receipts.all { it.cleaned }, "Every completed helper must report cleanup")
     }
     private class Observation(private val home: Path, private val destination: Path) : AutoCloseable {

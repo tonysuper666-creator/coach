@@ -101,6 +101,7 @@ class WindowsBookIsolationIntegrationTest {
         assertTrue(identities.all { it.verified && it.cleaned && it.childPid != null && it.containerSid?.startsWith("S-1-15-2-") == true })
         assertTrue(identities.none { ProcessHandle.of(it.childPid!!).orElse(null)?.isAlive == true })
         assertTrue(receipts.all { (argv, exit) -> exit == 0 && argv.first() == helper.toAbsolutePath().toString() && "--allow-read" in argv })
+        assertTrue(receipts.all { (argv, _) -> !Files.exists(Path.of(argv[argv.indexOf("--cwd") + 1]).parent) })
         assertEquals("""{"synthetic":"original"}""", Files.readString(auth))
         println("SYNTHETIC_ISOLATED phases=login,exec exits=0,0 appcontainer=verified neighbor=denied auth=unchanged")
         Files.writeString(auth, "{")

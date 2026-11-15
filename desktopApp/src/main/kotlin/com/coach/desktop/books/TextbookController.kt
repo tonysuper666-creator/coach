@@ -18,6 +18,7 @@ internal data class LibraryUi(
     val page: Int = 1, val source: BookLesson? = null,
     val answer: PracticeAnswer = PracticeAnswer(), val busy: Boolean = false, val error: String? = null,
     val reviews: List<LocalBookReview> = emptyList(), val review: LocalBookReview? = null,
+    val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
 )
 
 internal class TextbookController(val library: TextbookLibrary) {
@@ -40,6 +41,7 @@ internal class TextbookController(val library: TextbookLibrary) {
         val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
         mutable.value = LibraryUi(catalog = catalog, book = book, busy = true, reviews = library.reviews(),
             review = active, answer = active?.answer ?: PracticeAnswer(),
+            learningPath = book?.let(::restoredPath) ?: LearningPath.READ,
             screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING)
     }
 
@@ -47,14 +49,15 @@ internal class TextbookController(val library: TextbookLibrary) {
         val book = library.importBook(path)
         library.closeReview()
         mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
-            busy = true, reviews = library.reviews())
+            busy = true, reviews = library.reviews(),
+            learningPath = library.learningPath(book.id)?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST)
     }
 
     suspend fun select(id: String) = action {
         val book = library.book(id)
         library.save(book)
         library.closeReview()
-        mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews())
+        mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews(), learningPath = restoredPath(book))
     }
 
     private fun persist(book: Textbook) {
@@ -62,32 +65,54 @@ internal class TextbookController(val library: TextbookLibrary) {
         mutable.update { it.copy(book = book, catalog = library.catalog()) }
     }
 
-    suspend fun read() = action {
-        val book = mutable.value.book ?: return@action
+    private fun restoredPath(book: Textbook) = LearningPath.restore(library.learningPath(book.id), book.learning)
+
+    private fun openReading(book: Textbook, promptToLearn: Boolean = false) {
+        library.saveLearningPath(book.id, LearningPath.READ.name)
         library.closeReview()
-        mutable.update { it.copy(review = null) }
-        mutable.update { it.copy(screen = BookScreen.READER, page = book.readingPage, source = null,
-            prompt = if (!book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
+        mutable.update { it.copy(review = null, learningPath = LearningPath.READ, questionsOpen = false,
+            screen = BookScreen.READER, page = book.readingPage, source = null,
+            prompt = if (promptToLearn && !book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
     }
 
-    suspend fun learn() = action {
+    suspend fun read() = action { mutable.value.book?.let { openReading(it, promptToLearn = true) } }
+
+    /** An explicit entry changes the walk; the shared continue action restores the saved walk. */
+    suspend fun learn(path: LearningPath? = null) = action {
         val book = mutable.value.book ?: return@action
+        val target = path ?: restoredPath(book)
+        if (target == LearningPath.READ) { openReading(book); return@action }
         library.closeReview()
-        mutable.update { it.copy(review = null) }
+        mutable.update { it.copy(review = null, learningPath = target) }
         if (!book.learning) mutable.update { it.copy(prompt = BookPrompt.START) }
-        else openLearning(book)
+        else {
+            library.saveLearningPath(book.id, target.name)
+            openLearning(book, target)
+        }
     }
 
-    private fun openLearning(book: Textbook) {
+    private fun openLearning(book: Textbook, path: LearningPath = mutable.value.learningPath) {
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
-        mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null) }
+        mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null,
+            learningPath = path, questionsOpen = path == LearningPath.QUESTION_FIRST || answer.text.isNotBlank() || answer.revealed) }
+    }
+
+    suspend fun chooseLearningPath(path: LearningPath) = action(showBusy = false) {
+        mutable.update { it.copy(learningPath = path) }
+    }
+
+    suspend fun beginQuestions() = action(showBusy = false) {
+        if (mutable.value.screen == BookScreen.LEARNING) mutable.update { it.copy(questionsOpen = true) }
     }
 
     suspend fun enableLearning() = action {
         val book = mutable.value.book ?: return@action
+        val path = mutable.value.learningPath
+        if (path == LearningPath.READ) { openReading(book); return@action }
         require(book.lessons.isNotEmpty()) { "这本书暂时没有可提取的文字。仍可翻看 PDF 原页；开启 learning 需要带文字层的教材。" }
         val enabled = book.copy(learning = true, promptSeen = true)
+        library.saveLearningPath(book.id, path.name)
         persist(enabled); openLearning(enabled)
     }
 

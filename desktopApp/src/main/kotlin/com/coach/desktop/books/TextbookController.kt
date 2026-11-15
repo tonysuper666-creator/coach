@@ -31,10 +31,13 @@ internal data class LibraryUi(
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
     val practiceSync: String = "同步未备好：尚未连接配对课程。",
+    val practiceUnavailable: Boolean = false,
     val sourceRegistration: String? = null,
 )
 
 /** Supplied only by an already paired learning session; never derive course or device from a book. */
+internal class BookPracticeUnavailableException : Exception()
+
 internal class BookPracticeSession(val sync: SyncEngine, val courseId: String,
     val synchronize: suspend () -> Unit = {}, val now: () -> Long = System::currentTimeMillis)
 
@@ -321,24 +324,24 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
 
     private suspend fun refreshPracticeSync(book: Textbook, lesson: BookLesson?, answer: PracticeAnswer, submit: Boolean) {
         if ((practiceSession == null && connectPractice == null) || lesson == null || book.questionMode != QuestionMode.CHOICE) {
-            mutable.update { it.copy(practiceSync = "同步未备好：尚未连接配对课程。") }
+            mutable.update { if (it.practiceUnavailable) it else it.copy(practiceSync = "同步未备好：尚未连接配对课程。") }
             return
         }
         val practice = StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE)
         if (practice == null) {
-            mutable.update { it.copy(practiceSync = "同步未备好：没有对应练习。") }
+            mutable.update { if (it.practiceUnavailable) it else it.copy(practiceSync = "同步未备好：没有对应练习。") }
             return
         }
         try {
             val session = if (connectPractice == null) practiceSession else connectPractice.invoke(book, lesson, practice)
             if (session == null) {
-                mutable.update { it.copy(practiceSync = "同步未备好：缺少配对身份或已核准的书课关联。") }
+                mutable.update { if (it.practiceUnavailable) it else it.copy(practiceSync = "同步未备好：缺少配对身份或已核准的书课关联。") }
                 return
             }
             val outbox = BookPracticeOutbox(session.sync)
             val binding = outbox.bind(session.courseId, book, lesson, practice)
             if (binding !is BookPracticeBinding.Ready || !validPracticeFingerprint(binding.posed.payload)) {
-                mutable.update { it.copy(practiceSync = "同步未备好：原题身份尚未确认。") }
+                mutable.update { if (it.practiceUnavailable) it else it.copy(practiceSync = "同步未备好：原题身份尚未确认。") }
                 return
             }
             // Entering learning only reads an existing submission; it must not enqueue an answer.
@@ -358,12 +361,15 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
                     else -> "原作答已保存，等待同步。"
                 }
             } else "原题已备好，可同步本次作答。"
-            mutable.update { it.copy(practiceSync = message) }
+            mutable.update { it.copy(practiceSync = message, practiceUnavailable = false) }
         } catch (cancel: CancellationException) { throw cancel }
+        catch (_: BookPracticeUnavailableException) {
+            mutable.update { it.copy(practiceUnavailable = true, practiceSync = "这本原书的题目已撤回或暂不可用，请核对课程并重新登记原书。") }
+        }
         catch (failure: Exception) {
             val message = if (failure.message == "Answer is already locked" || failure.message == "Attempt already answered")
                 "原作答已锁定，当前本机修改未同步。" else "原作答已保存在本机，同步未完成；请重试。"
-            mutable.update { it.copy(practiceSync = message) }
+            mutable.update { if (it.practiceUnavailable) it else it.copy(practiceSync = message) }
         }
     }
 

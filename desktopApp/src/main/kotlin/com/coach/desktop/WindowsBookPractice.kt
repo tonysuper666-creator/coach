@@ -94,6 +94,7 @@ internal class WindowsBookPracticeConnection(
             credentials.clear(identity.serverUrl, identity.credentials)
             return@withContext null
         }
+        if (response.statusCode() == 409) throw BookPracticeUnavailableException()
         if (response.statusCode() != 200) return@withContext null
         // The response is not injected into SQLite. Normal authenticated ledger synchronization owns facts.
         val key = "${scope(identity)}:${hash(identity.credentials.token.toByteArray())}:$course"

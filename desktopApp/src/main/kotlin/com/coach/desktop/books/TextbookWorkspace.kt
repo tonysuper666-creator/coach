@@ -724,6 +724,10 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                     if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
                 }
                 if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
+                else if (ui.questionsOpen && book.questionMode == QuestionMode.CHOICE && ui.practiceUnavailable) {
+                    Text(ui.practiceSync, modifier = Modifier.testTag("practice-sync-status"))
+                    TextButton(onRetrySync, enabled = !ui.busy, modifier = Modifier.testTag("practice-sync-retry")) { Text("重试同步") }
+                }
                 else if (ui.questionsOpen) {
                     if (practice == null) Text("这一节的原文太少，暂时无法生成选择题。可以继续学，或改为简答。")
                     else {

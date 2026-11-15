@@ -18,6 +18,7 @@ import kotlin.test.*
 /** Ordinary startup, optional pairing, formal authenticated pose and HTTP receipt; all data synthetic. */
 @OptIn(ExperimentalTestApi::class)
 class WindowsPairedPracticeTest {
+    private val unavailableNotice = "这本原书的题目已撤回或暂不可用，请核对课程并重新登记原书。"
     private class Entry : AutoCloseable {
         val f = BookPracticeOutboxTest.F()
         val library = TextbookLibrary(f.root.resolve("library"))
@@ -75,6 +76,8 @@ class WindowsPairedPracticeTest {
             enterCourse()
             onNodeWithTag("home-learn").performClick()
             awaitText("原题已备好，可同步本次作答。")
+            onAllNodesWithText(unavailableNotice).assertCountEquals(0)
+            onNodeWithTag("choice-0").assertExists()
             capture("01-formal-pose.png")
             onNodeWithTag("guess-mark").performScrollTo().performClick()
             // Draft saving must finish before the explicit choice is made.
@@ -107,6 +110,33 @@ class WindowsPairedPracticeTest {
         snapshot(e)
     }
 
+    @Test fun withdrawnMappingReturns409AndHidesPreviouslyReadyQuestion() = Entry().use { e ->
+        e.pair()
+        runSkikoComposeUiTest(size = Size(946f, 690f), density = Density(1f)) {
+            setContent { WindowsTextbooksContent(e.library.directory, e.settings) { null } }
+            waitUntil(timeoutMillis = 30_000) { onAllNodesWithTag("home-learn").fetchSemanticsNodes().isNotEmpty() }
+            enterCourse()
+            onNodeWithTag("home-learn").performClick()
+            awaitText("原题已备好，可同步本次作答。")
+            onNodeWithTag("choice-0").assertExists()
+            val before = e.f.serverEvents()
+            // Model the mapping removal left by withdrawal, with a real authenticated endpoint.
+            DriverManager.getConnection("jdbc:sqlite:${e.f.root.resolve("server/coach.sqlite")}").use { db ->
+                db.createStatement().use { assertEquals(1, it.executeUpdate("DELETE FROM book_practice_mappings WHERE course='C'")) }
+            }
+            val response = practiceHttp(e.f.base, "/v1/courses/C/book-practice-pose", e.f.source().toString(), token = e.token)
+            assertEquals(409, response.statusCode())
+            onNodeWithTag("practice-sync-retry").performScrollTo().performClick()
+            awaitText(unavailableNotice)
+            onNodeWithTag("practice-sync-status").assertTextEquals(unavailableNotice)
+            onAllNodesWithTag("choice-0").assertCountEquals(0)
+            onNodeWithTag("practice-sync-retry").assertExists()
+            assertEquals(before, e.f.serverEvents())
+            assertTrue(e.commands().isEmpty())
+            println("WINDOWS_ENTRY http=409 notice=$unavailableNotice oldChoice=hidden retry=available serverDelta=0")
+        }
+    }
+
     @Test fun missingPairingOrOwnerMappingKeepsLocalReadingAndAnswerWithoutAnyIncrement() {
         for (paired in listOf(false, true)) Entry().use { e ->
             if (paired) e.pair()
@@ -120,7 +150,8 @@ class WindowsPairedPracticeTest {
                     controller.learn()
                     controller.answer(PracticeAnswer(e.f.practice.answer, revealed = true, guessed = true))
                 }
-                assertEquals("同步未备好：缺少配对身份或已核准的书课关联。", controller.state.value.practiceSync)
+                assertEquals(if (paired) unavailableNotice else "同步未备好：缺少配对身份或已核准的书课关联。", controller.state.value.practiceSync)
+                assertEquals(paired, controller.state.value.practiceUnavailable)
                 e.assertZero(before)
             }
             println("WINDOWS_ENTRY paired=$paired ownerMapping=false outbox=0 serverDelta=0 localRead=true")
@@ -159,7 +190,8 @@ class WindowsPairedPracticeTest {
                 val before = e.f.serverEvents()
                 val controller = e.controller(connection)
                 runBlocking { controller.load(); controller.learn(); controller.answer(PracticeAnswer(e.f.practice.answer, revealed = true, guessed = true)) }
-                assertEquals("同步未备好：缺少配对身份或已核准的书课关联。", controller.state.value.practiceSync)
+                assertEquals(if (rawBook) "同步未备好：缺少配对身份或已核准的书课关联。" else unavailableNotice, controller.state.value.practiceSync)
+                assertEquals(!rawBook, controller.state.value.practiceUnavailable)
                 e.assertZero(before)
             }
             println("WINDOWS_ENTRY changedRawBook=$rawBook changedQuestion=${!rawBook} outbox=0 serverDelta=0")

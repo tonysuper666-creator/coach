@@ -1,6 +1,7 @@
 package com.coach.ui.v7
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.TextSelectionColors
@@ -15,6 +16,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -283,9 +285,10 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 }
             }
         }, footer = {
-            Text(label(index - 1).let { if (it.isNotBlank()) "‹  $it" else "" }, Modifier.weight(1f).clickable { points.getOrNull(index - 1)?.let { weekActions?.onOpen(it.id) } }, style = MaterialTheme.typography.labelLarge)
+            fun step(at: Int): (() -> Unit)? = points.getOrNull(at)?.takeIf { weekActions != null }?.let { p -> { weekActions?.onOpen(p.id) } }
+            SectionStep(label(index - 1).let { if (it.isNotBlank()) "‹  $it" else "" }, "v7-reading-previous", step(index - 1), end = false)
             Text("${index + 1} / ${points.size}", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
-            Text(label(index + 1).let { if (it.isNotBlank()) "$it  ›" else "" }, Modifier.weight(1f).clickable { points.getOrNull(index + 1)?.let { weekActions?.onOpen(it.id) } }, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+            SectionStep(label(index + 1).let { if (it.isNotBlank()) "$it  ›" else "" }, "v7-reading-next", step(index + 1), end = true)
         }) {
         val m = LocalDeskMetrics.current
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -324,4 +327,19 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
         }
     }
 }
+}
+
+/**
+ * Footer step to the previous or next section. The V7 focus ring hugs the label; the rest of its half of the footer
+ * still takes a mouse click, as before. No target section, or no week navigation, leaves it disabled: no Tab stop.
+ */
+@Composable
+private fun RowScope.SectionStep(text: String, tag: String, onOpen: (() -> Unit)?, end: Boolean) {
+    val open by rememberUpdatedState(onOpen)
+    Box(Modifier.weight(1f).then(if (onOpen != null) Modifier.pointerInput(Unit) { detectTapGestures { open?.invoke() } } else Modifier),
+        contentAlignment = if (end) Alignment.CenterEnd else Alignment.CenterStart) {
+        val m = Modifier.testTag(tag).v7FocusRing().clickable(enabled = onOpen != null) { open?.invoke() }
+        if (end) Text(text, m, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+        else Text(text, m, style = MaterialTheme.typography.labelLarge)
+    }
 }

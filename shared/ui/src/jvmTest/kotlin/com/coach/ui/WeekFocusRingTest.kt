@@ -56,7 +56,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances and the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances and its footer ‹ 上一节 / 下一节 › steps.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -754,6 +754,112 @@ class WeekFocusRingTest {
     }
 
     /**
+     * Reading page footer: ‹ previous section and next section › step through the week's sections.
+     * Each existing direction shows the hugging ring on Tab (1224 and 700dp; at 699dp the page has no footer), Enter opens
+     * that section, blur restores the pixels, and a mouse click on the label or the empty rest of its half still opens it once.
+     * The first section's missing ‹, the last section's missing ›, and both when there is no week navigation leave no Tab stop.
+     */
+    @Test fun readingFooterSectionStepsShowRingAndLeaveNoDeadStops() {
+        val view = oneWeekThreeSections()
+        val text = "合成正文第一段，讲一个要点。\n\n合成正文第二段。"
+        val ids = listOf("s1", "s2", "s3")
+        val prev = hasTestTag("v7-reading-previous")
+        val next = hasTestTag("v7-reading-next")
+        data class Case(val name: String, val at: Int, val live: Boolean)
+        val cases = listOf(Case("首节", 0, true), Case("中节", 1, true), Case("末节", 2, true), Case("无回调", 1, false))
+        withController { controller ->
+            for (dark in listOf(false, true)) for (w in listOf(1224f, 700f, 699f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val opened = mutableListOf<String?>()
+                val shown = mutableStateOf(cases[0])
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface {
+                    focus = LocalFocusManager.current
+                    val scope = rememberCoroutineScope()
+                    val live = remember { WeekActions(controller, scope).apply { onOpen = { opened += it } } }
+                    val case = shown.value
+                    ReadingPage(controller, view.kp(ids[case.at])!!, view, text, false, {}, null,
+                        onAsk = {}, onQuiz = {}, onSource = {}, weekActions = if (case.live) live else null, onSelectionAsk = {})
+                } } }
+                // Never-focused frame of every case first, so the same frames can be compared with the parent ReadingPage.
+                val frames = cases.associateWith { case ->
+                    runOnIdle { shown.value = case }; waitForIdle()
+                    shot("$mode-footer-${case.name}-unfocused")
+                }
+                for (case in cases) {
+                    runOnIdle { focus.clearFocus(); shown.value = case }; waitForIdle()
+                    val before = frames.getValue(case)
+                    val counter = hasText("${case.at + 1} / ${ids.size}")
+                    if (w < 700f) {
+                        // Compact window: Desk shows no footer on the reading page, so there is nothing to step or focus.
+                        assertEquals(0, onAllNodes(counter).fetchSemanticsNodes().size, "$mode ${case.name} footer counter")
+                        assertEquals(0, onAllNodes(hasText("‹", substring = true)).fetchSemanticsNodes().size + onAllNodes(hasText("›", substring = true)).fetchSemanticsNodes().size,
+                            "$mode ${case.name} no footer step")
+                        println("TON-1603 week $mode footer ${case.name} absent (compact Desk has no footer)")
+                        continue
+                    }
+                    val band = first(counter).boundsInRoot
+                    val dirs = listOf(Triple("上一节", prev, case.at - 1), Triple("下一节", next, case.at + 1))
+                    val live = dirs.filter { case.live && it.third in ids.indices }
+                    val dead = dirs - live.toSet()
+                    val b0 = live.associate { (n, m, _) -> n to first(m).boundsInRoot }
+                    // A full Tab cycle: every stop inside the footer band must be a live step, and each live step is reached once.
+                    if (live.isNotEmpty()) { onNode(live[0].second).requestFocus(); waitForIdle() }
+                    else { onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle() }
+                    fun focusedNode() = onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Focused, true)).fetchSemanticsNodes().firstOrNull()
+                    val start = focusedNode()?.id
+                    val footerStops = mutableListOf<String>()
+                    var n = 0
+                    do {
+                        val f = focusedNode() ?: break
+                        if (abs(f.boundsInRoot.center.y - band.center.y) < 12 * scale)
+                            footerStops += live.firstOrNull { (_, m, _) -> first(m).id == f.id }?.first ?: "空位@${(f.boundsInRoot.left / scale).roundToInt()}dp"
+                        tabFromFocused(); n++
+                    } while (focusedNode()?.id != start && n < 80)
+                    println("TON-1603 week $mode footer ${case.name} tab-cycle=$n closed=${focusedNode()?.id == start} footer-stops=$footerStops")
+                    assertEquals(live.map { it.first }, footerStops, "$mode ${case.name} Tab stops in the footer (a blank or callback-less step must not take focus)")
+                    for ((dn, dm, _) in dead) {
+                        onNode(dm).assertIsNotEnabled()
+                        runCatching { onNode(dm).requestFocus() }; waitForIdle()
+                        assertTrue(!focused(dm), "$mode ${case.name} $dn took focus without a target")
+                    }
+                    for ((dn, m, _) in live) {
+                        onNode(m).requestFocus(); waitForIdle(); onNode(m).assertIsFocused()
+                        assertEquals(b0.getValue(dn), first(m).boundsInRoot, "$mode ${case.name} focusing must not move or resize $dn")
+                        measure(mode, "页脚-${case.name}-$dn", m, before, pageDx = 8f)
+                    }
+                    runOnIdle { focus.clearFocus() }; waitForIdle()
+                    val blurred = shot("$mode-footer-${case.name}-blurred")
+                    for ((dn, _, _) in live) assertRegionEqual(before, blurred, b0.getValue(dn).inflate(10 * scale), "$mode ${case.name} $dn after blur")
+                    for ((dn, m, at) in live) {
+                        val count = opened.size
+                        enter(m)
+                        assertEquals(listOf(ids[at]), opened.drop(count), "$mode ${case.name} Enter on $dn opens ${ids[at]}")
+                    }
+                    // Mouse: the label, the empty rest of a live half, and a dead half (which must do nothing).
+                    val root = onAllNodes(isRoot()).onFirst()
+                    val rowWidth = w * scale
+                    for ((dn, m, at) in dirs) {
+                        val isLive = live.any { it.first == dn }
+                        val halfX = if (dn == "上一节") band.left / 2 else (band.right + rowWidth) / 2
+                        val points = if (isLive) {
+                            val b = first(m).boundsInRoot
+                            listOf("文字" to b.center, "半区空白" to Offset(if (dn == "上一节") b.right + 24 * scale else b.left - 24 * scale, b.center.y))
+                        } else listOf("半区" to Offset(halfX, band.center.y))
+                        for ((where, p) in points) {
+                            val count = opened.size
+                            root.performMouseInput { click(p) }; waitForIdle()
+                            val want = if (isLive) listOf(ids[at]) else emptyList()
+                            assertEquals(want, opened.drop(count), "$mode ${case.name} mouse click on $dn $where")
+                        }
+                    }
+                }
+                println("TON-1603 week $mode footer opened=$opened")
+            }
+        }
+    }
+
+    /**
      * Ring drawn inside a text-button pill that sits on a clipping edge: from each pill edge walk inward on the centre lines.
      * The ring must start at the edge (no clipped part) and be V7FocusRingWidth wide on all four sides, ≥3:1 against the
      * surface the pill sits on and against the pill's own focused fill.
@@ -789,6 +895,18 @@ class WeekFocusRingTest {
     }
 
     private data class Edge(val week: Int, val dead: SemanticsMatcher, val live: SemanticsMatcher, val lands: Int)
+
+    /** One week (W2) with three sections, so the reading footer has a first, middle and last section. */
+    private fun oneWeekThreeSections(): CourseView {
+        val now = Instant.parse("2026-11-10T12:00:00Z").toEpochMilli()
+        val events = listOf(Event(1, "outline", "SYN", "outline_revised", recordedAt = now,
+            occurredAt = now, deviceId = "synthetic", actor = "SYSTEM", payload = json(
+                "knowledgePoints" to JsonArray(listOf(json("id" to "s1", "title" to "【W2】首节要点"), json("id" to "s2", "title" to "【W2】中节要点"),
+                    json("id" to "s3", "title" to "【W2】末节要点"))))),
+            Event(2, "exam", "SYN", "exam_set", recordedAt = now, occurredAt = now,
+                deviceId = "synthetic", actor = "USER", payload = json("examDay" to 20802)))
+        return CourseView(events, project(events))
+    }
 
     private fun threeWeeks(scope: Int? = null): CourseView {
         val now = Instant.parse("2026-11-10T12:00:00Z").toEpochMilli()

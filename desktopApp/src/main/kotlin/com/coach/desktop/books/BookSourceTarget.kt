@@ -24,38 +24,63 @@ internal sealed interface BookSourceResolution {
     data class Refused(val reason: BookSourceRefusal) : BookSourceResolution
 }
 
-internal class BookSourceResolver(private val library: TextbookLibrary) {
+internal open class BookSourceResolver(private val library: TextbookLibrary) {
     /**
-     * Same book, same version (file hash == id), same physical page, in-range UTF-16 interval,
-     * and (when given) the exact quote. A stale or foreign citation is refused, never relocated.
+     * Resolves against the WHOLE library: it does not know which book the UI currently shows and
+     * does not check that the citation belongs to the original request. The CALLER must (1) bind the
+     * reply to its originating book/lesson/request, (2) check `passage.book == currentBook.id` before
+     * calling, (3) pass the ORIGINAL physical page, range and verified quote as [expectedQuote] (never
+     * search a same-sentence page), (4) check `target.book == currentBook.id`, then [stillValid].
+     * Checks here: file hash == id, page order, UTF-16 range on code-point boundaries, quote, one body block.
+     * Page text comes from the trusted import cache; the PDF is not re-extracted.
      */
-    fun resolve(citation: OwnedBookCitation, expectedQuote: String? = null): BookSourceResolution {
+    open fun resolve(citation: OwnedBookCitation, expectedQuote: String? = null): BookSourceResolution =
+        resolveAll(listOf(citation to expectedQuote)).single()
+
+    /** Batch form: each distinct book is loaded, file-hashed and block-planned once for the whole batch. */
+    open fun resolveAll(requests: List<Pair<OwnedBookCitation, String?>>): List<BookSourceResolution> {
+        class Loaded(val book: Textbook?, val fileOk: Boolean, val blocks: List<SourceBlock>)
+        val cache = HashMap<String, Loaded>()
         fun no(r: BookSourceRefusal) = BookSourceResolution.Refused(r)
-        if (!citation.book.matches(Regex("[a-f0-9]{64}"))) return no(BookSourceRefusal.MALFORMED_BOOK)
-        val book = runCatching { library.book(citation.book) }.getOrNull() ?: return no(BookSourceRefusal.BOOK_MISSING)
-        if (book.id != citation.book || !fileMatches(book)) return no(BookSourceRefusal.FILE_CHANGED)
-        // The reader indexes pages by position; the stored number must agree with it.
-        val index = book.pages.indexOfFirst { it.number == citation.page }
-        if (index < 0 || index + 1 != citation.page) return no(BookSourceRefusal.PAGE_MISSING)
-        val page = book.pages[index]
-        if (citation.start < 0 || citation.end <= citation.start || citation.end > page.text.length) return no(BookSourceRefusal.RANGE_INVALID)
-        val quote = page.text.substring(citation.start, citation.end)
-        if (expectedQuote != null && quote != expectedQuote) return no(BookSourceRefusal.QUOTE_MISMATCH)
-        val oneBlock = StudyCoachCourse.blocks(book.id, book.pages).any {
-            !it.heading && it.page == citation.page && citation.start >= it.start && citation.end <= it.end
+        return requests.map { (citation, expectedQuote) ->
+            if (!citation.book.matches(Regex("[a-f0-9]{64}"))) return@map no(BookSourceRefusal.MALFORMED_BOOK)
+            val loaded = cache.getOrPut(citation.book) {
+                val b = runCatching { library.book(citation.book) }.getOrNull()
+                if (b == null || b.id != citation.book || !fileMatches(b)) Loaded(b, false, emptyList())
+                else Loaded(b, true, StudyCoachCourse.blocks(b.id, b.pages))
+            }
+            val book = loaded.book ?: return@map no(BookSourceRefusal.BOOK_MISSING)
+            if (!loaded.fileOk) return@map no(BookSourceRefusal.FILE_CHANGED)
+            // The reader indexes pages by position; the stored number must agree with it.
+            val index = book.pages.indexOfFirst { it.number == citation.page }
+            if (index < 0 || index + 1 != citation.page) return@map no(BookSourceRefusal.PAGE_MISSING)
+            val page = book.pages[index]
+            if (citation.start < 0 || citation.end <= citation.start || citation.end > page.text.length) return@map no(BookSourceRefusal.RANGE_INVALID)
+            // A UTF-16 boundary inside a surrogate pair would quote half a character.
+            if (splitsSurrogate(page.text, citation.start) || splitsSurrogate(page.text, citation.end)) return@map no(BookSourceRefusal.RANGE_INVALID)
+            val quote = page.text.substring(citation.start, citation.end)
+            if (expectedQuote != null && quote != expectedQuote) return@map no(BookSourceRefusal.QUOTE_MISMATCH)
+            val oneBlock = loaded.blocks.any { !it.heading && it.page == citation.page && citation.start >= it.start && citation.end <= it.end }
+            if (!oneBlock) return@map no(BookSourceRefusal.NOT_ONE_BODY_BLOCK)
+            val sha = MessageDigest.getInstance("SHA-256").digest(page.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            BookSourceResolution.Resolved(BookSourceTarget(book.id, book.title, citation.page, citation.start, citation.end, quote, sha))
         }
-        if (!oneBlock) return no(BookSourceRefusal.NOT_ONE_BODY_BLOCK)
-        val sha = MessageDigest.getInstance("SHA-256").digest(page.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-        return BookSourceResolution.Resolved(BookSourceTarget(book.id, book.title, citation.page, citation.start, citation.end, quote, sha))
     }
 
-    /** Call again at click time: refuses if the book/page changed since the answer was produced. */
-    fun stillValid(target: BookSourceTarget): Boolean {
+    /**
+     * Call at click time. NOT an atomic snapshot: it only proves cache and file hash matched at this instant;
+     * a file swapped afterwards is caught by the next call. Rendering must consume the same verified bytes
+     * if "safe after verification" is required.
+     */
+    open fun stillValid(target: BookSourceTarget): Boolean {
         val again = resolve(OwnedBookCitation(target.book, target.pdfPage, target.start, target.end), target.quote)
         return again is BookSourceResolution.Resolved && again.target == target
     }
 
-    private fun fileMatches(book: Textbook): Boolean = runCatching {
+    private fun splitsSurrogate(text: String, i: Int) =
+        i in 1 until text.length && Character.isHighSurrogate(text[i - 1]) && Character.isLowSurrogate(text[i])
+
+    protected open fun fileMatches(book: Textbook): Boolean = runCatching {
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(library.directory.resolve("${book.id}.${book.format}")).use { input ->
             val buffer = ByteArray(65536)

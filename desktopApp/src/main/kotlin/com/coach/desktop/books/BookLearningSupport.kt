@@ -186,14 +186,24 @@ internal fun BookLessonExplanation(
 }
 
 /** Explicit paragraph selection keeps the original page offsets even for Unicode text. */
+internal class BookPassageAskState(val page: BookPage) {
+    var selected by mutableStateOf<SourceBlock?>(null)
+    var question by mutableStateOf("")
+    var request by mutableStateOf<BookPassageQuestion?>(null)
+    var reply by mutableStateOf<BookLearningReply?>(null)
+    var revision by mutableIntStateOf(0)
+}
+
 @Composable
-internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+internal fun BookPassageAsk(book: Textbook, state: BookPassageAskState, support: BookLearningSupport,
+    sources: @Composable (List<BookPassage>) -> Unit = {}, onClose: () -> Unit) {
+    val page = state.page
     val blocks = remember(book.id, page.number) { StudyCoachCourse.blocks(book.id, listOf(page)).filterNot { it.heading } }
-    var selected by remember(book.id, page.number) { mutableStateOf<SourceBlock?>(null) }
-    var question by remember(book.id, page.number) { mutableStateOf("") }
-    var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
-    var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
-    var revision by remember(book.id, page.number) { mutableIntStateOf(0) }
+    var selected by state::selected
+    var question by state::question
+    var request by state::request
+    var reply by state::reply
+    var revision by state::revision
     val consenting = support as? ConsentingBookLearningSupport
     val epoch = consenting?.changes?.collectAsState()?.value ?: 0L
     var replyEpoch by remember(book.id, page.number, support) { mutableLongStateOf(epoch) }
@@ -246,10 +256,20 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                     (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = current) {
                     null -> if (request != null && consent?.stopped != true) Text("正在读这段问题…")
-                    is BookLearningReply.Text -> Text(result.text, Modifier.testTag("book-passage-answer"))
+                    is BookLearningReply.Text -> {
+                        Text(result.text, Modifier.testTag("book-passage-answer"))
+                        sources(result.sources)
+                    }
                     is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-passage-unavailable"))
                 }
             }
         }
     }, confirmButton = { TextButton(onClose) { Text("回到阅读") } })
+}
+
+/** Existing callers that own the dialog can retain their page-based entry point. */
+@Composable
+internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearningSupport, onClose: () -> Unit) {
+    val state = remember(book.id, page.number) { BookPassageAskState(page) }
+    BookPassageAsk(book, state, support, onClose = onClose)
 }

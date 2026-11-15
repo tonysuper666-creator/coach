@@ -27,17 +27,16 @@ import kotlin.test.*
  * Local Practice answer -> client outbox -> real HTTP submit_answer -> the server's original attempt, on
  * isolated SQLite for both client and server, with client and server restarts.
  *
- * The server pose is a stand-in: production has no route that registers and poses a book Practice yet
- * (server registration write domain). The fixture calls LedgerStore directly with the contract
- * BookPracticeOutbox documents; nothing here goes through a client-supplied identity.
+ * The positive path now uses the authenticated book-practice-pose route. Direct legacy poses below
+ * are adversarial fixtures only, proving that a link alone cannot authorize an answer.
  */
 class BookPracticeOutboxTest {
-    private val md = "<!-- PDF 第 1 页 · 书第 1 页 -->\n# Chapter 1 Light\n\n" +
+    internal class F : AutoCloseable {
+        private val md = "<!-- PDF 第 1 页 · 书第 1 页 -->\n# Chapter 1 Light\n\n" +
         "Photosynthesis is the process by which plants use light to make sugars.\n\n# Chapter 2 Cells\n\n" +
         "Chlorophyll is a green pigment that absorbs light in plant cells.\n\n# Chapter 3 Energy\n\n" +
         "Respiration is the process that releases energy from stored sugars.\n"
 
-    private inner class F : AutoCloseable {
         val root = Files.createTempDirectory("book-practice-outbox-")
         var clock = 1_794_052_800_000L - 86_400_000
         val token = "synthetic-book-practice-private-token-32c"
@@ -51,6 +50,8 @@ class BookPracticeOutboxTest {
         val wrong: String
         val options: List<Option>
         val base: String
+        val seed: ContentSeed
+        val questionId: String
         private fun openDriver() = JdbcSqliteDriver("jdbc:sqlite:${root.resolve("client.sqlite")}", Properties(), ClientDatabase.Schema)
         var driver = openDriver()
         val transport: HttpLedgerTransport
@@ -63,25 +64,26 @@ class BookPracticeOutboxTest {
             practice = assertNotNull(StudyCoachCourse.practice(book, lesson, QuestionMode.CHOICE))
             wrong = practice.options.first { it != practice.answer }
             options = practice.options.mapIndexed { n, t -> Option("o$n", t) }
-            val correct = options.single { it.text == practice.answer }.optionId
             store.enroll("phone", token)
             store.enroll("tablet", "synthetic-book-practice-tablet-token-32c!")
             val m = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").find(md)!!
-            store.seedContent(ContentSeed(CourseContent(Course("C", "C", "Synthetic"), listOf(Module("M", 1, "M")),
-                listOf(KnowledgePoint("K", "M", 1, "K", anchors = listOf(SourceAnchor("D", 1))))),
-                listOf(TextbookDocument("D", "Synthetic", md, listOf(TextbookPage(m.groupValues[1].toInt(), 1, md))))))
-            store.registerQuestion("bp", "C", "", "SINGLE_CHOICE", practice.prompt, "VERIFIED", correct, options, listOf("K"))
+            seed = ContentSeed(CourseContent(Course("C", "C", "Synthetic"), listOf(Module("M", 1, "M")),
+                listOf(KnowledgePoint("K", "M", 1, "K", anchors = listOf(SourceAnchor("D", 1, quote = practice.reference))))),
+                listOf(TextbookDocument("D", "Synthetic", md, listOf(TextbookPage(m.groupValues[1].toInt(), 1, md)))))
+            questionId = installPracticeMapping(store, root, seed, book, lesson, practice, options)
             server.start(false)
             base = "http://127.0.0.1:${runBlocking { server.engine.resolvedConnectors().first().port }}"
             transport = HttpLedgerTransport(base, "phone", token)
             sync = newSync()
         }
         val block get() = lesson.blocks.first { !it.heading && it.text.contains(practice.reference) }
+        fun source() = practiceSource(book, lesson, block, practice)
+        fun actualPose() = practiceHttp(base, "/v1/courses/C/book-practice-pose", source().toString())
         fun bookLink(lessonId: String = lesson.id, blockId: String = block.id) = json("bookSha256" to book.id,
             "lessonId" to lessonId, "blockId" to blockId, "reference" to practice.reference)
-        /** Stand-in for the missing server route: a server-appended pose for one paired device. */
+        /** Legacy/unregistered server link, used only by rejection tests. */
         fun serverPose(attempt: String, device: String = "phone", link: JsonObject? = bookLink()) = runBlocking { actor.execute {
-            poseChoiceGroup("C", "book-practice:$attempt", listOf(JsonObject(json("attemptId" to attempt, "questionId" to "bp",
+            poseChoiceGroup("C", "book-practice:$attempt", listOf(JsonObject(json("attemptId" to attempt, "questionId" to questionId,
                 "kpIds" to listOf("K"), "purpose" to "PRACTICE", "policyVersion" to 1, "posedAt" to clock) +
                 (link?.let { mapOf("bookPractice" to it) } ?: emptyMap()))), Random(7), device = device).single()
         } }
@@ -104,10 +106,11 @@ class BookPracticeOutboxTest {
     }
 
     @Test fun localAnswerOfAServerPosedPracticeReachesTheOriginalAttemptAcrossRestarts() = F().use { f ->
-        f.serverPose("bp-attempt")
+        val response = f.actualPose()
+        assertEquals(200, response.statusCode(), response.body())
         runBlocking { f.sync.syncOnce() }
         val ready = assertIs<BookPracticeBinding.Ready>(f.bind())
-        assertEquals("bp-attempt", ready.attemptId)
+        val attempt = ready.attemptId
         val before = f.serverEvents()
         val id = BookPracticeOutbox(f.sync).submit(ready, PracticeAnswer(f.wrong, guessed = true), f.clock)
         assertEquals(1, f.outbox()); assertEquals(before, f.serverEvents(), "queued only, not yet synced")
@@ -120,16 +123,16 @@ class BookPracticeOutboxTest {
         val receipt = assertNotNull(f.sync.receipt(id))
         println("PRACTICE outbox receipt=${receipt.status}")
         assertEquals("OK", receipt.status)
-        val answered = f.serverEvents().single { it.type == "answer_submitted" && it.payload.str("attemptId") == "bp-attempt" }
+        val answered = f.serverEvents().single { it.type == "answer_submitted" && it.payload.str("attemptId") == attempt }
         assertEquals("phone", answered.deviceId); assertEquals(id, answered.commandId); assertTrue(answered.payload.flag("guessed"))
-        assertEquals(1, f.serverEvents().count { it.type == "question_posed" && it.payload.str("attemptId") == "bp-attempt" })
-        assertEquals(0L, f.serverEvents().single { it.type == "attempt_graded" && it.payload.str("attemptId") == "bp-attempt" }.payload.num("score"))
+        assertEquals(1, f.serverEvents().count { it.type == "question_posed" && it.payload.str("attemptId") == attempt })
+        assertEquals(0L, f.serverEvents().single { it.type == "attempt_graded" && it.payload.str("attemptId") == attempt }.payload.num("score"))
         // Answered attempt is locked; a different choice cannot be queued.
         assertFails { BookPracticeOutbox(f.sync).submit(f.bind() as BookPracticeBinding.Ready, PracticeAnswer(f.practice.answer), f.clock) }
         // Server restart on the same SQLite: the facts persist and PR229's producer accepts the original attempt.
         f.server.stop(0, 0); runBlocking { f.actor.close() }; f.store.close()
         f.store = LedgerStore(f.root.resolve("server")) { f.clock }
-        val identity = f.store.publishBookLedgerSourceFromServerFacts(BookSourceLocator("C", "phone", "bp-attempt", f.book.id,
+        val identity = f.store.publishBookLedgerSourceFromServerFacts(BookSourceLocator("C", "phone", attempt, f.book.id,
             f.lesson.id, f.block.page, f.block.start, f.block.end, f.practice.reference, f.practice.options))
         println("PRACTICE producer attempt=${identity.originalAttemptId} guessed=${identity.guessed} original=${identity.originalAnswer == f.wrong}")
         assertTrue(identity.guessed); assertEquals(f.wrong, identity.originalAnswer); assertEquals(f.practice.prompt, identity.prompt)
@@ -154,7 +157,7 @@ class BookPracticeOutboxTest {
         runBlocking { f.sync.syncOnce() }
         f.notReady("BOOK_PRACTICE_UNPOSED")
         // An unpaired credential cannot move a queued answer: server stays unchanged, the command stays pending.
-        f.serverPose("bp-attempt"); runBlocking { f.sync.syncOnce() }
+        assertEquals(200, f.actualPose().statusCode()); runBlocking { f.sync.syncOnce() }
         val ready = assertIs<BookPracticeBinding.Ready>(f.bind())
         val id = BookPracticeOutbox(f.sync).submit(ready, PracticeAnswer(f.wrong), f.clock)
         val before = f.serverEvents()
@@ -171,13 +174,14 @@ class BookPracticeOutboxTest {
         val e = assertFailsWith<ReviewVariantRejected> { runBlocking { f.actor.execute { publishBookLedgerSourceFromServerFacts(BookSourceLocator(
             "C", "phone", "tablet-attempt", f.book.id, f.lesson.id, f.block.page, f.block.start, f.block.end, f.practice.reference, f.practice.options)) } } }
         println("PRACTICE cross-device producer=${e.code} serverReceipt=${crossReceipt.status}")
-        assertEquals("BOOK_DEVICE_MISMATCH", e.code)
+        assertEquals("REJECTED", crossReceipt.status)
+        assertEquals("BOOK_ANSWER_MISMATCH", e.code)
         assertEquals(0, DriverManager.getConnection("jdbc:sqlite:${f.root.resolve("server").resolve("coach.sqlite")}").use { c ->
             c.createStatement().use { s -> s.executeQuery("SELECT COUNT(*) FROM book_ledger_sources").use { it.next(); it.getInt(1) } } })
     }
 
     @Test fun aLearnerReadyHandedToAnAssistantSessionIsRefusedWithoutAnyIncrement() = F().use { f ->
-        f.serverPose("bp-attempt"); runBlocking { f.sync.syncOnce() }
+        assertEquals(200, f.actualPose().statusCode()); runBlocking { f.sync.syncOnce() }
         val ready = assertIs<BookPracticeBinding.Ready>(f.bind())
         val agent = SyncEngine(ClientDatabase(f.driver), "phone", f.transport, listOf("C"), { UUID.randomUUID().toString() },
             ::sha256, agentRunId = "synthetic-agent-run")

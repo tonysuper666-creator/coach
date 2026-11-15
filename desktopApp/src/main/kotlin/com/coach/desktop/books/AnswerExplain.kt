@@ -1,0 +1,183 @@
+package com.coach.desktop.books
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.coach.ui.v7.PrimaryButton
+import kotlinx.coroutines.CancellationException
+
+/**
+ * 「做题学」答完之后的讲解：同一本书只问一次能不能把这段发出去，问过之后才连已配对的 Mac。
+ * [load] 每次进入这张卡都重读配对文件，所以在原文页配好对回到这里就能直接用。
+ * [explain] 是唯一的网络入口，测试传一个本地函数即可，不碰网络。
+ */
+internal class AnswerExplain(
+    val consent: ExplainConsent,
+    val load: suspend () -> Unit,
+    val ready: () -> Boolean,
+    val paired: () -> Boolean,
+    val explain: suspend (chosen: SourceBlock, blocks: List<SourceBlock>) -> ExplainResult,
+)
+
+/** Windows 主机的接线：配对与「这本书允许吗」沿用原文页已有的那一套，不另建通道。 */
+internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent) = AnswerExplain(
+    consent = consent,
+    load = { explainer.load() },
+    ready = { explainer.loaded },
+    paired = { explainer.identity != null },
+    explain = { chosen, blocks -> explainer.explain(chosen, blocks) },
+)
+
+/**
+ * 讲解只从这一节里挑一段发出去：先找题目依据所在的那段，找不到才退回本节第一段正文。
+ * 回执里的块编号必须落在发出去的这几段里，否则这次讲解作废。
+ */
+internal class PairedBookExplainSupport(
+    private val gate: AnswerExplain,
+    private val focusText: String? = null,
+) : BookLearningSupport {
+    override suspend fun explain(request: BookExplanationRequest): BookLearningReply {
+        if (!gate.consent.allowed(request.book)) return BookLearningReply.Unavailable(CONSENT_FIRST)
+        val body = request.blocks.filterNot { it.heading }
+        val chosen = focusText?.let { text -> body.firstOrNull { it.text.contains(text) } } ?: body.firstOrNull()
+            ?: return BookLearningReply.Unavailable("这一节没有可讲的正文。")
+        return try {
+            when (val result = gate.explain(chosen, request.blocks)) {
+                is ExplainResult.Done -> {
+                    val byId = request.blocks.associateBy { it.id }
+                    val cited = result.explanation.citations.mapNotNull { citation ->
+                        byId[citation.blockId]?.let { block ->
+                            BookPassage(request.book, block.page, block.start, block.end, block.text)
+                        }
+                    }
+                    BookLearningReply.Text(withShortIds(result.explanation.text, result.explanation.citations), cited)
+                }
+                is ExplainResult.Refused -> BookLearningReply.Unavailable(result.message)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            BookLearningReply.Unavailable("讲解暂时读不到；作答和位置都还在。")
+        }
+    }
+
+    override suspend fun ask(request: BookPassageQuestion) =
+        BookLearningReply.Unavailable("选段问答还没接通；这里的讲解讲的是这一节正文。")
+
+    private companion object {
+        const val CONSENT_FIRST = "讲解要先得到你的允许：在原文页点「讲解」并允许一次，或在这里直接允许。"
+    }
+}
+
+/** `【anchor】` in the server's reply becomes the short block id the reader can point at. */
+private fun withShortIds(text: String, citations: List<Citation>): String =
+    citations.fold(text) { shown, citation ->
+        shown.replace("【${citation.anchor}】", "【${ExplainWire.shortId(citation.blockId)}】")
+    }
+
+/**
+ * 答完题之后的这一块：没配对就指路，没允许就问一次，都齐了才真的去取讲解。
+ * 一次都不自动发送原文；跳过之后保留一行可以反悔的入口。
+ */
+@Composable
+internal fun LessonAnswerExplanation(
+    book: Textbook,
+    lesson: BookLesson,
+    practice: Practice,
+    gate: AnswerExplain,
+    reply: MutableState<BookLearningReply?>,
+    sources: @Composable (List<BookPassage>) -> Unit,
+    onOpenSourcePage: () -> Unit,
+) {
+    LaunchedEffect(gate) { gate.load() }
+    var allowed by remember(book.id) { mutableStateOf(gate.consent.allowed(book.id)) }
+    var skipped by remember(book.id, lesson.id) { mutableStateOf(false) }
+    val ready = gate.ready()
+    val paired = gate.paired()
+    when {
+        !ready -> Text("正在看这台电脑和 Mac 的连接…", Modifier.testTag("answer-explain-loading"),
+            style = MaterialTheme.typography.bodySmall)
+        !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("讲解由你配对的 Mac 生成，这台电脑还没连上。", style = MaterialTheme.typography.bodySmall)
+            TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
+        }
+        skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("answer-explain-skipped")) {
+            Text("这次先不看讲解。", style = MaterialTheme.typography.bodySmall)
+            TextButton({ skipped = false }, modifier = Modifier.testTag("answer-explain-resume")) { Text("还是看一下") }
+        }
+        !allowed -> Column(Modifier.fillMaxWidth().testTag("answer-explain-consent"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("答完了，看看这段怎么讲", style = MaterialTheme.typography.titleMedium)
+            Text("讲解会把你刚做的这段原文和前后各一段发给你配对的 Mac，由它的 AI 生成。这本书只问这一次。",
+                style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                PrimaryButton({ gate.consent.allow(book.id); allowed = true }, modifier = Modifier.testTag("answer-explain-allow")) {
+                    Text("允许并讲解")
+                }
+                TextButton({ skipped = true }, modifier = Modifier.testTag("answer-explain-skip")) { Text("先不看") }
+            }
+        }
+        else -> {
+            val support = remember(book.id, lesson.id, practice.reference, gate) {
+                PairedBookExplainSupport(gate, practice.reference)
+            }
+            BookLessonExplanation(book, lesson, support, reply = reply, sources = sources)
+        }
+    }
+}
+
+/**
+ * 小结卡：只写这一节真的发生过的事——做了什么题、对不对、原文在哪一页——再给一条继续走的路。
+ * 原文不铺在这里，要回看就点上面练习里的「查看对应原文」。
+ */
+@Composable
+internal fun LessonSummaryCard(
+    book: Textbook,
+    lesson: BookLesson,
+    practice: Practice,
+    answer: PracticeAnswer,
+    nav: @Composable () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f), shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().testTag("book-summary-card")) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("小结", style = MaterialTheme.typography.titleMedium)
+            Text("这一节：${lesson.title}", style = MaterialTheme.typography.bodyMedium)
+            Text(summaryLine(practice, answer), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("book-summary-detail"))
+            Text("原文在「${lesson.title}」这一节，第 ${lesson.firstPage} 页起；要回看时再打开。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            nav()
+        }
+    }
+}
+
+private fun summaryLine(practice: Practice, answer: PracticeAnswer): String {
+    val picked = answer.text.trim()
+    return if (practice.options.isNotEmpty()) {
+        if (picked == practice.answer) "你选了「$picked」，和原文一致。"
+        else "你选了「$picked」，原句是「${practice.answer}」。错一次不要紧，讲过的这段下次还会碰到。"
+    } else {
+        val written = picked.length
+        when (answer.understood) {
+            true -> "你写下了 $written 个字，并标记了已理解。"
+            false -> "你写下了 $written 个字，并标记了还需复习。"
+            null -> "你写下了 $written 个字，还没标记是否理解。"
+        }
+    }
+}

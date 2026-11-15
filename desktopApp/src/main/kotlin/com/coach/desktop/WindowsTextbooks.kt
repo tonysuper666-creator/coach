@@ -17,10 +17,14 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.AnswerDrafts
+import com.coach.desktop.books.AnswerExplain
+import com.coach.desktop.books.BookExplainer
+import com.coach.desktop.books.ExplainConsent
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.TextbookController
 import com.coach.desktop.books.TextbookLibrary
 import com.coach.desktop.books.TextbookWorkspace
+import com.coach.desktop.books.answerExplainWith
 import com.coach.desktop.books.rememberAnswerDrafts
 import com.coach.ui.AppTab
 import com.coach.ui.CoachTheme
@@ -143,6 +147,18 @@ private val AppTab.hostDestination: AppTab
     }
 
 /**
+ * Answering in 做题学 is the first place this window sends book text anywhere: the same pairing, the same
+ * per-book consent file and the same explain call the 原文页 already uses, created once for the whole window
+ * so a book allowed on one screen is allowed on the next.
+ */
+@Composable
+internal fun rememberAnswerExplain(library: TextbookLibrary): AnswerExplain {
+    val explainer = remember(library) { BookExplainer() }
+    val consent = remember(library) { ExplainConsent(library.directory) }
+    return remember(explainer, consent) { answerExplainWith(explainer, consent) }
+}
+
+/**
  * The live Windows host: one chrome with 今天/课程/书架 and 设置 at the top right.
  * All three entries read the same [TextbookController]: the bookshelf owns the textbook workspace, and
  * 今天/课程 show the book that is actually on this machine and continue it in 书架. With an empty
@@ -150,7 +166,8 @@ private val AppTab.hostDestination: AppTab
  */
 @Composable
 internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
-    exams: LocalExamController = rememberLocalExamController(controller.library), chooseBook: suspend () -> Path?) {
+    exams: LocalExamController = rememberLocalExamController(controller.library),
+    answerExplain: AnswerExplain = rememberAnswerExplain(controller.library), chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     var settings by rememberSaveable { mutableStateOf(false) }
     val ui by controller.state.collectAsState()
@@ -204,7 +221,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                         Text("正在读取本书练习…")
                                     }
                                 })
-                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, chooseBook = chooseBook)
+                            else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, chooseBook = chooseBook)
                         }
                     }
                     if (rail) Row(Modifier.fillMaxSize()) {

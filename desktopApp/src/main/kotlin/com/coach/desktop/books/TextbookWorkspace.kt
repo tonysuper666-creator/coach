@@ -119,6 +119,7 @@ internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
     support: BookLearningSupport = UnconnectedBookLearningSupport,
+    answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -137,6 +138,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val practiceSourceFocus = remember { FocusRequester() }
     val lessonId = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)?.id
     val explanationReply = remember(ui.book?.id, lessonId, support) { mutableStateOf<BookLearningReply?>(null) }
+    // 答完就讲的话由另一条通道取，重开窗口会重新问一次；它不跟原文页的讲解共用缓存。
+    val answerExplainReply = remember(ui.book?.id, lessonId, answerExplain) { mutableStateOf<BookLearningReply?>(null) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) {
@@ -246,7 +249,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         val displayed = if (lesson == null) ui else ui.copy(
                             answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
                         TextbookLearning(displayed, support, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
-                        explanationReply, sourceResolver, citationFocus, citationIndex,
+                        explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
                         onCitation = { index, target ->
@@ -646,7 +649,8 @@ internal suspend fun restoreCitationFocus(
 
 @Composable
 private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
-    returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, sourceResolver: BookSourceResolver,
+    returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, answerExplain: AnswerExplain?, answerExplainReply: MutableState<BookLearningReply?>,
+    sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
@@ -693,17 +697,20 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                 Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。")
                 PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 HorizontalDivider()
-                if (ui.learningPath == LearningPath.READ_AND_LEARN || ui.answer.revealed) BookLessonExplanation(
-                    book, lesson, support, reply = explanationReply,
-                    sources = { sources -> BookSourceRow(sources, book, sourceResolver,
-                        focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
-                        onRefused = { onCitationRefused() }) },
-                )
-                if (ui.learningPath == LearningPath.READ_AND_LEARN && !ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
-                    PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
-                }
                 val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
                     if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
+                }
+                val sourceRow: @Composable (List<BookPassage>) -> Unit = { sources ->
+                    BookSourceRow(sources, book, sourceResolver,
+                        focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
+                        onRefused = { onCitationRefused() })
+                }
+                // 边看边学：先看讲解，再动手做题。
+                if (ui.learningPath == LearningPath.READ_AND_LEARN) {
+                    BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                    if (!ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
+                        PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }
+                    }
                 }
                 if (book.questionMode == QuestionMode.NONE) Text("当前已关闭出题，可在出题设置中重新选择。", Modifier.testTag("book-questions-off"))
                 else if (ui.questionsOpen) {
@@ -716,14 +723,29 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                         }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !ui.busy && book.lessonIndex > 0,
-                        modifier = Modifier.testTag("previous-lesson")) { Text("上一节") }
-                    PrimaryButton({ onLesson(book.lessonIndex + 1) }, enabled = !ui.busy, modifier = Modifier.testTag("next-lesson")) {
-                        Text(if (book.lessonIndex + 1 == book.lessons.size) "读完这一节" else "继续下一节")
-                    }
+                // 做题学：答完就讲，讲解在题下面；原文仍要点开才出现。讲完用小结点出下一步。
+                val question = practice
+                if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.answer.revealed && question != null) {
+                    if (answerExplain != null) LessonAnswerExplanation(
+                        book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
+                        onOpenSourcePage = onSource,
+                    ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                    LessonSummaryCard(book, lesson, question, ui.answer) { LessonNav(book, ui.busy, onLesson) }
+                } else {
+                    LessonNav(book, ui.busy, onLesson)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LessonNav(book: Textbook, busy: Boolean, onLesson: (Int) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !busy && book.lessonIndex > 0,
+            modifier = Modifier.testTag("previous-lesson")) { Text("上一节") }
+        PrimaryButton({ onLesson(book.lessonIndex + 1) }, enabled = !busy, modifier = Modifier.testTag("next-lesson")) {
+            Text(if (book.lessonIndex + 1 == book.lessons.size) "读完这一节" else "继续下一节")
         }
     }
 }

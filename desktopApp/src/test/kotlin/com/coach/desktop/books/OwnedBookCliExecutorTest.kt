@@ -67,7 +67,7 @@ class OwnedBookCliExecutorTest {
             val copied = prompt.excerpts.joinToString("\n") { it.text }
             OwnedBookAnswer(alter(copied), listOf(prompt.excerpts.first().citation))
         })
-        for (format in listOf("\u200b", "\u200c", "\u200d", "\ufeff")) {
+        for (format in listOf("\u200b", "\u200c", "\u200d", "\ufeff", "\u2800", "\u3164", "\uffa0", "\u115f")) {
             alter = { it.toList().joinToString(format) }
             assertIs<BookLearningReply.Unavailable>(provider.explain(request))
         }

@@ -63,7 +63,8 @@ internal class OwnedBookLearningProvider(
 
     private fun normalizeCopy(text: String): String = buildString {
         text.codePoints().forEach { codePoint ->
-            if (!Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint) &&
+            if (codePoint !in setOf(0x2800, 0x3164, 0xffa0, 0x115f) &&
+                !Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint) &&
                 Character.getType(codePoint) != Character.FORMAT.toInt()) appendCodePoint(codePoint)
         }
     }

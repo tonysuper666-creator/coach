@@ -16,7 +16,7 @@ import com.coach.ui.theme.CoachTheme
 fun PaperButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp), content: @Composable RowScope.() -> Unit) {
     val c = CoachTheme.colors
-    Row(modifier.paperShadow("button", c.dark).clip(RoundedCornerShape(8.dp)).background(if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg)
+    Row(modifier.v7FocusRing().paperShadow("button", c.dark).clip(RoundedCornerShape(8.dp)).background(if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg)
         .clickable(enabled = enabled, onClick = onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         CompositionLocalProvider(LocalContentColor provides c.fgPrimary.copy(alpha = if (enabled) 1f else .4f)) {
@@ -28,7 +28,7 @@ fun PaperButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boo
 fun PrimaryButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp), content: @Composable RowScope.() -> Unit) {
     val c = CoachTheme.colors
-    Row(modifier.clip(RoundedCornerShape(8.dp)).background(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f))
+    Row(modifier.v7FocusRing().clip(RoundedCornerShape(8.dp)).background(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f))
         .clickable(enabled = enabled, onClick = onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         CompositionLocalProvider(LocalContentColor provides c.surface1) { ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() } }

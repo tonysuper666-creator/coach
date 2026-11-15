@@ -131,6 +131,25 @@ class CourseHttp internal constructor(baseUrl: String, private val deviceId: Str
     } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
       catch (e: kotlinx.coroutines.CancellationException) { throw e }
       catch (_: Exception) { MockReply(null, "连不上 Mac，阅读位置已保存。可返回做题或手动重试。") }
+    /** 本机书架里的书：选中段加相邻原文块（带块编号）发给已配对的 Mac，讲解只引用这些块编号。 */
+    suspend fun explainLibrary(input: JsonObject): MockReply = try {
+        val response = http.post("$base/v1/library/explain") {
+            timeout { requestTimeoutMillis = ReaderTimeoutPolicy.CLIENT_REQUEST_MS }
+            setBody(TextContent(input.toString(), ContentType.Application.Json))
+        }
+        if (response.status.value == 401) MockReply(null, "这台电脑的配对已失效，请在 Mac 上生成新配对码重新配对。", statusCode = 401)
+        else {
+            val parsed = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            if (response.status.isSuccess()) MockReply(parsed, null, statusCode = response.status.value)
+            else MockReply(null, parsed.s("error").ifBlank { "暂时无法确认，请稍后重试。" }, statusCode = response.status.value)
+        }
+    } catch (_: HttpRequestTimeoutException) { MockReply(null, "讲解请求等待超时。可继续阅读或手动重试。") }
+      catch (e: kotlinx.coroutines.CancellationException) { throw e }
+      catch (_: Exception) { MockReply(null, "连不上 Mac，可继续阅读或稍后重试。") }
+    suspend fun cancelLibraryExplain(id: String) {
+        runCatching { http.post("$base/v1/library/explain/cancel") {
+            setBody(TextContent(buildJsonObject { put("requestId", id) }.toString(), ContentType.Application.Json)) } }
+    }
     suspend fun cancelSelection(week: Int, id: String) {
         mockCall("mainline/$week/explain/cancel", buildJsonObject { put("requestId", id) })
     }

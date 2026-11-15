@@ -24,8 +24,11 @@ a mismatch falls back to Mac without editing either host's configuration.
 Use `--local` when that dependency is known only to the caller.
 
 Never reboot winbox, change system settings, touch the user's accounts,
-trading applications/browser or desktop session. All build processes run at
-low priority. Job worktrees/bundles go into `D:\agent\_trash` before removal
+trading applications/browser or desktop session. Launching Coach's own window
+on winbox and operating it (clicking its buttons, including per-book consent,
+typing into it, taking screenshots) is development acceptance and is allowed;
+leave every other window alone. tonii keeps its stricter rules. All build
+processes run at low priority. Job worktrees/bundles go into `D:\agent\_trash` before removal
 from the active workspace. Do not run the legacy single-checkout winbox script
 alongside the new runner; it does not share this runner's two-slot limit.
 

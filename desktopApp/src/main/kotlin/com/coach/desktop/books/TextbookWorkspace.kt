@@ -384,6 +384,9 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
+    var explainOpen by remember(book.id) { mutableStateOf(false) }
+    val explainer = remember { BookExplainer() }
+    val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
     var asking by remember(book.id, ui.page) { mutableStateOf(false) }
 
@@ -467,6 +470,9 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 if (book.format == "pdf") TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
                 TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
+                    Text(if (explainOpen) "回到原文" else "讲解")
+                }
                 TextButton(onClick = {
                     if (notesOpen) session.cancelNote()
                     notesOpen = !notesOpen
@@ -479,7 +485,8 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
             sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
-                if (textView) {
+                if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
+                else if (textView) {
                     val highlight = MaterialTheme.colorScheme.secondaryContainer
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })

@@ -54,6 +54,33 @@ class OwnedBookCliExecutorTest {
         Unit
     }
 
+    @Test fun providerRejectsInvisibleFormatCharacterCopiesButNotPunctuationVariants() = runBlocking {
+        val root = Files.createTempDirectory("owned-format-echo-")
+        val source = root.resolve("synthetic.txt")
+        Files.writeString(source, "Chapter 1 Lamps\n\nA lamp powers a small pump.\n\nThe pump circulates water.")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(source)
+        val lesson = book.lessons.first()
+        val request = BookExplanationRequest(book.id, lesson.id, lesson.blocks)
+        var alter: (String) -> String = { it }
+        val provider = OwnedBookLearningProvider(library, OwnedBookExecutor { prompt ->
+            val copied = prompt.excerpts.joinToString("\n") { it.text }
+            OwnedBookAnswer(alter(copied), listOf(prompt.excerpts.first().citation))
+        })
+        for (format in listOf("\u200b", "\u200c", "\u200d", "\ufeff")) {
+            alter = { it.toList().joinToString(format) }
+            assertIs<BookLearningReply.Unavailable>(provider.explain(request))
+        }
+        alter = { "\u200b" }
+        assertIs<BookLearningReply.Unavailable>(provider.explain(request))
+        // Document the heuristic's remaining limitation, not a quality guarantee.
+        alter = { it.replace('.', '。') }
+        assertIs<BookLearningReply.Text>(provider.explain(request))
+        alter = { "$it。" }
+        assertIs<BookLearningReply.Text>(provider.explain(request))
+        Unit
+    }
+
     @Test fun structuredTransportPassesThroughProviderAndInvalidIndexFailsClosed() = runBlocking {
         val root = Files.createTempDirectory("owned-structured-")
         val library = TextbookLibrary(root.resolve("library"))

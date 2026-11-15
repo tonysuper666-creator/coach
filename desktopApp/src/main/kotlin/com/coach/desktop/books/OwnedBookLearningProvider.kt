@@ -47,18 +47,25 @@ internal class OwnedBookLearningProvider(
         require(withContext(Dispatchers.IO) { checked() } == prompt)
         val text = result.text.trim()
         require(text.isNotEmpty() && !text.equals("unavailable", ignoreCase = true))
-        // Reject whitespace-only changes to a verbatim source or complete lesson.
+        // Reject whitespace and invisible format-character changes to copied text.
         // This remains an exact-copy heuristic, not a test of explanation quality.
-        val normalized = text.filterNot { it.isWhitespace() || Character.isSpaceChar(it) }
-        require(prompt.excerpts.none { normalized == it.text.filterNot { c -> c.isWhitespace() || Character.isSpaceChar(c) } })
-        require(normalized != prompt.excerpts.joinToString("") { it.text }
-            .filterNot { it.isWhitespace() || Character.isSpaceChar(it) })
+        val normalized = normalizeCopy(text)
+        require(normalized.isNotEmpty())
+        require(prompt.excerpts.none { normalized == normalizeCopy(it.text) })
+        require(normalized != normalizeCopy(prompt.excerpts.joinToString("") { it.text }))
         val allowed = prompt.excerpts.map { it.citation }.toSet()
         require(result.citations.isNotEmpty() && result.citations.all { it in allowed })
         val references = result.citations.distinct().joinToString("；") {
             "书 SHA-256 ${it.book}，第 ${it.page} 页，字符 ${it.start}–${it.end}"
         }
         return BookLearningReply.Text("$text\n\n出处：$references")
+    }
+
+    private fun normalizeCopy(text: String): String = buildString {
+        text.codePoints().forEach { codePoint ->
+            if (!Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint) &&
+                Character.getType(codePoint) != Character.FORMAT.toInt()) appendCodePoint(codePoint)
+        }
     }
 
     private fun explanation(request: BookExplanationRequest): OwnedBookPrompt {

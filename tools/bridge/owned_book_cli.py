@@ -3,6 +3,8 @@
 This module supplies no HTTP route and does not change privateAi. A caller must
 provide an already authorized transport and a policy appropriate to the data.
 The real private-book policy remains disabled. Never log request/response bodies.
+This low-level adapter does not reject source echoes; callers must run responses
+through OwnedBookLearningProvider before treating them as learning material.
 """
 import json
 import time

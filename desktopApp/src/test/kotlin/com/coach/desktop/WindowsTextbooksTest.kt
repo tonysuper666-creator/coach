@@ -46,7 +46,7 @@ class WindowsTextbooksTest {
             onNodeWithText("返回书架").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
             capture("home")
-            onNodeWithTag("home-learn").performClick()
+            onNodeWithTag("home-question").performClick()
             ready(controller) { it.prompt == BookPrompt.START }
             onNodeWithTag("question-mode-CHOICE").performClick()
             ready(controller) { it.book?.questionMode == QuestionMode.CHOICE }

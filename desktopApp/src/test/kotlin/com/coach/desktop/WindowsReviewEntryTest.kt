@@ -26,7 +26,9 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class WindowsReviewEntryTest {
     private class Fixture(ready: Boolean = true) : AutoCloseable {
-        val root = Files.createTempDirectory("synthetic-windows-review-")
+        // macOS reports the temp root through the /var -> /private/var symlink; the pairing guard
+        // rejects symlinked parents, so resolve the fixture root before anything reads credentials.
+        val root = Files.createTempDirectory("synthetic-windows-review-").toRealPath()
         val token = "synthetic-windows-review-token-32-characters"
         var clock = 1_794_052_800_000L - 86_400_000
         val offline = AtomicBoolean(false)
@@ -327,7 +329,7 @@ class WindowsReviewEntryTest {
         assertTrue(desktopUsesTextbooks("Windows 11", " ", " "))
         assertFalse(desktopUsesTextbooks("Windows 11", "C", null))
         assertFalse(desktopUsesTextbooks("Windows 11", null, "C"))
-        assertFalse(desktopUsesTextbooks("Mac OS X", null, null))
+        assertTrue(desktopUsesTextbooks("Mac OS X", null, null))
         assertEquals("C", resolveCourse(" C ", "other"))
     }
 

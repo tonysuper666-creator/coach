@@ -7,6 +7,9 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.FileVisitResult
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.DosFileAttributeView
+import java.nio.file.AccessDeniedException
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -139,10 +142,16 @@ internal class LocalCodexBookTransport(
         catch (_: java.io.IOException) { throw LocalCodexFailure(if (!Files.isRegularFile(executable)) LocalCodexProblem.MISSING else LocalCodexProblem.FAILED) }
         finally {
             try { observation?.close() } finally {
-                // Discard our entire run before invoking the dependency's close. A failed tree
-                // cleanup must not fall through to a less restrictive recursive cleanup.
-                discardIsolatedBookRun(root, expectedRoot)
-                snapshot?.close()
+                // A failed file deletion must not skip the independent auth-home cleanup.
+                try { discardIsolatedBookRun(root, expectedRoot) }
+                finally {
+                    // Do not let the fallback traverse a replaced ancestor through a junction.
+                    val attrs = try { Files.readAttributes(root, BasicFileAttributes::class.java, NOFOLLOW_LINKS) }
+                        catch (_: java.nio.file.NoSuchFileException) { null }
+                    if (attrs != null && (!attrs.isDirectory || attrs.isOther || attrs.isSymbolicLink || root.toRealPath() != expectedRoot))
+                        throw IOException("Isolated run root changed during cleanup")
+                    snapshot?.close()
+                }
             }
         }
     }
@@ -251,25 +260,49 @@ internal class LocalCodexBookTransport(
 /** Pin the real root before launching a child; unlink junctions without traversing their targets. */
 internal fun discardIsolatedBookRun(root: Path, expectedRoot: Path) {
     if (!Files.exists(root, NOFOLLOW_LINKS)) return
+    var failure: IOException? = null
+    fun failed(error: IOException) {
+        if (failure == null) failure = error else if (failure !== error) failure!!.addSuppressed(error)
+    }
+    fun delete(path: Path, attrs: BasicFileAttributes) {
+        try { Files.delete(path) }
+        catch (denied: AccessDeniedException) {
+            // Windows refuses deletion of a readonly file. Clear only that DOS bit on a
+            // regular file still at its pinned location; never change a link or its target.
+            val current = Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            val expected = expectedRoot.resolve(root.relativize(path)).normalize()
+            if (!attrs.isRegularFile || !current.isRegularFile || current.isOther || current.isSymbolicLink || path.toRealPath() != expected)
+                throw denied
+            val dos = Files.getFileAttributeView(path, DosFileAttributeView::class.java, NOFOLLOW_LINKS) ?: throw denied
+            if (!dos.readAttributes().isReadOnly) throw denied
+            dos.setReadOnly(false)
+            Files.delete(path)
+        }
+    }
     Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
             val expected = expectedRoot.resolve(root.relativize(dir)).normalize()
             if (attrs.isOther || dir.toRealPath() != expected) {
-                Files.delete(dir)
+                try { Files.delete(dir) } catch (error: IOException) { failed(error) }
                 return FileVisitResult.SKIP_SUBTREE
             }
             return FileVisitResult.CONTINUE
         }
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-            Files.delete(file)
+            try { delete(file, attrs) } catch (error: IOException) { failed(error) }
+            return FileVisitResult.CONTINUE
+        }
+        override fun visitFileFailed(file: Path, error: IOException): FileVisitResult {
+            failed(error)
             return FileVisitResult.CONTINUE
         }
         override fun postVisitDirectory(dir: Path, error: java.io.IOException?): FileVisitResult {
-            if (error != null) throw error
-            Files.delete(dir)
+            error?.let(::failed)
+            try { Files.delete(dir) } catch (error: IOException) { failed(error) }
             return FileVisitResult.CONTINUE
         }
     })
+    failure?.let { throw it }
 }
 
 /** Tools are disabled before launch. This is a second, fail-closed check of the entire JSONL stream.

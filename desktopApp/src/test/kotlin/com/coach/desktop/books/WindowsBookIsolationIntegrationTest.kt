@@ -286,4 +286,42 @@ class WindowsBookIsolationIntegrationTest {
         native.clean()
         println("SYNTHETIC_TRANSPORT_JUNCTION victim_preserved=true run_roots=0")
     }
+
+    @Test fun readonlyRuntimeFileCannotLeaveTheAnswerOrRunRootBehind() = readonlyCleanup("runtime")
+
+    @Test fun readonlyAuthCopyCannotLeaveCredentialsOrExcerptsBehind() = readonlyCleanup("auth")
+
+    private fun readonlyCleanup(target: String) = runBlocking {
+        val native = SyntheticIsolatedCodex(OwnedBookConsentTest.Fixture(), "success")
+        var marked: Path? = null
+        native.beforePhaseReceipt = { receipt ->
+            if (receipt.phase == "exec" && receipt.exit == 0) {
+                val run = native.runs.single()
+                val file = if (target == "runtime") run.work.parent.resolve("runtime/codex.exe") else run.home.resolve("auth.json")
+                Files.setAttribute(file, "dos:readonly", true, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                assertEquals(true, Files.getAttribute(file, "dos:readonly", java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                marked = file
+            }
+        }
+        try {
+            val reply = support(native).explain(native.fixture.explain())
+            assertNotNull(marked, "The real exec must finish before the readonly fault is injected")
+            if (target == "runtime") assertIs<BookLearningReply.Text>(reply)
+            else assertIs<BookLearningReply.Unavailable>(reply, "Failed auth commit cleanup must still discard the answer")
+            assertEquals(2, native.receipts.size)
+            native.clean()
+            assertContentEquals(native.original, Files.readAllBytes(native.auth))
+            assertEquals(false, Files.getAttribute(native.auth, "dos:readonly"))
+            println("SYNTHETIC_TRANSPORT_READONLY target=$target fault_injected=true phases=2 auth_copies=0 excerpts=0 answers_on_disk=0 run_roots=0 original_preserved=true")
+        } finally {
+            // The red control must also release its synthetic leftovers after recording failure.
+            marked?.takeIf { Files.exists(it, java.nio.file.LinkOption.NOFOLLOW_LINKS) }?.let {
+                Files.setAttribute(it, "dos:readonly", false, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }
+            native.runs.forEach { run ->
+                val root = run.work.parent
+                if (Files.exists(root)) discardIsolatedBookRun(root, root.toRealPath())
+            }
+        }
+    }
 }

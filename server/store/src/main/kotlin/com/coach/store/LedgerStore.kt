@@ -418,6 +418,18 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         bookPractices.withdrawOriginal(course, original)
     }
 
+    /** Read-only check of an already issued original; never reserves or appends a pose. */
+    fun bookPracticeAvailability(course: String, device: String, source: BookPracticeSource): String {
+        val existing = bookPractices.existing(course, device, source)
+            ?: throw ReviewVariantRejected("BOOK_PRACTICE_UNPOSED")
+        val mapping = bookPractices.mapping(course, source, courseContent(course))
+        val prior = bookPractices.prior(course, device, mapping)
+        if (prior != existing || events(course).none { it == prior } || events(course).any {
+            it.type == "attempt_voided" && it.payload.str("attemptId") == existing.payload.str("attemptId")
+        }) throw ReviewVariantRejected("BOOK_ATTEMPT_MISMATCH")
+        return existing.payload.str("attemptId")
+    }
+
     /** Authenticated route calls this inside the single writer, using the paired device identity. */
     fun poseBookPractice(course: String, device: String, source: BookPracticeSource): Event = transaction {
         val mapping = bookPractices.mapping(course, source, courseContent(course))

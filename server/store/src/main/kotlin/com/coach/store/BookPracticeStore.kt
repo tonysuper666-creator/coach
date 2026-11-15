@@ -120,6 +120,10 @@ internal class BookPracticeStore(private val db: Connection, private val blobs: 
             "BOOK_QUESTION_MISMATCH")
         ChoiceKey(options, LedgerJson.parseToJsonElement(q[4]).jsonObject.str("correctOptionId"))
     }
+    fun existing(course: String, device: String, source: BookPracticeSource): Event? = rows(
+        "SELECT event_json FROM book_practice_poses WHERE course=? AND device=? AND source_key=?",
+        course, device, key(source)) { LedgerJson.decodeFromString<Event>(it.getString(1)) }.singleOrNull()
+
     fun prior(course: String, device: String, m: BookPracticeMapping): Event? = rows(
         "SELECT mapping_json,event_json FROM book_practice_poses WHERE course=? AND device=? AND source_key=?",
         course, device, key(m.source)) {

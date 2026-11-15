@@ -65,6 +65,7 @@ internal class TextbookLibrary(val directory: Path,
             ensureColumn(db, "book_reviews", "interval", "INTEGER")
             ensureColumn(db, "book_reviews", "ease", "REAL")
             ensureColumn(db, "book_reviews", "anchor", "INTEGER")
+            ensureColumn(db, "book_reviews", "source_available", "INTEGER NOT NULL DEFAULT 1")
         }
         backfillReviews()
     }
@@ -312,15 +313,42 @@ internal class TextbookLibrary(val directory: Path,
             projected.copy(answer = PracticeAnswer(), completed = false) else projected
     }
 
-    @Synchronized fun reviews(): List<LocalBookReview> = database().use { db ->
+    @Synchronized fun reviews(): List<LocalBookReview> = reviewRows(availableOnly = true)
+
+    /** Includes unavailable rows for revalidation; original responses and due dates stay untouched. */
+    @Synchronized fun reviewCandidates(): List<LocalBookReview> = reviewRows(availableOnly = false)
+
+    private fun reviewRows(availableOnly: Boolean): List<LocalBookReview> = database().use { db ->
         val day = reviewDay()
-        db.prepareStatement("SELECT * FROM book_reviews WHERE completed=0 OR due_day<=? ORDER BY rowid").use { sql ->
+        db.prepareStatement("SELECT * FROM book_reviews WHERE (completed=0 OR due_day<=?) AND (?=0 OR source_available=1) ORDER BY rowid").use { sql ->
             sql.setLong(1, day)
+            sql.setInt(2, if (availableOnly) 1 else 0)
             sql.executeQuery().use { rows ->
                 buildList { while (rows.next()) add(variants.project(db, rows.asReview(day))) }
             }
         }
     }.filterNot { Files.exists(removedMarker(it.book)) }
+
+    @Synchronized fun isReviewSourceAvailable(review: LocalBookReview): Boolean = database().use { db ->
+        db.prepareStatement("SELECT source_available FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+            sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
+            sql.executeQuery().use { rows -> rows.next() && rows.getInt(1) == 1 }
+        }
+    }
+
+    @Synchronized fun reviewSourceAvailable(review: LocalBookReview, available: Boolean) = database().use { db ->
+        db.autoCommit = false
+        try {
+            db.prepareStatement("UPDATE book_reviews SET source_available=? WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                sql.setInt(1, if (available) 1 else 0); sql.setString(2, review.book)
+                sql.setString(3, review.lesson); sql.setString(4, review.mode.name); sql.executeUpdate()
+            }
+            if (!available) db.prepareStatement("DELETE FROM book_review_position WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name); sql.executeUpdate()
+            }
+            db.commit()
+        } catch (failure: Exception) { db.rollback(); throw failure }
+    }
 
     @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
         db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
@@ -427,7 +455,7 @@ internal class TextbookLibrary(val directory: Path,
 
     @Synchronized fun activeReview(): LocalBookReview? = database().use { db ->
         db.createStatement().use { sql -> sql.executeQuery("""SELECT r.* FROM book_reviews r JOIN book_review_position p
-            ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode WHERE p.slot=1""").use { rows ->
+            ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode WHERE p.slot=1 AND r.source_available=1""").use { rows ->
             if (rows.next()) variants.project(db, rows.asReview()) else null
         } }
     }?.takeUnless { Files.exists(removedMarker(it.book)) }

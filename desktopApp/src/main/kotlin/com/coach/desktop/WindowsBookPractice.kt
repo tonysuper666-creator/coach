@@ -7,11 +7,14 @@ import com.coach.desktop.books.*
 import com.coach.domain.BookPracticeSource
 import com.coach.domain.LedgerJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.jsonObject
+import com.coach.domain.str
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -73,17 +76,7 @@ internal class WindowsBookPracticeConnection(
         val course = synchronized(this@WindowsBookPracticeConnection) {
             properties().getProperty(routeKey(identity, book.id))
         } ?: return@withContext null
-        // Import IDs are raw file hashes. An extracted server text blob is never a replacement for a PDF ID.
-        val original = library.directory.resolve("${book.id}.${book.format}")
-        val digest = MessageDigest.getInstance("SHA-256")
-        Files.newInputStream(original).use { input ->
-            val buffer = ByteArray(65536)
-            while (true) { val size = input.read(buffer); if (size < 0) break; digest.update(buffer, 0, size) }
-        }
-        if (digest.digest().joinToString("") { "%02x".format(it) } != book.id) return@withContext null
-        val block = lesson.blocks.singleOrNull { !it.heading && it.text.contains(practice.reference) }
-            ?: return@withContext null
-        val source = BookPracticeSource(book.id, lesson.id, block.page, block.start, block.end, practice.reference)
+        val source = verifiedSource(book, lesson, practice) ?: return@withContext null
         val path = URLEncoder.encode(course, Charsets.UTF_8).replace("+", "%20")
         val request = HttpRequest.newBuilder(URI("${identity.serverUrl}/v1/courses/$path/book-practice-pose"))
             .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer ${identity.credentials.token}")
@@ -97,10 +90,65 @@ internal class WindowsBookPracticeConnection(
         if (response.statusCode() == 409) throw BookPracticeUnavailableException()
         if (response.statusCode() != 200) return@withContext null
         // The response is not injected into SQLite. Normal authenticated ledger synchronization owns facts.
-        val key = "${scope(identity)}:${hash(identity.credentials.token.toByteArray())}:$course"
-        val live = sessions.getOrPut(key) { LiveSession(identity, course) }
+        val live = liveSession(identity, course)
         live.syncLocked()
         live.session
+    } }
+
+    private fun verifiedSource(book: Textbook, lesson: BookLesson, practice: Practice): BookPracticeSource? {
+        // Import IDs are raw file hashes. An extracted server text blob is never a replacement for a PDF ID.
+        val original = library.directory.resolve("${book.id}.${book.format}")
+        val digest = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(original).use { input ->
+            val buffer = ByteArray(65536)
+            while (true) { val size = input.read(buffer); if (size < 0) break; digest.update(buffer, 0, size) }
+        }
+        if (digest.digest().joinToString("") { "%02x".format(it) } != book.id) return null
+        val block = lesson.blocks.singleOrNull { !it.heading && it.text.contains(practice.reference) }
+            ?: return null
+        return BookPracticeSource(book.id, lesson.id, block.page, block.start, block.end, practice.reference)
+    }
+
+    private fun liveSession(identity: DesktopIdentity, course: String): LiveSession {
+        val key = "${scope(identity)}:${hash(identity.credentials.token.toByteArray())}:$course"
+        return sessions.getOrPut(key) { LiveSession(identity, course) }
+    }
+
+    /** Checks only originals already issued to this paired learner. No pose, submit or sync is requested. */
+    suspend fun refreshReviewAvailability() = withContext(Dispatchers.IO) { lifecycle.withLock {
+        if (closed || settings.agentRunId != null) return@withContext
+        val identity = runCatching { pairing.load() }.getOrNull() ?: return@withContext
+        requireDevelopmentServer(settings, identity.serverUrl)
+        for (review in library.reviewCandidates()) {
+            if (review.mode != QuestionMode.CHOICE) continue
+            try {
+                val course = synchronized(this@WindowsBookPracticeConnection) {
+                    properties().getProperty(routeKey(identity, review.book))
+                } ?: continue
+                val book = library.book(review.book)
+                val lesson = book.lessons.singleOrNull { it.id == review.lesson } ?: continue
+                val source = verifiedSource(book, lesson, review.originalPractice) ?: continue
+                val session = liveSession(identity, course).session
+                val binding = BookPracticeOutbox(session.sync).bind(course, book, lesson, review.originalPractice)
+                if (binding !is BookPracticeBinding.Ready) continue
+                val path = URLEncoder.encode(course, Charsets.UTF_8).replace("+", "%20")
+                val request = HttpRequest.newBuilder(URI("${identity.serverUrl}/v1/courses/$path/book-practice-status"))
+                    .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer ${identity.credentials.token}")
+                    .header("X-Coach-Device", identity.credentials.deviceId).header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(LedgerJson.encodeToString(source))).build()
+                val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+                if (response.statusCode() == 401) {
+                    credentials.clear(identity.serverUrl, identity.credentials)
+                    break
+                }
+                val payload = runCatching { LedgerJson.parseToJsonElement(response.body()).jsonObject }.getOrNull() ?: continue
+                if (response.statusCode() == 200 && payload.str("attemptId") == binding.attemptId)
+                    library.reviewSourceAvailable(review, true)
+                else if (response.statusCode() == 409 && payload.str("error") in setOf("BOOK_MAPPING_UNAVAILABLE", "BOOK_FILE_UNSEEDED"))
+                    library.reviewSourceAvailable(review, false)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { /* Offline, unknown and unpaired sources retain their last known queue state. */ }
+        }
     } }
 
     private inner class LiveSession(private val identity: DesktopIdentity, course: String) : AutoCloseable {

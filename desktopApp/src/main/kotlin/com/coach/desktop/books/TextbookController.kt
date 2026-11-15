@@ -44,6 +44,7 @@ internal class BookPracticeSession(val sync: SyncEngine, val courseId: String,
 internal class TextbookController(val library: TextbookLibrary, private val practiceSession: BookPracticeSession? = null,
     private val connectPractice: (suspend (Textbook, BookLesson, Practice) -> BookPracticeSession?)? = null,
     private val sourceRegistration: BookSourceRegistrationPort = UnconnectedBookSourceRegistration,
+    private val refreshReviewSources: suspend () -> Unit = {},
 ) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
@@ -59,6 +60,7 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
     }
 
     suspend fun load() = action {
+        refreshReviewSources()
         val catalog = library.catalog()
         val active = library.activeReview()
         val book = active?.let { library.book(it.book) } ?: catalog.firstOrNull()?.let { library.book(it.id) }
@@ -242,12 +244,19 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
     }
 
     suspend fun showReviews() = action {
+        refreshReviewSources()
         library.closeReview()
         mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null,
             prompt = null, reviews = library.reviews()) }
     }
 
     suspend fun openReview(entry: LocalBookReview) = action {
+        refreshReviewSources()
+        if (!library.isReviewSourceAvailable(entry)) {
+            library.closeReview()
+            mutable.update { it.copy(screen = BookScreen.REVIEWS, review = null, source = null, reviews = library.reviews()) }
+            return@action
+        }
         val review = library.review(entry.book, entry.lesson, entry.mode)
         val book = library.book(review.book)
         library.openReview(review)

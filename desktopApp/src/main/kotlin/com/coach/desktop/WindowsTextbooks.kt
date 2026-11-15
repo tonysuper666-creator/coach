@@ -368,7 +368,7 @@ private fun rememberPairedBookController(directory: Path, settings: DesktopConne
     val library = remember(directory) { TextbookLibrary(directory) }
     val connection = remember(library, settings) { WindowsBookPracticeConnection(settings, library) }
     val controller = remember(library, connection) { TextbookController(library, connectPractice = connection::prepare,
-        sourceRegistration = pairedBookSourceRegistration(connection)) }
+        sourceRegistration = pairedBookSourceRegistration(connection), refreshReviewSources = connection::refreshReviewAvailability) }
     DisposableEffect(connection) { onDispose { connection.close() } }
     return controller to connection
 }

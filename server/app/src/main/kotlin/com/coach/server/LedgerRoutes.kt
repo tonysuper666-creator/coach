@@ -105,6 +105,25 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
                     if (e.code == "REVIEW_DEVICE_UNAUTHORIZED") HttpStatusCode.Unauthorized else HttpStatusCode.Conflict)
             }
         }
+        post("/v1/courses/{course}/book-practice-status") {
+            val input = call.bookSourceBody() ?: return@post call.respond(HttpStatusCode.BadRequest)
+            if (input.keys != setOf("bookSha256", "lessonId", "pdfPage", "start", "end", "reference"))
+                return@post call.respond(HttpStatusCode.BadRequest)
+            val source = runCatching { LedgerJson.decodeFromJsonElement<BookPracticeSource>(input) }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val device = call.attributes[observedDevice]
+            val credential = call.request.header("Authorization")!!.removePrefix("Bearer ")
+            try {
+                val attempt = actor.execute {
+                    if (!authorize(device, credential)) throw ReviewVariantRejected("REVIEW_DEVICE_UNAUTHORIZED")
+                    bookPracticeAvailability(call.parameters["course"]!!, device, source)
+                }
+                call.respondText(json("attemptId" to attempt).toString(), ContentType.Application.Json)
+            } catch (e: ReviewVariantRejected) {
+                call.respondText(json("error" to e.code).toString(), ContentType.Application.Json,
+                    if (e.code == "REVIEW_DEVICE_UNAUTHORIZED") HttpStatusCode.Unauthorized else HttpStatusCode.Conflict)
+            }
+        }
         get("/v1/courses/{course}/book-review-coverage") {
             val coverage = actor.execute { bookLedgerCoverage(call.parameters["course"]!!) }
             call.respondText(LedgerJson.encodeToString(coverage), ContentType.Application.Json)

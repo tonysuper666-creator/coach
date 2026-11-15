@@ -47,8 +47,7 @@ class BookAskCitationCodexLiveTest {
                 PDPageContentStream(pdf, page).use { stream ->
                     stream.beginText(); stream.setFont(font, 11f); stream.newLineAtOffset(45f, 720f)
                     for (line in listOf("Chapter ${index + 1} Fictional gravity", repeated,
-                        if (index == 0) "Fictional plants use sunlight to grow."
-                        else "Gravity X pulls fictional bodies together across distance.")) {
+                        "Gravity X pulls fictional bodies together across distance.")) {
                         stream.showText(line); stream.newLineAtOffset(0f, -25f)
                     }
                     stream.endText()
@@ -60,6 +59,9 @@ class BookAskCitationCodexLiveTest {
         val book = library.importBook(pdfPath)
         assertTrue(book.pages.all { repeated in it.text })
         assertTrue("😀" in book.pages[1].text)
+        val paragraphs = StudyCoachCourse.blocks(book.id, listOf(book.pages[1])).filterNot { it.heading }
+        val paragraphIndex = paragraphs.indexOfFirst { "😀" in it.text }
+        assertTrue(paragraphIndex >= 0, "The selected imported paragraph must include the supplementary character")
         library.save(book.copy(learning = true, promptSeen = true, questionMode = QuestionMode.SHORT_ANSWER))
         val controller = TextbookController(library)
         runBlocking { controller.load(); controller.learn(LearningPath.READ_AND_LEARN); controller.source(); controller.page(2) }
@@ -97,7 +99,7 @@ class BookAskCitationCodexLiveTest {
             }
             setContent { WindowsTextbookHost(controller, support = support) { null } }
             onNodeWithTag("ask-book-passage").performClick()
-            onNodeWithTag("ask-paragraph-0").performScrollTo().performClick()
+            onNodeWithTag("ask-paragraph-$paragraphIndex").performScrollTo().performClick()
             onNodeWithTag("book-passage-question").performScrollTo().performTextInput(question)
             onNodeWithTag("book-passage-send").performScrollTo().performClick()
             waitUntil(timeoutMillis = 180_000) {

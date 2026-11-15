@@ -1406,6 +1406,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         else json("docId" to it.getString(1),"pdfPage" to pdfPage,"bookPage" to it.getObject(4)?.let { _ -> it.getInt(4) },"text" to it.getString(5))
     }.singleOrNull()
 
+    /** Exact registered page; document classification and both visibility flags are authoritative. */
+    fun learnerSourcePage(doc: String, pdfPage: Int): LearnerSourcePage? = query(
+        """SELECT d.course_id,d.title,d.kind,d.blob_sha256,p.text,p.text_sha256 FROM source_pages p JOIN source_docs d ON d.doc_id=p.doc_id
+           WHERE d.doc_id=? AND p.pdf_page=? AND d.learner_visible=1 AND d.tutor_visible=1""", doc, pdfPage) {
+        if (!tutorSourceAllowed(doc, it.getString(2).orEmpty(), it.getString(3).orEmpty())) null
+        else LearnerSourcePage(it.getString(1), SourcePage(doc, pdfPage, it.getString(5)),
+            it.getString(4).orEmpty() + ":" + it.getString(6).orEmpty())
+    }.singleOrNull()
+
     /** Reviewed (VERIFIED) constructed questions per knowledge point; a knowledge point missing here has none, and the stable layer is out of reach. */
     fun constructedSupply(course: String): Map<String,Int> = query(
         """SELECT k.kp_id,count(*) FROM questions q JOIN constructed_details d USING(question_id) JOIN question_kp k USING(question_id)

@@ -5,6 +5,9 @@ data class SourcePage(val docId: String, val pdfPage: Int, val text: String, val
     val key: String get() = "$docId:$pdfPage"
 }
 
+/** Server-owned identity and revision, never supplied by a reader client. */
+data class LearnerSourcePage(val course: String, val page: SourcePage, val revision: String)
+
 fun tutorSourceAllowed(vararg fields: String): Boolean = fields.none {
     val value = java.text.Normalizer.normalize(it, java.text.Normalizer.Form.NFKC).lowercase()
     value.contains("answer") || value.contains("答案") || value.contains("sealed")

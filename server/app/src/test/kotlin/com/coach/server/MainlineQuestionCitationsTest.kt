@@ -3,7 +3,6 @@ package com.coach.server
 import com.coach.ai.*
 import com.coach.core.LedgerActor
 import com.coach.domain.*
-import com.coach.server.reader.v2.*
 import com.coach.store.*
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -16,16 +15,12 @@ import java.nio.file.Files
 import java.sql.DriverManager
 import kotlin.test.*
 
-/** Integration fixture for main + PR142 + frozen PR148. Entirely invented sources. */
+/** Current page-citation contract; no dependency on frozen block-layout work. Entirely invented sources. */
 class MainlineQuestionCitationsTest {
     private val text = "A synthetic basket has two pears. Count pears once."
-    private val page = SourcePage("synthetic-book", 1, text, sourceSha256 = "a".repeat(64))
+    private val page = SourcePage("synthetic-book", 1, text)
+    private val sourceVersion = "a".repeat(64)
     private val later = "A synthetic basket has two pears. SYNTHETIC_UNREAD_SECRET."
-    private fun layout(p: SourcePage) = ReaderCitationPage(LayoutPage(p.pdfPage, "ok", 1, "single_column", null, 0,
-        listOf(600.0, 800.0), listOf(LayoutBlock("b1", "text", listOf(20.0, 20.0, 500.0, 60.0), 0, 0, "ok",
-            p.text.substringBefore(" Count pears"), true, null))), "f".repeat(64))
-    private fun token(p: SourcePage = page) = Regex("【(S1B[a-f0-9]+)】").find(
-        ReaderBlockCitations(SourcePack(listOf(p)), ::layout).render())!!.groupValues[1]
     private fun payload(id: String) = json("paragraphs" to JsonArray(listOf(json("text" to "每个梨只计一次。", "anchors" to listOf(id))))).toString()
 
     private inner class Harness : AutoCloseable {
@@ -66,7 +61,7 @@ class MainlineQuestionCitationsTest {
             store.registerSourcePage("SYNTHETIC", page.docId, "Synthetic book", 9, later)
             store.registerSourcePage("SYNTHETIC", "foreign-book", "Synthetic foreign", 1, "A synthetic basket has two pears. SYNTHETIC_FOREIGN_SECRET.")
             store.registerSourcePage("SYNTHETIC", "hidden-book", "Synthetic hidden", 1, "A synthetic basket has two pears. SYNTHETIC_HIDDEN_SECRET.", learnerVisible = false)
-            update("UPDATE source_docs SET blob_sha256='${page.sourceSha256}'")
+            update("UPDATE source_docs SET blob_sha256='$sourceVersion'")
             DriverManager.getConnection("jdbc:sqlite:${store.directory.resolve("coach.sqlite")}").use { db ->
                 db.prepareStatement("INSERT INTO outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired,legacy_id) VALUES(?,'SYNTHETIC','m',?,'x','x','[]','[]',?,0,NULL)").use {
                     for ((kp, n) in listOf("fruit" to 1, "later" to 9)) {
@@ -80,7 +75,8 @@ class MainlineQuestionCitationsTest {
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             val pushes = MutableSharedFlow<String>(extraBufferCapacity = 16)
             ledgerRoutes(actor, pushes)
-            mainlineRoutes(actor, pushes, mainline, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), citationLayout = ::layout))
+            // Exercise the HTTP/model boundary on Windows; the production OS sandbox remains the default.
+            mainlineRoutes(actor, pushes, mainline, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack }))
         }.also { it.start(false) }
         val client = HttpClient.newHttpClient()
         var serial = 0
@@ -94,7 +90,7 @@ class MainlineQuestionCitationsTest {
             val response = client.send(req, HttpResponse.BodyHandlers.ofString())
             response.statusCode() to LedgerJson.parseToJsonElement(response.body()).jsonObject
         }
-        fun reply(id: String = token(), delayMs: Long = 1) { stub.stream(delayMs, payload(id), StubTutor.terminal("complete"), StubTutor.DONE) }
+        fun reply(id: String = "S1", delayMs: Long = 1) { stub.stream(delayMs, payload(id), StubTutor.terminal("complete"), StubTutor.DONE) }
         fun assertSecretsAbsent(body: JsonObject) {
             for (secret in listOf("SYNTHETIC_UNREAD_SECRET", "SYNTHETIC_FOREIGN_SECRET", "SYNTHETIC_HIDDEN_SECRET")) {
                 assertFalse(stub.requestBodies.last().contains(secret), "Forbidden page reached bridge: $secret")
@@ -104,17 +100,17 @@ class MainlineQuestionCitationsTest {
         override fun close() { engine.stop(100, 1000); runBlocking { actor.close() }; jobs.cancel(); stub.close(); dir.toFile().deleteRecursively() }
     }
 
-    @Test fun questionWithoutSectionReturnsSameVersionBlockCard() = runBlocking {
+    @Test fun questionWithoutSectionReturnsOnlyAnAuthorizedPageCard() = runBlocking {
         Harness().use { h ->
             h.reply()
             val (status, body) = h.request()
             assertEquals(200, status)
             val card = body.getValue("sources").jsonArray.single().jsonObject
             assertEquals(page.docId, card.str("docId")); assertEquals(1, card.num("pdfPage"))
-            assertEquals("block", card.str("mode")); assertEquals("b1", card.str("blockId"))
-            assertEquals(page.sourceSha256, card.str("version")); assertEquals("f".repeat(64), card.str("pdfVersion"))
-            assertEquals(text.substringBefore(" Count pears"), card.str("text"))
-            assertEquals(card.str("text"), text.substring(card.num("startUtf16").toInt(), card.num("endUtf16").toInt()))
+            assertEquals("S1", card.str("anchor"))
+            assertEquals(setOf("anchor", "docId", "pdfPage"), card.keys, "No invented block identity, version, offsets or raw snapshot")
+            assertTrue(body.str("text").contains("每个梨只计一次。"))
+            assertEquals(1, h.stub.requests)
             h.assertSecretsAbsent(body)
         }
     }
@@ -141,19 +137,10 @@ class MainlineQuestionCitationsTest {
         }
     }
 
-    @Test fun invalidBlockIdentityFallsBackOnlyWithinAuthorizedPageAndUnknownPageIsRejected() = runBlocking {
+    @Test fun invalidBlockIdentityAndUnknownPageAreRejectedWithoutSalvage() = runBlocking {
         Harness().use { h ->
-            for (id in listOf("S1Bmissing", token(page.copy(docId = "foreign-book")), token(page.copy(sourceSha256 = "b".repeat(64))))) {
-                h.reply(id)
-                val (status, body) = h.request(json("sectionId" to "orchard"))
-                assertEquals(200, status)
-                val card = body.getValue("sources").jsonArray.single().jsonObject
-                assertEquals("page", card.str("mode")); assertEquals(text, card.str("text"))
-                assertEquals(page.docId, card.str("docId")); assertEquals(1, card.num("pdfPage"))
-                assertEquals(page.sourceSha256, card.str("version")); assertEquals(JsonNull, card["blockId"])
-                assertTrue(card.str("notice").contains("整页")); h.assertSecretsAbsent(body)
-            }
-            for (id in listOf("S0", "S2", "S999999999999Bmissing")) {
+            // A block-shaped anchor, foreign identity or stale revision grants no fallback page.
+            for (id in listOf("S1Bmissing", "foreign-book", sourceVersion, "b".repeat(64), "S0", "S2", "S999999999999Bmissing")) {
                 h.reply(id)
                 val (status, body) = h.request(json("sectionId" to "orchard"))
                 assertEquals(200, status); assertTrue(body.getValue("sources").jsonArray.isEmpty())
@@ -163,7 +150,9 @@ class MainlineQuestionCitationsTest {
     }
 
     @Test fun versionOrVisibilityChangeDuringHttpGenerationWithholdsSnapshots() = runBlocking {
-        for (change in listOf("UPDATE source_docs SET blob_sha256='${"b".repeat(64)}'", "UPDATE source_docs SET learner_visible=0")) Harness().use { h ->
+        for (change in listOf("UPDATE source_docs SET blob_sha256='${"b".repeat(64)}'", "UPDATE source_docs SET learner_visible=0",
+            "UPDATE source_docs SET tutor_visible=0", "UPDATE source_pages SET text='Replaced synthetic page.' WHERE pdf_page=1",
+            "UPDATE outline_kp SET anchors='[]'")) Harness().use { h ->
             h.reply(delayMs = 150)
             val response = async(Dispatchers.Default) { h.request(json("sectionId" to "orchard")) }
             withTimeout(5000) { while (h.stub.framesWritten == 0) delay(5) }

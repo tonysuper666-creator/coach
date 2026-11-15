@@ -66,7 +66,8 @@ class ReaderExplanationTest {
         val store = LedgerStore(Files.createTempDirectory("reader-synthetic-"))
         val actor = LedgerActor(scope, store)
         val stub = StubTutor()
-        val reader = ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)))
+        // Model/contract tests run on any host; SourceReadSandboxTest owns real OS isolation checks.
+        val reader = ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack })
         override fun close() { runBlocking { actor.close() }; scope.cancel(); stub.close() }
     }
     @Test fun explicitSelectionUsesVisibleCoursePagesAndNeverStartsWithoutEvidence() = runBlocking {

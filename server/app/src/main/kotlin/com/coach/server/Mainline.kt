@@ -503,14 +503,25 @@ fun Application.mainlineRoutes(actor: LedgerActor, pushes: MutableSharedFlow<Str
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val course = call.parameters["course"]!!
-                val (selected, found) = actor.execute {
+                val (selected, found, snapshots) = actor.execute {
                     val selected = mainline.selection(this, course, call.week(), input)
                     // Trusted ceiling: learner-visible documents, only up to the validated selection's knowledge points in outline order (fail-closed).
                     val scope = learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), selected.currentKps)
-                    selected to (scope to searchSourcePages(course, selected.quote, scope))
+                    val pages = searchSourcePages(course, selected.quote, scope)
+                    val snapshots = pages.map { learnerSourcePage(it.docId, it.pdfPage) }
+                    Triple(selected, scope to pages, snapshots)
                 }
                 val (scope, pages) = found
-                val body = reader?.explainMainline(call.attributes[observedDevice], course, input, selected, pages, scope)
+                val body = reader?.explainMainline(call.attributes[observedDevice], course, input, selected, pages, scope) {
+                    actor.execute {
+                        val current = learnedThrough(course, com.coach.domain.scope.VisibleScope.learner(), selected.currentKps)
+                        pages.zip(snapshots).all { (page, saved) ->
+                            saved != null && saved.course == course && saved.page.text == page.text &&
+                                current.permits(page.docId, page.pdfPage, page.learnerVisible) &&
+                                learnerSourcePage(page.docId, page.pdfPage) == saved
+                        }
+                    }
+                }
                     ?: json("text" to "课程依据服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

@@ -3,6 +3,8 @@ package com.coach.server
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.SourcePage
+import com.coach.store.LedgerStore
+import com.coach.store.LearnerSourcePage
 import com.coach.store.tutorSourceAllowed
 import com.coach.domain.scope.VisibleScope
 import io.ktor.http.*
@@ -13,19 +15,38 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 
 /**
- * Paired, explicitly submitted local-book text is user input, not a course-source lookup.
- * A client block id grants no access to the ledger, reader catalog or other blocks.
- * The server's ceiling is the selected text alone; neighbours (including unread pages)
- * are never made visible. Course questions use their separate, server-validated path.
+ * A local block id and its text are untrusted claims, including after pairing.
+ * The book id must name an existing server-registered learner source. Its stored
+ * course, classification, text and learning record authorize the selection.
+ * Unregistered local books fail closed; this endpoint never creates a registration.
  */
 internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope) {
+    fun authorize(store: LedgerStore): AuthorizedLibrarySelection {
+        val claimed = pages.single()
+        val saved = store.learnerSourcePage(claimed.docId.substringBefore(":p"), claimed.pdfPage)
+        if (saved == null || !containsReaderSelection(saved.page.text, quote) || !saved.inLearnedScope(store))
+            throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
+        // The alias is for the existing local reader's citation navigation only.
+        // It is minted after the real document/page passed the trusted ceiling.
+        return AuthorizedLibrarySelection(quote, pages, VisibleScope.learner()
+            .narrowToPages(claimed.docId, claimed.pdfPage..claimed.pdfPage), saved)
+    }
     companion object {
         fun selected(quote: String, page: SourcePage): LibraryExplainRequest {
-            val scope = VisibleScope.learner().narrowToPages(page.docId, page.pdfPage..page.pdfPage)
-            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), scope)
+            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), VisibleScope.NONE)
         }
     }
 }
+
+internal class AuthorizedLibrarySelection(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,
+    private val saved: LearnerSourcePage) {
+    fun isCurrent(store: LedgerStore): Boolean =
+        store.learnerSourcePage(saved.page.docId, saved.page.pdfPage) == saved && saved.inLearnedScope(store)
+}
+
+private fun LearnerSourcePage.inLearnedScope(store: LedgerStore): Boolean = store.learnedThrough(
+    course, VisibleScope.learner(), store.todayProgress(course).currentKpId
+).permits(page.docId, page.pdfPage, page.learnerVisible)
 
 private val blockId = Regex("[A-Za-z0-9._-]{1,80}:p([0-9]{1,5}):[0-9]{1,9}")
 
@@ -59,8 +80,10 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
         post("/v1/library/explain") { call.withReaderConnection {
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
-                val request = libraryExplainRequest(input)
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope)
+                val request = actor.execute { libraryExplainRequest(input).authorize(this) }
+                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope) {
+                    actor.execute { request.isCurrent(this) }
+                }
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

@@ -87,6 +87,61 @@ class KnowledgeRecapTest {
         assertNull(c.state.value.error)
     }
 
+    /**
+     * 简答是另一种交卷方式：明确自检过就算做过一题，点「我已理解」也要累计，只有「还需复习」才进复习。
+     * 这条回归覆盖的就是「六节都点我已理解，重开本机库却还是 0 条」那个缺陷。
+     */
+    @Test fun shortAnswerCountsOnceAfterASelfCheckWhetherTheReaderUnderstoodItOrNot() = runBlocking {
+        val root = Files.createTempDirectory("coach-recap-short-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(knowledgeRecapTextbook(root))
+        val c = TextbookController(library)
+        c.load(); c.learn()
+        c.chooseLearningPath(LearningPath.QUESTION_FIRST); c.enableLearning()
+        c.mode(QuestionMode.SHORT_ANSWER)
+        assertEquals(QuestionMode.SHORT_ANSWER, c.state.value.book!!.questionMode)
+
+        repeat(6) { index ->
+            c.lesson(index)
+            c.answer(PracticeAnswer("第${index + 1}节的回答", revealed = true, understood = true))
+            val session = library.ladder(book.id)
+            assertEquals(index + 1, session.responses.size, "「我已理解」第 ${index + 1} 题应累计")
+            if (index < 5) assertFalse(session.recapOpen) else {
+                assertTrue(session.recapOpen, "简答第六题后该出小结")
+                val lines = QuestionLadder.recap(session)
+                assertTrue(lines.size in 3..5, "小结是 3–5 句，实际 ${lines.size}")
+                assertTrue(lines.all { "：" in it }, "每句都带本节出处")
+            }
+        }
+        assertTrue(library.reviews().isEmpty(), "「我已理解」不该加入复习")
+
+        // 重答同一节不重复累计，重开本机库仍是 6 条、小结游标还停着。
+        c.lesson(0)
+        c.answer(PracticeAnswer("第1节的回答", revealed = true, understood = true))
+        val reopened = TextbookLibrary(root.resolve("library"))
+        val session = reopened.ladder(book.id)
+        assertEquals(6, session.responses.size)
+        assertTrue(session.recapOpen)
+        assertEquals(PracticeAnswer("第1节的回答", revealed = true, understood = true),
+            reopened.answer(book.id, book.lessons[0].id, QuestionMode.SHORT_ANSWER))
+
+        // 对照组：同样六节点「还需复习」，题梯一样累计 6 条，但六节都进了复习。
+        val controlRoot = Files.createTempDirectory("coach-recap-short-review-")
+        val controlLibrary = TextbookLibrary(controlRoot.resolve("library"))
+        val controlBook = controlLibrary.importBook(knowledgeRecapTextbook(controlRoot))
+        val control = TextbookController(controlLibrary)
+        control.load(); control.learn()
+        control.chooseLearningPath(LearningPath.QUESTION_FIRST); control.enableLearning()
+        control.mode(QuestionMode.SHORT_ANSWER)
+        repeat(6) { index ->
+            control.lesson(index)
+            control.answer(PracticeAnswer("第${index + 1}节的回答", revealed = true, understood = false))
+            assertEquals(index + 1, controlLibrary.ladder(controlBook.id).responses.size)
+        }
+        assertTrue(controlLibrary.ladder(controlBook.id).recapOpen)
+        assertEquals(6, controlLibrary.reviews().size, "「还需复习」六节都应进复习")
+    }
+
     @Test fun recapCardShowsOnTheSixthAnswerAndContinuingKeepsTheAnswerAndTheWalk() {
         val root = Files.createTempDirectory("coach-recap-card-")
         val directory = root.resolve("library")

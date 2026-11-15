@@ -180,14 +180,16 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     @Synchronized fun saveAnswer(book: String, lesson: String, mode: QuestionMode, answer: PracticeAnswer) {
-        val candidate = answer.revealed && (mode == QuestionMode.CHOICE && answer.text.isNotBlank() ||
-            mode == QuestionMode.SHORT_ANSWER && answer.understood == false)
-        val source = if (candidate) book(book) else null
+        // 「这一节做过一题」和「这一题要加入复习」是两道判断：选择题选了选项、简答题明确自检过，
+        // 都算做过一次、进题梯；简答点「我已理解」还是「还需复习」都算。复习只收答错的，规则见 needsReview。
+        val answered = answer.revealed && (mode == QuestionMode.CHOICE && answer.text.isNotBlank() ||
+            mode == QuestionMode.SHORT_ANSWER && answer.understood != null)
+        val source = if (answered) book(book) else null
         val section = source?.lessons?.find { it.id == lesson }
         val practice = section?.let { StudyCoachCourse.practice(checkNotNull(source), it, mode) }
         // 题梯会话和作答写在同一个事务里：读到一半的会话不会和刚保存的答案对不上。
         // 会话按「这本书 + 当前走法」累计，只在「做题学」里记，别的走法不改这张表。
-        val ladder = if (source != null && section != null && practice != null && answer.revealed)
+        val ladder = if (source != null && section != null && practice != null)
             nextLadderSession(checkNotNull(source), section, mode, practice, answer) else null
         database().use { db ->
             db.autoCommit = false

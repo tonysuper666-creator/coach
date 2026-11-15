@@ -181,7 +181,11 @@ class BookConsentUiTest {
                 assertEquals(round + 1, f.calls.get(), "One approval must be exactly one outbound request")
                 assertEquals(setOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK), f.store.read(f.book.id)!!.actions)
                 onNodeWithTag("book-consent-revoke").performScrollTo().performClick()
-                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+                // The reopen button appears while the close is still running, but it stays disabled and a
+                // click then is silently swallowed; wait for it to be clickable, not merely present.
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodes(hasTestTag("book-consent-reopen") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+                }
             }
             assertEquals(10, f.calls.get())
         }
@@ -195,14 +199,18 @@ class BookConsentUiTest {
             onNodeWithTag("book-consent-grant").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-consent-revoke").performScrollTo().performClick()
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodes(hasTestTag("book-consent-reopen") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+            }
             assertFalse(f.support.consentOffer(f.book.id).offerAutomatically, "Closing must be remembered")
             assertEquals(1, f.calls.get())
             onNodeWithText("返回书架").performClick()
             waitUntil(timeoutMillis = 20_000) { f.controller.state.value.screen == BookScreen.HOME && !f.controller.state.value.busy }
             onNodeWithTag("home-guided").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { f.controller.state.value.screen == BookScreen.LEARNING && !f.controller.state.value.busy }
-            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodes(hasTestTag("book-consent-reopen") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+            }
             onNodeWithTag("book-consent-notice").assertDoesNotExist()
             assertEquals(1, f.calls.get(), "Reentering after closing must not send anything")
             onNodeWithTag("book-consent-reopen").performScrollTo().performClick()

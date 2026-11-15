@@ -9,6 +9,7 @@ import com.coach.client.CourseView
 import com.coach.domain.*
 import com.coach.protocol.CommandBody
 import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.JsonObject
 
@@ -59,7 +60,7 @@ class WeekActions(private val c: CoachController, private val scope: CoroutineSc
 fun WeekPicker(view: CourseView, actions: WeekActions, connected: Boolean) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { expanded = true }, enabled = !actions.busy, modifier = Modifier.heightIn(min = 48.dp)) {
+        TextButton(onClick = { expanded = true }, enabled = !actions.busy, modifier = Modifier.heightIn(min = 48.dp).v7FocusRing(ButtonDefaults.textShape)) {
             Text(if (actions.busy) "正在更新…" else view.projection.studyScope?.let { "第 ${it.week} 周 · 换周 ▾" } ?: "浏览各周 ▾")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {

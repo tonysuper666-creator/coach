@@ -115,10 +115,10 @@ fun WeekPage(c: CoachController, view: CourseView, ui: TutorUiState, actions: We
             }
         }, footer = {
             val previous = weeks.lastOrNull { it < week }
-            Text(previous?.let { "‹  第 $it 周" }.orEmpty(), Modifier.testTag("v7-previous-week").clickable(enabled = previous != null && canSelect) { previous?.let(::selectWeek) }, style = MaterialTheme.typography.labelLarge)
+            Text(previous?.let { "‹  第 $it 周" }.orEmpty(), Modifier.testTag("v7-previous-week").v7FocusRing().clickable(enabled = previous != null && canSelect) { previous?.let(::selectWeek) }, style = MaterialTheme.typography.labelLarge)
             Text("第 $week 周", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
             val next = weeks.firstOrNull { it > week }
-            Text(next?.let { "第 $it 周  ›" }.orEmpty(), Modifier.testTag("v7-next-week").clickable(enabled = next != null && canSelect) { next?.let(::selectWeek) }, style = MaterialTheme.typography.labelLarge)
+            Text(next?.let { "第 $it 周  ›" }.orEmpty(), Modifier.testTag("v7-next-week").v7FocusRing().clickable(enabled = next != null && canSelect) { next?.let(::selectWeek) }, style = MaterialTheme.typography.labelLarge)
         }) {
         val m = LocalDeskMetrics.current
         Column(Modifier.widthIn(max = coach.design.tokens.CoachV7.Layout.colw + m.horizontalPadding * 2).fillMaxSize().verticalScroll(rememberScrollState())

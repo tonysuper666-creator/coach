@@ -5,6 +5,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
 import com.coach.ui.v7.V7TextButton
 import androidx.compose.runtime.CompositionLocalProvider
@@ -40,7 +46,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf and the margin summary buttons.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links and the week-scope dropdown entry.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -192,6 +198,144 @@ class WeekFocusRingTest {
         onNode(m).requestFocus(); waitForIdle()
         onNode(m).performKeyInput { pressKey(Key.Enter) }
         waitForIdle()
+    }
+
+    /**
+     * Week navigation in the page footer: ‹ 上一周 and 下一周 › are clickable text, not buttons.
+     * Middle week: both show the hugging ring on Tab, Enter browses that week, blur restores the pixels.
+     * First and last week: the missing direction is blank and disabled, so a whole Tab cycle never stops on it.
+     */
+    @Test fun weekFooterShowsRingAndSkipsTheMissingDirectionAtTheEdges() {
+        val view = threeWeeks()
+        withController { controller ->
+            for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                val mode = if (dark) "dark" else "light"
+                val browsed = mutableListOf<Int>()
+                val shown = mutableStateOf(2)
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface {
+                    focus = LocalFocusManager.current
+                    val actions = WeekActions(controller, rememberCoroutineScope()).apply { onBrowse = { browsed += it } }
+                    WeekPage(controller, view, TutorUiState(), actions, { _, _ -> }, shown.value)
+                } } }
+                waitForIdle()
+                val prev = hasTestTag("v7-previous-week")
+                val next = hasTestTag("v7-next-week")
+                val before = shot("$mode-footer-middle-unfocused")
+                val regions = listOf(prev, next).map { first(it).boundsInRoot.inflate(10 * scale) }
+                onNode(prev).requestFocus(); waitForIdle(); onNode(prev).assertIsFocused()
+                measure(mode, "页脚-上一周", prev, before, pageDx = 8f)
+                val stops = tabUntil(next)
+                assertTrue(focused(next), "$mode Tab never reached 下一周")
+                measure(mode, "页脚-下一周", next, before, pageDx = 8f)
+                println("TON-1603 week $mode footer tab-stops 上一周→下一周=$stops")
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                val blurred = shot("$mode-footer-middle-blurred")
+                for ((i, r) in regions.withIndex()) assertRegionEqual(before, blurred, r, "$mode footer link $i after blur")
+                enter(prev); enter(next)
+                assertEquals(listOf(1, 3), browsed, "$mode Enter on 上一周 / 下一周 from week 2")
+
+                for ((edge, dead, live, want) in listOf(Edge(1, prev, next, 2), Edge(3, next, prev, 2))) {
+                    runOnIdle { focus.clearFocus(); shown.value = edge }; waitForIdle()
+                    val name = if (edge == 1) "首周" else "末周"
+                    onNode(dead).assertIsNotEnabled()
+                    runCatching { onNode(dead).requestFocus() }; waitForIdle()
+                    assertTrue(!focused(dead), "$mode $name blank direction took focus")
+                    onNode(live).requestFocus(); waitForIdle(); onNode(live).assertIsFocused()
+                    shot("$mode-footer-$name-focused")
+                    var n = 0; var landedOnDead = false
+                    do { if (!tabOnce()) break; n++; if (focused(dead)) landedOnDead = true } while (!focused(live) && n < 80)
+                    println("TON-1603 week $mode footer $name dead=${if (edge == 1) "上一周" else "下一周"} tab-cycle=$n closed=${focused(live)} landed-on-dead=$landedOnDead")
+                    assertTrue(!landedOnDead, "$mode $name Tab stopped on the blank direction")
+                    val count = browsed.size
+                    enter(live)
+                    assertEquals(count + 1, browsed.size, "$mode $name Enter on the live direction")
+                    assertEquals(want, browsed.last(), "$mode $name Enter browses week 2")
+                }
+                println("TON-1603 week $mode footer enter browsed=$browsed")
+            }
+        }
+    }
+
+    /**
+     * The week-scope dropdown entry (WeekPicker) is a Material TextButton stretched to a 48dp pill.
+     * Unfocused it must stay pixel-identical to the same Material button; focused it shows the ring around that pill.
+     * Enter opens the menu, Enter on a week picks it and closes the menu, blur restores the pixels.
+     */
+    @Test fun weekScopePickerShowsRingAndPicksAWeekByKeyboard() {
+        val view = threeWeeks()
+        withController { controller ->
+            for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(400f * scale, 400f * scale), density = Density(scale)) {
+                val mode = if (dark) "dark" else "light"
+                val browsed = mutableListOf<Int>()
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface { Column(Modifier.padding(24.dp)) {
+                    focus = LocalFocusManager.current
+                    TextButton({}, Modifier.heightIn(min = 48.dp).testTag("m3")) { Text("浏览各周 ▾") }
+                    val actions = WeekActions(controller, rememberCoroutineScope()).apply { onBrowse = { browsed += it } }
+                    WeekPicker(view, actions, true)
+                } } } }
+                waitForIdle()
+                val picker = hasText("浏览各周 ▾") and hasClickAction() and !hasTestTag("m3")
+                val m3 = onNodeWithTag("m3").fetchSemanticsNode().boundsInRoot
+                val b = first(picker).boundsInRoot
+                val before = shot("$mode-picker-unfocused")
+                val dy = (b.top - m3.top).roundToInt()
+                var diff = 0
+                for (x in m3.left.toInt() until m3.right.toInt()) for (y in m3.top.toInt() - 4 until m3.bottom.toInt() + 4)
+                    if (before[x, y] != before[x, y + dy]) diff++
+                println("TON-1603 week $mode picker material=${m3.width / scale}x${m3.height / scale}dp picker=${b.width / scale}x${b.height / scale}dp unfocused-diff=$diff")
+                assertEquals(m3.size, b.size, "$mode picker keeps the Material 48dp pill")
+                assertEquals(0, diff, "$mode unfocused picker pixels differ from the Material button")
+
+                onNode(picker).requestFocus(); waitForIdle(); onNode(picker).assertIsFocused()
+                measure(mode, "周范围下拉", picker, before, pageDx = 8f)
+                onNode(picker).performKeyInput { pressKey(Key.Enter) }; waitForIdle()
+                val week2 = hasText("第 2 周", substring = true) and hasClickAction()
+                assertEquals(1, onAllNodes(week2).fetchSemanticsNodes().size, "$mode Enter opens the week menu")
+                shot("$mode-picker-menu-open", dialog = true)
+                enter(week2)
+                assertEquals(listOf(2), browsed, "$mode Enter on 第 2 周 in the menu")
+                assertEquals(0, onAllNodes(week2).fetchSemanticsNodes().size, "$mode picking closes the menu")
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                val blurred = shot("$mode-picker-blurred")
+                assertRegionEqual(before, blurred, b.inflate(10 * scale), "$mode picker after blur")
+                println("TON-1603 week $mode picker enter menu-opened=1 browsed=$browsed")
+            }
+        }
+    }
+
+    private data class Edge(val week: Int, val dead: SemanticsMatcher, val live: SemanticsMatcher, val lands: Int)
+
+    private fun threeWeeks(): CourseView {
+        val now = Instant.parse("2026-11-10T12:00:00Z").toEpochMilli()
+        val events = listOf(Event(1, "outline", "SYN", "outline_revised", recordedAt = now,
+            occurredAt = now, deviceId = "synthetic", actor = "SYSTEM", payload = json(
+                "knowledgePoints" to JsonArray(listOf(json("id" to "a", "title" to "【W1】合成要点"), json("id" to "c", "title" to "【W2】中间要点"),
+                    json("id" to "d", "title" to "【W3】末周要点"))))),
+            Event(2, "exam", "SYN", "exam_set", recordedAt = now, occurredAt = now,
+                deviceId = "synthetic", actor = "USER", payload = json("examDay" to 20802)))
+        return CourseView(events, project(events))
+    }
+
+    private fun withController(block: (CoachController) -> Unit) {
+        val now = Instant.parse("2026-11-10T12:00:00Z").toEpochMilli()
+        SyntheticLocalLedger().use { ledger ->
+            val tutor = TutorClient("http://127.0.0.1:18959", "synthetic", "synthetic", TutorModel({ now }))
+            try { block(CoachController("SYN", ledger.sync, tutor, formatClock = { "" }, nowMillis = { now })) } finally { tutor.close() }
+        }
+    }
+
+    /** Tab from the focused node; false when nothing holds focus any more. */
+    private fun ComposeUiTest.tabOnce(): Boolean {
+        if (onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Focused, true)).fetchSemanticsNodes().isEmpty()) return false
+        tabFromFocused(); return true
+    }
+
+    private fun ComposeUiTest.tabUntil(m: SemanticsMatcher): Int {
+        var n = 0
+        while (!focused(m) && n < 15 && tabOnce()) n++
+        return n
     }
 
     /** V7TextButton must keep Material's size, 48dp slot and unfocused pixels; only the focus ring is added. */

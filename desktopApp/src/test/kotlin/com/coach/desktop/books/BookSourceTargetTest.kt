@@ -39,4 +39,19 @@ class BookSourceTargetTest {
         assertEquals(BookSourceRefusal.FILE_CHANGED, assertIs<BookSourceResolution.Refused>(resolver.resolve(ok)).reason)
         assertFalse(resolver.stillValid(target))
     }
+
+
+    @Test fun surrogatePairBoundariesAreRefusedAndWholeCharacterAccepted() {
+        val text = "A synthetic sentence: A\uD83D\uDE00B."   // high surrogate at 23, low at 24
+        val page = block.page
+        java.sql.DriverManager.getConnection("jdbc:sqlite:${library.directory.resolve("library.sqlite")}").use { db ->
+            db.prepareStatement("UPDATE pages SET text=? WHERE book=? AND page=?").use { it.setString(1, text); it.setString(2, book.id); it.setInt(3, page); assertEquals(1, it.executeUpdate()) }
+        }
+        fun c(s: Int, e: Int) = OwnedBookCitation(book.id, page, s, e)
+        assertEquals(BookSourceRefusal.RANGE_INVALID, assertIs<BookSourceResolution.Refused>(resolver.resolve(c(23, 24))).reason) // ends mid-pair
+        assertEquals(BookSourceRefusal.RANGE_INVALID, assertIs<BookSourceResolution.Refused>(resolver.resolve(c(24, 26))).reason) // starts mid-pair
+        val whole = assertIs<BookSourceResolution.Resolved>(resolver.resolve(c(23, 25), "\uD83D\uDE00"))
+        assertEquals("\uD83D\uDE00", whole.target.quote)
+        assertEquals("A\uD83D\uDE00B.", assertIs<BookSourceResolution.Resolved>(resolver.resolve(c(22, 27))).target.quote.let { it })
+    }
 }

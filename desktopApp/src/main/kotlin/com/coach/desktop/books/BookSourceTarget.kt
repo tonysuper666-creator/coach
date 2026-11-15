@@ -26,8 +26,13 @@ internal sealed interface BookSourceResolution {
 
 internal class BookSourceResolver(private val library: TextbookLibrary) {
     /**
-     * Same book, same version (file hash == id), same physical page, in-range UTF-16 interval,
-     * and (when given) the exact quote. A stale or foreign citation is refused, never relocated.
+     * Resolves against the WHOLE library: it does not know which book the UI currently shows and
+     * does not check that the citation belongs to the original request. The CALLER must (1) bind the
+     * reply to its originating book/lesson/request, (2) check `passage.book == currentBook.id` before
+     * calling, (3) pass the ORIGINAL physical page, range and verified quote as [expectedQuote] (never
+     * search a same-sentence page), (4) check `target.book == currentBook.id`, then [stillValid].
+     * Checks here: file hash == id, page order, UTF-16 range on code-point boundaries, quote, one body block.
+     * Page text comes from the trusted import cache; the PDF is not re-extracted.
      */
     fun resolve(citation: OwnedBookCitation, expectedQuote: String? = null): BookSourceResolution {
         fun no(r: BookSourceRefusal) = BookSourceResolution.Refused(r)
@@ -39,6 +44,8 @@ internal class BookSourceResolver(private val library: TextbookLibrary) {
         if (index < 0 || index + 1 != citation.page) return no(BookSourceRefusal.PAGE_MISSING)
         val page = book.pages[index]
         if (citation.start < 0 || citation.end <= citation.start || citation.end > page.text.length) return no(BookSourceRefusal.RANGE_INVALID)
+        // A UTF-16 boundary inside a surrogate pair would quote half a character.
+        if (splitsSurrogate(page.text, citation.start) || splitsSurrogate(page.text, citation.end)) return no(BookSourceRefusal.RANGE_INVALID)
         val quote = page.text.substring(citation.start, citation.end)
         if (expectedQuote != null && quote != expectedQuote) return no(BookSourceRefusal.QUOTE_MISMATCH)
         val oneBlock = StudyCoachCourse.blocks(book.id, book.pages).any {
@@ -49,11 +56,18 @@ internal class BookSourceResolver(private val library: TextbookLibrary) {
         return BookSourceResolution.Resolved(BookSourceTarget(book.id, book.title, citation.page, citation.start, citation.end, quote, sha))
     }
 
-    /** Call again at click time: refuses if the book/page changed since the answer was produced. */
+    /**
+     * Call at click time. NOT an atomic snapshot: it only proves cache and file hash matched at this instant;
+     * a file swapped afterwards is caught by the next call. Rendering must consume the same verified bytes
+     * if "safe after verification" is required.
+     */
     fun stillValid(target: BookSourceTarget): Boolean {
         val again = resolve(OwnedBookCitation(target.book, target.pdfPage, target.start, target.end), target.quote)
         return again is BookSourceResolution.Resolved && again.target == target
     }
+
+    private fun splitsSurrogate(text: String, i: Int) =
+        i in 1 until text.length && Character.isHighSurrogate(text[i - 1]) && Character.isLowSurrogate(text[i])
 
     private fun fileMatches(book: Textbook): Boolean = runCatching {
         val digest = MessageDigest.getInstance("SHA-256")

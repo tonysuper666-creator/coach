@@ -11,6 +11,7 @@ import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.*
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.*
 import kotlinx.serialization.json.*
 
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.*
  * read back, and a file system that can enforce neither model is refused instead of left open.
  */
 private fun setPrivatePermissions(path: Path, directory: Boolean) {
+    if (!directory) requireSinglePrivateLink(path)
     val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
     if (posix != null) {
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------"))
@@ -37,28 +39,84 @@ private fun setPrivatePermissions(path: Path, directory: Boolean) {
     check(acl.acl == listOf(entry)) { "Private ACL did not retain the current user's exclusive grant" }
 }
 
-/** Only use a dedicated output tree: existing descendants have their permissions changed. */
+private fun requireSinglePrivateLink(path: Path) {
+    if ("unix" in path.fileSystem.supportedFileAttributeViews()) {
+        require((Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toLong() == 1L) {
+            "Refusing multiply linked private file"
+        }
+        return
+    }
+    // Java's Windows attribute views do not expose the link count. Use the system NTFS query;
+    // unsupported volumes, failed queries and ambiguous output must fail before any ACL write.
+    require(path.fileSystem == FileSystems.getDefault() && path.fileSystem.separator == "\\") {
+        "Cannot establish private file link count"
+    }
+    val systemRoot = System.getenv("SystemRoot") ?: error("Windows system directory unavailable")
+    val process = ProcessBuilder(Path.of(systemRoot, "System32", "fsutil.exe").toString(),
+        "hardlink", "list", path.toAbsolutePath().toString())
+        .redirectError(ProcessBuilder.Redirect.DISCARD).start()
+    try {
+        check(process.waitFor(10, TimeUnit.SECONDS)) { "Private file link query timed out" }
+        check(process.exitValue() == 0) { "Cannot establish private file link count" }
+        val links = process.inputStream.bufferedReader().use { reader -> reader.readLines().filter { it.isNotBlank() } }
+        require(links.size == 1 && links.single().startsWith("\\")) {
+            "Refusing multiply linked or unverifiable private file"
+        }
+    } finally {
+        if (process.isAlive) process.destroyForcibly()
+        process.inputStream.close()
+    }
+}
+
+private fun requireUnaliasedWindowsAncestors(path: Path) {
+    if (path.fileSystem != FileSystems.getDefault() || path.fileSystem.separator != "\\") return
+    val absolute = path.toAbsolutePath()
+    // Do not normalize away a reparse point followed by '..' before checking it.
+    require(absolute.none { it.toString() == ".." }) { "Refusing parent traversal in private Windows path" }
+    var current = absolute.root
+    for (component in listOf(absolute.root) + absolute.toList()) {
+        current = if (component == absolute.root) component else current.resolve(component)
+        val attrs = try {
+            Files.readAttributes(current, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (_: NoSuchFileException) {
+            return // Only a missing suffix is allowed; no directories have been created yet.
+        }
+        require(attrs.isDirectory && !attrs.isSymbolicLink && !attrs.isOther) {
+            "Refusing link or special private ancestor"
+        }
+    }
+}
+
+/**
+ * Only use a dedicated output tree: existing descendants have their permissions changed.
+ * Callers must exclude concurrent tree replacement. The preflight is not an atomic filesystem lock.
+ */
 fun privateDir(p: Path): Path {
+    requireUnaliasedWindowsAncestors(p)
     Files.createDirectories(p)
     val rootAttrs = Files.readAttributes(p, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
     require(rootAttrs.isDirectory && !rootAttrs.isSymbolicLink && !rootAttrs.isOther) {
         "Refusing link or special private root"
     }
-    // Existing files can carry explicit or inherited ACLs that survive changing their parent.
-    // Protect them before any caller can overwrite them; never follow links outside this tree.
+    // Validate the ENTIRE tree before changing even the root's inheritable ACL: a descendant
+    // hard link shares its security descriptor with aliases outside this tree.
+    val paths = mutableListOf<Pair<Path, Boolean>>()
     Files.walkFileTree(p, object : SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
             require(attrs.isDirectory && !attrs.isSymbolicLink && !attrs.isOther) { "Refusing non-directory private path" }
-            setPrivatePermissions(dir, directory = true)
+            paths.add(dir to true)
             return FileVisitResult.CONTINUE
         }
 
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
             require(attrs.isRegularFile && !attrs.isSymbolicLink && !attrs.isOther) { "Refusing link or special file in private path" }
-            setPrivatePermissions(file, directory = false)
+            requireSinglePrivateLink(file)
+            paths.add(file to false)
             return FileVisitResult.CONTINUE
         }
     })
+    // Existing files may have explicit grants. Retain protection before callers overwrite them.
+    for ((path, directory) in paths) setPrivatePermissions(path, directory)
     return p
 }
 fun safeFiles(root: Path): List<Path> {

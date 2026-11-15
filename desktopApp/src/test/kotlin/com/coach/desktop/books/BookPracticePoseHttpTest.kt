@@ -67,10 +67,10 @@ class BookPracticePoseHttpTest {
             file("copy-stats.json", "{}")
             file("data/user/workspace/courses/courses.json", """{"courses":[{"id":"C","name":"ECNM10119 synthetic","resources":[{"kind":"mastery_path","ref_id":"main"}]}]}""")
             val point = json("id" to "K", "module_id" to "M", "name" to "synthetic definition")
-            val module = json("id" to "M", "name" to "05 synthetic", "knowledge_points" to listOf(point))
+            val module = json("id" to "M", "name" to "05 synthetic", "knowledge_points" to JsonArray(listOf(point)))
             val reference = json("document_key" to "synthetic.pdf", "page_index" to 0, "page_label" to "1")
-            val evidence = json("K" to json("sources" to listOf(json("ref" to reference))))
-            val state = json("modules" to listOf(module), "lesson_evidence" to evidence)
+            val evidence = json("K" to json("sources" to JsonArray(listOf(json("ref" to reference)))))
+            val state = json("modules" to JsonArray(listOf(module)), "lesson_evidence" to evidence)
             val legacy = snapshot.resolve("data/user/workspace/learning/mastery/mastery.sqlite3")
             java.nio.file.Files.createDirectories(legacy.parent)
             DriverManager.getConnection("jdbc:sqlite:$legacy").use { db ->

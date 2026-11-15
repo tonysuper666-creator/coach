@@ -6,6 +6,7 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.WindowsTextbookHost
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -158,7 +159,7 @@ class BookAskCitationCodexLiveTest {
                 put("revoked_cached_answer_hidden", true); put("mode", "Windows JVM headless SOFTWARE_FAST; no native input lease")
             }
             Files.writeString(output.resolve("same-call-receipt.json").toPath(), Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), evidence))
-            Files.copy(pdfPath, output.resolve("synthetic-two-pages.pdf").toPath())
+            Files.copy(pdfPath, output.resolve("synthetic-two-pages.pdf").toPath(), StandardCopyOption.REPLACE_EXISTING)
             println("SYNTHETIC_ASK_SOURCE_RETURN outbound=1 page=2 range=${source.start}..${source.end} bookmark=$bookmark")
         }
     }

@@ -18,9 +18,7 @@ import org.apache.pdfbox.Loader
 import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.pdfbox.text.TextPosition
 import java.awt.image.BufferedImage
-import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
-import javax.imageio.ImageIO
 
 /**
  * 将本地 Windows TextbookLibrary 适配为 ReaderSource。
@@ -117,9 +115,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
             renderFallbackImage(book, pdfPage)
         } ?: return null
 
-        val baos = ByteArrayOutputStream()
-        ImageIO.write(bufferedImage, "png", baos)
-        return baos.toByteArray()
+        return encodeReaderPng(bufferedImage)
     }
 
     private fun renderFallbackImage(book: Textbook, pdfPage: Int): BufferedImage {

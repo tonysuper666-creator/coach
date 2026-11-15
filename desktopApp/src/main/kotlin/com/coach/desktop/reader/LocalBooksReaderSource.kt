@@ -4,6 +4,8 @@ import com.coach.client.ReaderReply
 import com.coach.desktop.books.Textbook
 import com.coach.desktop.books.StudyCoachCourse
 import com.coach.desktop.books.TextbookLibrary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -28,6 +30,10 @@ import javax.imageio.ImageIO
  * 书签仍由书架控制器保存；没有持久 CAS/幂等与批注存储时，拒绝 ReaderSource 写入。
  */
 internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSource {
+    // 书库（SQLite）、PDFBox、PNG 编码都是阻塞工作。调用方在 EDT 上时挪到 IO 线程执行，EDT 只挂起等待、结果由调用方的调度器接回，
+    // 状态提交仍在调用方；调用方本来就不在 EDT（后台线程、离屏测试）时原地执行，行为与以前完全一致。
+    private suspend inline fun <T> offEdt(crossinline block: () -> T): T =
+        if (java.awt.EventQueue.isDispatchThread()) withContext(Dispatchers.IO) { block() } else block()
 
     private val localId = Regex("[0-9a-f]{64}")
 
@@ -43,7 +49,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         else -> null
     }
 
-    override suspend fun catalog(): ReaderReply {
+    override suspend fun catalog(): ReaderReply = offEdt { catalogBlocking() }
+
+    private fun catalogBlocking(): ReaderReply {
         val summaries = library.catalog()
         val array = buildJsonArray {
             for (s in summaries) {
@@ -58,7 +66,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return ReaderReply(200, buildJsonObject { put("documents", array) })
     }
 
-    override suspend fun state(document: String): ReaderReply {
+    override suspend fun state(document: String): ReaderReply = offEdt { stateBlocking(document) }
+
+    private fun stateBlocking(document: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         val body = buildJsonObject {
             put("document", buildJsonObject {
@@ -78,7 +88,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return ReaderReply(200, body)
     }
 
-    override suspend fun page(document: String, pdfPage: Int): ReaderReply {
+    override suspend fun page(document: String, pdfPage: Int): ReaderReply = offEdt { pageBlocking(document, pdfPage) }
+
+    private fun pageBlocking(document: String, pdfPage: Int): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage)?.let { return it }
         val p = book.pages[pdfPage - 1]
@@ -94,7 +106,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return ReaderReply(200, body)
     }
 
-    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? {
+    override suspend fun image(document: String, pdfPage: Int, version: String?): ByteArray? = offEdt { imageBlocking(document, pdfPage, version) }
+
+    private fun imageBlocking(document: String, pdfPage: Int, version: String?): ByteArray? {
         val book = findBook(document) ?: return null
         if (version != "1" || pdfPage !in 1..book.pages.size) return null
         val bufferedImage = if (book.format == "pdf") {
@@ -128,7 +142,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return img
     }
 
-    override suspend fun study(document: String, pdfPage: Int): ReaderReply {
+    override suspend fun study(document: String, pdfPage: Int): ReaderReply = offEdt { studyBlocking(document, pdfPage) }
+
+    private fun studyBlocking(document: String, pdfPage: Int): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage)?.let { return it }
         val lessons = book.lessons.filter { pdfPage in it.firstPage..it.lastPage }
@@ -154,7 +170,9 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
         return ReaderReply(200, body)
     }
 
-    override suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply {
+    override suspend fun boxes(document: String, pdfPage: Int, version: String): ReaderReply = offEdt { boxesBlocking(document, pdfPage, version) }
+
+    private fun boxesBlocking(document: String, pdfPage: Int, version: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage, version)?.let { return it }
         if (book.format != "pdf") {

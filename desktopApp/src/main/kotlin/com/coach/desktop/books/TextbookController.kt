@@ -5,6 +5,7 @@ import com.coach.domain.Option
 import com.coach.domain.questionFingerprint
 import com.coach.domain.str
 import com.coach.domain.LedgerJson
+import com.coach.protocol.CommandBody
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.coroutines.CancellationException
@@ -251,9 +252,21 @@ internal class TextbookController(val library: TextbookLibrary, private val prac
                 mutable.update { it.copy(practiceSync = "同步未备好：原题身份尚未确认。") }
                 return
             }
-            val message = if (submit && answer.revealed && answer.text.isNotBlank()) {
-                outbox.submit(binding, answer, session.now())
-                "原作答已保存，等待同步。"
+            // Entering learning only reads an existing submission; it must not enqueue an answer.
+            val queued = !submit && session.sync.retainedCommands().any { command ->
+                val body = runCatching { LedgerJson.decodeFromString<CommandBody>(command.payloadBytes) }.getOrNull()
+                body?.type == "submit_answer" && body.courseId == binding.courseId &&
+                    body.payload.str("attemptId") == binding.attemptId
+            }
+            val message = if ((submit || queued) && answer.revealed && answer.text.isNotBlank()) {
+                // The idempotent submit also checks the frozen answer/guessed lock before using its receipt.
+                val commandId = outbox.submit(binding, answer, session.now())
+                val receipt = session.sync.receipt(commandId)
+                when (receipt?.status) {
+                    "OK" -> "原作答已同步。"
+                    "REJECTED" -> "同步被拒绝：${receipt.error ?: "未知原因"}"
+                    else -> "原作答已保存，等待同步。"
+                }
             } else "原题已备好，可同步本次作答。"
             mutable.update { it.copy(practiceSync = message) }
         } catch (cancel: CancellationException) { throw cancel }

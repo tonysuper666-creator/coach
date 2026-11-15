@@ -5,7 +5,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.*
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -61,7 +63,10 @@ internal class LocalCodexBookTransport(
             if (login.first != 0 || !login.second.contains("Logged in using ChatGPT", true))
                 throw LocalCodexFailure(LocalCodexProblem.LOGIN)
             val argv = commandPrefix + listOf("exec", "-m", identity.model, "-c", "model_reasoning_effort=low",
-                "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-o", output.toString(), "-")
+                "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "--ignore-user-config") +
+                listOf("shell_tool", "unified_exec", "apps", "plugins", "browser_use", "computer_use",
+                    "in_app_browser", "image_generation", "view_image").flatMap { listOf("-c", "features.$it=false") } +
+                listOf("-c", "web_search=disabled", "--json", "-o", output.toString(), "-")
             val prompt = "Use only the supplied excerpts. Return only a JSON object with exactly two fields: " +
                 "answer (a useful explanation or answer, not a quotation) and citations (an array of excerpt IDs used). " +
                 "Do not use Markdown.\n\n" + request
@@ -87,22 +92,77 @@ internal class LocalCodexBookTransport(
         try {
             return withTimeoutOrNull(timeout) {
                 coroutineScope {
-                    val stdout = async { runInterruptible { boundedDiagnostic(process.inputStream) } }
+                    // PR226 972c5a94: remember children before their parent exits and never reap
+                    // synchronously on a cancelling UI/timer thread. Finally still awaits cleanup.
+                    val tracker = launch {
+                        try {
+                            while (process.isAlive) { tree.track(); delay(100) }
+                            awaitCancellation()
+                        } finally { tree.stopAsync() }
+                    }
+                    var eventsComplete = false
+                    val stdout = async { runInterruptible {
+                        if (input == null) boundedDiagnostic(process.inputStream)
+                        else { eventsComplete = readCodexEvents(process.inputStream); "" }
+                    } }
                     val stderr = async { runInterruptible { boundedDiagnostic(process.errorStream) } }
                     val writer = async { runInterruptible { process.outputStream.use { if (input != null) it.write(input.toByteArray(Charsets.UTF_8)) } } }
                     val exit = suspendCancellableCoroutine<Int> { continuation ->
                         process.onExit().whenComplete { finished, error ->
                             if (error != null) continuation.resumeWithException(error) else continuation.resume(finished.exitValue())
                         }
-                        continuation.invokeOnCancellation { tree.stop() }
+                        continuation.invokeOnCancellation { tree.stopAsync() }
                     }
                     writer.await()
                     receipt(argv, exit)
-                    exit to (stdout.await() + "\n" + stderr.await())
+                    val diagnostic = stdout.await() + "\n" + stderr.await()
+                    tracker.cancel()
+                    if (input != null && exit == 0 && !eventsComplete) throw LocalCodexFailure(LocalCodexProblem.FAILED)
+                    exit to diagnostic
                 }
             } ?: throw LocalCodexFailure(LocalCodexProblem.TIMEOUT)
         } finally { tree.stop() }
     }
+}
+
+/** Tools are disabled before launch. This is a second, fail-closed check of the entire JSONL stream.
+ * Unknown future item/event kinds are rejected too; never return an answer after a tool event.
+ * Raw events can contain excerpts and remain private in memory, never in logs or exceptions.
+ */
+private fun readCodexEvents(stream: InputStream): Boolean {
+    var completed = false
+    var answer = false
+    var failed = false
+    fun reject(): Nothing = throw LocalCodexFailure(LocalCodexProblem.FAILED)
+    fun event(line: String) {
+        if (line.isBlank()) return
+        val json = try { Json.parseToJsonElement(line).jsonObject } catch (_: Exception) { reject() }
+        fun kind(value: JsonElement?): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: reject()
+        when (kind(json["type"])) {
+            "thread.started", "turn.started" -> Unit
+            "turn.completed" -> completed = true
+            "turn.failed", "error" -> failed = true
+            "item.started", "item.updated", "item.completed" -> {
+                val item = json["item"] as? JsonObject ?: reject()
+                if (kind(item["type"]) !in setOf("agent_message", "reasoning")) reject()
+                if (kind(json["type"]) == "item.completed" && kind(item["type"]) == "agent_message") answer = true
+            }
+            else -> reject()
+        }
+    }
+    stream.bufferedReader(Charsets.UTF_8).use { reader ->
+        val line = StringBuilder()
+        var total = 0
+        while (true) {
+            val char = reader.read()
+            if (char < 0) break
+            if (++total > 8_388_608 || line.length >= 1_048_576) reject()
+            if (char == '\n'.code) { event(line.toString()); line.setLength(0) }
+            else line.append(char.toChar())
+        }
+        if (line.isNotEmpty()) event(line.toString())
+    }
+    return completed && answer && !failed
 }
 
 private fun boundedDiagnostic(stream: InputStream): String = stream.use {
@@ -125,10 +185,24 @@ internal fun classifyCodexFailure(diagnostic: String): LocalCodexProblem {
     }
 }
 
-/** Same foreground snapshot/reap protocol as PR226. Snapshot before signalling the parent. */
+/** PR226 972c5a94 snapshot/reap protocol, not launch-time OS containment. */
 private class LocalCodexProcessTree(private val process: Process) {
+    private val tracked = LinkedHashSet<ProcessHandle>()
+    private val reaping = AtomicBoolean(false)
+    @Synchronized fun track() { process.descendants().use { stream -> stream.forEach { tracked.add(it) } } }
+    fun stopAsync() {
+        if (reaping.compareAndSet(false, true))
+            Thread(::stop, "local-book-codex-reaper").apply { isDaemon = true }.start()
+    }
     @Synchronized fun stop() {
-        val descendants = process.descendants().use { it.toList() }
+        try { reap() } finally {
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
+        }
+    }
+    private fun reap() {
+        track()
+        val descendants = tracked.toList()
         if (!process.isAlive && descendants.none { it.isAlive }) return
         var interrupted = Thread.interrupted()
         try {

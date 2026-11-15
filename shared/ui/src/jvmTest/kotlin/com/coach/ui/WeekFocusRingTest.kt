@@ -14,6 +14,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.ClipboardManager
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
 import com.coach.ui.v7.V7TextButton
@@ -56,7 +59,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances, its footer ‹ 上一节 / 下一节 › steps and its 一句批注 dialog's 取消 / 保存.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances, its footer ‹ 上一节 / 下一节 › steps, its 一句批注 dialog's 取消 / 保存 and its selection menu / bar actions 划线 / 一句批注 / 再讲一遍 / 举个例子 / 复制.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -975,6 +978,119 @@ class WeekFocusRingTest {
                 println("TON-1603 week $mode note tab-in-field=保存 shift-tab=取消 enter+click saved=${notes().size - saved0}")
             }
         }
+    }
+
+    /**
+     * Reading page selection actions 划线 / 一句批注 / 再讲一遍 / 举个例子 / 复制: the margin's 选中这一句 menu at 1224 / 700dp,
+     * the bottom bar at 699dp. Tab reaches each in order and shows the V7 ring hugging the label on all four sides (the menu's
+     * rounded clip cuts none of it), ≥3:1 against the menu; focusing moves nothing and blur restores the pixels. Enter and a
+     * real mouse click keep each action: 划线 saves the quoted line, 一句批注 opens its dialog, 再讲一遍 / 举个例子 ask about
+     * the selection, 复制 copies it. Offscreen Skiko, not a native window.
+     */
+    @Test fun readingSelectionActionsShowRingAndKeepTheirCallbacks() {
+        val view = threeWeeks()
+        val kp = view.kp("c")!!
+        val text = "合成正文第一段，讲一个要点。\n\n合成正文第二段。"
+        val quote = "合成选中的一句"
+        val details = V7PageDetails(course = "合成课", selection = quote)
+        val names = listOf("划线", "一句批注", "再讲一遍", "举个例子", "复制")
+        val actions = names.map { it to (hasText(it) and hasClickAction() and !hasAnyAncestor(isDialog())) }
+        val clip = object : ClipboardManager {
+            var copied: AnnotatedString? = null
+            override fun setText(annotatedString: AnnotatedString) { copied = annotatedString }
+            override fun getText() = copied
+        }
+        withController { controller ->
+            fun notes() = controller.sync.retainedCommands().map { kotlinx.serialization.json.Json.parseToJsonElement(it.payloadBytes).toString() }
+                .filter { "save_note" in it }
+            for (dark in listOf(false, true)) for (w in listOf(1224f, 700f, 699f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val bar = w < 700f
+                val asks = mutableListOf<String>()
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalV7PageDetails provides details, LocalClipboardManager provides clip) {
+                    focus = LocalFocusManager.current
+                    ReadingPage(controller, kp, view, text, false, {}, null,
+                        onAsk = {}, onQuiz = {}, onSource = {}, weekActions = null, onSelectionAsk = { asks += it })
+                } } } }
+                waitForIdle()
+                fun ready() = waitUntil(timeoutMillis = 10_000) { !first(actions[0].second).config.contains(SemanticsProperties.Disabled) }
+                ready()
+                fun dialogs() = onAllNodes(isDialog()).fetchSemanticsNodes().size
+                val before = shot("$mode-sel-unfocused")
+                val b0 = actions.map { (_, m) -> first(m).boundsInRoot }
+                println("TON-1603 week $mode sel ${if (bar) "bar" else "menu"} bounds=" + names.zip(b0).joinToString(" ") { (n, r) -> "$n@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                // The label inside its click area: the menu pads 4dp above and below each row label, 6dp above 复制; the bar pads nothing.
+                fun label(i: Int, r: Rect) = if (bar) r else Rect(r.left, r.top + (if (i == 4) 6 else 4) * scale, r.right, r.bottom - (if (i == 4) 0 else 4) * scale)
+                onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                val stops = mutableListOf<String>()
+                for ((i, nm) in actions.withIndex()) {
+                    val (n, m) = nm
+                    stops += "$n=${tabUntil(m)}"
+                    assertTrue(focused(m), "$mode Tab never reached $n")
+                    assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize $n")
+                    ringHugs(mode, "选区-$n", label(i, b0[i]), shot("$mode-选区-$n-focused"), before)
+                }
+                println("TON-1603 week $mode sel tab-stops ${stops.joinToString(" ")}")
+                assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the five actions are consecutive Tab stops: $stops")
+                runOnIdle { focus.clearFocus() }; waitForIdle()
+                val all = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                assertRegionEqual(before, shot("$mode-sel-blurred"), all, "$mode selection actions after blur")
+
+                /** Runs [act] on action [i] and checks that action's own effect. */
+                fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                    val m = actions[i].second
+                    val saved = notes().size; val asked = asks.size; clip.copied = null
+                    act(m); waitForIdle()
+                    when (i) {
+                        0 -> { waitUntil(timeoutMillis = 10_000) { notes().size == saved + 1 }; assertTrue("> $quote" in notes().last(), "$mode $how 划线 saves the quoted line: ${notes().last()}"); ready() }
+                        1 -> { assertEquals(1, dialogs(), "$mode $how 一句批注 opens the dialog"); onNode(hasText("取消") and hasAnyAncestor(isDialog())).performClick(); waitForIdle(); assertEquals(0, dialogs()) }
+                        2 -> assertEquals("请再讲一遍：$quote", asks.drop(asked).single(), "$mode $how 再讲一遍")
+                        3 -> assertEquals("请举例说明：$quote", asks.drop(asked).single(), "$mode $how 举个例子")
+                        4 -> assertEquals(quote, clip.copied?.text, "$mode $how 复制 copies the selection")
+                    }
+                    if (i != 0) assertEquals(saved, notes().size, "$mode $how ${names[i]} saves nothing")
+                    if (i != 2 && i != 3) assertEquals(asked, asks.size, "$mode $how ${names[i]} asks nothing")
+                }
+                // 划线 is disabled while it saves (unchanged behaviour), so focus leaves it; 一句批注 moves focus into its dialog.
+                for (i in names.indices) check("Enter", i) { m -> enter(m); assertTrue(i <= 1 || focused(m), "$mode focus stays on ${names[i]} after Enter") }
+                for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                println("TON-1603 week $mode sel enter+mouse asks=${asks.size} notes=${notes().size} clip=${clip.copied?.text}")
+            }
+        }
+    }
+
+    /**
+     * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
+     * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
+     * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.
+     */
+    private fun ringHugs(mode: String, label: String, b: Rect, shot: PixelMap, before: PixelMap) {
+        val cx = b.center.x.roundToInt(); val cy = b.center.y.roundToInt()
+        val l = b.left.roundToInt(); val t = b.top.roundToInt(); val r = b.right.roundToInt() - 1; val bo = b.bottom.roundToInt() - 1
+        fun k(p: Pair<Int, Int>) = contrast(shot[p.first, p.second], before[p.first, p.second])
+        val sides = listOf("left" to { i: Int -> Pair(l - i, cy) }, "right" to { i: Int -> Pair(r + i, cy) },
+            "top" to { i: Int -> Pair(cx, t - i) }, "bottom" to { i: Int -> Pair(cx, bo + i) })
+        val got = sides.map { (n, at) ->
+            var i = 1
+            while (i < 24 && k(at(i)) < 3f) i++
+            val inner = i
+            while (i < 24 && k(at(i)) >= 3f) i++
+            val gap = inner - 1; val width = i - inner
+            val (x, y) = at((inner + i - 1) / 2)
+            val ring = contrast(shot[x, y], before[x, y])
+            val past = at(i - 1 + scale.roundToInt())
+            assertTrue(abs(gap - V7FocusRingGap.value * scale) <= 1.5f, "$mode $label $n gap $gap px (ring must hug the label)")
+            assertTrue(abs(width - V7FocusRingWidth.value * scale) <= 1.5f, "$mode $label $n ring $width px (missing or clipped)")
+            assertTrue(ring >= 3f, "$mode $label $n ring ${hex(shot[x, y])} vs ${hex(before[x, y])}")
+            // 1dp past the ring is the untouched surface, or (复制, whose click area pads 6dp above the label) the click
+            // area's own focus tint that already lies inside the ring: either way nothing new is painted past the ring.
+            val inGap = at(inner - 1)
+            val pastOk = k(past) < 1.08f || contrast(shot[past.first, past.second], shot[inGap.first, inGap.second]) < 1.08f
+            assertTrue(pastOk, "$mode $label $n 1dp past the ring must be unfocused pixels or the focus tint, got ${hex(shot[past.first, past.second])}")
+            "$n=$gap/${width}px ${hex(shot[x, y])}:${hex(before[x, y])}=${"%.2f".format(ring)}"
+        }
+        println("TON-1603 week $mode $label hug ${got.joinToString(" ")}")
     }
 
     /**

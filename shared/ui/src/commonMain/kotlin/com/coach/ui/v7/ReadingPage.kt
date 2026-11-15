@@ -16,7 +16,12 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.pointer.pointerInput
@@ -122,6 +127,20 @@ internal fun SourceThumbnail(details: V7PageDetails, onOpen: () -> Unit) {
     }
 }
 
+/**
+ * The V7 ring shape for a menu label whose click area is padded beyond the text: [top] / [bottom] of that padding are left
+ * out, so the ring hugs the label (and stays clear of the menu title and dividers) while the click area stays as it was.
+ */
+private class LabelRingShape(private val top: Dp, private val bottom: Dp) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline = with(density) {
+        val t = top.toPx(); val b = size.height - bottom.toPx()
+        val r = minOf(CoachV7.Radius.btn.toPx(), (b - t) / 2, size.width / 2)
+        Outline.Rounded(RoundRect(0f, t, size.width, b, CornerRadius(r)))
+    }
+}
+private val MenuLabelRing = LabelRingShape(4.dp, 4.dp)
+private val CopyLabelRing = LabelRingShape(6.dp, 0.dp)
+
 @Composable
 private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighlight: () -> Unit, onNote: () -> Unit, enabled: Boolean) {
     val c = CoachTheme.colors
@@ -130,16 +149,16 @@ private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighligh
         .background(if (c.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text("选中这一句", style = MaterialTheme.typography.labelMedium, color = c.fgSecondary)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("划线", Modifier.clickable(enabled = enabled, onClick = onHighlight).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
-            Text("一句批注", Modifier.clickable(enabled = enabled, onClick = onNote).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("划线", Modifier.v7FocusRing(MenuLabelRing).clickable(enabled = enabled, onClick = onHighlight).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("一句批注", Modifier.v7FocusRing(MenuLabelRing).clickable(enabled = enabled, onClick = onNote).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
-            Text("举个例子", Modifier.clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("再讲一遍", Modifier.v7FocusRing(MenuLabelRing).clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("举个例子", Modifier.v7FocusRing(MenuLabelRing).clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
-        Text("复制", Modifier.clickable { clipboard.setText(AnnotatedString(selection)) }.padding(top = 6.dp), style = MaterialTheme.typography.labelLarge, color = c.fgSecondary)
+        Text("复制", Modifier.v7FocusRing(CopyLabelRing).clickable { clipboard.setText(AnnotatedString(selection)) }.padding(top = 6.dp), style = MaterialTheme.typography.labelLarge, color = c.fgSecondary)
     }
 
 }
@@ -326,12 +345,12 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 .width(minOf(640.dp, maxWidth - if (m.window == DeskWindow.OuterLandscape) 48.dp else 32.dp)).height(52.dp)
                 .paperShadow("menu", CoachTheme.colors.dark).clip(RoundedCornerShape(10.dp)).background(if (CoachTheme.colors.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg).padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("划线", Modifier.clickable(enabled = !saving) { saveNote("> ${d.selection}") }, style = MaterialTheme.typography.labelLarge)
-                Text("一句批注", Modifier.clickable(enabled = !saving) { noteQuote = d.selection }, style = MaterialTheme.typography.labelLarge)
-                Text("再讲一遍", Modifier.clickable { onSelectionAsk("请再讲一遍：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
-                Text("举个例子", Modifier.clickable { onSelectionAsk("请举例说明：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("划线", Modifier.v7FocusRing().clickable(enabled = !saving) { saveNote("> ${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("一句批注", Modifier.v7FocusRing().clickable(enabled = !saving) { noteQuote = d.selection }, style = MaterialTheme.typography.labelLarge)
+                Text("再讲一遍", Modifier.v7FocusRing().clickable { onSelectionAsk("请再讲一遍：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("举个例子", Modifier.v7FocusRing().clickable { onSelectionAsk("请举例说明：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
                 val clipboard = LocalClipboardManager.current
-                Text("复制", Modifier.clickable { clipboard.setText(AnnotatedString(d.selection)) }, style = MaterialTheme.typography.labelLarge)
+                Text("复制", Modifier.v7FocusRing().clickable { clipboard.setText(AnnotatedString(d.selection)) }, style = MaterialTheme.typography.labelLarge)
             }
         }
     }

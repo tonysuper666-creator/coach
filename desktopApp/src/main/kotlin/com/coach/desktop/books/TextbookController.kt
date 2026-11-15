@@ -1,5 +1,7 @@
 package com.coach.desktop.books
 
+import com.coach.domain.LadderSession
+import com.coach.domain.QuestionLadder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +23,8 @@ internal data class LibraryUi(
     val learningPath: LearningPath = LearningPath.READ, val questionsOpen: Boolean = false,
     /** Whether this book already has a chosen walk in the library, as opposed to the READ preview. */
     val learningPathSaved: Boolean = false,
+    /** 这本书「做题学」的累计会话：六题一次小结，继续后接着累计。 */
+    val ladder: LadderSession = LadderSession(),
 )
 
 internal class TextbookController(val library: TextbookLibrary) {
@@ -45,6 +49,7 @@ internal class TextbookController(val library: TextbookLibrary) {
             review = active, answer = active?.answer ?: PracticeAnswer(),
             learningPath = book?.let(::restoredPath) ?: LearningPath.READ,
             learningPathSaved = book?.let { library.learningPath(it.id) != null } ?: false,
+            ladder = book?.let { library.ladder(it.id) } ?: LadderSession(),
             screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING)
     }
 
@@ -54,7 +59,8 @@ internal class TextbookController(val library: TextbookLibrary) {
         mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
             busy = true, reviews = library.reviews(),
             learningPath = library.learningPath(book.id)?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
-            learningPathSaved = library.learningPath(book.id) != null)
+            learningPathSaved = library.learningPath(book.id) != null,
+            ladder = library.ladder(book.id))
     }
 
     suspend fun select(id: String) = action {
@@ -62,7 +68,8 @@ internal class TextbookController(val library: TextbookLibrary) {
         library.save(book)
         library.closeReview()
         mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews(),
-            learningPath = restoredPath(book), learningPathSaved = library.learningPath(book.id) != null)
+            learningPath = restoredPath(book), learningPathSaved = library.learningPath(book.id) != null,
+            ladder = library.ladder(book.id))
     }
 
     private fun persist(book: Textbook) {
@@ -106,7 +113,8 @@ internal class TextbookController(val library: TextbookLibrary) {
         val lesson = book.lessons.getOrNull(book.lessonIndex)
         val answer = lesson?.let { library.answer(book.id, it.id, book.questionMode) } ?: PracticeAnswer()
         mutable.update { it.copy(screen = BookScreen.LEARNING, prompt = null, source = null, answer = answer, review = null,
-            learningPath = path, questionsOpen = path == LearningPath.QUESTION_FIRST || answer.text.isNotBlank() || answer.revealed) }
+            learningPath = path, ladder = library.ladder(book.id),
+            questionsOpen = path == LearningPath.QUESTION_FIRST || answer.text.isNotBlank() || answer.revealed) }
     }
 
     suspend fun chooseLearningPath(path: LearningPath) = action(showBusy = false) {
@@ -246,7 +254,15 @@ internal class TextbookController(val library: TextbookLibrary) {
         mutable.update { it.copy(reviews = library.reviews()) }
         val open = mutable.value.book
         if (mutable.value.review == null && open?.id == book && open.lessons.getOrNull(open.lessonIndex)?.id == lesson && open.questionMode == mode) {
-            mutable.update { it.copy(answer = answer) }
+            mutable.update { it.copy(answer = answer, ladder = library.ladder(book)) }
         }
+    }
+
+    /** 「接着做题」只推进小结游标：答过的题、选过的选项和走到哪一节都不动。 */
+    suspend fun recapContinue() = action(showBusy = false) {
+        val book = mutable.value.book ?: return@action
+        val next = QuestionLadder.closeRecap(mutable.value.ladder)
+        library.saveLadder(book.id, next)
+        mutable.update { it.copy(ladder = next) }
     }
 }

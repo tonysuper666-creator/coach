@@ -6,62 +6,8 @@ import kotlinx.coroutines.*
 import kotlin.test.*
 
 class LocalCodexBookTransportTest {
-    private val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
-
     private fun fake(f: OwnedBookConsentTest.Fixture, mode: String, timeout: Long = 5000): LocalCodexBookTransport {
-        val script = f.root.resolve("fake-codex.py")
-        Files.writeString(script, """
-            import json, os, signal, subprocess, sys, time
-            from pathlib import Path
-            mode, root = sys.argv[1:3]
-            root = Path(root)
-            args = sys.argv[3:]
-            if mode == 'environment':
-                phase = 'login' if args == ['login', 'status'] else 'exec'
-                root.joinpath(phase + '-environment.json').write_text(json.dumps({'has_RUST_LOG': 'RUST_LOG' in os.environ}))
-            if args == ['login', 'status']:
-                print('Logged in using ' + ('an API key' if mode == 'apikey' else 'ChatGPT'))
-                sys.exit(0)
-            root.joinpath('argv.json').write_text(json.dumps(args))
-            root.joinpath('cwd').write_text(os.getcwd())
-            assert list(Path.cwd().iterdir()) == []
-            raw = sys.stdin.read()
-            assert 'Synthetic A' not in raw and 'book' not in raw and str(root) not in raw
-            if mode == 'model':
-                print('The model is not supported', file=sys.stderr)
-                sys.exit(3)
-            if mode in ('timeout', 'cancel', 'stubborn', 'parentexit'):
-                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
-                if mode == 'stubborn' and os.name != 'nt':
-                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                root.joinpath('pids').write_text(str(os.getpid()) + ',' + str(child.pid))
-                if mode == 'parentexit':
-                    time.sleep(0.5)
-                    os._exit(0)
-                time.sleep(120)
-            Path(args[args.index('-o') + 1]).write_text(json.dumps({'answer': 'Light supplies energy for making stored food.', 'citations': [0]}))
-            if mode == 'empty': sys.exit(0)
-            if mode == 'malformed':
-                print('not a JSON event')
-                sys.exit(0)
-            def event(kind, **fields): print(json.dumps(dict(type=kind, **fields)), flush=True)
-            event('thread.started', thread_id='synthetic')
-            event('turn.started')
-            event('item.completed', item=dict(type='reasoning', text='synthetic reasoning'))
-            if mode.startswith('tool-'):
-                event('item.started', item=dict(type=mode[5:], command='synthetic tool'))
-            event('item.completed', item=dict(type='agent_message', text='synthetic answer'))
-            if mode != 'truncated': event('turn.completed', usage={})
-            if mode == 'future-event': event('future.tool_started')
-            if mode == 'late-tool': event('item.completed', item=dict(type='command_execution'))
-            if mode == 'stderr-collab': print('collab spawn failed: no rollout found', file=sys.stderr)
-            if mode == 'stderr-router': print('codex_core::tools::router: tool invocation', file=sys.stderr)
-            if mode == 'stderr-late-collab': print('x' * 32768 + 'COLLAB spawn failed', file=sys.stderr)
-            if mode == 'stderr-split-router': print('x' * 8180 + 'codex_core::tools::router', file=sys.stderr)
-            if mode == 'stderr-benign': print('synthetic harmless diagnostic', file=sys.stderr)
-        """.trimIndent())
-        return LocalCodexBookTransport(Path.of(python), timeoutMillis = timeout,
-            commandPrefix = listOf(python, script.toString(), mode, f.root.toString()))
+        return SyntheticIsolatedCodex(f, mode).transport(timeout)
     }
 
     @Test fun exactArgvEmptyWorkingDirectoryTemporaryOutputAndSubscriptionLogin() = runBlocking {
@@ -151,7 +97,9 @@ class LocalCodexBookTransportTest {
         withTimeout(8000) { while (!Files.exists(f.root.resolve("pids"))) delay(10) }
         val handles = Files.readString(f.root.resolve("pids")).split(',').mapNotNull { ProcessHandle.of(it.toLong()).orElse(null) }
         try {
-            assertEquals(LocalCodexProblem.TIMEOUT.message, assertIs<BookLearningReply.Unavailable>(request.await()).message)
+            // The AppContainer helper closes its Job on parent exit, so inherited pipes close
+            // immediately. An exit without events is a protocol failure rather than a timeout.
+            assertEquals(LocalCodexProblem.FAILED.message, assertIs<BookLearningReply.Unavailable>(request.await()).message)
             val millis = (System.nanoTime() - start) / 1_000_000
             println("SYNTHETIC_PARENT_EXIT elapsed_ms=$millis survivors=${handles.count { it.isAlive }}")
             assertTrue(millis < 2500, "inherited pipe delayed timeout: ${millis}ms")

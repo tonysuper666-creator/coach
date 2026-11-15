@@ -3,6 +3,10 @@ package com.coach.desktop.books
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.FileVisitResult
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,6 +50,12 @@ internal fun discoverLocalCodex(
 /** Explicit, trusted installation paths. The default is unavailable until the owner wires them. */
 internal data class WindowsBookIsolation(val helper: Path, val authCommitHelper: Path, val authSource: Path)
 
+/** Only allowlisted helper metadata; never expose child output, auth or arbitrary diagnostics. */
+internal data class WindowsBookIsolationReceipt(val phase: String, val exit: Int, val childPid: Long?,
+    val containerSid: String?, val verified: Boolean, val cleaned: Boolean, val createError: Int?)
+
+internal data class WindowsBookRun(val work: Path, val home: Path)
+
 /** The helper is trusted code; a partial child output is never a success receipt. */
 internal fun validIsolationReceipt(log: String): Boolean {
     val lines = log.lineSequence().map { it.trim() }.toList()
@@ -64,6 +74,8 @@ internal class LocalCodexBookTransport(
     private val commandPrefix: List<String> = listOf(executable.toString()),
     private val receipt: (List<String>, Int) -> Unit = { _, _ -> },
     private val isolation: WindowsBookIsolation? = null,
+    private val isolationReceipt: (WindowsBookIsolationReceipt) -> Unit = {},
+    private val observeRun: (WindowsBookRun) -> AutoCloseable = { AutoCloseable {} },
 ) : OwnedBookCliTransport {
     override suspend fun complete(request: String): String = withContext(Dispatchers.IO) {
         val lease = currentCoroutineContext()[BookConsentLease] ?: throw LocalCodexFailure(LocalCodexProblem.FAILED)
@@ -72,9 +84,11 @@ internal class LocalCodexBookTransport(
         if (!System.getProperty("os.name").startsWith("Windows", true)) throw LocalCodexFailure(LocalCodexProblem.FAILED)
         if (commandPrefix != listOf(executable.toString())) throw LocalCodexFailure(LocalCodexProblem.FAILED)
         val root = Files.createTempDirectory("coach-book-codex-")
+        val expectedRoot = root.toRealPath()
         val cwd = Files.createDirectory(root.resolve("work"))
         val output = cwd.resolve("answer.txt")
         var snapshot: CodexAuthSnapshot? = null
+        var observation: AutoCloseable? = null
         try {
             val runtime = Files.createDirectory(root.resolve("runtime"))
             if (!Files.isRegularFile(executable) || !Files.isRegularFile(config.helper) || !Files.isRegularFile(config.authCommitHelper))
@@ -82,6 +96,7 @@ internal class LocalCodexBookTransport(
             val isolatedExecutable = Files.copy(executable, runtime.resolve("codex.exe"))
             snapshot = CodexAuthSnapshot.create(config.authSource, root, WindowsAuthAtomicCommit(config.authCommitHelper))
             val home = snapshot.home
+            observation = observeRun(WindowsBookRun(cwd, home))
             val login = executeIsolated(config, isolatedExecutable, listOf("login", "status"), root, cwd, runtime, home, null, lease, 15_000)
             // API-key sessions must not fall back to paid API usage.
             if (login.first != 0 || !login.second.contains("Logged in using ChatGPT", true))
@@ -103,7 +118,10 @@ internal class LocalCodexBookTransport(
             val answer = lease.checked { Files.readString(output) }
             currentCoroutineContext().ensureActive()
             lease.checked { Unit }
-            val committed = snapshot.commit()
+            // Cancellation interrupts the native commit wait and reaps that helper. Never hold
+            // the consent store lock across blocking filesystem/transaction work.
+            val authSnapshot = checkNotNull(snapshot)
+            val committed = runInterruptible { authSnapshot.commit() }
             if (!committed.cleaned || committed.status !in setOf(AuthCommitStatus.UNCHANGED, AuthCommitStatus.COMMITTED))
                 throw LocalCodexFailure(LocalCodexProblem.FAILED)
             snapshot = null
@@ -113,9 +131,11 @@ internal class LocalCodexBookTransport(
         catch (known: LocalCodexFailure) { throw known }
         catch (_: java.io.IOException) { throw LocalCodexFailure(if (!Files.isRegularFile(executable)) LocalCodexProblem.MISSING else LocalCodexProblem.FAILED) }
         finally {
-            // Snapshot close is terminal, and cleanup failures must prevent an answer.
-            try { snapshot?.close() } finally {
-                Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+            try { observation?.close() } finally {
+                // Discard our entire run before invoking the dependency's close. A failed tree
+                // cleanup must not fall through to a less restrictive recursive cleanup.
+                discardIsolatedBookRun(root, expectedRoot)
+                snapshot?.close()
             }
         }
     }
@@ -138,9 +158,29 @@ internal class LocalCodexBookTransport(
         val builder = ProcessBuilder(argv).directory(cwd.toFile())
         builder.environment().clear()
         System.getenv("SystemRoot")?.let { builder.environment()["SystemRoot"] = it }
+        // Windows resolves the AppContainer profile from LOCALAPPDATA during CreateProcess.
+        // Its presence grants no filesystem access; only the three per-run roots receive ACEs.
+        System.getenv("LOCALAPPDATA")?.let { builder.environment()["LOCALAPPDATA"] = it }
         builder.environment()["CODEX_HOME"] = home.toString()
         val process = lease.checked { builder.start() }
         val tree = LocalCodexProcessTree(process)
+        // Keep helper pipes open through cancellation so its finally can report and finish
+        // profile/ACL cleanup. These readers are collected below before this method returns.
+        val drainJob = SupervisorJob()
+        val drains = CoroutineScope(Dispatchers.IO + drainJob)
+        val helperOut = drains.async { boundedDiagnostic(process.inputStream) }
+        val helperErr = drains.async { boundedDiagnostic(process.errorStream) }
+        val reported = AtomicBoolean()
+        fun report(exit: Int, log: String) {
+            if (!reported.compareAndSet(false, true)) return
+            receipt(argv, exit)
+            isolationReceipt(WindowsBookIsolationReceipt(phase, exit,
+                Regex("(?m)^COACH_ISO_VERIFIED pid=([0-9]+) appcontainer=1\\s*$").find(log)?.groupValues?.get(1)?.toLongOrNull(),
+                Regex("(?m)^COACH_ISO_SID (S-1-15-2-[0-9-]+)\\s*$").find(log)?.groupValues?.get(1),
+                log.lineSequence().any { it.trim().matches(Regex("COACH_ISO_VERIFIED pid=[0-9]+ appcontainer=1")) },
+                "COACH_ISO_ACL_REVOKED 3" in log && "COACH_ISO_PROFILE_DELETED hr=0x0" in log,
+                Regex("create_process err=([0-9]+)").find(log)?.groupValues?.get(1)?.toIntOrNull()))
+        }
         try {
             return withTimeoutOrNull(timeout + 5_000) {
                 coroutineScope {
@@ -148,8 +188,6 @@ internal class LocalCodexBookTransport(
                         try { while (process.isAlive) { tree.track(); delay(100) }; awaitCancellation() }
                         finally { tree.stopAsync() }
                     }
-                    val helperOut = async { runInterruptible { boundedDiagnostic(process.inputStream) } }
-                    val helperErr = async { runInterruptible { boundedDiagnostic(process.errorStream) } }
                     process.outputStream.close()
                     val exit = suspendCancellableCoroutine<Int> { continuation ->
                         process.onExit().whenComplete { finished, error ->
@@ -160,9 +198,21 @@ internal class LocalCodexBookTransport(
                     val out = helperOut.await()
                     val log = helperErr.await()
                     tracker.cancel()
-                    receipt(argv, exit)
-                    if (exit != 0 || out.isNotBlank() || !validIsolationReceipt(log))
+                    report(exit, log)
+                    if (exit != 0 || out.isNotBlank() || !validIsolationReceipt(log)) {
+                        if (Regex("(?m)^COACH_ISO_REFUSED code=126 reason=timeout\\s*$").containsMatchIn(log))
+                            throw LocalCodexFailure(LocalCodexProblem.TIMEOUT)
+                        // A verified child failure may supply a diagnostic, never an answer or
+                        // stdout. Helper refusals/cleanup failures remain generic failures.
+                        val childExit = Regex("(?m)^COACH_ISO_CHILD_EXIT ([0-9]+)\\s*$").find(log)?.groupValues?.get(1)?.toIntOrNull()
+                        if (exit != 0 && childExit == exit && !log.contains("COACH_ISO_REFUSED") &&
+                            log.contains(" appcontainer=1") && log.contains("COACH_ISO_PROFILE_DELETED hr=0x0") &&
+                            log.contains("COACH_ISO_ACL_REVOKED 3") && Files.isRegularFile(stderr)) {
+                            val diagnostic = Files.newInputStream(stderr).use { boundedDiagnostic(it, rejectTools = input != null) }
+                            throw LocalCodexFailure(classifyCodexFailure(diagnostic))
+                        }
                         throw LocalCodexFailure(LocalCodexProblem.FAILED)
+                    }
                     if (!Files.isRegularFile(stdout) || !Files.isRegularFile(stderr))
                         throw LocalCodexFailure(LocalCodexProblem.FAILED)
                     val diagnostics = Files.newInputStream(stderr).use { boundedDiagnostic(it, rejectTools = input != null) }
@@ -171,9 +221,46 @@ internal class LocalCodexBookTransport(
                     0 to (childOutput + "\n" + diagnostics)
                 }
             } ?: throw LocalCodexFailure(LocalCodexProblem.TIMEOUT)
-        } finally { tree.stop() }
+        } finally {
+            withContext(NonCancellable) {
+                tree.stop()
+                try {
+                    runCatching { helperOut.await() }
+                    val log = runCatching { helperErr.await() }.getOrDefault("")
+                    if (!process.isAlive) report(process.exitValue(), log)
+                } finally {
+                    drainJob.cancelAndJoin()
+                    runCatching { process.inputStream.close() }
+                    runCatching { process.errorStream.close() }
+                }
+            }
+        }
     }
 
+}
+
+/** Pin the real root before launching a child; unlink junctions without traversing their targets. */
+internal fun discardIsolatedBookRun(root: Path, expectedRoot: Path) {
+    if (!Files.exists(root, NOFOLLOW_LINKS)) return
+    Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+            val expected = expectedRoot.resolve(root.relativize(dir)).normalize()
+            if (attrs.isOther || dir.toRealPath() != expected) {
+                Files.delete(dir)
+                return FileVisitResult.SKIP_SUBTREE
+            }
+            return FileVisitResult.CONTINUE
+        }
+        override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+            Files.delete(file)
+            return FileVisitResult.CONTINUE
+        }
+        override fun postVisitDirectory(dir: Path, error: java.io.IOException?): FileVisitResult {
+            if (error != null) throw error
+            Files.delete(dir)
+            return FileVisitResult.CONTINUE
+        }
+    })
 }
 
 /** Tools are disabled before launch. This is a second, fail-closed check of the entire JSONL stream.
@@ -246,7 +333,7 @@ internal fun classifyCodexFailure(diagnostic: String): LocalCodexProblem {
     }
 }
 
-/** PR226 972c5a94 snapshot/reap protocol, not launch-time OS containment. */
+/** Reap only this helper's descendants; AppContainer supplies the launch-time boundary. */
 private class LocalCodexProcessTree(private val process: Process) {
     private val tracked = LinkedHashSet<ProcessHandle>()
     private val reaping = AtomicBoolean(false)
@@ -255,20 +342,22 @@ private class LocalCodexProcessTree(private val process: Process) {
         if (reaping.compareAndSet(false, true))
             Thread(::stop, "local-book-codex-reaper").apply { isDaemon = true }.start()
     }
-    @Synchronized fun stop() {
-        try { reap() } finally {
-            runCatching { process.inputStream.close() }
-            runCatching { process.errorStream.close() }
-        }
-    }
+    @Synchronized fun stop() { reap() }
     private fun reap() {
         track()
         val descendants = tracked.toList()
         if (!process.isAlive && descendants.none { it.isAlive }) return
         var interrupted = Thread.interrupted()
         try {
-            process.destroy()
-            try { process.waitFor(2, TimeUnit.SECONDS) } catch (_: InterruptedException) { interrupted = true }
+            // Kill the isolated children first and let the helper observe their exit, revoke its
+            // temporary ACEs and delete the profile. Terminating the helper first skips finally.
+            val gracefulDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (process.isAlive && System.nanoTime() < gracefulDeadline) {
+                track()
+                tracked.toList().asReversed().forEach { if (it.isAlive) it.destroyForcibly() }
+                try { process.waitFor(10, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { interrupted = true }
+            }
+            if (process.isAlive) process.destroy()
             val remaining = (descendants + process.descendants().use { it.toList() }).distinct()
             remaining.asReversed().forEach { if (it.isAlive) it.destroyForcibly() }
             if (process.isAlive) process.destroyForcibly()

@@ -92,6 +92,26 @@ class ReaderExplanationTest {
             assertTrue(h.actor.execute { events("c") }.isEmpty(), "AI must not change quiz or mastery state")
         }
     }
+    @Test fun filteredSelectionCannotBorrowAnUnrelatedVisibleAnchor() = runBlocking {
+        Harness().use { h ->
+            val request = json("requestId" to "aa", "kind" to "explain")
+            val private = SourcePage("private", 1, "Synthetic confidential key", learnerVisible = false)
+            val later = SourcePage("later", 9, "Synthetic unlearned chapter")
+            val scope = com.coach.domain.scope.VisibleScope.learner().narrowToPages("synthetic-slides", 4..4)
+            for (quote in listOf(private.text, later.text, "", "not provided")) {
+                val result = h.reader.explain("d", "c", request, quote, pack.pages + private + later, scope)
+                assertTrue(result.str("text").contains("无法确认"))
+                assertTrue(result.getValue("sources").jsonArray.isEmpty())
+            }
+            // The pack's six-page budget can also remove a selected page after scope filtering.
+            val crowded = (1..6).map { SourcePage("public-$it", it, "Other synthetic material", score = 10.0) } +
+                SourcePage("dropped", 7, "Synthetic dropped selection")
+            assertTrue(h.reader.explain("d", "c", request, "Synthetic dropped selection", crowded,
+                com.coach.domain.scope.VisibleScope.learner()).str("text").contains("无法确认"))
+            assertEquals(0, h.stub.requests, "Refuse before any model or retry")
+        }
+    }
+
     @Test fun cancellationIsDeviceScopedAndAlsoWorksBeforeTheRequestArrives() = runBlocking {
         Harness().use { h ->
             h.reader.cancel("d", "c", "aa")
@@ -115,7 +135,7 @@ class ReaderExplanationTest {
             val haiku = StubTutor.terminal("complete").replace("claude-sonnet-5-5", "claude-haiku-5-5")
             repeat(2) { h.stub.stream(1, payload("不接受虚构引用。", "S9"), haiku, StubTutor.DONE) }
             h.stub.stream(1, payload("最后一次有依据的解释。"), StubTutor.terminal("complete"), StubTutor.DONE)
-            val answer = h.reader.explain("d", "c", json("requestId" to "ad", "kind" to "explain"), "Synthetic pears", pack.pages)
+            val answer = h.reader.explain("d", "c", json("requestId" to "ad", "kind" to "explain"), "Synthetic pears", pack.pages, com.coach.domain.scope.VisibleScope.learner())
             assertTrue(answer.str("text").contains("最后一次"))
             assertEquals(3, h.stub.requests)
             assertEquals(4, answer["sources"]!!.jsonArray.single().jsonObject.num("pdfPage"))

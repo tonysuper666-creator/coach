@@ -3,6 +3,8 @@ package com.coach.server
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.SourcePage
+import com.coach.store.tutorSourceAllowed
+import com.coach.domain.scope.VisibleScope
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -11,11 +13,19 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 
 /**
- * A paired client's own book: it sends the selected passage plus a few neighbouring source blocks, each with
- * its block id (`<bookHash>:p<page>:<index>`). The explanation may cite only those blocks, and the answer gives
- * those ids back, so the client opens the original text from its own copy. Nothing is stored or registered here.
+ * Paired, explicitly submitted local-book text is user input, not a course-source lookup.
+ * A client block id grants no access to the ledger, reader catalog or other blocks.
+ * The server's ceiling is the selected text alone; neighbours (including unread pages)
+ * are never made visible. Course questions use their separate, server-validated path.
  */
-internal class LibraryExplainRequest(val quote: String, val pages: List<SourcePage>)
+internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope) {
+    companion object {
+        fun selected(quote: String, page: SourcePage): LibraryExplainRequest {
+            val scope = VisibleScope.learner().narrowToPages(page.docId, page.pdfPage..page.pdfPage)
+            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), scope)
+        }
+    }
+}
 
 private val blockId = Regex("[A-Za-z0-9._-]{1,80}:p([0-9]{1,5}):[0-9]{1,9}")
 
@@ -32,15 +42,16 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
         val id = (block["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: bad()
         val text = (block["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim() ?: bad()
         val match = blockId.matchEntire(id) ?: bad()
-        if (text.isEmpty() || text.length > 8_000 || !seen.add(id)) bad()
+        if (text.isEmpty() || text.length > 8_000 || !seen.add(id) || match.groupValues[1].toInt() < 1) bad()
         total += text.length
         SourcePage(id, match.groupValues[1].toInt(), text)
     }
     if (total > 24_000) bad()
-    // The selection must come from the blocks that are sent; whitespace may differ.
-    fun squash(s: String) = s.split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ")
-    if (pages.none { squash(it.text).contains(squash(quote)) }) bad()
-    return LibraryExplainRequest(quote, pages)
+    // One local book per request. No client "scope" / visibility / course metadata is trusted.
+    val books = pages.map { it.docId.substringBefore(":p") }.toSet()
+    if (books.size != 1 || !tutorSourceAllowed(books.single())) bad()
+    val selected = pages.firstOrNull { containsReaderSelection(it.text, quote) } ?: bad()
+    return LibraryExplainRequest.selected(quote, selected)
 }
 
 fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?) {
@@ -49,7 +60,7 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
                 val request = libraryExplainRequest(input)
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages)
+                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope)
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

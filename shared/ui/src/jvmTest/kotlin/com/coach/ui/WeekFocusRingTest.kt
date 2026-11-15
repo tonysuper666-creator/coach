@@ -1209,7 +1209,7 @@ class WeekFocusRingTest {
                         fun dialogs() = onAllNodes(isDialog()).fetchSemanticsNodes().size
                         select()
                         for ((n, m) in actions) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode $n is offered once text is selected")
-                        val before = shot("$mode-sel-unfocused")
+                        val before = shot("$mode-selrow-unfocused")
                         val b0 = actions.map { first(it.second).boundsInRoot }
                         println("TON-1603 week $mode sel bounds=" + names.indices.joinToString(" ") { i -> val r = b0[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
                         if (!narrow) {
@@ -1221,13 +1221,13 @@ class WeekFocusRingTest {
                                 stops += "$n=${tabUntil(m)}"
                                 assertTrue(focused(m), "$mode Tab never reached $n")
                                 assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize $n")
-                                measurePillInside(mode, "选区-$n", m, before)
+                                measurePillInside(mode, "选区行-$n", m, before)
                             }
                             println("TON-1603 week $mode sel tab-stops ${stops.joinToString(" ")}")
                             assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the five actions are consecutive Tab stops: $stops")
                             runOnIdle { focus.clearFocus() }; waitForIdle()
                             val all = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
-                            assertRegionEqual(before, shot("$mode-sel-blurred"), all, "$mode selection actions after blur")
+                            assertRegionEqual(before, shot("$mode-selrow-blurred"), all, "$mode selection actions after blur")
                         } else {
                             // Scroll the row to its end, then back to its start: each time one pill sits flush against the
                             // clipped edge, and its ring must still be complete on that side.
@@ -1238,24 +1238,24 @@ class WeekFocusRingTest {
                             println("TON-1603 week $mode sel right-edge=${atEnd.right / scale}dp row=${rowRight / scale}dp scrolled=${(firstLeft - first(actions[0].second).boundsInRoot.left) / scale}dp")
                             assertTrue(firstLeft - first(actions[0].second).boundsInRoot.left > 8 * scale, "$mode the row really scrolls: 划线 moved ${(firstLeft - first(actions[0].second).boundsInRoot.left) / scale}dp")
                             assertTrue(abs(atEnd.right - rowRight) <= 2 * scale, "$mode 取消选择 is cut at the row's right edge: ${atEnd.right / scale}dp vs ${rowRight / scale}dp")
-                            val beforeRight = shot("$mode-sel-end-unfocused")
+                            val beforeRight = shot("$mode-selrow-end-unfocused")
                             onNode(actions[4].second).requestFocus(); waitForIdle()
                             assertTrue(focused(actions[4].second), "$mode 取消选择 takes focus at the clipped right edge")
                             assertEquals(atEnd, first(actions[4].second).boundsInRoot, "$mode focusing must not move or resize 取消选择 at the right edge")
                             measurePillInside(mode, "取消选择-右边缘", actions[4].second, beforeRight)
                             runOnIdle { focus.clearFocus() }; waitForIdle()
-                            assertRegionEqual(beforeRight, shot("$mode-sel-end-blurred"), atEnd.inflate(10 * scale), "$mode 取消选择 at the right edge after blur")
+                            assertRegionEqual(beforeRight, shot("$mode-selrow-end-blurred"), atEnd.inflate(10 * scale), "$mode 取消选择 at the right edge after blur")
                             onNode(actions[0].second).performScrollTo(); waitForIdle()
                             val backLeft = first(actions[0].second).boundsInRoot
                             println("TON-1603 week $mode sel left-edge=${backLeft.left / scale}dp row=${20f}dp")
                             assertTrue(abs(backLeft.left - 20f * scale) <= 2 * scale, "$mode 划线 is cut at the row's left edge: ${backLeft.left / scale}dp")
-                            val beforeLeft = shot("$mode-sel-start-unfocused")
+                            val beforeLeft = shot("$mode-selrow-start-unfocused")
                             onNode(actions[0].second).requestFocus(); waitForIdle()
                             assertTrue(focused(actions[0].second), "$mode 划线 takes focus at the clipped left edge")
                             assertEquals(backLeft, first(actions[0].second).boundsInRoot, "$mode focusing must not move or resize 划线 at the left edge")
                             measurePillInside(mode, "划线-左边缘", actions[0].second, beforeLeft)
                             runOnIdle { focus.clearFocus() }; waitForIdle()
-                            assertRegionEqual(beforeLeft, shot("$mode-sel-start-blurred"), backLeft.inflate(10 * scale), "$mode 划线 at the left edge after blur")
+                            assertRegionEqual(beforeLeft, shot("$mode-selrow-start-blurred"), backLeft.inflate(10 * scale), "$mode 划线 at the left edge after blur")
                         }
                         if (!narrow) {
                             /** Runs [act] on action [i] and checks that action's own effect, and nothing beyond it. */

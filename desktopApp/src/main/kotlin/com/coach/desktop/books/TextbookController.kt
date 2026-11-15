@@ -80,7 +80,10 @@ internal class TextbookController(val library: TextbookLibrary) {
     /** An explicit entry changes the walk; the shared continue action restores the saved walk. */
     suspend fun learn(path: LearningPath? = null) = action {
         val book = mutable.value.book ?: return@action
-        val target = path ?: restoredPath(book)
+        // A legacy, never-opened book has no previous walk. Keep the existing 今天/课程
+        // start-learning action; an explicit saved READ always continues in the reader.
+        val target = path ?: if (!book.learning && !book.promptSeen && library.learningPath(book.id) == null)
+            LearningPath.QUESTION_FIRST else restoredPath(book)
         if (target == LearningPath.READ) { openReading(book); return@action }
         library.closeReview()
         mutable.update { it.copy(review = null, learningPath = target) }

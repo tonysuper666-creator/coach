@@ -38,6 +38,25 @@ internal fun learningPathTextbook(root: Path, title: String, chemistry: Boolean 
 }
 
 class BookLearningPathPersistenceTest {
+    @Test fun legacyStartLearningStillPromptsButAnExplicitReadWalkContinuesReading() = runBlocking {
+        val root = Files.createTempDirectory("coach-legacy-start-walk-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(learningPathTextbook(root, "Synthetic legacy entry"))
+        val c = TextbookController(library)
+        c.load(); c.learn()
+        assertNull(c.state.value.error)
+        assertEquals(BookPrompt.START, c.state.value.prompt)
+        assertEquals(LearningPath.QUESTION_FIRST, c.state.value.learningPath)
+        assertNull(library.learningPath(book.id), "Do not persist a preview before the user enters")
+        c.chooseLearningPath(LearningPath.READ); c.enableLearning(); c.page(2); c.back()
+        c.learn()
+        assertEquals(BookScreen.READER, c.state.value.screen)
+        assertNull(c.state.value.prompt)
+        assertEquals(2, c.state.value.page)
+        assertFalse(c.state.value.book!!.learning)
+        assertEquals("READ", library.learningPath(book.id))
+    }
+
     @Test fun twoBooksRestoreTheirOwnWalkAndKeepPagesLessonsAndBothAnswerModes() = runBlocking {
         val root = Files.createTempDirectory("coach-learning-path-storage-")
         val directory = root.resolve("library")

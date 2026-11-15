@@ -48,6 +48,11 @@ class BookLearningPathPersistenceTest {
         assertEquals(BookPrompt.START, c.state.value.prompt)
         assertEquals(LearningPath.QUESTION_FIRST, c.state.value.learningPath)
         assertNull(library.learningPath(book.id), "Do not persist a preview before the user enters")
+        c.dismissPrompt(); c.read(); c.dismissPrompt(); c.page(2); c.back(); c.learn()
+        assertNull(c.state.value.error)
+        assertTrue(c.state.value.book!!.promptSeen)
+        assertEquals(BookPrompt.START, c.state.value.prompt, "Ordinary reading must not remove the old start-learning action")
+        assertNull(library.learningPath(book.id), "Reading does not choose a walk")
         c.chooseLearningPath(LearningPath.READ); c.enableLearning(); c.page(2); c.back()
         c.learn()
         assertEquals(BookScreen.READER, c.state.value.screen)
@@ -119,8 +124,15 @@ class BookLearningPathPersistenceTest {
             assertEquals(0, c.state.value.book!!.lessonIndex)
         }
         c.read()
-        assertEquals("READ", library.learningPath(id))
+        assertEquals("READ_AND_LEARN", library.learningPath(id))
+        assertEquals(LearningPath.READ_AND_LEARN, c.state.value.learningPath)
         assertEquals(QuestionMode.SHORT_ANSWER, library.book(id).questionMode)
+        assertEquals(BookScreen.READER, c.state.value.screen)
+        c.back(); c.learn()
+        assertEquals(BookScreen.LEARNING, c.state.value.screen)
+        assertEquals(LearningPath.READ_AND_LEARN, c.state.value.learningPath)
+        c.learn(LearningPath.READ)
+        assertEquals("READ", library.learningPath(id), "Only an explicit reading walk changes the saved choice")
         assertEquals(BookScreen.READER, c.state.value.screen)
     }
 

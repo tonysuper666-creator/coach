@@ -68,9 +68,8 @@ internal class TextbookController(val library: TextbookLibrary) {
     private fun restoredPath(book: Textbook) = LearningPath.restore(library.learningPath(book.id), book.learning)
 
     private fun openReading(book: Textbook, promptToLearn: Boolean = false) {
-        library.saveLearningPath(book.id, LearningPath.READ.name)
         library.closeReview()
-        mutable.update { it.copy(review = null, learningPath = LearningPath.READ, questionsOpen = false,
+        mutable.update { it.copy(review = null, questionsOpen = false,
             screen = BookScreen.READER, page = book.readingPage, source = null,
             prompt = if (promptToLearn && !book.promptSeen && !book.learning) BookPrompt.AFTER_READING else null) }
     }
@@ -80,11 +79,15 @@ internal class TextbookController(val library: TextbookLibrary) {
     /** An explicit entry changes the walk; the shared continue action restores the saved walk. */
     suspend fun learn(path: LearningPath? = null) = action {
         val book = mutable.value.book ?: return@action
-        // A legacy, never-opened book has no previous walk. Keep the existing 今天/课程
-        // start-learning action; an explicit saved READ always continues in the reader.
-        val target = path ?: if (!book.learning && !book.promptSeen && library.learningPath(book.id) == null)
+        // A legacy book with no chosen walk keeps the original start-learning action,
+        // even after ordinary reading. An explicit saved READ still continues reading.
+        val target = path ?: if (library.learningPath(book.id) == null)
             LearningPath.QUESTION_FIRST else restoredPath(book)
-        if (target == LearningPath.READ) { openReading(book); return@action }
+        if (target == LearningPath.READ) {
+            if (path != null) library.saveLearningPath(book.id, target.name)
+            mutable.update { it.copy(learningPath = target) }
+            openReading(book); return@action
+        }
         library.closeReview()
         mutable.update { it.copy(review = null, learningPath = target) }
         if (!book.learning) mutable.update { it.copy(prompt = BookPrompt.START) }
@@ -112,7 +115,10 @@ internal class TextbookController(val library: TextbookLibrary) {
     suspend fun enableLearning() = action {
         val book = mutable.value.book ?: return@action
         val path = mutable.value.learningPath
-        if (path == LearningPath.READ) { openReading(book); return@action }
+        if (path == LearningPath.READ) {
+            library.saveLearningPath(book.id, path.name)
+            openReading(book); return@action
+        }
         require(book.lessons.isNotEmpty()) { "这本书暂时没有可提取的文字。仍可翻看 PDF 原页；开启 learning 需要带文字层的教材。" }
         val enabled = book.copy(learning = true, promptSeen = true)
         library.saveLearningPath(book.id, path.name)

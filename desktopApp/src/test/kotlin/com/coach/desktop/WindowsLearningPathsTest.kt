@@ -84,6 +84,25 @@ class WindowsLearningPathsTest {
             onNodeWithTag("short-answer").assertTextContains("My retained guided draft")
             onNodeWithTag("open-practice-source").assertIsFocused()
             assertEquals(2, library.book(a.id).readingPage)
+
+            // The ordinary read buttons are a detour, not a new walk selection.
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            for ((destination, prefix) in listOf("今天" to "host-today", "课程" to "host-course")) {
+                nav(destination).performClick()
+                onNodeWithTag("$prefix-read").performClick()
+                ready(controller) { it.screen == BookScreen.READER && it.source == null && it.page == 2 }
+                assertEquals("READ_AND_LEARN", library.learningPath(a.id))
+                nav(destination).performClick()
+                onNodeWithTag("$prefix-learn").performClick()
+                ready(controller) { it.screen == BookScreen.LEARNING && it.answer.text == "My retained guided draft" }
+                assertEquals(LearningPath.READ_AND_LEARN, controller.state.value.learningPath)
+                val resumed = controller.state.value.book!!
+                assertEquals(a.id, resumed.id)
+                assertEquals(0, resumed.lessonIndex)
+                assertEquals(a.lessons[0].id, resumed.lessons[resumed.lessonIndex].id)
+                onNodeWithTag("short-answer").performScrollTo().assertTextContains("My retained guided draft")
+                capture("$prefix-learning-after-read")
+            }
             onNodeWithText("返回书架").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
 

@@ -20,6 +20,19 @@ KEY = "synthetic-not-a-real-key"
 NOW = 1794787200
 
 
+class RequestLogTests(unittest.TestCase):
+    def test_records_actual_transport_and_model_without_prompt_or_key(self):
+        for transport in ("api", "subscription"):
+            with self.subTest(transport=transport), patch.dict("os.environ", {"BRIDGE_LOG_STDOUT": "1"}), patch("builtins.print") as output:
+                bridge.write_log(transport=transport, served_by="claude-haiku-5-5",
+                                 prompt="private passage", api_key=KEY)
+            line = output.call_args.args[0]
+            self.assertIn(f"transport={transport} ", line)
+            self.assertIn("served=claude-haiku-5-5 ", line)
+            self.assertNotIn("private passage", line)
+            self.assertNotIn(KEY, line)
+
+
 def frames(provider, terminal=True, usage=True, model=None):
     model = model or ("claude-haiku-5-5" if provider == "anthropic" else "gpt-6.1-terra")
     if provider == "anthropic":

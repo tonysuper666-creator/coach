@@ -71,6 +71,14 @@ the full bound across restarts. Unexpected over-bound usage closes the local mon
 Do not delete a ledger to restore headroom. Log monthly progress as spent plus
 unresolved reservations; neither is the account's authoritative remaining balance.
 
+For a reservation left by a crashed process, first follow the existing maintenance
+and idle gates to stop its owning service, then make a private backup of the ledger
+and monthly summary. Only settle an identified `(cycle_id, month, token)` through
+`CreditLedger.settle(provider, reservation, actual_microusd)` after the provider has
+confirmed that request's final charge (an integer number of microdollars, including
+zero only when confirmed). Without that evidence, retain the reservation; never
+delete ledger records or reset the monthly limit to recover headroom.
+
 ## Streaming and fallback
 
 Missing key, budget limit, 402/429 and API/transport errors use the same
@@ -81,6 +89,10 @@ Chat emits a new snapshot retaining any completed preceding part. Old callers th
 do not advertise reset support receive an explicit truncated terminal after partial
 output, rather than concatenated answers. Cancellation closes the API stream and
 retains its reservation.
+
+Request logs record `transport=api` or `transport=subscription`, the actual model
+in `served=`, and `ttft` in milliseconds. Use completed requests for production
+routing and first-content latency checks; logs contain no source passage or key.
 
 ## Batch and acceptance limits
 

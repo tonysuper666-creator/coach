@@ -117,7 +117,8 @@ internal fun rememberAnswerDrafts(controller: TextbookController): AnswerDrafts 
 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
-    support: BookLearningSupport = UnconnectedBookLearningSupport, chooseBook: suspend () -> Path?) {
+    support: BookLearningSupport = UnconnectedBookLearningSupport,
+    sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }, chooseBook: suspend () -> Path?) {
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
@@ -132,7 +133,6 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val lessonId = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)?.id
     val explanationReply = remember(ui.book?.id, lessonId, support) { mutableStateOf<BookLearningReply?>(null) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
-    val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
     LaunchedEffect(controller) {
         val current = controller.state.value
@@ -243,10 +243,21 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
                         onCitation = { index, target ->
-                            citationIndex = index
-                            sourceOrigin = SourceFocus.CITATION
-                            practiceSource = PracticeSource(target.pdfPage, target.quote, null)
-                            run { controller.source(); controller.page(target.pdfPage) }
+                            val current = controller.state.value
+                            if (current.screen == BookScreen.LEARNING && current.book?.id == target.book &&
+                                current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id && lesson != null) {
+                                citationIndex = index
+                                sourceOrigin = SourceFocus.CITATION
+                                practiceSource = PracticeSource(target.pdfPage, target.quote, null)
+                                run { controller.citationSource(target.book, lesson.id, target.pdfPage) }
+                            }
+                        },
+                        onCitationRefused = {
+                            val current = controller.state.value
+                            if (current.screen == BookScreen.LEARNING && current.book?.id == book.id &&
+                                current.book.lessons.getOrNull(current.book.lessonIndex)?.id == lesson?.id) {
+                                runCatching { lessonSourceFocus.requestFocus() }
+                            }
                         },
                         onPracticeSource = { openPracticeSource(it) }, onLesson = { run { drafts.flush(); controller.lesson(it) } },
                         onSettings = { run { controller.questionSettings() } }, onAnswer = { answer ->
@@ -575,7 +586,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
 private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
     returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
-    onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
+    onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onCitationRefused: () -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
     val book = checkNotNull(ui.book)
     val lesson = book.lessons.getOrNull(book.lessonIndex)
@@ -588,7 +599,15 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
             SourceFocus.PRACTICE -> practiceSourceFocus.requestFocus()
             SourceFocus.CITATION -> {
                 // A changed file may turn the old button into read-only text while away.
-                if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false).not())
+                // The row verifies asynchronously, so allow its button to reappear first.
+                val restored = withTimeoutOrNull(2_000) {
+                    while (true) {
+                        if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false)) return@withTimeoutOrNull true
+                        withFrameNanos { }
+                    }
+                    @Suppress("UNREACHABLE_CODE") false
+                } == true
+                if (!restored)
                     lessonSourceFocus.requestFocus()
             }
             null -> return@LaunchedEffect
@@ -618,7 +637,8 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                 if (ui.learningPath == LearningPath.READ_AND_LEARN || ui.answer.revealed) BookLessonExplanation(
                     book, lesson, support, reply = explanationReply,
                     sources = { sources -> BookSourceRow(sources, book, sourceResolver,
-                        focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation) },
+                        focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation,
+                        onRefused = { onCitationRefused() }) },
                 )
                 if (ui.learningPath == LearningPath.READ_AND_LEARN && !ui.questionsOpen && book.questionMode != QuestionMode.NONE) {
                     PaperButton(onQuestions, enabled = !ui.busy, modifier = Modifier.testTag("guided-start-questions")) { Text("继续做题") }

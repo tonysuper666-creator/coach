@@ -1,6 +1,8 @@
 package com.coach.desktop.books
 
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import kotlinx.coroutines.runBlocking
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -10,6 +12,8 @@ import org.apache.pdfbox.pdmodel.font.PDType1Font
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -62,6 +66,7 @@ class BookCitationWorkspaceTest {
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.READER && controller.state.value.page == 2 && !controller.state.value.busy }
             onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-source-0").assertIsFocused()
             onNodeWithTag("book-explanation-text").assertTextEquals("A synthetic explanation (1)")
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("unfinished draft")
@@ -80,8 +85,71 @@ class BookCitationWorkspaceTest {
             Files.write(controller.library.directory.resolve("${book.id}.${book.format}"), byteArrayOf(10), StandardOpenOption.APPEND)
             onNodeWithTag("windows-textbooks").performKeyInput { pressKey(Key.Escape) }
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-stale-0").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-source-stale-0").assertExists()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("open-lesson-source").fetchSemanticsNodes().any { it.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Focused) == true } }
             onNodeWithTag("open-lesson-source").assertIsFocused()
         }
+    }
+
+    @Test fun refusedCitationMovesFocusToNamedLessonSource() {
+        val (controller, support) = setup()
+        runComposeUiTest {
+            setContent { TextbookWorkspace(controller, loadOnMount = false, support = support) { null } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-source-0").performScrollTo().performSemanticsAction(SemanticsActions.RequestFocus)
+            onNodeWithTag("book-source-0").assertIsFocused()
+            val book = controller.state.value.book!!
+            Files.write(controller.library.directory.resolve("${book.id}.${book.format}"), byteArrayOf(10), StandardOpenOption.APPEND)
+            onNodeWithTag("book-source-0").performKeyInput { pressKey(Key.Enter) }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-stale-0").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("open-lesson-source").assertIsFocused().assertHasClickAction()
+            assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+        }
+    }
+
+    @Test fun lateCitationForPreviousBookCannotNavigateCurrentBook() {
+        val (controller, support) = setup()
+        val original = controller.state.value.book!!
+        val lesson = original.lessons[original.lessonIndex]
+        val input = Files.createTempFile("citation-second-", ".pdf")
+        Files.copy(controller.library.directory.resolve("${original.id}.${original.format}"), input, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        Files.write(input, byteArrayOf(10), StandardOpenOption.APPEND)
+        val second = controller.library.importBook(input).copy(learning = true)
+        controller.library.save(second)
+        assertNotEquals(original.id, second.id)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val resolver = object : BookSourceResolver(controller.library) {
+            override fun resolve(citation: OwnedBookCitation, expectedQuote: String?): BookSourceResolution {
+                val result = super.resolve(citation, expectedQuote)
+                started.countDown()
+                check(release.await(20, TimeUnit.SECONDS))
+                returned.countDown()
+                return result
+            }
+        }
+        try {
+            runComposeUiTest {
+                setContent { TextbookWorkspace(controller, loadOnMount = false, support = support, sourceResolver = resolver) { null } }
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-source-0").fetchSemanticsNodes().isNotEmpty() }
+                onNodeWithTag("book-source-0").performScrollTo().performClick()
+                assertTrue(started.await(20, TimeUnit.SECONDS))
+                runOnIdle {
+                    runBlocking { controller.select(second.id); controller.learn(LearningPath.READ_AND_LEARN) }
+                    release.countDown()
+                    assertTrue(returned.await(20, TimeUnit.SECONDS))
+                }
+                waitForIdle()
+                assertEquals(second.id, controller.state.value.book!!.id)
+                assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+                // Also exercise the lock-protected check directly, after a queued navigation reaches the controller.
+                runBlocking { controller.citationSource(original.id, lesson.id, 2) }
+                assertEquals(second.id, controller.state.value.book!!.id)
+                assertEquals(BookScreen.LEARNING, controller.state.value.screen)
+                assertNull(controller.state.value.source)
+            }
+        } finally { release.countDown() }
     }
 }

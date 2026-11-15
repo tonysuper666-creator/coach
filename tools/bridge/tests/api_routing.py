@@ -2,7 +2,6 @@
 """Offline API contracts. MockTransport cannot contact a provider or subscription CLI."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -19,16 +18,6 @@ import subscription_bridge as bridge
 
 KEY = "synthetic-not-a-real-key"
 NOW = 1794787200
-
-
-def admission(now=NOW):
-    return {p: {"key_sha256": hashlib.sha256(KEY.encode()).hexdigest(),
-                "free_only_verified": True, "purchased_balance_usd": 0,
-                "auto_recharge": False, "invoiced": False, "provider_stops_at_zero": True,
-                "evidence": "synthetic provider-only fixture", "verified_at": now,
-                "cycle_start": now - 1000, "cycle_end": now + 100000,
-                "valid_until": now + 10000, "grant_usd": g, "remaining_usd": g}
-            for p, g in (("anthropic", 200), ("openai", 500))}
 
 
 def frames(provider, terminal=True, usage=True, model=None):
@@ -54,37 +43,25 @@ class LedgerTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.now = NOW
         self.ledger = CreditLedger(self.root, lambda: self.now)
-        self.accounts = admission()
-        self.save()
 
     def tearDown(self):
         self.tmp.cleanup()
-
-    def save(self):
-        atomic_json(self.root / "api-credit-admission.json", self.accounts)
 
     def test_missing_key_does_not_create_a_ledger(self):
         with self.assertRaisesRegex(Denied, "missing_key"):
             self.ledger.reserve("anthropic", "", 1)
         self.assertFalse((self.root / "api-credit-ledger.json").exists())
 
-    def test_key_alone_is_not_admission(self):
-        (self.root / "api-credit-admission.json").unlink()
-        with self.assertRaisesRegex(Denied, "free_credit_not_verified"):
-            self.ledger.reserve("openai", KEY, 1)
+    def test_owner_authorized_key_needs_no_account_attestation(self):
+        self.ledger.reserve("openai", KEY, 1)
+        self.assertFalse((self.root / "api-credit-admission.json").exists())
 
-    def test_account_payment_expiry_and_key_checks_fail_closed(self):
-        cases = {"purchased_balance_usd": 1, "auto_recharge": True, "invoiced": True,
-                 "provider_stops_at_zero": False, "key_sha256": "different-key",
-                 "verified_at": NOW - 86401, "valid_until": NOW + 200,
-                 "grant_usd": "NaN", "free_only_verified": False, "evidence": ""}
-        for field, value in cases.items():
-            with self.subTest(field=field):
-                self.accounts = admission()
-                self.accounts["anthropic"][field] = value
-                self.save()
-                with self.assertRaises(Denied):
-                    self.ledger.reserve("anthropic", KEY, 1)
+    def test_invalid_reservations_fail_before_network(self):
+        for amount in (0, -1, True, 1.5):
+            with self.subTest(amount=amount), self.assertRaisesRegex(Denied, "invalid_reservation"):
+                self.ledger.reserve("anthropic", KEY, amount)
+        with self.assertRaisesRegex(Denied, "invalid_reservation"):
+            self.ledger.reserve("unknown", KEY, 1)
 
     def test_new_coach_caps_and_95_percent_of_grant(self):
         for provider, limit in (("anthropic", 150), ("openai", 475)):
@@ -92,12 +69,10 @@ class LedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(Denied, "95_percent"):
                 self.ledger.reserve(provider, KEY, 1)
 
-    def test_other_consumers_balance_is_used_conservatively(self):
-        self.accounts["anthropic"]["remaining_usd"] = 11
-        self.save()
-        self.ledger.reserve("anthropic", KEY, micros(1))
+    def test_key_change_does_not_reset_provider_budget(self):
+        self.ledger.reserve("anthropic", KEY, micros(150))
         with self.assertRaises(Denied):
-            self.ledger.reserve("anthropic", KEY, 1)
+            self.ledger.reserve("anthropic", "another-synthetic-key", 1)
 
     def test_restart_retains_unsettled_usage(self):
         self.ledger.reserve("anthropic", KEY, micros(150))
@@ -141,13 +116,28 @@ class LedgerTests(unittest.TestCase):
 
     def test_calendar_rollover_preserves_cycle_reservations(self):
         self.now = 1796083140  # 2026-11-30 23:59 UTC
-        self.accounts = admission(self.now)
-        self.save()
         self.ledger.reserve("openai", KEY, micros(475))
         self.now += 120
         with self.assertRaisesRegex(Denied, "95_percent"):
             self.ledger.reserve("openai", KEY, 1)
         self.assertNotIn("2026-12", self.ledger.read()["months"])
+
+    def test_settled_usage_resets_month_but_unknown_usage_carries_forward(self):
+        self.now = 1796083140
+        r = self.ledger.reserve("anthropic", KEY, micros(149))
+        self.ledger.settle("anthropic", r, micros(149))
+        self.ledger.reserve("anthropic", KEY, micros(1))
+        self.now += 120
+        self.ledger.reserve("anthropic", KEY, micros(149))
+        with self.assertRaises(Denied):
+            self.ledger.reserve("anthropic", KEY, 1)
+
+    def test_old_ledger_unsettled_calls_still_count(self):
+        atomic_json(self.root / "api-credit-ledger.json", {"version": 1, "cycles": {
+            "anthropic:old-cycle:old-key": {"spent": 0, "reserved": {"old": micros(150)}, "limit": micros(190)}
+        }, "months": {}})
+        with self.assertRaises(Denied):
+            self.ledger.reserve("anthropic", KEY, 1)
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
@@ -155,7 +145,6 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.ledger = CreditLedger(self.root, lambda: NOW)
-        atomic_json(self.root / "api-credit-admission.json", admission())
         self.requests = []
 
     def tearDown(self):
@@ -217,12 +206,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ApiFailure, "^api_ReadError$"):
             await self.collect(self.router(handler=fail))
 
-    async def test_missing_key_or_proof_never_contacts_network(self):
-        for keys in ({}, {"anthropic": KEY}):
-            (self.root / "api-credit-admission.json").unlink(missing_ok=True)
-            with self.assertRaises(Denied):
-                await self.collect(self.router(keys=keys))
+    async def test_missing_key_never_contacts_network_and_existing_key_works(self):
+        with self.assertRaisesRegex(Denied, "missing_key"):
+            await self.collect(self.router(keys={}))
         self.assertEqual([], self.requests)
+        events = await self.collect(self.router(frames("anthropic"), keys={"anthropic": KEY}))
+        self.assertEqual("complete", events[-1]["kind"])
+        self.assertEqual(1, len(self.requests))
 
     async def test_wrong_served_model_fails_closed(self):
         with self.assertRaisesRegex(ApiFailure, "api_model_mismatch"):

@@ -1,4 +1,4 @@
-# Coach API routing and free-credit admission
+# Coach API routing and monthly accounting
 
 `tools/bridge/model_routes.json` is the model, task, price and monthly-cap source.
 The server keeps sending task names and vendor selectors to the local bridge.
@@ -36,41 +36,16 @@ Install `tools/bridge/requirements.txt` into the bridge's Python environment bef
 using the startup script. Tests inject dummy keys and HTTP clients; they never
 read Keychain. Directly launching the Python module does not read Keychain.
 
-## Admission is closed until the account is demonstrably free-only
+## Owner-authorized API access
 
-A key, a successful model request, and a local 95% ledger cannot establish this.
-Other applications can spend the same grant between observations. Both providers'
-grants expire on their subscription billing cycle, rather than the UTC calendar
-month. They can continue into purchased credit / billing after a grant expires:
-[OpenAI credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits),
-[Anthropic credits](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers).
+On 2026-11-15 the owner waived the account-evidence prerequisite and authorized
+using the existing keys under Coach's local monthly caps. No private admission
+file or account attestation is required. A configured key can use its provider's
+API immediately; a missing key still uses the subscription bridge.
 
-Admission requires account evidence of **zero purchased balance, auto-recharge off,
-no invoice billing, and provider-enforced refusal at zero**, plus actual grant-cycle
-timestamps and current remaining balance. An observation of a successful charged
-grant is insufficient. This change does not obtain, fabricate, or modify those
-account facts. If any fact cannot be established, leave API admission closed.
-Do not change shared organization billing to enable Coach.
-
-An operator who has verified these facts may write a private, mode-0600
-`~/Coach/state/api-credit-admission.json` containing one record per verified
-provider. No example with a true attestation is installed automatically. The
-required record fields are:
-
-| Field | Meaning |
-| --- | --- |
-| `key_sha256` | SHA256 of the existing key, computed privately without printing the key |
-| `free_only_verified`, `provider_stops_at_zero` | Both boolean true only with actual account evidence |
-| `purchased_balance_usd`, `auto_recharge`, `invoiced` | Numeric zero, boolean false, boolean false |
-| `grant_usd`, `remaining_usd` | Actual grant and remaining USD; grant at most 200 / 500 |
-| `cycle_start`, `cycle_end` | Actual subscription-cycle UTC epoch seconds |
-| `verified_at`, `valid_until` | Observation and expiry UTC epoch seconds; at most 24h old, within the grant cycle |
-| `evidence` | Nonempty private reference to account evidence, never a secret or textbook text |
-
-The file is shaped as `{"anthropic": {...}, "openai": {...}}`. Missing, corrupt,
-expired, mismatched-key or paid-enabled records fall back before any API request.
-Requests cannot start within 240 seconds of evidence/grant expiry. Account evidence
-is a prerequisite, not a claim that local accounting controls provider billing.
+The ledger measures Coach consumption in UTC calendar months. It does not measure
+other applications in the shared organization or establish the provider's grant
+expiry, remaining balance or billing behavior. No organization settings are changed.
 
 ## Conservative accounting
 
@@ -83,19 +58,20 @@ Atomic, fsynced `api-credit-ledger.json` is authoritative. Calendar summaries
 `api-spend-YYYY-MM.json` report `spent_microusd`, `reserved_microusd`, and completed
 `calls` per provider. One dollar is 1,000,000 microdollars. Coach's UTC monthly caps
 are **Anthropic $150 and OpenAI $475**, including all unresolved reservations.
-The grant-cycle ceiling additionally retains 5% of the grant, taking account of
-observed external consumption. Refreshing evidence can only lower that cycle's
-limit. Crossing a calendar boundary does not discard cycle reservations.
+The ceiling also retains 5% of the nominal $200 / $500 grant; the stricter
+$150 / $475 caps apply. Changing a key does not reset the provider budget.
+Unresolved reservations from all prior months (including old ledger records)
+continue to consume headroom until settled; completed spend resets each month.
 
 Complete, model-matching usage settles the reservation at configured price;
 timeouts, HTTP errors, cancellation, missing usage and stream interruption retain
-the full bound across restarts. Unexpected over-bound usage closes the cycle.
+the full bound across restarts. Unexpected over-bound usage closes the local month.
 Do not delete a ledger to restore headroom. Log monthly progress as spent plus
 unresolved reservations; neither is the account's authoritative remaining balance.
 
 ## Streaming and fallback
 
-Missing admission/key, budget limit, 402/429 and API/transport errors use the same
+Missing key, budget limit, 402/429 and API/transport errors use the same
 vendor's existing subscription bridge. If the API already emitted partial text,
 reset-aware readers receive `x_coach_reset` and **replace** that attempt's text.
 Reader resets its parser/body deadline; the original total deadline still applies.
@@ -123,7 +99,7 @@ tools/dev/heavy ./gradlew :server:ai:test :server:app:test
 ```
 
 Use the Python environment containing the pinned bridge dependencies. Real
-acceptance remains separate: only after admission is verified, use four private
+acceptance uses four private
 passages from `~/Coach/state/model-routing-20261115/` through an isolated server and
 bridge, check the existing Reader format gate, actual Haiku served_by, and measured
 first-content latency against the subscription path. Never import that existing

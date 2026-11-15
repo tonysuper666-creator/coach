@@ -1,16 +1,15 @@
 """Conservative credit reservations. Billing authority remains the provider, not this ledger.
 
-No account is admitted merely because a key exists. The operator must verify a
-free-only account and record its actual grant period; see docs/operations/api-routing.md.
+The owner authorized existing keys with local monthly limits. This ledger records
+Coach usage, not the shared account's remaining grant or provider billing period.
 All amounts on disk are integer microdollars, never prompt/response contents.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, DecimalException, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,7 +26,7 @@ class Denied(Exception):
 def require(condition):
     # Safety checks must remain enabled under python -O.
     if not condition:
-        raise ValueError("invalid credit evidence or ledger")
+        raise ValueError("invalid credit ledger")
 
 
 def micros(value) -> int:
@@ -91,46 +90,26 @@ class CreditLedger:
         for month, summary in data["months"].items():
             atomic_json(self.state / f"api-spend-{month}.json", summary)
 
-    def admission(self, provider: str, key: str) -> dict:
-        try:
-            all_accounts = json.loads((self.state / "api-credit-admission.json").read_text())
-            a = all_accounts[provider]
-            now = self.clock()
-            require(a["key_sha256"] == hashlib.sha256(key.encode()).hexdigest())
-            require(a["free_only_verified"] is True)
-            require(a["purchased_balance_usd"] == 0 and a["auto_recharge"] is False and a["invoiced"] is False)
-            require(a["provider_stops_at_zero"] is True)
-            require(isinstance(a["evidence"], str) and a["evidence"].strip())
-            require(0 <= now - a["verified_at"] <= 86400)
-            require(a["cycle_start"] <= now < a["valid_until"] <= a["cycle_end"])
-            # Never begin a request close to a grant or evidence expiry.
-            require(now + 240 < a["valid_until"])
-            grant = micros(a["grant_usd"])
-            require(0 < grant <= micros({"anthropic": 200, "openai": 500}[provider]))
-            require(0 <= micros(a["remaining_usd"]) <= grant)
-            return a
-        except (OSError, ValueError, KeyError, TypeError, OverflowError, DecimalException):
-            raise Denied("free_credit_not_verified") from None
-
     def reserve(self, provider: str, key: str, maximum: int) -> tuple[str, str, str]:
         if not key:
             raise Denied("missing_key")
-        if maximum <= 0:
+        if type(maximum) is not int or maximum <= 0 or provider not in MONTHLY_CAPS:
             raise Denied("invalid_reservation")
         with self.locked():
-            a = self.admission(provider, key)
             data = self.read()
-            cycle_id = f"{provider}:{a['cycle_start']}:{a['cycle_end']}:{a['key_sha256']}"
-            grant = micros(a["grant_usd"])
-            # The remaining balance may already reflect other consumers. A refresh
-            # may lower our limit, but can never reset consumption for this cycle.
-            available = max(0, micros(a["remaining_usd"]) - (grant - grant * 95 // 100))
-            cycle = data["cycles"].setdefault(cycle_id, {"spent": 0, "reserved": {}, "limit": available})
-            cycle["limit"] = min(cycle["limit"], available)
             month = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m")
+            # Caps are per Coach/provider, independent of key changes. Keep 5% of
+            # the nominal grant (200/500) and the owner's stricter Coach caps.
+            limit = min(micros(MONTHLY_CAPS[provider]), micros({"anthropic": 200, "openai": 500}[provider]) * 95 // 100)
+            cycle_id = f"{provider}:{month}"
+            cycle = data["cycles"].setdefault(cycle_id, {"spent": 0, "reserved": {}, "limit": limit})
+            cycle["limit"] = min(cycle["limit"], limit)
+            # Unknown usage survives month rollover and migration from the earlier
+            # evidence-based ledger; starting a new month must not erase a call.
+            pending = sum(sum(c["reserved"].values()) for cid, c in data["cycles"].items() if cid.startswith(provider + ":"))
             summary = data["months"].setdefault(month, {}).setdefault(provider, {"spent_microusd": 0, "reserved_microusd": 0, "calls": 0})
-            if (cycle["spent"] + sum(cycle["reserved"].values()) + maximum > cycle["limit"] or
-                    summary["spent_microusd"] + summary["reserved_microusd"] + maximum > min(micros(MONTHLY_CAPS[provider]), grant * 95 // 100)):
+            if (cycle["spent"] + pending + maximum > cycle["limit"] or
+                    summary["spent_microusd"] + pending + maximum > limit):
                 raise Denied("credit_limit_95_percent")
             token = secrets.token_hex(16)
             cycle["reserved"][token] = maximum

@@ -230,13 +230,14 @@ internal fun WeeklyReader(
                                     V7TextButton(onClick = { onSection(s.str("section_id")) }, ringInside = true) { Text("要点：" + com.coach.client.displayTitle(s.str("title"))) }
                                     for ((index, fact) in s.strings("fact_ids").withIndex()) {
                                         val mastered = factMastered(fact, items)
-                                        TextButton(onClick = { onSection(s.str("section_id")) }) {
+                                        // The 考点 and 题 rows stay in this clipping column too, so their rings go inside as well.
+                                        V7TextButton(onClick = { onSection(s.str("section_id")) }, ringInside = true) {
                                             Text((if (mastered) "✓ 考点 ${index + 1} · 相关题均答对 · " else "○ 考点 ${index + 1} · ") + com.coach.client.displayTitle(s.str("title")),
                                                 color = if (mastered) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                         emphasis(listOf(fact))
                                         for (q in items.filter { fact in it.strings("factIds") })
-                                            TextButton(onClick = { onQuiz(s.str("section_id"), q.str("id")) }, modifier = Modifier.padding(start = 16.dp)) {
+                                            V7TextButton(onClick = { onQuiz(s.str("section_id"), q.str("id")) }, modifier = Modifier.padding(start = 16.dp), ringInside = true) {
                                                 val stem = q.str("stem").trim()
                                                 Text((if (stem.isEmpty()) "这一题" else "题：${stem.take(40)}") + " · " + when (q.str("status")) {
                                                     "mastered" -> com.coach.client.latestCorrectAttemptLabel(); "guessed" -> "猜对，待练"; "missed" -> "做错，待练"; else -> "待练"
@@ -258,7 +259,7 @@ internal fun WeeklyReader(
                     }, label = { Text("一句批注") }, modifier = Modifier.testTag("reader-note").semantics { contentDescription = "一句批注输入框" })
                     Text("个人批注不作为课件或教材证据。")
                 }
-            }, confirmButton = { TextButton(onClick = { editMark = null }) { Text("返回阅读") } })
+            }, confirmButton = { V7TextButton(onClick = { editMark = null }, ringInside = true) { Text("返回阅读") } })
             if (action != null) AlertDialog(onDismissRequest = { action = null }, title = { Text("选中追问") }, text = {
                 Column(Modifier.heightIn(max = 450.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(action!!.str("quote"))

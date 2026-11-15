@@ -71,7 +71,8 @@ import kotlin.test.assertTrue
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
  * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows, the top-bar week name, the Desk 目录 / 收起目录 buttons, the Desk 返回 / 出处与批注 / 专心读 entrances, the reading page's 问一句 / 开始做题 / 继续练习 / 打开原页 entrances, its footer ‹ 上一节 / 下一节 › steps, its 一句批注 dialog's 取消 / 保存, its selection menu / bar actions 划线 / 一句批注 / 再讲一遍 / 举个例子 / 复制, and the
- * reader's own selection row 划线 / 一句批注 / 再讲一遍 / 举个例子 / 取消选择, its 本周脉络 toggle and 要点：… entries (ring inside the pill, because those rows clip).
+ * reader's own selection row 划线 / 一句批注 / 再讲一遍 / 举个例子 / 取消选择, its 本周脉络 toggle and 要点：… entries, its 考点 and 题
+ * rows under them, and 返回阅读 in the 一句批注 dialog (ring inside the pill, because those rows clip).
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -1882,6 +1883,151 @@ class WeekFocusRingTest {
     }
 
     /**
+     * The 考点 rows, the 题 rows nested under them and 返回阅读 in the 一句批注 dialog sit in the same reading column, so they
+     * draw the ring just inside the pill as well. With real material at both widths and both page lightnesses: every pill
+     * is offered once, the 题 rows keep the plain TextButton's 16dp indent, focusing resizes nothing and leaves the row
+     * fully in view, each ring starts at the pill edge and is 2dp on all four sides at ≥3:1 to the paper and to the
+     * focused fill, and blur restores the pixels. Enter and a real mouse click call onSection for a 考点 row, onQuiz for
+     * its own 题, and 返回阅读 closes the dialog — no other reader callback fires.
+     */
+    @Test fun weeklyReaderFactAndQuestionRowsAndNoteDialogShowRingInsideAndKeepTheirActions() {
+        val body = "Synthetic pears grow.\nThey ripen in *autumn*."
+        val section = json("section_id" to "S1", "body" to body, "title" to "【W5】合成一节",
+            "content_version" to "v1", "fact_ids" to listOf("F1", "F2"), "sources" to listOf("Synthetic slide 5"))
+        val note = json("id" to "M1", "section" to "S1", "version" to "v1", "original" to body, "start" to 0, "end" to 9,
+            "quote" to body.substring(0, 9), "note" to "")
+        // Two 考点 with two 题 each; the last one has no stem, so it prints the 这一题 fallback.
+        val items = listOf(
+            json("id" to "Q1", "factIds" to listOf("F1"), "stem" to "第一题题干", "status" to "mastered"),
+            json("id" to "Q2", "factIds" to listOf("F1"), "stem" to "第二题题干", "status" to "guessed"),
+            json("id" to "Q3", "factIds" to listOf("F2"), "stem" to "第三题题干", "status" to "missed"),
+            json("id" to "Q4", "factIds" to listOf("F2"), "stem" to "", "status" to ""))
+        val names = listOf("考点1", "题1", "题2", "考点2", "题3", "题4")
+        val targets = listOf(
+            hasClickAction() and hasText("考点 1", substring = true),
+            hasClickAction() and hasText("题：第一题题干", substring = true),
+            hasClickAction() and hasText("题：第二题题干", substring = true),
+            hasClickAction() and hasText("考点 2", substring = true),
+            hasClickAction() and hasText("题：第三题题干", substring = true),
+            hasClickAction() and hasText("这一题", substring = true))
+        val dialogButton = hasClickAction() and hasText("返回阅读") and hasAnyAncestor(isDialog())
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = "{}".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val events = mutableListOf<String>()
+                        val start = json("map" to true, "dark" to dark, "marks" to JsonArray(listOf(note)))
+                        val state = mutableStateOf(start)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 5, listOf(section), section, items,
+                                    (state.value["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state.value, rememberScrollState(), "",
+                                    { transform -> state.value = transform(state.value) }, { events += "section:$it" },
+                                    { s, q -> events += "quiz:$s:$q" }, { events += "refresh" }, { on -> events += "focus:$on" }, {})
+                            }
+                        }
+                        waitForIdle()
+                        fun dialogs() = onAllNodes(isDialog()).fetchSemanticsNodes().size
+                        for ((i, m) in targets.withIndex()) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode ${names[i]} is offered once")
+                        /** Where the pill really is, before the scrolling column clips it (boundsInRoot is clipped). */
+                        fun full(m: SemanticsMatcher) = first(m).let { Rect(it.positionInRoot, Size(it.size.width.toFloat(), it.size.height.toFloat())) }
+                        val boxes = targets.map { full(it) }
+                        println("TON-1603 week $mode fact bounds=" + names.indices.joinToString(" ") { i -> val r = boxes[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                        assertEquals(boxes[3].left, boxes[0].left, 0.5f, "$mode the second 考点 row stays aligned with the first")
+                        for (i in listOf(1, 2, 4, 5)) assertEquals(boxes[0].left + 16f * scale, boxes[i].left, 0.5f, "$mode ${names[i]} keeps the plain button's 16dp indent")
+                        /** The column scrolls as a pill takes focus, so the paper under it is shot here: blur, shoot, refocus, measure, blur again. */
+                        fun measureHere(label: String, m: SemanticsMatcher) {
+                            val at = full(m)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertEquals(at, full(m), "$mode $label blur must not scroll the column")
+                            val under = shot("$mode-$label-unfocused")
+                            onNode(m).requestFocus(); waitForIdle()
+                            assertTrue(focused(m), "$mode $label takes focus again")
+                            assertEquals(at, full(m), "$mode $label refocus must not scroll the column")
+                            measurePillInside(mode, label, m, under)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertRegionEqual(under, shot("$mode-$label-blurred"), at.inflate(10 * scale), "$mode $label after blur")
+                            onNode(m).requestFocus(); waitForIdle()
+                        }
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        val stops = mutableListOf<String>()
+                        for ((i, m) in targets.withIndex()) {
+                            stops += "${names[i]}=${tabUntil(m)}"
+                            assertTrue(focused(m), "$mode Tab never reached ${names[i]}")
+                            assertEquals(boxes[i].size, full(m).size, "$mode focusing must not resize ${names[i]}")
+                            assertEquals(full(m), first(m).boundsInRoot, "$mode Tab leaves ${names[i]} fully in view")
+                            measureHere("考点区-${names[i]}", m)
+                        }
+                        println("TON-1603 week $mode fact tab-stops ${stops.joinToString(" ")}")
+                        assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the 考点 and 题 rows are consecutive Tab stops: $stops")
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+
+                        /** Runs [act] on pill [i] and checks it fires exactly that pill's own callback. */
+                        fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                            val n0 = events.size
+                            act(targets[i]); waitForIdle()
+                            val want = when (i) {
+                                0, 3 -> "section:S1"
+                                1 -> "quiz:S1:Q1"; 2 -> "quiz:S1:Q2"; 4 -> "quiz:S1:Q3"; else -> "quiz:S1:Q4"
+                            }
+                            assertEquals(listOf(want), events.drop(n0), "$mode $how ${names[i]} fires only its own callback")
+                            if (how == "Enter") assertTrue(focused(targets[i]), "$mode $how ${names[i]} keeps focus")
+                            assertEquals(dark, (state.value["dark"] as? JsonPrimitive)?.content == "true", "$mode $how ${names[i]} leaves the page lightness alone")
+                        }
+                        for (i in names.indices) check("Enter", i) { enter(it) }
+                        for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                        println("TON-1603 week $mode fact enter+mouse events=$events")
+
+                        // The 一句批注 dialog in the same column: 返回阅读 carries the same inside ring.
+                        fun openNote() {
+                            onNode(hasText("编辑这一句")).performMouseInput { click() }; waitForIdle()
+                            assertEquals(1, onAllNodes(dialogButton).fetchSemanticsNodes().size, "$mode 编辑这一句 opens the note dialog")
+                        }
+                        openNote()
+                        val under = shot("$mode-批注-返回阅读-unfocused", dialog = true)
+                        // The dialog keeps its own focus owner: its Tab cycle runs note field ⇄ 返回阅读. The multi-line note
+                        // field keeps a forward Tab for typing, so the keyboard way into the button is Shift+Tab; a plain
+                        // Tab from the button goes back to the field.
+                        onNodeWithTag("reader-note").requestFocus(); waitForIdle()
+                        onNodeWithTag("reader-note").performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }; waitForIdle()
+                        assertTrue(focused(dialogButton), "$mode Shift+Tab in the note field moves to 返回阅读")
+                        val at = full(dialogButton)
+                        assertEquals(at, first(dialogButton).boundsInRoot, "$mode 返回阅读 is whole inside the dialog")
+                        measurePillInside(mode, "批注-返回阅读", dialogButton, under, dialog = true)
+                        onNode(dialogButton).performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        assertFalse(focused(dialogButton), "$mode Tab leaves 返回阅读 for the note field")
+                        val n0 = events.size
+                        enter(dialogButton)
+                        assertEquals(0, dialogs(), "$mode Enter on 返回阅读 closes the dialog")
+                        assertEquals(emptyList(), events.drop(n0), "$mode 返回阅读 fires no reader callback")
+                        assertEquals(1, (state.value["marks"] as? JsonArray).orEmpty().size, "$mode 返回阅读 keeps the mark")
+                        openNote()
+                        assertRegionEqual(under, shot("$mode-批注-返回阅读-reopened", dialog = true), at.inflate(10 * scale), "$mode the reopened dialog")
+                        onNode(dialogButton).performMouseInput { click() }; waitForIdle()
+                        assertEquals(0, dialogs(), "$mode a click on 返回阅读 closes the dialog")
+                        assertEquals(emptyList(), events.drop(n0), "$mode the dialog buttons fire no reader callback")
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+
+    /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
      * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.
@@ -1939,8 +2085,8 @@ class WeekFocusRingTest {
      * The ring must start at the edge (no clipped part) and be V7FocusRingWidth wide on all four sides, ≥3:1 against the
      * surface the pill sits on and against the pill's own focused fill.
      */
-    private fun ComposeUiTest.measurePillInside(mode: String, label: String, m: SemanticsMatcher, before: PixelMap): PixelMap {
-        val shot = shot("$mode-$label-focused")
+    private fun ComposeUiTest.measurePillInside(mode: String, label: String, m: SemanticsMatcher, before: PixelMap, dialog: Boolean = false): PixelMap {
+        val shot = shot("$mode-$label-focused", dialog)
         val b = first(m).boundsInRoot
         val cx = b.center.x.roundToInt(); val cy = b.center.y.roundToInt()
         val l = b.left.roundToInt(); val t = b.top.roundToInt(); val r = b.right.roundToInt() - 1; val bo = b.bottom.roundToInt() - 1

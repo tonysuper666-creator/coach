@@ -228,6 +228,7 @@ def write_log(**kw: Any) -> None:
     line = (f"{datetime.now().astimezone().isoformat(timespec='seconds')} "
             f"rid={kw.get('request_id') or '-'} model={str(kw.get('model'))[:48]} "
             f"served={str(kw.get('served_by') or '-')[:48]} stream={int(bool(kw.get('stream')))} "
+            f"transport={kw.get('transport') or '-'} "
             f"traffic={kw.get('traffic', 'unknown')} source={kw.get('source', 'unknown')} bg={int(bool(kw.get('background')))} effort={kw.get('effort') or '-'} "
             f"in={kw.get('in_chars', 0)} out={kw.get('out_chars', 0)} "
             f"queue={kw.get('queue_ms', 0)}ms ttft={kw.get('ttft_ms') if kw.get('ttft_ms') is not None else '-'}ms "

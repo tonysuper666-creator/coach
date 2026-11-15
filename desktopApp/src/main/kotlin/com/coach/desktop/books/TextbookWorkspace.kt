@@ -222,13 +222,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             val startBookId = ui.book?.id; val startSource = ui.source
                             run {
                                 controller.page(page)
-                                if (restoreFocus) {
-                                    val lostFocus = withTimeoutOrNull(1_000) {
-                                        snapshotFlow { !readerHasFocus }.first { it }
-                                    } == true
-                                    val current = controller.state.value
-                                    if (lostFocus && !readerHasFocus && readerFocusStillOwned(startBookId, startSource, current))
-                                        readerFocusTicket = ReaderFocusTicket(startBookId, startSource)
+                                if (restoreFocus) awaitReaderFocusRestore(startBookId, startSource, { readerHasFocus }, { controller.state.value }) {
+                                    readerFocusTicket = it
                                 }
                             }
                         }, onBack = { returnFromReader() },
@@ -700,3 +695,16 @@ internal class ReaderFocusTicket(val bookId: String?, val source: BookLesson?)
 internal fun readerFocusStillOwned(startBookId: String?, startSource: BookLesson?, current: LibraryUi): Boolean =
     current.screen == BookScreen.READER && current.source != null && current.prompt == null &&
         current.book?.id == startBookId && current.source == startSource
+
+/**
+ * 翻页之后等阅读器丢掉焦点（最多 [timeoutMs]），再核对发起时的书和出处仍是当前的，才发焦点票。
+ * 抽成独立函数是为了能用受控的延迟和状态变化单独验证"旧请求晚到"的各种情形。
+ */
+internal suspend fun awaitReaderFocusRestore(
+    startBookId: String?, startSource: BookLesson?,
+    hasFocus: () -> Boolean, current: () -> LibraryUi,
+    timeoutMs: Long = 1_000, issue: (ReaderFocusTicket) -> Unit,
+) {
+    val lostFocus = withTimeoutOrNull(timeoutMs) { snapshotFlow { !hasFocus() }.first { it } } == true
+    if (lostFocus && !hasFocus() && readerFocusStillOwned(startBookId, startSource, current())) issue(ReaderFocusTicket(startBookId, startSource))
+}

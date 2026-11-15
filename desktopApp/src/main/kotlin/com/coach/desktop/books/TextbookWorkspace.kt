@@ -131,10 +131,19 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val practiceSourceFocus = remember { FocusRequester() }
     val activeLesson = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)
     val lessonId = activeLesson?.id
-    val consentEpoch = (support as? ConsentingBookLearningSupport)?.changes?.collectAsState()?.value ?: 0L
+    val consenting = support as? ConsentingBookLearningSupport
     val explanationReply = remember(ui.book?.id, lessonId, activeLesson?.blocks, support) { mutableStateOf<BookLearningReply?>(null) }
+    val explanationEpoch = remember(explanationReply, support) { mutableStateOf(consenting?.changes?.value ?: 0L) }
     // This observer stays mounted while reading a source page or visiting the bookshelf.
-    LaunchedEffect(explanationReply, support, consentEpoch) { explanationReply.value = null }
+    LaunchedEffect(explanationReply, support) {
+        consenting?.changes?.collect {
+            val epoch = consenting.changes.value
+            if (explanationEpoch.value != epoch) {
+                explanationReply.value = null
+                explanationEpoch.value = epoch
+            }
+        }
+    }
     var removingBook by remember(ui.book?.id) { mutableStateOf(false) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
@@ -245,7 +254,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         val displayed = if (lesson == null) ui else ui.copy(
                             answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
                         TextbookLearning(displayed, support, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
-                        explanationReply, sourceResolver, citationFocus, citationIndex,
+                        explanationReply, explanationEpoch, sourceResolver, citationFocus, citationIndex,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },
                         onCitation = { index, target ->
@@ -593,7 +602,7 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
 
 @Composable
 private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
-    returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, sourceResolver: BookSourceResolver,
+    returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, explanationEpoch: MutableState<Long>, sourceResolver: BookSourceResolver,
     citationFocus: MutableMap<Int, FocusRequester>, citationIndex: Int,
     onFocusRestored: () -> Unit, onBack: () -> Unit, onSource: () -> Unit, onCitation: (Int, BookSourceTarget) -> Unit, onPracticeSource: (Practice) -> Unit, onLesson: (Int) -> Unit,
     onSettings: () -> Unit, onAnswer: (PracticeAnswer) -> Unit, onReviews: () -> Unit, onQuestions: () -> Unit) {
@@ -636,7 +645,7 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
                 PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
                 HorizontalDivider()
                 if (ui.learningPath == LearningPath.READ_AND_LEARN || ui.answer.revealed) BookLessonExplanation(
-                    book, lesson, support, reply = explanationReply,
+                    book, lesson, support, reply = explanationReply, replyEpoch = explanationEpoch,
                     sources = { sources -> BookSourceRow(sources, book, sourceResolver,
                         focus = { i -> citationFocus.getOrPut(i) { FocusRequester() } }, onOpen = onCitation) },
                 )

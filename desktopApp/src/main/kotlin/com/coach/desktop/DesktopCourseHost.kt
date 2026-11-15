@@ -3,10 +3,11 @@ package com.coach.desktop
 import androidx.compose.runtime.Composable
 import com.coach.ui.CoachApp
 
-/** A configured ledger course uses its paired identity on Windows too. Local books have no
- * implicit remote course/question mapping and keep their existing unconfigured entry. */
+/** Unconfigured desktops open local books; configured courses retain their paired identity.
+ * Keep the host argument for existing callers, but course availability decides this route. */
+@Suppress("UNUSED_PARAMETER")
 internal fun desktopUsesTextbooks(osName: String, environmentCourse: String?, packagedCourse: String?): Boolean =
-    osName.startsWith("Windows") && environmentCourse.isNullOrBlank() && packagedCourse.isNullOrBlank()
+    environmentCourse.isNullOrBlank() && packagedCourse.isNullOrBlank()
 
 /** Shared by runCoach's paired window and the Windows entry behavior tests. */
 @Composable

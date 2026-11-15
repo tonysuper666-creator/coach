@@ -26,7 +26,19 @@ internal data class BookPassage(val book: String, val page: Int, val start: Int,
         }
     }
 }
-internal data class BookPassageQuestion(val passage: BookPassage, val question: String)
+internal data class BookPassageQuestion(val passage: BookPassage, val question: String) {
+    companion object {
+        /**
+         * The bound the provider already enforces on the trimmed question, counted in UTF-16 code
+         * units (Kotlin [String.length]). The composer reads this same constant so it cannot offer
+         * text that the provider will reject.
+         */
+        const val MAX_QUESTION_LENGTH = 500
+
+        /** The exact predicate the provider applies; the composer must not be more permissive. */
+        fun accepts(question: String) = question.trim().length in 1..MAX_QUESTION_LENGTH
+    }
+}
 internal sealed interface BookLearningReply {
     data class Text(val text: String, val sources: List<BookPassage> = emptyList()) : BookLearningReply
     data class Unavailable(val message: String) : BookLearningReply
@@ -108,9 +120,19 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                     }
                 }
             } else {
+                val typed = question.trim().length
+                val tooLong = typed > BookPassageQuestion.MAX_QUESTION_LENGTH
                 Text(checkNotNull(selected).text, Modifier.testTag("book-selected-passage"))
-                OutlinedTextField(question, { question = it.take(1000) }, label = { Text("想问什么？") },
-                    modifier = Modifier.fillMaxWidth().testTag("book-passage-question"))
+                // Nothing typed here is truncated: over-length text stays editable and copyable, and
+                // the hint below says why sending is closed instead of letting the provider reject it.
+                OutlinedTextField(question, { question = it }, label = { Text("想问什么？") },
+                    modifier = Modifier.fillMaxWidth().testTag("book-passage-question"), isError = tooLong)
+                Text(
+                    if (tooLong) "已超过 ${BookPassageQuestion.MAX_QUESTION_LENGTH} 字，删掉 " +
+                        "${typed - BookPassageQuestion.MAX_QUESTION_LENGTH} 字才能发送。已输入的文字没有被截断。"
+                    else "$typed / ${BookPassageQuestion.MAX_QUESTION_LENGTH}",
+                    modifier = Modifier.testTag("book-passage-length"), style = MaterialTheme.typography.bodySmall,
+                    color = if (tooLong) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(onClick = {
                     val passage = runCatching { BookPassage.from(book, checkNotNull(selected)) }.getOrNull()
                     if (passage == null) {
@@ -121,7 +143,7 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                         request = BookPassageQuestion(passage, question)
                         revision++
                     }
-                }, enabled = question.isNotBlank() && (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
+                }, enabled = BookPassageQuestion.accepts(question) && (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…")
                     is BookLearningReply.Text -> Text(result.text)

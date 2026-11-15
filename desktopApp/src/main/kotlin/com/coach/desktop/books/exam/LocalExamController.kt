@@ -19,11 +19,14 @@ internal data class LocalExamUi(
     val papers: List<JsonObject> = emptyList(), val active: JsonObject? = null,
     val history: List<JsonObject> = emptyList(), val attempt: JsonObject? = null, val source: JsonObject? = null,
     val busy: Boolean = false, val saving: Boolean = false, val error: String? = null, val conflict: Boolean = false,
+    val nowMillis: Long = 0,
 )
 
 /** Window-owned accepted writes survive course/tab detours and participate in the existing close guard. */
-internal class LocalExamController(library: TextbookLibrary, private val scope: CoroutineScope) {
-    private val store = LocalExamStore(library)
+internal class LocalExamController(library: TextbookLibrary, private val scope: CoroutineScope,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val store = LocalExamStore(library, clock = clock)
     private val mutable = MutableStateFlow(LocalExamUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
@@ -32,6 +35,26 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
     private val queueLock = Any()
     private val pending = linkedMapOf<Key, Draft>()
     private var writer: Job? = null
+
+    init {
+        // Window-owned, so opening a source or returning to the course cannot pause the timer.
+        scope.launch { while (isActive) { tick(); delay(250) } }
+    }
+
+    suspend fun tick() {
+        val active = mutable.value.active ?: return
+        if (active.str("timing") != "TIMED") return
+        val now = clock()
+        mutable.update { it.copy(nowMillis = now) }
+        if (now < active.num("deadline") || !flush()) return
+        action(showBusy = false) {
+            val ui = mutable.value
+            val book = ui.book ?: return@action
+            if (ui.active?.str("mockId") != active.str("mockId")) return@action
+            store.submit(book.id, active.str("mockId"), auto = true)
+            refresh(book, ui.attempt?.str("mockId"))
+        }
+    }
 
     private suspend fun action(showBusy: Boolean = true, block: () -> Unit): Boolean = actions.withLock {
         mutable.update { it.copy(busy = showBusy, error = null) }
@@ -49,7 +72,7 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
     private fun refresh(book: Textbook, opened: String? = null) {
         mutable.update { it.copy(book = book, reference = textbookReferencePaper(book), papers = store.papers(book.id),
             active = store.active(book.id), history = store.history(book.id),
-            attempt = opened?.let { id -> store.get(book.id, id) }, source = null) }
+            attempt = opened?.let { id -> store.get(book.id, id) }, source = null, nowMillis = clock()) }
     }
 
     suspend fun load(book: Textbook) {
@@ -68,11 +91,11 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
         }
     }
 
-    suspend fun start(paper: String) {
+    suspend fun start(paper: String, durationMinutes: Int? = null) {
         if (!flush()) return
         action {
             val book = checkNotNull(mutable.value.book)
-            refresh(book, store.start(book.id, paper).str("mockId"))
+            refresh(book, store.start(book.id, paper, durationMinutes).str("mockId"))
         }
     }
 
@@ -102,6 +125,7 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
         val ui = mutable.value
         val attempt = ui.attempt ?: return@synchronized
         if (ui.busy || ui.conflict || attempt.str("status") != "active") return@synchronized
+        if (attempt.str("timing") == "TIMED" && clock() >= attempt.num("deadline")) return@synchronized
         val key = Key(attempt.str("bookId"), attempt.str("mockId"))
         val answers = JsonObject(attempt.getValue("answers").jsonObject + (question to answer))
         val sequence = Math.addExact(attempt.num("answersSeq"), 1)
@@ -128,7 +152,8 @@ internal class LocalExamController(library: TextbookLibrary, private val scope: 
                 }
                 if (!reply.flag("saved")) {
                     mutable.update { it.copy(conflict = true) }
-                    error("另一个窗口已更新这次作答。本页内容仍保留，请确认后读取已保存作答。")
+                    error(if (reply.flag("expired")) "计时已结束，本页迟到内容没有写入成绩。请先复制需要保留的文字，再读取已保存作答。"
+                        else "另一个窗口已更新这次作答。本页内容仍保留，请确认后读取已保存作答。")
                 }
                 mutable.update { ui ->
                     if (ui.attempt?.str("mockId") == key.attempt && ui.attempt.num("answersSeq") <= reply.num("answersSeq"))

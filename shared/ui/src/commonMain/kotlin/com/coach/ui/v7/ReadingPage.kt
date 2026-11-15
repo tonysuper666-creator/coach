@@ -1,6 +1,7 @@
 package com.coach.ui.v7
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.TextSelectionColors
@@ -12,9 +13,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -112,10 +122,24 @@ internal fun SourceThumbnail(details: V7PageDetails, onOpen: () -> Unit) {
             overflow = androidx.compose.ui.text.style.TextOverflow.Clip)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(details.thumbnailCaption.ifBlank { details.sourceCaption }, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
-            Text("打开原页 →", Modifier.clickable(onClick = onOpen), style = MaterialTheme.typography.labelMedium.copy(textDecoration = TextDecoration.Underline), color = CoachTheme.colors.successFg)
+            Text("打开原页 →", Modifier.v7FocusRing().clickable(onClick = onOpen), style = MaterialTheme.typography.labelMedium.copy(textDecoration = TextDecoration.Underline), color = CoachTheme.colors.successFg)
         }
     }
 }
+
+/**
+ * The V7 ring shape for a menu label whose click area is padded beyond the text: [top] / [bottom] of that padding are left
+ * out, so the ring hugs the label (and stays clear of the menu title and dividers) while the click area stays as it was.
+ */
+private class LabelRingShape(private val top: Dp, private val bottom: Dp) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline = with(density) {
+        val t = top.toPx(); val b = size.height - bottom.toPx()
+        val r = minOf(CoachV7.Radius.btn.toPx(), (b - t) / 2, size.width / 2)
+        Outline.Rounded(RoundRect(0f, t, size.width, b, CornerRadius(r)))
+    }
+}
+private val MenuLabelRing = LabelRingShape(4.dp, 4.dp)
+private val CopyLabelRing = LabelRingShape(6.dp, 0.dp)
 
 @Composable
 private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighlight: () -> Unit, onNote: () -> Unit, enabled: Boolean) {
@@ -125,16 +149,16 @@ private fun SelectionMenu(selection: String, onAsk: (String) -> Unit, onHighligh
         .background(if (c.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text("选中这一句", style = MaterialTheme.typography.labelMedium, color = c.fgSecondary)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("划线", Modifier.clickable(enabled = enabled, onClick = onHighlight).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
-            Text("一句批注", Modifier.clickable(enabled = enabled, onClick = onNote).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("划线", Modifier.v7FocusRing(MenuLabelRing).clickable(enabled = enabled, onClick = onHighlight).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("一句批注", Modifier.v7FocusRing(MenuLabelRing).clickable(enabled = enabled, onClick = onNote).padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
         Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Text("再讲一遍", Modifier.clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
-            Text("举个例子", Modifier.clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("再讲一遍", Modifier.v7FocusRing(MenuLabelRing).clickable { onAsk("请再讲一遍：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
+            Text("举个例子", Modifier.v7FocusRing(MenuLabelRing).clickable { onAsk("请举例说明：$selection") }.padding(vertical = 4.dp), style = MaterialTheme.typography.labelLarge)
         }
         HorizontalDivider(color = c.borderSubtle)
-        Text("复制", Modifier.clickable { clipboard.setText(AnnotatedString(selection)) }.padding(top = 6.dp), style = MaterialTheme.typography.labelLarge, color = c.fgSecondary)
+        Text("复制", Modifier.v7FocusRing(CopyLabelRing).clickable { clipboard.setText(AnnotatedString(selection)) }.padding(top = 6.dp), style = MaterialTheme.typography.labelLarge, color = c.fgSecondary)
     }
 
 }
@@ -151,7 +175,8 @@ private fun MarginQuestion(q: V7MarginQuestion, onQuiz: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         q.options.forEachIndexed { i, option ->
             if (i > 0) Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (i == q.answer) CoachTheme.colors.successBg else if (CoachTheme.colors.dark) CoachV7.Dark.optBg else CoachV7.Light.optBg)
+            // The ring sits outside the clipped option pill, so it goes before the clip.
+            Row(Modifier.fillMaxWidth().v7FocusRing(RoundedCornerShape(10.dp)).clip(RoundedCornerShape(10.dp)).background(if (i == q.answer) CoachTheme.colors.successBg else if (CoachTheme.colors.dark) CoachV7.Dark.optBg else CoachV7.Light.optBg)
                 .clickable(onClick = onQuiz).padding(horizontal = 12.dp, vertical = 4.dp).heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(('A' + i).toString(), style = MaterialTheme.typography.labelMedium)
                 Text(option, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp))
@@ -168,7 +193,7 @@ private fun MarginQuestion(q: V7MarginQuestion, onQuiz: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(q.source, style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.successFg)
-            Text("继续练习 →", Modifier.clickable(onClick = onQuiz), style = MaterialTheme.typography.labelMedium)
+            Text("继续练习 →", Modifier.v7FocusRing().clickable(onClick = onQuiz), style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -259,10 +284,16 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
     fun label(at: Int) = points.getOrNull(at)?.let { "${week?.let { n -> "$n." }.orEmpty()}${at + 1} ${splitTitle(it.title).second}" }.orEmpty()
     CompositionLocalProvider(LocalMarginAnchors provides railAnchors, LocalV7PageDetails provides d) {
     if (noteQuote != null) AlertDialog(onDismissRequest = { noteQuote = null }, title = { Text("一句批注") },
-        text = { Column { Text(noteQuote.orEmpty()); OutlinedTextField(noteText, { noteText = it }, label = { Text("批注") }, modifier = Modifier.testTag("v7-note-input")) } },
-        confirmButton = { TextButton(enabled = noteText.isNotBlank() && !saving, onClick = {
+        text = { val focus = LocalFocusManager.current; Column { Text(noteQuote.orEmpty()); OutlinedTextField(noteText, { noteText = it }, label = { Text("批注") },
+        // A one-line note never wants a tab character: Tab / Shift+Tab leave the field for 取消 / 保存 instead of typing one.
+        modifier = Modifier.testTag("v7-note-input").onPreviewKeyEvent { e ->
+            if ((e.key != Key.Tab && e.utf16CodePoint != 9) || e.isCtrlPressed || e.isAltPressed || e.isMetaPressed) return@onPreviewKeyEvent false
+            if (e.type == KeyEventType.KeyDown) focus.moveFocus(if (e.isShiftPressed) FocusDirection.Previous else FocusDirection.Next)
+            true
+        }) } },
+        confirmButton = { V7TextButton(enabled = noteText.isNotBlank() && !saving, onClick = {
             saveNote("> ${noteQuote.orEmpty()}\n\n${noteText.trim()}"); noteQuote = null; noteText = ""
-        }) { Text("保存") } }, dismissButton = { TextButton(onClick = { noteQuote = null }) { Text("取消") } })
+        }) { Text("保存") } }, dismissButton = { V7TextButton(onClick = { noteQuote = null }) { Text("取消") } })
     Desk(crumb = d.course.ifBlank { kp.module.ifBlank { c.courseId } } + week?.let { " · 第 $it 周" }.orEmpty(), focus = focus, onFocus = onFocus,
         status = d.readStatus, compactStatus = "${index + 1} / ${points.size}", onBack = onBack, backLabel = backLabel ?: week?.let { "← 第 $it 周" } ?: "← 今天",
         directory = { WeekDirectory(view, week, weekActions?.let { it::select }) },
@@ -283,9 +314,10 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 }
             }
         }, footer = {
-            Text(label(index - 1).let { if (it.isNotBlank()) "‹  $it" else "" }, Modifier.weight(1f).clickable { points.getOrNull(index - 1)?.let { weekActions?.onOpen(it.id) } }, style = MaterialTheme.typography.labelLarge)
+            fun step(at: Int): (() -> Unit)? = points.getOrNull(at)?.takeIf { weekActions != null }?.let { p -> { weekActions?.onOpen(p.id) } }
+            SectionStep(label(index - 1).let { if (it.isNotBlank()) "‹  $it" else "" }, "v7-reading-previous", step(index - 1), end = false)
             Text("${index + 1} / ${points.size}", style = MaterialTheme.typography.labelMedium, fontFamily = LocalV7Fonts.current.numbers)
-            Text(label(index + 1).let { if (it.isNotBlank()) "$it  ›" else "" }, Modifier.weight(1f).clickable { points.getOrNull(index + 1)?.let { weekActions?.onOpen(it.id) } }, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+            SectionStep(label(index + 1).let { if (it.isNotBlank()) "$it  ›" else "" }, "v7-reading-next", step(index + 1), end = true)
         }) {
         val m = LocalDeskMetrics.current
         BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -303,8 +335,8 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 } else Markdown(text, true, "reading:${kp.id}", c.math)
                 Spacer(Modifier.height(8.7.dp))
                 Row(Modifier.fillMaxWidth().railAnchor("end"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("问一句…", Modifier.clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
-                    Text("开始做题 →", Modifier.clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
+                    Text("问一句…", Modifier.v7FocusRing().clickable(onClick = onAsk).testTag("v7-reading-ask"), style = MaterialTheme.typography.labelLarge, color = CoachTheme.colors.fgSecondary)
+                    Text("开始做题 →", Modifier.v7FocusRing().clickable(onClick = onQuiz).testTag("v7-reading-quiz"), style = MaterialTheme.typography.labelLarge)
                 }
             }
             if (!m.inner && !focus) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (d.selection.isNotBlank()) 84.dp else 40.dp)
@@ -314,14 +346,29 @@ internal fun ReadingPage(c: CoachController, kp: KpRow, view: CourseView, text: 
                 .width(minOf(640.dp, maxWidth - if (m.window == DeskWindow.OuterLandscape) 48.dp else 32.dp)).height(52.dp)
                 .paperShadow("menu", CoachTheme.colors.dark).clip(RoundedCornerShape(10.dp)).background(if (CoachTheme.colors.dark) CoachV7.Dark.menuBg else CoachV7.Light.menuBg).padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("划线", Modifier.clickable(enabled = !saving) { saveNote("> ${d.selection}") }, style = MaterialTheme.typography.labelLarge)
-                Text("一句批注", Modifier.clickable(enabled = !saving) { noteQuote = d.selection }, style = MaterialTheme.typography.labelLarge)
-                Text("再讲一遍", Modifier.clickable { onSelectionAsk("请再讲一遍：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
-                Text("举个例子", Modifier.clickable { onSelectionAsk("请举例说明：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("划线", Modifier.v7FocusRing().clickable(enabled = !saving) { saveNote("> ${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("一句批注", Modifier.v7FocusRing().clickable(enabled = !saving) { noteQuote = d.selection }, style = MaterialTheme.typography.labelLarge)
+                Text("再讲一遍", Modifier.v7FocusRing().clickable { onSelectionAsk("请再讲一遍：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
+                Text("举个例子", Modifier.v7FocusRing().clickable { onSelectionAsk("请举例说明：${d.selection}") }, style = MaterialTheme.typography.labelLarge)
                 val clipboard = LocalClipboardManager.current
-                Text("复制", Modifier.clickable { clipboard.setText(AnnotatedString(d.selection)) }, style = MaterialTheme.typography.labelLarge)
+                Text("复制", Modifier.v7FocusRing().clickable { clipboard.setText(AnnotatedString(d.selection)) }, style = MaterialTheme.typography.labelLarge)
             }
         }
     }
 }
+}
+
+/**
+ * Footer step to the previous or next section. The V7 focus ring hugs the label; the rest of its half of the footer
+ * still takes a mouse click, as before. No target section, or no week navigation, leaves it disabled: no Tab stop.
+ */
+@Composable
+private fun RowScope.SectionStep(text: String, tag: String, onOpen: (() -> Unit)?, end: Boolean) {
+    val open by rememberUpdatedState(onOpen)
+    Box(Modifier.weight(1f).then(if (onOpen != null) Modifier.pointerInput(Unit) { detectTapGestures { open?.invoke() } } else Modifier),
+        contentAlignment = if (end) Alignment.CenterEnd else Alignment.CenterStart) {
+        val m = Modifier.testTag(tag).v7FocusRing().clickable(enabled = onOpen != null) { open?.invoke() }
+        if (end) Text(text, m, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+        else Text(text, m, style = MaterialTheme.typography.labelLarge)
+    }
 }

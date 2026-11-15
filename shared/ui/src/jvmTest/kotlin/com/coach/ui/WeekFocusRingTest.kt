@@ -1,6 +1,9 @@
 package com.coach.ui
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -15,6 +18,7 @@ import androidx.compose.ui.platform.testTag
 import com.coach.ui.v7.V7TextButton
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -35,6 +39,7 @@ import com.coach.ui.v7.LocalV7PageDetails
 import com.coach.ui.v7.WeekPage
 import com.coach.ui.v7.coursePageDetails
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import java.io.File
 import java.time.Instant
 import javax.imageio.ImageIO
@@ -46,7 +51,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links and the week-scope dropdown entry.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry and its menu rows.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -305,16 +310,111 @@ class WeekFocusRingTest {
         }
     }
 
+    /**
+     * The rows inside the week-scope dropdown (each week and 全部课程). The menu clips its rows, so the ring sits inside
+     * each row; first and last row must keep all four sides. Unfocused rows and the menu frame stay pixel-identical to the
+     * same Material menu, arrow keys walk the rows, Enter picks and closes, Escape closes, and a mouse click on a row's
+     * corner still picks it.
+     */
+    @Test fun weekScopeMenuRowsShowRingInsideAndKeepTheirLook() {
+        val view = threeWeeks(scope = 2)
+        withController { controller ->
+            for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(480f * scale, 520f * scale), density = Density(scale)) {
+                val mode = if (dark) "dark" else "light"
+                val browsed = mutableListOf<Int>()
+                val reference = mutableStateOf(true)
+                var referenceDismissed = 0
+                setContent { CoachTheme(dark) { Surface { Column(Modifier.padding(24.dp)) {
+                    val actions = WeekActions(controller, rememberCoroutineScope()).apply { onBrowse = { browsed += it } }
+                    if (reference.value) Box {
+                        TextButton({}, Modifier.heightIn(min = 48.dp)) { Text("第 2 周 · 换周 ▾") }
+                        DropdownMenu(expanded = true, onDismissRequest = { referenceDismissed++ }) {
+                            view.weeks.forEach { DropdownMenuItem(text = { Text("${view.weekLabel(it)} · 还有 1 节没会") }, onClick = {}) }
+                            DropdownMenuItem(text = { Text("全部课程") }, onClick = {})
+                        }
+                    } else WeekPicker(view, actions, true)
+                } } } }
+                waitForIdle()
+                val labels = view.weeks.map { "第 $it 周 · 还有 1 节没会" } + "全部课程"
+                val rows = labels.map { hasText(it) and hasClickAction() }
+                val ref = shot("$mode-menu-reference", dialog = true)
+                val refBounds = rows.map { first(it).boundsInRoot }
+                fun key(k: Key) {
+                    val target = rows.firstOrNull { focused(it) }?.let { onNode(it) } ?: onAllNodes(isRoot()).onLast()
+                    target.performKeyInput { pressKey(k) }; waitForIdle()
+                }
+                fun focusedRow() = rows.indexOfFirst { focused(it) }
+                // Baseline for Escape: the untouched Material menu in this offscreen harness.
+                key(Key.DirectionDown); key(Key.Escape)
+                val materialEscapeDismisses = referenceDismissed > 0
+                runOnIdle { reference.value = false }; waitForIdle()
+
+                val picker = hasText("第 2 周 · 换周 ▾") and hasClickAction()
+                fun open() {
+                    onNode(picker).requestFocus(); waitForIdle()
+                    onNode(picker).performKeyInput { pressKey(Key.Enter) }; waitForIdle()
+                    assertEquals(1, onAllNodes(rows.last()).fetchSemanticsNodes().size, "$mode Enter opens the menu with 全部课程")
+                }
+                open()
+                val opened = shot("$mode-menu-opened", dialog = true)
+                assertEquals(-1, focusedRow(), "$mode no row is focused before the first arrow key")
+                assertEquals(refBounds, rows.map { first(it).boundsInRoot }, "$mode menu rows keep Material's size and position")
+                // The focused picker's ring sits in the window behind the menu, so compare the menu itself (rows, padding, side and bottom shadow).
+                val pad = 8 * scale; val shadow = 6 * scale
+                val menu = Rect(refBounds.first().left - shadow, refBounds.first().top - pad, refBounds.last().right + shadow, refBounds.last().bottom + pad + shadow)
+                val menuDiff = countDiff(ref, opened, menu)
+                println("TON-1603 week $mode menu rows=${labels.size} size=${(menu.width / scale).roundToInt()}x${(menu.height / scale).roundToInt()}dp unfocused-vs-material diff=$menuDiff")
+                assertEquals(0, menuDiff, "$mode unfocused menu differs from the Material menu")
+
+                val order = mutableListOf<Int>()
+                for ((i, row) in rows.withIndex()) {
+                    key(Key.DirectionDown); order += focusedRow()
+                    assertTrue(focused(row), "$mode ↓ ${i + 1} should land on ${labels[i]}")
+                    val focusedShot = measureInside(mode, labels[i], row, ref, edgeRows = i == 0 || i == rows.lastIndex)
+                    if (i > 0) assertRegionEqual(ref, focusedShot, refBounds[i - 1], "$mode ${labels[i - 1]} after focus moved on")
+                }
+                key(Key.DirectionUp); order += focusedRow()
+                println("TON-1603 week $mode menu down-order=${order.dropLast(1)} up-from-last=${order.last()}")
+                assertEquals(rows.lastIndex - 1, order.last(), "$mode ↑ goes back one row")
+                assertRegionEqual(ref, shot("$mode-menu-after-up", dialog = true), refBounds.last(), "$mode 全部课程 after focus moved off")
+
+                key(Key.Escape)
+                val escapeClosed = onAllNodes(rows.last()).fetchSemanticsNodes().isEmpty()
+                println("TON-1603 week $mode menu escape material-dismisses=$materialEscapeDismisses picker-closes=$escapeClosed")
+                assertEquals(materialEscapeDismisses, escapeClosed, "$mode Escape behaves like the Material menu")
+                assertEquals(emptyList(), browsed, "$mode Escape picks nothing")
+                if (!escapeClosed) { onNode(picker).performClick(); waitForIdle() }
+                if (onAllNodes(rows.last()).fetchSemanticsNodes().isNotEmpty()) { onAllNodes(isRoot()).onLast().performMouseInput { click(Offset(width - 4f, height - 4f)) }; waitForIdle() }
+                assertEquals(0, onAllNodes(rows.last()).fetchSemanticsNodes().size, "$mode menu closed before reopening")
+                open(); key(Key.DirectionDown); key(Key.DirectionDown); key(Key.DirectionDown)
+                assertTrue(focused(rows[2]), "$mode third row focused before Enter")
+                key(Key.Enter)
+                assertEquals(listOf(3), browsed, "$mode Enter on 第 3 周")
+                assertEquals(0, onAllNodes(rows.last()).fetchSemanticsNodes().size, "$mode Enter closes the menu")
+                open(); repeat(rows.size) { key(Key.DirectionDown) }
+                key(Key.Enter)
+                assertEquals(listOf(3, 0), browsed, "$mode Enter on 全部课程 selects the whole course")
+                assertEquals(0, onAllNodes(rows.last()).fetchSemanticsNodes().size, "$mode menu closed after 全部课程")
+                open()
+                onNode(rows.first()).performMouseInput { click(Offset(2 * scale, 2 * scale)) }; waitForIdle()
+                assertEquals(listOf(3, 0, 1), browsed, "$mode a click 2dp inside the first row's corner still picks it")
+                println("TON-1603 week $mode menu enter/escape/click browsed=$browsed escape-closed=$escapeClosed")
+            }
+        }
+    }
+
     private data class Edge(val week: Int, val dead: SemanticsMatcher, val live: SemanticsMatcher, val lands: Int)
 
-    private fun threeWeeks(): CourseView {
+    private fun threeWeeks(scope: Int? = null): CourseView {
         val now = Instant.parse("2026-11-10T12:00:00Z").toEpochMilli()
         val events = listOf(Event(1, "outline", "SYN", "outline_revised", recordedAt = now,
             occurredAt = now, deviceId = "synthetic", actor = "SYSTEM", payload = json(
                 "knowledgePoints" to JsonArray(listOf(json("id" to "a", "title" to "【W1】合成要点"), json("id" to "c", "title" to "【W2】中间要点"),
                     json("id" to "d", "title" to "【W3】末周要点"))))),
             Event(2, "exam", "SYN", "exam_set", recordedAt = now, occurredAt = now,
-                deviceId = "synthetic", actor = "USER", payload = json("examDay" to 20802)))
+                deviceId = "synthetic", actor = "USER", payload = json("examDay" to 20802))) +
+            listOfNotNull(scope?.let { Event(3, "scope", "SYN", "study_scope_set", recordedAt = now, occurredAt = now,
+                deviceId = "synthetic", actor = "USER", payload = json("week" to it, "kpIds" to JsonArray(listOf(JsonPrimitive("c"))))) })
         return CourseView(events, project(events))
     }
 
@@ -409,18 +509,60 @@ class WeekFocusRingTest {
         assertTrue(contrast(before[cx, ringY], page) < 1.05f, "$mode $label ring pixel must be background when unfocused")
     }
 
+    /**
+     * Ring drawn inside a full-width menu row: walk inward from each edge through the row's focused fill to the ring.
+     * edgeRows also checks the outer side (top of the first row, bottom of the last) so a clipped ring would fail.
+     */
+    private fun ComposeUiTest.measureInside(mode: String, label: String, m: SemanticsMatcher, before: PixelMap, edgeRows: Boolean): PixelMap {
+        val shot = shot("$mode-menu-$label-focused", dialog = true)
+        val b = first(m).boundsInRoot
+        val cx = b.center.x.roundToInt(); val cy = b.center.y.roundToInt()
+        val l = b.left.roundToInt(); val t = b.top.roundToInt(); val r = b.right.roundToInt() - 1; val bo = b.bottom.roundToInt() - 1
+        val fill = shot[l + 2, cy]
+        fun isFill(c: Color) = contrast(c, fill) < 1.08f
+        fun walk(step: (Int) -> Color): Pair<Int, Int> {
+            var i = 1
+            while (isFill(step(i))) i++
+            val margin = i
+            while (!isFill(step(i))) i++
+            return margin to i - margin
+        }
+        val sides = listOf("left" to walk { shot[l + it, cy] }, "right" to walk { shot[r - it, cy] },
+            "top" to walk { shot[cx, t + it] }, "bottom" to walk { shot[cx, bo - it] })
+        val (marginL, _) = sides[0].second
+        val ring = shot[l + marginL + 1, cy]
+        val surface = before[l + marginL + 1, cy]
+        val wantMargin = (MenuInsetForTest - V7FocusRingGap - V7FocusRingWidth).value * scale
+        println("TON-1603 week $mode 菜单-$label ring=${hex(ring)} menu=${hex(surface)} fill=${hex(fill)} ring:menu=${"%.2f".format(contrast(ring, surface))} ring:fill=${"%.2f".format(contrast(ring, fill))} " +
+            sides.joinToString(" ") { (n, v) -> "$n=${v.first}/${v.second}px" })
+        assertTrue(contrast(ring, surface) >= 3f, "$mode $label ring vs the menu surface")
+        assertTrue(contrast(ring, fill) >= 3f, "$mode $label ring vs the row's focused fill")
+        for ((n, v) in sides) {
+            assertTrue(abs(v.first - wantMargin) <= 1.5f, "$mode $label $n margin ${v.first}px, want $wantMargin (ring inside the row, not clipped)")
+            assertTrue(abs(v.second - V7FocusRingWidth.value * scale) <= 1.5f, "$mode $label $n ring ${v.second}px")
+        }
+        assertTrue(contrast(surface, before[l + 2, cy]) < 1.05f, "$mode $label ring pixel is plain menu surface when unfocused")
+        return shot
+    }
+
+    /** Mirrors the private MenuRingInset in WeekStudyControls.kt. */
+    private val MenuInsetForTest = 8.dp
+
     private fun ComposeUiTest.shot(name: String, dialog: Boolean = false): PixelMap {
         val image = (if (dialog) onAllNodes(isRoot()).onLast() else onAllNodes(isRoot()).onFirst()).captureToImage()
         ImageIO.write(image.toAwtImage(), "png", File(out, "$name.png"))
         return image.toPixelMap()
     }
 
-    private fun assertRegionEqual(a: PixelMap, b: PixelMap, r: Rect, what: String) {
+    private fun assertRegionEqual(a: PixelMap, b: PixelMap, r: Rect, what: String) =
+        assertEquals(0, countDiff(a, b, r), "$what: pixels differ from the never-focused frame")
+
+    private fun countDiff(a: PixelMap, b: PixelMap, r: Rect): Int {
         var diff = 0
         for (x in r.left.toInt().coerceAtLeast(0) until r.right.toInt().coerceAtMost(a.width))
             for (y in r.top.toInt().coerceAtLeast(0) until r.bottom.toInt().coerceAtMost(a.height))
                 if (a[x, y] != b[x, y]) diff++
-        assertEquals(0, diff, "$what: pixels differ from the never-focused frame")
+        return diff
     }
 
     private fun contrast(a: Color, b: Color): Float {

@@ -55,10 +55,16 @@ internal class OwnedBookLearningProvider(
         require(normalized != normalizeCopy(prompt.excerpts.joinToString("") { it.text }))
         val allowed = prompt.excerpts.map { it.citation }.toSet()
         require(result.citations.isNotEmpty() && result.citations.all { it in allowed })
-        val references = result.citations.distinct().joinToString("；") {
-            "书 SHA-256 ${it.book}，第 ${it.page} 页，字符 ${it.start}–${it.end}"
+        // A citation only selects a passage this same run already verified against the book id,
+        // physical page and UTF-16 range. The excerpt text never comes from the executor, so a
+        // reply cannot invent a book, page or quote. Duplicates keep the model's order.
+        val sources = result.citations.distinctBy { it.page to it.start }.map { citation ->
+            val excerpt = prompt.excerpts.single { it.citation == citation }
+            BookPassage(citation.book, citation.page, citation.start, citation.end, excerpt.text)
         }
-        return BookLearningReply.Text("$text\n\n出处：$references")
+        require(sources.isNotEmpty())
+        // The body carries no book SHA-256, page number or character offset footer.
+        return BookLearningReply.Text(text, sources)
     }
 
     private fun normalizeCopy(text: String): String = buildString {

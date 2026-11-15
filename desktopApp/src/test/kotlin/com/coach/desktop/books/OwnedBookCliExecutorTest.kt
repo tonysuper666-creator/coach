@@ -92,8 +92,9 @@ class OwnedBookCliExecutorTest {
         val executor = OwnedBookCliExecutor(OwnedBookCliTransport { response }, OwnedBookOutboundPolicy { true })
         val provider = OwnedBookLearningProvider(library, executor)
         val good = assertIs<BookLearningReply.Text>(provider.ask(request))
-        assertTrue(good.text.contains(book.id))
-        assertTrue(good.text.contains("第 ${block.page} 页"))
+        assertEquals(listOf(BookPassage.from(book, block)), good.sources)
+        assertFalse(good.text.contains(book.id))
+        assertFalse(good.text.contains("第 ${block.page} 页"))
         response = """{"answer":"Forged reference.","citations":[1]}"""
         assertIs<BookLearningReply.Unavailable>(provider.ask(request))
         Unit

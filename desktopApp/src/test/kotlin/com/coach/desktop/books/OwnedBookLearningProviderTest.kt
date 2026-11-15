@@ -22,7 +22,7 @@ class OwnedBookLearningProviderTest {
         }
     }
 
-    @Test fun explanationAndQuestionKeepActionsAndReturnVerifiedSource() = runBlocking {
+    @Test fun explanationAndQuestionKeepActionsAndReturnTheVerifiedSource() = runBlocking {
         val f = Fixture()
         val seen = mutableListOf<OwnedBookPrompt>()
         val provider = f.provider(OwnedBookExecutor { prompt ->
@@ -34,11 +34,35 @@ class OwnedBookLearningProviderTest {
         assertEquals(listOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK), seen.map { it.action })
         assertNull(seen.first().question)
         assertEquals(f.ask.question, seen.last().question)
-        for (text in listOf(explanation.text, reply.text)) {
-            assertTrue(text.contains(f.book.id))
-            assertTrue(text.contains("第 ${f.block.page} 页"))
-            assertTrue(text.contains("${f.block.start}–${f.block.end}"))
+        for (answer in listOf(explanation, reply)) {
+            assertEquals(listOf(f.passage), answer.sources)
+            // The body must not leak the book SHA-256, the page number or the internal range.
+            assertFalse(answer.text.contains(f.book.id))
+            assertFalse(answer.text.contains("书 SHA"))
+            assertFalse(answer.text.contains("字符 "))
+            assertFalse(answer.text.contains("第 ${f.block.page} 页"))
+            assertFalse(Regex("[0-9a-f]{64}").containsMatchIn(answer.text))
         }
+    }
+
+    @Test fun sourcesKeepVerifiedOrderCollapseDuplicatesAndNeverTakeModelText() = runBlocking {
+        val f = Fixture()
+        val good = OwnedBookCitation(f.book.id, f.block.page, f.block.start, f.block.end)
+        val provider = f.provider(OwnedBookExecutor { OwnedBookAnswer("An explanation.", listOf(good, good)) })
+        val reply = assertIs<BookLearningReply.Text>(provider.ask(f.ask))
+        assertEquals(1, reply.sources.size, "a repeated citation must not add a second source")
+        val source = reply.sources.single()
+        assertEquals(f.passage, source)
+        // The excerpt is the re-verified page text, never anything the executor wrote.
+        val page = f.book.pages.single { it.number == source.page }
+        assertEquals(page.text.substring(source.start, source.end), source.text)
+
+        // A real block of the same book that this request never sent is refused.
+        val elsewhere = f.book.lessons[1].blocks.first { !it.heading }
+        val foreign = OwnedBookCitation(f.book.id, elsewhere.page, elsewhere.start, elsewhere.end)
+        val refused = f.provider(OwnedBookExecutor { OwnedBookAnswer("An explanation.", listOf(foreign)) })
+        assertIs<BookLearningReply.Unavailable>(refused.ask(f.ask))
+        Unit
     }
 
     @Test fun invalidInputNeverReachesExecutor() = runBlocking {

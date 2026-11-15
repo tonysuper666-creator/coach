@@ -244,5 +244,19 @@ elif source.endswith('/gradle.log'): pathlib.Path(dest).write_text('BUILD FAILED
         self.assertEqual(fingerprint(), hashes(port=''))
 
 
+
+class DesktopDefault(unittest.TestCase):
+    def test_desktop_tests_default_to_winbox_console_unless_pinned_local(self):
+        old = os.environ.pop('COACH_DESKTOP_HOST', None)
+        try:
+            self.assertTrue(winbox.default_desktop(['./gradlew', ':desktopApp:test', '--offline']))
+            self.assertFalse(winbox.default_desktop(['./gradlew', ':shared:domain:jvmTest']))
+            os.environ['COACH_DESKTOP_HOST'] = 'local'
+            self.assertFalse(winbox.default_desktop(['./gradlew', ':desktopApp:test']))
+        finally:
+            os.environ.pop('COACH_DESKTOP_HOST', None)
+            if old is not None:
+                os.environ['COACH_DESKTOP_HOST'] = old
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

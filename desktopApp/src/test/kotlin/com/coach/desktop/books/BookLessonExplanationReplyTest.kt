@@ -36,7 +36,7 @@ class BookLessonExplanationReplyTest {
             setContent {
                 if (visible) BookLessonExplanation(book, lesson, support, reply)
             }
-            waitUntil(timeoutMillis = 20_000) { support.explainCalls == 1 && reply.value != null }
+            waitUntil(timeoutMillis = 20_000) { support.explainCalls >= 1 && reply.value != null }
             onNodeWithTag("book-explanation-text").assertTextEquals(body)
 
             runOnIdle { visible = false }

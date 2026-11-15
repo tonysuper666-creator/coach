@@ -47,8 +47,12 @@ internal class OwnedBookLearningProvider(
         require(withContext(Dispatchers.IO) { checked() } == prompt)
         val text = result.text.trim()
         require(text.isNotEmpty() && !text.equals("unavailable", ignoreCase = true))
-        require(prompt.excerpts.none { text == it.text.trim() })
-        require(text != prompt.excerpts.joinToString("\n\n") { it.text }.trim())
+        // Reject whitespace-only changes to a verbatim source or complete lesson.
+        // This remains an exact-copy heuristic, not a test of explanation quality.
+        val normalized = text.filterNot { it.isWhitespace() || Character.isSpaceChar(it) }
+        require(prompt.excerpts.none { normalized == it.text.filterNot { c -> c.isWhitespace() || Character.isSpaceChar(c) } })
+        require(normalized != prompt.excerpts.joinToString("") { it.text }
+            .filterNot { it.isWhitespace() || Character.isSpaceChar(it) })
         val allowed = prompt.excerpts.map { it.citation }.toSet()
         require(result.citations.isNotEmpty() && result.citations.all { it in allowed })
         val references = result.citations.distinct().joinToString("；") {

@@ -69,7 +69,7 @@ class BookSourceRowTest {
         val sources = listOf(p2, p3.copy(text = p3.text.dropLast(1) + "X"), passage(b, 2), p3)
         setContent { BookSourceRow(sources, a, resolver, { focus[it] }, { i, t -> opened += i to t }) }
         settled(0, 1, 2, 3)
-        onNodeWithTag("book-source-0").assertTextEquals(bookSourceLabel(p2)).assertHasClickAction()
+        onNodeWithTag("book-source-0").assertTextEquals("打开原文 · " + bookSourceLabel(p2)).assertHasClickAction()
         onNodeWithTag("book-source-1").assertDoesNotExist()
         onNodeWithTag("book-source-stale-1").assertExists()
         onNodeWithTag("book-source-wrong-2").assertExists()
@@ -139,5 +139,25 @@ class BookSourceRowTest {
         fun desc(i: Int) = onNodeWithTag("book-source-$i").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.ContentDescription].single()
         assertTrue(desc(0).contains(bookSourceLabel(p2)) && desc(0).contains("《${a.title}》"))
         assertNotEquals(desc(0), desc(1))
+    }
+
+    private class Gated(lib: TextbookLibrary) : BookSourceResolver(lib) {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        override fun resolveAll(requests: List<Pair<OwnedBookCitation, String?>>): List<BookSourceResolution> { gate.await(); return super.resolveAll(requests) }
+    }
+
+    private fun ComposeUiTest.textX(tag: String): Float =
+        onAllNodes((hasTestTag(tag) or hasAnyAncestor(hasTestTag(tag))) and hasText("", substring = true), useUnmergedTree = true).onFirst().fetchSemanticsNode().positionInRoot.x
+
+    @Test fun allRowKindsShareOneLeftEdgeAndPendingToButtonDoesNotShift() = runComposeUiTest {
+        val gated = Gated(library)
+        val sources = listOf(p2, p3.copy(text = p3.text.dropLast(1) + "X"), passage(b, 2))
+        setContent { BookSourceRow(sources, a, gated, { FocusRequester() }, { _, _ -> }) }
+        val pendingX = (0..2).map { textX("book-source-pending-$it") }
+        assertEquals(1, pendingX.toSet().size)
+        gated.gate.countDown(); settled(0, 1, 2)
+        val readyX = textX("book-source-0"); val staleX = textX("book-source-stale-1"); val wrongX = textX("book-source-wrong-2")
+        assertEquals(pendingX[0], readyX, "pending -> button must not move sideways")
+        assertEquals(readyX, staleX); assertEquals(readyX, wrongX)
     }
 }

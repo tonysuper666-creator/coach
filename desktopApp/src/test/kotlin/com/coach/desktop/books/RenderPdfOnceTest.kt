@@ -44,3 +44,13 @@ class RenderPdfOnceTest {
         assertEquals(0, library.renderTraces().count { it.outcome == "hit" && it.page == 1 })
     }
 }
+
+class PdfWarmupTest {
+    @Test fun openingALibraryStartsAOneShotBackgroundWarmupThatFinishes() {
+        TextbookLibrary(Files.createTempDirectory("coach-warm-"))
+        val ms = PdfWarmup.done.get(60, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue(ms >= 0, "预热成功：$ms")
+        TextbookLibrary(Files.createTempDirectory("coach-warm2-")) // 再开不会重复预热
+        assertTrue(PdfWarmup.done.isDone)
+    }
+}

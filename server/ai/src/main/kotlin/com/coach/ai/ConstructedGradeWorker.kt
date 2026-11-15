@@ -44,9 +44,15 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
             require(process.rubric.isNotEmpty()) { "missing_process_rubric" }
             val pipeline=GradePipeline(client)
             if(work.kind=="grade_attempt") {
-                // HTTP/API failures retry through the same vendor's subscription
-                // transport. Never reverse the generator/reviewer roles on 429.
-                val draft=withContext(Dispatchers.IO) { pipeline.gradeConstructed(process,answer,draftOnly=true) }
+                var draft=withContext(Dispatchers.IO) { pipeline.gradeConstructed(process,answer,draftOnly=true) }
+                var fallbackNotice: String?=null
+                if(draft.calls.any { it.error?.contains("429")==true } || draft.defects.any { it.contains("429") }) {
+                    val first=draft.calls
+                    draft=withContext(Dispatchers.IO) { pipeline.gradeConstructed(process,answer,
+                        graderModel=BridgeClient.CODEX,reviewerModel=BridgeClient.CLAUDE,draftOnly=true) }
+                    draft=draft.copy(calls=first+draft.calls)
+                    fallbackNotice="Claude 当前限流，改由 ${BridgeClient.CODEX} 批改；异厂复核后才计入。"
+                }
                 actor.execute { draft.calls.forEach { recordAiCall(it.toJson(),"foreground") } }
                 if(draft.defects.isNotEmpty() || draft.draft==null) {
                     // A bridge that is restarting or rate limited is not a verdict on the answer; only a bad grade is final.
@@ -57,7 +63,7 @@ class ConstructedGradeWorker(private val actor: LedgerActor, private val client:
                 val payload=gradePayload(requireNotNull(draft.draft),working,numeric,question,input.str("finalAnswer"),draft.evidenceSpans)
                 val stored=JsonObject(payload + json("status" to "AI_UNREVIEWED","graderModel" to grader,
                     "rubricFingerprint" to work.fingerprint,"processGrade" to storedDraft(draft.draft),
-                    "callIds" to draft.calls.map { it.callId },"notice" to null,
+                    "callIds" to draft.calls.map { it.callId },"notice" to fallbackNotice,
                     "rewriteNotice" to if(draft.rewriteWithheld) "这次的改写示范和参考答案重合太多，没有显示；各项得分不受影响。" else null))
                 if(actor.execute { persistGradeDraft(work,stored,grader) }) onChanged(input.str("course"))
             } else {

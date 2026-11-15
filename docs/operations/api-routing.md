@@ -14,8 +14,10 @@ The bridge selects the API model, preserving the draft/reviewer vendor boundary.
 
 Planning task names are reserved configuration: the present application constructs
 outlines from its catalog; this change does not invent a new model-backed planner.
-Legacy persisted OpenAI drafts retain an Anthropic reviewer. Grading failures no
-longer reverse the two vendors. Existing evidence and grading gates still apply.
+Persisted OpenAI drafts retain an Anthropic reviewer. If both Anthropic API and
+its subscription fallback are rate limited, grading keeps its existing immediate
+OpenAI draft / Anthropic review fallback and notice; the two vendors stay distinct.
+Existing evidence and grading gates still apply.
 
 For recognized draft schemas and Reader's whole-answer gate, two consecutive Haiku
 format failures permit one Sonnet attempt. Review schema failure permits one Sol
@@ -99,8 +101,7 @@ tools/dev/heavy ./gradlew :server:ai:test :server:app:test
 ```
 
 Use the Python environment containing the pinned bridge dependencies. Real
-acceptance uses four private
-passages from `~/Coach/state/model-routing-20261115/` through an isolated server and
+acceptance uses four private passages from `~/Coach/state/model-routing-20261115/` through an isolated server and
 bridge, check the existing Reader format gate, actual Haiku served_by, and measured
 first-content latency against the subscription path. Never import that existing
 `run.py` as a helper: its top-level code starts calls. Keep source passages and

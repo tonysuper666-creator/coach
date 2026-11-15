@@ -155,21 +155,22 @@ class ConstructedGradeWorkerTest {
         } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 
-    @Test fun claudeRateLimitQueuesSameVendorRetryInsteadOfReversingTheReviewers() = runBlocking<Unit> {
+    @Test fun claudeRateLimitFallsBackWithNoticeAndRetainsCrossVendorReview() = runBlocking<Unit> {
         val dir=Files.createTempDirectory("grade-fallback")
         val actor=LedgerActor(this,LedgerStore(dir))
         try { StubBridge().use { bridge ->
             actor.execute { poseAndSubmit() }
             bridge.enqueue(429,"""{"error":{"message":"429 Too many requests"}}""")
+            bridge.enqueue(200,StubBridge.completion(draft()))
+            bridge.enqueue(200,StubBridge.completion("""{"verdict":"CONFIRM"}"""))
             val worker=ConstructedGradeWorker(actor,BridgeClient(stubConfig(bridge)))
-            assertTrue(worker.runOne())
-            assertFalse(worker.runOne()) // Persistent job backoff, no immediate vendor reversal.
+            worker.runOne();worker.runOne()
             val es=actor.execute { events("c") }
-            assertTrue(es.none { it.type in setOf("attempt_graded", "grade_reviewed") })
-            val jobs=actor.execute { constructedRecord("c","a")!!.getValue("jobs").jsonArray }
-            assertEquals("queued",jobs.single().jsonObject.str("state"))
-            assertTrue(bridge.requests.single().contains(BridgeClient.CLAUDE))
-            assertEquals(1L,actor.execute { supplyCallCount() })
+            val graded=es.single { it.type=="attempt_graded" }.payload
+            assertEquals(BridgeClient.CODEX,graded.str("graderModel"))
+            assertTrue(graded.str("notice").contains("限流"))
+            assertEquals(BridgeClient.CLAUDE,es.single { it.type=="grade_reviewed" }.payload.str("reviewerModel"))
+            assertEquals(3L,actor.execute { supplyCallCount() })
         } } finally { actor.close();dir.toFile().deleteRecursively() }
     }
 

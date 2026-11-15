@@ -227,6 +227,13 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RoutingTests(unittest.IsolatedAsyncioTestCase):
+    def test_rate_limited_grading_swap_keeps_cross_vendor_review(self):
+        draft = route("grade_constructed", "gpt-6.1-sol")
+        review = route("cross_review_grade", "claude-sonnet-5-5")
+        self.assertEqual("gpt-6.1-terra", draft)
+        self.assertEqual("claude-haiku-5-5", review)
+        self.assertNotEqual(vendor(draft), vendor(review))
+
     def test_task_roles_and_format_escalation(self):
         for task, group in CONFIG["tasks"].items():
             expected = CONFIG["models"][group]

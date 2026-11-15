@@ -15,6 +15,10 @@ public static class CoachIso {
     const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000, CREATE_SUSPENDED = 0x4, CREATE_NO_WINDOW = 0x08000000, CREATE_UNICODE_ENVIRONMENT = 0x400;
     static readonly IntPtr ATTR_SECURITY_CAPABILITIES = (IntPtr)0x00020009;
     static readonly IntPtr ATTR_HANDLE_LIST = (IntPtr)0x00020002;
+    // PROC_THREAD_ATTRIBUTE_JOB_LIST hands the Job to CreateProcess, so the child is in the Job
+    // from its first instant. AssignProcessToJobObject afterwards left a window between creation
+    // and assignment in which a hard-killed helper could orphan a (still suspended) child.
+    static readonly IntPtr ATTR_JOB_LIST = (IntPtr)0x0002000D;
     const int STARTF_USESTDHANDLES = 0x100;
 
     [DllImport("userenv.dll", CharSet = CharSet.Unicode)] static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint count, out IntPtr sid);
@@ -39,13 +43,17 @@ public static class CoachIso {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string n, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr t);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObjectW(IntPtr a, string n);
-    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr p);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, byte[] info, int len);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr p, uint access, out IntPtr tok);
     [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr tok, int cls, IntPtr buf, int len, out int ret);
     [DllImport("advapi32.dll")] static extern bool EqualSid(IntPtr a, IntPtr b);
 
     static int Refuse(int code, string why) { Console.Error.WriteLine("COACH_ISO_REFUSED code=" + code + " reason=" + why); return code; }
+
+    // The stdout file this run opened. Only a file the helper created itself is ever truncated;
+    // a caller path that was never opened is left alone.
+    static string openedOutput;
 
     sealed class Refusal : Exception {
         public readonly int Code;
@@ -105,14 +113,35 @@ public static class CoachIso {
         catch (Exception) { failures.Add("close_stream"); }
     }
 
+    // Every non-zero helper result must leave stdout empty, not only the ones that failed cleanup.
+    static bool DiscardOutput() {
+        if (openedOutput == null || !File.Exists(openedOutput)) return true;
+        try {
+            long before = new FileInfo(openedOutput).Length;
+            using (new FileStream(openedOutput, FileMode.Truncate, FileAccess.Write)) { }
+            Console.Error.WriteLine("COACH_ISO_STDOUT_DISCARDED bytes=" + before);
+            return true;
+        } catch (Exception e) {
+            Console.Error.WriteLine("COACH_ISO_DISCARD_FAILED " + e.GetType().Name);
+            return false;
+        }
+    }
+
     public static int Main(string[] argv) {
-        try { return Launch(argv); }
-        catch (Refusal e) { return Refuse(e.Code, e.Message); }
-        catch (ArgumentException) { return Refuse(120, "invalid_argument"); }
-        catch (IndexOutOfRangeException) { return Refuse(120, "missing_argument"); }
-        catch (FormatException) { return Refuse(120, "invalid_number"); }
-        catch (OverflowException) { return Refuse(120, "invalid_number"); }
-        catch (Exception e) { return Refuse(127, "helper_error " + e.GetType().Name); }
+        openedOutput = null;
+        int code;
+        try { code = Launch(argv); }
+        catch (Refusal e) { code = Refuse(e.Code, e.Message); }
+        catch (ArgumentException) { code = Refuse(120, "invalid_argument"); }
+        catch (IndexOutOfRangeException) { code = Refuse(120, "missing_argument"); }
+        catch (FormatException) { code = Refuse(120, "invalid_number"); }
+        catch (OverflowException) { code = Refuse(120, "invalid_number"); }
+        catch (Exception e) { code = Refuse(127, "helper_error " + e.GetType().Name); }
+        // A non-zero result is never an answer, so whatever the child already wrote is discarded
+        // here for every such code: refusals 120-128 and a child that exited non-zero on its own.
+        // If the output cannot be discarded the caller must not see it, so report a cleanup refusal.
+        if (code != 0 && !DiscardOutput()) return Refuse(128, "discard_stdout");
+        return code;
     }
 
     static int Launch(string[] argv) {
@@ -136,7 +165,9 @@ public static class CoachIso {
         var cmd = new StringBuilder();
         for (int j = i + 1; j < argv.Length; j++) { if (cmd.Length > 0) cmd.Append(' '); cmd.Append(Quote(argv[j])); }
 
-        int swept = Sweep();
+        int swept = 0;
+        try { swept = Sweep(); }
+        catch (Exception e) { Console.Error.WriteLine("COACH_ISO_SWEEP_ABORTED " + e.GetType().Name); }
         if (swept > 0) Console.Error.WriteLine("COACH_ISO_SWEPT " + swept);
         string name = "coach.book.iso." + System.Diagnostics.Process.GetCurrentProcess().Id + "." + Guid.NewGuid().ToString("N");
         // Only a fixed image inside an allowed read root (or the OS directory) may be launched; the helper's own
@@ -149,7 +180,7 @@ public static class CoachIso {
         IntPtr acSid = IntPtr.Zero; SecurityIdentifier sid = null; bool profileCreated = false;
         var capSids = new List<IntPtr>();
         var granted = new List<string>();
-        IntPtr attrs = IntPtr.Zero, secCapsPtr = IntPtr.Zero, capArr = IntPtr.Zero, handleArr = IntPtr.Zero, job = IntPtr.Zero;
+        IntPtr attrs = IntPtr.Zero, secCapsPtr = IntPtr.Zero, capArr = IntPtr.Zero, handleArr = IntPtr.Zero, job = IntPtr.Zero, jobArr = IntPtr.Zero;
         bool attrsInitialized = false;
         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
         FileStream fin = null, fout = null, ferr = null;
@@ -172,15 +203,24 @@ public static class CoachIso {
             }
             fin = stdin != null ? new FileStream(stdin, FileMode.Open, FileAccess.Read) : new FileStream(CreateFileW("NUL", 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero), FileAccess.Read);
             fout = new FileStream(stdout, FileMode.Create, FileAccess.Write, FileShare.Read);
+            openedOutput = stdout;
             ferr = new FileStream(stderr, FileMode.Create, FileAccess.Write, FileShare.Read);
             var handles = new[] { Inheritable(fin, "inherit_stdin").DangerousGetHandle(), Inheritable(fout, "inherit_stdout").DangerousGetHandle(), Inheritable(ferr, "inherit_stderr").DangerousGetHandle() };
 
+            // Establish reclamation before creating a child. A failed Job setup never reaches
+            // CreateProcess.
+            job = Fault("job_create") ? IntPtr.Zero : CreateJobObjectW(IntPtr.Zero, null);
+            Require(job != IntPtr.Zero, 125, "job_create");
+            var info = new byte[IntPtr.Size == 8 ? 144 : 112];
+            BitConverter.GetBytes((uint)0x2000).CopyTo(info, 16); // KILL_ON_JOB_CLOSE; not read isolation.
+            Require(!Fault("job_limits") && SetInformationJobObject(job, 9, info, info.Length), 125, "job_limits");
+
             IntPtr size = IntPtr.Zero;
-            bool probed = InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref size);
+            bool probed = InitializeProcThreadAttributeList(IntPtr.Zero, 3, 0, ref size);
             int probeError = Marshal.GetLastWin32Error();
             Require(!Fault("attr_size") && !probed && probeError == 122 /* ERROR_INSUFFICIENT_BUFFER */ && size.ToInt64() > 0, 123, "attr_size");
             attrs = Marshal.AllocHGlobal(size);
-            Require(!Fault("attr_init") && InitializeProcThreadAttributeList(attrs, 2, 0, ref size), 123, "attr_init");
+            Require(!Fault("attr_init") && InitializeProcThreadAttributeList(attrs, 3, 0, ref size), 123, "attr_init");
             attrsInitialized = true;
             handleArr = Marshal.AllocHGlobal(IntPtr.Size * 3);
             for (int k = 0; k < 3; k++) Marshal.WriteIntPtr(handleArr, k * IntPtr.Size, handles[k]);
@@ -194,14 +234,12 @@ public static class CoachIso {
             secCapsPtr = Marshal.AllocHGlobal(Marshal.SizeOf(sc));
             Marshal.StructureToPtr(sc, secCapsPtr, false);
             Require(!Fault("attr_caps") && UpdateProcThreadAttribute(attrs, 0, ATTR_SECURITY_CAPABILITIES, secCapsPtr, (IntPtr)Marshal.SizeOf(sc), IntPtr.Zero, IntPtr.Zero), 123, "attr_caps");
+            // Hand the Job to CreateProcess itself: the child is inside it the moment it exists, so
+            // there is no window in which a hard-killed helper leaves an unbound suspended child.
+            jobArr = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(jobArr, 0, job);
+            Require(!Fault("job_list") && UpdateProcThreadAttribute(attrs, 0, ATTR_JOB_LIST, jobArr, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero), 125, "job_list");
 
-            // Establish reclamation before creating a child. A failed Job setup never reaches
-            // CreateProcess, and a failed assignment below leaves the child suspended.
-            job = Fault("job_create") ? IntPtr.Zero : CreateJobObjectW(IntPtr.Zero, null);
-            Require(job != IntPtr.Zero, 125, "job_create");
-            var info = new byte[IntPtr.Size == 8 ? 144 : 112];
-            BitConverter.GetBytes((uint)0x2000).CopyTo(info, 16); // KILL_ON_JOB_CLOSE; not read isolation.
-            Require(!Fault("job_limits") && SetInformationJobObject(job, 9, info, info.Length), 125, "job_limits");
             var si = new STARTUPINFOEX();
             si.StartupInfo.cb = Marshal.SizeOf(si);
             si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -228,7 +266,10 @@ public static class CoachIso {
                 }
             }
             Console.Error.WriteLine("COACH_ISO_VERIFIED pid=" + pi.dwProcessId + " appcontainer=1");
-            Require(!Fault("job_assign") && AssignProcessToJobObject(job, pi.hProcess), 125, "job_assign");
+            // The Job came in through PROC_THREAD_ATTRIBUTE_JOB_LIST, so this only confirms it
+            // took effect; nothing runs until it does.
+            bool inJob;
+            Require(!Fault("job_assign") && IsProcessInJob(pi.hProcess, job, out inJob) && inJob, 125, "job_assign");
             Require(!Fault("resume"), 125, "resume");
             Require(ResumeThread(pi.hThread) == 1, 125, "resume");
             Console.Error.WriteLine("COACH_ISO_RESUMED pid=" + pi.dwProcessId);
@@ -252,6 +293,7 @@ public static class CoachIso {
             DisposeStream(fin, cleanup); DisposeStream(fout, cleanup); DisposeStream(ferr, cleanup);
             if (attrs != IntPtr.Zero) { if (attrsInitialized) DeleteProcThreadAttributeList(attrs); Marshal.FreeHGlobal(attrs); }
             if (handleArr != IntPtr.Zero) Marshal.FreeHGlobal(handleArr);
+            if (jobArr != IntPtr.Zero) Marshal.FreeHGlobal(jobArr);
             if (secCapsPtr != IntPtr.Zero) Marshal.FreeHGlobal(secCapsPtr);
             if (capArr != IntPtr.Zero) Marshal.FreeHGlobal(capArr);
             int revoked = 0;
@@ -272,19 +314,18 @@ public static class CoachIso {
                 if (dh != 0) cleanup.Add("delete_profile_retry");
                 Console.Error.WriteLine("COACH_ISO_PROFILE_DELETED hr=0x" + dh.ToString("x"));
             }
-            if (cleanup.Count > 0 && fout != null) {
-                // The helper created this output. Do not leave a successful-looking answer
-                // behind when cleanup failed, even if the child itself exited successfully.
-                try { using (var rejected = new FileStream(stdout, FileMode.Truncate, FileAccess.Write)) { } }
-                catch (Exception) { cleanup.Add("discard_stdout"); }
-            }
+            // Output discarding is not cleanup-specific: Main truncates the file this run opened
+            // for every non-zero result, so a timeout (126) or a failed wait (127) cannot leave a
+            // half answer behind either. A result that cannot be discarded becomes 128.
             Require(cleanup.Count == 0, 128, "cleanup_failed:" + string.Join(",", cleanup));
         }
     }
 
     // Deletes coach.book.iso.<pid>.* profiles left by a helper that was force-killed (Coach's revoke path kills the tree).
+    // A leftover pid may have been reused by a protected process, whose exit state cannot be read; that
+    // profile is skipped instead of deleted, and never turns this launch into a refusal.
     static int Sweep() {
-        int n = 0;
+        int n = 0, skipped = 0;
         using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings")) {
             if (k == null) return 0;
             foreach (var sidName in k.GetSubKeyNames()) {
@@ -293,10 +334,22 @@ public static class CoachIso {
                 if (moniker == null || !moniker.StartsWith("coach.book.iso.")) continue;
                 var parts = moniker.Split('.');
                 int pid; bool alive = false;
-                if (parts.Length >= 5 && int.TryParse(parts[3], out pid)) { try { alive = !System.Diagnostics.Process.GetProcessById(pid).HasExited; } catch (ArgumentException) { } }
+                if (parts.Length >= 5 && int.TryParse(parts[3], out pid)) {
+                    try {
+                        if (Fault("sweep_query")) throw new System.ComponentModel.Win32Exception(5);
+                        using (var p = System.Diagnostics.Process.GetProcessById(pid)) alive = !p.HasExited;
+                    } catch (ArgumentException) { }
+                    catch (Exception e) {
+                        // Unknown state is treated as alive: refusing to delete one stale profile is
+                        // recoverable, deleting a live one or failing every start is not.
+                        alive = true; skipped++;
+                        Console.Error.WriteLine("COACH_ISO_SWEEP_SKIP pid=" + pid + " reason=" + e.GetType().Name);
+                    }
+                }
                 if (!alive && DeleteAppContainerProfile(moniker) == 0) n++;
             }
         }
+        if (skipped > 0) Console.Error.WriteLine("COACH_ISO_SWEEP_SKIPPED " + skipped);
         return n;
     }
 

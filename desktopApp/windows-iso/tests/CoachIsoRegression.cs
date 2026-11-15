@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.RegularExpressions;
@@ -103,6 +104,120 @@ public static class CoachIsoRegression {
         CheckCleanup(log, work, true);
         results.Add(new { test = step, exit, childExit = 0, answers = 0, recovered = true, residual = 0, log });
     }
+    // --- wiring contract and Sweep cases ---
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)] static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint count, out IntPtr sid);
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)] static extern int DeleteAppContainerProfile(string name);
+    [DllImport("advapi32.dll")] static extern IntPtr FreeSid(IntPtr sid);
+    static long Size(string path) { var f = new FileInfo(path); return f.Exists ? f.Length : 0; }
+    // The README contract: read the answer only when the helper itself reported success. Anything
+    // else - including 120-128 and a child that exited non-zero - discards the whole work
+    // directory, answer.json included, because the helper never writes or removes that file.
+    static string ReadAnswer(int exit, string log, string work) {
+        if (exit != 0 || log.Contains("COACH_ISO_REFUSED") || !log.Contains("COACH_ISO_CHILD_EXIT 0")) return null;
+        string path = Path.Combine(work, "answer.json");
+        return File.Exists(path) ? File.ReadAllText(path) : null;
+    }
+    static int DeadPid() {
+        for (int pid = 999000; pid < 1000000; pid++) {
+            try { using (var p = Process.GetProcessById(pid)) { } }
+            catch (ArgumentException) { return pid; }
+        }
+        throw new Exception("no dead pid available");
+    }
+    static bool MappingExists(string moniker) {
+        using (var mappings = Registry.CurrentUser.OpenSubKey(@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings")) {
+            if (mappings == null) return false;
+            foreach (string key in mappings.GetSubKeyNames())
+                using (var sub = mappings.OpenSubKey(key)) if ((string)sub.GetValue("Moniker") == moniker) return true;
+        }
+        return false;
+    }
+    static string CreateStaleProfile(int pid) {
+        string name = "coach.book.iso." + pid + ".s" + Guid.NewGuid().ToString("N");
+        IntPtr sid;
+        int hr = CreateAppContainerProfile(name, name, "sweep regression", IntPtr.Zero, 0, out sid);
+        Check(hr == 0, "cannot create stale profile hr=0x" + hr.ToString("x"));
+        if (sid != IntPtr.Zero) FreeSid(sid);
+        Check(MappingExists(name), "stale profile was not registered");
+        return name;
+    }
+    // C1: the child writes a partial answer and its output, then blocks past the timeout. The
+    // helper must refuse with 126 and leave stdout empty; answer.json remains on disk, so the
+    // contract reader has to refuse it as well.
+    static void TimeoutDiscardsPartialAnswer() {
+        string work = NewWork("timeout-partial"); int exit;
+        // A cmd spin loop rather than ping/choice: both of those need console or ICMP rights the
+        // container does not have and exit immediately, which would turn this into a normal exit.
+        var argv = Args(work, "echo PARTIAL_ANSWER_Q7 > answer.json & echo PARTIAL_STDOUT_Q7 & for /l %i in (1,1,20000000) do @rem");
+        argv[11] = "2000";
+        string log = Invoke(argv, null, out exit);
+        Check(exit == 126 && log.Contains("COACH_ISO_REFUSED code=126 reason=timeout"), "timeout not refused: " + log);
+        long stdoutBytes = Size(Path.Combine(work, "stdout.txt"));
+        Check(stdoutBytes == 0, "timeout left partial stdout: " + stdoutBytes + " bytes");
+        Check(File.Exists(Path.Combine(work, "answer.json")), "synthetic partial answer missing");
+        Check(ReadAnswer(exit, log, work) == null, "contract read a partial answer after a timeout");
+        CheckCleanup(log, work);
+        results.Add(new { test = "timeout_partial_answer", exit, stdoutBytes, answerOnDisk = true, answerRead = (string)null, residual = 0, log });
+    }
+    // 127 happens after the child already finished, so its output is real and must still be gone.
+    static void ExitCodeRefusalDiscardsOutput() {
+        string work = NewWork("exit-code-partial"); int exit;
+        string log = Invoke(Args(work, "echo PARTIAL_STDOUT_Q7"), "exit_code", out exit);
+        Check(exit == 127 && log.Contains("COACH_ISO_REFUSED code=127 reason=exit_code"), "exit-code refusal wrong: " + log);
+        Check(Size(Path.Combine(work, "stdout.txt")) == 0, "127 left partial stdout");
+        Check(ReadAnswer(exit, log, work) == null, "contract read output after 127");
+        CheckCleanup(log, work);
+        results.Add(new { test = "exit_code_discards_stdout", exit, stdoutBytes = Size(Path.Combine(work, "stdout.txt")), residual = 0, log });
+    }
+    // A child's own non-zero exit is indistinguishable from a helper refusal in the exit code
+    // alone, so its output is discarded too: the caller never sees a partial answer.
+    static void ChildNonZeroDiscardsOutput() {
+        string work = NewWork("child-nonzero"); int exit;
+        string log = Invoke(Args(work, "echo PARTIAL_STDOUT_Q7 & exit /b 125"), null, out exit);
+        Check(exit == 125 && log.Contains("COACH_ISO_CHILD_EXIT 125") && !log.Contains("COACH_ISO_REFUSED"), "child exit not passed through: " + log);
+        Check(Size(Path.Combine(work, "stdout.txt")) == 0, "child nonzero left partial stdout");
+        Check(ReadAnswer(exit, log, work) == null, "contract read a child failure as an answer");
+        CheckCleanup(log, work);
+        results.Add(new { test = "child_nonzero_discards_stdout", exit, stdoutBytes = Size(Path.Combine(work, "stdout.txt")), answerRead = (string)null, residual = 0, log });
+    }
+    // Positive control for the same reader: identical shape, but the helper really succeeded.
+    static void ContractReadsSuccessfulAnswer() {
+        string work = NewWork("contract-success"); int exit;
+        string log = Invoke(Args(work, "echo ANSWER_OK_K3 > answer.json"), null, out exit);
+        Check(exit == 0 && log.Contains("COACH_ISO_CHILD_EXIT 0") && !log.Contains("COACH_ISO_REFUSED"), "successful run refused: " + log);
+        string answer = ReadAnswer(exit, log, work);
+        Check(answer != null && answer.Trim() == "ANSWER_OK_K3", "contract did not read the answer: " + answer);
+        CheckCleanup(log, work);
+        results.Add(new { test = "contract_reads_successful_answer", exit, answer = answer.Trim(), residual = 0, log });
+    }
+    // Sweep must still remove a profile whose recorded pid is gone.
+    static void SweepDeletesDeadProfile() {
+        string name = CreateStaleProfile(DeadPid());
+        try {
+            string work = NewWork("sweep-dead"); int exit;
+            string log = Invoke(Args(work, "echo ALLOWED_SEGMENT_7Q2"), null, out exit);
+            Check(exit == 0 && log.Contains("COACH_ISO_SWEPT"), "sweep did not run: " + log);
+            Check(!MappingExists(name), "stale profile survived a readable sweep");
+            CheckCleanup(log, work);
+            results.Add(new { test = "sweep_deletes_dead_profile", exit, deleted = true, residual = 0, log });
+        } finally { DeleteAppContainerProfile(name); }
+    }
+    // An unreadable pid query (a protected process may have reused the pid) must be treated as
+    // alive: the profile is kept and this launch still succeeds.
+    static void SweepQueryRefusedKeepsProfile() {
+        string name = CreateStaleProfile(DeadPid());
+        try {
+            string work = NewWork("sweep-refused"); int exit;
+            string log = Invoke(Args(work, "echo ALLOWED_SEGMENT_7Q2"), "sweep_query", out exit);
+            Check(CoachIsoTestHooks.Hits >= 1, "sweep fault not reached");
+            Check(exit == 0 && log.Contains("COACH_ISO_VERIFIED") && log.Contains("COACH_ISO_RESUMED"), "refused sweep blocked the launch: " + log);
+            Check(log.Contains("COACH_ISO_SWEEP_SKIP"), "no skip evidence: " + log);
+            Check(MappingExists(name), "profile deleted although the query failed");
+            Check(File.ReadAllText(Path.Combine(work, "stdout.txt")).Contains("ALLOWED_SEGMENT_7Q2"), "launch produced no answer: " + log);
+            CheckCleanup(log, work);
+            results.Add(new { test = "sweep_query_refused_keeps_profile", exit, profileKept = true, residual = 0, log });
+        } finally { DeleteAppContainerProfile(name); }
+    }
     static string Quote(string arg) {
         if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return arg;
         var quoted = new System.Text.StringBuilder("\""); int slashes = 0;
@@ -150,7 +265,7 @@ public static class CoachIsoRegression {
         try {
             string[] faults = { "create_profile", "profile_sid", "acl_grant", "capability_sid",
                 "inherit_stdin", "inherit_stdout", "inherit_stderr", "attr_size", "attr_init", "attr_handles", "attr_caps",
-                "job_create", "job_limits", "create_process", "open_token", "token_flag", "token_sid", "token_sid_match", "close_token", "job_assign", "resume" };
+                "job_create", "job_limits", "job_list", "create_process", "open_token", "token_flag", "token_sid", "token_sid_match", "close_token", "job_assign", "resume" };
             foreach (string fault in faults) FaultCase(fault, fault == "acl_grant" ? 122 :
                 (fault == "create_profile" || fault == "profile_sid" || fault == "capability_sid") ? 121 :
                 fault.StartsWith("token_") || fault == "open_token" ? 124 : fault == "close_token" ? 128 : fault.StartsWith("job_") || fault == "resume" ? 125 : 123);
@@ -161,6 +276,12 @@ public static class CoachIsoRegression {
             Check(CoachIsoTestHooks.Hits == 1 && childExit == 127, "exit-code refusal failed"); CheckCleanup(log, work);
             results.Add(new { test = "exit_code", exit = childExit, residual = 0, log });
             RuntimeCase("timeout", 126);
+            TimeoutDiscardsPartialAnswer();
+            ExitCodeRefusalDiscardsOutput();
+            ChildNonZeroDiscardsOutput();
+            ContractReadsSuccessfulAnswer();
+            SweepDeletesDeadProfile();
+            SweepQueryRefusedKeepsProfile();
             CleanupFailureCase("revoke_acl");
             CleanupFailureCase("delete_profile");
             ProductionRejects("--no-container-negative-control");

@@ -33,7 +33,7 @@ import secrets
 import signal
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, aclosing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +42,8 @@ from typing import Any, AsyncIterator
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from api_route import ApiRouter, ApiFailure, route as api_model
+from api_budget import Denied
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
@@ -515,6 +517,11 @@ class ReqCtx:
     fallback: bool = False
     routed_from: str | None = None   # 后台转派时的原请求模型
     out_chars: int = 0
+    task: str = ""
+    format_attempt: int = 0
+    transport: str = "subscription"
+    api_fallback: str | None = None
+    stream_reset: bool = False
 
     def queue_ms(self) -> float:
         if self.t_acq is None:
@@ -541,7 +548,8 @@ class Outcome:
                 "served_by": self.served_by, "fallback": req.fallback,
                 "physical_calls": req.physical_calls, "request_id": req.request_id,
                 "requested_model": req.model, "traffic": req.traffic, "source": "production" if req.production_source else "unknown", "queue_ms": req.queue_ms(),
-                "ttft_ms": req.ttft_ms, "elapsed_ms": req.total_ms()}
+                "ttft_ms": req.ttft_ms, "elapsed_ms": req.total_ms(),
+                "transport": req.transport, "api_fallback": req.api_fallback}
 
 
 # ---------- 子进程 ----------
@@ -551,6 +559,11 @@ CHILDREN: set[asyncio.subprocess.Process] = set()
 
 def child_env(backend: str) -> dict[str, str]:
     env = dict(os.environ)
+    # API credentials belong only to the bridge's HTTP transport. Subscription
+    # children must never inherit an API key and silently switch billing routes.
+    for name in list(env):
+        if name.startswith("COACH_") and name.endswith("API_KEY") or name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            del env[name]
     env["PATH"] = CHILD_PATH + ":" + env.get("PATH", "")
     env["LANG"] = "en_US.UTF-8"
     env["TMPDIR"] = str(TMP_DIR)
@@ -1289,6 +1302,9 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
                   fallback_enabled=fallback_enabled, effort=effort, t_req=t_req,
                   exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
                   test_traffic=tag == "test", traffic=traffic, production_source=trusted,
+                  task=(headers.get("x-coach-task") or "")[:64],
+                  format_attempt=2 if headers.get("x-coach-format-attempt") == "2" else 0,
+                  stream_reset=headers.get("x-coach-stream-reset") == "v1",
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
 
@@ -1303,7 +1319,7 @@ def effort_for(req: ReqCtx, backend: str) -> str | None:
     return e
 
 
-async def dispatch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
+async def dispatch_cli(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     """按模型调后端；这里的失败都以 BridgeError 抛出，由外层决定兜底与否。"""
     spec = MODELS[model]
     req.physical_calls += 1 if spec.backend != "claude" else 0   # claude_stream 自己计数
@@ -1314,6 +1330,72 @@ async def dispatch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
     if spec.backend == "agy":
         return await call_agy(req, model, effort)
     raise BridgeError(500, f"未知后端 {spec.backend}")
+
+
+API_ROUTER = ApiRouter()
+
+
+async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIterator[dict]:
+    """Keep the vendor fixed. Reset-aware callers replace interrupted content."""
+    sent = False
+    if api_model(req.task, model, req.format_attempt) is not None:
+        if req.format_attempt == 2:
+            write_log(request_id=req.request_id, task=req.task, event="format_escalation", model=api_model(req.task, model, 2))
+        try:
+            async with aclosing(API_ROUTER.events(req.task, model, req.spec_data.system, req.spec_data.prompt,
+                                                 req.body.get("max_tokens"), req.format_attempt)) as events:
+                async for event in events:
+                    kind = event["kind"]
+                    if kind == "attempt":
+                        req.physical_calls += 1
+                        req.t_acq = req.t_acq or time.monotonic()
+                        req.transport = "api"
+                    elif kind == "complete":
+                        req.served_by = event["served_by"]
+                        yield {"kind": "end", "outcome": Outcome("complete", None, "stop", event["served_by"],
+                               text=event["text"], usage=event["usage"], started=sent)}
+                        return
+                    else:
+                        if kind == "meta":
+                            req.served_by = event["served_by"]
+                        if kind == "text":
+                            if req.ttft_ms is None:
+                                req.ttft_ms = (time.monotonic() - req.t_acq) * 1000
+                            sent = sent or bool(event["text"])
+                        yield event
+            raise ApiFailure("api_no_terminal")
+        except (ApiFailure, Denied, OSError) as error:
+            # These exceptions contain fixed codes only; upstream messages and keys
+            # never enter the diagnostics. Retain ambiguous credit reservations.
+            reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "api_ledger_io"
+            req.api_fallback = reason
+            write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason,
+                      after_content=sent, physical_calls=req.physical_calls)
+            if sent and req.stream:
+                if not req.stream_reset:
+                    yield {"kind": "end", "outcome": Outcome("truncated", reason, "error", req.served_by or model, started=True)}
+                    return
+                yield {"kind": "reset"}
+            req.served_by = None
+            req.ttft_ms = None
+            req.transport = "subscription"
+    if req.stream and MODELS[model].backend == "claude" and not req.spec_data.json_mode:
+        async for event in claude_stream(req, model, effort):
+            yield event
+    else:
+        outcome = await dispatch_cli(req, model, effort)
+        if outcome.text:
+            yield {"kind": "text", "text": outcome.text}
+        yield {"kind": "end", "outcome": outcome}
+
+
+async def dispatch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
+    if api_model(req.task, model, req.format_attempt) is None:
+        return await dispatch_cli(req, model, effort)
+    async for event in routed_events(req, model, effort):
+        if event["kind"] == "end":
+            return event["outcome"]
+    raise BridgeError(502, "模型未返回终态", reason="no_terminal")
 
 
 # ---------- SSE ----------
@@ -1347,7 +1429,8 @@ def log_req(req: ReqCtx, oc: Outcome) -> None:
               in_chars=req.in_chars, out_chars=req.out_chars, queue_ms=req.queue_ms(),
               ttft_ms=req.ttft_ms, total_ms=req.total_ms(), status=oc.status, reason=oc.reason,
               finish_reason=oc.finish_reason, physical_calls=req.physical_calls,
-              fallback=req.fallback, note=oc.detail or None)
+              fallback=req.fallback, transport=req.transport, api_fallback=req.api_fallback, task=req.task,
+              format_attempt=req.format_attempt, note=oc.detail or None)
 
 
 def buffered_stream(req: ReqCtx, cid: str, created: int, oc: Outcome, content: str | None,
@@ -1406,6 +1489,11 @@ def live_stream(req: ReqCtx, cid: str, created: int, pending: list[dict],
                 if kind == "meta":
                     served0 = ev["served_by"]
                     req.served_by = served0
+                elif kind == "reset":
+                    sent_text = False
+                    req.out_chars = 0
+                    yield sse({"id": cid, "object": "chat.completion.chunk", "created": created,
+                               "choices": [], "x_coach_reset": True})
                 elif kind == "text":
                     sent_text = True
                     req.out_chars += len(ev["text"])
@@ -1548,9 +1636,9 @@ async def chat(request: Request):
         cid, created = "chatcmpl-" + secrets.token_hex(12), int(time.time())
 
         # ---- 真流式（Claude 流式且非 JSON 模式）----
-        if req.stream and MODELS[target].true_stream and not req.spec_data.json_mode:
-            effort = effort_for(req, "claude")
-            events = claude_stream(req, target, effort)
+        if req.stream and (MODELS[target].true_stream or api_model(req.task, target, req.format_attempt)) and not req.spec_data.json_mode:
+            effort = effort_for(req, MODELS[target].backend)
+            events = routed_events(req, target, effort)
             # 先攒到「第一段正文」或「终态」再回包：这样出字前的失败/拒答仍能兜底或给 502，
             # 已经出字之后就只能截断（文字收不回来）。
             pending: list[dict] = []

@@ -105,4 +105,16 @@ class ReaderExplanationTest {
             withTimeout(5_000) { while (!h.stub.aborted) delay(10) }
         }
     }
+
+    @Test fun haikuCitationFailuresGetTwoAttemptsThenOneSonnetAttempt() = runBlocking {
+        Harness().use { h ->
+            val haiku = StubTutor.terminal("complete").replace("claude-sonnet-5-5", "claude-haiku-5-5")
+            repeat(2) { h.stub.stream(1, payload("不接受虚构引用。", "S9"), haiku, StubTutor.DONE) }
+            h.stub.stream(1, payload("最后一次有依据的解释。"), StubTutor.terminal("complete"), StubTutor.DONE)
+            val answer = h.reader.explain("d", "c", json("requestId" to "ad", "kind" to "explain"), "Synthetic pears", pack.pages)
+            assertTrue(answer.str("text").contains("最后一次"))
+            assertEquals(3, h.stub.requests)
+            assertEquals(4, answer["sources"]!!.jsonArray.single().jsonObject.num("pdfPage"))
+        }
+    }
 }

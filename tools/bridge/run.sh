@@ -3,6 +3,13 @@
 #   tools/bridge/run.sh                 # 默认 COACH_BRIDGE_HOME=~/Coach/bridge
 #   COACH_BRIDGE_HOME=/tmp/bridge-x tools/bridge/run.sh   # 换目录（回归测试用）
 set -euo pipefail
+# Never trace keychain command substitutions, including when invoked with zsh -x.
+set +x
+unset COACH_ANTHROPIC_API_KEY COACH_OPENAI_API_KEY
+if [[ $(uname -s) == Darwin ]]; then
+  export COACH_ANTHROPIC_API_KEY="$(security find-generic-password -s coach-anthropic-api -w 2>/dev/null || true)"
+  export COACH_OPENAI_API_KEY="$(security find-generic-password -s coach-openai-api -w 2>/dev/null || true)"
+fi
 
 HERE=${0:A:h}
 PY="$HERE/.venv/bin/python"

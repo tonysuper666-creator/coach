@@ -1,8 +1,11 @@
 package com.coach.desktop.reader
 
 import jdk.jfr.FlightRecorder
+import jdk.jfr.Event
+import jdk.jfr.Name
 import jdk.jfr.Recording
 import jdk.jfr.RecordingState
+import jdk.jfr.StackTrace
 import jdk.jfr.consumer.RecordingFile
 import kotlinx.serialization.json.*
 import org.junit.rules.TestWatcher
@@ -11,10 +14,19 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+@Name("coach.test.DraftPut")
+@StackTrace(false)
+class DraftPutEvent : Event() {
+    @JvmField var observer: Long = 0
+    @JvmField var call: Int = 0
+}
 
 /** Test-only observer: delegates unchanged, enriches the original failure, and never logs note/quote text. */
 class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Recording() }) : TestWatcher() {
-    private class Put(val store: Int) {
+    private class Put(val id: Int, val store: Int) {
         val start: Instant = Instant.now()
         val thread: Long = Thread.currentThread().id
         @Volatile var end: Instant? = null
@@ -22,6 +34,11 @@ class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Rec
         @Volatile var thrown: Throwable? = null
     }
     private data class ObservedException(val time: Instant, val thread: Long?, val type: String, val message: String?, val stage: String?)
+    private data class Span(val start: Instant, val end: Instant, val thread: Long?)
+    private companion object { val observerSequence = AtomicLong() }
+    private val observer = observerSequence.incrementAndGet()
+    private val sequence = AtomicInteger()
+    private var spans: Map<Int, Span> = emptyMap()
     private val puts = CopyOnWriteArrayList<Put>()
     private val stores = CopyOnWriteArrayList<JsonObject>()
     private val collectorErrors = CopyOnWriteArrayList<String>()
@@ -32,7 +49,11 @@ class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Rec
         try {
             if (!FlightRecorder.isAvailable()) { collectorErrors += "JFR unavailable"; return }
             recording = recordingFactory()
-            recording!!.apply { enable("jdk.JavaExceptionThrow").withStackTrace(); start() }
+            recording!!.apply {
+                enable("jdk.JavaExceptionThrow").withStackTrace()
+                enable(DraftPutEvent::class.java).withThreshold(java.time.Duration.ZERO)
+                start()
+            }
         } catch (error: Exception) {
             collectorErrors += "${error.javaClass.name}: ${error.message}"
             closeRecording()
@@ -47,10 +68,11 @@ class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Rec
         }
         return object : NoteDraftStore by delegate {
             override fun put(draft: StoredDraft): Boolean {
-                val call = Put(id).also { puts += it }
+                val call = Put(sequence.getAndIncrement(), id).also { puts += it }
+                val span = DraftPutEvent().also { it.observer = observer; it.call = call.id; it.begin() }
                 try { return delegate.put(draft).also { call.returned = it } }
                 catch (error: Throwable) { call.thrown = error; throw error }
-                finally { call.end = Instant.now() }
+                finally { span.end(); span.commit(); call.end = Instant.now() }
             }
         }
     }
@@ -88,16 +110,28 @@ class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Rec
             val report = buildJsonObject {
                 put("snapshotBeforeAssertion", snapshot ?: JsonNull)
                 put("stores", JsonArray(stores))
-                put("puts", JsonArray(puts.mapIndexed { index, call ->
+                put("correlationClock", "JFR put span and exception clock; wall start/end are informational")
+                put("puts", JsonArray(puts.map { call ->
                     val end = call.end
                     val returned = call.returned
-                    val matching = events.filter { it.thread == call.thread && end != null && it.time >= call.start && it.time <= end }
-                    val candidate = matching.lastOrNull { it.stage != null && (it.type.startsWith("java.nio.file.") || it.type.startsWith("java.io.") || it.type == "java.lang.SecurityException") }
+                    val span = spans[call.id]
+                    val matching = if (span == null) emptyList() else events.filter {
+                        it.thread == span.thread && it.time >= span.start && it.time <= span.end
+                    }
+                    val candidate = matching.lastOrNull {
+                        it.type.startsWith("java.nio.file.") || it.type.startsWith("java.io.") ||
+                            it.type == "java.lang.SecurityException" || it.type == "java.lang.UnsupportedOperationException"
+                    }
                     buildJsonObject {
-                        put("id", index); put("store", call.store); put("start", call.start.toString()); put("end", end?.toString())
+                        put("id", call.id); put("store", call.store); put("start", call.start.toString()); put("end", end?.toString())
+                        put("jfrStart", span?.start?.toString()); put("jfrEnd", span?.end?.toString())
                         put("thread", call.thread); put("returned", returned); put("inFlightAtReport", end == null)
                         put("escapedType", call.thrown?.javaClass?.name); put("escapedMessage", call.thrown?.message)
-                        put("failureStage", if (returned == true) "none (put returned true)" else candidate?.stage ?: "unknown")
+                        put("failureStage", when {
+                            returned == true -> "none (put returned true)"
+                            call.thrown != null -> "delegate.put (exception escaped)"
+                            else -> candidate?.stage ?: "unknown"
+                        })
                         put("recordedExceptions", JsonArray(matching.map(::json)))
                     }
                 }))
@@ -119,7 +153,10 @@ class DraftSaveDiagnostics(private val recordingFactory: () -> Recording = { Rec
         val current = recording ?: return emptyList()
         if (current.state == RecordingState.RUNNING) current.stop()
         current.dump(file)
-        return RecordingFile.readAllEvents(file).filter { it.eventType.name == "jdk.JavaExceptionThrow" }.mapNotNull { event ->
+        val captured = RecordingFile.readAllEvents(file)
+        spans = captured.filter { it.eventType.name == "coach.test.DraftPut" && it.getLong("observer") == observer }
+            .associate { it.getInt("call") to Span(it.startTime, it.endTime, it.thread?.javaThreadId) }
+        return captured.filter { it.eventType.name == "jdk.JavaExceptionThrow" }.mapNotNull { event ->
             val stack = event.stackTrace?.frames.orEmpty().map { it.method.type.name + "." + it.method.name }
             if ("com.coach.desktop.reader.FileNoteDraftStore.put" !in stack) return@mapNotNull null
             val stage = when {

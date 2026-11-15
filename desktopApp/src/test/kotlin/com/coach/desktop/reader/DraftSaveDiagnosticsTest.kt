@@ -50,6 +50,7 @@ class DraftSaveDiagnosticsTest {
         assertEquals(JsonNull, call["returned"])
         assertEquals("java.io.IOException", call["escapedType"]!!.jsonPrimitive.content)
         assertEquals("synthetic opaque failure", call["escapedMessage"]!!.jsonPrimitive.content)
+        assertEquals("delegate.put (exception escaped)", call["failureStage"]!!.jsonPrimitive.content)
         assertEquals("kept assertion", original.message)
     }
 

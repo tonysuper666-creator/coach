@@ -53,12 +53,21 @@ internal class BookReviewVariants(private val port: BookReviewVariantPort,
 
     private fun input(review: LocalBookReview, previous: Saved?): BookReviewVariantInput? {
         val input = port.input(review.copy(practice = review.originalPractice, variant = null)) ?: return null
+        return input.takeIf { matchesOrigin(review, it, previous) }
+    }
+
+    private fun matchesOrigin(review: LocalBookReview, input: BookReviewVariantInput, previous: Saved?): Boolean {
         val o = input.origin
-        if (review.mode != QuestionMode.CHOICE || o.courseId.isBlank() || o.kpId.isBlank() ||
+        return !(review.mode != QuestionMode.CHOICE || o.courseId.isBlank() || o.kpId.isBlank() ||
             o.question.id.isBlank() || o.question.version.isNullOrBlank() || o.attemptId.isBlank() ||
             o.practice != review.originalPractice || o.answer != review.originalAnswer || o.guessed != review.originalGuessed ||
-            (previous != null && o != previous.origin)) return null
-        return input
+            (previous != null && o != previous.origin))
+    }
+
+    fun validateSource(db: Connection, review: LocalBookReview, input: BookReviewVariantInput) {
+        require(matchesOrigin(review, input, history(db, review).lastOrNull())) {
+            "来源身份须明确，且原题、原答和原作答记录须与本地一致。"
+        }
     }
 
     private fun offers(review: LocalBookReview, input: BookReviewVariantInput): List<BookReviewVariantOffer> {

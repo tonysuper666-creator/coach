@@ -27,11 +27,12 @@ import java.util.zip.ZipFile
 import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
-/** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
+/** All state belongs to this Windows library. No server, token or external user corpus is opened. */
 internal class TextbookLibrary(val directory: Path,
-    variantPort: BookReviewVariantPort = BookReviewVariantPort { null },
+    variantPort: BookReviewVariantPort? = null,
     private val reviewDay: () -> Long = { logicalDay(System.currentTimeMillis(), ZoneId.systemDefault().id) }) {
-    private val variants = BookReviewVariants(variantPort) { review ->
+    private val sources = BookReviewSources(::database)
+    private val variants = BookReviewVariants(variantPort ?: sources) { review ->
         book(review.book).lessons.single { it.id == review.lesson }.text
     }
     init {
@@ -51,6 +52,7 @@ internal class TextbookLibrary(val directory: Path,
                 sql.execute("CREATE TABLE IF NOT EXISTS book_review_position(slot INTEGER PRIMARY KEY CHECK(slot=1),book TEXT NOT NULL,lesson TEXT NOT NULL,mode TEXT NOT NULL)")
             }
             variants.initialize(db)
+            sources.initialize(db)
             // Older libraries already have these tables; CREATE IF NOT EXISTS never adds a column to them.
             ensureColumn(db, "answers", "guessed", "INTEGER NOT NULL DEFAULT 0")
             ensureColumn(db, "book_reviews", "wrong_guessed", "INTEGER NOT NULL DEFAULT 0")
@@ -348,6 +350,22 @@ internal class TextbookLibrary(val directory: Path,
             db.commit()
             result
         } catch (failure: Exception) { db.rollback(); throw failure }
+    }
+
+    /** Explicit approved input from a source owner; never manufactures IDs for generated Practice. */
+    @Synchronized fun updateReviewVariantSource(review: LocalBookReview, update: BookReviewSourceUpdate) {
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                val current = db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
+                    sql.setString(1, review.book); sql.setString(2, review.lesson); sql.setString(3, review.mode.name)
+                    sql.executeQuery().use { row -> check(row.next()); row.asReview() }
+                }
+                update.input?.let { variants.validateSource(db, current, it) }
+                sources.update(db, current, update)
+                db.commit()
+            } catch (failure: Exception) { db.rollback(); throw failure }
+        }
     }
 
     @Synchronized fun activeReview(): LocalBookReview? = database().use { db ->

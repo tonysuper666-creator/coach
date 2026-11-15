@@ -1,6 +1,15 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
@@ -18,6 +27,38 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class BookCitationWorkspaceTest {
+    @Test fun timeoutFallbackRequestsFocusOnFrameOwnerThread() {
+        val calls = mutableListOf<Pair<String, Thread>>()
+        runComposeUiTest {
+            mainClock.autoAdvance = false
+            setContent {
+                val fallback = remember { FocusRequester() }
+                Box(Modifier.focusRequester(fallback).focusable().testTag("focus-fallback"))
+                LaunchedEffect(Unit) {
+                    withFrameNanos { calls += "owner" to Thread.currentThread() }
+                    restoreCitationFocus(
+                        tryCitation = { calls += "citation" to Thread.currentThread(); false },
+                        fallback = { calls += "fallback" to Thread.currentThread(); fallback.requestFocus() },
+                        finished = { calls += "finished" to Thread.currentThread() },
+                        timeoutNanos = 80_000_000L,
+                    )
+                }
+            }
+            mainClock.advanceTimeByFrame()
+            mainClock.advanceTimeByFrame()
+            runOnIdle { assertTrue(calls.none { it.first == "fallback" }) }
+            mainClock.advanceTimeBy(160)
+            runOnIdle {
+                val owner = calls.single { it.first == "owner" }.second
+                assertTrue(calls.count { it.first == "citation" } >= 2)
+                assertEquals(1, calls.count { it.first == "fallback" })
+                assertEquals(1, calls.count { it.first == "finished" })
+                assertTrue(calls.all { it.second === owner }, calls.toString())
+            }
+            onNodeWithTag("focus-fallback").assertIsFocused()
+        }
+    }
+
     private fun setup(): Pair<TextbookController, BookLearningSupport> {
         val root = Files.createTempDirectory("citation-workspace-")
         val file = root.resolve("synthetic.pdf")

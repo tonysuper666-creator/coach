@@ -143,7 +143,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     }
     fun run(action: suspend () -> Unit) { scope.launch { action() } }
     fun returnFromReader() {
-        if (ui.source != null) returnFocus = sourceOrigin
+        if (ui.source != null) {
+            // Only newly composed, ready rows may supply focus targets on return.
+            if (sourceOrigin == SourceFocus.CITATION) citationFocus.clear()
+            returnFocus = sourceOrigin
+        }
         run { controller.back() }
     }
     fun openPracticeSource(practice: Practice) {
@@ -582,6 +586,27 @@ private fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Boo
     if (asking) BookPassageAsk(book, page, support) { asking = false }
 }
 
+/** Focus changes must run inside the UI frame, including the timeout fallback. */
+internal suspend fun restoreCitationFocus(
+    tryCitation: () -> Boolean,
+    fallback: () -> Unit,
+    finished: () -> Unit,
+    timeoutNanos: Long = 2_000_000_000L,
+) {
+    var start: Long? = null
+    while (true) {
+        val done = withFrameNanos { frame ->
+            val firstFrame = start ?: frame.also { start = it }
+            when {
+                tryCitation() -> { finished(); true }
+                frame - firstFrame >= timeoutNanos -> { fallback(); finished(); true }
+                else -> false
+            }
+        }
+        if (done) return
+    }
+}
+
 @Composable
 private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll: ScrollState, lessonSourceFocus: FocusRequester, practiceSourceFocus: FocusRequester,
     returnFocus: SourceFocus?, explanationReply: MutableState<BookLearningReply?>, sourceResolver: BookSourceResolver,
@@ -600,15 +625,12 @@ private fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scroll
             SourceFocus.CITATION -> {
                 // A changed file may turn the old button into read-only text while away.
                 // The row verifies asynchronously, so allow its button to reappear first.
-                val restored = withTimeoutOrNull(2_000) {
-                    while (true) {
-                        if (runCatching { citationFocus[citationIndex]?.requestFocus() == true }.getOrDefault(false)) return@withTimeoutOrNull true
-                        withFrameNanos { }
-                    }
-                    @Suppress("UNREACHABLE_CODE") false
-                } == true
-                if (!restored)
-                    lessonSourceFocus.requestFocus()
+                restoreCitationFocus(
+                    tryCitation = { citationFocus[citationIndex]?.requestFocus() == true },
+                    fallback = { lessonSourceFocus.requestFocus() },
+                    finished = onFocusRestored,
+                )
+                return@LaunchedEffect
             }
             null -> return@LaunchedEffect
         }

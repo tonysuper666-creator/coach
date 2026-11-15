@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.joinAll
 import java.nio.file.Path
 
 internal enum class BookScreen { HOME, READER, LEARNING, REVIEWS, REVIEWING }
@@ -63,6 +64,18 @@ internal class TextbookController(val library: TextbookLibrary) {
         library.closeReview()
         mutable.value = LibraryUi(library.catalog(), book, page = book.readingPage, busy = true, reviews = library.reviews(),
             learningPath = restoredPath(book), learningPathSaved = library.learningPath(book.id) != null)
+    }
+
+    suspend fun removeBook(id: String, consent: ConsentingBookLearningSupport?) = action {
+        if (consent != null) consent.forgetBook(id)
+        else OwnedBookConsentStore(library).revoke(id).joinAll()
+        library.removeBook(id)
+        library.closeReview()
+        val catalog = library.catalog()
+        val next = catalog.firstOrNull()?.let { library.book(it.id) }
+        mutable.value = LibraryUi(catalog = catalog, book = next, busy = true,
+            reviews = library.reviews(), learningPath = next?.let(::restoredPath) ?: LearningPath.READ,
+            learningPathSaved = next?.let { library.learningPath(it.id) != null } ?: false)
     }
 
     private fun persist(book: Textbook) {

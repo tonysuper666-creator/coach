@@ -131,7 +131,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val practiceSourceFocus = remember { FocusRequester() }
     val activeLesson = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)
     val lessonId = activeLesson?.id
+    val consentEpoch = (support as? ConsentingBookLearningSupport)?.changes?.collectAsState()?.value ?: 0L
     val explanationReply = remember(ui.book?.id, lessonId, activeLesson?.blocks, support) { mutableStateOf<BookLearningReply?>(null) }
+    // This observer stays mounted while reading a source page or visiting the bookshelf.
+    LaunchedEffect(explanationReply, support, consentEpoch) { explanationReply.value = null }
+    var removingBook by remember(ui.book?.id) { mutableStateOf(false) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
@@ -205,7 +209,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onImport = { run { chooseBook()?.let { controller.importBook(it) } } },
                         onSelect = { run { controller.select(it) } }, onRead = { run { if (drafts.flush()) controller.learn(LearningPath.READ) } },
                         onLearn = { run { if (drafts.flush()) controller.learn() } },
-                        onPath = { path -> run { if (drafts.flush()) controller.learn(path) } })
+                        onPath = { path -> run { if (drafts.flush()) controller.learn(path) } },
+                        onRemove = { removingBook = true })
                     ui.screen == BookScreen.REVIEWS -> LocalBookReviews(ui,
                         onBack = { run { controller.back() } },
                         onOpen = { entry -> run { if (drafts.flush()) controller.openReview(entry) } })
@@ -265,6 +270,16 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                 onDismiss = { run { controller.dismissPrompt() } }, onRead = { run { controller.read() } },
                 onEnable = { run { controller.enableLearning() } }, onMode = { run { controller.mode(it) } },
                 onPath = { run { controller.chooseLearningPath(it) } })
+            if (removingBook && ui.book != null) AlertDialog(
+                onDismissRequest = { removingBook = false }, title = { Text("移出这本书？") },
+                text = { Text("讲解授权会清除，正在生成的回答会取消。书文件和学习记录保留在这台电脑，重新上传同一文件可恢复。") },
+                confirmButton = { TextButton(onClick = {
+                    val id = checkNotNull(ui.book).id
+                    removingBook = false
+                    run { if (drafts.flush()) controller.removeBook(id, support as? ConsentingBookLearningSupport) }
+                }, modifier = Modifier.testTag("confirm-remove-book")) { Text("移出书架") } },
+                dismissButton = { TextButton({ removingBook = false }) { Text("保留") } },
+            )
         }
     }
 }
@@ -274,7 +289,7 @@ private enum class SourceFocus { LESSON, PRACTICE, CITATION }
 
 @Composable
 private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) -> Unit, onRead: () -> Unit, onLearn: () -> Unit,
-    onPath: (LearningPath) -> Unit) {
+    onPath: (LearningPath) -> Unit, onRemove: () -> Unit) {
     val book = ui.book
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 1000.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(36.dp),
@@ -288,6 +303,7 @@ private fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String) 
                 Text("上传后，可以直接开始学，也可以先当一本书读。")
             } else {
                 Text(book.title, style = MaterialTheme.typography.titleLarge)
+                TextButton(onRemove, enabled = !ui.busy, modifier = Modifier.testTag("remove-book")) { Text("移出书架") }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     EntryCard("看书", "翻开第 ${book.readingPage} 页，可就原文段落提问。", "home-read", !ui.busy, Modifier.weight(1f), onRead)
                     EntryCard("边看边学", "先看讲解，再选择是否做题。", "home-guided", !ui.busy, Modifier.weight(1f)) { onPath(LearningPath.READ_AND_LEARN) }

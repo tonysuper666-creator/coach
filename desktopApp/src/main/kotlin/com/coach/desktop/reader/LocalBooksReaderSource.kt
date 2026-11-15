@@ -51,7 +51,8 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
                     put("id", s.id)
                     put("title", s.title)
                     put("version", "1")
-                    put("pages", s.pageCount)
+                    // The reachable range ends at the highest real PDF page, not the list size.
+                    put("pages", s.lastPage)
                 })
             }
         }
@@ -65,11 +66,12 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
                 put("id", book.id)
                 put("title", book.title)
                 put("version", "1")
-                put("pages", book.pages.size)
+                // The reader addresses PDF page numbers, so the reachable range must end at this
+                // book's highest real page — a two-page export of pages 5–6 is not "2 pages".
+                put("pages", book.pages.maxOf { it.number })
             })
             put("progress", buildJsonObject {
-                // Stored progress is a local position; the reader is told the physical page it names.
-                put("pdfPage", book.pages.getOrNull(book.readingPage - 1)?.number ?: book.readingPage)
+                put("pdfPage", book.readingPage)
                 put("version", "1")
                 put("revision", 0L) // 只读投影；不宣称提供 CAS 修订号。
                 put("stale", false)

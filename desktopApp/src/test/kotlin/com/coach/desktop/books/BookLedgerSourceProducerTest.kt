@@ -32,14 +32,12 @@ class BookLedgerSourceProducerTest {
         "Chlorophyll is a green pigment that absorbs light in plant cells.\n\n$shared\n\n" +
         "$rare Respiration is the process that releases energy from stored sugars.\n"
 
-    /** Mirrors tools/migrate-deeptutor SeedContent.kt: a page runs from just after its PDF marker to the next marker, trimmed. */
-    private fun markerPages(md: String): List<TextbookPage> {
-        val m = Regex("<!-- PDF 第 (\\d+) 页 · 书第 (\\d+) 页 -->").findAll(md).toList()
-        return m.mapIndexed { i, x ->
-            val end = m.getOrNull(i + 1)?.range?.first ?: md.length
-            TextbookPage(x.groupValues[1].toInt(), x.groupValues[2].toIntOrNull(), md.substring(x.range.last + 1, end).trim())
-        }
-    }
+    /**
+     * The very function `tools/migrate-deeptutor` seeds `source_pages` with. A hand-written copy of
+     * the marker formula already hid one contract gap, so the fixture and the assertion both call
+     * production code instead of restating it.
+     */
+    private fun markerPages(md: String): List<TextbookPage> = textbookPagesFromMarkers(md)
 
     private inner class F(md: String = oneMarker, localBytes: ByteArray? = null, poseDevice: String = "phone") : AutoCloseable {
         val root = Files.createTempDirectory("book-source-producer-")
@@ -134,6 +132,21 @@ class BookLedgerSourceProducerTest {
         }
         // Pose and answer belong to another device of the account.
         F(poseDevice = "tablet").use { f -> assertEquals("BOOK_DEVICE_MISMATCH", f.refused(f.locator())) }
+    }
+
+    /**
+     * The page text the real seed writes and the page text the app imports must be one string:
+     * the marker stays in place and nothing is trimmed, otherwise every UTF-16 offset shifts by a
+     * few code units and the server refuses the block the learner actually selected.
+     */
+    @Test fun theLocalImportReadsTheSamePageTextAsTheRealStructuredSeed() {
+        F(twoPages).use { f ->
+            val seeded = markerPages(twoPages)
+            assertEquals(seeded.map { it.pdfPage }, f.book.pages.map { it.number })
+            assertEquals(seeded.map { it.text }, f.book.pages.map { it.text })
+            assertTrue(f.book.page(5)!!.text.startsWith("<!-- PDF 第 5 页 · 书第 1 页 -->"), "text starts at its own marker")
+            assertTrue(f.book.page(6)!!.text.startsWith("<!-- PDF 第 6 页 · 书第 2 页 -->"), "next page starts at its marker")
+        }
     }
 
     /**

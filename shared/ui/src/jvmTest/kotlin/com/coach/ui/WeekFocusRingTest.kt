@@ -1420,6 +1420,144 @@ class WeekFocusRingTest {
     }
 
     /**
+     * The reader's top toolbar — 深色阅读, 专心读, 跳过要点，直接做题, 做这一节的题 — sits in a row that scrolls and clips to
+     * its own bounds, so each pill draws its ring just inside its edge. At 1224dp Tab walks all four as consecutive stops:
+     * each ring starts at the pill edge, is 2dp wide on all four sides, ≥3:1 to the paper and to the pill's focused fill;
+     * focusing moves nothing and blur restores the pixels. At 360dp the row really scrolls: Tab brings each pill fully into
+     * view, so the last pill ends inside the row's 8dp end padding at the clipped right edge, Shift+Tab back brings the first
+     * inside the 8dp start padding at the left edge, and every ring is still whole there. Enter and a real mouse click keep each action's own effect and nothing
+     * else; after Enter on 深色阅读 the page flips, focus stays put, and the ring follows the new paper.
+     */
+    @Test fun weeklyReaderToolbarShowsRingInsideAndKeepsItsActions() {
+        val section = json("section_id" to "S1", "body" to "Synthetic pears grow in an orchard.", "title" to "【W3·slides】Synthetic section",
+            "content_version" to "v1", "fact_ids" to listOf("F1"), "sources" to listOf("Synthetic slide 4"))
+        val names = listOf("阅读明暗", "专心读", "跳过要点", "做这一节的题")
+        val tools = listOf(hasClickAction() and (hasText("深色阅读") or hasText("浅色阅读")),
+            hasClickAction() and (hasText("专心读") or hasText("退出专心读")),
+            hasClickAction() and hasTestTag("mainline-skip"), hasClickAction() and hasTestTag("mainline-section-quiz"))
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            exchange.requestBody.readBytes()
+            val reply = "{}".toByteArray(Charsets.UTF_8)
+            exchange.sendResponseHeaders(200, reply.size.toLong())
+            exchange.responseBody.use { it.write(reply) }
+        }
+        server.start()
+        val http = CourseHttp("http://127.0.0.1:${server.address.port}", "synthetic", "account1", "C")
+        try {
+            SyntheticLocalLedger("C").use { ledger ->
+                val tutor = TutorClient("http://127.0.0.1:19291", "synthetic", "synthetic", TutorModel({ 0 }))
+                try {
+                    val c = CoachController("C", ledger.sync, tutor, formatClock = { "" }, course = http)
+                    for (dark in listOf(false, true)) for (w in listOf(1224f, 360f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                        val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                        val narrow = w < 700f
+                        val events = mutableListOf<String>()
+                        var latest = json("marks" to JsonArray(emptyList()), "dark" to dark)
+                        lateinit var focus: FocusManager
+                        setContent {
+                            var state by remember { mutableStateOf(latest) }
+                            focus = LocalFocusManager.current
+                            CoachTheme(dark) {
+                                WeeklyReader(c, 1, listOf(section), section, emptyList(),
+                                    (state["marks"] as? JsonArray).orEmpty().map { it.jsonObject }, state, rememberScrollState(), "",
+                                    { transform -> state = transform(state); latest = state }, { events += "section:$it" },
+                                    { s, q -> events += "quiz:$s:$q" }, { events += "refresh" },
+                                    { on -> events += "focus:$on"; state = kotlinx.serialization.json.JsonObject(state + ("focus" to JsonPrimitive(on))); latest = state }, {})
+                            }
+                        }
+                        waitForIdle()
+                        fun flag(k: String) = (latest[k] as? JsonPrimitive)?.content == "true"
+                        for ((i, m) in tools.withIndex()) assertEquals(1, onAllNodes(m).fetchSemanticsNodes().size, "$mode ${names[i]} is on the toolbar once")
+                        val before = shot("$mode-toolbar-unfocused")
+                        /** Where the pill really is, before the scrolling row clips it (boundsInRoot is clipped). */
+                        fun full(m: SemanticsMatcher) = first(m).let { Rect(it.positionInRoot, Size(it.size.width.toFloat(), it.size.height.toFloat())) }
+                        val b0 = tools.map { full(it) }
+                        println("TON-1603 week $mode toolbar bounds=" + names.indices.joinToString(" ") { i -> val r = b0[i]; "${names[i]}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                        /** On a scrolled row the paper under the pill is only known at the same scroll position: blur, shoot, refocus. */
+                        fun measureHere(label: String, m: SemanticsMatcher) {
+                            val at = full(m)
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            assertEquals(at, full(m), "$mode $label blur must not scroll the row")
+                            val under = shot("$mode-$label-unfocused")
+                            onNode(m).requestFocus(); waitForIdle()
+                            assertTrue(focused(m), "$mode $label takes focus again")
+                            assertEquals(at, full(m), "$mode $label refocus must not scroll the row")
+                            measurePillInside(mode, label, m, under)
+                        }
+                        runOnIdle { focus.clearFocus() }; waitForIdle()
+                        onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle()
+                        val stops = mutableListOf<String>()
+                        for ((i, m) in tools.withIndex()) {
+                            stops += "${names[i]}=${tabUntil(m)}"
+                            assertTrue(focused(m), "$mode Tab never reached ${names[i]}")
+                            val b = full(m)
+                            assertEquals(b0[i].size, b.size, "$mode focusing must not resize ${names[i]}")
+                            if (!narrow) {
+                                assertEquals(b0[i], b, "$mode focusing must not move ${names[i]}")
+                                measurePillInside(mode, "工具栏-${names[i]}", m, before)
+                            } else {
+                                assertEquals(b, first(m).boundsInRoot, "$mode Tab leaves ${names[i]} unclipped")
+                                assertTrue(b.left >= -0.5f && b.right <= w * scale + 0.5f, "$mode Tab brings ${names[i]} fully into view: ${b.left / scale}..${b.right / scale}dp")
+                                measureHere("工具栏-${names[i]}", m)
+                            }
+                        }
+                        println("TON-1603 week $mode toolbar tab-stops ${stops.joinToString(" ")}")
+                        assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode the four toolbar actions are consecutive Tab stops: $stops")
+                        if (narrow) {
+                            val end = full(tools[3])
+                            val scrolled = b0[0].left - full(tools[0]).left
+                            println("TON-1603 week $mode toolbar right-edge=${end.right / scale}dp row=${w}dp scrolled=${scrolled / scale}dp")
+                            assertTrue(scrolled > 8 * scale, "$mode the toolbar really scrolls: ${scrolled / scale}dp")
+                            assertTrue(end.right <= w * scale + 0.5f && w * scale - end.right <= 8 * scale, "$mode 做这一节的题 ends within the row's end padding: ${end.right / scale}dp")
+                            for (k in 0 until 3) {
+                                onAllNodes(SemanticsMatcher.expectValue(SemanticsProperties.Focused, true)).onLast()
+                                    .performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }
+                                waitForIdle()
+                            }
+                            assertTrue(focused(tools[0]), "$mode Shift+Tab walks back to ${names[0]}")
+                            val start = full(tools[0])
+                            println("TON-1603 week $mode toolbar left-edge=${start.left / scale}dp")
+                            assertTrue(start.left >= -0.5f && start.left <= 8 * scale, "$mode ${names[0]} starts within the row's start padding: ${start.left / scale}dp")
+                            measureHere("工具栏-${names[0]}-左边缘", tools[0])
+                        } else {
+                            runOnIdle { focus.clearFocus() }; waitForIdle()
+                            val all = b0.reduce { a, b -> Rect(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom)) }.inflate(10 * scale)
+                            assertRegionEqual(before, shot("$mode-toolbar-blurred"), all, "$mode toolbar actions after blur")
+
+                            /** Runs [act] on action [i] and checks that action's own effect, and nothing beyond it. */
+                            fun check(how: String, i: Int, act: (SemanticsMatcher) -> Unit) {
+                                val m = tools[i]; val n0 = events.size; val dark0 = flag("dark"); val focus0 = flag("focus")
+                                act(m); waitForIdle()
+                                val got = events.drop(n0)
+                                when (i) {
+                                    0 -> {
+                                        assertEquals(!dark0, flag("dark"), "$mode $how ${names[i]} flips the page")
+                                        assertEquals(emptyList(), got, "$mode $how ${names[i]} calls nothing else")
+                                    }
+                                    1 -> assertEquals(listOf("focus:${!focus0}"), got, "$mode $how ${names[i]} toggles 专心读 once")
+                                    2 -> assertEquals(listOf("quiz::null"), got, "$mode $how ${names[i]} opens the quiz once")
+                                    else -> assertEquals(listOf("quiz:S1:null"), got, "$mode $how ${names[i]} opens this section's quiz once")
+                                }
+                                if (i != 0) assertEquals(dark0, flag("dark"), "$mode $how ${names[i]} leaves the page lightness alone")
+                                if (how == "Enter") assertTrue(focused(m), "$mode $how ${names[i]} keeps focus")
+                                if (how == "Enter" && i == 0) {
+                                    // Still focused on the flipped page: the ring must follow the new paper, not the old one.
+                                    println("TON-1603 week $mode toolbar after Enter page dark=${flag("dark")}")
+                                    measureHere("工具栏-${names[0]}-翻页后", m)
+                                }
+                            }
+                            for (i in names.indices) check("Enter", i) { enter(it) }
+                            for (i in names.indices) check("mouse", i) { m -> onNode(m).performMouseInput { click() } }
+                            assertEquals(dark, flag("dark"), "$mode two flips put the page back")
+                            println("TON-1603 week $mode toolbar enter+mouse events=$events")
+                        }
+                    }
+                } finally { tutor.close() }
+            }
+        } finally { http.close(); server.stop(0) }
+    }
+    /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
      * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.

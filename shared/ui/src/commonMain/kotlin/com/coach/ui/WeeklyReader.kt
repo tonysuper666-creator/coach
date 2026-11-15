@@ -125,10 +125,11 @@ internal fun WeeklyReader(
             Surface(Modifier.fillMaxSize()) {
                 Column {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { set("dark", JsonPrimitive(!dark)) }) { Text(if (dark) "浅色阅读" else "深色阅读") }
-                        TextButton(onClick = { onFocus(!focus) }) { Text(if (focus) "退出专心读" else "专心读") }
-                        TextButton(onClick = { onQuiz("", null) }, modifier = Modifier.testTag("mainline-skip")) { Text("跳过要点，直接做题") }
-                        if (section != null) TextButton(onClick = { onQuiz(section.str("section_id"), null) }, modifier = Modifier.testTag("mainline-section-quiz")) { Text("做这一节的题") }
+                        // This row scrolls and clips to its own bounds, so the ring is drawn inside each pill to stay whole.
+                        V7TextButton(onClick = { set("dark", JsonPrimitive(!dark)) }, ringInside = true) { Text(if (dark) "浅色阅读" else "深色阅读") }
+                        V7TextButton(onClick = { onFocus(!focus) }, ringInside = true) { Text(if (focus) "退出专心读" else "专心读") }
+                        V7TextButton(onClick = { onQuiz("", null) }, modifier = Modifier.testTag("mainline-skip"), ringInside = true) { Text("跳过要点，直接做题") }
+                        if (section != null) V7TextButton(onClick = { onQuiz(section.str("section_id"), null) }, modifier = Modifier.testTag("mainline-section-quiz"), ringInside = true) { Text("做这一节的题") }
                     }
                     Column(Modifier.fillMaxSize().testTag("mainline-reading-scroll").verticalScroll(scroll).padding(horizontal = 20.dp, vertical = 12.dp),
                         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {

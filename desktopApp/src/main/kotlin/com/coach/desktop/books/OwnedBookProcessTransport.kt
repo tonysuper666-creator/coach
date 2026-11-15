@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -25,6 +26,7 @@ internal class OwnedBookProcessTransport(
         require(command.isNotEmpty() && timeoutMillis > 0)
         require(request.toByteArray(Charsets.UTF_8).size <= 1_048_576)
         val process = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+        val ownedTree = OwnedProcessTree(process)
         try {
             val result = withTimeoutOrNull(timeoutMillis) {
                 coroutineScope {
@@ -38,7 +40,7 @@ internal class OwnedBookProcessTransport(
                             process.outputStream.use { it.write(request.toByteArray(Charsets.UTF_8)) }
                         }
                     }
-                    val exit = awaitExit(process)
+                    val exit = awaitExit(process, ownedTree)
                     input.await()
                     val bytes = output.await()
                     require(exit == 0 && bytes.size <= 1_048_576) { "Book CLI transport failed" }
@@ -47,37 +49,55 @@ internal class OwnedBookProcessTransport(
             }
             result ?: error("Book CLI transport timed out")
         } finally {
-            terminateTree(process)
+            ownedTree.stop()
         }
     }
 
-    private fun terminateTree(process: Process) = synchronized(process) {
-        // Snapshot while the parent is still alive: killing it first can orphan its CLI.
-        // This cannot recover a descendant already orphaned by an earlier parent exit.
-        val descendants = process.descendants().use { it.toList() }
-        val byPid = descendants.associateBy { it.pid() }
-        fun depth(handle: ProcessHandle): Int {
-            var parent = handle.parent().orElse(null)
-            var depth = 0
-            while (parent != null && byPid.containsKey(parent.pid())) {
-                depth++
-                parent = parent.parent().orElse(null)
-            }
-            return depth
-        }
-        descendants.sortedByDescending(::depth).forEach { it.destroyForcibly() }
-        if (process.isAlive) process.destroyForcibly()
-        descendants.forEach { runCatching { it.onExit().get(2, TimeUnit.SECONDS) } }
-        if (process.isAlive) process.waitFor(2, TimeUnit.SECONDS)
-        Unit
-    }
-
-    private suspend fun awaitExit(process: Process): Int = suspendCancellableCoroutine { continuation ->
+    private suspend fun awaitExit(process: Process, ownedTree: OwnedProcessTree): Int = suspendCancellableCoroutine { continuation ->
         process.onExit().whenComplete { finished, error ->
             if (error != null) continuation.resumeWithException(error)
             else continuation.resume(finished.exitValue())
         }
-        // Unblock pipe readers on cancellation, but snapshot descendants before killing the parent.
-        continuation.invokeOnCancellation { terminateTree(process) }
+        continuation.invokeOnCancellation { ownedTree.stop() }
+    }
+
+    private class OwnedProcessTree(private val process: Process) {
+        // Cancellation and finally can race. Neither may destroy the parent before the other's snapshot.
+        @Synchronized fun stop() {
+            val descendants = process.descendants().use { it.toList() }
+            if (!process.isAlive && descendants.none { it.isAlive }) return
+            var interrupted = Thread.interrupted()
+            try {
+                // Capture before signalling: children may be reparented as soon as the adapter exits.
+                // First allow the adapter's own cancellation/reaping path to run.
+                process.destroy()
+                try {
+                    process.waitFor(2, TimeUnit.SECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+                val remaining = (descendants + process.descendants().use { it.toList() }).distinct()
+                remaining.asReversed().forEach { if (it.isAlive) it.destroyForcibly() }
+                if (process.isAlive) process.destroyForcibly()
+
+                // Collect exits in the foreground, with one shared deadline for the entire tree.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+                for (handle in remaining + process.toHandle()) {
+                    while (handle.isAlive) {
+                        val nanos = deadline - System.nanoTime()
+                        if (nanos <= 0) break
+                        try {
+                            handle.onExit().get(nanos, TimeUnit.NANOSECONDS)
+                        } catch (_: InterruptedException) {
+                            interrupted = true
+                        } catch (_: TimeoutException) {
+                            break
+                        }
+                    }
+                }
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt()
+            }
+        }
     }
 }

@@ -1,0 +1,24 @@
+{
+  "monthly_caps_usd": {"anthropic": 150, "openai": 475},
+  "models": {
+    "teaching": "claude-haiku-5-5",
+    "draft": "claude-haiku-5-5",
+    "review": "gpt-6.1-terra",
+    "review_upgrade": "gpt-6.1-sol",
+    "planning": "claude-sonnet-5-5"
+  },
+  "tasks": {
+    "TEACH": "teaching", "READER_SELECTION": "teaching", "SOURCE_LOOKUP": "teaching", "PREPARE_TEACH": "teaching",
+    "gen_mcq": "draft", "repair_mcq_sources": "draft", "gen_constructed": "draft", "repair_constructed_sources": "draft",
+    "grade_constructed": "draft", "grade_essay": "draft", "repair_grade": "draft", "repair_essay": "draft", "JOURNAL_SUMMARY": "draft",
+    "blind_review": "review", "blind_review_existing": "review", "blind_review_planted": "review",
+    "review_constructed_key": "review", "review_constructed": "review", "cross_review_grade": "review", "cross_review_essay": "review",
+    "COURSE_PLAN": "planning", "INITIAL_OUTLINE": "planning", "REVISE_OUTLINE": "planning"
+  },
+  "prices_usd_per_million": {
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cached": 0.01},
+    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cached": 0.20},
+    "gpt-6.1-terra": {"input": 1.00, "output": 5.00, "cached": 0.05},
+    "gpt-6.1-sol": {"input": 2.00, "output": 10.00, "cached": 0.10}
+  }
+}

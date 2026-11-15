@@ -924,6 +924,71 @@ class ChatFlowTest {
     }
 
     @Test
+    fun sameVendorBridgeResetReplacesPartialAnswerOnClientAndDisk() {
+        Harness().use { h ->
+            h.tutor.stream(40, "需要丢弃的半截回答。", "data: {\"choices\":[],\"x_coach_reset\":true}\n\n",
+                "订阅桥的完整回答。", StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                ask(ws)
+                val start = ws.await("msg.start")
+                val id = start.str("msg")
+                val assembler = ChatStreamAssembler()
+                assembler.handle(start)
+                var resets = 0
+                while (true) {
+                    val frame = ws.await("msg.delta", "msg.snapshot", "msg.end")
+                    if (frame.str("t") == "msg.snapshot" && frame.str("text").isEmpty()) resets++
+                    assembler.handle(frame)
+                    if (frame.str("t") == "msg.end") {
+                        assertEquals("complete", frame.str("status"))
+                        break
+                    }
+                }
+                assertEquals(1, resets)
+                assertEquals("订阅桥的完整回答。", assembler.text(id))
+                assertEquals(assembler.text(id), runBlocking { h.snapshot(id) }!!.content)
+                assertEquals(1, h.tutor.requests, "transport fallback stays inside one bridge request")
+            }
+        }
+    }
+
+    @Test
+    fun sameVendorLessonResetPreservesTheCompletedMistakeBlock() {
+        Harness().use { h ->
+            runBlocking { seedReviewed(h) }
+            val first = "你选的「sunk expenditure」不对，因为已花掉的钱收不回。"
+            val replacement = "机会成本是放弃的最佳替代。"
+            h.tutor.streamWhen("explains the graded mistakes only", 10, first, StubTutor.terminal("complete"), StubTutor.DONE)
+            h.tutor.streamWhen("Start directly with the new concepts", 100, "需要丢弃的讲课半句。",
+                "data: {\"choices\":[],\"x_coach_reset\":true}\n\n", replacement, StubTutor.terminal("complete"), StubTutor.DONE)
+            Ws(h.port, h.token).use { ws ->
+                answerWrongBeforeTeaching(h, ws)
+                ws.send("""{"t":"tutor.next","threadId":"thread-1","courseId":"course-1"}""")
+                val start = ws.await("msg.start")
+                val id = start.str("msg")
+                val assembler = ChatStreamAssembler()
+                assembler.handle(start)
+                val snapshots = mutableListOf<String>()
+                while (true) {
+                    val frame = ws.await("msg.delta", "msg.snapshot", "msg.end")
+                    if (frame.str("t") == "msg.snapshot") snapshots += frame.str("text")
+                    assembler.handle(frame)
+                    if (frame.str("t") == "msg.end") {
+                        assertEquals("complete", frame.str("status"))
+                        break
+                    }
+                }
+                assertTrue(snapshots.isNotEmpty())
+                assertTrue(snapshots.all { it.startsWith(first) })
+                val stored = runBlocking { h.snapshot(id) }!!.content
+                assertEquals(stored, assembler.text(id))
+                assertTrue(stored.startsWith(first) && stored.endsWith(replacement))
+                assertTrue(!stored.contains("需要丢弃"))
+            }
+        }
+    }
+
+    @Test
     fun streamedAnswerReachesTheClientAndLandsComplete() {
         Harness().use { h ->
             h.tutor.stream(40, "你好，", "这是导师的", "回答。", StubTutor.terminal("complete"), StubTutor.DONE)

@@ -1,6 +1,7 @@
 package com.coach.ai
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -32,7 +33,7 @@ data class BridgeConfig(
             Path.of(System.getProperty("user.home"),"Coach/bridge").toString()).resolve("state/production-key").toString()) else null,
 )
 
-/** 一次逻辑请求。`task` 只用于 `ai_calls` 归类，不发给模型。 */
+/** Task metadata goes to the local router, never into the model prompt. */
 data class ChatRequest(
     val task: String,
     val model: String,
@@ -42,6 +43,7 @@ data class ChatRequest(
     val effort: String? = null,
     val background: Boolean = false,
     val maxTokens: Int? = null,
+    val formatAttempt: Int = 0,
 )
 
 /** `x_coach` 终态帧（ADR-0002：这是唯一可信的结束信号）。 */
@@ -163,12 +165,54 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     }
 
     fun chat(request: ChatRequest): BridgeResult {
+        val started = System.nanoTime()
+        var physical = 0
+        var attempt = request.formatAttempt
+        var result: BridgeResult
+        while (true) {
+            result = chatOnce(request.copy(formatAttempt = attempt))
+            physical += result.call.physicalCalls
+            if (result !is BridgeResult.Success || attempt >= 2) break
+            val served = result.terminal.servedBy.orEmpty()
+            if (served.startsWith("claude-haiku-") && invalidDraftFormat(request.task, result.text)) attempt++
+            else if (served.startsWith("gpt-6.1-terra") && invalidReviewFormat(request.task, result.text)) attempt = 2
+            else break
+        }
+        val call = result.call.copy(physicalCalls = physical, durMs = millisSince(started))
+        return when (val final = result) {
+            is BridgeResult.Success -> final.copy(call = call, terminal = final.terminal.copy(physicalCalls = physical))
+            is BridgeResult.Failure -> final.copy(call = call, terminal = final.terminal?.copy(physicalCalls = physical))
+        }
+    }
+
+    /** Escalate a malformed Terra review once; a substantive rejection remains a rejection. */
+    private fun invalidReviewFormat(task: String, text: String): Boolean = runCatching {
+        when (task) {
+            "blind_review", "blind_review_existing", "blind_review_planted" -> require(TaskParsing.verdicts(text).isNotEmpty())
+            "review_constructed", "review_constructed_key", "cross_review_grade", "cross_review_essay" ->
+                require(JsonText.objectOf(text)["verdict"]?.jsonPrimitive?.content?.uppercase() in setOf("CONFIRM", "REVISE", "REJECT"))
+            else -> Unit
+        }
+    }.isFailure
+
+    /** Only schema failures retry; evidence, arithmetic and answer-key gates remain with the caller. */
+    private fun invalidDraftFormat(task: String, text: String): Boolean = runCatching {
+        when (task) {
+            "gen_mcq", "repair_mcq_sources" -> require(TaskParsing.mcqs(text).isNotEmpty())
+            "gen_constructed", "repair_constructed_sources" -> require(TaskParsing.constructed(text).isNotEmpty())
+            "grade_constructed", "grade_essay", "repair_grade", "repair_essay" -> require(TaskParsing.grade(text).items.isNotEmpty())
+            "JOURNAL_SUMMARY" -> JsonText.objectOf(text)
+            else -> Unit
+        }
+    }.isFailure
+
+    private fun chatOnce(request: ChatRequest): BridgeResult {
         val callId = UUID.randomUUID().toString()
         val requestId = UUID.randomUUID().toString()
         val startedAt = Instant.now().toString()
         val started = System.nanoTime()
         val payload = payloadFor(request, request.stream)
-        val builder = builderFor(request, payload, requestId)
+        val builder = builderFor(request, payload, requestId, supportsReset = true)
 
         val response = try {
             http.send(builder.build(), HttpResponse.BodyHandlers.ofInputStream())
@@ -233,7 +277,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         val handle = BridgeStreamHandle()
         onHandle(handle)
         val future = http.sendAsync(
-            builderFor(request, payloadFor(request, stream = true), requestId).build(),
+            builderFor(request, payloadFor(request, stream = true), requestId, sink.supportsReset).build(),
             HttpResponse.BodyHandlers.ofInputStream(),
         )
         handle.future = future
@@ -316,6 +360,11 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
                     continue
                 }
                 (frame["x_coach"] as? JsonObject)?.let { terminal = TerminalState.fromJson(it) }
+                if (frame["x_coach_reset"]?.jsonPrimitive?.booleanOrNull == true) {
+                    if (!sink.supportsReset) { failure = "unsupported_stream_reset"; break }
+                    text.setLength(0)
+                    sink.onReset()
+                }
                 val model = frame.stringOrNull("model")
                 if (!model.isNullOrBlank() && model != served) {
                     served = model
@@ -378,7 +427,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         request.maxTokens?.let { put("max_tokens", it) }
     }
 
-    private fun builderFor(request: ChatRequest, payload: JsonObject, requestId: String): HttpRequest.Builder {
+    private fun builderFor(request: ChatRequest, payload: JsonObject, requestId: String, supportsReset: Boolean = false): HttpRequest.Builder {
         requireIsolatedTestBridge()
         val builder = HttpRequest.newBuilder(URI.create("${config.baseUrl}/v1/chat/completions"))
             .timeout(config.requestTimeout)
@@ -386,6 +435,9 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
             .header("X-Request-Id", requestId)
             .header("X-Coach-Fallback", "off")
             .header("X-Coach-Model-Policy", "exact")
+            .header("X-Coach-Task", request.task)
+            .header("X-Coach-Format-Attempt", request.formatAttempt.toString())
+            .header("X-Coach-Stream-Reset", if (supportsReset) "v1" else "off")
             .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
         builder.header("X-Coach-Traffic", if (config.testTraffic) "test" else "user")
         if (!config.testTraffic && config.productionKeyFile != null) {
@@ -477,6 +529,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
                     continue
                 }
                 (frame["x_coach"] as? JsonObject)?.let { terminal = TerminalState.fromJson(it) }
+                if (frame["x_coach_reset"]?.jsonPrimitive?.booleanOrNull == true) text.setLength(0)
                 val delta = (frame["choices"] as? kotlinx.serialization.json.JsonArray)
                     ?.firstOrNull()?.jsonObject
                     ?.get("delta")?.jsonObject

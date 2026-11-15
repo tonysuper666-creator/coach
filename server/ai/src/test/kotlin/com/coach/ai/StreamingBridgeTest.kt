@@ -7,6 +7,52 @@ import kotlin.test.assertTrue
 
 /** 真流式：delta 边到边发、首字用单调钟、取消 = 断开 HTTP（桥据此杀 CLI 进程组）。 */
 class StreamingBridgeTest {
+    @Test fun resetReplacesPartialTextInBothStreamingReaders() {
+        StubBridge().use { stub ->
+            val reset = "data: {\"choices\":[],\"x_coach_reset\":true}\n\n"
+            repeat(2) { stub.enqueueSse(StubBridge.frame("partial"), reset, StubBridge.frame("replacement"),
+                StubBridge.terminal("complete"), StubBridge.DONE) }
+            val client = BridgeClient(stubConfig(stub))
+            val visible = StringBuilder()
+            var resets = 0
+            val result = client.streamChat(request(), object : BridgeStreamSink {
+                override val supportsReset = true
+                override fun onReset() { visible.setLength(0); resets++ }
+                override fun onDelta(text: String, atMs: Long) { visible.append(text) }
+            })
+            assertTrue(result is BridgeResult.Success)
+            assertEquals("replacement", result.text)
+            assertEquals("replacement", visible.toString())
+            assertEquals(1, resets)
+            assertEquals("replacement", (client.chat(request()) as BridgeResult.Success).text)
+            assertTrue(stub.requestedHeaders.all { h -> h.entries.any { it.key.equals("X-Coach-Stream-Reset", true) && it.value == listOf("v1") } })
+        }
+    }
+
+    @Test fun haikuGetsTwoFormatAttemptsThenOneExplicitSonnetEscalation() {
+        StubBridge().use { stub ->
+            repeat(2) { stub.enqueue(200, StubBridge.completion("invalid JSON", "claude-haiku-5-5")) }
+            stub.enqueue(200, StubBridge.completion("[]", "claude-sonnet-5-5"))
+            val result = BridgeClient(stubConfig(stub)).chat(request().copy(task = "gen_mcq", stream = false))
+            assertTrue(result is BridgeResult.Success)
+            assertEquals(3, result.call.physicalCalls)
+            val attempts = stub.requestedHeaders.map { h -> h.entries.single { it.key.equals("X-Coach-Format-Attempt", true) }.value.single() }
+            assertEquals(listOf("0", "1", "2"), attempts)
+        }
+    }
+
+    @Test fun malformedTerraReviewEscalatesOnceWithoutReversingTheVendor() {
+        StubBridge().use { stub ->
+            stub.enqueue(200, StubBridge.completion("invalid JSON", "gpt-6.1-terra"))
+            stub.enqueue(200, StubBridge.completion("{\"verdict\":\"REJECT\"}", "gpt-6.1-sol"))
+            val result = BridgeClient(stubConfig(stub)).chat(request().copy(task = "review_constructed", model = BridgeClient.CODEX, stream = false))
+            assertTrue(result is BridgeResult.Success)
+            assertEquals("gpt-6.1-sol", result.call.servedBy)
+            assertEquals(2, result.call.physicalCalls)
+            val attempts = stub.requestedHeaders.map { h -> h.entries.single { it.key.equals("X-Coach-Format-Attempt", true) }.value.single() }
+            assertEquals(listOf("0", "2"), attempts)
+        }
+    }
 
     private fun request() = ChatRequest(
         task = "TEACH",

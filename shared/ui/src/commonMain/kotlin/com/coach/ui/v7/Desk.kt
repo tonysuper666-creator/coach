@@ -149,7 +149,7 @@ fun Desk(
                         val start = crumb.lastIndexOf('·').takeIf { it >= 0 }?.plus(1) ?: 0
                         addStyle(SpanStyle(fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary), start, crumb.length)
                     }, Modifier.align(if (inner) Alignment.Center else Alignment.BottomStart).padding(bottom = if (inner) 0.dp else 4.dp).widthIn(max = if (inner) windowWidth * .30f else windowWidth - 32.dp)
-                        .then(if (onCrumbClick != null) Modifier.clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
+                        .then(if (onCrumbClick != null) Modifier.v7FocusRing().clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus

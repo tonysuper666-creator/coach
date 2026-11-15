@@ -34,6 +34,7 @@ import com.coach.client.*
 import com.coach.domain.*
 import com.coach.ui.v7.V7FocusRingGap
 import com.coach.ui.v7.V7FocusRingWidth
+import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalDeskSelect
 import com.coach.ui.v7.LocalV7PageDetails
 import com.coach.ui.v7.WeekPage
@@ -51,7 +52,7 @@ import kotlin.test.assertTrue
 
 /**
  * TON-1603: the week page's three learning entrances (整周刷题 / 开始 / 先看要点) are direct text buttons.
- * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry and its menu rows.
+ * Later slices add the week-picker dialog, the 资料 shelf, the margin summary buttons, the footer week links, the week-scope dropdown entry, its menu rows and the top-bar week name.
  * Keyboard focus must show the V7 ring hugging the visible pill (same gap above as beside), ≥3:1 in light and dark,
  * Tab must reach them, and blur must restore the never-focused pixels. Offscreen Skiko, not a native window.
  */
@@ -399,6 +400,68 @@ class WeekFocusRingTest {
                 onNode(rows.first()).performMouseInput { click(Offset(2 * scale, 2 * scale)) }; waitForIdle()
                 assertEquals(listOf(3, 0, 1), browsed, "$mode a click 2dp inside the first row's corner still picks it")
                 println("TON-1603 week $mode menu enter/escape/click browsed=$browsed escape-closed=$escapeClosed")
+            }
+        }
+    }
+
+    /**
+     * The top-bar week name (Desk crumb) opens the 换周 dialog when the page passes onCrumbClick.
+     * Real WeekPage, wide window (crumb centred in the 48dp bar): Tab reaches it from 目录, the ring hugs the text box ≥3:1,
+     * blur restores the pixels, Enter opens the real dialog. Without onCrumbClick the crumb stays plain text:
+     * the bar has exactly one focus stop fewer and the crumb takes no focus.
+     */
+    @Test fun weekCrumbShowsRingAndOpensTheWeekDialog() {
+        val view = threeWeeks()
+        withController { controller ->
+            for (dark in listOf(false, true)) {
+                val mode = if (dark) "dark" else "light"
+                val stops = mutableMapOf<Boolean, Int>()
+                runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                    lateinit var focus: FocusManager
+                    setContent { CoachTheme(dark) { Surface {
+                        focus = LocalFocusManager.current
+                        WeekPage(controller, view, TutorUiState(), WeekActions(controller, rememberCoroutineScope()), { _, _ -> }, 2)
+                    } } }
+                    waitForIdle()
+                    val crumb = hasTestTag("v7-week-picker")
+                    val directory = hasTestTag("v7-directory-toggle")
+                    val before = shot("$mode-crumb-unfocused")
+                    val b = first(crumb).boundsInRoot
+                    println("TON-1603 week $mode crumb bounds=${b.left / scale},${b.top / scale} ${b.width / scale}x${b.height / scale}dp")
+
+                    onNode(directory).requestFocus(); waitForIdle(); onNode(directory).assertIsFocused()
+                    val n = tabUntil(crumb)
+                    assertTrue(focused(crumb), "$mode Tab never reached the top-bar week name")
+                    assertEquals(b, first(crumb).boundsInRoot, "$mode focusing must not move or resize the week name")
+                    measure(mode, "顶栏周名", crumb, before, pageDx = 8f)
+                    println("TON-1603 week $mode crumb tab-stops 目录→周名=$n")
+                    runOnIdle { focus.clearFocus() }; waitForIdle()
+                    assertRegionEqual(before, shot("$mode-crumb-blurred"), b.inflate(10 * scale), "$mode week name after blur")
+
+                    assertEquals(0, onAllNodes(isDialog()).fetchSemanticsNodes().size)
+                    enter(crumb)
+                    assertEquals(1, onAllNodes(isDialog()).fetchSemanticsNodes().size, "$mode Enter on the week name opens the dialog")
+                    onNode(hasText("换周") and hasAnyAncestor(isDialog())).assertExists()
+                    shot("$mode-crumb-dialog", dialog = true)
+                    enter(hasText("关闭") and hasClickAction() and hasAnyAncestor(isDialog()))
+                    assertEquals(0, onAllNodes(isDialog()).fetchSemanticsNodes().size, "$mode 关闭 closes the dialog")
+                    println("TON-1603 week $mode crumb enter dialog-opened=1 closed=1")
+                }
+                for (clickable in listOf(true, false)) runSkikoComposeUiTest(size = Size(1224f * scale, 900f * scale), density = Density(scale)) {
+                    setContent { CoachTheme(dark) { Surface {
+                        Desk("合成课 · 第 2 周", onCrumbClick = if (clickable) ({}) else null) { Text("合成正文") }
+                    } } }
+                    waitForIdle()
+                    stops[clickable] = onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.Focused)).fetchSemanticsNodes().size
+                    val name = onNode(hasText("合成课 · 第 2 周"))
+                    if (!clickable) {
+                        assertEquals(0, onAllNodes(hasTestTag("v7-week-picker")).fetchSemanticsNodes().size)
+                        name.assert(!hasClickAction())
+                        name.assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.Focused))
+                    }
+                }
+                println("TON-1603 week $mode crumb focus-stops with=${stops[true]} without=${stops[false]}")
+                assertEquals(stops.getValue(true) - 1, stops.getValue(false), "$mode without onCrumbClick the bar has exactly one focus stop fewer")
             }
         }
     }

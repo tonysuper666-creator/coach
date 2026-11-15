@@ -9,7 +9,9 @@ import kotlinx.serialization.json.*
 
 fun privateDir(p: Path): Path {
     Files.createDirectories(p)
-    Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rwx------"))
+    // Windows has no POSIX view; the owner CLI must still run there (previously threw UnsupportedOperationException).
+    if (Files.getFileAttributeView(p, java.nio.file.attribute.PosixFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS) != null)
+        Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rwx------"))
     return p
 }
 fun safeFiles(root: Path): List<Path> {

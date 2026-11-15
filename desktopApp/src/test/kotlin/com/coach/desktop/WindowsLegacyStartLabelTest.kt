@@ -11,6 +11,53 @@ import kotlin.test.*
 /** The shelf button must say what it does on an old book that never chose a walk. */
 @OptIn(ExperimentalTestApi::class)
 class WindowsLegacyStartLabelTest {
+    @Test fun sameBookStartsThenContinuesReading() = startThenContinue(LearningPath.READ)
+
+    @Test fun sameBookStartsThenContinuesGuidedLearning() = startThenContinue(LearningPath.READ_AND_LEARN)
+
+    @Test fun sameBookStartsThenContinuesQuestionLearning() = startThenContinue(LearningPath.QUESTION_FIRST)
+
+    private fun startThenContinue(path: LearningPath) = runBlocking {
+        val root = Files.createTempDirectory("coach-same-book-start-continue-")
+        val directory = root.resolve("library")
+        val library = TextbookLibrary(directory)
+        val book = library.importBook(learningPathTextbook(root, "Synthetic same book"))
+        val controller = TextbookController(TextbookLibrary(directory))
+        val destination = if (path == LearningPath.READ) BookScreen.READER else BookScreen.LEARNING
+
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(controller) { null } }
+            ready(controller) { it.book?.id == book.id && it.screen == BookScreen.HOME }
+            assertNull(library.learningPath(book.id))
+            onNodeWithTag("home-learn").assertTextEquals("开始学").performClick()
+            ready(controller) { it.prompt == BookPrompt.START }
+            assertNull(library.learningPath(book.id), "Opening the chooser must not count as starting")
+            onNodeWithTag("learning-path-${path.name}").performClick()
+            ready(controller) { it.learningPath == path }
+            onNodeWithTag("enable-learning").performClick()
+            ready(controller) { it.screen == destination && it.prompt == null }
+        }
+        // Retain the same book and database; only its chosen walk and position have changed.
+        if (path == LearningPath.READ) controller.page(2) else controller.lesson(1)
+        assertNull(controller.state.value.error)
+        controller.back()
+        assertEquals(path.name, library.learningPath(book.id))
+
+        val reopened = TextbookController(TextbookLibrary(directory))
+        runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(reopened) { null } }
+            ready(reopened) { it.book?.id == book.id && it.screen == BookScreen.HOME }
+            val position = if (path == LearningPath.READ) "第 2 页" else "第 2 节"
+            onNodeWithTag("home-learn").assertTextEquals("继续${path.label} · $position").performClick()
+            ready(reopened) { it.screen == destination }
+            assertNull(reopened.state.value.prompt, "Continue must not offer to start the same book again")
+            assertEquals(book.id, reopened.state.value.book!!.id)
+            assertEquals(path, reopened.state.value.learningPath)
+            if (path == LearningPath.READ) assertEquals(2, reopened.state.value.page)
+            else assertEquals(1, reopened.state.value.book!!.lessonIndex)
+        }
+    }
+
     @Test fun legacyBookWithoutAChosenWalkOffersStartLearningAndStillPrompts() = runBlocking {
         val root = Files.createTempDirectory("coach-legacy-start-label-")
         val directory = root.resolve("library")

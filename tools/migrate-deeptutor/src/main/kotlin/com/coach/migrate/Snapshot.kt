@@ -1,15 +1,58 @@
 package com.coach.migrate
 
 import java.nio.file.*
+import java.nio.file.attribute.AclEntry
+import java.nio.file.attribute.AclEntryFlag
+import java.nio.file.attribute.AclEntryPermission
+import java.nio.file.attribute.AclEntryType
+import java.nio.file.attribute.AclFileAttributeView
+import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.*
 import java.security.MessageDigest
 import kotlin.io.path.*
 import kotlinx.serialization.json.*
 
+/**
+ * POSIX 0700/0600, or the current user's exclusive ACL where POSIX is unavailable.
+ * Windows previously returned the directory unprotected; inherited grants are replaced here and
+ * read back, and a file system that can enforce neither model is refused instead of left open.
+ */
+private fun setPrivatePermissions(path: Path, directory: Boolean) {
+    val posix = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
+    if (posix != null) {
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(if (directory) "rwx------" else "rw-------"))
+        return
+    }
+    val acl = Files.getFileAttributeView(path, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
+        ?: throw UnsupportedOperationException("Private owner paths require POSIX permissions or ACLs")
+    // The owner may resolve to BUILTIN\\Administrators on Windows. Grant the process user instead.
+    val user = path.fileSystem.userPrincipalLookupService.lookupPrincipalByName(System.getProperty("user.name"))
+    val entry = AclEntry.newBuilder().setType(AclEntryType.ALLOW).setPrincipal(user)
+        .setPermissions(*AclEntryPermission.values()).apply {
+            if (directory) setFlags(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT)
+        }.build()
+    acl.acl = listOf(entry)
+    check(acl.acl == listOf(entry)) { "Private ACL did not retain the current user's exclusive grant" }
+}
+
 fun privateDir(p: Path): Path {
     Files.createDirectories(p)
-    Files.setPosixFilePermissions(p, PosixFilePermissions.fromString("rwx------"))
+    // Existing files can carry explicit or inherited ACLs that survive changing their parent.
+    // Protect them before any caller can overwrite them; never follow links outside this tree.
+    Files.walkFileTree(p, object : SimpleFileVisitor<Path>() {
+        override fun preVisitDirectory(dir: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
+            require(attrs.isDirectory && !attrs.isSymbolicLink) { "Refusing non-directory private path" }
+            setPrivatePermissions(dir, directory = true)
+            return FileVisitResult.CONTINUE
+        }
+
+        override fun visitFile(file: Path, attrs: java.nio.file.attribute.BasicFileAttributes): FileVisitResult {
+            require(attrs.isRegularFile && !attrs.isSymbolicLink) { "Refusing link or special file in private path" }
+            setPrivatePermissions(file, directory = false)
+            return FileVisitResult.CONTINUE
+        }
+    })
     return p
 }
 fun safeFiles(root: Path): List<Path> {
@@ -29,7 +72,7 @@ fun copyFile(from: Path, to: Path) {
     require(from.toAbsolutePath().normalize()==from.toRealPath()) { "Refusing symbolic link or aliased ancestor" }
     privateDir(to.parent)
     Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES)
-    Files.setPosixFilePermissions(to, PosixFilePermissions.fromString("rw-------"))
+    setPrivatePermissions(to, directory = false)
 }
 fun stat(p: Path): String = if (!p.exists()) "absent" else {
     val a = Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)

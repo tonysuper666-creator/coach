@@ -1,8 +1,6 @@
 package com.coach.domain
 
 import kotlinx.serialization.json.*
-import kotlin.math.floor
-import kotlin.math.round
 
 private val knownFormats = Format.entries.map { it.name }.toSet()
 private val strictPurposes = setOf("CLOSED_BOOK","UNSEEN_VARIANT","TIMED","FULL_MOCK")
@@ -82,11 +80,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
     fun schedule(kp: String, day: Long, result: String) {
         val old = review[kp] ?: return
         if (old.lastReviewDay == day) return
-        val interval = when(result) { "PASS" -> floor(old.intervalDays * old.ease).toInt().coerceAtLeast(1); "NEEDS_WORK" -> (old.intervalDays / 2).coerceAtLeast(1); else -> 1 }
-        val ease = round((when(result) { "PASS" -> (old.ease + .1).coerceAtMost(3.0); "NEEDS_WORK" -> (old.ease - .15).coerceAtLeast(1.3); else -> (old.ease - .2).coerceAtLeast(1.3) }) * 1000) / 1000
-        val n = interval
-        review[kp] = old.copy(dueDay = due(day,n), intervalDays = n, ease = ease,
-            lapses = old.lapses + if (result == "FAIL") 1 else 0, lastResult = result, lastReviewDay = day, snoozedUntilDay = null)
+        review[kp] = nextReview(old, day, result)
         updateJournal(day) { j -> when(result) { "PASS" -> j.copy(reviewPass = j.reviewPass + 1); "NEEDS_WORK" -> j.copy(reviewNeedsWork = j.reviewNeedsWork + 1); else -> j.copy(reviewFail = j.reviewFail + 1) } }
         mastery[kp] = (mastery[kp] ?: Mastery()).copy(needsRepair = result != "PASS")
     }
@@ -169,8 +163,7 @@ fun project(input: Iterable<Event>, zone: String? = null, upcasters: Upcasters =
             tail.map { it.id }, support, progress, revokedSeq, reason, solidLatch)
         val day = logicalDay(event.occurredAt.coerceAtMost(event.recordedAt), effectiveZone)
         if (!old.passed && passed) {
-            val n = if (solid) 3 else 1
-            review.putIfAbsent(kp, Review(due(day,n), n))
+            review.putIfAbsent(kp, initialReview(day, solid))
             updateJournal(day) { it.copy(newlyPassed = (it.newlyPassed + kp).distinct()) }
         }
         if (!old.solid && solid) {

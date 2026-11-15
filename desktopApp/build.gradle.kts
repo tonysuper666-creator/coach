@@ -96,11 +96,75 @@ val coachCourse = providers.gradleProperty("coach.course")
 require(coachCourse.isEmpty() || coachCourse.matches(Regex("[A-Za-z0-9_-]+"))) {
     "coach.course must contain only letters, digits, underscores or hyphens"
 }
+
+// Explicit, independently approved offline inputs only. No PATH/key discovery or
+// test-key fallback. Revalidate every invocation, including changes in-place.
+val windowsRuntimeInput = providers.gradleProperty("coach.windowsBookRuntimeDir")
+val windowsRuntimePin = providers.gradleProperty("coach.windowsBookRuntimeKeySha256")
+val windowsRuntimeOutput = layout.buildDirectory.dir("generated/windows-book-runtime")
+val prepareWindowsBookRuntime = tasks.register("prepareWindowsBookRuntime") {
+    group = "build"
+    description = "Reverify explicit Windows book runtime inputs, or remove the previous generated runtime"
+    outputs.dir(windowsRuntimeOutput)
+    outputs.upToDateWhen { false }
+    doLast {
+        val output = windowsRuntimeOutput.get().asFile
+        // Owned generated files only. Invalidate before checking new inputs so
+        // failed verification cannot leave a previously trusted staging tree.
+        delete(output)
+        // Compose's Sync is NO-SOURCE after withdrawal and may retain its old
+        // destination. Revoke the reserved runtime there before that skip too.
+        delete(tasks.named<Sync>("prepareAppResources").get().destinationDir.resolve("windows-book-runtime"))
+        output.mkdirs()
+        val input = windowsRuntimeInput.orNull
+        val pin = windowsRuntimePin.orNull
+        require((input == null) == (pin == null)) { "Runtime directory and independently approved key fingerprint are required together" }
+        if (input == null) {
+            logger.lifecycle("Windows book runtime: absent; ordinary entry remains Unavailable")
+        } else {
+            val source = rootProject.file(input)
+            val runtime = source.resolve("resources/windows-book-runtime")
+            val result = providers.exec {
+                isIgnoreExitValue = true // retain the precise public-metadata refusal reason
+                commandLine(providers.gradleProperty("coach.runtimePython").getOrElse("python3"),
+                    rootProject.file("tools/windows-book-runtime/assemble-runtime.py"),
+                    "--public-key", source.resolve("classpath/windows-book-runtime-trust.der"),
+                    "--approved-key-sha256", pin!!,
+                    "--manifest", runtime.resolve("manifest.json"), "--signature", runtime.resolve("manifest.sig"),
+                    "--codex", runtime.resolve("codex.exe"), "--isolation", runtime.resolve("coach-iso.exe"),
+                    "--auth-helper", runtime.resolve("coach-auth.exe"),
+                    "--openssl", providers.gradleProperty("coach.runtimeOpenSsl").getOrElse("openssl"),
+                    "--stage", output.resolve("verified"))
+            }
+            result.standardOutput.asText.get().trim().takeIf(String::isNotEmpty)?.let(logger::lifecycle)
+            result.standardError.asText.get().trim().takeIf(String::isNotEmpty)?.let(logger::error)
+            // A refusal aborts before either application resource set can be consumed.
+            result.result.get().assertNormalExitValue()
+            copy {
+                from(output.resolve("verified/resources"))
+                into(output.resolve("compose/windows"))
+            }
+        }
+        // Keep the declared Compose source directory present even without inputs.
+        output.resolve("compose/windows").mkdirs()
+    }
+}
+sourceSets.main {
+    resources.srcDir(prepareWindowsBookRuntime.map { windowsRuntimeOutput.get().dir("verified/classpath") })
+}
+tasks.processResources {
+    dependsOn(prepareWindowsBookRuntime)
+    outputs.upToDateWhen { false }
+    // Copy normally retains removed sources. Revoke this reserved resource too
+    // when approval is withdrawn, without cleaning unrelated application data.
+    doFirst { delete(destinationDir.resolve("windows-book-runtime-trust.der")) }
+}
 compose.desktop {
     application {
         mainClass = "com.coach.desktop.MainKt"
         if (coachCourse.isNotEmpty()) jvmArgs("-Dcoach.course=$coachCourse")
         nativeDistributions {
+            appResourcesRootDir.set(prepareWindowsBookRuntime.map { windowsRuntimeOutput.get().dir("compose") })
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi)
             packageName = "Coach"
             packageVersion = releaseVersion

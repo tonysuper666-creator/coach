@@ -22,6 +22,8 @@ import kotlin.test.*
  */
 @OptIn(ExperimentalComposeUiApi::class, androidx.compose.ui.InternalComposeUiApi::class)
 class ReaderDraftWindowTest {
+    @org.junit.Rule @JvmField val diagnostics = DraftSaveDiagnostics()
+
     private class Rig(val session: ReaderSession) {
         var t = 0L
         val scene = ImageComposeScene(1100, 700, Density(1f)) { ReaderWindow(session) }
@@ -62,7 +64,7 @@ class ReaderDraftWindowTest {
         val dir = Files.createTempDirectory("drafts-"); val scope = "local-library:window-test"
         fun open(): Rig {
             val remote = ReaderRemote(ReaderHttpSource(CourseHttp(lb.base, "dev1", "tok", "c1").reader))
-            val session = ReaderSession(ReaderFixture("远端", emptyList(), emptyList()), 1100, remote, FileNoteDraftStore(dir, scope))
+            val session = ReaderSession(ReaderFixture("远端", emptyList(), emptyList()), 1100, remote, diagnostics.observe(FileNoteDraftStore(dir, scope), dir))
             val rig = Rig(session)
             runBlocking { remote.loadCatalog(); session.openRemote("a") }
             rig.until("page ready") { remote.page is PageState.Ready }
@@ -77,6 +79,7 @@ class ReaderDraftWindowTest {
                 first.key(Key.Enter, ctrl = true)
                 first.until("refusal shown") { first.node("note-failure-reason") != null }
                 val shown = first.text("note-failure-reason")!!
+                diagnostics.atAssertion(first.session, shown)
                 assertTrue(shown.contains("留在本机"), "界面提示必须与实际能力一致（草稿真的留在本机），实际：$shown")
                 assertFalse(shown.contains("不会保留"), "有存储时不能再说不会保留，实际：$shown")
                 first.key(Key.Escape)                       // 普通关闭编辑区

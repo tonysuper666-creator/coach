@@ -54,7 +54,7 @@ class ReaderEntryParityTest {
             assertEquals(2, library.book(book.id).readingPage, "书架翻页会记住读到第 2 页")
 
             // 题目出处入口：同一本书、同一页、同一个阅读器，只多一个当前节。
-            onNodeWithTag("home-learn").performClick()
+            onNodeWithTag("home-question").performClick()  // 看书已保存为当前走法，「继续」会回到看书；题目出处走显式的「做题学」入口
             waitUntil(timeoutMillis = 20_000) { controller.state.value.screen == BookScreen.LEARNING && !controller.state.value.busy }
             val lesson = controller.state.value.book!!.lessons[controller.state.value.book!!.lessonIndex]
             val practice = StudyCoachCourse.practice(controller.state.value.book!!, lesson, QuestionMode.CHOICE)!!

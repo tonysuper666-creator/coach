@@ -124,6 +124,12 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var readerHasFocus by remember { mutableStateOf(false) }
     var noteReader by remember { mutableStateOf<ReaderSession?>(null) }
     val readerFocus = remember { FocusRequester() }
+    // 翻页后恢复阅读器焦点：续体可能在后台线程恢复（控制器动作在 IO 上完成），不能在那里直接动 Compose 焦点；
+    // 只改这个状态，由下面的 LaunchedEffect 在组合所在的 UI 上下文里真正请求焦点。
+    var readerFocusRequests by remember { mutableIntStateOf(0) }
+    LaunchedEffect(readerFocusRequests) {
+        if (readerFocusRequests > 0 && ui.screen == BookScreen.READER && ui.source != null && ui.prompt == null) readerFocus.requestFocus()
+    }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }
@@ -220,7 +226,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                     } == true
                                     val current = controller.state.value
                                     if (lostFocus && !readerHasFocus && current.screen == BookScreen.READER &&
-                                        current.source != null && current.prompt == null) readerFocus.requestFocus()
+                                        current.source != null && current.prompt == null) readerFocusRequests++
                                 }
                             }
                         }, onBack = { returnFromReader() },

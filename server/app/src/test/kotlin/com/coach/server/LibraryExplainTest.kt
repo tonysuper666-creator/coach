@@ -63,8 +63,19 @@ class LibraryExplainTest {
         Unit
     }
 
-    private inner class Harness : AutoCloseable {
+    private inner class Harness(local: Boolean = false) : AutoCloseable {
         val dir = Files.createTempDirectory("synthetic-library-scope-")
+        val libraryRoot = Files.createDirectory(dir.resolve("private-library"))
+        // Binding tests need bytes and their identity only; the importer tests validate actual PDFs with Poppler.
+        val bookFile = libraryRoot.resolve("synthetic.pdf").also { Files.writeString(it, "Synthetic private file identity") }
+        val version = ReaderLibrary.digest(Files.readAllBytes(bookFile))
+        val localId get() = "$version:p12:340"
+        fun entry(course: String = "SYNTHETIC", source: String? = "0123abcd", title: String = "Synthetic book", pages: Int = 13) =
+            JsonObject(json("id" to "synthetic", "course" to course, "title" to title, "file" to "synthetic.pdf",
+                "sha256" to version, "pages" to pages, "kind" to "textbook") +
+                (source?.let { mapOf("explainSourceId" to JsonPrimitive(it)) } ?: emptyMap()))
+        fun catalog(vararg entries: JsonObject) = Files.writeString(libraryRoot.resolve("catalog.json"),
+            json("schema" to 1, "documents" to JsonArray(entries.toList())).toString())
         val jobs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(dir)
         val stub = StubTutor()
@@ -72,6 +83,7 @@ class LibraryExplainTest {
             db.createStatement().use { it.executeUpdate(sql) }
         }
         init {
+            catalog(entry())
             store.enroll("phone", "synthetic-private-token-32-characters")
             store.registerSourcePage("SYNTHETIC", "0123abcd", "Synthetic book", 12,
                 "Synthetic price elasticity is a ratio. Synthetic selected. SYNTHETIC_NEIGHBOUR_SECRET.")
@@ -84,9 +96,10 @@ class LibraryExplainTest {
             store.append("SYNTHETIC", "kp_opened", json("kpId" to "k1"))
         }
         val actor = LedgerActor(jobs, store)
+        val library = if (local) ReaderLibrary(libraryRoot) else null
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 16))
-            libraryExplainRoutes(actor, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack }))
+            libraryExplainRoutes(actor, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack }), library)
         }.also { it.start(false) }
         val client = HttpClient.newHttpClient()
         suspend fun post(input: JsonObject): Pair<Int, JsonObject> = withContext(Dispatchers.IO) {
@@ -145,6 +158,96 @@ class LibraryExplainTest {
             val (status, body) = withTimeout(5000) { response.await() }
             assertEquals(200, status); assertTrue(body.getValue("sources").jsonArray.isEmpty())
             assertTrue(body.str("text").contains("当前不可见")); assertFalse(body.toString().contains("有依据的解释。"))
+        }
+    }
+
+    @Test fun explicitlyBoundLocalFileExplainsLearnedSelectionAndKeepsLocalCitationAlias() = runBlocking {
+        Harness(local = true).use { h ->
+            h.reply()
+            val input = JsonObject(request("Synthetic selected", blocks(
+                h.localId to "CLIENT_PREFIX. Synthetic selected. CLIENT_SUFFIX.",
+                "${h.version}:p13:0" to "SYNTHETIC_UNREAD_SECRET")) + json(
+                "course" to "CLIENT_FAKE_COURSE", "explainSourceId" to "CLIENT_FAKE_SOURCE"))
+            val (status, body) = h.post(input)
+            assertEquals(200, status)
+            assertTrue(body.str("text").contains("有依据的解释。"))
+            assertEquals(h.localId, body.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertEquals(1, h.stub.requests)
+            val wire = h.stub.requestBodies.single()
+            assertTrue(wire.contains("Synthetic selected"))
+            for (secret in listOf("CLIENT_PREFIX", "CLIENT_SUFFIX", "SYNTHETIC_UNREAD_SECRET", "SYNTHETIC_NEIGHBOUR_SECRET",
+                "CLIENT_FAKE_COURSE", "CLIENT_FAKE_SOURCE")) assertFalse(wire.contains(secret), secret)
+        }
+    }
+
+    @Test fun localHashCannotBypassOptInByNamingAnExistingLedgerDocument() = runBlocking {
+        Harness(local = true).use { h ->
+            h.actor.execute {
+                registerSourcePage("SYNTHETIC", h.version, "Synthetic hash-named book", 12, "Synthetic selected")
+                h.update("""UPDATE outline_kp SET anchors='[{"docId":"${h.version}","pdfPage":12}]' WHERE kp_id='k1'""")
+            }
+            for (entries in listOf(emptyArray(), arrayOf(h.entry(source = null)))) {
+                h.catalog(*entries)
+                val forged = JsonObject(request("Synthetic selected", blocks(h.localId to "Synthetic selected")) +
+                    json("explainSourceId" to h.version, "course" to "SYNTHETIC", "learnerVisible" to true))
+                assertEquals(409, h.post(forged).first)
+            }
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun localBindingRejectsUnknownAmbiguousWrongCourseProtectedAndOutOfRangeMappings() = runBlocking {
+        Harness(local = true).use { h ->
+            val duplicate = JsonObject(h.entry() + ("id" to JsonPrimitive("second-registration")))
+            for (entries in listOf(arrayOf(h.entry(source = "unknown")), arrayOf(h.entry(course = "OTHER")),
+                arrayOf(h.entry(title = "Synthetic answers")), arrayOf(h.entry(pages = 11)), arrayOf(h.entry(), duplicate))) {
+                h.catalog(*entries)
+                assertEquals(409, h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected"))).first)
+            }
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun localBindingDoesNotAuthorizeUnreadProtectedOrForgedSelections() = runBlocking {
+        Harness(local = true).use { h ->
+            for ((source, page, quote) in listOf(Triple("0123abcd", 13, "SYNTHETIC_UNREAD_SECRET"),
+                Triple("harmless-id", 12, "SYNTHETIC_ANSWER_SECRET"), Triple("ordinary-id", 12, "SYNTHETIC_HELDOUT_SECRET"),
+                Triple("0123abcd", 12, "SYNTHETIC_FORGED_TEXT"))) {
+                h.catalog(h.entry(source = source))
+                val forged = JsonObject(request(quote, blocks("${h.version}:p$page:0" to quote)) +
+                    json("currentKps" to listOf("k2"), "scope" to json("allowsInternalReference" to true), "learnerVisible" to true))
+                assertEquals(409, h.post(forged).first, source)
+            }
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun changedFileAndUnreadableCatalogFailClosedBeforeModel() = runBlocking {
+        Harness(local = true).use { h ->
+            val original = Files.readAllBytes(h.bookFile)
+            Files.writeString(h.bookFile, "Changed synthetic private file")
+            assertEquals(409, h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected"))).first)
+            Files.write(h.bookFile, original)
+            Files.writeString(h.libraryRoot.resolve("catalog.json"), "invalid synthetic catalog")
+            assertEquals(409, h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected"))).first)
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun localBindingRevokedOrFileChangedDuringGenerationWithholdsAnswerAndCitations() = runBlocking {
+        for (change in listOf<(Harness) -> Unit>({ it.catalog(it.entry(source = null)); Unit },
+            { it.catalog(it.entry(course = "OTHER")); Unit }, { Files.writeString(it.bookFile, "Changed synthetic file"); Unit })) {
+            Harness(local = true).use { h ->
+                h.reply(delayMs = 150)
+                val response = async { h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected"))) }
+                withTimeout(5000) { while (h.stub.framesWritten == 0) delay(5) }
+                change(h)
+                val (status, body) = withTimeout(5000) { response.await() }
+                assertEquals(200, status)
+                assertTrue(body.getValue("sources").jsonArray.isEmpty())
+                assertTrue(body.str("text").contains("当前不可见"))
+                assertFalse(body.toString().contains("有依据的解释。"))
+            }
         }
     }
 

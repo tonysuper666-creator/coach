@@ -79,6 +79,20 @@ class PrivateImportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.import_one()
 
+    def test_explanation_binding_requires_explicit_opt_in_and_reimport_can_revoke_it(self):
+        self.assertNotIn("explainSourceId", self.import_one())
+        entry = self.import_one(explain_source_id="existing.source-1")
+        self.assertEqual("existing.source-1", entry["explainSourceId"])
+        catalog = self.root / "library/catalog.json"
+        self.assertEqual("existing.source-1", json.loads(catalog.read_text())["documents"][0]["explainSourceId"])
+        before = catalog.read_bytes()
+        for bad in ["", "../source", "x" * 81]:
+            with self.assertRaises(ValueError):
+                self.import_one(explain_source_id=bad)
+        self.assertEqual(before, catalog.read_bytes())
+        self.import_one()
+        self.assertNotIn("explainSourceId", json.loads(catalog.read_text())["documents"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

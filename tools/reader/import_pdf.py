@@ -11,11 +11,13 @@ import subprocess
 import tempfile
 
 
-def import_pdf(source, library, *, document_id, course, title, kind, offset=None, week=None):
+def import_pdf(source, library, *, document_id, course, title, kind, offset=None, week=None, explain_source_id=None):
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", document_id):
         raise ValueError("invalid document ID")
     if not 1 <= len(course) <= 128 or not 1 <= len(title) <= 300:
         raise ValueError("invalid course/title")
+    if explain_source_id is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", explain_source_id):
+        raise ValueError("invalid explanation source ID")
     if kind not in {"textbook", "slides", "reading"} or (kind == "slides" and not (week and 1 <= week <= 100)):
         raise ValueError("slides require an explicit week")
     source = Path(source).resolve(strict=True)
@@ -67,6 +69,8 @@ def import_pdf(source, library, *, document_id, course, title, kind, offset=None
                 entry["printedPageOffset"] = offset
             if week is not None:
                 entry["week"] = week
+            if explain_source_id is not None:
+                entry["explainSourceId"] = explain_source_id
             docs = [d for d in catalog["documents"] if (d["course"], d["id"]) != (course, document_id)]
             docs.append(entry)
             if len(docs) > 500:
@@ -96,10 +100,12 @@ def main():
     parser.add_argument("--kind", required=True, choices=["textbook", "slides", "reading"])
     parser.add_argument("--printed-page-offset", type=int)
     parser.add_argument("--week", type=int)
+    parser.add_argument("--explain-source-id", help="explicit opt-in: existing server learner-source docId with the same PDF page numbering")
     args = parser.parse_args()
     try:
         entry = import_pdf(args.source, args.library, document_id=args.id, course=args.course,
-                           title=args.title, kind=args.kind, offset=args.printed_page_offset, week=args.week)
+                           title=args.title, kind=args.kind, offset=args.printed_page_offset, week=args.week,
+                           explain_source_id=args.explain_source_id)
     except (ValueError, OSError, subprocess.SubprocessError):
         parser.exit(1, "Private import failed: check the explicit PDF, catalog and permissions locally.\n")
     print(f"Imported {entry['id']}: {entry['pages']} PDF pages. Restart the development server to reload catalog.")

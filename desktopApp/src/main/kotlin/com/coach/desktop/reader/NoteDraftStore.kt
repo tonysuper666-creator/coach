@@ -18,6 +18,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * 本机批注草稿的存储合同（只存当前用户自己还没保存成功的文字，仅在本机）。
@@ -46,6 +49,12 @@ interface NoteDraftStore {
 
 /** 目录里一份草稿一个 JSON（schema=1）；文件名是身份的哈希，不含文档 id/正文；写入先临时文件再原子替换。 */
 class FileNoteDraftStore(private val directory: Path, override val scope: String) : NoteDraftStore {
+    private companion object {
+        // Windows can refuse an atomic replacement while our own readString channel is open.
+        // Share across instances (including reopened sessions/path aliases), and release reads
+        // only after their channels close. External file occupation still returns false.
+        val fileAccess = ReentrantReadWriteLock()
+    }
     private val enabled get() = scope.isNotBlank()
 
     private fun key(i: DraftIdentity): String {
@@ -54,9 +63,9 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
     }
     private fun file(i: DraftIdentity) = directory.resolve(key(i) + ".json")
 
-    override fun put(draft: StoredDraft): Boolean {
-        if (!enabled || draft.identity.scope != scope || (draft.note.isEmpty() && !draft.cleared)) return false
-        return try {
+    override fun put(draft: StoredDraft): Boolean = fileAccess.write {
+        if (!enabled || draft.identity.scope != scope || (draft.note.isEmpty() && !draft.cleared)) return@write false
+        try {
             Files.createDirectories(directory)
             val i = draft.identity
             val body = buildJsonObject {
@@ -85,23 +94,25 @@ class FileNoteDraftStore(private val directory: Path, override val scope: String
         return StoredDraft(identity, s("noteId") ?: return null, s("quote") ?: return null, s("note") ?: return null, base, cleared)
     }
 
-    override fun get(identity: DraftIdentity): StoredDraft? {
-        if (!enabled || identity.scope != scope) return null
-        val path = file(identity).takeIf { Files.isRegularFile(it) } ?: return null
-        return parse(path)?.takeIf { it.identity == identity } // 文件内容的身份必须和请求逐项一致
+    override fun get(identity: DraftIdentity): StoredDraft? = fileAccess.read {
+        if (!enabled || identity.scope != scope) return@read null
+        val path = file(identity).takeIf { Files.isRegularFile(it) } ?: return@read null
+        parse(path)?.takeIf { it.identity == identity } // 文件内容的身份必须和请求逐项一致
     }
 
-    override fun listFor(doc: String, version: String, pdfPage: Int): List<StoredDraft> {
-        if (!enabled || !Files.isDirectory(directory)) return emptyList()
-        return Files.list(directory).use { s ->
+    override fun listFor(doc: String, version: String, pdfPage: Int): List<StoredDraft> = fileAccess.read {
+        if (!enabled || !Files.isDirectory(directory)) return@read emptyList()
+        Files.list(directory).use { s ->
             s.filter { it.fileName.toString().endsWith(".json") }.toList().mapNotNull { parse(it) }
         }.filter { it.identity.scope == scope && it.identity.doc == doc && it.identity.version == version && it.identity.pdfPage == pdfPage }
             .sortedBy { it.identity.start }
     }
 
     override fun remove(identity: DraftIdentity) {
-        if (!enabled || identity.scope != scope) return
-        runCatching { Files.deleteIfExists(file(identity)) } // 只删这一个身份对应的文件；失败不抛
+        fileAccess.write {
+            if (!enabled || identity.scope != scope) return@write
+            runCatching { Files.deleteIfExists(file(identity)) } // 只删这一个身份对应的文件；失败不抛
+        }
     }
 }
 

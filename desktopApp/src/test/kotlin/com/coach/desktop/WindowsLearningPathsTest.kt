@@ -22,8 +22,11 @@ class WindowsLearningPathsTest {
         val library = TextbookLibrary(directory)
         var nextFile = aFile
         var controller by mutableStateOf(TextbookController(library))
+        // 讲解通道给一个确定不联网的实现：这台机器的配对与 Mac 都不参与这条测试。
+        val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { false },
+            explain = { _, _ -> ExplainResult.Refused("测试里不配对") })
         runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
-            setContent { key(controller) { WindowsTextbookHost(controller) { nextFile } } }
+            setContent { key(controller) { WindowsTextbookHost(controller, answerExplain = gate) { nextFile } } }
             ready(controller) { it.catalog.isEmpty() }
             onNodeWithTag("upload-textbook").performClick()
             ready(controller) { it.prompt == BookPrompt.IMPORTED }
@@ -129,7 +132,12 @@ class WindowsLearningPathsTest {
             val q0 = StudyCoachCourse.practice(b, b.lessons[0], QuestionMode.CHOICE)!!
             onNodeWithTag("choice-${q0.options.indexOf(q0.answer)}").performScrollTo().performClick()
             ready(controller) { it.answer.revealed }
-            onNodeWithTag("book-lesson-explanation").assertExists()
+            // 答完就讲：没配对时指路而不发原文，题下给小结卡接着走。
+            onNodeWithTag("answer-explain-unpaired").assertExists()
+            onNodeWithTag("answer-explain-consent").assertDoesNotExist()
+            onNodeWithTag("book-lesson-explanation").assertDoesNotExist()
+            onNodeWithTag("book-summary-card").assertExists()
+            onNodeWithTag("book-summary-detail").assertTextContains("和原文一致", substring = true)
             onNodeWithText("原文：${q0.reference}").assertDoesNotExist()
             onNodeWithText(b.lessons[0].text).assertDoesNotExist()
             capture("question-route-after-answer")

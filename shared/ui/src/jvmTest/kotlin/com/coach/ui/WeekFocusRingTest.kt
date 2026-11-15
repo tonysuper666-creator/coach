@@ -1061,6 +1061,90 @@ class WeekFocusRingTest {
     }
 
     /**
+     * 本节最近一题's option rows (MarginQuestion): in the margin column at 1224 / 700dp, in the 出处与批注 sheet at 699dp.
+     * Both rows, the answer on successBg and the other on the option grey, show the ring outside their pill on all four sides,
+     * ≥3:1 to the card around it and to the pill's own fill; Tab walks 选项A → 选项B → 继续练习 one stop each, focus keeps
+     * the bounds, blur restores the pixels, and Enter and a real mouse click each run onQuiz once (and nothing else).
+     */
+    @Test fun readingMarginQuestionOptionsShowRingAndKeepOnQuiz() {
+        val view = threeWeeks()
+        val kp = view.kp("c")!!
+        val text = "合成正文第一段，讲一个要点。\n\n合成正文第二段。"
+        val details = V7PageDetails(course = "合成课", readStatus = "读到第 1 段", sourceLabel = "合成教材 · 第 3 页",
+            sourceText = "合成教材第 3 页的原文缩略。", thumbnailCaption = "图 1",
+            question = V7MarginQuestion("合成题干：哪一项对？", listOf("合成选项一", "合成选项二"), 0, "为什么：合成解释。", 3, "合成教材 3"))
+        val options = listOf("A" to (hasText("合成选项一", substring = true) and hasClickAction()),
+            "B" to (hasText("合成选项二", substring = true) and hasClickAction()))
+        val practice = hasText("继续练习 →") and hasClickAction()
+        val open = hasText("打开原页 →") and hasClickAction()
+        val mid = (V7FocusRingGap + V7FocusRingWidth / 2).value * scale
+        withController { controller ->
+            for (dark in listOf(false, true)) for (w in listOf(1224f, 700f, 699f)) runSkikoComposeUiTest(size = Size(w * scale, 900f * scale), density = Density(scale)) {
+                val mode = "${if (dark) "dark" else "light"}-${w.toInt()}"
+                val sheet = w < 700f
+                val calls = mutableListOf<String>()
+                lateinit var focus: FocusManager
+                setContent { CoachTheme(dark) { Surface { CompositionLocalProvider(LocalV7PageDetails provides details) {
+                    focus = LocalFocusManager.current
+                    ReadingPage(controller, kp, view, text, false, {}, null,
+                        onAsk = { calls += "问一句" }, onQuiz = { calls += "做题" }, onSource = { calls += "原页" }, weekActions = null, onSelectionAsk = {})
+                } } } }
+                waitForIdle()
+                if (sheet) {
+                    // 699dp: the question card lives in the 出处与批注 sheet; open it by keyboard.
+                    val toggle = hasTestTag("v7-margin-toggle")
+                    onNode(toggle).requestFocus(); waitForIdle(); enter(toggle)
+                    assertEquals(1, onAllNodes(hasTestTag("v7-margin-sheet")).fetchSemanticsNodes().size, "$mode the margin sheet is open")
+                }
+                val before = shot("$mode-quiz-unfocused", sheet)
+                val b0 = options.map { first(it.second).boundsInRoot }
+                println("TON-1603 week $mode quiz bounds=" + options.indices.joinToString(" ") { i -> val r = b0[i]; "${options[i].first}@${r.left / scale},${r.top / scale} ${r.width / scale}x${r.height / scale}dp" })
+                val area = Rect(b0[0].left, b0[0].top, b0[1].right, b0[1].bottom).inflate(10 * scale)
+                fun blur() {
+                    if (sheet) { onNode(open).requestFocus(); waitForIdle(); assertTrue(focused(open), "$mode focus moved to 打开原页") }
+                    else { runOnIdle { focus.clearFocus() }; waitForIdle() }
+                }
+                if (!sheet) { onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Tab) }; waitForIdle() }
+                val stops = mutableListOf<String>()
+                for ((i, o) in options.withIndex()) {
+                    val (n, m) = o
+                    stops += "选项$n=${tabUntil(m)}"
+                    assertTrue(focused(m), "$mode Tab never reached 选项$n")
+                    assertEquals(b0[i], first(m).boundsInRoot, "$mode focusing must not move or resize 选项$n")
+                    val s = shot("$mode-选项$n-focused", sheet)
+                    ringOnFourSides(mode, "选项$n", b0[i], s, before)
+                    // Against the pill's own fill too (successBg for the answer, the option grey for the other).
+                    val ring = s[(b0[i].left - mid).roundToInt(), b0[i].center.y.roundToInt()]
+                    val fill = before[(b0[i].left + 4 * scale).roundToInt(), b0[i].center.y.roundToInt()]
+                    assertTrue(contrast(ring, fill) >= 3f, "$mode 选项$n ring ${hex(ring)} vs pill ${hex(fill)}")
+                    println("TON-1603 week $mode 选项$n ring ${hex(ring)}:pill ${hex(fill)}=${"%.2f".format(contrast(ring, fill))}")
+                }
+                stops += "继续练习=${tabUntil(practice)}"
+                assertTrue(focused(practice), "$mode Tab never reached 继续练习")
+                assertTrue(stops.drop(1).all { it.endsWith("=1") }, "$mode 选项A → 选项B → 继续练习 one Tab each: $stops")
+                println("TON-1603 week $mode quiz tab-stops ${stops.joinToString(" ")}")
+                for ((n, m) in options) {
+                    onNode(m).requestFocus(); waitForIdle(); assertTrue(focused(m), "$mode 选项$n focused")
+                    blur()
+                    assertRegionEqual(before, shot("$mode-选项$n-blurred", sheet), area, "$mode 选项$n after blur")
+                }
+                for ((n, m) in options) {
+                    val k = calls.size
+                    onNode(m).requestFocus(); waitForIdle(); enter(m)
+                    assertEquals(listOf("做题"), calls.drop(k), "$mode Enter on 选项$n runs onQuiz once")
+                    assertTrue(focused(m), "$mode focus stays on 选项$n after Enter")
+                }
+                for ((n, m) in options) {
+                    val k = calls.size
+                    onNode(m).performMouseInput { click() }; waitForIdle()
+                    assertEquals(listOf("做题"), calls.drop(k), "$mode mouse click on 选项$n runs onQuiz once")
+                }
+                println("TON-1603 week $mode quiz enter+mouse calls=$calls")
+            }
+        }
+    }
+
+    /**
      * Ring hugging the label [b] on all four centre lines. Walking outward: the gap (at most the click area's light focus fill),
      * then the ring, ≥3:1 against what was there unfocused, then 1dp further the unfocused pixels (or that same focus fill) again. Gap and ring must be
      * V7FocusRingGap / V7FocusRingWidth on every side; a side cut by the menu's clip finds no ring there.

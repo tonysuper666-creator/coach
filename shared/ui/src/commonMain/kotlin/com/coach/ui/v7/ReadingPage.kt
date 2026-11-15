@@ -175,7 +175,8 @@ private fun MarginQuestion(q: V7MarginQuestion, onQuiz: () -> Unit) {
         Spacer(Modifier.height(12.dp))
         q.options.forEachIndexed { i, option ->
             if (i > 0) Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (i == q.answer) CoachTheme.colors.successBg else if (CoachTheme.colors.dark) CoachV7.Dark.optBg else CoachV7.Light.optBg)
+            // The ring sits outside the clipped option pill, so it goes before the clip.
+            Row(Modifier.fillMaxWidth().v7FocusRing(RoundedCornerShape(10.dp)).clip(RoundedCornerShape(10.dp)).background(if (i == q.answer) CoachTheme.colors.successBg else if (CoachTheme.colors.dark) CoachV7.Dark.optBg else CoachV7.Light.optBg)
                 .clickable(onClick = onQuiz).padding(horizontal = 12.dp, vertical = 4.dp).heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(('A' + i).toString(), style = MaterialTheme.typography.labelMedium)
                 Text(option, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp))

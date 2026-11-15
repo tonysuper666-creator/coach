@@ -164,6 +164,53 @@ class BookConsentUiTest {
         }
     }
 
+    @Test fun oneApprovalIsOneOutboundRequestEveryTime() {
+        val f = Fixture()
+        runSkikoComposeUiTest(size = Size(1100f, 1000f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(f.controller, support = f.support) { null } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-grant").fetchSemanticsNodes().isNotEmpty() }
+            repeat(10) { round ->
+                if (round > 0) {
+                    onNodeWithTag("book-consent-reopen").performScrollTo().performClick()
+                    waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-grant").fetchSemanticsNodes().isNotEmpty() }
+                }
+                val before = f.store.changes.value
+                onNodeWithTag("book-consent-grant").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+                assertEquals(before + 1, f.store.changes.value, "One approval must be one revision for observers")
+                assertEquals(round + 1, f.calls.get(), "One approval must be exactly one outbound request")
+                assertEquals(setOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK), f.store.read(f.book.id)!!.actions)
+                onNodeWithTag("book-consent-revoke").performScrollTo().performClick()
+                waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+            }
+            assertEquals(10, f.calls.get())
+        }
+    }
+
+    @Test fun closingTheExplanationIsRememberedAcrossReentryAndOnlyReopenOffersAgain() {
+        val f = Fixture()
+        runSkikoComposeUiTest(size = Size(1100f, 1000f), density = Density(1f)) {
+            setContent { WindowsTextbookHost(f.controller, support = f.support) { null } }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-grant").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-consent-grant").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-consent-revoke").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+            assertFalse(f.support.consentOffer(f.book.id).offerAutomatically, "Closing must be remembered")
+            assertEquals(1, f.calls.get())
+            onNodeWithText("返回书架").performClick()
+            waitUntil(timeoutMillis = 20_000) { f.controller.state.value.screen == BookScreen.HOME && !f.controller.state.value.busy }
+            onNodeWithTag("home-guided").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { f.controller.state.value.screen == BookScreen.LEARNING && !f.controller.state.value.busy }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-consent-reopen").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-consent-notice").assertDoesNotExist()
+            assertEquals(1, f.calls.get(), "Reentering after closing must not send anything")
+            onNodeWithTag("book-consent-reopen").performScrollTo().performClick()
+            onNodeWithTag("book-consent-notice").assertExists()
+            assertEquals(1, f.calls.get(), "Opening the notice is not consent")
+        }
+    }
+
     @Test fun removalWithoutACliStillForgetsAnEarlierGrantAndRestoresTheOriginalFormat() = runBlocking {
         val f = Fixture()
         f.support.grant(f.support.consentOffer(f.book.id), setOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK))

@@ -24,12 +24,13 @@ internal class ConsentedBookLearningSupport(
     override fun consentOffer(book: String) = store.offer(book, identity)
     override suspend fun grant(offer: NeedsConsent, actions: Set<OwnedBookAction>) {
         require(offer.identity == identity)
-        revoke(offer.book)
-        withContext(Dispatchers.IO) { store.grant(offer, actions) }
+        withContext(Dispatchers.IO) { store.replace(offer, actions) }.joinAll()
     }
     override suspend fun decline(book: String) { withContext(Dispatchers.IO) { store.revoke(book, identity) }.joinAll() }
-    override suspend fun revoke(book: String) { withContext(Dispatchers.IO) { store.revoke(book) }.joinAll() }
-    override suspend fun forgetBook(book: String) = revoke(book)
+    /** An explicit "关掉讲解" is remembered like a decline, so the notice does not reopen by itself. */
+    override suspend fun revoke(book: String) { withContext(Dispatchers.IO) { store.revoke(book, identity) }.joinAll() }
+    /** Removing the book also forgets the decline, so re-importing asks again. */
+    override suspend fun forgetBook(book: String) { withContext(Dispatchers.IO) { store.revoke(book) }.joinAll() }
 
     private fun needsConsent(book: String) = BookLearningReply.Unavailable(
         "这本书没开讲解，可以直接读原文或先做题。", consentOffer(book),

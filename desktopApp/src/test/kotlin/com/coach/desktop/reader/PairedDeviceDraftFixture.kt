@@ -34,7 +34,9 @@ import kotlin.test.*
 
 /** Real Ktor routes, LedgerStore/SQLite, minted pairings and invented PDFs; never a response override. */
 internal class PairedDeviceDraftFixture(label: String) : AutoCloseable {
-    val root = Files.createTempDirectory("paired-draft-$label-")
+    // Default java.io.tmpdir on macOS is reached through the /var symlink; resolve it so the fixture's
+    // protected directories are real paths and the pairing guard tests what it means to test.
+    val root = Files.createTempDirectory("paired-draft-$label-").toRealPath()
     val evidence = Path.of("build", "paired-device-drafts", label).also { Files.createDirectories(it) }
     private val library = root.resolve("library").also { Files.createDirectories(it) }
     private val database = root.resolve("database").also { Files.createDirectories(it) }

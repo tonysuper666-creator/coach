@@ -9,6 +9,8 @@ private const val USAGE = """Usage: migrate-deeptutor --dry-run [--capture-only 
     [--seed-manifest FILE [--proposal FILE [--confirmation FILE]]]
        migrate-deeptutor seed-content --snapshot DIR [--data DIR] [--corpus DIR]
        migrate-deeptutor seed-content --snapshot DIR --database DIR [--out DIR] [--weights FILE]
+       migrate-deeptutor register-book-original --database OFFLINE_DIR --course ID --pdf FILE --sha256 SHA --canonical-sha256 SHA --mappings FILE
+       migrate-deeptutor withdraw-book-original --database OFFLINE_DIR --course ID --sha256 SHA
        migrate-deeptutor add-outline --input FILE --database OFFLINE_DIR [--preflight | --expect FILE --backup NEW_DIR]
        migrate-deeptutor rehearse --snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE [--confirmation FILE] --out NEW_DIR
        migrate-deeptutor rehearse-incremental --snapshot DIR --next-snapshot DIR --second-snapshot DIR --coach-db FILE --seed-manifest FILE --proposal FILE --out NEW_DIR
@@ -33,6 +35,9 @@ fun requirePrivateDestination(path: Path, sources: List<Path>) {
 }
 fun main(args: Array<String>) {
     if(args.contentEquals(arrayOf("--help"))) { println(USAGE);return }
+    if(args.firstOrNull() in setOf("register-book-original", "withdraw-book-original")) {
+        bookOriginalCommand(args[0], args.drop(1)); return
+    }
     if(args.firstOrNull()=="add-outline") { outlineAdditionCommand(args.drop(1));return }
     if(args.firstOrNull() in setOf("apply-confirmed","rollback-confirmed")) { formalImportCommand(args[0],args.drop(1));return }
     if(args.firstOrNull()=="rehearse") { rehearseCommand(args.drop(1));return }

@@ -8,6 +8,7 @@ dependencies {
     api(project(":shared:protocol"))
     testImplementation(kotlin("test"))
     implementation(libs.sqlite.jdbc)
+    implementation("org.apache.pdfbox:pdfbox:3.0.8")
     implementation(libs.sqldelight.driver) { exclude(group = "org.xerial", module = "sqlite-jdbc") }
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }

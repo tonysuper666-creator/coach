@@ -20,6 +20,7 @@ data class BookSourceLocator(
 
 /** Builds a [BookLedgerIdentity] only from facts the server already owns; runs in LedgerStore's writer transaction. */
 internal class BookLedgerSourceProducer(private val db: Connection, private val blobs: Path) {
+    private val originals = BookOriginalStore(db, blobs)
     private fun <T> rows(statement: String, vararg args: Any?, read: (java.sql.ResultSet) -> T): List<T> =
         db.prepareStatement(statement).use { ps ->
             args.forEachIndexed { i, a -> ps.setObject(i + 1, a) }
@@ -32,8 +33,9 @@ internal class BookLedgerSourceProducer(private val db: Connection, private val 
             l.originalAttemptId.isBlank()) refuse("BOOK_IDENTITY_INCOMPLETE")
         // The book must be the server's own seeded textbook: its original bytes are re-read and re-hashed
         // from the content-addressed blob store, never accepted from the caller.
+        val canonical = originals.blob(l.courseId, l.bookSha256)
         val docId = rows("""SELECT doc_id FROM source_docs WHERE course_id=? AND blob_sha256=? AND kind='TEXTBOOK'
-            AND tutor_visible=1""", l.courseId, l.bookSha256) { it.getString(1) }.singleOrNull() ?: refuse("BOOK_FILE_UNSEEDED")
+            AND tutor_visible=1""", l.courseId, canonical) { it.getString(1) }.singleOrNull() ?: refuse("BOOK_FILE_UNSEEDED")
         val file = blobs.resolve(l.bookSha256)
         val bytes = if (Files.isRegularFile(file)) Files.readAllBytes(file) else refuse("BOOK_FILE_UNSEEDED")
         if (sha256(bytes) != l.bookSha256) refuse("BOOK_FILE_UNSEEDED")
@@ -45,8 +47,7 @@ internal class BookLedgerSourceProducer(private val db: Connection, private val 
         // Same learner device saw the server pose and submitted the answer through its own authenticated command.
         if (posed.deviceId != l.device || answer.deviceId != l.device || answer.commandId == null) refuse("BOOK_DEVICE_MISMATCH")
         val p = posed.payload
-        val page = rows("SELECT text FROM source_pages WHERE doc_id=? AND pdf_page=?", docId, l.pdfPage) { it.getString(1) }
-            .singleOrNull() ?: refuse("BOOK_BLOCK_MISMATCH")
+        val page = originals.page(l.courseId, l.bookSha256, canonical, docId, l.pdfPage)
         if (l.start < 0 || l.end <= l.start || l.end > page.length) refuse("BOOK_BLOCK_MISMATCH")
         // Offsets are UTF-16 code units into this exact page: a range that starts or ends between
         // the two halves of a surrogate pair names half a character, not a source block.
@@ -66,7 +67,7 @@ internal class BookLedgerSourceProducer(private val db: Connection, private val 
         val text = page.substring(l.start, l.end)
         return BookLedgerIdentity(l.bookSha256, l.lessonId,
             BookLedgerBlock("${l.bookSha256}:p${l.pdfPage}:${l.start}", l.pdfPage, l.start, l.end, sha256(text.toByteArray())),
-            docId, l.bookSha256, l.courseId, kp, QueueQuestion(p.str("questionId"), null, p.str("fingerprint").ifBlank { null }),
+            docId, canonical, l.courseId, kp, QueueQuestion(p.str("questionId"), null, p.str("fingerprint").ifBlank { null }),
             l.originalAttemptId, p.str("stem"), l.optionOrder, l.reference, correct.text, chosen.text,
             answer.payload.flag("guessed")) to bytes
     }

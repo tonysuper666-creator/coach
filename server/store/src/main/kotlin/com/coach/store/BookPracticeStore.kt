@@ -10,6 +10,7 @@ import java.sql.Connection
 
 /** No authorization grants or question approval here. Used inside LedgerStore's writer transaction. */
 internal class BookPracticeStore(private val db: Connection, private val blobs: Path) {
+    private val originals = BookOriginalStore(db, blobs)
     init {
         sql("""CREATE TABLE IF NOT EXISTS book_practice_mappings(
             course TEXT NOT NULL,source_key TEXT NOT NULL,mapping_json TEXT NOT NULL,
@@ -35,12 +36,7 @@ internal class BookPracticeStore(private val db: Connection, private val blobs: 
     private fun key(s: BookPracticeSource) = canonicalJson(json("book" to s.bookSha256, "lesson" to s.lessonId,
         "page" to s.pdfPage, "start" to s.start, "end" to s.end))
     private fun encoded(m: BookPracticeMapping) = canonicalJson(LedgerJson.encodeToJsonElement(m))
-    private fun blob(course: String, original: String): String {
-        val direct = rows("""SELECT blob_sha256 FROM source_docs WHERE course_id=? AND blob_sha256=?
-            AND kind='TEXTBOOK' AND tutor_visible=1""", course, original) { it.getString(1) }.singleOrNull()
-        return direct ?: rows("SELECT blob_sha256 FROM book_original_sha WHERE course=? AND original_sha256=?",
-            course, original) { it.getString(1) }.singleOrNull() ?: throw ReviewVariantRejected("BOOK_FILE_UNSEEDED")
-    }
+    private fun blob(course: String, original: String) = originals.blob(course, original)
     private fun snapshot(course: String, m: BookPracticeMapping): String = canonicalJson(JsonObject(
         LedgerJson.encodeToJsonElement(m).jsonObject + ("sourceBlobSha256" to JsonPrimitive(blob(course, m.source.bookSha256)))))
     private fun snapshotMatches(course: String, m: BookPracticeMapping, raw: String): Boolean {
@@ -58,6 +54,27 @@ internal class BookPracticeStore(private val db: Connection, private val blobs: 
         mappings.forEach { validate(course, it, content) }
         sql("DELETE FROM book_practice_mappings WHERE course=?", course)
         mappings.forEach { sql("INSERT INTO book_practice_mappings VALUES(?,?,?)", course, key(it.source), encoded(it)) }
+    }
+    fun addOriginalMappings(course: String, original: String, mappings: List<BookPracticeMapping>, content: CourseContent): Boolean {
+        need(mappings.isNotEmpty() && mappings.all { it.source.bookSha256 == original }, "BOOK_IDENTITY_INCOMPLETE")
+        need(mappings.map { key(it.source) }.distinct().size == mappings.size, "BOOK_MAPPING_AMBIGUOUS")
+        mappings.forEach { validate(course, it, content) }
+        var changed = false
+        mappings.forEach { m ->
+            val prior = rows("SELECT mapping_json FROM book_practice_mappings WHERE course=? AND source_key=?", course, key(m.source)) {
+                it.getString(1)
+            }.singleOrNull()
+            need(prior == null || prior == encoded(m), "BOOK_SOURCE_CONFLICT")
+            changed = (sql("INSERT OR IGNORE INTO book_practice_mappings VALUES(?,?,?)", course, key(m.source), encoded(m)) == 1) || changed
+        }
+        return changed
+    }
+    fun withdrawOriginal(course: String, original: String) {
+        val keys = rows("SELECT source_key,mapping_json FROM book_practice_mappings WHERE course=?", course) {
+            it.getString(1) to LedgerJson.decodeFromString<BookPracticeMapping>(it.getString(2))
+        }.filter { it.second.source.bookSha256 == original }.map { it.first }
+        keys.forEach { sql("DELETE FROM book_practice_mappings WHERE course=? AND source_key=?", course, it) }
+        originals.withdraw(course, original)
     }
     fun mapping(course: String, s: BookPracticeSource, content: CourseContent?): BookPracticeMapping {
         need(content?.course?.id == course, "BOOK_COURSE_UNKNOWN")
@@ -78,17 +95,15 @@ internal class BookPracticeStore(private val db: Connection, private val blobs: 
             AND kind='TEXTBOOK' AND tutor_visible=1""", course, resolved) { it.getString(1) }.singleOrNull()
         val file = blobs.resolve(resolved)
         need(doc != null && Files.isRegularFile(file) && sha256(Files.readAllBytes(file)) == resolved, "BOOK_FILE_UNSEEDED")
-        val page = rows("SELECT text,text_sha256 FROM source_pages WHERE doc_id=? AND pdf_page=?", doc, s.pdfPage) {
-            it.getString(1) to it.getString(2)
-        }.singleOrNull()
-        need(page != null && sha256(page.first.toByteArray()) == page.second && s.end <= page.first.length &&
-            page.first.substring(s.start, s.end).contains(s.reference), "BOOK_BLOCK_MISMATCH")
+        val page = originals.page(course, s.bookSha256, resolved, doc!!, s.pdfPage)
+        need(s.end <= page.length && page.substring(s.start, s.end).contains(s.reference) &&
+            !Character.isLowSurrogate(page[s.start]) && !Character.isHighSurrogate(page[s.end - 1]), "BOOK_BLOCK_MISMATCH")
         val kp = content.knowledgePoints.singleOrNull { it.id == m.kpId && !it.retired }
         need(content.course.id == course && kp != null && kp.anchors.any {
             val quote = it.quote.orEmpty()
             it.docId == doc && it.pdfPage == s.pdfPage &&
                 (if (quote.isBlank()) it.basis == "SOURCE_REFERENCE"
-                 else quote.contains(s.reference) && page!!.first.contains(quote))
+                 else quote.contains(s.reference) && page.contains(quote))
         }, "BOOK_KP_SOURCE_MISMATCH")
         val q = rows("""SELECT q.stem_md,q.options,q.fingerprint,q.key_state,a.key_json,a.reviewed_by,
             d.source_quote,d.generator,d.reviewer FROM questions q JOIN answer_keys a USING(question_id)

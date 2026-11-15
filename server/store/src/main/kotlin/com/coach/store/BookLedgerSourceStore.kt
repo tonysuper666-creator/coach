@@ -6,9 +6,11 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.*
 import java.sql.Connection
+import java.nio.file.Path
 
 /** Used only in LedgerStore's single-writer transaction. No learner HTTP route can approve links. */
-internal class BookLedgerSourceStore(private val db: Connection) {
+internal class BookLedgerSourceStore(private val db: Connection, blobs: Path) {
+    private val originals = BookOriginalStore(db, blobs)
     init {
         sql("""CREATE TABLE IF NOT EXISTS book_ledger_sources(
             book TEXT NOT NULL,course TEXT NOT NULL,attempt TEXT NOT NULL,identity_json TEXT NOT NULL,
@@ -60,12 +62,14 @@ internal class BookLedgerSourceStore(private val db: Connection) {
         val kp = content?.takeIf { it.course.id == i.courseId }?.knowledgePoints
             ?.singleOrNull { it.id == i.kpId && !it.retired }
         requireFact(kp != null && kp.anchors.any { it.docId == i.docId && it.pdfPage == i.block.pdfPage }, "BOOK_KP_SOURCE_MISMATCH")
-        val page = rows("""SELECT p.text FROM source_pages p JOIN source_docs d USING(doc_id)
+        val doc = rows("""SELECT d.doc_id FROM source_pages p JOIN source_docs d USING(doc_id)
             WHERE d.course_id=? AND d.doc_id=? AND d.blob_sha256=? AND d.tutor_visible=1 AND p.pdf_page=?""",
             i.courseId, i.docId, i.docBlobSha256, i.block.pdfPage) { it.getString(1) }.singleOrNull()
-        requireFact(page != null && i.block.start >= 0 && i.block.end > i.block.start &&
+        requireFact(doc != null, "BOOK_BLOCK_MISMATCH")
+        val page = originals.page(i.courseId, i.bookSha256, i.docBlobSha256, doc!!, i.block.pdfPage)
+        requireFact(i.block.start >= 0 && i.block.end > i.block.start &&
             i.block.end <= page.length && i.block.id == "${i.bookSha256}:p${i.block.pdfPage}:${i.block.start}", "BOOK_BLOCK_MISMATCH")
-        val text = page!!.substring(i.block.start, i.block.end)
+        val text = page.substring(i.block.start, i.block.end)
         requireFact(sha256(text.toByteArray()) == i.block.textSha256 && i.reference.isNotBlank() &&
             text.contains(i.reference), "BOOK_BLOCK_MISMATCH")
         val question = rows("""SELECT q.stem_md,q.fingerprint,q.options,q.key_state,a.key_json FROM questions q

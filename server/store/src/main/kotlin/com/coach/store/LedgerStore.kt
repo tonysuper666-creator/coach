@@ -399,8 +399,21 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     private val contentStore by lazy { CourseContentStore(connection) }
     // Initialize outside request transactions: a rejected first claim must not roll back the schema
     // while leaving a cached adapter pointing at tables that no longer exist.
-    private val bookLedgerSources = BookLedgerSourceStore(connection)
+    private val bookLedgerSources = BookLedgerSourceStore(connection, directory.resolve("blobs"))
     private val bookPractices = BookPracticeStore(connection, directory.resolve("blobs"))
+    private val bookOriginals = BookOriginalStore(connection, directory.resolve("blobs"))
+
+    /** Offline owner import, under server.lock; deliberately absent from learner HTTP/commands. */
+    fun registerBookOriginal(course: String, original: String, canonical: String, actualPdf: ByteArray,
+        mappings: List<BookPracticeMapping>): Boolean = transaction {
+        val content = courseContent(course) ?: throw ReviewVariantRejected("BOOK_COURSE_UNKNOWN")
+        val changed = bookOriginals.install(course, original, canonical, actualPdf)
+        check(putBlob(actualPdf, "application/pdf") == original)
+        bookPractices.addOriginalMappings(course, original, mappings, content) || changed
+    }
+    fun withdrawBookOriginal(course: String, original: String) = transaction {
+        bookPractices.withdrawOriginal(course, original)
+    }
 
     /** Authenticated route calls this inside the single writer, using the paired device identity. */
     fun poseBookPractice(course: String, device: String, source: BookPracticeSource): Event = transaction {

@@ -87,7 +87,8 @@ class BookPracticePoseHttpTest {
             val seed = com.coach.migrate.contentSeed(snapshot)
             val doc = seed.documents.single(); val page = doc.pages.single()
             val quote = "Synthetic first page definition."
-            val options = listOf(Option("a", "first"), Option("b", "second"))
+            val options = listOf(Option("a", "first"), Option("b", "second"),
+                Option("c", "third"), Option("d", "fourth"))
             val stem = "Which synthetic page is this?"
             LedgerStore(database).use { store ->
                 val id = store.enqueueSupply("C", "K", "Synthetic recall", quote)

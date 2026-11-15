@@ -173,6 +173,31 @@ class WindowsBookIsolationIntegrationTest {
         println("SYNTHETIC_TRANSPORT_REFRESH_FAILURE relogin_required=true adapter_retries=0 original_preserved=true")
     }
 
+    @Test fun unknownWritebackOutcomeIsTerminalAndTheNextExplicitRequestRereadsAuth() = runBlocking {
+        val native = SyntheticIsolatedCodex(OwnedBookConsentTest.Fixture(), "refresh")
+        val source = Files.writeString(native.root.resolve("SYNTHETIC-UncertainCommit.cs"), """
+            using System.IO;
+            class SyntheticUncertainCommit {
+              static int Main(string[] args) {
+                File.WriteAllText(args[0], File.ReadAllText(args[1]));
+                return 5;
+              }
+            }
+        """.trimIndent())
+        val helper = SyntheticIsolatedCodex.compile(native.root.resolve("SYNTHETIC-uncertain-commit.exe"), listOf(source))
+        val support = support(native, native.transport(commitHelper = helper))
+        val first = assertIs<BookLearningReply.Unavailable>(support.explain(native.fixture.explain()))
+        assertEquals(LocalCodexProblem.AUTH_REFRESH.message, first.message)
+        assertEquals(2, native.argv.size, "Unknown outcome must not retry the adapter")
+        assertEquals("""{"SYNTHETIC":"REFRESHED_NOT_A_CREDENTIAL"}""", Files.readString(native.auth))
+        // The new request must snapshot the updated original; its identical refresh is then
+        // UNCHANGED. Reusing the stale snapshot would call the uncertain helper and fail again.
+        assertIs<BookLearningReply.Text>(support.explain(native.fixture.explain()))
+        assertEquals(4, native.argv.size)
+        native.clean()
+        println("SYNTHETIC_TRANSPORT_UNKNOWN first_answers=0 automatic_retries=0 next_request_rereads_original=true")
+    }
+
     @Test fun revokeDuringTheTransactionRollsBackAndCannotPublishTheCompletedAnswer() = runBlocking {
         val native = SyntheticIsolatedCodex(OwnedBookConsentTest.Fixture(), "refresh")
         Files.writeString(native.auth.parent.resolve("SYNTHETIC-pause-closed"), "SYNTHETIC_BARRIER")

@@ -1,4 +1,4 @@
-"""Explicit synthetic-only Windows local Codex smoke. No server, relay, or private course materials."""
+"""Synthetic-only local Codex smoke; --local selects Mac, --interactive the existing Windows console."""
 from pathlib import Path
 import subprocess
 import sys
@@ -13,7 +13,8 @@ try:
     # The extra live case probes the old CLI's real file-read capability (negative control),
     # then challenges the production transport with the same test-owned canary file.
     local = "--local" in sys.argv[1:]
-    prefix = [] if local else ["python3", "tools/dev/winbox.py", "--ssh"]
+    session = "--interactive" if "--interactive" in sys.argv[1:] else "--ssh"
+    prefix = [] if local else ["python3", "tools/dev/winbox.py", session]
     result = subprocess.run(prefix + [
         "./gradlew", ":desktopApp:test",
         "--tests", "com.coach.desktop.books.ConsentedBookCodexLiveTest",

@@ -125,10 +125,11 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     var noteReader by remember { mutableStateOf<ReaderSession?>(null) }
     val readerFocus = remember { FocusRequester() }
     // 翻页后恢复阅读器焦点：续体可能在后台线程恢复（控制器动作在 IO 上完成），不能在那里直接动 Compose 焦点；
-    // 只改这个状态，由下面的 LaunchedEffect 在组合所在的 UI 上下文里真正请求焦点。
-    var readerFocusRequests by remember { mutableIntStateOf(0) }
-    LaunchedEffect(readerFocusRequests) {
-        if (readerFocusRequests > 0 && ui.screen == BookScreen.READER && ui.source != null && ui.prompt == null) readerFocus.requestFocus()
+    // 只发一张"焦点票"，由下面的 LaunchedEffect 在组合所在的 UI 上下文里核对票上的书和出处仍是当前的，才真正请求焦点。
+    var readerFocusTicket by remember { mutableStateOf<ReaderFocusTicket?>(null) }
+    LaunchedEffect(readerFocusTicket) {
+        val ticket = readerFocusTicket ?: return@LaunchedEffect
+        if (readerFocusStillOwned(ticket.bookId, ticket.source, ui)) readerFocus.requestFocus()
     }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
@@ -218,6 +219,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         onNoteSession = { noteReader = it },
                         onPage = { page ->
                             val restoreFocus = ui.source != null && readerHasFocus
+                            val startBookId = ui.book?.id; val startSource = ui.source
                             run {
                                 controller.page(page)
                                 if (restoreFocus) {
@@ -225,8 +227,8 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                                         snapshotFlow { !readerHasFocus }.first { it }
                                     } == true
                                     val current = controller.state.value
-                                    if (lostFocus && !readerHasFocus && current.screen == BookScreen.READER &&
-                                        current.source != null && current.prompt == null) readerFocusRequests++
+                                    if (lostFocus && !readerHasFocus && readerFocusStillOwned(startBookId, startSource, current))
+                                        readerFocusTicket = ReaderFocusTicket(startBookId, startSource)
                                 }
                             }
                         }, onBack = { returnFromReader() },
@@ -690,3 +692,11 @@ private fun LocalBookReviewQuestion(review: LocalBookReview, enabled: Boolean, s
         }
     }
 }
+
+/** 待办的阅读器焦点请求：发起时的书与出处。 */
+internal class ReaderFocusTicket(val bookId: String?, val source: BookLesson?)
+
+/** 焦点只能还给发起请求时的那本书、那个出处的阅读屏；退出、切书、换出处、弹窗出现后旧请求一律作废。 */
+internal fun readerFocusStillOwned(startBookId: String?, startSource: BookLesson?, current: LibraryUi): Boolean =
+    current.screen == BookScreen.READER && current.source != null && current.prompt == null &&
+        current.book?.id == startBookId && current.source == startSource

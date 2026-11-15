@@ -129,8 +129,9 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val readerFocus = remember { FocusRequester() }
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
-    val lessonId = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)?.id
-    val explanationReply = remember(ui.book?.id, lessonId, support) { mutableStateOf<BookLearningReply?>(null) }
+    val activeLesson = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)
+    val lessonId = activeLesson?.id
+    val explanationReply = remember(ui.book?.id, lessonId, activeLesson?.blocks, support) { mutableStateOf<BookLearningReply?>(null) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
     val sourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }
     val learningScroll = remember(ui.book?.id, ui.book?.lessonIndex) { ScrollState(0) }

@@ -78,7 +78,7 @@ class WindowsOwnedBookHostTest {
             waitUntil(timeoutMillis = if (live == null) 20_000 else 180_000) { onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() || onAllNodesWithTag("book-explanation-unavailable").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-explanation-text").assertExists()
             if (live == null) onNodeWithTag("book-explanation-text").assertTextContains("An orbit describes motion", substring = true)
-            onNodeWithTag("book-explanation-text").assertTextContains("第 ${block.page} 页", substring = true)
+            onNodeWithTag("book-source-0").assertTextContains("第 ${block.page} 页", substring = true)
             assertEquals(1, calls)
             if (live != null) {
                 val evidence = Files.readString(receipt)
@@ -99,7 +99,8 @@ class WindowsOwnedBookHostTest {
             onNodeWithTag("short-answer").performScrollTo().assertTextContains("Synthetic draft")
             onNodeWithTag("open-lesson-source").assertIsFocused()
             assertEquals(book.readingPage, library.book(book.id).readingPage)
-            waitUntil(timeoutMillis = if (live == null) 20_000 else 180_000) { calls >= 2 && onAllNodesWithTag("book-explanation-text").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("book-explanation-text").assertExists()
+            assertEquals(1, calls)
         }
     }
 }

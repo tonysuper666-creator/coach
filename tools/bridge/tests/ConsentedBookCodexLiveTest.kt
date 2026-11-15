@@ -27,9 +27,16 @@ class ConsentedBookCodexLiveTest {
         // The uploader of this exact fictional fixture explicitly grants this book's two actions.
         support.grant(support.consentOffer(book.id), setOf(OwnedBookAction.EXPLAIN, OwnedBookAction.ASK))
         for ((action, reply) in listOf("explain" to support.explain(explanation), "ask" to support.ask(question))) {
-            val text = assertIs<BookLearningReply.Text>(reply).text
-            assertTrue(text.contains(book.id))
-            assertTrue(text.contains("第 ${block.page} 页，字符 ${block.start}–${block.end}"))
+            val answer = assertIs<BookLearningReply.Text>(reply)
+            assertTrue(answer.text.isNotBlank())
+            assertTrue(answer.sources.isNotEmpty())
+            answer.sources.forEach { source ->
+                assertEquals(book.id, source.book)
+                assertEquals(block.page, source.page)
+                assertEquals(block.start, source.start)
+                assertEquals(block.end, source.end)
+                assertEquals(block.text, source.text)
+            }
             println("SYNTHETIC_VERIFIED action=$action book=${book.id} page=${block.page} range=${block.start}..${block.end}")
         }
         assertEquals(4, spawns) // login status + exec for each action

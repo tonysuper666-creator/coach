@@ -31,7 +31,7 @@ class SyncEngine(private val db: ClientDatabase, val deviceId: String,
     private val transport: LedgerTransport, private val courses: List<String>,
     private val newId: () -> String, private val hash: (ByteArray) -> String,
     private val retentionTimeSource: TimeSource = TimeSource.Monotonic,
-    private val agentRunId: String? = null) {
+    val agentRunId: String? = null) {
     companion object {
         // Server retention: 14 daily days + the preceding 8 weekly weeks.
         const val OUTBOX_RETENTION_MILLIS = 70L * 24 * 60 * 60 * 1000

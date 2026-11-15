@@ -48,6 +48,11 @@ internal class TextbookLibrary(val directory: Path) {
         db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
             while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
         } } }
+    }.filterNot { Files.exists(removedMarker(it.id)) }
+
+    private fun removedMarker(id: String): Path {
+        require(id.matches(Regex("[a-f0-9]{64}")))
+        return directory.resolve("removed-books").resolve("$id.removed")
     }
 
     @Synchronized fun learningPath(book: String): String? = database().use { db ->
@@ -68,6 +73,7 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     @Synchronized fun book(id: String): Textbook = database().use { db ->
+        check(!Files.exists(removedMarker(id))) { "这本教材已不在书架中。" }
         db.prepareStatement("SELECT * FROM books WHERE id=?").use { sql ->
             sql.setString(1, id)
             sql.executeQuery().use { row ->
@@ -97,6 +103,14 @@ internal class TextbookLibrary(val directory: Path) {
             }
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return book(id)
+            if (Files.exists(removedMarker(id))) {
+                val savedFormat = database().use { db -> db.prepareStatement("SELECT format FROM books WHERE id=?").use { sql ->
+                    sql.setString(1, id); sql.executeQuery().use { row -> check(row.next()); row.getString(1) }
+                } }
+                Files.move(stage, original(id, savedFormat), StandardCopyOption.REPLACE_EXISTING)
+                Files.delete(removedMarker(id))
+                return book(id) // Restore the same material's progress, never its former consent.
+            }
             val fallback = source.fileName.toString().substringBeforeLast('.')
             val extracted = TextbookExtraction.extract(stage, format, fallback)
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
@@ -127,6 +141,22 @@ internal class TextbookLibrary(val directory: Path) {
     private fun original(id: String, format: String): Path {
         require(id.matches(Regex("[a-f0-9]{64}")) && format in setOf("pdf", "epub", "md", "txt"))
         return directory.resolve("$id.$format")
+    }
+
+    /** Reversible bookshelf removal. Call only after revoking and awaiting this book's requests. */
+    @Synchronized fun removeBook(id: String) {
+        val book = book(id)
+        val source = original(id, book.format)
+        val archive = directory.resolve("removed-books").resolve("$id-${UUID.randomUUID()}")
+        Files.createDirectories(archive)
+        val target = archive.resolve(source.fileName)
+        if (Files.exists(source)) Files.move(source, target)
+        try {
+            Files.writeString(removedMarker(id), archive.fileName.toString())
+        } catch (failure: Exception) {
+            if (Files.exists(target)) Files.move(target, source)
+            throw failure
+        }
     }
 
     @Synchronized fun save(book: Textbook) {
@@ -183,7 +213,7 @@ internal class TextbookLibrary(val directory: Path) {
                 while (rows.next()) add(Triple(rows.getString(1), rows.getString(2), QuestionMode.valueOf(rows.getString(3))))
             } }
         } }
-        for ((id, lessonId, mode) in old) {
+        for ((id, lessonId, mode) in old.filterNot { Files.exists(removedMarker(it.first)) }) {
             val book = book(id)
             val lesson = book.lessons.find { it.id == lessonId } ?: continue
             val practice = StudyCoachCourse.practice(book, lesson, mode) ?: continue
@@ -224,7 +254,7 @@ internal class TextbookLibrary(val directory: Path) {
                 buildList { while (rows.next()) add(rows.asReview()) }
             }
         }
-    }
+    }.filterNot { Files.exists(removedMarker(it.book)) }
 
     @Synchronized fun review(book: String, lesson: String, mode: QuestionMode): LocalBookReview = database().use { db ->
         db.prepareStatement("SELECT * FROM book_reviews WHERE book=? AND lesson=? AND mode=?").use { sql ->
@@ -256,7 +286,7 @@ internal class TextbookLibrary(val directory: Path) {
             ON r.book=p.book AND r.lesson=p.lesson AND r.mode=p.mode WHERE p.slot=1""").use { rows ->
             if (rows.next()) rows.asReview() else null
         } }
-    }
+    }?.takeUnless { Files.exists(removedMarker(it.book)) }
 
     @Synchronized fun openReview(review: LocalBookReview) {
         database().use { db -> db.prepareStatement("INSERT OR REPLACE INTO book_review_position(slot,book,lesson,mode) VALUES(1,?,?,?)").use { sql ->

@@ -50,7 +50,7 @@ class MainlineTest {
             LedgerStore(dir.resolve("db")).use { store ->
                 val mainline = Mainline(library)
                 val valid = json("sectionId" to "S1", "version" to notesVersion(text), "start" to 0, "end" to 9, "quote" to "Synthetic")
-                assertEquals("Synthetic", mainline.selection(store, "C1", 1, valid))
+                assertEquals("Synthetic", mainline.selection(store, "C1", 1, valid).quote)
                 for ((field, value) in listOf("quote" to JsonPrimitive("Forged"), "start" to JsonPrimitive(-1),
                     "end" to JsonPrimitive(9999), "version" to JsonPrimitive("old"), "sectionId" to JsonPrimitive("UNKNOWN")))
                     assertFailsWith<MockError> { mainline.selection(store, "C1", 1, JsonObject(valid + (field to value))) }

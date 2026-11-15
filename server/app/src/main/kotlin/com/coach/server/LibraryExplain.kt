@@ -3,6 +3,10 @@ package com.coach.server
 import com.coach.core.LedgerActor
 import com.coach.domain.*
 import com.coach.store.SourcePage
+import com.coach.store.LedgerStore
+import com.coach.store.LearnerSourcePage
+import com.coach.store.tutorSourceAllowed
+import com.coach.domain.scope.VisibleScope
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
@@ -11,11 +15,38 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
 
 /**
- * A paired client's own book: it sends the selected passage plus a few neighbouring source blocks, each with
- * its block id (`<bookHash>:p<page>:<index>`). The explanation may cite only those blocks, and the answer gives
- * those ids back, so the client opens the original text from its own copy. Nothing is stored or registered here.
+ * A local block id and its text are untrusted claims, including after pairing.
+ * The book id must name an existing server-registered learner source. Its stored
+ * course, classification, text and learning record authorize the selection.
+ * Unregistered local books fail closed; this endpoint never creates a registration.
  */
-internal class LibraryExplainRequest(val quote: String, val pages: List<SourcePage>)
+internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope) {
+    fun authorize(store: LedgerStore): AuthorizedLibrarySelection {
+        val claimed = pages.single()
+        val saved = store.learnerSourcePage(claimed.docId.substringBefore(":p"), claimed.pdfPage)
+        if (saved == null || !containsReaderSelection(saved.page.text, quote) || !saved.inLearnedScope(store))
+            throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
+        // The alias is for the existing local reader's citation navigation only.
+        // It is minted after the real document/page passed the trusted ceiling.
+        return AuthorizedLibrarySelection(quote, pages, VisibleScope.learner()
+            .narrowToPages(claimed.docId, claimed.pdfPage..claimed.pdfPage), saved)
+    }
+    companion object {
+        fun selected(quote: String, page: SourcePage): LibraryExplainRequest {
+            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), VisibleScope.NONE)
+        }
+    }
+}
+
+internal class AuthorizedLibrarySelection(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,
+    private val saved: LearnerSourcePage) {
+    fun isCurrent(store: LedgerStore): Boolean =
+        store.learnerSourcePage(saved.page.docId, saved.page.pdfPage) == saved && saved.inLearnedScope(store)
+}
+
+private fun LearnerSourcePage.inLearnedScope(store: LedgerStore): Boolean = store.learnedThrough(
+    course, VisibleScope.learner(), store.todayProgress(course).currentKpId
+).permits(page.docId, page.pdfPage, page.learnerVisible)
 
 private val blockId = Regex("[A-Za-z0-9._-]{1,80}:p([0-9]{1,5}):[0-9]{1,9}")
 
@@ -32,15 +63,16 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
         val id = (block["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: bad()
         val text = (block["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim() ?: bad()
         val match = blockId.matchEntire(id) ?: bad()
-        if (text.isEmpty() || text.length > 8_000 || !seen.add(id)) bad()
+        if (text.isEmpty() || text.length > 8_000 || !seen.add(id) || match.groupValues[1].toInt() < 1) bad()
         total += text.length
         SourcePage(id, match.groupValues[1].toInt(), text)
     }
     if (total > 24_000) bad()
-    // The selection must come from the blocks that are sent; whitespace may differ.
-    fun squash(s: String) = s.split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ")
-    if (pages.none { squash(it.text).contains(squash(quote)) }) bad()
-    return LibraryExplainRequest(quote, pages)
+    // One local book per request. No client "scope" / visibility / course metadata is trusted.
+    val books = pages.map { it.docId.substringBefore(":p") }.toSet()
+    if (books.size != 1 || !tutorSourceAllowed(books.single())) bad()
+    val selected = pages.firstOrNull { containsReaderSelection(it.text, quote) } ?: bad()
+    return LibraryExplainRequest.selected(quote, selected)
 }
 
 fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?) {
@@ -48,8 +80,10 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
         post("/v1/library/explain") { call.withReaderConnection {
             try {
                 val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
-                val request = libraryExplainRequest(input)
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages)
+                val request = actor.execute { libraryExplainRequest(input).authorize(this) }
+                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope) {
+                    actor.execute { request.isCurrent(this) }
+                }
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)
             } catch (e: MockError) {

@@ -70,7 +70,7 @@ fun main(): Unit = runBlocking {
             if (enabled) for ((i,case) in questions.withIndex()) {
                 val (label,q,p)=case
                 val outside=i>=10
-                val hits=actor.execute { searchSourcePages("c",q.removePrefix("Explain ")) }
+                val hits=actor.execute { searchSourcePages("c",q.removePrefix("Explain "),com.coach.domain.scope.VisibleScope.tutorInternal()) }
                 val (anchor,quote) = SourcePack.prepare("",hits).pages.mapIndexedNotNull { index,page ->
                     Regex("[A-Za-z][A-Za-z ,;:()0-9-]{7,120}").findAll(page.text)
                         .firstOrNull { !com.coach.core.TutorOutputGuard.referencesLetter(it.value) }

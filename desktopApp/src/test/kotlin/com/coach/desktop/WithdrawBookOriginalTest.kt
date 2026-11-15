@@ -111,7 +111,7 @@ class WithdrawBookOriginalTest {
         assertFalse(output.contains("withdraw-book-original: course=c"), "A refused withdrawal must not claim it happened: $output")
         assertEquals(before, f.counts(), "A refused withdrawal must delete nothing")
         assertEquals(200, f.pose().statusCode(), "A refused withdrawal must leave the same original poseable")
-        println("OWNER_PDF_WITHDRAW_REFUSED reason=wrongCourse exit=$refused mappings=0 pose=200")
+        println("OWNER_PDF_WITHDRAW_REFUSED reason=wrongCourse exit=$refused unchanged=$before pose=200")
     }
 
     @Test fun anUnknownShaIsRefusedAndTheRegisteredOriginalStaysPoseable() = F().use { f ->
@@ -125,7 +125,7 @@ class WithdrawBookOriginalTest {
         assertEquals(before, f.counts(), "A refused withdrawal must delete nothing")
         assertEquals("C|${f.book.id}|${f.canonical}", f.query("SELECT * FROM book_original_sha").single())
         assertEquals(200, f.pose().statusCode(), "A refused withdrawal must leave the same original poseable")
-        println("OWNER_PDF_WITHDRAW_REFUSED reason=unknownSha exit=$refused mappings=0 pose=200")
+        println("OWNER_PDF_WITHDRAW_REFUSED reason=unknownSha exit=$refused unchanged=$before pose=200")
     }
 
     @Test fun anEffectiveWithdrawalReportsTheRealCountsAndStopsTheExistingPose() = F().use { f ->
@@ -149,7 +149,7 @@ class WithdrawBookOriginalTest {
         val (again, againOut) = f.withdraw()
         assertEquals(1, again, "A second withdrawal has nothing to delete and must say so: $againOut")
         assertEquals(after, f.counts())
-        println("OWNER_PDF_WITHDRAW_HONEST mappings=${before.getValue("book_practice_mappings")} " +
-            "pages=${before.getValue("book_original_pages")} pose=409 repeatExit=$again")
+        println("OWNER_PDF_WITHDRAW_HONEST before=$before after=$after pose=409 repeatExit=$again")
+        println("OWNER_PDF_WITHDRAW_CLI ${output.trim().replace("\n", " | ")}")
     }
 }

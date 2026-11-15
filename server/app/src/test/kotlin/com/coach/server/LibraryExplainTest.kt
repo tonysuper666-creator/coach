@@ -63,14 +63,14 @@ class LibraryExplainTest {
         Unit
     }
 
-    private inner class Harness(local: Boolean = false) : AutoCloseable {
+    private inner class Harness(local: Boolean = false, val sourceId: String = "0123abcd") : AutoCloseable {
         val dir = Files.createTempDirectory("synthetic-library-scope-")
         val libraryRoot = Files.createDirectory(dir.resolve("private-library"))
         // Binding tests need bytes and their identity only; the importer tests validate actual PDFs with Poppler.
         val bookFile = libraryRoot.resolve("synthetic.pdf").also { Files.writeString(it, "Synthetic private file identity") }
         val version = ReaderLibrary.digest(Files.readAllBytes(bookFile))
         val localId get() = "$version:p12:340"
-        fun entry(course: String = "SYNTHETIC", source: String? = "0123abcd", title: String = "Synthetic book", pages: Int = 13) =
+        fun entry(course: String = "SYNTHETIC", source: String? = sourceId, title: String = "Synthetic book", pages: Int = 13) =
             JsonObject(json("id" to "synthetic", "course" to course, "title" to title, "file" to "synthetic.pdf",
                 "sha256" to version, "pages" to pages, "kind" to "textbook") +
                 (source?.let { mapOf("explainSourceId" to JsonPrimitive(it)) } ?: emptyMap()))
@@ -85,14 +85,14 @@ class LibraryExplainTest {
         init {
             catalog(entry())
             store.enroll("phone", "synthetic-private-token-32-characters")
-            store.registerSourcePage("SYNTHETIC", "0123abcd", "Synthetic book", 12,
+            store.registerSourcePage("SYNTHETIC", sourceId, "Synthetic book", 12,
                 "Synthetic price elasticity is a ratio. Synthetic selected. SYNTHETIC_NEIGHBOUR_SECRET.")
-            store.registerSourcePage("SYNTHETIC", "0123abcd", "Synthetic book", 13, "SYNTHETIC_UNREAD_SECRET.")
+            store.registerSourcePage("SYNTHETIC", sourceId, "Synthetic book", 13, "SYNTHETIC_UNREAD_SECRET.")
             store.registerSourcePage("SYNTHETIC", "harmless-id", "Synthetic answers", 12, "SYNTHETIC_ANSWER_SECRET.")
             store.registerSourcePage("SYNTHETIC", "ordinary-id", "Synthetic sealed material", 12, "SYNTHETIC_HELDOUT_SECRET.", learnerVisible = false)
             for ((kp, page) in listOf("k1" to 12, "k2" to 13)) update(
                 """INSERT INTO outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired,legacy_id)
-                    VALUES('$kp','SYNTHETIC','m',$page,'x','x','[]','[]','[{"docId":"0123abcd","pdfPage":$page}]',0,NULL)""")
+                    VALUES('$kp','SYNTHETIC','m',$page,'x','x','[]','[]','[{"docId":"$sourceId","pdfPage":$page}]',0,NULL)""")
             store.append("SYNTHETIC", "kp_opened", json("kpId" to "k1"))
         }
         val actor = LedgerActor(jobs, store)
@@ -177,6 +177,19 @@ class LibraryExplainTest {
             assertTrue(wire.contains("Synthetic selected"))
             for (secret in listOf("CLIENT_PREFIX", "CLIENT_SUFFIX", "SYNTHETIC_UNREAD_SECRET", "SYNTHETIC_NEIGHBOUR_SECRET",
                 "CLIENT_FAKE_COURSE", "CLIENT_FAKE_SOURCE")) assertFalse(wire.contains(secret), secret)
+        }
+    }
+
+    @Test fun boundNamespacedLearnerSourceExplainsOnlyItsLearnedPage() = runBlocking {
+        Harness(local = true, sourceId = "textbook:synthetic.chapter-1").use { h ->
+            h.reply()
+            val (status, body) = h.post(request("Synthetic selected", blocks(h.localId to "Synthetic selected")))
+            assertEquals(200, status)
+            assertTrue(body.str("text").contains("有依据的解释。"))
+            assertEquals(h.localId, body.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertEquals(409, h.post(request("SYNTHETIC_UNREAD_SECRET", blocks(
+                "${h.version}:p13:0" to "SYNTHETIC_UNREAD_SECRET"))).first)
+            assertEquals(1, h.stub.requests)
         }
     }
 

@@ -75,7 +75,7 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
                 (kind != "slides" || week != null && week in 1..100) &&
                 d.str("course").length in 1..128 && d.str("title").length in 1..300) { "Invalid reader metadata" }
             val explainSource = d["explainSourceId"]?.let {
-                require(it is JsonPrimitive && it.isString && Regex("[A-Za-z0-9._-]{1,80}").matches(it.content)) { "Invalid explanation source" }
+                require(it is JsonPrimitive && it.isString && Regex("[A-Za-z0-9._:-]{1,80}").matches(it.content)) { "Invalid explanation source" }
                 it.content
             }
             ReaderDocument(id, d.str("course"), d.str("title"), file, version, pages, offset, kind, week,

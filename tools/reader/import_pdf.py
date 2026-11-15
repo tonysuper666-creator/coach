@@ -16,7 +16,7 @@ def import_pdf(source, library, *, document_id, course, title, kind, offset=None
         raise ValueError("invalid document ID")
     if not 1 <= len(course) <= 128 or not 1 <= len(title) <= 300:
         raise ValueError("invalid course/title")
-    if explain_source_id is not None and not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", explain_source_id):
+    if explain_source_id is not None and not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", explain_source_id):
         raise ValueError("invalid explanation source ID")
     if kind not in {"textbook", "slides", "reading"} or (kind == "slides" and not (week and 1 <= week <= 100)):
         raise ValueError("slides require an explicit week")

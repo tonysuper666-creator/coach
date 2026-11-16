@@ -227,7 +227,7 @@ same stripper settings and cleaning as before. A word whose presentation-form
 expansion does not match the stripper's output has null glyph offsets; it must
 not be located by searching for possibly repeated words.
 
-Given that probe's JSONL and pipeline-5 page JSON, join them with:
+Given that probe's JSONL and pipeline-6 page JSON, join them with:
 
 ```sh
 python3 tools/reader-v2/reflow/source_payload.py \
@@ -277,6 +277,36 @@ agree; this is distinct from legacy C's conservative benchmark fallback flag.
 No crops are rasterized or saved as `BookIllustration`, and no shared model,
 canonical importer or UI flow is changed.
 
+The same command also writes private `table-continuations.json`. This separate
+schema-1 batch payload can certify `verified_source_fragments` only for one
+explicit source table with complete occurrences on consecutive physical pages.
+Both `source_scope` and `source_ref` must match; the scope identifies one Docling
+conversion graph, not the PDF. Old page JSON remains usable for single-page
+payloads, but missing scopes never certify a continuation. Separate tables are
+never joined by proximity, matching column widths or matching header text.
+
+Because Docling cell boxes lack page IDs, continuation evidence requires exactly
+one complete ordered row partition whose every cell matches the canonical glyph
+slices on its assigned page. Every table glyph must belong to exactly one cell;
+extra/partial/unmapped/reused glyph ranges, mismatched text or ambiguous page
+assignments reject the entire group. Every within-fragment row cut and the first
+header boundary must also have the existing single-page evidence. Rowspans,
+rotation, untrusted order, incomplete provenance and unsafe geometry are refused.
+Limits of 500 rows, 32 pages and two million cell/glyph verification comparisons
+bound the partition search; hitting a limit returns no partial fragments.
+
+Each accepted fragment has a half-open global row interval, page-local cell/cut
+regions and a canonical text hash. `header_mode=source` means that fragment
+already has the verified source header. `repeat_first_fragment` requests a visual
+copy of the first fragment's header, whose descriptor retains its source page,
+region, exact UTF-16 ranges and text hash. It never creates a new text range at
+the destination. All continuation `replacement_range` fields are null and the
+group's `hide_source_allowed` is false. This is geometry/source evidence, not a
+semantic table certificate or a renderer. The ordinary page payload still refuses
+multi-page cell geometry; consumers must explicitly understand this batch payload.
+Docling may emit independent page tables instead of one multi-page source item;
+those remain unassociated and cannot use this continuation path.
+
 For native packages, retain source structure before a future importer flattens it:
 
 ```sh
@@ -300,21 +330,27 @@ production storage still need implementation and regression tests.
 python3 -I -m unittest discover -s tools/reader-v2/reflow -v
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_pdf_payload.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
+tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_cross_page_tables.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
 DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   tools/dev/heavy --local "$DOCLING_PYTHON" \
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 33 reflow tests cover diff accounting, private-output guards, stale identities,
+The 45 reflow tests cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
-caption fragment references and self-authored EPUB/Word structure/byte retention.
+caption fragment references, scoped cross-page table partitions and header copies,
+batch refusal/budget cases and self-authored EPUB/Word structure/byte retention.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,
 callout/formula, interleaved columns, negative
 MediaBox/CropBox and rotation. It uses known layout boxes to isolate mapping
-from model quality; the 26 layout tests separately exercise real Docling on
+from model quality. The second integration generates three self-authored pages,
+checks three exact fragments and three row cuts, verifies source/repeat/source
+header modes and refuses stale text. It also uses known source geometry and is
+not a Docling table recognition test. The 26 layout tests separately exercise real Docling on
 synthetic PDFs with local models. Set the existing model path explicitly when
 the default offline cache is empty. Real geometry still needs private visual
 review; product offset regressions and the 32 reader UI cells remain unverified.

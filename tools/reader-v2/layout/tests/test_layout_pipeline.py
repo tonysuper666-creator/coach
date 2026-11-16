@@ -172,7 +172,7 @@ class CacheLogic(Base):
         s = lp.ingest(pdf, self.cache, "d", eng)
         self.assertFalse(s["cache_hit"])
         self.assertEqual(len(eng.calls), 1)
-        self.assertIn("-p5-", s["version"])
+        self.assertIn("-p6-", s["version"])
 
     def test_resume_skips_done_pages(self):
         pdf = self.syn / "mixed.pdf"

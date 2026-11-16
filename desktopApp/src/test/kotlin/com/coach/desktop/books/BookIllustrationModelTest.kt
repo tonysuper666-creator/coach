@@ -227,10 +227,62 @@ class BookIllustrationModelTest {
                 assertEquals(legacyLoaded, BookIllustrationStore.loadByPage(db, imported.id)[1])
             }
             val reopened = TextbookLibrary(library.directory).book(imported.id)
-            assertEquals(imported.pages, reopened.pages)
+            assertEquals(imported.pages.map { page ->
+                if (page.number == 1) page.copy(illustrations = listOf(BookIllustration(1, 0, "b".repeat(64), "png", 200, 100, "旧图"))) else page
+            }, reopened.pages)
         } finally {
             root.toFile().deleteRecursively()
         }
+    }
+
+    @Test fun importPersistsPageModelsAndKeepsUtf16CitationsAfterReopen() {
+        val root = Files.createTempDirectory("coach-page-model-import-")
+        try {
+            val text = "第1章 测试\n\n前段 😀 内容。\n\n后段原文保留。"
+            val anchor = text.indexOf("后段")
+            val layout = PageTextLayout(1, 600.0, 800.0, listOf(
+                PageTextBox(anchor, text.length, ReaderRect(0.1, 0.2, 0.4, 0.1)),
+            ))
+            val visual = ExtractedIllustration(1, anchor, samplePng, "png", 100, 80, "图 1")
+            val source = root.resolve("book.txt")
+            Files.writeString(source, "source")
+            val library = TextbookLibrary(root.resolve("library"), extractBook = { _, _, _, _, _ ->
+                ExtractedBook("测试", listOf(BookPage(1, text, textLayout = layout)), listOf(visual))
+            })
+            val imported = library.importBook(source)
+            val page = TextbookLibrary(library.directory).book(imported.id).pages.single()
+            assertEquals(text, page.text)
+            assertEquals(anchor, page.illustrations.single().anchorOffset)
+            assertEquals(visual.contentSha256, page.illustrations.single().imageSha256)
+            assertContentEquals(samplePng, Files.readAllBytes(BookIllustrationAssets.imageFile(library.directory, imported.id, page.illustrations.single())))
+            assertEquals(layout.boxes.map { it.startOffset to it.endOffset }, page.textLayout!!.boxes.map { it.startOffset to it.endOffset })
+            assertEquals(page.textLayout, library.pageTextLayout(imported.id, 1))
+            val block = StudyCoachCourse.blocks(imported.id, listOf(BookPage(1, text))).last()
+            val resolved = assertIs<BookSourceResolution.Resolved>(BookSourceResolver(library).resolve(
+                OwnedBookCitation(imported.id, 1, block.start, block.end), block.text,
+            )).target
+            assertEquals(block.text, page.text.substring(resolved.start, resolved.end))
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun failedImportRollsBackPageModelsAndNewImageFiles() {
+        val root = Files.createTempDirectory("coach-page-model-rollback-")
+        try {
+            val source = root.resolve("book.txt")
+            Files.writeString(source, "source")
+            val invalid = PageTextLayout(1, 600.0, 800.0, listOf(
+                PageTextBox(0, 100, ReaderRect(0.1, 0.2, 0.4, 0.1)),
+            ))
+            val library = TextbookLibrary(root.resolve("library"), extractBook = { _, _, _, _, _ ->
+                ExtractedBook("测试", listOf(BookPage(1, "短文", textLayout = invalid)),
+                    listOf(ExtractedIllustration(1, 0, samplePng, "png", 100, 80)))
+            })
+            assertFailsWith<IllegalArgumentException> { library.importBook(source) }
+            assertTrue(library.catalog().isEmpty())
+            Files.walk(library.directory).use { paths ->
+                assertFalse(paths.anyMatch { it.fileName.toString().endsWith(".png") || it.fileName.toString().endsWith(".txt") })
+            }
+        } finally { root.toFile().deleteRecursively() }
     }
 
     @Test fun segmentingPageAroundIllustrationsAndCroppedBlocksPreservesExactOffsets() {

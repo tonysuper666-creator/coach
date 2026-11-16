@@ -434,6 +434,52 @@ original now passes (65 text pages / 21 members / 1,777 ranges); the report keep
 both the original failure and the subsequent result. The real Word trial still
 passes (72 text pages / 1,559 ranges).
 
+### Explicit review of complete PDF objects and production persistence
+
+`ReviewedPdfVisualsProbe.java` exercises `PdfReviewedVisuals` and the production
+`TextbookLibrary.addReviewedPdfVisuals` API. It does not approve B/C candidates
+automatically. Use a private PDF copy and directories outside Git:
+
+```sh
+mkdir -p "$PRIVATE_STATE/reviewed-classes"
+javac --release 17 -cp "$DESKTOP_CLASSPATH" -d "$PRIVATE_STATE/reviewed-classes" \
+  tools/reader-v2/reflow/ReviewedPdfVisualsProbe.java
+java -cp "$PRIVATE_STATE/reviewed-classes:$DESKTOP_CLASSPATH" ReviewedPdfVisualsProbe \
+  preview "$PRIVATE_PDF" "$PRIVATE_SELECTIONS" "$PRIVATE_NEW_PREVIEWS"
+java -cp "$PRIVATE_STATE/reviewed-classes:$DESKTOP_CLASSPATH" ReviewedPdfVisualsProbe \
+  apply "$PRIVATE_PDF" "$PRIVATE_APPROVED_REVIEWS" "$PRIVATE_LIBRARY"
+```
+
+Supply `*.selection.json` files with integer `page`, `left`, `top`, `right`,
+`bottom` and `kind` (`PageVisualKind` enum name). Pixel edges refer to the
+production PDFBox raster: scale 2, reduced if necessary to a 4096px maximum edge;
+pages start at 1. The preview command writes original-page PNGs, individual PNGs
+and `*.review.json`, all **UNREVIEWED**. Compare each full-size PNG with its page:
+include the complete body, title, caption, notes and credits, exclude adjacent
+prose, and retain one complete version of each object. Only then copy the chosen
+receipts into the approved directory and explicitly set their decision to
+`COMPLETE_OBJECT_WITH_LABELS`. Keep rejected/draft receipts separately. No command
+performs that decision change. This is a local review declaration, not reviewer
+authentication or an automated guarantee that the object is complete.
+
+Import rechecks PDF bytes, canonical UTF-16 text, pixel selection and exact PNG
+digest. Stale receipts, partial glyphs, rotated/OCR pages and same-page overlapping
+objects (duplicates and nested boxes included) are refused as a set. Existing
+overlapping assets also require manual resolution; the API never chooses a
+largest box or silently replaces them. Exact existing supplements are idempotent.
+It saves disjoint supplements and review declarations in one SQLite transaction,
+preserves existing assets, and rolls back new files if the transaction fails.
+Review rows are historical declarations, not a replacement for checking current
+assets after later manual edits.
+
+`apply` checks reopen equality, exact saved image bytes, unchanged canonical text,
+study blocks and valid citations, and both text-hiding settings. The imported
+objects have no replacement range: **all original text stays visible**. Geometry
+alone cannot detect a clipped photograph; the real trial rejected such a preview
+despite valid glyph mapping. No UI, automatic caption grouping, model approval,
+cross-page table association or reader retention measurement is implemented here.
+The old 66 B/C candidate receipts remain unapproved.
+
 ### Regression commands
 
 ```sh

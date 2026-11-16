@@ -2,13 +2,11 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -19,7 +17,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.PaperCard
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -115,22 +116,24 @@ internal fun LessonAnswerExplanation(
             style = MaterialTheme.typography.bodySmall)
         !paired -> Column(Modifier.fillMaxWidth().testTag("answer-explain-unpaired"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("讲解由你配对的 Mac 生成，这台电脑还没连上。", style = MaterialTheme.typography.bodySmall)
-            TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
+            V7TextButton(onOpenSourcePage, modifier = Modifier.testTag("answer-explain-pair")) { Text("去原文页配对") }
         }
         skipped -> Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("answer-explain-skipped")) {
             Text("这次先不看讲解。", style = MaterialTheme.typography.bodySmall)
-            TextButton({ skipped = false }, modifier = Modifier.testTag("answer-explain-resume")) { Text("还是看一下") }
+            V7TextButton({ skipped = false }, modifier = Modifier.testTag("answer-explain-resume")) { Text("还是看一下") }
         }
-        !allowed -> Column(Modifier.fillMaxWidth().testTag("answer-explain-consent"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("答完了，看看这段怎么讲", style = MaterialTheme.typography.titleMedium)
-            Text("讲解会把你刚做的这段原文和前后各一段发给你配对的 Mac，由它的 AI 生成。这本书只问这一次。",
-                style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PrimaryButton({ gate.consent.allow(book.id); allowed = true }, modifier = Modifier.testTag("answer-explain-allow")) {
-                    Text("允许并讲解")
+        !allowed -> V7ExpandIn {
+            PaperCard(Modifier.testTag("answer-explain-consent"), contentPadding = PaddingValues(16.dp)) {
+                Text("答完了，看看这段怎么讲", style = MaterialTheme.typography.titleMedium)
+                Text("讲解会把你刚做的这段原文和前后各一段发给你配对的 Mac，由它的 AI 生成。这本书只问这一次。",
+                    style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    PrimaryButton({ gate.consent.allow(book.id); allowed = true }, modifier = Modifier.testTag("answer-explain-allow")) {
+                        Text("允许并讲解")
+                    }
+                    V7TextButton({ skipped = true }, modifier = Modifier.testTag("answer-explain-skip")) { Text("先不看") }
                 }
-                TextButton({ skipped = true }, modifier = Modifier.testTag("answer-explain-skip")) { Text("先不看") }
             }
         }
         else -> {
@@ -154,14 +157,13 @@ internal fun LessonSummaryCard(
     answer: PracticeAnswer,
     nav: @Composable () -> Unit,
 ) {
-    Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f), shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().testTag("book-summary-card")) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    V7ExpandIn {
+        PaperCard(Modifier.v7Resize().testTag("book-summary-card"), contentPadding = PaddingValues(16.dp)) {
             Text("小结", style = MaterialTheme.typography.titleMedium)
             Text("这一节：${lesson.title}", style = MaterialTheme.typography.bodyMedium)
             Text(summaryLine(practice, answer), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("book-summary-detail"))
             Text("原文在「${lesson.title}」这一节，第 ${lesson.firstPage} 页起；要回看时再打开。",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
             nav()
         }
     }

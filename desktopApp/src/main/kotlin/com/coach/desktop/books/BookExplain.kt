@@ -218,15 +218,13 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
 @Composable
 private fun ExplanationView(explanation: Explanation, onOpen: (Citation) -> Unit) {
     val shown = explanation.citations.fold(explanation.text) { text, c -> text.replace("【${c.anchor}】", "【${ExplainWire.shortId(c.blockId)}】") }
-    Surface(color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f), shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().testTag("explain-answer")) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(shown, modifier = Modifier.testTag("explain-text"))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text("块编号", style = MaterialTheme.typography.bodySmall)
-                for (c in explanation.citations) OutlinedButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
-                    Text(ExplainWire.shortId(c.blockId), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                }
+    // V7：讲解是一张纸卡；块编号是主色下划线的「出处」小字，像页边注，不再是一排描边按钮。
+    com.coach.ui.v7.PaperCard(Modifier.testTag("explain-answer"), contentPadding = PaddingValues(16.dp)) {
+        Text(shown, modifier = Modifier.testTag("explain-text"))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            for (c in explanation.citations) com.coach.ui.v7.V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
+                Text("出处 · " + ExplainWire.shortId(c.blockId), style = MaterialTheme.typography.labelLarge, color = v7Pine(),
+                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             }
         }
     }

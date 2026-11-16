@@ -71,7 +71,7 @@ class BookSourceRowTest {
         val sources = listOf(p2, p3.copy(text = p3.text.dropLast(1) + "X"), passage(b, 2), p3)
         setContent { BookSourceRow(sources, a, resolver, { focus[it] }, { i, t -> opened += i to t }) }
         settled(0, 1, 2, 3)
-        onNodeWithTag("book-source-0").assertTextEquals("打开原文 · " + bookSourceLabel(p2)).assertHasClickAction()
+        onNodeWithTag("book-source-0").assertTextEquals("出处 · " + bookSourceLabel(p2)).assertHasClickAction()
         onNodeWithTag("book-source-1").assertDoesNotExist()
         onNodeWithTag("book-source-stale-1").assertExists()
         onNodeWithTag("book-source-wrong-2").assertExists()

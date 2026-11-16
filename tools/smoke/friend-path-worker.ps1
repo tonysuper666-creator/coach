@@ -142,7 +142,13 @@ try {
     Pass 4 '选中一段后得到带出处的讲解'
     # ⑦ 先做（依赖第 4 步留在屏幕上的讲解）：点「出处」，应弹出原文卡
     $cardOk = $null
-    $o = Await-Text 7 'cite' @('出处') 10
+    # 出处可能在视口外：先看当前屏，找不到就先往下再往上有界滚动（最多 8 次）
+    $o = $null
+    foreach ($k in 0..8) {
+        if ($k -gt 0) { Scroll-At 900 700 $(if ($k -le 4) { -5 } else { 5 }); Start-Sleep -Milliseconds 700 }
+        $o = Await-Text 7 'cite' @('出处') 1
+        if ($o) { break }
+    }
     if (-not $o) { $cardOk = '讲解下面没有「出处」链接' }
     else {
         Click-At $o.X $o.Y; Start-Sleep -Seconds 3

@@ -139,7 +139,24 @@ sealed interface BridgeResult {
  *
  * 收不到终态帧 = 截断；`status != complete` = 不完整。两种都不当成功交给上层。
  */
-class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
+class BatchPending(val retryAfterMillis: Long) : RuntimeException("batch_pending")
+
+class BridgeClient(
+    private val config: BridgeConfig = BridgeConfig(),
+    private val batchScope: String? = null,
+    private val http: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(config.connectTimeout)
+        .version(HttpClient.Version.HTTP_1_1)
+        .build(),
+) {
+    /** Fence values change at every claim; epoch + job ID remain stable across polls. */
+    fun forBatchJob(epoch: String, jobId: String): BridgeClient = BridgeClient(config, "$epoch:$jobId", http)
+
+    private fun batchKey(request: ChatRequest): String? = batchScope?.takeIf { request.background && !request.stream }?.let {
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest("$it:${request.task}:${request.formatAttempt}".toByteArray())
+            .joinToString("") { b -> "%02x".format(b) }
+    }
     private fun requireIsolatedTestBridge() {
         require(!config.testTraffic || URI(config.baseUrl).port !in setOf(8790,8791)) {
             "Test traffic requires an isolated bridge port (COACH_BRIDGE_URL); 8790/8791 are reserved for the learner"
@@ -147,11 +164,6 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     }
 
     private val json = Json { ignoreUnknownKeys = true }
-
-    private val http: HttpClient = HttpClient.newBuilder()
-        .connectTimeout(config.connectTimeout)
-        .version(HttpClient.Version.HTTP_1_1)
-        .build()
 
     fun health(): JsonObject? = try {
         val request = HttpRequest.newBuilder(URI.create("${config.baseUrl}/health"))
@@ -198,7 +210,15 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     /** Only schema failures retry; evidence, arithmetic and answer-key gates remain with the caller. */
     private fun invalidDraftFormat(task: String, text: String): Boolean = runCatching {
         when (task) {
-            "gen_mcq", "repair_mcq_sources" -> require(TaskParsing.mcqs(text).isNotEmpty())
+            "gen_mcq" -> require(TaskParsing.mcqs(text).isNotEmpty())
+            "repair_mcq_sources" -> {
+                val rows = JsonText.arrayOf(text).map { it.jsonObject }
+                require(rows.isNotEmpty() && rows.all { row ->
+                    row.keys == setOf("id", "source_quote") &&
+                        row["id"]?.jsonPrimitive?.content?.toIntOrNull()?.let { it >= 0 } == true &&
+                        !row["source_quote"]?.jsonPrimitive?.content.isNullOrBlank()
+                })
+            }
             "gen_constructed", "repair_constructed_sources" -> require(TaskParsing.constructed(text).isNotEmpty())
             "grade_constructed", "grade_essay", "repair_grade", "repair_essay" -> require(TaskParsing.grade(text).items.isNotEmpty())
             "JOURNAL_SUMMARY" -> JsonText.objectOf(text)
@@ -207,7 +227,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
     }.isFailure
 
     private fun chatOnce(request: ChatRequest): BridgeResult {
-        val callId = UUID.randomUUID().toString()
+        val callId = batchKey(request) ?: UUID.randomUUID().toString()
         val requestId = UUID.randomUUID().toString()
         val startedAt = Instant.now().toString()
         val started = System.nanoTime()
@@ -231,6 +251,13 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         }
 
         response.body().use { body ->
+            if (response.statusCode() == 202 && batchKey(request) != null) {
+                val pending = runCatching { json.parseToJsonElement(body.readBytes().decodeToString()).jsonObject }.getOrNull()
+                if (pending?.get("x_coach_batch")?.jsonPrimitive?.content == "pending") {
+                    val retry = pending["retry_after_ms"]?.jsonPrimitive?.content?.toLongOrNull() ?: 60_000L
+                    throw BatchPending(retry.coerceIn(1_000L, 300_000L))
+                }
+            }
             if (response.statusCode() != 200) {
                 val text = body.readBytes().decodeToString()
                 // 错误体里也可能带 x_coach（例如 CLI 跑了一半超时后退出）：照它的 physical_calls 记账
@@ -448,6 +475,7 @@ class BridgeClient(private val config: BridgeConfig = BridgeConfig()) {
         }
         request.effort?.let { builder.header("X-Coach-Effort", it) }
         if (request.background) builder.header("X-Coach-Background", "1")
+        batchKey(request)?.let { builder.header("X-Coach-Batch-Key", it) }
         return builder
     }
 

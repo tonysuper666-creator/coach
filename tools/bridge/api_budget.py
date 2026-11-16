@@ -117,11 +117,16 @@ class CreditLedger:
             self.save(data)
             return cycle_id, month, token
 
-    def settle(self, provider: str, reservation, actual: int):
+    def settle(self, provider: str, reservation, actual: int, *, idempotent=False):
         with self.locked():
             data = self.read()
             cycle_id, month, token = reservation
             cycle = data["cycles"][cycle_id]
+            if idempotent and token not in cycle["reserved"]:
+                # A Batch poll can replay after a crash following the ledger commit.
+                # Rewrite summaries too if their previous write was interrupted.
+                self.save(data)
+                return
             reserved = cycle["reserved"].pop(token)
             if actual < 0:
                 raise Denied("invalid_usage")

@@ -94,22 +94,58 @@ Request logs record `transport=api` or `transport=subscription`, the actual mode
 in `served=`, and `ttft` in milliseconds. Use completed requests for production
 routing and first-content latency checks; logs contain no source passage or key.
 
-## Batch and acceptance limits
+## Durable background Batch
 
-These transports use standard streaming requests. Batch submission is not wired:
-current workers and local bridge requests have synchronous deadlines and leases,
-whereas provider Batch jobs can finish up to 24 hours later. A durable submit / poll /
-resume contract is needed before Batch can safely replace these calls. The cost
-helper's batch-price option is arithmetic only, not a Batch transport.
+Background MCQ and constructed-question generation, source repair and independent
+review use provider Batch APIs. Foreground requests, teaching, grading a submitted
+answer and journal summaries keep their synchronous transports. A foreground pool
+request can create its own work instead of waiting for a pending background batch.
+The API price calculation applies the providers' 50% Batch discount. See the
+[OpenAI Batch guide](https://developers.openai.com/api/docs/guides/batch) and
+[Anthropic Message Batches guide](https://platform.claude.com/docs/en/build-with-claude/batch-processing).
+
+A stable `X-Coach-Batch-Key` derives from database epoch, supply job ID, task and
+format attempt. The bridge persists submission intent before reserving budget or
+sending a POST. HTTP 202 releases the worker's fenced lease and schedules a poll
+in 60 seconds without consuming a failure attempt. Deadlines survive database
+reopen; completed draft/repair results are replayed when later stages resume.
+Existing call IDs deduplicate accounting, and the independent-vendor admission
+gate still runs before questions enter the pool. No database migration is needed.
+
+Private `api-batches/` state beside the credit ledger contains provider IDs,
+reservations and cached answers. Directory mode is 0700, state files are 0600;
+do not attach or commit them. Per-key process locks and atomic fsynced writes
+prevent concurrent submission. Polls use fixed provider origins and correlate the
+exact custom ID. Valid usage settles at Batch prices once, including after a
+crash between settlement and result persistence. Spend is attributed to the
+original reservation month. Retain completed state while its database job may
+still be replayed.
+
+An ambiguous submission is never POSTed again. It falls back to the same vendor's
+subscription bridge and retains the API reservation. Poll transport failures retry
+read-only GETs; an unresolved job after 25 hours, terminal provider failure, missing
+usage or invalid model/result also falls back conservatively. Missing keys or local
+budget exhaustion use that same subscription path. Successful fallback results
+are cached. Never delete batch state to force resubmission or clear a reservation:
+first stop the owning service under the maintenance gates, back up private state,
+identify the provider batch and confirm its final charge before the manual
+settlement procedure above. Provider-side cancellation does not itself prove zero
+charge. This version does not automatically cancel batches or delete remote files;
+operators must follow their provider retention policy for uploaded passages/results.
+
+Offline Batch coverage uses injected HTTP clients and synthetic sources; live
+provider Batch submission, delayed completion and Batch production deployment
+remain separate acceptance steps. Preserve the existing production gates.
 
 Offline checks:
 
 ```sh
+python tools/bridge/tests/batch_routing.py
 python tools/bridge/tests/api_routing.py
 python tools/bridge/tests/exam_protection.py
 python tools/bridge/tests/fault_injection.py
 python tools/bridge/tests/traffic_isolation.py
-tools/dev/heavy ./gradlew :server:ai:test :server:app:test
+tools/dev/heavy ./gradlew :server:store:test :server:ai:test :server:app:test
 ```
 
 Use the Python environment containing the pinned bridge dependencies. Real

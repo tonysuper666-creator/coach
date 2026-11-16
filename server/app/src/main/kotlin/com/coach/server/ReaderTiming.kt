@@ -24,7 +24,13 @@ internal class ReaderTimeout(val stage: String) : Exception(stage) {
     }
 }
 
-internal class ReaderFormat(val servedBy: String? = null) : Exception("Invalid reader JSON")
+/** Fixed codes only: never include model text, source text, paths or exception messages. */
+internal enum class ReaderFormatReason {
+    STREAM_JSON, PAYLOAD_SIZE, PAYLOAD_JSON, ROOT_FIELDS, PARAGRAPH_COUNT,
+    PARAGRAPH_FIELDS, PARAGRAPH_TEXT, ANCHORS, DUPLICATE_ANCHORS, ANSWER_LOCATOR, ANSWER_CITATION
+}
+internal class ReaderFormat(val servedBy: String? = null,
+    val reason: ReaderFormatReason = ReaderFormatReason.STREAM_JSON) : Exception("Invalid reader JSON")
 
 /** Prefix lexer: only decoded, non-whitespace characters at paragraphs[*].text count.
  * Stores keys/grammar only, never source or explanation text. Final citation gate is separate.

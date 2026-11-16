@@ -778,8 +778,8 @@ class ChatService(
             }
             val request = com.coach.ai.ChatRequest(
                 task="SOURCE_LOOKUP",model=session.model,system=com.coach.ai.TeachPrompt.SYSTEM,
-                user="""Use the browsable textbook pages to answer. Internal references must not be quoted or repeated.
-                    |Write ONLY supplement paragraphs, separated by a blank line. End EVERY paragraph with its source anchor, e.g. 【S1】.
+                user="""Answer only from the textbook pages below.
+                    |Write ONLY supplement paragraphs in Simplified Chinese, separated by a blank line. End EVERY paragraph with its source anchor, e.g. 【S1】.
                     |Every quotation must be copied verbatim from the anchored page. No unsupported claims. No questions, grading, tools, JSON or lookup markers.
                     |Student question: ${TutorOutputGuard.modelInput(question)}
                     |Lookup request: ${TutorOutputGuard.modelInput(query)}

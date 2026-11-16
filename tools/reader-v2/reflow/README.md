@@ -98,6 +98,15 @@ duplicates. These are confirmed lower bounds, not a complete readability score.
 Save per-page event notes privately beside the counts. C's text order equals A
 by construction; its eventual crop/body reading stream remains unmeasured.
 
+For the separate structural-internal review, inspect every ordered B block,
+every output table-cell entry and every formula region against the original
+page, alongside the full A text. Save per-page coverage and observations
+privately. Report confirmed structural defects separately from unresolved
+orientation or spatial-association risks. Do not add these page observations to
+the cross-block error-group counts: their units differ and some defects overlap.
+Checking all entries does not establish character accuracy, formula semantics,
+independent review or a working rendered reading stream.
+
 ## Existing environment and offline timing
 
 `platform_probe.py` measures an already provisioned Docling environment and
@@ -166,6 +175,45 @@ dependency search or a model-download benchmark. Transitive packages are
 resolved at run time, so compare the saved versions before comparing runs.
 Use the new venv in the second command to verify it can actually convert pages;
 a successful pip exit alone does not establish a working runtime.
+
+## Model download with empty application caches
+
+`model_download_probe.py` uses an already installed Docling environment to
+download layout, tableformer and RapidOCR models. The layout group includes all
+default engine variants; this is not a minimal model set. Optional formula,
+picture-classifier and VLM models are disabled. No document input is accepted.
+
+```powershell
+& D:\work\venv\Scripts\python.exe tools\reader-v2\reflow\model_download_probe.py `
+  --out D:\private-state\model-download --timeout 300
+
+& D:\work\venv\Scripts\python.exe tools\reader-v2\reflow\platform_probe.py `
+  --pdf D:\work\synthetic\mixed.pdf --pages 1,2,3,4 `
+  --models-dir D:\private-state\model-download\models `
+  --out D:\private-state\model-download\verify --repeats 2
+```
+
+The output directory must be new and outside the checkout. The child process
+gets fresh HF/Transformers/Torch/XDG cache locations; implicit hub authentication
+is disabled and inherited hub tokens/endpoint/offline overrides are removed.
+Do not pass credentials. This downloads public model files, without sending
+documents to a model service.
+
+`download-metrics.json` records package versions, initial empty output, child
+exit code, wall time, model footprint and separate download-cache footprints.
+The private log retains failures; a timeout records exit 124 and partial files.
+`model-files-private.json` records relative file names, logical bytes and SHA-256
+for the exact downloaded files. Model revisions are resolved at run time, so
+retain this private manifest when comparing runs. Wall time includes child
+imports and hub metadata requests, but excludes the later manifest hashing.
+Footprints include model-directory metadata; they are not network traffic or
+filesystem allocation. Logs, receipts and manifests stay outside Git.
+
+OS, Python, installed packages and system/network caches already exist; this
+does not measure a clean OS or product installation. Use the second command to
+check the downloaded files can convert the synthetic PDF under the documented
+offline constraints. Preserve failed attempts as well as successful receipts;
+download success alone does not prove conversion success.
 
 ## Checks
 

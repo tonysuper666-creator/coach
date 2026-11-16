@@ -50,7 +50,7 @@ private val AppTab.hostDestination: AppTab
  */
 @Composable
 internal fun rememberAnswerExplain(library: TextbookLibrary): AnswerExplain {
-    val explainer = remember(library) { BookExplainer() }
+    val explainer = remember(library) { BookExplainer(library = library) }
     val consent = remember(library) { ExplainConsent(library.directory) }
     return remember(explainer, consent) { answerExplainWith(explainer, consent) }
 }

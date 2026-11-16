@@ -13,12 +13,16 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import io.ktor.utils.io.readAvailable
 
 /**
  * A local block id and its text are untrusted claims, including after pairing.
  * A file hash needs an explicit private-catalog binding to a learner source. Its stored
  * course, classification, text and learning record authorize the selection.
- * Unregistered local books fail closed; this endpoint never creates a registration.
+ * Unregistered local books fail closed. Explicit device-owned import receipts below
+ * are separate from this course authorization; they cannot create learned permissions.
  */
 internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,
     private val claimedBlock: String) {
@@ -90,17 +94,39 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
     return LibraryExplainRequest.selected(quote, selected)
 }
 
-fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?, library: ReaderLibrary? = null) {
+fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?, library: ReaderLibrary? = null,
+    imports: ImportedBookSources? = null) {
     routing {
         post("/v1/library/explain") { call.withReaderConnection {
             try {
-                val input = LedgerJson.parseToJsonElement(call.receiveText()).jsonObject
+                val channel = call.receiveChannel()
+                val bytes = ByteArray(131_073)
+                var size = 0
+                while (size < bytes.size) {
+                    val n = channel.readAvailable(bytes, size, bytes.size - size)
+                    if (n < 0) break
+                    size += n
+                }
+                if (size > 131_072) throw MockError(HttpStatusCode.PayloadTooLarge, "选中的原文过长，请缩短后重试。")
+                val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
                 val parsed = libraryExplainRequest(input)
                 val binding = if (parsed.isLocalBook) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
-                val request = actor.execute { parsed.authorize(this, binding) }
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, request.quote, request.pages, request.scope) {
-                    (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
-                        actor.execute { request.isCurrent(this) }
+                val personal = input["localSource"] != null && parsed.isLocalBook && withContext(Dispatchers.IO) {
+                    // Unreadable catalogs fail closed, including while generating.
+                    runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
+                }
+                val receipt = if (personal) withContext(Dispatchers.IO) {
+                    (imports ?: throw MockError(HttpStatusCode.ServiceUnavailable, "Mac 还未接通新书讲解，请更新服务后重试。"))
+                        .register(call.attributes[observedDevice], input, parsed)
+                } else null
+                val request = if (receipt == null) actor.execute { parsed.authorize(this, binding) } else null
+                val scope = request?.scope ?: VisibleScope.learner().narrowToPages(parsed.pages.single().docId,
+                    parsed.pages.single().pdfPage..parsed.pages.single().pdfPage)
+                val body = reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope) {
+                    if (receipt != null) withContext(Dispatchers.IO) {
+                        imports!!.isCurrent(receipt) && runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
+                    } else (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
+                        actor.execute { request!!.isCurrent(this) }
                 }
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
                 call.respondText(body.toString(), ContentType.Application.Json)

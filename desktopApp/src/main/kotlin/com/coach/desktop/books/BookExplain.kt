@@ -105,7 +105,9 @@ internal object ExplainWire {
  * Pairing with the Mac server and asking it to explain a block of a book that lives on this computer.
  * Open only so a screenshot test can stand in for the Mac without a network; the app uses this class as is.
  */
-internal open class BookExplainer(private val settings: DesktopConnectionSettings = DesktopConnectionSettings()) {
+internal open class BookExplainer(private val settings: DesktopConnectionSettings = DesktopConnectionSettings(),
+    library: TextbookLibrary? = null) {
+    private val imports = library?.let(::ImportedBookWire)
     private val pairing = DesktopPairing(settings)
     var identity by mutableStateOf<DesktopIdentity?>(null)
         protected set
@@ -138,7 +140,11 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         val paired = identity ?: return ExplainResult.Refused("还没连上你的 Mac。先在讲解页配对。")
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
         return try {
-            val reply = http.explainLibrary(input)
+            val snapshot = withContext(Dispatchers.IO) { imports?.snapshot(context) }
+            val wire = if (snapshot == null) input else JsonObject(input + ("localSource" to snapshot))
+            val reply = http.explainLibrary(wire)
+            if (snapshot != null && withContext(Dispatchers.IO) { imports!!.snapshot(context) } != snapshot)
+                return ExplainResult.Refused("保存的原文已变化，请重新打开这本书后重试。")
             val body = reply.body
             when {
                 reply.statusCode == 401 -> { identity = null; ExplainResult.Refused(reply.error.orEmpty(), unauthorized = true) }
@@ -148,6 +154,8 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
         } catch (cancelled: CancellationException) {
             runCatching { http.cancelLibraryExplain(requestId) }
             throw cancelled
+        } catch (_: Exception) {
+            ExplainResult.Refused("保存的原文或发送许可无法核对，请重新打开这本书后重试。")
         } finally { http.close() }
     }
 }

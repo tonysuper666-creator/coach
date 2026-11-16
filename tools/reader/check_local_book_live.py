@@ -31,6 +31,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bridge-python', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--automatic', action='store_true', help='Exercise first-request registration without catalog or course grants')
     args = parser.parse_args()
     os.umask(0o077)
     args.output.mkdir(parents=True, exist_ok=False)
@@ -53,7 +54,7 @@ def main():
         data, library = base / 'data', base / 'library'
         course = smoke.fixture.COURSE
         smoke.fixture.write_pack(base / 'mock/mcq-mainline')
-        bindings = [import_local_book(fixtures / 'library', sample['book'], library,
+        bindings = [] if args.automatic else [import_local_book(fixtures / 'library', sample['book'], library,
             document_id='synthetic-' + sample['format'], course=course,
             explain_source_id='synthetic-' + sample['format']) for sample in samples]
         server_env = dict(env, COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data / 'device-token'),
@@ -105,14 +106,19 @@ def main():
                         raise TimeoutError('Isolated bridge readiness') from None
                     time.sleep(.2)
             server = start_server()
-            smoke.stop(server)
+            if args.automatic:
+                smoke.stop(server)
+                # The ordinary server creates this private directory. No source/outline seeding.
+                server = start_server()
+            else:
+                smoke.stop(server)
             now = int(time.time() * 1000)
             points = [dict(id='saved-' + s['format'], title='Synthetic ' + s['format'], week=1) for s in samples]
             payload = dict(course=dict(id=course, name='Self-authored saved books', tz='Europe/London'), knowledgePoints=points)
             events = [('outline_revised', payload), ('kp_opened', dict(kpId=points[-1]['id']))]
             with closing(sqlite3.connect(data / 'coach.sqlite')) as db, db:
                 assert db.execute('select count(*) from events').fetchone()[0] == 0
-                for seq, (kind, payload) in enumerate(events, 1):
+                for seq, (kind, payload) in enumerate([] if args.automatic else events, 1):
                     event = dict(seq=seq, id=f'saved-live-{seq}', courseId=course, type=kind, schema=1,
                         recordedAt=now, occurredAt=now, deviceId='desktop', actor='SYSTEM' if seq == 1 else 'LEARNER',
                         effectIndex=0, idemKey=f'saved-live-{seq}', payload=payload)
@@ -129,10 +135,20 @@ def main():
                     db.execute('insert into outline_kp(kp_id,course_id,module_id,ord,title,kind,exam_formats,prereqs,anchors,retired) values(?,?,?,?,?,?,?,?,?,0)',
                         (points[i]['id'], course, 'synthetic', i, points[i]['title'], 'concept', '[]', '[]',
                          json.dumps([dict(docId=source, pdfPage=sample['page'])])))
-            server = start_server()
+            if not args.automatic:
+                server = start_server()
             for sample in samples:
                 body = dict(requestId=uuid.uuid4().hex, kind='explain', selection=sample['text'],
                             blocks=[dict(id=sample['id'], text=sample['text'])])
+                if args.automatic:
+                    with closing(sqlite3.connect((fixtures / 'library/library.sqlite').as_uri() + '?mode=ro', uri=True)) as saved:
+                        title = saved.execute('select title from books where id=?', (sample['book'],)).fetchone()[0]
+                        text, ocr = saved.execute('select text,ocr from pages where book=? and page=?',
+                                                 (sample['book'], sample['page'])).fetchone()
+                    assert text.encode('utf-16-le')[sample['start'] * 2:sample['end'] * 2].decode('utf-16-le') == sample['text']
+                    body['localSource'] = dict(schema=1, book=sample['book'], format=sample['format'], title=title,
+                        consented=True, pages=[dict(number=sample['page'], length=len(text.encode('utf-16-le')) // 2,
+                            ocr=bool(ocr), sha256=hashlib.sha256(text.encode()).hexdigest())])
                 started = time.monotonic()
                 result = request('/v1/library/explain', body)
                 passed = bool(result.get('sources')) and all(s['docId'] == sample['id'] and s['pdfPage'] == sample['page'] for s in result['sources'])
@@ -140,13 +156,21 @@ def main():
                     block=sample['id'], start=sample['start'], end=sample['end'], passed=passed,
                     roundTripMs=round((time.monotonic() - started) * 1000), response=result))
                 (args.output / 'report.json').write_text(json.dumps(dict(syntheticOnly=True, isolatedServer=True,
-                    operatorRegisteredExistingSource=True, nativeWindow=False, samples=rows), ensure_ascii=False, indent=2))
+                    operatorRegisteredExistingSource=not args.automatic, automaticRegistration=args.automatic,
+                    nativeWindow=False, samples=rows), ensure_ascii=False, indent=2))
                 print(sample['format'] + ': ' + ('PASS' if passed else 'FAIL'), flush=True)
             smoke.stop(server)
             with closing(sqlite3.connect(data / 'coach.sqlite')) as db:
+                if args.automatic:
+                    assert db.execute('select count(*) from events').fetchone()[0] == 0
+                    assert db.execute('select count(*) from source_docs').fetchone()[0] == 0
+                    assert db.execute('select count(*) from outline_kp').fetchone()[0] == 0
                 calls = [dict(zip(('task', 'requestedModel', 'servedBy', 'status', 'physicalCalls', 'durationMs'), row))
                          for row in db.execute('select task,requested_model,served_by,status,physical_calls,dur_ms from ai_calls')]
             (args.output / 'calls.json').write_text(json.dumps(calls, indent=2))
+            if args.automatic:
+                with closing(sqlite3.connect(data / 'personal-imports/sources.sqlite')) as db:
+                    assert db.execute('select count(distinct book) from blocks where device=?', ('desktop',)).fetchone()[0] == len(samples)
             assert len(calls) >= len(samples) and all(c['task'] == 'READER_SELECTION' and c['physicalCalls'] >= 1 for c in calls)
             assert all(s['passed'] for s in rows), 'Real explanation did not pass the citation gate'
         finally:

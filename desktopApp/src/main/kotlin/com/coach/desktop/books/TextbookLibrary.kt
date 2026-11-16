@@ -532,7 +532,17 @@ internal object TextbookExtraction {
         return chunks.mapIndexed { index, content -> BookPage(index + 1, content) }
     }
 
-    private fun epub(path: Path, fallback: String): ExtractedBook = ZipFile(path.toFile()).use { zip ->
+    /** On-demand extraction payload. It is not persisted or used by the reader yet. */
+    fun epubSourceMapping(path: Path, canonicalPages: List<BookPage>): EpubSourceMapping {
+        val elements = mutableListOf<EpubElementSource>()
+        val extracted = epub(path, "", elements)
+        // Existing books must match every page, including page numbers. Never relocate stale text.
+        return if (extracted.pages.map { it.number to it.text } == canonicalPages.map { it.number to it.text })
+            EpubSourceMapping(EpubSourceMapping.Status.MAPPED, elements)
+        else EpubSourceMapping(EpubSourceMapping.Status.STALE_TEXT, emptyList())
+    }
+
+    private fun epub(path: Path, fallback: String, elements: MutableList<EpubElementSource>? = null): ExtractedBook = ZipFile(path.toFile()).use { zip ->
         fun read(name: String): ByteArray {
             require(!name.startsWith('/') && name.split('/').none { it == ".." } && '\\' !in name) { "EPUB 内含无效的文件位置。" }
             val entry = requireNotNull(zip.getEntry(name)) { "EPUB 缺少阅读顺序中的正文。" }
@@ -566,31 +576,45 @@ internal object TextbookExtraction {
         val packagePath = container.all("rootfile").firstOrNull()?.getAttribute("full-path") ?: error("EPUB 缺少内容目录。")
         val opf = xml(read(packagePath))
         val manifest = opf.all("item").associate { it.getAttribute("id") to it.getAttribute("href") }
-        val spine = opf.all("itemref").filter { it.getAttribute("linear") != "no" }
+        val spine = opf.all("itemref").withIndex().filter { it.value.getAttribute("linear") != "no" }
         require(spine.size in 1..5000) { "EPUB 没有可读正文，或章节太多。" }
         val root = java.net.URI("/$packagePath")
         var totalBytes = 0L
-        val pages = spine.flatMap { item ->
+        var pageBase = 0
+        val pages = spine.flatMap { (spineIndex, item) ->
             val href = requireNotNull(manifest[item.getAttribute("idref")]) { "EPUB 阅读顺序不完整。" }
             val resolved = root.resolve(href).normalize()
             require(resolved.scheme == null && resolved.host == null && resolved.fragment == null) { "EPUB 的正文必须包含在书内。" }
-            val bytes = read(resolved.path.removePrefix("/"))
+            val member = resolved.path.removePrefix("/")
+            val bytes = read(member)
             totalBytes += bytes.size
             require(totalBytes <= 64L * 1024 * 1024) { "EPUB 的正文过大。" }
             val doc = xml(bytes)
             val output = StringBuilder()
-            fun visit(node: Node) {
+            val trace = if (elements != null) EpubTextTrace() else null
+            fun visit(node: Node, elementPath: List<Int>) {
                 if (node.nodeType == Node.TEXT_NODE) { output.append(node.nodeValue); return }
                 val name = node.localName?.lowercase().orEmpty()
                 if (name in setOf("script", "style", "head")) return
                 val block = name in setOf("p", "div", "li", "h1", "h2", "h3", "h4", "section", "br", "tr")
                 if (block) output.append("\n\n")
+                val start = output.length
                 if (name.matches(Regex("h[1-6]"))) output.append("# ")
-                for (i in 0 until node.childNodes.length) visit(node.childNodes.item(i))
+                var childIndex = 0
+                for (i in 0 until node.childNodes.length) {
+                    val child = node.childNodes.item(i)
+                    val childPath = if (trace != null && child is Element) elementPath + childIndex else emptyList()
+                    if (child is Element) childIndex++
+                    visit(child, childPath)
+                }
+                if (node is Element) trace?.record(elementPath, node.namespaceURI.orEmpty(), node.localName ?: node.tagName, start, output.length)
                 if (block) output.append("\n\n")
             }
-            visit(doc)
-            paginate(clean(output.toString()).trim())
+            visit(doc, emptyList())
+            val localPages = paginate(clean(output.toString()).trim())
+            trace?.let { elements?.addAll(it.project(output.toString(), localPages, spineIndex, member, bytes, pageBase)) }
+            pageBase += localPages.size
+            localPages
         }.mapIndexed { index, page -> page.copy(number = index + 1) }
         require(pages.any { it.text.isNotBlank() }) { "EPUB 中没有可读取的文字正文。" }
         ExtractedBook(opf.all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: fallback, pages)

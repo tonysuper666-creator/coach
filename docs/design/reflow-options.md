@@ -449,8 +449,54 @@ Mac 本机使用生产类处理原 20 页，canonical text **20/20 与历史 A �
 误作用于 included build 失败，修正为仅对存在 desktopApp 的构建注册后编译退出 0。
 最终命令与结果见复现节和交付收据。
 
-可靠长表行边界、图注续段、EPUB/Word 结构到 canonical text 的生产映射仍未解决；
-没有扩展 TON-1665 共享字段。显示仍守 TON-1667/TON-1670 前置，32 格均未验证。
+本段交付时，可靠长表行边界、图注续段、EPUB/Word 结构到 canonical text 的生产映射
+仍未解决；后续 EPUB 映射见下节。没有扩展 TON-1665 共享字段。
+显示仍守 TON-1667/TON-1670 前置，32 格均未验证。
+
+## EPUB 元素到既有文字的映射
+
+目标是让表格、MathML、知识框和样式节点能引用已有正文，同时保持出处、高亮和批注的
+UTF-16 偏移。新增生产接口 `TextbookExtraction.epubSourceMapping(path, canonicalPages)`，
+**按需调用，尚未接入自动导入、持久化或阅读器**。普通导入不生成该载荷。
+
+原有 EPUB 提取遍历可选择记录元素的输出区间，之后沿用同一套 clean、trim 和 paginate。
+映射使用被消费的连续文字切片，不用 `indexOf` 搜索句子；相同段落、相同章节和重复的
+spine 引用也有独立位置。输出包括完整 OPF spine 的序号、包内成员名、成员原始字节的
+SHA-256、从 XML 根开始的元素子节点索引路径、命名空间/标签，以及分散到各页的
+`[start,end)` 范围。路径忽略文本、注释节点，与 `native_payload.py` 的源树对应；
+使用源树时必须先核对成员摘要。`linear="no"` 的章节仍不生成正文或范围，但保留其
+在完整 spine 中的位置，不能把筛选后的序号直接当作源包序号。
+
+这些是**正文覆盖范围**：包含原提取器生成的标题标记和子块分隔符，不含元素自身的
+外侧分隔符；父子元素范围会重叠，不能据此授权隐藏文字。空元素/仅含被修剪空白的
+元素返回空范围，不猜图片锚点。跨页元素返回多段，每段仍指向原页串；不把 form-feed
+或空页伪造成文字。清理偏移只保存需要的端点，不为章节中每个字符分配映射数组；
+范围定位按页边界二分，再只遍历实际相交的页。
+
+重提取后的全部页码和文字须与传入的 canonical pages 完全一致，否则返回
+`STALE_TEXT` 和空载荷，不搜索相近位置。图像、字框等附加页字段不参与文字身份比较。
+源包精确字节/树仍由已有 native payload 工具保留；本接口并未持久化这些结构、展开
+CSS、导出行分页契约或渲染公式，也没有改 EPUB 的既有文字串或替换 TON-1665 模型。
+
+新增 `EpubSourceMappingTest` 覆盖重复正文/章节/引用、表格/MathML/aside 节点身份、
+源树路径和摘要、非线性章节、注释/空白、代理对跨页、清理与空 form-feed 页、空元素、
+过期页拒绝，以及真实 `TextbookLibrary` 导入后删除外部源文件、重开保存副本，核对
+正文、课程块和合法出处解析不变。全部材料自生成，不使用真实教材。
+首次定向 7 项中 1 项失败：元素范围包含自身前置段落分隔符。已将记录起止点移到
+自身外侧分隔符以内，保留原有文字输出；未修改或放宽该断言及既有测试。
+最终检查（2026-11-16）：
+
+- `tools/dev/heavy ./gradlew :desktopApp:test --tests 'com.coach.desktop.books.EpubSourceMappingTest' --console=plain`：
+  winbox 退出 0，8 tests、0 failures/errors/skipped，57 秒，测试实际执行。
+- `tools/dev/heavy ./gradlew :desktopApp:test --console=plain`：winbox 退出 0，
+  `BUILD SUCCESSFUL in 6m 43s`，453 tests、0 failures、0 errors、7 skipped；
+  `:desktopApp:test` 实际执行。7 项跳过为既有的 3 项窗口/4 项本机服务端环境测试，
+  既有测试未删除、跳过或放宽。新增 8 项均无跳过。
+- `tools/dev/heavy --local python3 -I -m unittest discover -s tools/reader-v2/reflow`：
+  Mac 25 tests OK，退出 0；`git diff --cached --check` 退出 0。
+
+Word 结构到既有文字的映射、可靠长表行/表头、图注续段、自动裁图导入和 B+C 联合
+质量仍待补齐。显示仍等 TON-1667、TON-1670，32 格真窗口验收未验证。
 
 ## 产品实现契约与下一步
 
@@ -505,9 +551,11 @@ Mac 本机使用生产类处理原 20 页，canonical text **20/20 与历史 A �
 | EPUB/Word 结构块 | 行列与合并关系、原始 MathML / `m:oMath`、知识框内容和样式、对应 UTF-16 范围 | 现有位图资产不能承载这些结构；保留可核实来源后才用 `MathAsset` 或结构渲染 |
 | 按原文字号定裁图大小 | PDF 正文中位字号及其来源 | 现有宽高只是像素；不能据此宣称已实现 6.7 的字号缩放 |
 
-`StructuredBookExtraction.kt` 目前仍将表格行连接成平文字，EPUB 的 aside 还会被移除。
-结构保留须在生成侧挂载荷时补齐，同时保持既有 `BookPage.text`、清理规则与偏移。
-此处没有认定 EPUB/Word 的原结构提取已经完成。
+`StructuredBookExtraction.kt` 目前仍将 Word 表格行连接成平文字；HTML 提取会移除
+aside。EPUB 使用 `TextbookLibrary.kt` 中的独立提取器，aside 文字本来就保留，但未
+显示为知识框（此前将这两条路径混写，此处更正）。EPUB 已有上节按需元素范围载荷，
+尚未持久化或渲染；Word 映射仍待补齐。结构显示须保持既有 `BookPage.text`、清理规则
+与偏移，不能把提取映射当作原结构显示已完成。
 
 ### 表格合行与图注插断续段：第二阶段对策
 

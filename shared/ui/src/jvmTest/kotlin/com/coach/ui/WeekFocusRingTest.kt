@@ -193,6 +193,9 @@ class WeekFocusRingTest {
                     val dialogRegions = listOf(week1, week2, close).map { first(it).boundsInRoot.inflate(10 * scale) }
                     println("TON-1603 week $mode dialog opened focused-nodes=$initiallyFocused size=${dialogBefore.width}x${dialogBefore.height}")
                     onNode(week1).requestFocus(); waitForIdle(); onNode(week1).assertIsFocused()
+                    // A dialog starts in pointer mode. Focus alone must no longer paint a keyboard ring.
+                    tabFromFocused()
+                    onNode(week2).performKeyInput { keyDown(Key.ShiftLeft); pressKey(Key.Tab); keyUp(Key.ShiftLeft) }; waitForIdle()
                     measure(mode, "换周-第1周", week1, dialogBefore, pageDx = 8f, dialog = true)
                     tabFromFocused(); assertTrue(focused(week2), "$mode Tab after 第 1 周 must land on 第 2 周")
                     measure(mode, "换周-第2周", week2, dialogBefore, pageDx = 8f, dialog = true)

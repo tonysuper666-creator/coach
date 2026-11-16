@@ -1,6 +1,6 @@
 package com.coach.ui.v7
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -16,8 +16,10 @@ import com.coach.ui.theme.CoachTheme
 fun PaperButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp), content: @Composable RowScope.() -> Unit) {
     val c = CoachTheme.colors
-    Row(modifier.v7FocusRing().paperShadow("button", c.dark).clip(RoundedCornerShape(8.dp)).background(if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg)
-        .clickable(enabled = enabled, onClick = onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
+    val interaction = remember { MutableInteractionSource() }
+    val base = if (c.dark) CoachV7.Dark.btnBg else CoachV7.Light.btnBg
+    Row(modifier.v7FocusRing().paperShadow("button", c.dark).clip(RoundedCornerShape(8.dp)).v7ButtonSurface(base, interaction, enabled)
+        .v7ButtonClick(interaction, enabled, onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         CompositionLocalProvider(LocalContentColor provides c.fgPrimary.copy(alpha = if (enabled) 1f else .4f)) {
             ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() }
@@ -28,9 +30,19 @@ fun PaperButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boo
 fun PrimaryButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp), content: @Composable RowScope.() -> Unit) {
     val c = CoachTheme.colors
-    Row(modifier.v7FocusRing().clip(RoundedCornerShape(8.dp)).background(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f))
-        .clickable(enabled = enabled, onClick = onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
+    val interaction = remember { MutableInteractionSource() }
+    Row(modifier.v7FocusRing().clip(RoundedCornerShape(8.dp)).v7ButtonSurface(c.fgPrimary.copy(alpha = if (enabled) 1f else .4f), interaction, enabled, primary = true)
+        .v7ButtonClick(interaction, enabled, onClick).defaultMinSize(minHeight = if (LocalDeskMetrics.current.inner) 36.dp else 44.dp).padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
         CompositionLocalProvider(LocalContentColor provides c.surface1) { ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() } }
     }
 }
+
+/** Desktop owns mouse feedback; Android keeps its original fill and indication. */
+@Composable
+internal expect fun Modifier.v7ButtonSurface(base: Color, interaction: MutableInteractionSource,
+    enabled: Boolean, primary: Boolean = false): Modifier
+
+@Composable
+internal expect fun Modifier.v7ButtonClick(interaction: MutableInteractionSource,
+    enabled: Boolean, onClick: () -> Unit): Modifier

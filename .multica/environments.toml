@@ -1,0 +1,6 @@
+[environments.friend-service]
+label = "Friend path · isolated Mac service"
+start = "python3 tools/smoke/friend-service.py serve --port $MULTICA_PORT"
+url = "http://localhost:$MULTICA_PORT/v1/hello"
+ready = "http://localhost:$MULTICA_PORT/v1/hello"
+ttl = "24h"

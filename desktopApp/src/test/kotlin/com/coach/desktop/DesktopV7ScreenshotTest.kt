@@ -126,6 +126,14 @@ class DesktopV7ScreenshotTest {
             onNodeWithTag("host-today-read").performClick()
             ready(controller) { it.screen == BookScreen.READER && it.prompt == null }
             onNodeWithTag("textbook-reader").assertExists()
+            // 阅读器（D5、D6）：按钮不夹英文；Markdown 标题的井号隐去，但原文字符一个不少，出处偏移照旧对得上。
+            onAllNodesWithText("learning", substring = true, ignoreCase = true).assertCountEquals(0)
+            val readerText = onNodeWithTag("reader-text").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
+            val hashes = readerText.text.indices.filter { readerText.text[it] == '#' }
+            assertTrue(hashes.isNotEmpty(), "这本示例书的正文带 Markdown 标题")
+            assertTrue(hashes.all { i -> readerText.spanStyles.any {
+                it.item.color == androidx.compose.ui.graphics.Color.Transparent && i in it.start until it.end } }, "标题井号要隐去")
             shot("reader")
 
             nav("课程").performClick(); waitForIdle()

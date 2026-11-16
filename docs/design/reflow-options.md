@@ -1427,3 +1427,70 @@ namespace/localName、EPUB 原 spine 下标和精确页内范围；无文字节�
 没有重跑 layout/Docling、旧 PDF 工具集成或 20 页 PDF 保存回归，不新增这些结论。
 历史 Mac 扫描 PDF NPE 未定位，TON-1679 另案。显示继续守 TON-1667、TON-1670；
 32 格 winbox 真窗口均未验证，整卡继续 in_progress。
+
+### 按成员摘要读取 EPUB / Word 原生结构
+
+PR #357 已由 QA-C 独立验收并合并，其核对了索引过期拒绝、UTF-16 范围、事务和
+winbox books 测试；没有重跑真实样本或全量测试。本段把已存的出处索引接回原件
+结构，落实其提醒的“读取样式或 MathML 节点前必须先核对成员摘要”。不新增显示结论。
+
+#### 生产读取契约
+
+`TextbookLibrary.nativeDocument(bookId, member)` 先用既有 `nativeSources` 逐页校验
+canonical 文字，再打开书库保留的 ZIP 原件。只读索引列出的 XML 成员，在解析前
+核对原始成员字节摘要。随后用既有安全解析器构造纯数据树：按顺序
+保留文字/CDATA 与元素混合内容、namespace/localName/prefix、属性、祖先上下文，
+以及表格、MathML/OMML、段落/字符属性与样式引用。重复 EPUB spine 仍保留各自
+出处，但指向同一个成员节点。所有索引元素必须按精确子节点路径和名称解析成功，
+任何一个失败就整次返回空，不重新搜索或移动文字范围。
+
+链接、脚本文字仅作数据，不执行、不联网；没有改 XML 安全配置。注释与处理指令
+省略；未知内容类型拒绝。沿用 ZIP 16 MiB 单成员、64 MiB 总量及 1 万成员限制，
+另限制树节点/属性各 20 万、名称/namespace/属性值/文字累计 16 Mi UTF-16 code
+units、深度 256。取消继续抛出；缺成员、摘要变化、路径/名称不符、超限或解析错误
+返回空。不会改写已存索引、正文、学习块、出处偏移或阅读位置。
+
+本 API 每次验证**所读成员**，不宣称验证整份 ZIP 原件的所有成员。它只开放有索引
+的 XML 成员，不解析外链 CSS、Word `styles.xml`、关系或图片载荷，不计算最终样式，
+不渲染公式，也不提供替代范围或隐藏许可。完整树保存同成员内没有文字索引的样式
+等节点，不能把“读到了源属性”当成“样式已还原”。没有自动补建、缓存或界面入口。
+
+#### 真实材料与验证范围
+
+`NativeDocumentProbe.java` 用 Java `--release 17` 与现有持久化探针一同编译，退出 0。
+在 Mac 原有私有 EPUB/DOCX 测试书库逐成员读两轮（第二轮重新打开书库），均退出 0：
+
+| 格式 | 文字页 | XML 成员 | 解析成功的索引元素 | XML 元素 | 属性 | 表格节点 | 公式根节点 | 样式相关节点 | 未变的正文出处 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| EPUB | 65 | 21 | 1567 | 1632 | 1146 | 1 | 0 | 0 | 831 |
+| DOCX | 72 | 2 | 3707 | 3707 | 3585 | 0 | 0 | 633 | 231 |
+
+每个已索引元素均解析成功，重开前后树、canonical 页、索引和出处解析结果全等。
+两轮读取、重开校验、树比较和汇总合计为 EPUB 339.5 ms、DOCX 98.3 ms；不是导入
+耗时、冷启动或超大书基准。计数只证明结构载荷可读，不证明字符/语义/样式正确率。
+真实样本均无公式根节点，MathML/OMML 只由合成用例覆盖。原件、树内容、范围及
+原始日志仅在 Mac 私有目录，Git/Windows/附件只有代码、合成输入和汇总数。
+
+新增 7 项生产测试覆盖混合内容与 namespace/属性、表格与 MathML/OMML、Word
+脚注成员、重复 spine 与重开、只变样式但 canonical 文字不变的过期拒绝、缺失/
+未索引/过期来源、精确路径/名称、XXE、深度/节点超限及取消；既有测试未改。
+Mac 当前生产 classes 编译退出 0；Python/Pillow 环境经
+`tools/dev/heavy --local "$REVIEW_PYTHON" -I -m unittest discover -s tools/reader-v2/reflow`
+退出 0，原 71 项通过。
+
+首次 winbox 测试编译因新增表达式测试推断出内部返回类型而退出 1，显式标注
+`Unit` 修正，断言不变。首次真实探针没有 headless 参数，主逻辑已输出数字但
+AWT 非守护线程阻止 JVM 退出，人工终止后退出 143，不计通过；另一次误用带包名
+的主类退出 1。最终以 `-Djava.awt.headless=true` 和正确主类分别重跑两本，均退出 0，
+失败日志保留。
+
+修正新增测试后，`tools/dev/heavy ./gradlew :desktopApp:test --console=plain` 在 winbox
+退出 0，`BUILD SUCCESSFUL in 7m 43s`，快照 `d95abfb26493b1d7e6e9981ffea9e9bdf9f9de7a`。
+JUnit 汇总 494 项、487 通过、7 项既有跳过、0 failures/errors；新增 7 项实际全过。
+`:desktopApp:test` 实际执行，不是 FROM-CACHE。`git diff --check` 退出 0。
+
+自动图注/来源归组、语义去重、正文剔除、无标签跨页表、完整 B+C 联合质量仍未完成。
+本段没有重跑 layout/Docling、旧 PDF 工具集成或 20 页 PDF 保存回归，不新增这些
+通过结论。超大书的完整 DOM 解析期间取消粒度和内存未测；原生结构未接渲染。
+历史 Mac 扫描 PDF NPE 未定位，TON-1679 另案；显示仍等 TON-1667、TON-1670，
+32 格 winbox 真窗口均未验证，整卡继续 in_progress。

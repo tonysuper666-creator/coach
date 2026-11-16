@@ -449,8 +449,8 @@ available; a database write failure rolls the import back.
 The record retains member hashes, XML element paths, namespaces/names, EPUB
 spine indices and exact ranges, including empty and nested ranges. It is an
 index into the already retained archive, **not** a flattened copy of styles,
-attributes, MathML/OMML or image resources. A future node resolver must verify
-the member hash before reading those original payloads. No range grants source
+attributes, MathML/OMML or image resources. `nativeDocument` now verifies
+the indexed member hash before returning its original XML structure. No range grants source
 hiding or rendering permission. Capture currently adds a second parser traversal;
 large-book latency and cancellation inside that traversal have not been measured.
 
@@ -472,6 +472,45 @@ results against ordinary extraction, equal reopened/backfilled indices, and
 refusal of a same-length page-text change. It prints aggregate counts only.
 Real originals and disposable libraries stay on their owning machine. The
 exercise does not establish semantic/character correctness or reader display.
+
+### Digest-checked native XML documents
+
+`TextbookLibrary.nativeDocument(bookId, member)` reads an indexed EPUB/DOCX member
+from the retained archive after validating the saved index against current
+canonical pages. It hashes the raw member bytes before parsing with the existing
+secure format parser. Every indexed element in that member must still resolve
+by exact element-child path, namespace and local name, or the whole read returns
+no document. Missing/changed members, excessive depth/size and unsupported XML
+also return no document; cancellation propagates.
+
+The inert tree preserves ordered mixed text, element and attribute namespaces,
+prefixes, inline properties, table/MathML/OMML nodes and ancestor context. Repeated
+EPUB spine occurrences share a node while retaining their separate source ranges.
+Comments and processing instructions are omitted. Links and script text remain
+data: nothing executes or fetches resources. The API does not resolve external
+CSS, Word `styles.xml`, relationships or images, compute styles, render formulas,
+rebuild indices or grant text replacement/hiding permission. Only indexed XML
+members can be read. Each call checks its member, not the whole archive identity.
+
+Read existing private libraries on their owning machine (no original contents
+are printed):
+
+```sh
+javac --release 17 -cp "$DESKTOP_CLASSPATH" -d "$PRIVATE_STATE/native-classes" \
+  tools/reader-v2/reflow/NativeSourcePersistenceProbe.java \
+  tools/reader-v2/reflow/NativeDocumentProbe.java
+java -Djava.awt.headless=true -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeDocumentProbe \
+  "$PRIVATE_EXISTING_EPUB_LIBRARY"
+java -Djava.awt.headless=true -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeDocumentProbe \
+  "$PRIVATE_EXISTING_DOCX_LIBRARY"
+```
+
+Only exit 0 passes. The probe checks every indexed member and element, equal
+trees after reopen, unchanged canonical pages/index/citation results, and prints
+aggregate node counts and elapsed time. Counts describe payload availability,
+not semantic accuracy or reader display. The real samples currently contain no
+formula roots; MathML/OMML preservation is covered by synthetic tests only. Use
+headless mode so the library's PDF warmup cannot keep a Mac AWT JVM alive.
 
 ### Explicit review of complete PDF objects and production persistence
 

@@ -230,5 +230,16 @@ SHA-256 `2801c4cbe7a46579cf95712bd5b0f8bf0f4372b76f5743ae135c7f2bcc387509`。
 本轮补充实跑：Mac 与 winbox 均运行 `platform_probe.py --pages 1,2,3,4 --repeats 2`，
 指定同一 PDF、预取模型目录和仓库外输出目录，均退出 0；完整命令模板见工具 README。
 `python3 -I -m unittest discover -s tools/reader-v2/reflow`：6 tests OK，退出 0。
+本轮第一次完整执行 `tools/dev/heavy ./gradlew :desktopApp:test`：winbox 退出 1，
+424 tests、1 failed、6 skipped，`BUILD FAILED in 7m 53s`。失败为既有
+`WindowsLocalExamUiTest.failedAcceptedAnswerBlocksCloseAndRetryPersistsIt` 找不到选项节点；
+没有改动或跳过该测试，未定位根因。快照 `bf34b669e4d54eb3ca5c008a866978597f805b23`，
+日志及失败 XML 保留在 `.coach-winbox/heavy-d2e1a87650074e0c80c1cb5b0306fed9/`。
+
+衔接主干 `5c066b97` 后完整重跑同一命令：winbox 退出 0，
+`BUILD SUCCESSFUL in 7m 38s`。JUnit XML 合计 431 tests、0 failures、0 errors、6 skipped；
+`:desktopApp:test` 实际执行，非 FROM-CACHE。没有修改测试；这次通过没有解释第一次失败的根因。
+快照 `3af05b68afe74858fc8c365049bf4d424229ee3a`，日志和测试产物保留在
+`.coach-winbox/heavy-a8a759f952bd413aaf65dbfc70172877/`。
 
 第二阶段、完整四路比较、完整阅读顺序准确率、Windows 干净安装成本和真实 UI 效果均未完成。

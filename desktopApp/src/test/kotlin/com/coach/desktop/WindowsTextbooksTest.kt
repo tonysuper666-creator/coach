@@ -2,6 +2,7 @@ package com.coach.desktop
 
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
 import com.coach.desktop.books.*
@@ -130,7 +131,7 @@ class WindowsTextbooksTest {
             onNodeWithTag("library-title").assertTextEquals("书架")
             capture("host-library-1440x900", "windows-host")
 
-            // 设置右上角，内容是本机的书架位置。
+            // 设置在导航栏底部，内容是本机的书架位置。
             onNodeWithTag("open-settings").assertIsDisplayed().performClick()
             onNodeWithTag("settings-library-directory").assertTextEquals(root.resolve("library").toString())
             onNodeWithTag("close-settings").performClick()
@@ -280,6 +281,63 @@ class WindowsTextbooksTest {
         assertEquals(1, reopened.lessonIndex)
         assertEquals(2, reopened.readingPage)
         assertEquals(QuestionMode.CHOICE, reopened.questionMode)
+    }
+
+    /**
+     * TON-1650 D4 / D9: a page has one top bar, and the rail points where the book was opened from.
+     * 今天 / 课程 open their book inside 书架's workspace; before, the rail jumped to 书架 and the reader showed
+     * the host's "Coach" row above the desk's own one.
+     */
+    @Test fun railFollowsWhereTheBookWasOpenedFromAndEachPageHasOneBar() {
+        val root = Files.createTempDirectory("coach-windows-host-origin-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val stored = library.importBook(syntheticTextbook(root.resolve("friend")))
+        val controller = TextbookController(library)
+        runSkikoComposeUiTest(size = Size(2880f, 1800f), density = Density(2f)) {
+            setContent { WindowsTextbookHost(controller) { null } }
+            ready(controller) { it.book?.id == stored.id }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            fun highlighted(label: String) = onNodeWithTag("host-navigation")
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, label))
+            fun coachMarks() = onAllNodes(hasText("Coach")).fetchSemanticsNodes().size
+            fun readFrom(button: String) {
+                onNodeWithTag(button).performClick()
+                ready(controller) { it.screen == BookScreen.READER }
+                if (controller.state.value.prompt == BookPrompt.AFTER_READING) {
+                    onNodeWithTag("read-only").performClick()
+                    ready(controller) { it.prompt == null }
+                }
+            }
+
+            highlighted("书架")
+            onNodeWithTag("host-crumb").assertTextEquals("书架")
+            assertEquals(1, coachMarks())
+
+            nav("今天").performClick()
+            highlighted("今天")
+            onNodeWithTag("host-crumb").assertTextEquals("今天")
+            readFrom("host-today-read")
+            highlighted("今天")
+            onAllNodesWithTag("host-bar").assertCountEquals(0)
+            assertEquals(1, coachMarks())
+            onNodeWithTag("open-settings").assertIsDisplayed()
+
+            // Back on the shelf the rail is on 书架 again, and a book opened from the shelf keeps it there.
+            onNodeWithText("返回书架").performClick()
+            ready(controller) { it.screen == BookScreen.HOME }
+            highlighted("书架")
+            onNodeWithTag("host-bar").assertIsDisplayed()
+            readFrom("home-read")
+            highlighted("书架")
+
+            nav("课程").performClick()
+            highlighted("课程")
+            readFrom("host-course-read")
+            highlighted("课程")
+            nav("书架").performClick()
+            highlighted("书架")
+            onNodeWithTag("textbook-reader").assertIsDisplayed()
+        }
     }
 
     private fun ComposeUiTest.ready(controller: TextbookController, condition: (LibraryUi) -> Boolean) {

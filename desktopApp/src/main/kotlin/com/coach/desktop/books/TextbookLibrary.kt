@@ -138,6 +138,15 @@ internal class TextbookLibrary(
         return database().use { BookNativeSourceStore.load(it, bookId, book.format, book.pages) }
     }
 
+    /** Optional, inert source structure. Never read a node against an unchecked member digest. */
+    @Synchronized fun nativeDocument(
+        bookId: String, member: String, control: BookImportControl = BookImportControl(),
+    ): BookNativeDocument? {
+        control.check()
+        val index = nativeSources(bookId) ?: return null
+        return BookNativeDocument.read(original(bookId, index.format), index, member, control)
+    }
+
     /** Explicit backfill for old libraries; never relocate text or replace a valid saved index. */
     @Synchronized fun retainNativeSources(bookId: String, control: BookImportControl = BookImportControl()): BookNativeSources? {
         control.check()

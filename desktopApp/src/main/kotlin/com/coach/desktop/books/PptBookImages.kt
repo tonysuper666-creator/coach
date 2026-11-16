@@ -1,7 +1,11 @@
 package com.coach.desktop.books
 
 import org.apache.poi.xslf.usermodel.XMLSlideShow
-import org.apache.poi.sl.draw.Drawable
+import org.apache.poi.xslf.usermodel.XSLFShape
+import org.apache.poi.xslf.usermodel.XSLFTextShape
+import org.apache.poi.xslf.usermodel.XSLFGroupShape
+import org.apache.poi.xslf.usermodel.XSLFTable
+import java.awt.Font
 import java.awt.Color
 import java.awt.geom.Rectangle2D
 import java.awt.RenderingHints
@@ -96,6 +100,10 @@ internal object PptBookImages {
             val scale = minOf(2.0, 1600.0 / maxOf(size.width, size.height))
             val width = (size.width * scale).toInt().coerceAtLeast(1)
             val height = (size.height * scale).toInt().coerceAtLeast(1)
+            show.slideMasters.forEach { master ->
+                prepareFonts(master.shapes)
+                master.slideLayouts.forEach { prepareFonts(it.shapes) }
+            }
             var total = 0L
             show.slides.mapIndexed { index, slide ->
                 control.check()
@@ -107,17 +115,18 @@ internal object PptBookImages {
                     graphics.fillRect(0, 0, width, height)
                     graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
                     graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
-                    // POI otherwise reuses the original Latin face for missing CJK glyphs.
-                    // Java's logical font delegates to installed Chinese/emoji fonts.
-                    graphics.setRenderingHint(Drawable.FONT_FALLBACK, mapOf("*" to java.awt.Font.SANS_SERIF))
                     graphics.scale(scale, scale)
                     val text = unpositionedText[slide.packagePart.partName.name.removePrefix("/")]
-                    if (text == null) slide.draw(graphics) else XMLSlideShow().use { reconstructed ->
+                    if (text == null) {
+                        prepareFonts(slide.shapes)
+                        slide.draw(graphics)
+                    } else XMLSlideShow().use { reconstructed ->
                         reconstructed.pageSize = size
                         reconstructed.createSlide().createTextBox().apply {
                             anchor = Rectangle2D.Double(24.0, 24.0, size.width - 48.0, size.height - 48.0)
                             this.text = text
                         }
+                        prepareFonts(reconstructed.slides.single().shapes)
                         reconstructed.slides.single().draw(graphics)
                     }
                     control.check()
@@ -128,6 +137,22 @@ internal object PptBookImages {
                             if (text == null) "" else "（原文件缺少版式，按文字排版）")
                 } finally { graphics.dispose(); canvas.flush() }
             }
+        }
+    }
+    /** POI 5.5.1's glyph fallback sets FAMILY, but its FONT attribute takes precedence.
+     * Repair only runs whose effective face lacks glyphs, in the in-memory rendering copy. */
+    private fun prepareFonts(shapes: List<XSLFShape>) {
+        val fallback = Font(Font.SANS_SERIF, Font.PLAIN, 12)
+        for (shape in shapes) when (shape) {
+            is XSLFTextShape -> shape.textParagraphs.flatMap { it.textRuns }.forEach { run ->
+                val text = run.rawText.orEmpty()
+                val original = Font(run.fontFamily ?: Font.SANS_SERIF, Font.PLAIN, 12)
+                if (original.canDisplayUpTo(text) >= 0 && fallback.canDisplayUpTo(text) == -1) {
+                    run.fontFamily = Font.SANS_SERIF
+                }
+            }
+            is XSLFGroupShape -> prepareFonts(shape.shapes)
+            is XSLFTable -> shape.rows.forEach { row -> prepareFonts(row.cells) }
         }
     }
 }

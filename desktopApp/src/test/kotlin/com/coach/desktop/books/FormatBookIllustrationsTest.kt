@@ -68,6 +68,12 @@ class FormatBookIllustrationsTest {
                     anchor = Rectangle2D.Double(20.0, 20.0, 600.0, 50.0)
                     text = "Slide ${index + 1} 生物 Biology 😀"
                 }
+                // A Latin face without CJK glyphs must render actual Chinese, not two tofu boxes.
+                slide.createTextBox().apply {
+                    anchor = Rectangle2D.Double(20.0, 260.0, 200.0, 50.0)
+                    text = "生物"
+                    textParagraphs.single().textRuns.single().apply { fontFamily = "Calibri"; fontSize = 24.0 }
+                }
             }
             Files.newOutputStream(path).use(show::write)
         }
@@ -78,7 +84,7 @@ class FormatBookIllustrationsTest {
         powerpoint(source)
         val library = TextbookLibrary(root.resolve("library"))
         val book = library.importBook(source)
-        assertEquals(listOf("Slide 1 生物 Biology 😀", "Slide 2 生物 Biology 😀"), book.pages.map { it.text })
+        assertEquals(listOf("Slide 1 生物 Biology 😀\n\n生物", "Slide 2 生物 Biology 😀\n\n生物"), book.pages.map { it.text })
         for ((index, page) in book.pages.withIndex()) {
             val image = page.illustrations.single()
             assertEquals(0, image.anchorOffset)
@@ -95,6 +101,8 @@ class FormatBookIllustrationsTest {
             val original = ImageIO.read(javaClass.getResourceAsStream("/books/illustrations/diagram.png"))
             assertEquals(original.getRGB(8, 8), raster.getRGB(832, 392), "Picture top-left orientation")
             assertEquals(original.getRGB(55, 24), raster.getRGB(1020, 456), "Picture bottom-right orientation")
+            val chineseInk = (40 until 280).filter { x -> (520 until 630).any { y -> raster.getRGB(x, y) != Color.WHITE.rgb } }
+            assertTrue(chineseInk.last() - chineseInk.first() > 75, "Expected two full-width CJK glyphs, not narrow missing-glyph boxes")
             if (index == 0) {
                 val output = Path.of("build/screens/ton1663-rendered-slide.png")
                 Files.createDirectories(output.parent); Files.copy(file, output, java.nio.file.StandardCopyOption.REPLACE_EXISTING)

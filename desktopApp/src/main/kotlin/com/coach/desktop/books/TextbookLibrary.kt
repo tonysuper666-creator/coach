@@ -131,6 +131,66 @@ internal class TextbookLibrary(
         BookPageTextBoxStore.loadPage(db, bookId, page)
     }
 
+    /** Explicit local review only. A preview or an adjacent model box is not approval.
+     * Add disjoint objects; never silently replace an existing manual/automatic visual.
+     */
+    @Synchronized fun addReviewedPdfVisuals(
+        bookId: String, reviews: List<PdfVisualReview>, control: BookImportControl = BookImportControl(),
+    ): Textbook {
+        val book = book(bookId)
+        require(book.format == "pdf") { "这本教材不是 PDF。" }
+        val bytes = Files.readAllBytes(original(bookId, book.format))
+        require(BookIllustrationAssets.sha256(bytes) == bookId) { "原文件已变化，请重新导入。" }
+        val images = PdfReviewedVisuals.extract(bytes, book.pages, reviews, control)
+        val merged = mutableListOf<ExtractedIllustration>()
+        for ((number, incoming) in images.groupBy { it.page }) {
+            val existing = checkNotNull(book.page(number)).illustrations
+            for (item in incoming) for (old in existing) {
+                val same = old.imageSha256 == item.contentSha256 && old.sourceRegion == item.sourceRegion &&
+                    old.kind == item.kind && old.anchorOffset == item.anchorOffset && old.sourceStart == null && old.sourceEnd == null
+                val a = requireNotNull(old.sourceRegion) { "本页已有无法核对位置的插图，请先人工整理。" }
+                val b = checkNotNull(item.sourceRegion)
+                require(same || !(a.x < b.x + b.width && b.x < a.x + a.width &&
+                    a.y < b.y + b.height && b.y < a.y + a.height)) { "与本页已有插图重叠，请先人工整理。" }
+            }
+            for (old in existing) {
+                val data = Files.readAllBytes(BookIllustrationAssets.imageFile(directory, bookId, old))
+                check(BookIllustrationAssets.sha256(data) == old.imageSha256) { "已有插图已变化。" }
+                merged += ExtractedIllustration(number, old.anchorOffset, data, old.extension, old.width, old.height,
+                    old.caption, old.kind, old.sourceStart, old.sourceEnd, old.sourceRegion)
+            }
+            merged += incoming.filterNot { item -> existing.any { it.imageSha256 == item.contentSha256 && it.sourceRegion == item.sourceRegion } }
+        }
+        val newFiles = merged.map { BookIllustrationAssets.imageFile(directory, bookId, it.contentSha256, it.extension) }
+            .distinct().filterNot(Files::exists)
+        database().use { db ->
+            db.autoCommit = false
+            try {
+                db.createStatement().use { it.execute("CREATE TABLE IF NOT EXISTS book_pdf_visual_reviews(book TEXT NOT NULL,page INTEGER NOT NULL,image_sha TEXT NOT NULL,review TEXT NOT NULL,PRIMARY KEY(book,page,image_sha))") }
+                BookPageModelStore.saveInTransaction(db, directory, bookId, book.pages.associate { it.number to it.text },
+                    merged.sortedWith(compareBy({ it.page }, { it.anchorOffset })))
+                db.prepareStatement("INSERT OR REPLACE INTO book_pdf_visual_reviews(book,page,image_sha,review) VALUES(?,?,?,?)").use { sql ->
+                    for (review in reviews) {
+                        sql.setString(1, bookId); sql.setInt(2, review.selection.page); sql.setString(3, review.pngSha256)
+                        sql.setString(4, PdfVisualReviewCodec.encode(review)); sql.addBatch()
+                    }
+                    sql.executeBatch()
+                }
+                control.check()
+                db.commit()
+            } catch (error: Exception) { db.rollback(); newFiles.forEach { Files.deleteIfExists(it) }; throw error }
+        }
+        return book(bookId)
+    }
+
+    @Synchronized fun pdfVisualReviews(bookId: String): List<PdfVisualReview> = database().use { db ->
+        val exists = db.createStatement().use { sql -> sql.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_pdf_visual_reviews'").use { it.next() } }
+        if (!exists) emptyList() else db.prepareStatement("SELECT review FROM book_pdf_visual_reviews WHERE book=? ORDER BY page,image_sha").use { sql ->
+            sql.setString(1, bookId)
+            sql.executeQuery().use { rows -> buildList { while (rows.next()) add(PdfVisualReviewCodec.decode(rows.getString(1))) } }
+        }
+    }
+
     @Synchronized fun importBook(source: Path, control: BookImportControl = BookImportControl()): Textbook {
         control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }

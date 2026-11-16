@@ -5,6 +5,7 @@ Build :server:app:installDist and run SavedBookBindingTest on Windows first.
 Never pass a user library. Uses disposable server/bridge state and random loopback ports.
 """
 import argparse
+import base64
 from contextlib import closing
 import hashlib
 import importlib.util
@@ -27,12 +28,45 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 
 
+def native_windows(port, token, output, launch):
+    """A private SSH loopback forward; neither service nor pairing on Windows is changed."""
+    def powershell(script, body=None):
+        encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+        return subprocess.run(['ssh', 'winbox', 'powershell.exe', '-NoProfile', '-NonInteractive',
+            '-EncodedCommand', encoded], input=body, text=True, encoding='utf-8', errors='replace',
+            capture_output=True, check=True).stdout.strip()
+
+    remote_port = int(powershell("$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0);"
+        "$l.Start();$l.LocalEndpoint.Port;$l.Stop()"))
+    connection_name = 'ton1663-live-' + uuid.uuid4().hex + '.json'
+    connection = 'D:/agent/logs/' + connection_name
+    try:
+        powershell(f"[IO.File]::WriteAllText('{connection}',[Console]::In.ReadToEnd())",
+                   json.dumps(dict(url=f'http://127.0.0.1:{remote_port}', token=token)))
+        tunnel = launch('windows-loopback', ['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', '-R',
+            f'127.0.0.1:{remote_port}:127.0.0.1:{port}', 'winbox'], os.environ.copy())
+        assert tunnel.poll() is None
+        # The heavy runner owns the console session and collects screenshots/test reports.
+        with (output / 'native-window.log').open('w') as log:
+            result = subprocess.run([str(ROOT / 'tools/dev/heavy'), './gradlew', ':desktopApp:test',
+                '--tests', 'ImportedBookLiveWindowTest', '--tests', 'ImportedBookWireTest', '-Pcoach.nativeOcr=true',
+                '-Pcoach.liveBookConnection=' + connection_name], cwd=ROOT,
+                stdout=log, stderr=subprocess.STDOUT)
+        assert result.returncode == 0, 'Native window failed; see native-window.log'
+        assert 'host=winbox' in (output / 'native-window.log').read_text(), 'Local fallback cannot verify Windows'
+        assert tunnel.poll() is None, 'Private Windows loopback forward exited'
+    finally:
+        powershell(f"Remove-Item -LiteralPath '{connection}' -Force -ErrorAction SilentlyContinue")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bridge-python', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--automatic', action='store_true', help='Exercise first-request registration without catalog or course grants')
+    parser.add_argument('--native-windows', action='store_true', help='Run real console file-drop/explanation/citation in both themes over SSH loopback')
     args = parser.parse_args()
+    assert not args.native_windows or args.automatic
     os.umask(0o077)
     args.output.mkdir(parents=True, exist_ok=False)
     fixtures = ROOT / 'desktopApp/build/screens/saved-book-binding'
@@ -57,6 +91,9 @@ def main():
         bindings = [] if args.automatic else [import_local_book(fixtures / 'library', sample['book'], library,
             document_id='synthetic-' + sample['format'], course=course,
             explain_source_id='synthetic-' + sample['format']) for sample in samples]
+        if args.automatic:
+            library.mkdir(mode=0o700)
+            (library / 'catalog.json').write_text('{"schema":1,"documents":[]}\n')
         server_env = dict(env, COACH_DATA_DIR=str(data), COACH_TOKEN_FILE=str(data / 'device-token'),
             COACH_LOG_DIR=str(base / 'logs'), COACH_STATE_DIR=str(base / 'state'), COACH_RUN_DIR=str(base / 'run'),
             COACH_PACKS_DIR=str(base / 'packs'), COACH_MOCK_DIR=str(base / 'mock'), COACH_GENERATED_DIR=str(base / 'generated'),
@@ -106,11 +143,7 @@ def main():
                         raise TimeoutError('Isolated bridge readiness') from None
                     time.sleep(.2)
             server = start_server()
-            if args.automatic:
-                smoke.stop(server)
-                # The ordinary server creates this private directory. No source/outline seeding.
-                server = start_server()
-            else:
+            if not args.automatic:
                 smoke.stop(server)
             now = int(time.time() * 1000)
             points = [dict(id='saved-' + s['format'], title='Synthetic ' + s['format'], week=1) for s in samples]
@@ -137,7 +170,7 @@ def main():
                          json.dumps([dict(docId=source, pdfPage=sample['page'])])))
             if not args.automatic:
                 server = start_server()
-            for sample in samples:
+            for sample in ([] if args.native_windows else samples):
                 body = dict(requestId=uuid.uuid4().hex, kind='explain', selection=sample['text'],
                             blocks=[dict(id=sample['id'], text=sample['text'])])
                 if args.automatic:
@@ -159,6 +192,8 @@ def main():
                     operatorRegisteredExistingSource=not args.automatic, automaticRegistration=args.automatic,
                     nativeWindow=False, samples=rows), ensure_ascii=False, indent=2))
                 print(sample['format'] + ': ' + ('PASS' if passed else 'FAIL'), flush=True)
+            if args.native_windows:
+                native_windows(port, token, args.output, launch)
             smoke.stop(server)
             with closing(sqlite3.connect(data / 'coach.sqlite')) as db:
                 if args.automatic:
@@ -172,12 +207,27 @@ def main():
                 with closing(sqlite3.connect(data / 'personal-imports/sources.sqlite')) as db:
                     assert db.execute('select count(distinct book) from blocks where device=?', ('desktop',)).fetchone()[0] == len(samples)
             assert len(calls) >= len(samples) and all(c['task'] == 'READER_SELECTION' and c['physicalCalls'] >= 1 for c in calls)
+            if args.native_windows:
+                assert len(calls) == 2 * len(samples), 'Expected one real native-window call per format per theme'
+                (args.output / 'report.json').write_text(json.dumps(dict(syntheticOnly=True, isolatedServer=True,
+                    automaticRegistration=True, nativeWindow=True, themes=['light', 'dark'], formats=list(names),
+                    productionPairedService=False, passed=True), indent=2))
             assert all(s['passed'] for s in rows), 'Real explanation did not pass the citation gate'
         finally:
             for child in reversed(children):
                 smoke.stop(child)
             for handle in handles:
                 handle.close()
+            # Preserve non-content diagnostics even when a native assertion fails. Never include
+            # pairing credentials, prompt/answer text or the private database in this artifact.
+            if (data / 'coach.sqlite').exists():
+                try:
+                    with closing(sqlite3.connect((data / 'coach.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+                        calls = [dict(zip(('task', 'requestedModel', 'servedBy', 'status', 'physicalCalls', 'durationMs'), row))
+                                 for row in db.execute('select task,requested_model,served_by,status,physical_calls,dur_ms from ai_calls')]
+                    (args.output / 'calls.json').write_text(json.dumps(calls, indent=2))
+                except (OSError, sqlite3.Error):
+                    pass  # Retain the original failure if startup did not create the audit table.
 
 
 if __name__ == '__main__':

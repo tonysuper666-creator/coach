@@ -19,7 +19,7 @@ internal class ImportedBookWire(private val library: TextbookLibrary) {
         }
         require(hex(digest.digest()) == id)
         for (block in blocks) {
-            val page = book.pages.single { it.number == block.page }
+            val page = requireNotNull(book.pages.singleOrNull { it.number == block.page })
             require(block.id == "$id:p${block.page}:${block.start}" && block.start >= 0 &&
                 block.end > block.start && block.end <= page.text.length &&
                 page.text.substring(block.start, block.end) == block.text)

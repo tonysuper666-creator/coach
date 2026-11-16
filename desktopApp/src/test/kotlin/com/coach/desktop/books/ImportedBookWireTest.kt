@@ -29,6 +29,7 @@ class ImportedBookWireTest {
             assertFailsWith<IllegalArgumentException> { wire.snapshot(listOf(block.copy(page = 2))) }
             Files.writeString(library.directory.resolve("${book.id}.${book.format}"), "Changed synthetic original")
             assertFailsWith<IllegalArgumentException> { wire.snapshot(listOf(block)) }
+            Unit
         } finally { root.toFile().deleteRecursively() }
     }
 }

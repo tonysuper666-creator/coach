@@ -157,7 +157,7 @@ internal class TextbookController(val library: TextbookLibrary) {
 
     suspend fun page(number: Int) = action {
         val book = mutable.value.book ?: return@action
-        require(number in 1..book.pages.size) { "页码超出了这本教材的范围。" }
+        require(book.page(number) != null) { "页码超出了这本教材的范围。" }
         if (mutable.value.source == null) persist(book.copy(readingPage = number))
         mutable.update { it.copy(page = number) }
     }
@@ -175,7 +175,7 @@ internal class TextbookController(val library: TextbookLibrary) {
         val book = current.book ?: return@action
         val lesson = book.lessons.getOrNull(book.lessonIndex) ?: return@action
         if (current.screen != BookScreen.LEARNING || book.id != bookId || lesson.id != lessonId) return@action
-        require(page in 1..book.pages.size) { "页码超出了这本教材的范围。" }
+        require(book.page(page) != null) { "页码超出了这本教材的范围。" }
         mutable.update { it.copy(screen = BookScreen.READER, source = lesson, page = page, prompt = null) }
     }
 

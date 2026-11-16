@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7TextButton
 import kotlinx.coroutines.flow.first
 
 /** Focus changes must run inside the UI frame, including the timeout fallback. */
@@ -71,13 +72,14 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
     Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
-            book.lessons.forEachIndexed { index, item -> TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
+            book.lessons.forEachIndexed { index, item -> V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }
         }) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(24.dp).testTag("textbook-learning"),
             verticalArrangement = Arrangement.spacedBy(18.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("出题：${book.questionMode.label}") }
+                Text(if (lesson == null) "这一遍学完了" else ui.learningPath.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                    color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                V7TextButton(onSettings, enabled = !ui.busy, modifier = Modifier.testTag("question-settings")) { Text("出题：${book.questionMode.label}") }
             }
             if (lesson == null) {
                 Text("已走完「${book.title}」的 ${book.lessons.size} 节内容。", style = MaterialTheme.typography.titleLarge)
@@ -85,12 +87,15 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                 PaperButton({ onLesson(0) }, enabled = !ui.busy) { Text("从头回看") }
             } else {
                 Text(lesson.title, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("lesson-title"))
-                Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。")
-                PaperButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("打开对应原文 · 第 ${lesson.firstPage} 页") }
-                HorizontalDivider()
-                // 做题学：累计到六题就在这里先读一遍知识小结，读完再接着做题；作答和走法都不动。
-                if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen) {
-                    KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
+                // 导语和整节原文入口并成一行小字：这里只按页打开，讲解后面的出处才指到具体那一块，两处不再一样重。
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (ui.learningPath == LearningPath.READ_AND_LEARN) "先理解讲解，再试着回答。" else "先试着回答，答后再看讲解；原文可以主动打开。",
+                        style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary, modifier = Modifier.weight(1f, fill = false))
+                    V7TextButton(onSource, enabled = !ui.busy, modifier = Modifier.focusRequester(lessonSourceFocus).testTag("open-lesson-source")) { Text("本节原文 · 第 ${lesson.firstPage} 页") }
+                }
+                // 做题学：累计到六题出知识小结。小结排在这一题和讲解后面，不把题挤下去；作答和走法都不动。
+                val recap: @Composable () -> Unit = {
+                    if (ui.learningPath == LearningPath.QUESTION_FIRST && ui.ladder.recapOpen) KnowledgeRecapCard(ui.ladder) { onRecapContinue() }
                 }
                 val practice = remember(book.id, lesson.id, book.questionMode, ui.questionsOpen) {
                     if (ui.questionsOpen) StudyCoachCourse.practice(book, lesson, book.questionMode) else null
@@ -113,8 +118,9 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                     else {
                         SourcePractice(lesson.id, book.questionMode, practice, ui.answer, onAnswer, { onPracticeSource(practice) }, !ui.busy, practiceSourceFocus, showReference = false)
                         if (ui.reviews.any { it.book == book.id && it.lesson == lesson.id && it.mode == book.questionMode }) {
-                            Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"))
-                            TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
+                            Text("已加入复习，可在今天查看原题。", modifier = Modifier.testTag("local-review-saved"),
+                                style = MaterialTheme.typography.bodySmall, color = com.coach.ui.theme.CoachTheme.colors.fgSecondary)
+                            V7TextButton(onReviews, enabled = !ui.busy, modifier = Modifier.testTag("open-local-reviews")) { Text("查看复习") }
                         }
                     }
                 }
@@ -125,8 +131,10 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
                         book, lesson, question, answerExplain, answerExplainReply, sources = sourceRow,
                         onOpenSourcePage = onSource,
                     ) else BookLessonExplanation(book, lesson, support, reply = explanationReply, sources = sourceRow)
+                    recap()
                     LessonSummaryCard(book, lesson, question, ui.answer) { LessonNav(book, ui.busy, onLesson) }
                 } else {
+                    recap()
                     LessonNav(book, ui.busy, onLesson)
                 }
             }
@@ -137,7 +145,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
 @Composable
 private fun LessonNav(book: Textbook, busy: Boolean, onLesson: (Int) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedButton({ onLesson(book.lessonIndex - 1) }, enabled = !busy && book.lessonIndex > 0,
+        PaperButton({ onLesson(book.lessonIndex - 1) }, enabled = !busy && book.lessonIndex > 0,
             modifier = Modifier.testTag("previous-lesson")) { Text("上一节") }
         PrimaryButton({ onLesson(book.lessonIndex + 1) }, enabled = !busy, modifier = Modifier.testTag("next-lesson")) {
             Text(if (book.lessonIndex + 1 == book.lessons.size) "读完这一节" else "继续下一节")

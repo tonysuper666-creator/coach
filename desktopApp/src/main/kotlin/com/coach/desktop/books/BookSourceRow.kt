@@ -8,7 +8,6 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,6 +24,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextDecoration
+import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.V7TextButton
 
 internal sealed interface BookSourceState {
     data object Ready : BookSourceState
@@ -83,7 +85,7 @@ internal fun BookSourceRow(
                 null -> Column(Modifier.testTag("book-source-pending-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
                 }
-                BookSourceState.Ready -> TextButton(
+                BookSourceState.Ready -> V7TextButton(
                     onClick = {
                         scope.launch {
                             val again = withContext(Dispatchers.IO) { resolver.resolve(OwnedBookCitation(p.book, p.page, p.start, p.end), p.text) }
@@ -93,14 +95,17 @@ internal fun BookSourceRow(
                     },
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
                         .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p)}" },
-                ) { Text("打开原文 · " + bookSourceLabel(p)) }
+                ) {
+                    // V7 出处：主色下划线小字，像书页边的注，不再是一排和正文抢眼的按钮。
+                    Text("出处 · " + bookSourceLabel(p), style = MaterialTheme.typography.labelLarge, color = v7Pine(), textDecoration = TextDecoration.Underline)
+                }
                 is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
-                    Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
                 is BookSourceState.WrongBook -> Column(Modifier.testTag("book-source-wrong-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
                     Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
-                    Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
             }
         }
@@ -111,3 +116,8 @@ internal fun BookSourceRow(
 @Composable
 private fun Modifier.nonButtonRow(): Modifier =
     this.fillMaxWidth().minimumInteractiveComponentSize().padding(ButtonDefaults.TextButtonContentPadding)
+
+/** V7 出处链接色：松绿 pine，随明暗取 token，不用 Material 主色（主色是墨色，给主按钮用）。 */
+@Composable
+internal fun v7Pine(): androidx.compose.ui.graphics.Color =
+    if (CoachTheme.colors.dark) coach.design.tokens.CoachV7.Dark.pine else coach.design.tokens.CoachV7.Light.pine

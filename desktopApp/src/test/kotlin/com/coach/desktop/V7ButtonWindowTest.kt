@@ -84,6 +84,8 @@ class V7ButtonWindowTest {
                             LaunchedEffect(Unit) { start.requestFocus() }
                         }
                     } }
+                    // Above other jobs' windows, so OS clicks and screen captures hit this fixture, not an overlapping one.
+                    isAlwaysOnTop = true
                     isVisible = true
                     toFront()
                 }
@@ -134,6 +136,7 @@ class V7ButtonWindowTest {
                     // Another process holds the keyboard foreground; a real click on empty canvas takes it back.
                     if (++foreignForeground > 3) fail("OS Tab never reached the $mode window: keyboard foreground held by another process")
                     println("TON-1657 native $mode Tab went to another window; re-activating ($foreignForeground)")
+                    EventQueue.invokeAndWait { window.toFront() }
                     robot.mouseMove(neutral.x, neutral.y)
                     robot.mousePress(InputEvent.BUTTON1_DOWN_MASK); robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
                     robot.waitForIdle(); robot.delay(300)

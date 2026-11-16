@@ -5,7 +5,7 @@ internal class PairedBookLearningSupport(
     private val library: TextbookLibrary,
     private val consent: ExplainConsent = ExplainConsent(library.directory),
     private val send: suspend (SourceBlock, String) -> ExplainResult = { block, question ->
-        BookExplainer().run { load(); ask(block, question) }
+        BookExplainer(library = library).run { load(); ask(block, question) }
     },
 ) : BookLearningSupport {
     override fun consentRequired(book: String) = !consent.allowed(book)

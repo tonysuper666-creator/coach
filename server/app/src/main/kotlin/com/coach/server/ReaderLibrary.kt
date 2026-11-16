@@ -88,6 +88,18 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
     }
 
     internal fun list(course: String) = documents.filter { it.course == course }
+
+    /** A personal import cannot relabel an existing course book or revive a revoked catalog grant. */
+    internal fun reservesVersion(version: String): Boolean {
+        if (root == null) return false
+        if (load().any { it.version == version }) return true
+        val local = root.resolve("local-books.json")
+        if (!Files.exists(local)) return false
+        require(Files.size(local) <= 1_048_576)
+        val manifest = LedgerJson.parseToJsonElement(Files.readString(local)).jsonObject
+        require(manifest.num("schema") == 1L)
+        return manifest.getValue("books").jsonArray.any { it.jsonObject.str("sha256") == version }
+    }
     internal fun document(course: String, id: String): ReaderDocument = list(course).singleOrNull { it.id == id }
         ?: throw ReaderFailure(io.ktor.http.HttpStatusCode.NotFound, "资料未加入这门课的私有书库")
 

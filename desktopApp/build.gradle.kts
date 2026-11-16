@@ -126,6 +126,7 @@ tasks.withType<JavaExec>().configureEach {
 tasks.test {
     if (providers.gradleProperty("coach.nativeOcr").orNull == "true") systemProperty("coach.nativeOcr", "true")
     if (providers.gradleProperty("coach.nativeFormats").orNull == "true") systemProperty("coach.nativeFormats", "true")
+    providers.gradleProperty("coach.liveBookConnection").orNull?.let { systemProperty("coach.liveBookConnection", it) }
 }
 
 // Ship the very same stdlib-only extraction core used by tools.notes, including in DMGs.

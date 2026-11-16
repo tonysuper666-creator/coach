@@ -20,6 +20,80 @@ class LibraryExplainTest {
     private fun request(selection: String, blocks: JsonArray) = json("requestId" to "ab12", "kind" to "explain", "selection" to selection, "blocks" to blocks)
     private val id = "0123abcd:p12:340"
 
+    private fun personal(book: String, text: String = "自写🌱 Synthetic selected.", start: Int = 5,
+        hash: String = "a".repeat(64)): JsonObject = JsonObject(request(text,
+        blocks("$book:p1:$start" to text, "$book:p1:100" to "PRIVATE_NEIGHBOUR")) +
+        ("localSource" to json("schema" to 1, "book" to book, "format" to "png", "title" to "Self-authored scan",
+            "consented" to true, "pages" to JsonArray(listOf(json("number" to 1, "length" to 200,
+                "ocr" to true, "sha256" to hash))))))
+
+    @Test fun firstConsentedPersonalImportExplainsWithoutCourseRegistrationAndPersistsOnlySentBlocks() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            h.reply()
+            val input = personal(h.version)
+            val (status, body) = h.post(input)
+            assertEquals(200, status)
+            assertEquals("${h.version}:p1:5", body.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertFalse(h.stub.requestBodies.single().contains("PRIVATE_NEIGHBOUR"))
+            val receipt = h.imports!!.register("phone", input, libraryExplainRequest(input))
+            assertTrue(ImportedBookSources(h.dir.resolve("personal-imports")).isCurrent(receipt))
+            assertFalse(h.imports.isCurrent(receipt.copy(device = "other-device")))
+            assertNull(h.store.learnerSourcePage(h.version, 1), "Personal import must not grant course authority")
+            assertEquals(409, h.post(JsonObject(input - "localSource")).first)
+            assertEquals(1, h.stub.requests)
+        }
+    }
+
+    @Test fun personalReceiptsRejectMissingConsentImpossibleOffsetsAndConflictingSnapshotsBeforeModel() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog()
+            val input = personal(h.version)
+            val source = input.getValue("localSource").jsonObject
+            for (bad in listOf(JsonObject(source + ("consented" to JsonPrimitive(false))),
+                JsonObject(source + ("book" to JsonPrimitive("0".repeat(64)))))) {
+                assertEquals(400, h.post(JsonObject(input + ("localSource" to bad))).first)
+            }
+            assertEquals(400, h.post(personal(h.version, start = 199)).first)
+            h.imports!!.register("phone", input, libraryExplainRequest(input))
+            assertEquals(409, h.post(personal(h.version, hash = "b".repeat(64))).first)
+            assertEquals(409, h.post(personal(h.version, text = "不同的原文" )).first)
+            assertEquals(413, h.post(JsonObject(input + ("padding" to JsonPrimitive("x".repeat(131_073))))).first)
+            assertEquals(0, h.stub.requests)
+            // Selecting a prefix later is legitimate; overlapping UTF-16 characters must still match.
+            val prefix = personal(h.version, text = "自写🌱")
+            val receipt = h.imports.register("phone", prefix, libraryExplainRequest(prefix))
+            assertTrue(h.imports.isCurrent(receipt))
+        }
+    }
+
+    @Test fun personalReceiptCannotReclassifyKnownCatalogBookOrRestoreRevokedCoursePermissions() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            for (entry in listOf(h.entry(source = null), h.entry(title = "Synthetic answers"), h.entry(source = "unknown"))) {
+                h.catalog(entry)
+                assertEquals(409, h.post(personal(h.version)).first)
+            }
+            Files.writeString(h.libraryRoot.resolve("catalog.json"), "broken")
+            assertEquals(409, h.post(personal(h.version)).first)
+            assertEquals(0, h.stub.requests)
+        }
+    }
+
+    @Test fun deletingPersonalRegistrationWhileGeneratingWithholdsReplyAndCitations() = runBlocking {
+        Harness(local = true, personal = true).use { h ->
+            h.catalog(); h.reply(delayMs = 250)
+            val pending = async { h.post(personal(h.version)) }
+            withTimeout(5000) { while (h.stub.framesWritten == 0) delay(5) }
+            DriverManager.getConnection("jdbc:sqlite:${h.dir.resolve("personal-imports/sources.sqlite")}").use { db ->
+                db.createStatement().use { it.executeUpdate("DELETE FROM blocks") }
+            }
+            val (status, body) = pending.await()
+            assertEquals(200, status)
+            assertTrue(body.getValue("sources").jsonArray.isEmpty())
+            assertFalse(body.str("text").contains("有依据的解释"))
+        }
+    }
+
     @Test fun savedOcrPageBindingPreservesUtf16AnchorsAndCannotGrantOtherPages() = runBlocking {
         Harness(local = true).use { h ->
             val prefix = "自写🌱\n"
@@ -144,7 +218,7 @@ class LibraryExplainTest {
         Unit
     }
 
-    private inner class Harness(local: Boolean = false, val sourceId: String = "0123abcd") : AutoCloseable {
+    private inner class Harness(local: Boolean = false, val sourceId: String = "0123abcd", personal: Boolean = false) : AutoCloseable {
         val dir = Files.createTempDirectory("synthetic-library-scope-")
         val libraryRoot = Files.createDirectory(dir.resolve("private-library"))
         // Binding tests need bytes and their identity only; the importer tests validate actual PDFs with Poppler.
@@ -190,9 +264,10 @@ class LibraryExplainTest {
         }
         val actor = LedgerActor(jobs, store)
         val library = if (local) ReaderLibrary(libraryRoot) else null
+        val imports = if (personal) ImportedBookSources(dir.resolve("personal-imports")) else null
         val engine = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
             ledgerRoutes(actor, MutableSharedFlow(extraBufferCapacity = 16))
-            libraryExplainRoutes(actor, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack }), library)
+            libraryExplainRoutes(actor, ReaderExplanation(actor, BridgeClient(BridgeConfig(stub.baseUrl)), readSources = { pack, _ -> pack }), library, imports)
         }.also { it.start(false) }
         val client = HttpClient.newHttpClient()
         suspend fun post(input: JsonObject): Pair<Int, JsonObject> = withContext(Dispatchers.IO) {

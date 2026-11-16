@@ -77,7 +77,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
     var explainOpen by remember(book.id) { mutableStateOf(false) }
-    val explainer = remember { BookExplainer() }
+    val explainer = remember(library) { BookExplainer(library = library) }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
     LaunchedEffect(book.id, ui.page, source) {

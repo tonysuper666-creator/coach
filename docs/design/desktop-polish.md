@@ -93,7 +93,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 截图 / 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | E1 | 第一次打开 / 空书架 | 已对 | `TextbookShelf.kt:38-65` | 一句说明 + 「上传教材」，格式和存放位置写在下面 |
-| E2 | 加载不转圈 | 待修（阅读已对） | `TextbookReader.kt:333-345`、`TextbookWorkspace.kt:120` | 页图加载的转圈已换成同尺寸纸面占位（`pgPaper` 底、`line` 细边，按这一页的页面框先铺（图片书和 OCR 页那份 1200×1600 是常数，不当几何用），这一页量不到几何才借上一张成功页图的比例，图到了原地换掉）；打不开时同一张纸上给「这一页暂时打不开。」和「重试」。忙时顶部默认蓝色细条还在外壳文件里，等 TON-1656 释放后并入 P5 |
+| E2 | 加载不转圈 | 待修（阅读已对） | `TextbookReader.kt:333-345`、`TextbookWorkspace.kt:120` | 页图加载的转圈已换成纸面占位（`pgPaper` 底、`line` 细边）：同向页的占位与真图同尺寸，图到了原地换掉；横竖混排的书冷加载仍会换一次比例（先按上一页比例铺、真图到了再换成本页），加载期间拿不到本页尺寸，这一项已按 TON-1658 二退裁决记入「以后再说」，下一次用整本页面比例表做。图片书和 OCR 页那份 1200×1600 是常数，不当几何用。打不开时同一张纸上给「这一页暂时打不开。」和「重试」。忙时顶部默认蓝色细条还在外壳文件里，等 TON-1656 释放后并入 P5 |
 | E3 | 出错给下一步 | 待修 | `light/explain-failed`；`TextbookWorkspace.kt:121`、`TextbookShelf.kt:142` | 讲解失败只有一行朱字，没有「重试」；工作区和书架错误仍用 `colorScheme.error`。去向：P2（讲解）；外壳和书架两处并入 P5、P3 |
 | E4 | 长书名 / 长段落 | 未验证 | — | 截图测试只有短书名 `knowledge-recap`。盲评轮补一本长书名隔离样书 |
 | E5 | 离线 | 已对 | `light/explain-failed`、`ask-unavailable` | 文案「暂时没连上 Mac，可继续阅读或稍后重试」是人话 |
@@ -185,7 +185,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | 卡 | 范围 | 文件 | 状态 |
 | --- | --- | --- | --- |
 | P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
-| P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`，并已换用 P0 的 `V7Tooltip`/`V7Scrollbar`、占位比例改取当前页几何；待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、占位与滚动条的浅深截图 |
+| P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`，并已换用 P0 的 `V7Tooltip`/`V7Scrollbar`；占位的混排页冷加载一跳按二退裁决砍出本卡、记入「以后再说」。待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、同向页占位与滚动条的浅深截图 |
 | P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | 排队，P0 合并后 |
 | P4 本地参考练习文案 | A7 A11(作答记录、出题) | `books/exam/LocalExamUi.kt`、`books/TextbookLearning.kt` | 排队，等 TON-1650 第 13 刀合并 |

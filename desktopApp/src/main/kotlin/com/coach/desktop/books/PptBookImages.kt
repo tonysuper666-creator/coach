@@ -1,6 +1,7 @@
 package com.coach.desktop.books
 
 import org.apache.poi.xslf.usermodel.XMLSlideShow
+import org.apache.poi.sl.draw.Drawable
 import java.awt.Color
 import java.awt.geom.Rectangle2D
 import java.awt.RenderingHints
@@ -106,6 +107,9 @@ internal object PptBookImages {
                     graphics.fillRect(0, 0, width, height)
                     graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
                     graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+                    // POI otherwise reuses the original Latin face for missing CJK glyphs.
+                    // Java's logical font delegates to installed Chinese/emoji fonts.
+                    graphics.setRenderingHint(Drawable.FONT_FALLBACK, mapOf("*" to java.awt.Font.SANS_SERIF))
                     graphics.scale(scale, scale)
                     val text = unpositionedText[slide.packagePart.partName.name.removePrefix("/")]
                     if (text == null) slide.draw(graphics) else XMLSlideShow().use { reconstructed ->

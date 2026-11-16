@@ -383,7 +383,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         position(false, id, selectedFilter = selectedFilter)
     }
     val showingCheckpoint = body != null && !reading && learning && (recapVisible || ladderSession.complete ||
-        (items.isNotEmpty() && item == null && (runtime.declaredKpTotal != null || runtime.declaredCapabilityTotal != null)))
+        (item == null && (runtime.declaredKpTotal != null || runtime.declaredCapabilityTotal != null)))
     val goUp: () -> Unit = { if (!reading && !directEntry && (body == null || items.isNotEmpty() || sections.isNotEmpty())) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
     TaskChrome(!reading || readerState.flag("focus"))

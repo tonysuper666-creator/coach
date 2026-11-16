@@ -20,6 +20,58 @@ class LibraryExplainTest {
     private fun request(selection: String, blocks: JsonArray) = json("requestId" to "ab12", "kind" to "explain", "selection" to selection, "blocks" to blocks)
     private val id = "0123abcd:p12:340"
 
+    @Test fun savedOcrPageBindingPreservesUtf16AnchorsAndCannotGrantOtherPages() = runBlocking {
+        Harness(local = true).use { h ->
+            val prefix = "自写🌱\n"
+            val quote = "Synthetic selected."
+            val text = prefix + quote
+            h.actor.execute { registerSourcePage("SYNTHETIC", h.sourceId, "Synthetic scan", 12, text) }
+            h.savedBinding(text)
+            val block = "${h.version}:p12:${prefix.length}"
+            for ((anchor, selection) in listOf(
+                "${h.version}:p12:${prefix.length - 1}" to quote,
+                "${h.version}:p13:0" to "SYNTHETIC_UNREAD_SECRET.",
+                "${h.version}:p11:0" to quote,
+                block to "Forged text.")) {
+                assertEquals(409, h.post(request(selection, blocks(anchor to selection))).first)
+            }
+            assertEquals(0, h.stub.requests)
+            h.reply()
+            val (status, body) = h.post(request(quote, blocks(block to quote)))
+            assertEquals(200, status)
+            assertEquals(block, body.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertFalse(h.stub.requestBodies.single().contains(prefix))
+            // The snapshot is not a second authority: changing the ledger revokes it.
+            h.actor.execute { registerSourcePage("SYNTHETIC", h.sourceId, "Synthetic scan", 12, "Different trusted text.") }
+            assertEquals(409, h.post(request(quote, blocks(block to quote))).first)
+            assertEquals(1, h.stub.requests)
+        }
+    }
+
+    @Test fun savedBookBindingsFailClosedOnSnapshotTamperAmbiguityAndRevocation() = runBlocking {
+        Harness(local = true).use { h ->
+            val text = "Synthetic selected."
+            h.actor.execute { registerSourcePage("SYNTHETIC", h.sourceId, "Synthetic scan", 12, text) }
+            val block = "${h.version}:p12:0"
+            val input = request(text, blocks(block to text))
+            val snapshot = h.savedBinding(text)
+            Files.writeString(snapshot, "{}")
+            assertEquals(409, h.post(input).first)
+            h.savedBinding(text)
+            h.catalog(h.entry()) // Same original in PDF and saved-page registries is ambiguous.
+            assertEquals(409, h.post(input).first)
+            h.catalog()
+            h.reply(delayMs = 250)
+            val pending = async { h.post(input) }
+            withTimeout(5_000) { while (h.stub.requests == 0) delay(10) }
+            Files.delete(h.libraryRoot.resolve("local-books.json"))
+            val (_, body) = pending.await()
+            assertTrue(body.getValue("sources").jsonArray.isEmpty())
+            assertFalse(body.str("text").contains("有依据的解释"))
+            assertEquals(409, h.post(input).first)
+        }
+    }
+
     @Test fun boundParagraphExtractionAndQuestionRetainAllAuthorizationGates() = runBlocking {
         Harness(local = true).use { h ->
             h.actor.execute { registerSourcePage("SYNTHETIC", h.sourceId, "Synthetic book", 12,
@@ -105,6 +157,18 @@ class LibraryExplainTest {
                 (source?.let { mapOf("explainSourceId" to JsonPrimitive(it)) } ?: emptyMap()))
         fun catalog(vararg entries: JsonObject) = Files.writeString(libraryRoot.resolve("catalog.json"),
             json("schema" to 1, "documents" to JsonArray(entries.toList())).toString())
+        fun savedBinding(text: String): java.nio.file.Path {
+            catalog()
+            val snapshot = libraryRoot.resolve("saved-pages.json")
+            Files.writeString(snapshot, json("schema" to 1, "book" to version, "format" to "png", "pages" to JsonArray(listOf(
+                json("number" to 12, "text" to text, "ocr" to true),
+                json("number" to 13, "text" to "SYNTHETIC_UNREAD_SECRET.", "ocr" to true)))).toString())
+            val entry = json("id" to "saved-scan", "course" to "SYNTHETIC", "title" to "Synthetic scan",
+                "file" to "synthetic.pdf", "sha256" to version, "explainSourceId" to sourceId,
+                "pagesFile" to "saved-pages.json", "pagesSha256" to ReaderLibrary.digest(Files.readAllBytes(snapshot)))
+            Files.writeString(libraryRoot.resolve("local-books.json"), json("schema" to 1, "books" to JsonArray(listOf(entry))).toString())
+            return snapshot
+        }
         val jobs = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = LedgerStore(dir)
         val stub = StubTutor()

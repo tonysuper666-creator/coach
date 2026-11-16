@@ -20,6 +20,8 @@ internal data class ReaderDocument(
     val version: String, val pages: Int, val offset: Int?, val kind: String, val week: Int?,
     val outline: List<OutlineNode> = emptyList(),
     val explainSourceId: String? = null,
+    val savedPage: String? = null,
+    val pageSnapshotVersion: String? = null,
 ) {
     fun view() = json("id" to id, "title" to title, "version" to version, "pages" to pages,
         "printedPageOffset" to offset, "kind" to kind, "week" to week)
@@ -95,7 +97,9 @@ class ReaderLibrary internal constructor(private val root: Path?, private val bi
      */
     internal suspend fun explanationSource(version: String, page: Int): ReaderDocument? = withContext(Dispatchers.IO) {
         try {
-            val d = load().filter { it.version == version && it.explainSourceId != null }.singleOrNull()
+            val candidates = load().filter { it.version == version && it.explainSourceId != null } +
+                localBookBindings(root, version, page)
+            val d = candidates.singleOrNull()
                 ?: return@withContext null
             if (page !in 1..d.pages || !tutorSourceAllowed(d.id, d.title, d.kind, d.explainSourceId!!)) return@withContext null
             val hash = MessageDigest.getInstance("SHA-256")

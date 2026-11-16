@@ -39,6 +39,38 @@ This adds optional `explainSourceId` to the private catalog. The ledger source m
 
 The existing desktop per-book explanation consent still applies. This path sends the authorized selection through the configured tutor bridge, which can invoke external subscription CLIs; it does not establish on-device inference. A catalog registration alone does not call AI or export text. Keep real-material and production acceptance on the controlled acceptance lane.
 
+Saved desktop pages, including OCR and common formats (TON-1663)
+---------------------------------------------------------------
+
+For an already imported local book, use its **saved desktop pages** instead of extracting its original again. This supports all currently stored formats, including PNG/JPG, scanned PDF, TXT/Markdown, Word, PowerPoint, HTML, Kindle, RTF, ODT and EPUB. Explicitly select one book ID from the desktop library; do not pass an entire course directory:
+
+```sh
+python3 tools/reader/import_local_book.py \
+  --desktop-library /private/path/to/selected-desktop-library \
+  --book SHA256_OF_ONE_IMPORTED_BOOK \
+  --library ~/Coach/reader-development --id selected-book \
+  --course ACTUAL_LEDGER_COURSE_ID \
+  --explain-source-id EXISTING_LEARNER_SOURCE_DOC_ID
+```
+
+This operator-side tool reads that book's `books`/`pages` records in a read-only SQLite transaction, copies only its original, and saves an immutable page snapshot plus `local-books.json`. Transfer only the explicitly selected import when desktop and server are different machines. Original SHA-256, exact page numbers, Unicode text and OCR flags are retained. It does not OCR again, normalize whitespace, insert illustrations into text, or alter UTF-16 offsets. Original and snapshot files are private and content-addressed; the independent PDF catalog is preserved.
+
+**The existing trusted ledger source is still required.** Its selected page text must equal the saved import page exactly, including whitespace; it needs learner/tutor visibility and a learned outline anchor in the bound course. Registering a book does not create that source or grant learning permissions. This is an operator setup tool, not automatic drag-and-drop enrollment or an HTTP upload route. A new arbitrary local book still returns 409 until its source and binding have been explicitly established. Existing per-book desktop consent applies before an explanation request.
+
+The explanation endpoint checks the saved block at the block ID's UTF-16 start, the trusted page and learned scope, and hashes the original and page snapshot before/after generation. Revocation, ambiguous bindings (including a simultaneous PDF binding), mismatched text or changed bytes fail closed. Remove the selected entry from `local-books.json` to revoke it; the explanation endpoint reloads it without restarting. Do not bind the same hash through both importers.
+
+Self-authored real-subscription reproduction (no production service or user library):
+
+```sh
+tools/dev/heavy ./gradlew :desktopApp:test --tests SavedBookBindingTest
+tools/dev/heavy ./gradlew :server:app:installDist
+tools/dev/heavy python3 tools/reader/check_local_book_live.py \
+  --bridge-python /path/to/coach-bridge-venv/bin/python \
+  --output /private/new-evidence-directory
+```
+
+The Windows test exports only committed self-authored fixtures to `desktopApp/build/screens/saved-book-binding`; the check verifies their original hashes against those fixtures, seeds disposable trusted sources, and uses new loopback ports and private bridge state. It uses the existing logged-in subscription CLI without changing accounts. Its report distinguishes the actual model calls from native-window and production acceptance. See `docs/acceptance/TON-1663-source-binding.md`.
+
 Transport contract for TON-1394 integration
 -----------------------------------------
 

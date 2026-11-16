@@ -20,7 +20,8 @@ import kotlinx.serialization.json.*
  * course, classification, text and learning record authorize the selection.
  * Unregistered local books fail closed; this endpoint never creates a registration.
  */
-internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope) {
+internal class LibraryExplainRequest private constructor(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,
+    private val claimedBlock: String) {
     val bookId: String get() = pages.single().docId.substringBefore(":p")
     val isLocalBook: Boolean get() = Regex("[0-9a-f]{64}").matches(bookId)
     fun authorize(store: LedgerStore, binding: ReaderDocument? = null): AuthorizedLibrarySelection {
@@ -29,6 +30,7 @@ internal class LibraryExplainRequest private constructor(val quote: String, val 
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
         val saved = store.learnerSourcePage(binding?.explainSourceId ?: bookId, claimed.pdfPage)
         if (saved == null || (binding != null && saved.course != binding.course) ||
+            (binding?.savedPage != null && (saved.page.text != binding.savedPage || !matchesSavedBlock(binding.savedPage, claimed.docId, claimedBlock))) ||
             !(containsReaderSelection(saved.page.text, quote) ||
                 (isLocalBook && containsBoundBookSelection(saved.page.text, quote))) || !saved.inLearnedScope(store))
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
@@ -39,9 +41,16 @@ internal class LibraryExplainRequest private constructor(val quote: String, val 
     }
     companion object {
         fun selected(quote: String, page: SourcePage): LibraryExplainRequest {
-            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), VisibleScope.NONE)
+            return LibraryExplainRequest(quote, listOf(page.copy(text = quote)), VisibleScope.NONE, page.text)
         }
     }
+}
+
+/** The importer's page text is never re-extracted or normalized: offsets are Java/Kotlin UTF-16 indices. */
+private fun matchesSavedBlock(page: String, id: String, block: String): Boolean {
+    val start = id.substringAfterLast(':').toIntOrNull() ?: return false
+    return start >= 0 && start <= page.length && block.length <= page.length - start &&
+        page.regionMatches(start, block, 0, block.length)
 }
 
 internal class AuthorizedLibrarySelection(val quote: String, val pages: List<SourcePage>, val scope: VisibleScope,

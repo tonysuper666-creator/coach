@@ -138,7 +138,7 @@ internal class TextbookController(val library: TextbookLibrary) {
             mutable.update { it.copy(learningPathSaved = true) }
             openReading(book); return@action
         }
-        require(book.lessons.isNotEmpty()) { "这本书暂时没有可提取的文字。仍可翻看 PDF 原页；开启 learning 需要带文字层的教材。" }
+        require(book.lessons.isNotEmpty()) { "这本书暂时没有可提取的文字。仍可翻看 PDF 原页；要开始学，需要能提取出文字的版本。" }
         val enabled = book.copy(learning = true, promptSeen = true)
         library.saveLearningPath(book.id, path.name)
         mutable.update { it.copy(learningPathSaved = true) }

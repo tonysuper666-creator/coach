@@ -433,6 +433,11 @@ class DesktopV7ScreenshotTest {
             onNodeWithText("尚未选择保存位置").assertExists()
             shot("notes-export")
 
+            // 第 15 刀：PDF 勾选项换了字体，整行仍是一个勾选框，点一下取消、再点一下勾回。
+            onNodeWithTag("notes-pdf").assertIsOn().performClick(); waitForIdle()
+            assertFalse(state.includePdf); onNodeWithTag("notes-pdf").assertIsOff().performClick(); waitForIdle()
+            assertTrue(state.includePdf)
+
             // 第 14 刀：周次下拉的展开态，当前是第 1 周；点第 2 周后菜单收起、选中改成第 2 周，再改回第 1 周。
             fun menuItem(label: String) = onNode(hasText(label) and hasAnyAncestor(isPopup()))
             onNodeWithTag("notes-picker").performClick(); waitForIdle()

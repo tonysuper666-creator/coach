@@ -26,7 +26,10 @@ import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
-internal class TextbookLibrary(val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr) {
+internal class TextbookLibrary(
+    val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr,
+    private val extractBook: (Path, String, String, BookOcr, BookImportControl) -> ExtractedBook = TextbookExtraction::extract,
+) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
     init {
         Files.createDirectories(directory)
@@ -52,6 +55,7 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             } }
             if (!hasOcr) db.createStatement().use { it.execute("ALTER TABLE pages ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0") }
             reviewStore.migrate(db)
+            BookPageModelStore.migrate(db)
         }
         backfillReviews()
     }
@@ -109,9 +113,14 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             sql.setString(1, id)
             sql.executeQuery().use { row ->
                 check(row.next()) { "这本教材已不在书架中。" }
+                val extras = BookPageModelStore.loadExtrasByPage(db, id, includeTextLayouts = true)
                 val pages = db.prepareStatement("SELECT page,text,ocr FROM pages WHERE book=? ORDER BY page").use { query ->
                     query.setString(1, id)
-                    query.executeQuery().use { p -> buildList { while (p.next()) add(BookPage(p.getInt(1), p.getString(2), p.getInt(3) == 1)) } }
+                    query.executeQuery().use { p -> buildList { while (p.next()) {
+                        val number = p.getInt(1)
+                        val extra = extras[number]
+                        add(BookPage(number, p.getString(2), p.getInt(3) == 1, extra?.illustrations.orEmpty(), extra?.textLayout))
+                    } } }
                 }
                 val storedPage = row.getInt("reading_page")
                 Textbook(id, row.getString("title"), row.getString("format"), pages, if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
@@ -119,6 +128,10 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
                     QuestionMode.valueOf(row.getString("mode")))
             }
         }
+    }
+
+    @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
+        BookPageTextBoxStore.loadPage(db, bookId, page)
     }
 
     @Synchronized fun importBook(source: Path, control: BookImportControl = BookImportControl()): Textbook {
@@ -138,12 +151,15 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return book(id)
             val fallback = source.fileName.toString().substringBeforeLast('.')
-            val extracted = TextbookExtraction.extract(stage, format, fallback, ocr, control)
+            val extracted = extractBook(stage, format, fallback, ocr, control)
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
             control.check()
             val target = original(id, format)
             // The immutable source is in place before the single transaction makes it visible.
             Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
+            val newImages = extracted.illustrations.map {
+                BookIllustrationAssets.imageFile(directory, id, it.contentSha256, it.extension)
+            }.distinct().filterNot(Files::exists)
             database().use { db ->
                 db.autoCommit = false
                 try {
@@ -158,9 +174,18 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
                         }
                         sql.executeBatch()
                     }
+                    BookPageModelStore.saveInTransaction(
+                        db, directory, id, extracted.pages.associate { it.number to it.text },
+                        extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
+                    )
                     control.check()
                     db.commit()
-                } catch (error: Exception) { db.rollback(); Files.deleteIfExists(target); throw error }
+                } catch (error: Exception) {
+                    db.rollback()
+                    newImages.forEach { Files.deleteIfExists(it) }
+                    Files.deleteIfExists(target)
+                    throw error
+                }
             }
             return book(id)
         } finally { Files.deleteIfExists(stage) }
@@ -409,7 +434,9 @@ internal object PdfWarmup {
 /** 一次页图渲染的分段计时（毫秒）。 */
 internal data class RenderTrace(val book: String, val page: Int, val outcome: String, val loadMs: Double, val pageBoxMs: Double, val renderMs: Double, val totalMs: Double, val thread: String)
 
-internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
+internal data class ExtractedBook(
+    val title: String, val pages: List<BookPage>, val illustrations: List<ExtractedIllustration> = emptyList(),
+)
 
 internal object TextbookExtraction {
     fun extract(path: Path, format: String, title: String, ocr: BookOcr = BundledBookOcr, control: BookImportControl = BookImportControl()): ExtractedBook = try {

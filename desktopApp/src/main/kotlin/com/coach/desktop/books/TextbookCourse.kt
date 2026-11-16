@@ -32,7 +32,8 @@ internal data class Textbook(
 }
 internal data class BookSummary(val id: String, val title: String, val pageCount: Int, val lastPage: Int, val readingPage: Int, val learning: Boolean)
 internal data class Practice(val prompt: String, val reference: String, val answer: String, val options: List<String>)
-internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null)
+internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null,
+    val guessed: Boolean = false)
 
 /**
  * Kotlin port of the archived StudyCoach deterministic-text-v1 / moduleGroups /

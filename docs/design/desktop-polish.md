@@ -103,10 +103,10 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | K1 | Tab 顺序 | 未验证 | — | 需 winbox 真窗口走一遍；派给 P1 交付时附 |
-| K2 | 焦点环 | 待修 | `light/explain-failed`（鼠标点过的「讲解这段」留着黑框） | 鼠标点击后不该留环，只在键盘焦点时显示。TON-1650「以后再说」里也记了。去向：P0 |
+| K2 | 焦点环 | 已对（共享按钮） | `FocusRing.kt`；`V7DesktopFeedbackTest`、`V7FocusRingTest`、`V7ButtonWindowTest`；TON-1657 真窗口 `after-2d22cba1/` | 浅深像素测试覆盖鼠标隐藏、Tab 恢复；真 Windows 窗口里 OS Tab 聚焦按钮并画出环，随后 OS 鼠标点击同一按钮，焦点保留、环消失，浅深两套都有像素断言 |
 | K3 | 方向键 / PageUp / PageDown 翻页 | 待修 | `TextbookWorkspace.kt:108-122` 只处理 Esc；配对阅读器 `reader/ReaderKeys.kt` 已有 | 本机教材阅读不能用键盘翻页。去向：P1（在 `TextbookReader.kt` 内处理，不碰外壳） |
 | K4 | Esc 关闭 | 已对 | `Key.Escape` 6 处 | 阅读、批注、对话框都能 Esc |
-| K5 | 快捷键看得见 | 待修 | 全局无提示组件 | 「上一页 / 下一页」等按钮悬停时写出快捷键。去向：P0 提供带快捷键的提示组件，P1 用上 |
+| K5 | 快捷键看得见 | 已对（组件） | `V7Tooltip.kt`；`V7DesktopFeedbackTest` | 提示支持可选 `shortcut`，验证显示 Esc；阅读页快捷键接入仍归 P1 |
 | K6 | Ctrl+F | 不做 | — | 书内查找是新功能，本卡不加功能；记在 TON-1654「以后再说」 |
 | K7 | Enter 提交 | 未验证 | — | 选段就问、配对码输入框 Enter 是否提交，随 P2 核 |
 
@@ -114,9 +114,9 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
-| M1 | 悬停状态 | 待修 | `shared/ui/.../v7/PaperButton.kt`；全模块悬停处理只有 3 处（`hoverable`/`onPointerEvent`） | 按钮、选项行没有悬停变化，按下是 Material 水波纹。改成悬停加一层 `selBg`/`zhuWash` 级别的浅底，按下略深，不要水波纹。去向：P0 |
-| M2 | 指针形状 | 待修 | 全仓 `pointerHoverIcon` 0 处 | 可点的地方显示手形，正文显示 I 形。去向：P0（按钮）、P1（正文） |
-| M3 | 提示与延迟 | 待修 | `Tooltip` 0 处 | 只有图标或缩写的按钮（`Aa`、侧栏）悬停约 0.5 s 出提示。去向：P0 |
+| M1 | 悬停状态 | 已对（共享按钮） | `PaperButton.kt`、`ButtonFeedback.jvm.kt`；TON-1657 真窗口 `before/` → `after/` | PaperButton / PrimaryButton 使用既有 token 叠色，悬停浅底、按下更强，无桌面水波纹；禁用不响应。选项行不在本卡范围 |
+| M2 | 指针形状 | 已对（共享按钮） | `ButtonFeedback.jvm.kt:pointerHoverIcon` | 启用按钮为手形，禁用为默认指针；正文 I 形接入仍归 P1 |
+| M3 | 提示与延迟 | 已对（组件及导航示范） | `V7Tooltip.kt`、`DeskNavIcon.kt`；`V7DesktopFeedbackTest` | 导航图标悬停 500ms 出纸面提示，离开消失，细边及 UI 字体；Aa 等页面接入归 P1 |
 | M4 | 右键菜单 | 未验证 | `SelectionContainer` 4 处 | Compose 默认右键菜单的文字是否中文、是否只有「复制」，需真窗口核 |
 
 **排版**
@@ -137,7 +137,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | W2 | 窗口标题统一 | 待修 | 「Coach」「LerningCoach」「教材原文」三种 | 归 TON-1656 |
 | W3 | 最小窗口尺寸 / 贴靠 | 待修 | 全仓 `minimumSize` 0 处 | 拖得很窄时侧栏和正文会挤坏。先在 1/2、1/3 贴靠下截图定最小值，再设 `window.minimumSize`。`WindowsTextbooks.kt` 被 TON-1656 占用，排在其后：P5 |
 | W4 | 125/150/175% 缩放 | 未验证 | — | 截图测试固定 Density 1.5。P5 交付时在 winbox 改系统缩放各拍一张 |
-| W5 | 滚动条 | 待修 | `verticalScroll` 多处、`Scrollbar` 仅 1 处 | 书架、讲解、考试长页面没有滚动条，看不出还有内容（`light/bookshelf` 底部被截断的书目即此）。去向：P3（书架）、P2（讲解）、P1（阅读）各自加，用同一个 V7 细滚动条样式（P0 提供） |
+| W5 | 滚动条 | 已对（组件） | `V7Scrollbar.kt`；`V7DesktopFeedbackTest` | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。P1/P2/P3 分别接入阅读/讲解/书架 |
 | W6 | 跟随系统明暗 | 未验证 | `WindowsTextbookHost.kt:103` 用 `isSystemInDarkTheme()` | 运行中切换系统主题是否即时跟随需真窗口核；P5 |
 | W7 | 系统标题栏 | 已对 | 使用系统标题栏 | 不自绘，贴靠菜单可用 |
 
@@ -153,17 +153,27 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 
 main `941b08a2`，`desktopApp/src/main/kotlin/com/coach/desktop` 下 `rg -c`：
 
-| 项 | 数 | 集中在 |
-| --- | --- | --- |
-| `Color(0x` 硬编码颜色 | 45 | 全在 `reader/`（配对阅读器）：ReaderNotes 13、ReaderBody 10、ReaderQuestions 9、ReaderWindow 6、ReaderPalette 4、LocalBooksReaderSource 2、ReaderShelf 1 |
-| `N.sp` 硬编码字号 | 68 | ReaderNotes 25、ReaderBody 15、ReaderQuestions 15、ReaderWindow 7、ReaderShelf 5、TextbookReader 1 |
-| `AlertDialog(` / `TextButton(` | 10 / 12 | |
-| `OutlinedTextField(` / `Checkbox(` / `DropdownMenu(` | 3 / 2 / 1 | |
-| `*ProgressIndicator(` | 5 | |
-| `colorScheme.error` | 4 | |
-| `pointerHoverIcon` / `Tooltip` / 右键菜单 / `minimumSize` | 0 / 0 / 0 / 0 | |
+| 项 | 数 | 修后（TON-1657） | 集中在 |
+| --- | --- | --- | --- |
+| `Color(0x` 硬编码颜色 | 45 | 45 | 全在 `reader/`；仍按匹配行计数（`rg -c`） |
+| `N.sp` 硬编码字号 | 68 | 68 | |
+| `AlertDialog(` / `TextButton(` | 10 / 12 | 10 / 12 | |
+| `OutlinedTextField(` / `Checkbox(` / `DropdownMenu(` | 3 / 2 / 1 | 3 / 2 / 1 | |
+| `*ProgressIndicator(` | 5 | 5 | |
+| `colorScheme.error` | 4 | 4 | |
+| `pointerHoverIcon` / `Tooltip` / 右键菜单 / `minimumSize` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 此表只数 desktopApp；共享 JVM 新增 `pointerHoverIcon` 调用 1 处、`TooltipArea` 调用 1 处 |
 
-每张修复卡交付时在本表追加一列「修后」。
+### TON-1657 组件验收
+
+真 Windows 窗口、OS 鼠标与 Tab 输入，150% 系统缩放；合成标签，没有教材原文。原始截图不进 Git，保存在 winbox `D:\agent\design\polish-shots\ton1657\`：`before/` 为 `71661f3e` 的同一按钮，`after-2d22cba1/` 为修后（另有 `contact-sheet.png` 浅深改前改后对照）；每组均有 `light` / `dark` × `normal` / `hover` / `pressed` / `keyboard` / `mouse-after`。旧的 `after/`（`d82f12ae`）深色 keyboard 图没有焦点环，已作废。这是组件验证窗口；完整阅读、讲解、书架页面由各泳道接入后再核。
+
+`V7ButtonWindowTest` 在浅深两套里各做：OS Tab 必须到达本窗口并聚焦按钮；keyboard 图按钮左侧 2dp 外有环像素；再用 OS 鼠标点击同一按钮，点击数到 2、焦点仍在、mouse-after 图环像素为 0。`2d22cba1` 的 winbox `tools/dev/heavy ./gradlew :desktopApp:test --console=plain` 退出 0：409 用例，0 失败、4 跳过（原有 ReaderLiveServerTest 的显式开启项），环像素浅深均为 keyboard=3、mouse-after=0；Mac `tools/dev/heavy ./gradlew :shared:ui:jvmTest --console=plain` 退出 0：279 用例，0 失败、0 跳过。
+
+此前两次失败（深色 OS Tab 未聚焦目标）不是产品缺陷：winbox 两个 heavy 槽位共用控制台会话 1，别的任务的原生窗口测试会抢走键盘前台，Tab 送到了另一个窗口。测试现在逐次核对 Tab 是否到达本窗口：到达却没聚焦按钮按产品缺陷立即失败；没到达按外部干扰重新激活窗口再试，三次仍没到达就以「键盘前台被其他进程占用」失败。窗口置顶，避免截图和点击落到别人的窗口上。
+
+B5 的 `dark/ask-pick` 已查看 Windows 全量测试生成的离屏图，背景「选段提问」没有双层焦点环；这不代替真窗口键盘验收。
+
+Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 clickable 只在 JVM actual；未新增 token。对话框旧测试先用 Tab / Shift+Tab 建立键盘输入，再保留原有环宽、间距、对比度与回调断言。
 
 ## 4. 修复分卡
 
@@ -171,7 +181,7 @@ main `941b08a2`，`desktopApp/src/main/kotlin/com/coach/desktop` 下 `rg -c`：
 
 | 卡 | 范围 | 文件 | 状态 |
 | --- | --- | --- | --- |
-| P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 本轮派 |
+| P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
 | P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | 本轮派 |
 | P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | 排队，P0 合并后 |

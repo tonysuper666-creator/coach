@@ -50,7 +50,7 @@ fun Modifier.v7FocusRing(shape: Shape = RoundedCornerShape(CoachV7.Radius.btn)):
  * that box instead. Here the same centred 48dp box is laid outside the ring; size, touch area and look are unchanged.
  * [contentPadding] is passed to Material as is. [ringInside] draws the same ring just inside the pill's edge instead,
  * for a pill that sits on a clipping edge or right against a neighbour; layout and unfocused pixels stay the same.
- * That inside ring shows only while input is from the keyboard, so focus Material moves on its own after a click
+ * Both ring placements show only while input is from the keyboard, so focus Material moves on its own after a click
  * (a drawer focusing its first button when it opens) stays as invisible as it is in Material.
  */
 @Composable
@@ -77,7 +77,7 @@ fun V7TextButton(
  * [inset] moves the ring inward by that much: gap + width puts the ring just inside the control's own edge.
  * [keyboardOnly] hides the ring while the input mode is not [InputMode.Keyboard].
  */
-private data class V7FocusRingElement(val shape: Shape, val inset: Dp = 0.dp, val keyboardOnly: Boolean = false) :
+private data class V7FocusRingElement(val shape: Shape, val inset: Dp = 0.dp, val keyboardOnly: Boolean = true) :
     ModifierNodeElement<V7FocusRingNode>() {
     override fun create() = V7FocusRingNode(shape, inset, keyboardOnly)
     override fun update(node: V7FocusRingNode) { node.shape = shape; node.inset = inset; node.keyboardOnly = keyboardOnly; node.invalidateDraw() }

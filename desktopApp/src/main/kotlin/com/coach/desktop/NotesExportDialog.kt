@@ -1,6 +1,10 @@
 package com.coach.desktop
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -14,6 +18,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path as TickPath
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -134,7 +143,7 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
 /**
  * 导出窗口里的全部内容；窗口外壳和文件选择框留在 [NotesExportDialog]。
  * V7：窗口是一张 surface2 的纸，字段名是 fgSecondary 的小字；范围是两格纸面选项（选中为松绿），
- * 下拉和选文件夹走纸面按钮，保存位置是叠在上面的一层 surface1 纸、路径用数字字体；导出是墨色主按钮，
+ * 下拉和选文件夹走纸面按钮，展开的菜单也是一张弱线纸，保存位置是叠在上面的一层 surface1 纸、路径用数字字体；导出是墨色主按钮，
  * 成功写 successFg，失败写朱色，进行中是松绿进度条。颜色、字号、圆角都走 token。
  */
 @Composable
@@ -163,9 +172,15 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
                     Spacer(Modifier.width(10.dp))
                     Text("▾", style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                 }
-                DropdownMenu(expanded, { expanded = false }) {
-                    if (byWeek) weeks.forEach { w -> DropdownMenuItem(text = { Text("第 $w 周") }, onClick = { week = w; expanded = false }) }
-                    else points.forEach { p -> DropdownMenuItem(text = { Text(p.title) }, onClick = { point = p.id; expanded = false }) }
+                // V7 纸面菜单：一张 surface1 的纸加一道弱线，没有 Material 的灰底和色调抬升；
+                // 方向键、回车、Esc 和点外面关闭仍由 DropdownMenu 负责。
+                DropdownMenu(expanded, { expanded = false }, shape = paper, containerColor = colors.surface1,
+                    tonalElevation = 0.dp, shadowElevation = 6.dp, border = BorderStroke(1.dp, colors.borderSubtle),
+                    modifier = Modifier.testTag("notes-picker-menu")) {
+                    Column(Modifier.padding(horizontal = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (byWeek) weeks.forEach { w -> NotesMenuItem("第 $w 周", w == week, "notes-week-$w") { week = w; expanded = false } }
+                        else points.forEach { p -> NotesMenuItem(p.title, p.id == point, "notes-point-${p.id}") { point = p.id; expanded = false } }
+                    }
                 }
             }
         }
@@ -209,6 +224,36 @@ private fun NotesField(label: String, content: @Composable ColumnScope.() -> Uni
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = CoachTheme.colors.fgSecondary)
         content()
+    }
+}
+
+/**
+ * 下拉菜单里的一行：没选是透明的纸，鼠标停留时浅一层 surface2，选中是松绿淡底配松绿字和对勾，
+ * 和上面「范围」两格的选中色一致；键盘焦点是 V7 焦点环（行两侧留了 6dp，环不会被菜单裁掉）。
+ */
+@Composable
+private fun NotesMenuItem(label: String, selected: Boolean, tag: String, onClick: () -> Unit) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    val wash = if (colors.dark) CoachV7.Dark.pineWash else CoachV7.Light.pineWash
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    Row(Modifier.widthIn(min = 180.dp).heightIn(min = 40.dp).v7FocusRing(shape).clip(shape)
+        .background(when { selected -> wash; hovered -> colors.surface2; else -> Color.Transparent })
+        .hoverable(interaction)
+        .selectable(selected, interaction, null, role = Role.RadioButton, onClick = onClick)
+        .padding(horizontal = 12.dp).testTag(tag), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) v7Pine() else colors.fgPrimary,
+            modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(16.dp))
+        // 对勾的位置每行都留着，选中与否文字不跳；勾是画的两笔，不靠字体里的 ✓（有的字体会落成 √）。
+        val tick = v7Pine()
+        Canvas(Modifier.size(14.dp)) {
+            if (!selected) return@Canvas
+            val w = size.width
+            drawPath(TickPath().apply { moveTo(w * 0.12f, w * 0.52f); lineTo(w * 0.40f, w * 0.78f); lineTo(w * 0.88f, w * 0.24f) },
+                tick, style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
     }
 }
 

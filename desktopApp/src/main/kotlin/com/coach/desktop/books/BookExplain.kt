@@ -1,18 +1,31 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import coach.design.tokens.CoachV7
+import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.LocalV7Fonts
+import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 import com.coach.client.CourseHttp
 import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
@@ -79,29 +92,32 @@ internal object ExplainWire {
     fun shortId(id: String): String = id.substringBefore(':').let { if (it.length > 8) it.take(8) + "…" else it } + ":" + id.substringAfter(':')
 }
 
-/** Pairing with the Mac server and asking it to explain a block of a book that lives on this computer. */
-internal class BookExplainer(private val settings: DesktopConnectionSettings = DesktopConnectionSettings()) {
+/**
+ * Pairing with the Mac server and asking it to explain a block of a book that lives on this computer.
+ * Open only so a screenshot test can stand in for the Mac without a network; the app uses this class as is.
+ */
+internal open class BookExplainer(private val settings: DesktopConnectionSettings = DesktopConnectionSettings()) {
     private val pairing = DesktopPairing(settings)
     var identity by mutableStateOf<DesktopIdentity?>(null)
-        private set
+        protected set
     var loaded by mutableStateOf(false)
-        private set
+        protected set
     var defaultAddress by mutableStateOf("")
-        private set
+        protected set
 
-    suspend fun load() {
+    open suspend fun load() {
         val result = withContext(Dispatchers.IO) { runCatching { settings.serverUrl() to pairing.load() } }
         result.getOrNull()?.let { defaultAddress = it.first.orEmpty(); identity = it.second }
         loaded = true
     }
 
-    suspend fun pair(address: String, code: String): Boolean = try {
+    open suspend fun pair(address: String, code: String): Boolean = try {
         identity = withContext(Dispatchers.IO) { pairing.pair(address, code, "Windows 电脑") }
         true
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { false }
 
-    suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
+    open suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
         val paired = identity ?: return ExplainResult.Refused("还没连上你的 Mac。先配对。")
         val context = ExplainWire.context(blocks, chosen)
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
@@ -156,62 +172,67 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
         }
     }
 
+    val colors = CoachTheme.colors
+    val numbers = LocalV7Fonts.current.numbers
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp).testTag("book-explain"), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         val paired = explainer.identity
-        if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (paired == null && explainer.loaded) Column(Modifier.testTag("explain-pairing"), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("先连上你的 Mac", style = MaterialTheme.typography.titleMedium)
-            Text("讲解由你配对的 Mac 生成。打开 Tailscale，输入 Mac 地址和 Mac 上生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall)
-            OutlinedTextField(address, { address = it; pairError = null }, label = { Text("Mac 地址") }, singleLine = true,
-                enabled = !pairing, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
-            OutlinedTextField(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, label = { Text("配对码") }, singleLine = true,
-                enabled = !pairing, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword), modifier = Modifier.testTag("explain-code"))
-            Button(onClick = {
+            Text("讲解由你配对的 Mac 生成。打开 Tailscale，输入 Mac 地址和 Mac 上生成的 6 位配对码。", style = MaterialTheme.typography.bodySmall,
+                color = colors.fgSecondary)
+            V7Field(address, { address = it; pairError = null }, "Mac 地址", enabled = !pairing, paper = colors.surface2, modifier = Modifier.fillMaxWidth().testTag("explain-address"))
+            V7Field(code, { code = it.filter(Char::isDigit).take(6); pairError = null }, "配对码", enabled = !pairing, paper = colors.surface2,
+                visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                modifier = Modifier.width(200.dp).testTag("explain-code"))
+            PrimaryButton(onClick = {
                 pairing = true
                 scope.launch {
                     if (!explainer.pair(address, code)) pairError = "没配上。确认 Mac 地址、Tailscale，并在 Mac 上生成新的配对码。"
                     code = ""; pairing = false
                 }
             }, enabled = code.length == 6 && address.isNotBlank() && !pairing, modifier = Modifier.testTag("explain-pair")) { Text(if (pairing) "正在配对…" else "配对") }
-            pairError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        } else if (paired != null) Text("已连上你的 Mac。点一段原文旁的「讲解」。", style = MaterialTheme.typography.bodySmall)
-        if (onPage.isEmpty()) Text("这一页没有可讲的正文。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(block.text, fontSize = 17.sp, lineHeight = 27.sp)
+            pairError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-pair-error")) }
+        } else if (paired != null) Text("已连上你的 Mac。点一段原文旁的「讲解」。", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+        if (onPage.isEmpty()) Text("这一页没有可讲的正文。", style = MaterialTheme.typography.bodyMedium, color = colors.fgSecondary)
+        for (block in onPage) Column(Modifier.fillMaxWidth().testTag("explain-block-${block.id}"), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(block.text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary)
             val state = states[block.id]
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                OutlinedButton(onClick = {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                PaperButton(onClick = {
                     if (consented) start(block) else pending = block
                 }, enabled = paired != null && state != BlockState.Waiting, modifier = Modifier.testTag("explain-button")) {
                     Text(if (state == BlockState.Waiting) "讲解中…" else "讲解这段")
                 }
-                Text(ExplainWire.shortId(block.id), fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(ExplainWire.shortId(block.id), style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary)
             }
             when (state) {
                 is BlockState.Done -> ExplanationView(state.explanation) { citation ->
                     state.context.firstOrNull { it.id == citation.blockId }?.let { opened = citation to it }
                 }
-                is BlockState.Failed -> Text(state.message, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("explain-failed"))
+                is BlockState.Failed -> Text(state.message, style = MaterialTheme.typography.bodySmall, color = v7Alert(), modifier = Modifier.testTag("explain-failed"))
                 else -> {}
             }
         }
     }
     pending?.let { block ->
         AlertDialog(onDismissRequest = { pending = null }, title = { Text("把这段发到你的 Mac？") },
-            text = { Text("讲解会把你选的这一段和前后各一段原文发给你配对的 Mac，由它的 AI 生成。这本书之后不再询问。《${book.title}》允许吗？") },
+            text = { Text("讲解会把你选的这一段和前后各一段原文发给你配对的 Mac，由它的 AI 生成。这本书之后不再询问。《${book.title}》允许吗？",
+                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("explain-consent")) },
             confirmButton = {
-                TextButton({ consent.allow(book.id); consented = true; pending = null; start(block) }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
-            }, dismissButton = { TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
+                PrimaryButton({ consent.allow(book.id); consented = true; pending = null; start(block) }, modifier = Modifier.testTag("explain-consent-allow")) { Text("允许并讲解") }
+            }, dismissButton = { V7TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     }
     opened?.let { (citation, block) ->
         AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · 第 ${citation.page} 页") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.testTag("explain-source-card")) {
-                    Text(citation.blockId, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.testTag("explain-source-id"))
-                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) { Text(block.text, modifier = Modifier.testTag("explain-source-text")) }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("explain-source-card")) {
+                    Text(citation.blockId, style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary,
+                        modifier = Modifier.testTag("explain-source-id"))
+                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                        Text(block.text, style = MaterialTheme.typography.bodyLarge, color = colors.fgPrimary, modifier = Modifier.testTag("explain-source-text"))
+                    }
                 }
-            }, confirmButton = { TextButton({ opened = null }, modifier = Modifier.testTag("explain-source-close")) { Text("关闭") } })
+            }, confirmButton = { V7TextButton({ opened = null }, modifier = Modifier.testTag("explain-source-close")) { Text("关闭") } })
     }
 }
 
@@ -220,12 +241,37 @@ private fun ExplanationView(explanation: Explanation, onOpen: (Citation) -> Unit
     val shown = explanation.citations.fold(explanation.text) { text, c -> text.replace("【${c.anchor}】", "【${ExplainWire.shortId(c.blockId)}】") }
     // V7：讲解是一张纸卡；块编号是主色下划线的「出处」小字，像页边注，不再是一排描边按钮。
     com.coach.ui.v7.PaperCard(Modifier.testTag("explain-answer"), contentPadding = PaddingValues(16.dp)) {
-        Text(shown, modifier = Modifier.testTag("explain-text"))
+        Text(shown, style = MaterialTheme.typography.bodyMedium, color = CoachTheme.colors.fgPrimary, modifier = Modifier.testTag("explain-text"))
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            for (c in explanation.citations) com.coach.ui.v7.V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
+            for (c in explanation.citations) V7TextButton({ onOpen(c) }, modifier = Modifier.testTag("explain-citation")) {
                 Text("出处 · " + ExplainWire.shortId(c.blockId), style = MaterialTheme.typography.labelLarge, color = v7Pine(),
                     textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             }
         }
+    }
+}
+
+/** V7 提醒色：朱 zhu，随明暗取 token。讲解面板和选段就问里「没配上、超字数、暂时读不到」都用它，不用 Material 红。 */
+@Composable
+internal fun v7Alert(): Color = if (CoachTheme.colors.dark) CoachV7.Dark.zhu else CoachV7.Light.zhu
+
+/**
+ * V7 输入框：字段名写在框上方，框是一张无阴影的纸（默认 surface1，放在 surface2 的弹窗里也看得出边），
+ * 细描边 borderSubtle，出错时描边换朱色；焦点环和按钮同一套。字号走 typography，不写死。
+ */
+@Composable
+internal fun V7Field(value: String, onValueChange: (String) -> Unit, label: String, modifier: Modifier = Modifier,
+    enabled: Boolean = true, isError: Boolean = false, singleLine: Boolean = true, minLines: Int = 1,
+    visualTransformation: VisualTransformation = VisualTransformation.None, keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    paper: Color = CoachTheme.colors.surface1) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(CoachV7.Radius.btn)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+        BasicTextField(value, onValueChange, enabled = enabled, singleLine = singleLine, minLines = minLines,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary.copy(alpha = if (enabled) 1f else .5f)),
+            cursorBrush = SolidColor(colors.fgPrimary), visualTransformation = visualTransformation, keyboardOptions = keyboardOptions,
+            modifier = modifier.v7FocusRing(shape).clip(shape).background(paper)
+                .border(1.dp, if (isError) v7Alert() else colors.borderSubtle, shape).padding(horizontal = 12.dp, vertical = 10.dp))
     }
 }

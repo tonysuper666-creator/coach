@@ -1,13 +1,22 @@
 package com.coach.desktop
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.InternalComposeUiApi
 import androidx.compose.ui.LocalSystemTheme
 import androidx.compose.ui.SystemTheme
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import com.coach.client.PairedCredentials
 import com.coach.desktop.books.*
 import kotlinx.coroutines.runBlocking
 import java.awt.Color
@@ -45,6 +54,10 @@ class DesktopV7ScreenshotTest {
         "bookshelf" to "inner-week", "today" to "inner-week", "course" to "inner-week",
         "reader" to "inner-read", "quiz" to "inner-quiz", "explain" to "inner-quiz",
         "summary" to "inner-quiz", "recap" to "inner-quiz", "reviews" to "inner-quiz", "review-question" to "inner-quiz",
+        // 第 8 刀：阅读器里的「选段提问」弹窗和「讲解」面板，都对读书那一屏。
+        "ask-pick" to "inner-read", "ask-unavailable" to "inner-read", "ask-too-long" to "inner-read",
+        "explain-pairing" to "inner-read", "explain-consent" to "inner-read", "explain-answer" to "inner-read",
+        "explain-source" to "inner-read", "explain-failed" to "inner-read",
     )
 
     @Test fun everyDesktopSceneInLightAndDarkAtWindowsScaling() {
@@ -54,6 +67,7 @@ class DesktopV7ScreenshotTest {
             for (screen in screens) for (dark in listOf(false, true)) {
                 System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
                 shots += walk(screen, dark)
+                shots += explainWalk(screen, dark)
             }
         } finally {
             if (previous == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previous)
@@ -147,6 +161,25 @@ class DesktopV7ScreenshotTest {
             typeSize("小"); assertEquals(normalHeading * .9f, headingSize(), 0.01f, "Aa 小：标题跟着缩小")
             typeSize("中"); assertEquals(normalHeading, headingSize(), 0.01f)
 
+            // 选段提问（第 8 刀）：在真阅读器里点开。宿主没接问答方案商，发出去一定落到「暂时不能回答」，所以每次拍到的都一样。
+            onNodeWithTag("ask-book-passage").performClick(); waitForIdle()
+            onNodeWithTag("ask-paragraph-0").assertExists()
+            shot("ask-pick")
+            onNodeWithTag("ask-paragraph-0").performClick(); waitForIdle()
+            onNodeWithTag("book-selected-passage").assertExists()
+            onNodeWithTag("book-passage-question").performTextInput("这里说的「基本单位」是什么意思？")
+            onNodeWithTag("book-passage-send").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            shot("ask-unavailable")
+            onNodeWithTag("book-passage-question").performTextReplacement("问".repeat(BookPassageQuestion.MAX_QUESTION_LENGTH + 1))
+            onNodeWithTag("book-passage-length").assertTextContains("已超过", substring = true)
+            onNodeWithTag("book-passage-send").assertIsNotEnabled()
+            waitForIdle()
+            shot("ask-too-long")
+            onNodeWithTag("book-passage-close").performClick(); waitForIdle()
+            onNodeWithTag("book-passage-ask").assertDoesNotExist()
+
             nav("课程").performClick(); waitForIdle()
             onNodeWithTag("host-course-learn").performClick()
             ready(controller) { it.screen == BookScreen.LEARNING && it.book?.lessonIndex == 5 && it.questionsOpen }
@@ -181,6 +214,86 @@ class DesktopV7ScreenshotTest {
             shot("review-question")
         }
         return shots
+    }
+
+    /**
+     * 讲解面板在阅读器里用的是本机真实的配对状态，拍出来会随机器变。这里单独把面板放进同一套 V7 主题和纸面，
+     * 用 [FakeMac] 顶替 Mac：配对码 000000 配不上，别的码配上；第一段讲解给一条带出处的回答，之后一律拒绝。
+     * 不联网，不写真实凭据；逐书同意存在临时目录里，每一遍都会弹一次。
+     */
+    private fun explainWalk(screen: Screen, dark: Boolean): List<Shot> {
+        val root = Files.createTempDirectory("coach-v7-explain-")
+        val directory = root.resolve("library")
+        val controller = TextbookController(TextbookLibrary(directory))
+        runBlocking { controller.importBook(knowledgeRecapTextbook(root)) }
+        val book = controller.state.value.book!!
+        val blocks = StudyCoachCourse.blocks(book.id, book.pages).filterNot { it.heading }
+        val page = blocks.groupBy { it.page }.maxBy { it.value.size }.key
+        val consent = ExplainConsent(directory)
+        val mac = FakeMac(root.resolve("home"))
+        val shots = mutableListOf<Shot>()
+        runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
+            setContent {
+                com.coach.ui.CoachTheme(dark) {
+                    val colors = com.coach.ui.theme.CoachTheme.colors
+                    Surface(Modifier.fillMaxSize().testTag("windows-host"), color = colors.bgCanvas) {
+                        com.coach.ui.v7.Desk(crumb = book.title, showNavigation = false, hasMargin = false, status = "第 $page 页 · 讲解") {
+                            Box(Modifier.fillMaxSize().padding(20.dp).background(colors.surface1)) {
+                                BookExplainPanel(book, page, consent, mac)
+                            }
+                        }
+                    }
+                }
+            }
+            fun shot(scene: String) { shots += capture(scene, screen, dark) }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("explain-code").performTextInput("000000")
+            onNodeWithTag("explain-pair").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pair-error").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            shot("explain-pairing")
+
+            onNodeWithTag("explain-code").performTextInput("246810")
+            onNodeWithTag("explain-pair").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-pairing").fetchSemanticsNodes().isEmpty() }
+            onAllNodesWithTag("explain-button")[0].performClick(); waitForIdle()
+            onNodeWithTag("explain-consent").assertExists()
+            shot("explain-consent")
+
+            onNodeWithTag("explain-consent-allow").performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-answer").fetchSemanticsNodes().isNotEmpty() }
+            waitForIdle()
+            shot("explain-answer")
+
+            onNodeWithTag("explain-citation").performClick(); waitForIdle()
+            onNodeWithTag("explain-source-text").assertTextEquals(blocks.first { it.page == page }.text)
+            shot("explain-source")
+            onNodeWithTag("explain-source-close").performClick(); waitForIdle()
+            onNodeWithTag("explain-source-card").assertDoesNotExist()
+
+            val buttons = onAllNodesWithTag("explain-button")
+            buttons[buttons.fetchSemanticsNodes().size - 1].performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("explain-failed").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithTag("explain-failed").performScrollTo(); waitForIdle()
+            shot("explain-failed")
+        }
+        assertEquals(2, mac.explained)
+        return shots
+    }
+
+    private class FakeMac(home: Path) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
+        var explained = 0
+        override suspend fun load() { defaultAddress = "mac.local"; loaded = true }
+        override suspend fun pair(address: String, code: String): Boolean {
+            if (code == "000000") return false
+            identity = DesktopIdentity("http://mac.test:18791", PairedCredentials("test-device", "test-token"))
+            return true
+        }
+        override suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String): ExplainResult =
+            if (explained++ == 0) ExplainResult.Done(Explanation(
+                "这一段讲的是细胞在生物体里的位置：结构从它搭起，功能也由它完成，所以叫「基本单位」。后半句提到细胞核，是给下一节留的线头。【c1】",
+                listOf(Citation("c1", chosen.id, chosen.page)), 12))
+            else ExplainResult.Refused("暂时没连上 Mac，可继续阅读或稍后重试。")
     }
 
     private fun ComposeUiTest.ready(c: TextbookController, condition: (LibraryUi) -> Boolean) {

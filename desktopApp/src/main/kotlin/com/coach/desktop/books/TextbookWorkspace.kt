@@ -118,6 +118,15 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
             color = com.coach.ui.theme.CoachTheme.colors.bgCanvas) {
             Column {
                 if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                ui.importing?.let { progress ->
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("book-import-progress"),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Text(if (progress.total == 0) "正在准备教材…" else
+                            "${if (progress.recognizing) "正在识别文字" else "正在读取教材"} · 第 ${progress.page} / ${progress.total} 页",
+                            Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        TextButton(controller::cancelImport, Modifier.testTag("book-import-cancel")) { Text("取消导入") }
+                    }
+                }
                 ui.error?.let { error -> Text(error, color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.fillMaxWidth().padding(12.dp).testTag("book-error")) }
                 val book = ui.book

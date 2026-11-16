@@ -25,12 +25,15 @@ internal data class LibraryUi(
     val learningPathSaved: Boolean = false,
     /** 这本书「做题学」的累计会话：六题一次小结，继续后接着累计。 */
     val ladder: LadderSession = LadderSession(),
+    val importing: BookImportProgress? = null,
 )
 
 internal class TextbookController(val library: TextbookLibrary) {
     private val mutable = MutableStateFlow(LibraryUi())
     val state = mutable.asStateFlow()
     private val actions = Mutex()
+    @Volatile private var activeImport: BookImportControl? = null
+    fun cancelImport() { activeImport?.cancel() }
 
     private suspend fun action(showBusy: Boolean = true, block: suspend () -> Unit) = actions.withLock {
         mutable.update { it.copy(busy = showBusy, error = null) }
@@ -59,13 +62,25 @@ internal class TextbookController(val library: TextbookLibrary) {
     }
 
     suspend fun importBook(path: Path) = action {
-        val book = library.importBook(path)
-        library.closeReview()
-        mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
-            busy = true, reviews = library.reviews(),
-            learningPath = library.learningPath(book.id)?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
-            learningPathSaved = library.learningPath(book.id) != null,
-            ladder = library.ladder(book.id))
+        val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        val control = BookImportControl({ job?.isActive == false }) { progress ->
+            mutable.update { it.copy(importing = progress) }
+        }
+        activeImport = control
+        try {
+            val book = library.importBook(path, control)
+            library.closeReview()
+            mutable.value = LibraryUi(library.catalog(), book, prompt = BookPrompt.IMPORTED, page = book.readingPage,
+                busy = true, reviews = library.reviews(),
+                learningPath = library.learningPath(book.id)?.let { LearningPath.restore(it, book.learning) } ?: LearningPath.QUESTION_FIRST,
+                learningPathSaved = library.learningPath(book.id) != null,
+                ladder = library.ladder(book.id))
+        } catch (_: BookImportCancelled) {
+            mutable.update { it.copy(error = "已取消导入，书架没有新增教材。") }
+        } finally {
+            activeImport = null
+            mutable.update { it.copy(importing = null) }
+        }
     }
 
     suspend fun select(id: String) = action {
@@ -138,7 +153,7 @@ internal class TextbookController(val library: TextbookLibrary) {
             mutable.update { it.copy(learningPathSaved = true) }
             openReading(book); return@action
         }
-        require(book.lessons.isNotEmpty()) { "这本书暂时没有可提取的文字。仍可翻看 PDF 原页；要开始学，需要能提取出文字的版本。" }
+        require(book.lessons.isNotEmpty()) { "这本书没有可提取或识别出的学习文字。仍可翻看 PDF 原页或图片原件；要开始学，请换用有文字或更清晰的版本后重试。" }
         val enabled = book.copy(learning = true, promptSeen = true)
         library.saveLearningPath(book.id, path.name)
         mutable.update { it.copy(learningPathSaved = true) }

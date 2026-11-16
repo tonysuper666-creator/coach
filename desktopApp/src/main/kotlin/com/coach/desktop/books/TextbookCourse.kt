@@ -14,7 +14,7 @@ internal enum class LearningPath(val label: String) {
                 ?: throw IllegalArgumentException("保存的学习方式无法识别，原有进度和作答已保留。")
     }
 }
-internal data class BookPage(val number: Int, val text: String)
+internal data class BookPage(val number: Int, val text: String, val ocr: Boolean = false)
 internal data class SourceBlock(val id: String, val page: Int, val start: Int, val end: Int, val heading: Boolean, val text: String)
 internal data class BookLesson(val id: String, val title: String, val blocks: List<SourceBlock>) {
     val firstPage get() = blocks.first().page

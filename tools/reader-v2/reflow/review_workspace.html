@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; script-src 'sha256-__SCRIPT_HASH__'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<title>裁片复核 · 本机</title>
+<style>
+:root {color-scheme:light dark;--paper:#faf7ef;--ink:#282b27;--line:#cecbbf;--muted:#62675c;--accent:#335b48;--field:#fffdf7}
+* {box-sizing:border-box} body {margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
+header {padding:14px 24px;border-bottom:1px solid var(--line);display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+h1 {font:600 23px/1.2 Georgia,serif;margin:0} header p {margin:0;color:var(--muted);flex:1}
+button,select,.file {font:inherit;color:inherit;background:var(--field);border:1px solid var(--line);border-radius:3px;padding:7px 12px;cursor:pointer}
+button:hover,.file:hover {border-color:var(--accent)} button:focus-visible,select:focus-visible,.file:focus-within {outline:2px solid var(--accent);outline-offset:2px}
+button:disabled {opacity:.45;cursor:default} .primary {background:var(--accent);color:#fff;border-color:var(--accent)}
+.file input {width:1px;height:1px;position:absolute;opacity:0} main {display:grid;grid-template-columns:230px minmax(0,1fr);height:calc(100vh - 84px)}
+nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {color:var(--muted);margin:0 0 12px}
+#list button {display:block;text-align:left;width:100%;margin:0 0 6px;overflow-wrap:anywhere} #list button[aria-current=true] {border:2px solid var(--accent);padding:6px 11px}
+.work {min-width:0;display:flex;flex-direction:column;padding:16px 20px;gap:12px;overflow:auto}
+.toolbar {display:flex;gap:10px;align-items:center;flex-wrap:wrap} #name {font-weight:600;overflow-wrap:anywhere;margin-right:auto}
+.panes {display:grid;grid-template-columns:1fr 1fr;gap:16px;min-height:240px;flex:1}
+.pane {display:flex;flex-direction:column;min-width:0;min-height:0} h2 {font-size:15px;font-weight:500;margin:0 0 6px}
+.viewport {background:#dddcd7;border:1px solid var(--line);overflow:auto;flex:1;min-height:220px;position:relative}
+.canvas {position:relative;width:100%;line-height:0} .canvas img {display:block;width:100%;height:auto;max-width:none}
+.marker {position:absolute;border:2px solid #a85c1b;pointer-events:none}.marker.current {border:3px solid #087a42;box-shadow:0 0 0 1px #fff}
+.checks {display:flex;gap:12px 24px;flex-wrap:wrap} .checks label {cursor:pointer} input[type=checkbox] {accent-color:var(--accent);width:16px;height:16px;vertical-align:middle}
+.decision {display:flex;align-items:center;gap:10px;flex-wrap:wrap} #status {color:var(--muted);margin-right:auto}
+#message {min-height:24px;color:var(--muted);margin:0} .note {font-size:13px;color:var(--muted);margin:0}
+@media (prefers-color-scheme:dark) {:root {--paper:#232723;--ink:#eeeade;--line:#53594f;--muted:#bdc2b6;--accent:#377454;--field:#2c312b}.viewport {background:#41453f}}
+@media (max-width:950px) {main {grid-template-columns:170px 1fr;height:auto;min-height:calc(100vh - 84px)} .panes {grid-template-columns:1fr}.viewport {height:48vh;flex:auto} .work {overflow:visible} header {padding:12px 16px} header p {flex-basis:100%}}
+</style>
+<header><h1>裁片复核</h1><p>对照原页逐张检查。所有内容仅在本机打开。</p>
+<label class="file">继续上次复核<input id="resume" type="file" accept="application/json,.json"></label>
+<button id="save">保存复核进度</button></header>
+<main><nav aria-label="裁片列表"><p id="progress"></p><div id="list"></div></nav>
+<section class="work" aria-label="当前裁片">
+<div class="toolbar"><span id="name"></span><button id="previous">上一张</button><button id="next">下一张</button>
+<label>缩放 <select id="zoom"><option value="fit">适合宽度</option><option value="1">原尺寸 100%</option><option value="2">放大 200%</option></select></label></div>
+<div class="panes">
+<section class="pane"><h2>完整原页 · 绿框为当前裁片，棕框为其他候选</h2><div class="viewport" id="pageView"><div class="canvas" id="pageCanvas"><img id="page" alt="完整原页"><div id="markers"></div></div></div></section>
+<section class="pane"><h2>裁片 · 请切到原尺寸检查边缘与小字</h2><div class="viewport" id="cropView"><div class="canvas" id="cropCanvas"><img id="crop" alt="当前裁片"></div></div></section>
+</div>
+<div class="checks">
+<label><input type="checkbox" id="wholeObject">主体完整，无截断</label>
+<label><input type="checkbox" id="labels">标题、图注、表注和来源齐全</label>
+<label><input type="checkbox" id="noProseOrDuplicate">不混入正文，只保留完整的一份</label>
+</div>
+<div class="decision"><span id="status" role="status"></span><button id="reset">留待复核</button><button id="reject">拒绝这张</button><button id="approve" class="primary">批准完整对象</button></div>
+<p id="message" role="alert"></p><p class="note">保存后会下载复核文件。只有明确批准的对象才能导出入库；未审和拒绝的对象不会入库。关闭前请保存进度。勾选是人工声明，不能代替对照原页。</p>
+</section></main>
+<script id="batch" type="application/json">__BATCH__</script>
+<script id="app">
+"use strict";
+const batch = JSON.parse(document.getElementById("batch").textContent);
+const $ = id => document.getElementById(id);
+const labels = {UNREVIEWED:"待复核", COMPLETE_OBJECT_WITH_LABELS:"已批准", REJECTED:"已拒绝"};
+const checkIds = ["wholeObject", "labels", "noProseOrDuplicate"];
+let rows = batch.items.map(item => ({id:item.id, review:item.review, decision:"UNREVIEWED",
+  checks:Object.fromEntries(checkIds.map(id => [id,false]))}));
+let index = 0, loaded = false, generation = 0, dirty = false;
+function overlaps(a,b) {return a.page===b.page && a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom;}
+function message(text) {$("message").textContent = text;}
+function stats() {
+  const count = key => rows.filter(row => row.decision === key).length;
+  $("progress").textContent = `${rows.length} 张 · 已批准 ${count("COMPLETE_OBJECT_WITH_LABELS")} · 已拒绝 ${count("REJECTED")} · 待复核 ${count("UNREVIEWED")}`;
+  $("list").replaceChildren(...rows.map((row,i) => {
+    const button = document.createElement("button");
+    button.textContent = `${i+1}. ${row.id} · ${labels[row.decision]}`;
+    button.setAttribute("aria-current", String(index===i));
+    button.addEventListener("click", () => show(i)); return button;
+  }));
+  $("status").textContent = labels[rows[index].decision];
+}
+function updateApproval() {$("approve").disabled = !loaded || !checkIds.every(id => $(id).checked);}
+function zoom() {
+  const scale = $("zoom").value;
+  for (const [canvas, img] of [["pageCanvas","page"],["cropCanvas","crop"]])
+    $(canvas).style.width = scale === "fit" ? "100%" : `${$(img).naturalWidth * Number(scale)}px`;
+}
+async function show(next) {
+  index = next; const token = ++generation; loaded = false; updateApproval(); message("");
+  const row = rows[index], s = row.review.selection, context = batch.pages[s.page];
+  $("name").textContent = `${index+1} / ${rows.length} · ${row.id} · 第 ${s.page} 页`;
+  $("previous").disabled = index===0; $("next").disabled = index===rows.length-1;
+  for (const id of checkIds) $(id).checked = row.checks[id];
+  $("page").src = context.image; $("crop").src = batch.items[index].image;
+  $("markers").replaceChildren(...rows.filter(r => r.review.selection.page===s.page).map(r => {
+    const marker = document.createElement("div"), box = r.review.selection;
+    marker.className = `marker${r===row ? " current" : ""}`;
+    Object.assign(marker.style, {left:`${100*box.left/context.width}%`,top:`${100*box.top/context.height}%`,
+      width:`${100*(box.right-box.left)/context.width}%`,height:`${100*(box.bottom-box.top)/context.height}%`});
+    return marker;
+  }));
+  for (const id of ["pageView","cropView"]) {$(id).scrollTop=0; $(id).scrollLeft=0;}
+  stats();
+  try {await Promise.all([$("page").decode(),$("crop").decode()]);
+    if (token!==generation) return;
+    loaded=true; zoom(); updateApproval();
+  } catch {if(token===generation) message("图片未能完整打开，请重新生成预览。");}
+}
+function decide(decision) {
+  const row = rows[index];
+  if (decision==="COMPLETE_OBJECT_WITH_LABELS") {
+    if (!loaded || !checkIds.every(id => $(id).checked)) return;
+    if (rows.some(other => other!==row && other.decision==="COMPLETE_OBJECT_WITH_LABELS" && overlaps(row.review.selection,other.review.selection))) {
+      message("与另一张已批准裁片重叠。请先拒绝重复版本，再保留完整的一份。"); return;
+    }
+  }
+  row.decision = decision; dirty=true; stats(); message("已记录，请保存复核进度。");
+}
+function validateResume(saved) {
+  if (!saved || saved.schema!==1 || !Array.isArray(saved.items) || saved.items.length!==rows.length) throw Error();
+  const byId = new Map(saved.items.map(row => [row.id,row]));
+  if (byId.size!==rows.length) throw Error();
+  const restored = rows.map(draft => {
+    const row = byId.get(draft.id);
+    if (!row || !Object.hasOwn(labels,row.decision) || JSON.stringify(row.review)!==JSON.stringify(draft.review) ||
+        !row.checks || Object.keys(row.checks).length!==3 || !checkIds.every(id => typeof row.checks[id]==="boolean") ||
+        (row.decision==="COMPLETE_OBJECT_WITH_LABELS" && !checkIds.every(id => row.checks[id]))) throw Error();
+    return {id:draft.id,review:draft.review,decision:row.decision,checks:row.checks};
+  });
+  const approved=restored.filter(r => r.decision==="COMPLETE_OBJECT_WITH_LABELS");
+  if (approved.some((r,i) => approved.slice(0,i).some(o => overlaps(r.review.selection,o.review.selection)))) throw Error();
+  return restored;
+}
+for (const id of checkIds) $(id).addEventListener("change", () => {
+  const row=rows[index]; row.checks[id]=$(id).checked;
+  // Revoking any check revokes an existing approval immediately.
+  if (row.decision==="COMPLETE_OBJECT_WITH_LABELS") row.decision="UNREVIEWED";
+  dirty=true; stats(); updateApproval();
+});
+$("previous").addEventListener("click", () => show(Math.max(0,index-1)));
+$("next").addEventListener("click", () => show(Math.min(rows.length-1,index+1)));
+$("zoom").addEventListener("change", zoom);
+$("approve").addEventListener("click", () => decide("COMPLETE_OBJECT_WITH_LABELS"));
+$("reject").addEventListener("click", () => decide("REJECTED"));
+$("reset").addEventListener("click", () => decide("UNREVIEWED"));
+$("save").addEventListener("click", () => {
+  const url=URL.createObjectURL(new Blob([JSON.stringify({schema:1,items:rows},null,2)],{type:"application/json"}));
+  const link=document.createElement("a"); link.href=url; link.download="crop-review-decisions.json";
+  link.click(); setTimeout(() => URL.revokeObjectURL(url),1000); dirty=false;
+  message("已下载复核进度。请保存在本机的私有材料目录。");
+});
+$("resume").addEventListener("change", async event => {
+  const file=event.target.files[0]; if(!file) return;
+  try {if(file.size>2*1024*1024) throw Error();
+    const restored=validateResume(JSON.parse(await file.text())); rows=restored; dirty=false; await show(index);
+    message("已恢复这批裁片的复核进度。");
+  } catch {message("无法恢复：文件不属于当前预览，或复核记录不完整。当前决定未改变。");}
+  event.target.value="";
+});
+window.addEventListener("beforeunload", event => {if(dirty) {event.preventDefault();event.returnValue="";}});
+show(0);
+</script>
+</html>

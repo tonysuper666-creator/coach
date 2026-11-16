@@ -50,11 +50,11 @@ internal fun bookSourceStates(sources: List<BookPassage>, book: Textbook, resolv
 }
 
 /** 「第 12 页 · “前 16 字…”」: no SHA, no offsets. Counts by code point so a surrogate pair is never split. */
-internal fun bookSourceLabel(p: BookPassage): String {
+internal fun bookSourceLabel(p: BookPassage, book: Textbook? = null): String {
     val flat = p.text.replace(Regex("""\s+"""), " ").trim()
     val points = flat.codePointCount(0, flat.length)
     val short = if (points <= 16) flat else flat.substring(0, flat.offsetByCodePoints(0, 16)) + "…"
-    return "第 ${p.page} 页 · “$short”"
+    return "${book?.pageLabel(p.page) ?: "第 ${p.page} 页"} · “$short”"
 }
 
 /**
@@ -83,7 +83,7 @@ internal fun BookSourceRow(
         sources.forEachIndexed { i, p ->
             when (val state = states?.getOrNull(i)) {
                 null -> Column(Modifier.testTag("book-source-pending-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
+                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
                 }
                 BookSourceState.Ready -> V7TextButton(
                     onClick = {
@@ -94,17 +94,17 @@ internal fun BookSourceRow(
                         }
                     },
                     modifier = Modifier.focusRequester(focus(i)).testTag("book-source-$i")
-                        .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p)}" },
+                        .semantics { contentDescription = "打开出处：《${book.title}》${bookSourceLabel(p, book)}" },
                 ) {
                     // V7 出处：主色下划线小字，像书页边的注，不再是一排和正文抢眼的按钮。
-                    Text("出处 · " + bookSourceLabel(p), style = MaterialTheme.typography.labelLarge, color = v7Pine(), textDecoration = TextDecoration.Underline)
+                    Text("出处 · " + bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge, color = v7Pine(), textDecoration = TextDecoration.Underline)
                 }
                 is BookSourceState.Stale -> Column(Modifier.testTag("book-source-stale-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
+                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
                 is BookSourceState.WrongBook -> Column(Modifier.testTag("book-source-wrong-$i").nonButtonRow(), verticalArrangement = Arrangement.Center) {
-                    Text(bookSourceLabel(p), style = MaterialTheme.typography.labelLarge)
+                    Text(bookSourceLabel(p, book), style = MaterialTheme.typography.labelLarge)
                     Text(state.message, style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.dangerFg)
                 }
             }

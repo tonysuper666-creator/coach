@@ -63,7 +63,8 @@ internal fun rememberAnswerExplain(library: TextbookLibrary): AnswerExplain {
 @Composable
 internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
     exams: LocalExamController = rememberLocalExamController(controller.library),
-    answerExplain: AnswerExplain = rememberAnswerExplain(controller.library), chooseBook: suspend () -> Path?) {
+    answerExplain: AnswerExplain = rememberAnswerExplain(controller.library),
+    learningSupport: com.coach.desktop.books.BookLearningSupport? = null, chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     // 今天 / 课程 open their book inside 书架's workspace; the rail keeps pointing where the reader came from
     // until they pick another entry or the workspace is back on the shelf.
@@ -73,6 +74,13 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val examUi by exams.state.collectAsState()
     val scope = rememberCoroutineScope()
     val book = ui.book
+    LaunchedEffect(ui.prompt, book?.id) {
+        if (ui.prompt == com.coach.desktop.books.BookPrompt.IMPORTED) {
+            origin = null
+            settings = false
+            tab = AppTab.RESOURCES
+        }
+    }
     // On the shelf with nothing being opened over it; a start prompt still belongs to the book being opened.
     val onShelf = book == null || (ui.screen == BookScreen.HOME && ui.prompt == null)
     LaunchedEffect(book?.id) { book?.let { exams.load(it) } }
@@ -138,7 +146,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                     Text("正在读取本书练习…")
                                 }
                             })
-                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, chooseBook = chooseBook)
+                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, chooseBook = chooseBook)
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }

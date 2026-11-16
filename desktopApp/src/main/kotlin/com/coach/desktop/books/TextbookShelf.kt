@@ -38,7 +38,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
                 Text("书架", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.testTag("library-title"))
                 Text("带来一本教材，从想读的地方开始。", color = colors.fgSecondary)
                 PrimaryButton(onImport, enabled = !ui.busy, modifier = Modifier.testTag("upload-textbook")) { Text("上传教材") }
-                Text("PDF、EPUB、Markdown 或文本 · 教材和进度保存在这台电脑", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
+                Text("${BookFormats.description} · 教材和进度保存在这台电脑", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                 if (book == null) {
                     Text("书架还是空的", style = MaterialTheme.typography.titleLarge)
                     Text("上传后，可以直接开始学，也可以先当一本书读。", color = colors.fgSecondary)

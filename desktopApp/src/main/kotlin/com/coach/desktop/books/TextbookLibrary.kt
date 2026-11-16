@@ -12,7 +12,6 @@ import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
-import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -21,7 +20,6 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.time.Clock
 import java.time.LocalDate
-import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipFile
 import javax.xml.XMLConstants
@@ -116,12 +114,13 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
     }
 
     @Synchronized fun importBook(source: Path): Textbook {
-        val format = source.fileName.toString().substringAfterLast('.', "").lowercase(Locale.ROOT)
-        require(format in setOf("pdf", "epub", "md", "txt")) { "请选择 PDF、EPUB、Markdown 或 UTF-8 文本教材。" }
-        require(Files.size(source) in 1..(256L * 1024 * 1024)) { "请选择不超过 256 MB 的教材。" }
+        require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
+        require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
+        require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
         val stage = directory.resolve(".import-${UUID.randomUUID()}")
         try {
             Files.copy(source, stage)
+            val format = BookFormats.detect(stage, source.fileName.toString())
             val digest = MessageDigest.getInstance("SHA-256")
             Files.newInputStream(stage).use { input ->
                 val buffer = ByteArray(65536)
@@ -157,7 +156,7 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
     }
 
     private fun original(id: String, format: String): Path {
-        require(id.matches(Regex("[a-f0-9]{64}")) && format in setOf("pdf", "epub", "md", "txt"))
+        require(id.matches(Regex("[a-f0-9]{64}")) && format in BookFormats.supported)
         return directory.resolve("$id.$format")
     }
 
@@ -393,7 +392,17 @@ internal data class RenderTrace(val book: String, val page: Int, val outcome: St
 internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
 
 internal object TextbookExtraction {
-    fun extract(path: Path, format: String, title: String): ExtractedBook = when (format) {
+    fun extract(path: Path, format: String, title: String): ExtractedBook = try {
+        extractContent(path, format, title)
+    } catch (e: org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException) {
+        throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+    } catch (e: IllegalArgumentException) {
+        throw e
+    } catch (e: Exception) {
+        throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
+    }
+
+    private fun extractContent(path: Path, format: String, title: String): ExtractedBook = when (format) {
         "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
             require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
@@ -405,10 +414,15 @@ internal object TextbookExtraction {
             ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, pages)
         }
         "epub" -> epub(path, title)
+        "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
+            val name = book.title().ifBlank { title }
+            ExtractedBook(name, book.documents().flatMap { StructuredBookExtraction.html(it, name).pages }
+                .mapIndexed { i, page -> page.copy(number = i + 1) })
+        }
+        "docx", "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title)
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
-            val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-            val text = decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF")
+            val text = BookText.decode(Files.readAllBytes(path))
             require(text.isNotBlank()) { "教材中没有文字。" }
             val markers = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").findAll(text).toList()
             val marked = markers.mapIndexed { index, marker ->
@@ -418,13 +432,13 @@ internal object TextbookExtraction {
             ExtractedBook(title, marked.ifEmpty {
                 val cleaned = clean(text)
                 require(cleaned.isNotBlank()) { "教材中没有文字。" }
-                paginate(cleaned)
+                BookText.chapters(cleaned)
             })
         }
     }
 
-    private fun clean(text: String) = text.replace("\r\n", "\n").replace('\r', '\n').replace("\u0000", "")
-    private fun paginate(text: String): List<BookPage> {
+    internal fun clean(text: String) = text.replace("\r\n", "\n").replace('\r', '\n').replace("\u0000", "")
+    internal fun paginate(text: String): List<BookPage> {
         val chunks = mutableListOf<String>()
         for (section in text.split('\u000c')) {
             var rest = section
@@ -465,6 +479,13 @@ internal object TextbookExtraction {
             return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes)).documentElement
         }
         fun Element.all(name: String): List<Element> = getElementsByTagNameNS("*", name).let { list -> (0 until list.length).map { list.item(it) as Element } }
+        if (zip.getEntry("META-INF/encryption.xml") != null) {
+            val encryption = xml(read("META-INF/encryption.xml"))
+            val fontObfuscation = setOf("http://www.idpf.org/2008/embedding", "http://ns.adobe.com/pdf/enc#RC")
+            require(encryption.all("EncryptionMethod").all { it.getAttribute("Algorithm") in fontObfuscation }) {
+                "这本 EPUB 有版权保护，打不开。请使用无 DRM、且有权阅读的版本。"
+            }
+        }
         val container = xml(read("META-INF/container.xml"))
         val packagePath = container.all("rootfile").firstOrNull()?.getAttribute("full-path") ?: error("EPUB 缺少内容目录。")
         val opf = xml(read(packagePath))

@@ -103,7 +103,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | K1 | Tab 顺序 | 未验证 | — | 需 winbox 真窗口走一遍；派给 P1 交付时附 |
-| K2 | 焦点环 | 部分已对 | `FocusRing.kt`；`V7DesktopFeedbackTest`、`V7FocusRingTest`；TON-1657 真窗口对照图 | 浅深像素测试覆盖鼠标隐藏、Tab 恢复；真窗口加强断言后两次失败，最新为深色 OS Tab 未聚焦目标，未通过验收。原焦点环断言保留 |
+| K2 | 焦点环 | 已对（共享按钮） | `FocusRing.kt`；`V7DesktopFeedbackTest`、`V7FocusRingTest`、`V7ButtonWindowTest`；TON-1657 真窗口 `after-2d22cba1/` | 浅深像素测试覆盖鼠标隐藏、Tab 恢复；真 Windows 窗口里 OS Tab 聚焦按钮并画出环，随后 OS 鼠标点击同一按钮，焦点保留、环消失，浅深两套都有像素断言 |
 | K3 | 方向键 / PageUp / PageDown 翻页 | 待修 | `TextbookWorkspace.kt:108-122` 只处理 Esc；配对阅读器 `reader/ReaderKeys.kt` 已有 | 本机教材阅读不能用键盘翻页。去向：P1（在 `TextbookReader.kt` 内处理，不碰外壳） |
 | K4 | Esc 关闭 | 已对 | `Key.Escape` 6 处 | 阅读、批注、对话框都能 Esc |
 | K5 | 快捷键看得见 | 已对（组件） | `V7Tooltip.kt`；`V7DesktopFeedbackTest` | 提示支持可选 `shortcut`，验证显示 Esc；阅读页快捷键接入仍归 P1 |
@@ -165,9 +165,11 @@ main `941b08a2`，`desktopApp/src/main/kotlin/com/coach/desktop` 下 `rg -c`：
 
 ### TON-1657 组件验收
 
-真 Windows 窗口、OS 鼠标与 Tab 输入，150% 系统缩放；合成标签，没有教材原文。原始截图不进 Git，保存在 winbox `D:\agent\design\polish-shots\ton1657\`，交付评论附浅深对照图及 20 张原图。`before/` 为 `71661f3e` 的同一按钮，`after/` 来自测试快照 `d82f12ae`；每组均有 `light` / `dark` × `normal` / `hover` / `pressed` / `keyboard` / `mouse-after`。**这组是部分证据：修后深色 keyboard 图没有验证到焦点环，不作通过依据。**这是组件验证窗口；完整阅读、讲解、书架页面由各泳道接入后再核。
+真 Windows 窗口、OS 鼠标与 Tab 输入，150% 系统缩放；合成标签，没有教材原文。原始截图不进 Git，保存在 winbox `D:\agent\design\polish-shots\ton1657\`：`before/` 为 `71661f3e` 的同一按钮，`after-2d22cba1/` 为修后（另有 `contact-sheet.png` 浅深改前改后对照）；每组均有 `light` / `dark` × `normal` / `hover` / `pressed` / `keyboard` / `mouse-after`。旧的 `after/`（`d82f12ae`）深色 keyboard 图没有焦点环，已作废。这是组件验证窗口；完整阅读、讲解、书架页面由各泳道接入后再核。
 
-此前 winbox `tools/dev/heavy ./gradlew :desktopApp:test :androidApp:compileDebugKotlin --console=plain` 退出 0：409 用例，0 失败、4 跳过（原有 ReaderLiveServerTest 的显式开启项）；仓库要求共享 UI 语料测试留 Mac，`tools/dev/heavy ./gradlew :shared:ui:jvmTest --console=plain` 退出 0：279 用例，0 失败、0 跳过。随后原生截图测试新增「OS Tab 必须聚焦目标按钮」断言，连续两次定向运行退出 1；最新快照 `9fc70747` 共 6 用例、1 失败、0 跳过，其余 5 项通过，失败为 `OS Tab must focus the captured button in dark`。保留失败断言，按疑难链交接，K2 尚未完成。
+`V7ButtonWindowTest` 在浅深两套里各做：OS Tab 必须到达本窗口并聚焦按钮；keyboard 图按钮左侧 2dp 外有环像素；再用 OS 鼠标点击同一按钮，点击数到 2、焦点仍在、mouse-after 图环像素为 0。`2d22cba1` 的 winbox `tools/dev/heavy ./gradlew :desktopApp:test --console=plain` 退出 0：409 用例，0 失败、4 跳过（原有 ReaderLiveServerTest 的显式开启项），环像素浅深均为 keyboard=3、mouse-after=0；Mac `tools/dev/heavy ./gradlew :shared:ui:jvmTest --console=plain` 退出 0：279 用例，0 失败、0 跳过。
+
+此前两次失败（深色 OS Tab 未聚焦目标）不是产品缺陷：winbox 两个 heavy 槽位共用控制台会话 1，别的任务的原生窗口测试会抢走键盘前台，Tab 送到了另一个窗口。测试现在逐次核对 Tab 是否到达本窗口：到达却没聚焦按钮按产品缺陷立即失败；没到达按外部干扰重新激活窗口再试，三次仍没到达就以「键盘前台被其他进程占用」失败。窗口置顶，避免截图和点击落到别人的窗口上。
 
 B5 的 `dark/ask-pick` 已查看 Windows 全量测试生成的离屏图，背景「选段提问」没有双层焦点环；这不代替真窗口键盘验收。
 
@@ -179,7 +181,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 
 | 卡 | 范围 | 文件 | 状态 |
 | --- | --- | --- | --- |
-| P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现；真窗口 Tab 验收待补，TON-1657 |
+| P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
 | P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | 本轮派 |
 | P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | 排队，P0 合并后 |

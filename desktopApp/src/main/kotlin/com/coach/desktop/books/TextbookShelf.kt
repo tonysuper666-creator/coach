@@ -75,7 +75,7 @@ internal fun LibraryHome(ui: LibraryUi, onImport: () -> Unit, onSelect: (String)
 
 /** A borderless card-coloured block on the sheet that reads as one button: V7's card, focus ring and press. */
 @Composable
-private fun PaperTile(enabled: Boolean, modifier: Modifier, onClick: () -> Unit, padding: PaddingValues, spacing: Dp,
+internal fun PaperTile(enabled: Boolean, modifier: Modifier, onClick: () -> Unit, padding: PaddingValues, spacing: Dp,
     content: @Composable ColumnScope.() -> Unit) {
     val colors = CoachTheme.colors
     val shape = RoundedCornerShape(10.dp)

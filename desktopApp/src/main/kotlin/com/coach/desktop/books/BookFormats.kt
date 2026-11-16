@@ -116,6 +116,7 @@ internal class SafeBookArchive(path: Path) : AutoCloseable {
             }
         } catch (e: Exception) { zip.close(); throw e }
     }
+    fun names(): List<String> = zip.entries().asSequence().filter { !it.isDirectory }.map { it.name }.toList()
     fun contains(name: String) = zip.getEntry(name) != null
     fun read(name: String): ByteArray {
         checkName(name)

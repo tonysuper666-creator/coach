@@ -7,12 +7,15 @@ import java.nio.charset.CodingErrorAction;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import org.jsoup.Jsoup;
 
 /** The small Palm/MOBI decoder is isolated from page planning and never opens external files. */
 public final class KindleText {
     private static final int MAX_TEXT = 32 * 1024 * 1024;
 
-    public record Book(String title, List<String> documents) { }
+    public record Book(String title, List<String> documents, Map<Integer, byte[]> images) { }
 
     public static Book read(byte[] bytes) throws IOException {
         PalmDatabase pdb = PalmDatabase.read(bytes);
@@ -59,6 +62,33 @@ public final class KindleText {
         for (byte[] document : documents) text.add(header.charset().newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(document)).toString());
         String title = header.exthString(MobiHeader.EXTH_UPDATED_TITLE);
-        return new Book(title == null ? header.fullName() : title, text);
+        Map<Integer, byte[]> images = new HashMap<>();
+        long total = 0;
+        for (String document : text) {
+            for (var image : Jsoup.parse(document).getElementsByTag("img")) {
+                String reference = image.attr("recindex");
+                int radix = 10;
+                if (reference.isBlank()) {
+                    var match = java.util.regex.Pattern.compile("(?i)^kindle:embed:([0-9a-v]+)(?:[?].*)?$").matcher(image.attr("src"));
+                    if (!match.matches()) continue;
+                    reference = match.group(1);
+                    radix = 32;
+                }
+                int index;
+                try { index = Integer.parseInt(reference, radix); }
+                catch (NumberFormatException e) { throw new IOException("Invalid Kindle image reference", e); }
+                if (images.containsKey(index)) continue;
+                long record = header.firstImageIndex() + index - 1L;
+                if (index < 1 || header.firstImageIndex() <= header.textRecordCount() || record >= pdb.recordCount()
+                        || record < 0 || images.size() >= 1000) throw new IOException("Incomplete Kindle image table");
+                var slice = pdb.slice((int) record);
+                total += slice.length();
+                if (slice.length() > 16 * 1024 * 1024 || total > 64 * 1024 * 1024) {
+                    throw new IllegalArgumentException("这本 Kindle 书插图超过大小限制，请分册导入。");
+                }
+                images.put(index, pdb.record((int) record));
+            }
+        }
+        return new Book(title == null ? header.fullName() : title, text, Map.copyOf(images));
     }
 }

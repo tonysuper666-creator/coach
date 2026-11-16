@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方向 B「朱印」：整块朱色印面，留白刻一本摊开的书。 -->
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="#A63E2C"/>
+  <rect x="42" y="42" width="172" height="172" rx="14" fill="none" stroke="#FCFAF6" stroke-width="10"/>
+  <path d="M74 92 Q101 80 128 96 Q155 80 182 92 L182 170 Q155 158 128 174 Q101 158 74 170 Z" fill="none" stroke="#FCFAF6" stroke-width="12" stroke-linejoin="round"/>
+  <line x1="128" y1="98" x2="128" y2="170" stroke="#FCFAF6" stroke-width="10"/>
+</svg>

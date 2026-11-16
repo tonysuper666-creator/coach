@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" shape-rendering="crispEdges">
+  <!-- 方向 A 的 16–24px 版：去掉正文线，只留纸、页边和朱印，按像素对齐。 -->
+  <rect x="1" y="1" width="14" height="14" rx="3" fill="#FCFAF6"/>
+  <rect x="1.5" y="1.5" width="13" height="13" rx="2.5" fill="none" stroke="#857D71" stroke-width="1" shape-rendering="geometricPrecision"/>
+  <rect x="4" y="3" width="2" height="10" fill="#2F6A4B"/>
+  <rect x="8" y="4" width="4" height="1" fill="#857D71"/>
+  <rect x="9" y="9" width="4" height="4" fill="#A63E2C"/>
+</svg>

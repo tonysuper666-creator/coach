@@ -85,12 +85,18 @@ internal object BookText {
 
     private val heading = Regex("(?im)^(?:#{1,6}\\s+[^\\r\\n]+|第\\s*[零〇一二三四五六七八九十百千万两0-9]+\\s*[章节篇][^\\r\\n]*|(?:Chapter|Section)\\s+(?:[0-9]+|[IVXLC]+)\\b[^\\r\\n]*)$")
 
-    fun chapters(text: String): List<BookPage> {
-        val cleaned = TextbookExtraction.clean(text).trim()
+    /** Optional section provenance uses offsets in clean(text), before its outer trim. */
+    fun chapters(text: String, section: ((Int, List<BookPage>) -> Unit)? = null): List<BookPage> {
+        val normalized = TextbookExtraction.clean(text)
+        val leading = normalized.length - normalized.trimStart().length
+        val cleaned = normalized.trim()
         require(cleaned.isNotBlank()) { "教材中没有可读取的文字。" }
         val starts = (listOf(0) + heading.findAll(cleaned).map { it.range.first }).distinct().sorted()
         return starts.flatMapIndexed { i, start ->
-            TextbookExtraction.paginate(cleaned.substring(start, starts.getOrNull(i + 1) ?: cleaned.length).trim())
+            val raw = cleaned.substring(start, starts.getOrNull(i + 1) ?: cleaned.length)
+            val local = TextbookExtraction.paginate(raw.trim())
+            section?.invoke(leading + start + raw.length - raw.trimStart().length, local)
+            local
         }.mapIndexed { i, page -> page.copy(number = i + 1) }
     }
 

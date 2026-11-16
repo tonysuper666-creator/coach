@@ -82,6 +82,11 @@ class PracticeSourceMultiBlockTest {
 
             assertEquals(lesson.firstPage, controller.state.value.page, "重复句不猜块、不跳页")
             onNodeWithTag("source-anchor-status").assertTextEquals("无法确认原句：本题依据出现多次。")
+            // 出处提示用 V7 朱色（第 11 刀），不用 Material 的报错红。
+            val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+            onNodeWithTag("source-anchor-status").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+            assertEquals(coach.design.tokens.CoachV7.Light.zhu, layouts.single().layoutInput.style.color, "出处提示是朱色")
         }
     }
 

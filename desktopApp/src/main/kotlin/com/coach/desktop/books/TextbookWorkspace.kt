@@ -25,9 +25,10 @@ import java.nio.file.Path
 
 @Composable
 internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller), loadOnMount: Boolean = true,
-    support: BookLearningSupport = UnconnectedBookLearningSupport,
+    support: BookLearningSupport? = null,
     answerExplain: AnswerExplain? = null,
     sourceResolver: BookSourceResolver = remember(controller.library) { BookSourceResolver(controller.library) }, chooseBook: suspend () -> Path?) {
+    val learningSupport = support ?: remember(controller.library) { PairedBookLearningSupport(controller.library) }
     val ui by controller.state.collectAsState()
     val scope = rememberCoroutineScope()
     var practiceSource by remember { mutableStateOf<PracticeSource?>(null) }
@@ -44,7 +45,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
     val lessonSourceFocus = remember { FocusRequester() }
     val practiceSourceFocus = remember { FocusRequester() }
     val lessonId = ui.book?.lessons?.getOrNull(ui.book?.lessonIndex ?: -1)?.id
-    val explanationReply = remember(ui.book?.id, lessonId, support) { mutableStateOf<BookLearningReply?>(null) }
+    val explanationReply = remember(ui.book?.id, lessonId, learningSupport) { mutableStateOf<BookLearningReply?>(null) }
     // 答完就讲的话由另一条通道取，重开窗口会重新问一次；它不跟原文页的讲解共用缓存。
     val answerExplainReply = remember(ui.book?.id, lessonId, answerExplain) { mutableStateOf<BookLearningReply?>(null) }
     val citationFocus = remember(ui.book?.id, lessonId) { mutableMapOf<Int, FocusRequester>() }
@@ -137,7 +138,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                             onSource = { openPracticeSource(review.practice) },
                             onAnswer = { drafts.saveReview(review, it) })
                     }
-                    ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, support,
+                    ui.screen == BookScreen.READER -> TextbookReader(ui, controller.library, learningSupport,
                         practiceSource = practiceSource,
                         onNoteSession = { noteReader = it },
                         onPage = { page ->
@@ -155,7 +156,7 @@ internal fun TextbookWorkspace(controller: TextbookController, drafts: AnswerDra
                         val lesson = book.lessons.getOrNull(book.lessonIndex)
                         val displayed = if (lesson == null) ui else ui.copy(
                             answer = drafts.current(book.id, lesson.id, book.questionMode, ui.answer))
-                        TextbookLearning(displayed, support, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
+                        TextbookLearning(displayed, learningSupport, learningScroll, lessonSourceFocus, practiceSourceFocus, returnFocus,
                         explanationReply, answerExplain, answerExplainReply, sourceResolver, citationFocus, citationIndex,
                         onFocusRestored = { returnFocus = null }, onBack = { run { controller.back() } },
                         onSource = { practiceSource = null; sourceOrigin = SourceFocus.LESSON; run { controller.source() } },

@@ -29,7 +29,8 @@ internal class LibraryExplainRequest private constructor(val quote: String, val 
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
         val saved = store.learnerSourcePage(binding?.explainSourceId ?: bookId, claimed.pdfPage)
         if (saved == null || (binding != null && saved.course != binding.course) ||
-            !containsReaderSelection(saved.page.text, quote) || !saved.inLearnedScope(store))
+            !(containsReaderSelection(saved.page.text, quote) ||
+                (isLocalBook && containsBoundBookSelection(saved.page.text, quote))) || !saved.inLearnedScope(store))
             throw MockError(HttpStatusCode.Conflict, "这段原文的来源或可见范围尚未核实，暂时无法讲解。")
         // The alias is for the existing local reader's citation navigation only.
         // It is minted after the real document/page passed the trusted ceiling.

@@ -61,6 +61,12 @@ internal class ExplainConsent(private val directory: Path) {
 
 /** The request and reply contract with the paired server; pure so it is testable without a network. */
 internal object ExplainWire {
+    fun question(requestId: String, chosen: SourceBlock, question: String): JsonObject {
+        require(BookPassageQuestion.accepts(question))
+        require(chosen.text.trim().length in 1..4_000)
+        return JsonObject(request(requestId, chosen, listOf(chosen)) + mapOf(
+            "kind" to JsonPrimitive("ask"), "question" to JsonPrimitive(question.trim())))
+    }
     /** The chosen block plus its neighbours in book order; the server may cite only these. */
     fun context(blocks: List<SourceBlock>, chosen: SourceBlock): List<SourceBlock> {
         val i = blocks.indexOfFirst { it.id == chosen.id }.takeIf { it >= 0 } ?: return listOf(chosen)
@@ -76,11 +82,14 @@ internal object ExplainWire {
 
     fun parse(body: JsonObject, sent: List<SourceBlock>): ExplainResult {
         val text = (body["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-        val citations = (body["sources"] as? JsonArray).orEmpty().mapNotNull { value ->
-            val source = value as? JsonObject ?: return@mapNotNull null
-            val id = (source["docId"] as? JsonPrimitive)?.contentOrNull ?: return@mapNotNull null
-            val block = sent.firstOrNull { it.id == id } ?: return@mapNotNull null
-            Citation((source["anchor"] as? JsonPrimitive)?.contentOrNull.orEmpty(), id, block.page)
+        val citations = (body["sources"] as? JsonArray).orEmpty().map { value ->
+            val source = value as? JsonObject ?: return ExplainResult.Refused("这次回答的出处无法核对。")
+            val id = (source["docId"] as? JsonPrimitive)?.contentOrNull
+            val block = sent.firstOrNull { it.id == id } ?: return ExplainResult.Refused("这次回答的出处无法核对。")
+            val page = (source["pdfPage"] as? JsonPrimitive)?.intOrNull
+            val anchor = (source["anchor"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            if (page != block.page || anchor.isBlank()) return ExplainResult.Refused("这次回答的出处无法核对。")
+            Citation(anchor, block.id, block.page)
         }
         // A reply without a verified block reference is a refusal message, never an explanation.
         if (text.isBlank() || citations.isEmpty()) return ExplainResult.Refused(text.ifBlank { "这次没有得到可核对的讲解。" })
@@ -118,11 +127,18 @@ internal open class BookExplainer(private val settings: DesktopConnectionSetting
     catch (_: Exception) { false }
 
     open suspend fun explain(chosen: SourceBlock, blocks: List<SourceBlock>, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult {
-        val paired = identity ?: return ExplainResult.Refused("还没连上你的 Mac。先配对。")
         val context = ExplainWire.context(blocks, chosen)
+        return send(ExplainWire.request(requestId, chosen, context), context, requestId)
+    }
+
+    suspend fun ask(chosen: SourceBlock, question: String, requestId: String = UUID.randomUUID().toString().replace("-", "")): ExplainResult =
+        send(ExplainWire.question(requestId, chosen, question), listOf(chosen), requestId)
+
+    private suspend fun send(input: JsonObject, context: List<SourceBlock>, requestId: String): ExplainResult {
+        val paired = identity ?: return ExplainResult.Refused("还没连上你的 Mac。先在讲解页配对。")
         val http = CourseHttp(paired.serverUrl, paired.credentials.deviceId, paired.credentials.token, "library")
         return try {
-            val reply = http.explainLibrary(ExplainWire.request(requestId, chosen, context))
+            val reply = http.explainLibrary(input)
             val body = reply.body
             when {
                 reply.statusCode == 401 -> { identity = null; ExplainResult.Refused(reply.error.orEmpty(), unauthorized = true) }

@@ -456,11 +456,12 @@ production PDFBox raster: scale 2, reduced if necessary to a 4096px maximum edge
 pages start at 1. The preview command writes original-page PNGs, individual PNGs
 and `*.review.json`, all **UNREVIEWED**. Compare each full-size PNG with its page:
 include the complete body, title, caption, notes and credits, exclude adjacent
-prose, and retain one complete version of each object. Only then copy the chosen
-receipts into the approved directory and explicitly set their decision to
-`COMPLETE_OBJECT_WITH_LABELS`. Keep rejected/draft receipts separately. No command
-performs that decision change. This is a local review declaration, not reviewer
-authentication or an automated guarantee that the object is complete.
+prose, and retain one complete version of each object. The offline workspace
+below records this decision without hand-editing receipts. If reviewing manually,
+only then copy the chosen receipts into the approved directory and explicitly set
+their decision to `COMPLETE_OBJECT_WITH_LABELS`. Keep rejected/draft receipts
+separately. This is a local review declaration, not reviewer authentication or an
+automated guarantee that the object is complete.
 
 Import rechecks PDF bytes, canonical UTF-16 text, pixel selection and exact PNG
 digest. Stale receipts, partial glyphs, rotated/OCR pages and same-page overlapping
@@ -476,9 +477,59 @@ assets after later manual edits.
 study blocks and valid citations, and both text-hiding settings. The imported
 objects have no replacement range: **all original text stays visible**. Geometry
 alone cannot detect a clipped photograph; the real trial rejected such a preview
-despite valid glyph mapping. No UI, automatic caption grouping, model approval,
+despite valid glyph mapping. No reader UI, automatic caption grouping, model approval,
 cross-page table association or reader retention measurement is implemented here.
 The old 66 B/C candidate receipts remain unapproved.
+
+### Offline full-size batch review
+
+`review_workspace.py` requires Pillow. Use a private, unsynced directory outside
+**every** Git worktree; do not upload the HTML, saved decisions or real PNGs.
+Start from fresh `ReviewedPdfVisualsProbe preview` output, not B/C candidate
+receipts. Both output directories below must be new:
+
+```sh
+tools/dev/heavy --local "$REVIEW_PYTHON" tools/reader-v2/reflow/review_workspace.py \
+  prepare --previews "$PRIVATE_NEW_PREVIEWS" --out "$PRIVATE_NEW_WORKSPACE"
+# Open PRIVATE_NEW_WORKSPACE/review.html locally in a browser (file://).
+# Compare the full page and crop; use 100% / 200% for small print and edges.
+# Check all three statements, then explicitly approve or reject each object.
+# Save progress; the browser downloads crop-review-decisions.json.
+tools/dev/heavy --local "$REVIEW_PYTHON" tools/reader-v2/reflow/review_workspace.py \
+  export --previews "$PRIVATE_NEW_PREVIEWS" --decisions "$PRIVATE_SAVED_DECISIONS" \
+  --out "$PRIVATE_NEW_APPROVED_REVIEWS"
+java -cp "$PRIVATE_STATE/reviewed-classes:$DESKTOP_CLASSPATH" ReviewedPdfVisualsProbe \
+  apply "$PRIVATE_PDF" "$PRIVATE_NEW_APPROVED_REVIEWS" "$PRIVATE_LIBRARY"
+```
+
+The HTML embeds its images and scripts, opens without a server and blocks network
+connections with a CSP. It shows the entire source page beside one crop, marks
+other same-page candidates and supports native-size scrolling, light/dark themes,
+previous/next navigation and save/resume. Opening or checking a crop never
+approves it; explicit approval needs all three statements. Unchecking revokes an
+approval. Two overlapping approvals are refused; the reviewer chooses one
+complete version. This is an aid to human review, not semantic deduplication,
+automatic label grouping, a signature or the reader's display acceptance.
+
+Prepare checks bounded PNGs, crop hashes and pixel equality with the full-page
+context. Fresh production-generated context is still a trust assumption; this
+tool does not independently re-render the PDF. Export reloads current previews
+and requires an exact match to saved draft identities, hashes and selections;
+stale/unknown/duplicate rows or overlapping approvals fail before any output.
+Pending and rejected items are omitted. Exported receipts use the existing
+production schema; `apply` independently re-renders and checks the original PDF
+again. Output is refused inside Git or over an existing directory; newly created
+review directories use owner-only permissions where supported. Image budgets are
+128 objects, 32 per page, 64 MiB encoded bytes and 64 × 1024² decoded pixels.
+
+Browser acceptance: start with all objects pending, approve one, refuse an
+overlapping duplicate, reject it, approve a disjoint object, uncheck/recheck,
+save, reload and resume. Alter a saved digest and confirm resume refuses it
+without changing the current decisions. Check 100% and 200% image widths, both
+themes and a narrow viewport. Finally export and use production `apply`; a
+successful browser save alone is not an import test. The private trial reused
+the four objects independently accepted in PR #355 and its rejected photograph;
+it adds workflow evidence, not new object coverage.
 
 ### Regression commands
 
@@ -497,7 +548,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 63 reflow tests cover diff accounting, private-output guards, stale identities,
+The 71 reflow tests (Pillow required for the eight new workspace tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -508,6 +559,9 @@ disjoint ranges, frame conversion and budgets. The new crop CLI integration uses
 the existing own four-page fixture, verifies three saved crops pixel for pixel,
 checks disjoint/CropBox mappings and refuses rotation and stale PDF identity.
 It uses known proposals and does not measure B/C recognition.
+The eight workspace tests additionally cover explicit approval/export, required
+checks, stale/partial/duplicate decisions, overlap refusal, changed PNG/context,
+mixed source identities, inert untrusted names/CSP and Git/symlink/overwrite guards.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

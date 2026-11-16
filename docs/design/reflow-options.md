@@ -496,7 +496,52 @@ CSS、导出行分页契约或渲染公式，也没有改 EPUB 的既有文字�
   Mac 25 tests OK，退出 0；`git diff --cached --check` 退出 0。
 
 Word 结构到既有文字的映射、可靠长表行/表头、图注续段、自动裁图导入和 B+C 联合
-质量仍待补齐。显示仍等 TON-1667、TON-1670，32 格真窗口验收未验证。
+质量在本段交付时仍待补齐；Word 映射的后续进展见下节。
+显示仍等 TON-1667、TON-1670，32 格真窗口验收未验证。
+
+## Word 元素到既有文字的映射
+
+新增生产接口 `StructuredBookExtraction.wordSourceMapping(path, canonicalPages)`，按需
+重提取 DOCX 并核对全部页号、文字；任一不符即返回 `STALE_TEXT` 和空载荷。普通导入
+不生成映射，未接入持久化、自动裁图、隐藏或阅读器。本文的 Word 指 DOCX，不涵盖旧
+二进制 `.doc`。全部回归使用自生成材料，没有真实 Word/EPUB 的本机补验。
+
+追踪沿用原 Word 遍历：段落、表格行/单元格、OMML 公式和其子节点分别记录输出范围，
+不是搜索重复文字。每个元素携带包成员、原始字节 SHA-256、XML 元素路径、命名空间
+和跨页 UTF-16 范围，与 `native_payload.py` 的源树定位方式一致。表头、合并单元格、
+样式等属性节点只保留源身份，没有正文就返回空范围；须核对成员摘要后读取原树，不能
+从空范围猜显示锚点，也不能把范围当作完整的行分页或公式结构载荷。
+
+两条既有分页路径均保留：有显式换页时各段单独 trim、分页（包括空页）；没有显式
+换页时继续经 clean、标题拆章再分页。`BookText.chapters` 只新增可选的已消费切片
+回调，默认输出不变。映射核对切片逐字相等；仅归一化需要的端点，不创建逐字符数组。
+父子范围可重叠、跨页可分段，都只是来源关系，不授权隐藏原文。合成回归分别检查了
+CR/CRLF 在两条路径中的既有差异，没有借映射改变清洗规则。
+
+脚注有独立成员和位置：引用标记仍属于 document，追加到页尾的脚注正文映射到
+footnotes。相同脚注在同页仍只追加一次，跨页出现则返回各副本的范围；新增的“脚注
+编号”前缀、缺失脚注提示没有伪造的源文字范围。未引用脚注、删除内容、域指令、原
+提取器忽略的嵌套表格等节点保留源身份但没有范围。本段没有补回它们的显示，尤其
+不能把“空映射”解释为源文件没有这些内容。
+
+新增 8 项 `WordSourceMappingTest` 回归，覆盖重复段落、源树路径和摘要、表头/合并
+属性、公式、标题拆章、跨页代理对、连续换页和空页、CR 清洗、跨页脚注副本、遗漏
+内容、过期页拒绝；还走真实 `TextbookLibrary` 导入、删除外部原件、从保存副本重开，
+核对 canonical text、课程正文块和所有合法正文出处解析不变。既有测试未修改。
+
+实际验证（2026-11-16）：
+
+- `tools/dev/heavy ./gradlew :desktopApp:test --tests 'com.coach.desktop.books.WordSourceMappingTest' --console=plain`：
+  winbox 退出 0，`BUILD SUCCESSFUL in 1m 2s`，8 tests、0 failures/errors/skipped。
+- `tools/dev/heavy ./gradlew :desktopApp:test --console=plain`：winbox 控制台实际执行，
+  退出 0，`BUILD SUCCESSFUL in 6m 45s`，461 tests、0 failures、0 errors、7 skipped。
+  快照 `f3be128632ed49f105985c7c89ba445ceb86df87`；7 项仍为既有的 3 项窗口和
+  4 项本机服务端环境测试，新增 8 项没有跳过。两次测试均首次运行通过。
+- `tools/dev/heavy --local python3 -I -m unittest discover -s tools/reader-v2/reflow`：
+  Mac 退出 0，25 tests OK；`git diff --cached --check` 退出 0。
+
+可靠长表行/表头、图注续段、自动裁图导入、结构持久化和渲染、B+C 联合质量仍待补齐。
+显示仍等 TON-1667、TON-1670，32 格真窗口验收未验证。
 
 ## 产品实现契约与下一步
 
@@ -553,8 +598,8 @@ Word 结构到既有文字的映射、可靠长表行/表头、图注续段、�
 
 `StructuredBookExtraction.kt` 目前仍将 Word 表格行连接成平文字；HTML 提取会移除
 aside。EPUB 使用 `TextbookLibrary.kt` 中的独立提取器，aside 文字本来就保留，但未
-显示为知识框（此前将这两条路径混写，此处更正）。EPUB 已有上节按需元素范围载荷，
-尚未持久化或渲染；Word 映射仍待补齐。结构显示须保持既有 `BookPage.text`、清理规则
+显示为知识框（此前将这两条路径混写，此处更正）。EPUB 和 Word 已有上节按需元素
+范围载荷，尚未持久化或渲染。结构显示须保持既有 `BookPage.text`、清理规则
 与偏移，不能把提取映射当作原结构显示已完成。
 
 ### 表格合行与图注插断续段：第二阶段对策

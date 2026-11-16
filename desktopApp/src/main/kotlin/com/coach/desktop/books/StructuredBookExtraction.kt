@@ -106,20 +106,44 @@ internal object StructuredBookExtraction {
         ?: Regex("(?i)^kindle:embed:([0-9a-v]+)(?:[?].*)?$").matchEntire(image.attr("src"))
             ?.groupValues?.get(1)?.toIntOrNull(32)
 
-    private fun word(zip: SafeBookArchive, title: String): ExtractedBook {
-        val footnotes = if (zip.contains("word/footnotes.xml")) xml(zip.read("word/footnotes.xml")).all("footnote")
-            .filter { it.attr("id").toIntOrNull()?.let { id -> id > 0 } == true }
-            .associate { it.attr("id") to inline(it) } else emptyMap()
+    /** On-demand provenance, not yet persisted or used for rendering/hiding. */
+    fun wordSourceMapping(path: Path, canonicalPages: List<BookPage>): WordSourceMapping = SafeBookArchive(path).use { zip ->
+        val elements = mutableListOf<WordElementSource>()
+        val book = word(zip, "", elements)
+        if (book.pages.map { it.number to it.text } == canonicalPages.map { it.number to it.text })
+            WordSourceMapping(WordSourceMapping.Status.MAPPED, elements)
+        else WordSourceMapping(WordSourceMapping.Status.STALE_TEXT, emptyList())
+    }
+
+    private fun word(zip: SafeBookArchive, title: String, elements: MutableList<WordElementSource>? = null): ExtractedBook {
+        val noteBytes = if (zip.contains("word/footnotes.xml")) zip.read("word/footnotes.xml") else null
+        val noteRoot = noteBytes?.let(::xml)
+        val noteTrace = if (elements != null && noteBytes != null && noteRoot != null) WordTextTrace("word/footnotes.xml", noteBytes, noteRoot) else null
+        val noteText = if (noteTrace != null) StringBuilder() else null
+        val footnotes = noteRoot?.all("footnote")
+            ?.filter { it.attr("id").toIntOrNull()?.let { id -> id > 0 } == true }
+            ?.associate { note ->
+                val base = noteText?.length ?: 0
+                val value = inline(note, span = noteTrace?.let { trace -> { node, start, end -> trace.record(node, base + start, base + end) } })
+                noteText?.append(value)
+                note.attr("id") to (base to value)
+            }.orEmpty()
+        if (noteTrace != null && noteRoot != null) noteTrace.record(noteRoot, 0, noteText!!.length)
         val headingStyles = if (zip.contains("word/styles.xml")) xml(zip.read("word/styles.xml")).all("style")
             .filter { style -> style.all("outlineLvl").isNotEmpty() || style.all("name").any { it.attr("val").matches(Regex("(?i)heading\\s*\\d+")) } }
             .map { it.attr("styleId") }.toSet() else emptySet()
         val output = StringBuilder()
+        val documentBytes = zip.read("word/document.xml")
+        val document = xml(documentBytes)
+        val trace = if (elements != null) WordTextTrace("word/document.xml", documentBytes, document) else null
         val placements = mutableListOf<FormatBookImages.Placement>()
         val rels = if (zip.contains("word/_rels/document.xml.rels")) relationships(zip, "word/_rels/document.xml.rels") else emptyMap()
         var imageBytes = 0L
-        fun appendInline(node: Node) {
+        fun appendInline(node: Node, includeRoot: Boolean = true) {
             val base = output.length
-            val value = inline(node) { image, offset ->
+            val value = inline(node, span = trace?.let { source -> { current, start, end ->
+                if (includeRoot || current !== node) source.record(current, base + start, base + end)
+            } }) { image, offset ->
                 val id = if (image.localName == "blip") image.attr("embed") else image.attr("id")
                 val target = rels[id] ?: return@inline
                 require(placements.size < FormatBookImages.MAX_IMAGES) { "这份 Word 插图过多，请分册导入。" }
@@ -140,46 +164,76 @@ internal object StructuredBookExtraction {
         }
         fun visit(node: Node) {
             if (node !is Element) return
+            var start = output.length
+            var end: Int? = null
             when (node.localName) {
                 "p" -> {
                     if (node.all("pageBreakBefore").any { it.attr("val") !in setOf("0", "false", "off") }) output.append('\u000c')
                     val style = node.all("pStyle").firstOrNull()?.attr("val").orEmpty()
                     output.append("\n\n")
+                    start = output.length
                     if (style in headingStyles || style.matches(Regex("(?i)heading[1-9]"))) output.append("# ")
-                    appendInline(node)
+                    appendInline(node, includeRoot = false)
+                    end = output.length
                     output.append("\n\n")
                 }
                 "tbl" -> node.children().filter { it.localName == "tr" }.forEach { row ->
                     output.append("\n\n")
+                    val rowStart = output.length
                     row.children().filter { it.localName == "tc" }.forEachIndexed { cellIndex, cell ->
                         if (cellIndex > 0) output.append(" | ")
+                        val cellStart = output.length
                         cell.children().filter { it.localName == "p" }.forEachIndexed { paragraphIndex, paragraph ->
                             if (paragraphIndex > 0) output.append(" ")
                             appendInline(paragraph)
                         }
+                        trace?.record(cell, cellStart, output.length)
                     }
+                    trace?.record(row, rowStart, output.length)
                     output.append("\n\n")
                 }
                 "sectPr" -> if (node.all("type").any { it.attr("val") in setOf("nextPage", "evenPage", "oddPage") }) output.append('\u000c')
                 else -> node.children().forEach(::visit)
             }
+            trace?.record(node, start, end ?: output.length)
         }
-        visit(xml(zip.read("word/document.xml")))
+        visit(document)
         val text = output.toString().trim()
         require(text.isNotBlank()) { "这份 Word 文档没有可读取的文字。" }
-        val divided = if ('\u000c' in text) text.split('\u000c').flatMap { TextbookExtraction.paginate(it.trim()) }
-            .mapIndexed { i, page -> page.copy(number = i + 1) } else BookText.chapters(text)
+        val leading = output.length - output.toString().trimStart().length
+        val explicitPages = '\u000c' in text
+        val divided = if (explicitPages) {
+            var cursor = leading
+            text.split('\u000c').flatMap { section ->
+                val local = TextbookExtraction.paginate(section.trim())
+                trace?.pages(cursor + section.length - section.trimStart().length, local)
+                cursor += section.length + 1
+                local
+            }.mapIndexed { i, page -> page.copy(number = i + 1) }
+        } else BookText.chapters(text, trace?.let { source -> { start, pages ->
+            source.pages(TextbookExtraction.clean(output.substring(0, leading)).length + start, pages)
+        } })
         val pages = divided.map { page ->
             val ids = Regex("【脚注 ([0-9]+)】").findAll(page.text).map { it.groupValues[1] }.distinct().toList()
-            page.copy(text = page.text + ids.joinToString("") { id -> "\n\n脚注 $id：${footnotes[id] ?: "（原文件缺少这条脚注）"}" })
+            val suffix = StringBuilder()
+            for (id in ids) {
+                suffix.append("\n\n脚注 $id：")
+                val note = footnotes[id]
+                if (note != null) noteTrace?.copy(page.number, note.first, note.second, page.text.length + suffix.length)
+                suffix.append(note?.second ?: "（原文件缺少这条脚注）")
+            }
+            page.copy(text = page.text + suffix)
         }
+        trace?.let { elements?.addAll(it.project(output.toString(), normalize = !explicitPages)) }
+        noteTrace?.let { elements?.addAll(it.project(noteText.toString(), normalize = false)) }
         return ExtractedBook(title, pages, FormatBookImages.attach(output.toString(), divided, placements))
     }
 
-    private fun inline(node: Node, image: ((Element, Int) -> Unit)? = null): String {
+    private fun inline(node: Node, span: ((Element, Int, Int) -> Unit)? = null, image: ((Element, Int) -> Unit)? = null): String {
         val output = StringBuilder()
         fun visit(current: Node) {
             if (current !is Element) return
+            val start = output.length
             when (current.localName) {
                 "t" -> output.append(current.textContent)
                 "tab" -> output.append('\t')
@@ -190,6 +244,7 @@ internal object StructuredBookExtraction {
                 "blip", "imagedata" -> { image?.invoke(current, output.length); current.children().forEach(::visit) }
                 else -> current.children().forEach(::visit)
             }
+            span?.invoke(current, start, output.length)
         }
         visit(node)
         return output.toString()

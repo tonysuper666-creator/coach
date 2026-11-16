@@ -308,7 +308,7 @@ class WindowsTextbooksTest {
             fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
             fun highlighted(label: String) = onNodeWithTag("host-navigation")
                 .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, label))
-            fun coachMarks() = onAllNodes(hasText("Coach")).fetchSemanticsNodes().size
+            fun coachMarks() = onAllNodes(hasText("LearningCoach")).fetchSemanticsNodes().size
             fun readFrom(button: String) {
                 onNodeWithTag(button).performClick()
                 ready(controller) { it.screen == BookScreen.READER }

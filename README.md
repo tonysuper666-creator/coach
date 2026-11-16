@@ -1,7 +1,7 @@
-# Coach（代号，占位名 LerningCoach）
+# LearningCoach
 
 > [!IMPORTANT]
-> **权威产品决定入口**：参见 [PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)。以李政最新追加更正为准：软件开发第一、项目优先级未降；长期读教材/文献/好书、课程可配置；考试资料仅填充，不因缺课件/真题挡功能；先做后讲、自己的题覆盖真题知识点且不直接放真题；教材优先；V7已定、一套风格派生；精确占位 `LerningCoach`（正式名未定）；长期覆盖三移动形态+Mac/Windows桌面、无Web、无产品工期；当前唯一开发范围是Windows（上传教材先读/直接学、询问是否开启learning、出题可选不出/选择/简答、学习位置打开对应原文、阅读器翻真页；安卓/iOS/Fold8/Mac安装包暂停，Windows安装包最后；长期形态保留）；iOS已有账号内部TestFlight/直装不上架（沿现有配置、不改变身份）；暂不合并Sable；不测Mac睡眠，不反复索辅助功能授权，OPPO可替代样本（等待入口走 `~/Coach/testphone/wait.sh`）。
+> **权威产品决定入口**：参见 [PRODUCT_DECISIONS.md](docs/PRODUCT_DECISIONS.md)。以李政最新追加更正为准：软件开发第一、项目优先级未降；长期读教材/文献/好书、课程可配置；考试资料仅填充，不因缺课件/真题挡功能；先做后讲、自己的题覆盖真题知识点且不直接放真题；教材优先；V7已定、一套风格派生；正式产品名 `LearningCoach`；长期覆盖三移动形态+Mac/Windows桌面、无Web、无产品工期；当前唯一开发范围是Windows（上传教材先读/直接学、询问是否开启learning、出题可选不出/选择/简答、学习位置打开对应原文、阅读器翻真页；安卓/iOS/Fold8/Mac安装包暂停，Windows安装包最后；长期形态保留）；iOS已有账号内部TestFlight/直装不上架（沿现有配置、不改变身份）；暂不合并Sable；不测Mac睡眠，不反复索辅助功能授权，OPPO可替代样本（等待入口走 `~/Coach/testphone/wait.sh`）。
 
 把 StudyCoach 的学习闭环与证据规则、DeepTutor 的导师能力合在一起，从 0 重写的学习应用。目标：安卓原生 + macOS 桌面（之后 Windows），服务端先放用户的 Mac，AI 经订阅 CLI。
 
@@ -23,7 +23,7 @@ tools/dev/heavy ./gradlew :androidApp:assembleDebug :androidApp:assembleDebugAnd
 COACH_URL=http://127.0.0.1:<测试端口> COACH_TOKEN_FILE=<测试令牌> COACH_CLIENT_DIR=<测试账本目录> tools/dev/heavy ./gradlew :desktopApp:run --offline -Pcoach.autoExitSeconds=5 --max-workers=2
 ```
 
-首次联网同步包括 Compose 安卓构件与桌面打包的 JDK probe。以后桌面运行可 `--offline`。**开发版桌面（`:desktopApp:run`，或带 `COACH_AUTOPLAY` / `COACH_RENDER_STATE` / `-Dcoach.capturePath` 等测量开关的任何启动）不再默认连生产**：必须显式给 `COACH_URL`（端口不得是 18791 / 8791 / 8790）、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`，否则启动即失败；打包的 `Coach.app` 日常使用不受影响。渲染回放用 `COACH_MODE=spike`，不连服务端。产物为 `androidApp/build/outputs/apk/debug/androidApp-debug.apk` 和 `desktopApp/build/compose/binaries/main/app/Coach.app`。
+首次联网同步包括 Compose 安卓构件与桌面打包的 JDK probe。以后桌面运行可 `--offline`。**开发版桌面（`:desktopApp:run`，或带 `COACH_AUTOPLAY` / `COACH_RENDER_STATE` / `-Dcoach.capturePath` 等测量开关的任何启动）不再默认连生产**：必须显式给 `COACH_URL`（端口不得是 18791 / 8791 / 8790）、`COACH_TOKEN_FILE`、`COACH_CLIENT_DIR`，否则启动即失败；打包的 `LearningCoach.app` 日常使用不受影响。渲染回放用 `COACH_MODE=spike`，不连服务端。产物为 `androidApp/build/outputs/apk/debug/androidApp-debug.apk` 和 `desktopApp/build/compose/binaries/main/app/LearningCoach.app`。
 
 **每个重命令都用 `tools/dev/heavy COMMAND ...`**（包括 Gradle、SDK 安装）；**模拟器会话用 `tools/dev/heavy --emulator COMMAND ...`**（会话里的 APK 编译、adb 安装和验收都放在这一条命令里）。锁是 `mkdir` 原子锁：构建最多 `COACH_HEAVY_BUILD_LANES`（默认 3）道并行，用 `~/dev/.coach-heavy.lock.2` 起的几个目录；模拟器只用 `~/dev/.coach-heavy.lock` 这一道，一次一个，旧版脚本也只抢这一道，所以新旧脚本可以混用。等待时打印各道持有者的 PID 与命令；子进程以 `nice -n 15` 运行，退出或中断时释放锁；持有者 PID 已不在且锁目录超过 60 秒的，下一个等待者会自动回收。构建道数会跟着本机负载变：守护进程把允许的道数写进 `~/dev/.coach-heavy.lanes`（内存吃紧时 1 道，宽松时最多 4 道），等待者每 5 秒重读，只限制新拿锁、不打断在跑的；没有这个文件就按 `COACH_HEAVY_BUILD_LANES`。Gradle 默认 `org.gradle.workers.max=2`。不要绕过锁，也不要写「拿到锁以后一直等」的占位脚本。测试可用 `COACH_HEAVY_LOCK` 指定隔离锁目录。
 
@@ -68,7 +68,7 @@ SQLDelight 固定 2.4.0、方言 sqlite-3-38。上游 [#5986](https://github.com
 桌面 JDK 厂商检查按 ADR-0001 的 Homebrew JDK 17 决定关闭，实际打包、启动和 Metal 渲染需实测；不跳过测试。macOS 的应用包版本首位必须为正，当前包版本为 1.0.0。无系统录屏权限时，可以捕获本应用已经显示的 Skia 渲染表面（仅开发验收使用）：
 
 ```sh
-JAVA_TOOL_OPTIONS="-Dcoach.autoExitSeconds=3 -Dcoach.capturePath=$PWD/coach-window.png" desktopApp/build/compose/binaries/main/app/Coach.app/Contents/MacOS/Coach
+JAVA_TOOL_OPTIONS="-Dcoach.autoExitSeconds=3 -Dcoach.capturePath=$PWD/coach-window.png" desktopApp/build/compose/binaries/main/app/LearningCoach.app/Contents/MacOS/LearningCoach
 ```
 
 S0 的 Ktor 引擎使用 Netty；CIO 3.3.3 在绑定失败的实测中卡住启动，不能满足重试要求。Netty 分别限制连接/工作/调用线程组为 1/1/2，并使用单一进程退出钩子按顺序停止两路引擎。

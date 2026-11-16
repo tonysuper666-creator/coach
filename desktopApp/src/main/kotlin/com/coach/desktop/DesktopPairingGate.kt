@@ -51,7 +51,7 @@ internal fun DesktopPairingGate(settings: DesktopConnectionSettings, content: @C
             else if (!initialized) Box(Modifier.padding(24.dp)) { Text("正在读取连接信息…") }
             else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("连接你的 Mac", style = MaterialTheme.typography.headlineMedium)
-                Text("先打开 Tailscale，确认 Mac 上的 Coach 服务已运行，再输入 Mac 地址和 6 位配对码。")
+                Text("先打开 Tailscale，确认 Mac 上的 LearningCoach 服务已运行，再输入 Mac 地址和 6 位配对码。")
                 OutlinedTextField(value = address, onValueChange = { address = it; error = null },
                     label = { Text("Mac 地址") }, placeholder = { Text("http://你的Mac地址:18791") },
                     singleLine = true, enabled = !busy)

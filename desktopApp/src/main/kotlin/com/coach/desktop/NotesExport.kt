@@ -93,7 +93,7 @@ internal fun saveNotes(directory: Path, draft: NotesDraft, pdf: ByteArray?, file
         files.verifyPrivate(staging, true)
         files.write(staging.resolve("复习提纲.md"), draft.markdown.toByteArray(Charsets.UTF_8))
         if (pdf != null) files.write(staging.resolve("复习提纲.pdf"), pdf)
-        val target = chosen.resolve("Coach-复习-${java.time.LocalDate.now()}-${UUID.randomUUID()}")
+        val target = chosen.resolve("LearningCoach-复习-${java.time.LocalDate.now()}-${UUID.randomUUID()}")
         return files.publish(staging, target)
     } catch (error: Throwable) {
         failure = error

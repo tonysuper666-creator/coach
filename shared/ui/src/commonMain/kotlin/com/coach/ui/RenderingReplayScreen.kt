@@ -144,7 +144,7 @@ fun RenderingReplayScreen(state: ReplayState, corpus: ReplayCorpus?, desktop: Bo
                     }
                 }
                 Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Coach · 渲染回放", style = MaterialTheme.typography.titleLarge)
+                    Text("LearningCoach · 渲染回放", style = MaterialTheme.typography.titleLarge)
                     Text("窗口 ${windowWidth} × ${windowHeight} dp · ${density.density} · $folding", style = MaterialTheme.typography.labelSmall)
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(enabled = corpus != null, onClick = { state.running = !state.running; save() }) { Text(if (state.running) "暂停" else "回放") }

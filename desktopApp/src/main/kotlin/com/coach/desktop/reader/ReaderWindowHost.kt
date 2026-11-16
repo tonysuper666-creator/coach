@@ -71,7 +71,7 @@ fun main() {
         val docTitle = session?.remote?.current?.title ?: "资料阅读"
         Window(
             onCloseRequest = ::exitApplication,
-            title = "Coach 阅读器 · $docTitle",
+            title = "$docTitle · LearningCoach",
             state = rememberWindowState(width = 1200.dp, height = 760.dp),
         ) {
             if (httpMode) {

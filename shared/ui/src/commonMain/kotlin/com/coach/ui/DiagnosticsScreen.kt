@@ -17,7 +17,7 @@ fun DiagnosticsScreen(foldingFeature: String) {
                 val width = maxWidth.value.roundToInt()
                 val height = maxHeight.value.roundToInt()
                 Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text("Coach", style = MaterialTheme.typography.headlineLarge)
+                    Text("LearningCoach", style = MaterialTheme.typography.headlineLarge)
                     Text("窗口 $width × $height dp")
                     Text("密度 ${density.density} · 字体缩放 ${density.fontScale}")
                     Text("FoldingFeature: $foldingFeature")

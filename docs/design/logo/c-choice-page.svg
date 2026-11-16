@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- 方向 C「选项即课本」：纸上三行选项，第二行点了朱色。 -->
+  <rect x="16" y="16" width="224" height="224" rx="44" fill="#FCFAF6" stroke="#B9B0A1" stroke-width="6"/>
+  <g fill="none" stroke="#857D71" stroke-width="8">
+    <circle cx="74" cy="78" r="14"/><circle cx="74" cy="178" r="14"/>
+  </g>
+  <circle cx="74" cy="128" r="18" fill="#A63E2C"/>
+  <rect x="106" y="72" width="94" height="12" rx="6" fill="#857D71"/>
+  <rect x="106" y="122" width="94" height="12" rx="6" fill="#2F6A4B"/>
+  <rect x="106" y="172" width="70" height="12" rx="6" fill="#857D71"/>
+</svg>

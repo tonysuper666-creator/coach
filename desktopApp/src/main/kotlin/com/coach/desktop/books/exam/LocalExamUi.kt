@@ -3,6 +3,7 @@ package com.coach.desktop.books.exam
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -137,8 +138,9 @@ internal fun LocalExamsSummary(controller: LocalExamController) {
                 Text("${paper.str("title")} · ${paper.num("items")} 题", style = MaterialTheme.typography.titleMedium)
                 if (paper.str("origin") == "AUTHORED") {
                     Text("自编题卷，参考答案尚未独立核对。", style = note, color = colors.fgSecondary)
-                    // 整行可点：方框和「计时作答」是同一个开关，键盘空格也能切。
-                    Row(Modifier.v7FocusRing().toggleable(timed, enabled = canStart, role = Role.Checkbox) { timed = it }
+                    // 整行可点：方框和「计时作答」是同一个开关，键盘空格也能切；焦点只画 V7 墨色环，不叠 Material 灰底。
+                    Row(Modifier.v7FocusRing().toggleable(timed, remember { MutableInteractionSource() }, indication = null,
+                        enabled = canStart, role = Role.Checkbox) { timed = it }
                         .testTag("local-timed-$index").padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(timed, onCheckedChange = null, enabled = canStart, modifier = Modifier.minimumInteractiveComponentSize(),
                             colors = CheckboxDefaults.colors(checkedColor = v7Pine(), uncheckedColor = colors.fgSecondary, checkmarkColor = colors.surface1))

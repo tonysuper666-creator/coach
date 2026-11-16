@@ -1,17 +1,24 @@
 package com.coach.desktop
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.Textbook
+import coach.design.tokens.CoachV7
+import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
+import com.coach.ui.v7.paperShadow
 import java.nio.file.Path
 
 /** 今天: the book on this machine, at the page and lesson 书架 left off. */
@@ -44,18 +51,31 @@ internal fun HostCourseBook(book: Textbook, busy: Boolean, onLearn: () -> Unit, 
 private fun HostPanel(tag: String, title: String, body: String, busy: Boolean, onPrimary: () -> Unit,
     primaryTag: String, primaryLabel: String, onSecondary: (() -> Unit)?, secondaryTag: String?, secondaryLabel: String?,
     extra: @Composable () -> Unit = {}) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-        Column(Modifier.widthIn(max = 900.dp).fillMaxWidth().verticalScroll(rememberScrollState())
+    HostSheet {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
             .padding(36.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text(title, style = MaterialTheme.typography.headlineMedium)
-            Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(body, color = CoachTheme.colors.fgSecondary)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 PrimaryButton(onPrimary, enabled = !busy, modifier = Modifier.testTag(primaryTag)) { Text(primaryLabel) }
-                if (onSecondary != null && secondaryTag != null && secondaryLabel != null) OutlinedButton(onSecondary,
+                if (onSecondary != null && secondaryTag != null && secondaryLabel != null) PaperButton(onSecondary,
                     enabled = !busy, modifier = Modifier.testTag(secondaryTag)) { Text(secondaryLabel) }
             }
             extra()
         }
+    }
+}
+
+/**
+ * V7 puts every page on a sheet with the desk showing round it: the same margins, corner and shadow as the
+ * paper `Desk` lays out for the reader, so 今天 / 课程 and the reader read as the same desk.
+ */
+@Composable
+private fun HostSheet(content: @Composable () -> Unit) {
+    val colors = CoachTheme.colors
+    Box(Modifier.fillMaxSize().padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 12.dp), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.widthIn(max = 900.dp).fillMaxWidth().fillMaxHeight().paperShadow("sheet", colors.dark)
+            .clip(RoundedCornerShape(CoachV7.Radius.sheet)).background(colors.surface1).testTag("host-sheet")) { content() }
     }
 }
 
@@ -64,9 +84,11 @@ private fun Textbook.progressLine(): String =
 
 @Composable
 internal fun HostEmptyState(tag: String, title: String, text: String) {
-    Column(Modifier.fillMaxSize().padding(36.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(title, style = MaterialTheme.typography.headlineMedium)
-        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    HostSheet {
+        Column(Modifier.fillMaxSize().padding(36.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineMedium)
+            Text(text, color = CoachTheme.colors.fgSecondary)
+        }
     }
 }
 

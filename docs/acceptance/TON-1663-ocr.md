@@ -44,7 +44,9 @@ winbox build 28000.3501 有简体识别包，繁体及日文创建返回空；**
 tools/dev/heavy ./gradlew :desktopApp:test -Pcoach.nativeOcr=true
 ```
 
-2026-11-16 最终 Windows 全量命令退出 **0**：419 项、0 失败、0 错误、5 跳过；实际 OCR 两个测试类均执行，未跳过。heavy 测试快照 `bb3486ff6ced1761a38bdb6b00a5b96bbf8340cc`，Gradle 8 分 49 秒。
+2026-11-16 Windows 全量命令退出 **0**：419 项、0 失败、0 错误、5 跳过；实际 OCR 两个测试类均执行，未跳过。heavy 测试快照 `bb3486ff6ced1761a38bdb6b00a5b96bbf8340cc`，Gradle 8 分 49 秒。
+
+随后 rebase 到最新 `main 0bb82584`，保留 main 新增的空教材中文提示断言，合并一处产品提示措辞冲突，未改测试。对快照 `1a56b9b9d104973dfcc30007fcd0af42ffd29cdd` 运行 `tools/dev/heavy ./gradlew :desktopApp:test --tests 'com.coach.desktop.books.*' -Pcoach.nativeOcr=true`，退出 **0**：37 个测试类、135 项、0 失败/错误/跳过，Gradle 2 分 40 秒；实际 OCR 再次执行。此项为 rebase 后定向验证，不是重新执行全量。
 
 首次全量发现空教材提示不再包含已有测试约定的「没有可提取」，仅修正产品措辞；随后一次全量中已有考试窗口测试 `failedAcceptedAnswerBlocksCloseAndRetryPersistsIt` 在保存后立即寻找选项节点失败，OCR 测试全过。保留考试代码和全部已有测试原样复跑，最终全量通过；前两次各为 419 项、1 失败、5 跳过，没有删除、跳过或放宽测试。
 
@@ -68,7 +70,7 @@ tools/dev/heavy ./gradlew :desktopApp:test -Pcoach.nativeOcr=true
 | OCR 实现 | `5bf32a3b` | 117,059,673 |
 | 增量 | | **9,276,501（9.28 MB，8.61%）** |
 
-这次测量包含 JNA 与压缩 OCR 资源，基于实际 MSI，不用模型原始大小估算。后续仅修正空白教材错误提示的措辞并补验收文档、截图；此表标明实际打包的提交。
+这次测量包含 JNA 与压缩 OCR 资源，基于实际 MSI，不用模型原始大小估算。此表标明实际打包的提交；之后修正空白教材错误提示措辞、补验收文档和截图，并 rebase 到 `main 0bb82584`（含随后合入的提示与笔记导出改动）。没有对 rebase 后的提交重新测量 MSI。
 
 ## 尚未通过的真实链路
 

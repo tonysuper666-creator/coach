@@ -388,6 +388,10 @@ class ReaderSession(val fixture: ReaderFixture, initialWidthDp: Int, val remote:
         if (option in q.options.indices) answers[selectedQuestion] = option
     }
 
+    fun selectRemoteQuestion(index: Int) {
+        if (index in (remote?.studyQuestions?.indices ?: IntRange.EMPTY)) selectedQuestion = index
+    }
+
     fun openProvenanceOfSelected() {
         val q = fixture.questions.getOrNull(selectedQuestion) ?: return
         val page = fixture.pageOfAnchor(q.anchorId)
@@ -593,7 +597,7 @@ private val Flash = Color(0xFFFFE9A8)
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
+fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier, onPractice: ((StudyQuestion) -> Unit)? = null) {
     val density = LocalDensity.current
     BoxWithConstraints(modifier.fillMaxSize().background(Paper)) {
         val widthDp = maxWidth.value.toInt()
@@ -659,7 +663,7 @@ fun ReaderWindow(session: ReaderSession, modifier: Modifier = Modifier) {
                                     )
                                 }
                             }
-                            ReaderPane.Related -> RelatedPane(session)
+                            ReaderPane.Related -> RelatedPane(session, onPractice)
                         }
                     }
                 }
@@ -774,8 +778,8 @@ private fun BodyPane(session: ReaderSession) {
 }
 
 @Composable
-private fun RelatedPane(session: ReaderSession) {
-    if (session.remote != null) { RemoteStudy(session, session.remote); return }
+private fun RelatedPane(session: ReaderSession, onPractice: ((StudyQuestion) -> Unit)?) {
+    if (session.remote != null) { RemoteStudy(session, session.remote, onPractice); return }
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         session.fixture.questions.forEachIndexed { i, q ->
@@ -979,7 +983,7 @@ internal fun NotesSection(session: ReaderSession, remote: ReaderRemote, view: Re
 }
 
 @Composable
-private fun RemoteStudy(session: ReaderSession, remote: ReaderRemote) {
+private fun RemoteStudy(session: ReaderSession, remote: ReaderRemote, onPractice: ((StudyQuestion) -> Unit)?) {
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Text("题目", fontWeight = FontWeight.Bold, fontSize = 14.sp)
         when (val s = remote.study) {
@@ -992,13 +996,22 @@ private fun RemoteStudy(session: ReaderSession, remote: ReaderRemote) {
                     val selected = session.selectedQuestion == i
                     Column(Modifier.fillMaxWidth().padding(top = 8.dp).then(if (selected) Modifier.background(Color(0xFFE6EEF6)) else Modifier).testTag("study-$i")) {
                         Text(q.stem, fontSize = 13.sp)
+                        if (q.week != null && q.id.isNotBlank() && onPractice != null) Text(
+                            "做这题", Modifier.testTag("study-practice-$i").clickable {
+                                session.selectRemoteQuestion(i)
+                                onPractice(q)
+                            }.padding(vertical = 4.dp), color = Accent, fontSize = 12.sp,
+                        )
+                        if (onPractice != null && (q.week == null || q.id.isBlank())) Text(
+                            "这题的所属周或编号待确认，暂不能练习", fontSize = 12.sp, color = Color(0xFF666666),
+                        )
                         if (selected) Text(
                             if (q.anchor.isBlank()) "这题没有登记原句" else "这句在哪考过（回车）",
                             Modifier.testTag("study-source-$i").clickable { session.openRemoteProvenance() }, color = Accent, fontSize = 12.sp,
                         )
                     }
                 }
-                if (s.view.unlocated > 0) Text("另有${s.view.unlocated}题没能定位到页", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = Color(0xFF666666))
+                if (s.view.unlocated > 0) Text("本课程另有${s.view.unlocated}个题目或考点条目位置待确认", Modifier.padding(top = 8.dp), fontSize = 12.sp, color = Color(0xFF666666))
             }
         }
         session.message?.let { Text(it, Modifier.testTag("message").padding(top = 8.dp), color = Color(0xFFA33B2D), fontSize = 13.sp) }

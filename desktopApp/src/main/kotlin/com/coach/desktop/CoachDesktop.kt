@@ -53,6 +53,7 @@ fun runCoach() {
     val size = env("COACH_WINDOW", "900x700").split("x").let { (it.getOrNull(0)?.toIntOrNull() ?: 900) to (it.getOrNull(1)?.toIntOrNull() ?: 700) }
     application {
         var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
+        var readerController by remember { mutableStateOf<CoachController?>(null) }
         Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
@@ -61,7 +62,7 @@ fun runCoach() {
                     onDispose { session.close() }
                 }
                 Column {
-                    TextButton(onClick = { readerIdentity = identity }) { Text("阅读教材") }
+                    TextButton(onClick = { readerController = session.controller; readerIdentity = identity }) { Text("阅读教材") }
                     DesktopCourseContent(session, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", System.getenv("COACH_OPEN_SOURCE") == "1")
                 }
                 LaunchedEffect(session) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(session.controller, it) } }
@@ -73,9 +74,9 @@ fun runCoach() {
         }
         // Keep the course controller mounted; closing this window returns to its original state.
         readerIdentity?.let { identity ->
-            Window(onCloseRequest = { readerIdentity = null }, title = "教材原文",
+            Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文",
                 state = rememberWindowState(width = 1200.dp, height = 760.dp)) {
-                PairedHttpReader(settings, identity, course)
+                PairedHttpReader(settings, identity, course, controller = readerController)
             }
         }
     }

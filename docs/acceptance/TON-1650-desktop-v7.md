@@ -19,30 +19,34 @@ Windows 桌面端每个主要界面和 V7「案头」设计包逐张对照后的
 
 ## 偏差
 
-| # | 类别 | 现象与证据 | 违反 | 代码位置 |
-|---|---|---|---|---|
-| D1 | 字体回退错 / 标题不是宋 | 中文标题和正文全部落到系统黑体：书架标题、走法卡标题、「今天接着读」「本地练习与记录」「第6节 核糖体」「复习 1 题」「讲解」、阅读器标题和正文。拉丁字母（如 `knowledge-recap`）是 Literata，说明只缺中文。见 `compare/1920x1080-light-reader.png`、`-quiz.png` | 正文和标题应为 Literata + Noto Serif SC，界面字 IBM Plex Sans + Noto Sans SC | `shared/ui/src/jvmMain/kotlin/com/coach/ui/v7/V7Fonts.jvm.kt:10` 只装了 literata、ibm_plex_sans、lxgw_wenkai、ibm_plex_mono；`noto_serif_sc.ttf`、`noto_sans_sc.ttf` 只在 `androidMain/res/font` |
-| D2 | 纸面错 | 书架、今天、课程三处的内容直接放在 desk `#E8E2D6` 上，没有 V7 那张纸。见 `compare/1920x1080-light-bookshelf.png`、`-today.png`、`-course.png` | V7 内容都在 sheet 上，四周留桌面 | `WindowsTextbooks.kt`（今天、课程）、`books/TextbookWorkspace.kt`（书架） |
-| D3 | 多余线框 | V7 没有描边，桌面端到处是 1dp 线：走法卡有 `#E3DCCF` / `#34302A` 描边（bookshelf (322,634)）；顶栏底线 y=84，导航栏右线 x=114；「全部教材」上方、课程页、做题页都有分隔线；「全部教材」条目、今天「继续学」、课程「接着读」、小结「上一节」都是描边按钮（today (605,300)） | V7 只用色块和留白分层，不用描边 | `WindowsTextbooks.kt:194` `HorizontalDivider`、`:229` `VerticalDivider`、`:233`、`:280` `OutlinedButton`；`books/TextbookWorkspace.kt:330`、`:758` |
-| D4 | 顶栏 | 顶栏是衬线大字「Coach」（`titleMedium`）加「设置」。V7 是小号无衬线「Coach」、居中面包屑、右侧 Aa / 专心读。进阅读器、做题、复习后，`Desk` 又出一行「Coach 目录 返回书架」，「Coach」出现两次 | 顶栏只有一行 | `WindowsTextbooks.kt:190`；`books/TextbookWorkspace.kt:527`、`:689`、`:815`、`:847` 的 `Desk(...)` |
-| D5 | 文案 | 书架条目写「已开启 learning」，中英混排；做题后另起两行「你选择：核糖体」「与原文一致。」，和选项上的对勾重复；讲解里的出处是正文中的「【短块号】」加一个描边按钮，V7 是正文后一行松绿下划线「出处 · 教材 p.x」 | 文案用人话，不混英文；出处样式 | `books/TextbookWorkspace.kt:334`、`:791-792`；`books/AnswerExplain.kt:91`、`books/BookExplain.kt:220-227`（块号是主线要的，保留，只改呈现） |
-| D6 | 原文显示 | 阅读器里 markdown 标题带着井号显示成「## 第1节 细胞」。见 `compare/1920x1080-light-reader.png` | 标题应排成宋体标题，不露标记 | 阅读器正文渲染（`books/TextbookWorkspace.kt` 阅读器段） |
-| D7 | 控件 / 暗色漏改 | 阅读器「页码」是 Material 描边输入框，带浮动标签；描边浅色 `#665F55`、深色 `#A0978A`（reader (1248,935)），在深色纸上很刺眼；「上一页」「下一页」是描边按钮 | 用纸面按钮和 V7 输入样式；深色用 line `#34302A` 一级的弱线 | `books/TextbookWorkspace.kt:623-627` |
-| D8 | 颜色不取 token | 复习条目底色是 `#EBE9E4` / `#2A2925`，偏灰，不是 card（reviews (786,569)，左缘 x=152 有描边）；浅色做题选项卡片是纯白 `#FFFFFF`，不是 card `#FBF8F2`；小结和知识回顾卡是 `#FCFAF4` / `#1D1B18`，放在 sheet `#FCFAF6` / `#1B1916` 上几乎看不见，原因是 `secondaryContainer` 叠 0.35 透明度；导航栏选中项底色用的是 sheet | 卡片用 card，强调用 zhu / pine，不用 Material 动态色 | `books/AnswerExplain.kt:157`、`books/KnowledgeRecap.kt:30`、`books/BookExplain.kt:221`、`books/TextbookWorkspace.kt:823`（复习条目）、`:554`、`:610` |
-| D9 | 导航状态 | 从「今天」或「课程」进入阅读器、做题、复习后，左栏高亮仍停在「书架」。见 `compare/1920x1080-light-quiz.png` 左栏 | 高亮跟着来处走 | `WindowsTextbooks.kt` 导航栏选中逻辑 |
-| D10 | 动效 | 桌面端只有 `Desk` 里的纸张进场用 300ms / 180ms（`shared/ui/src/commonMain/kotlin/com/coach/ui/v7/Desk.kt:94`）；卡片展开（讲解、小结、知识回顾）没有 260ms `expandMs`，是直接出现；JVM 上 `rememberReducedMotion()` 固定返回 false，Windows「显示动画」关掉后不会停 | 300 / 260 / 180ms，减少动态时全部关掉 | `V7Fonts.jvm.kt:13`；`books/AnswerExplain.kt`、`books/KnowledgeRecap.kt` 卡片出现处。代码层核对，截图看不出时长 |
-| D11 | 版式 | 内容是一整栏，V7 是左目录、中间纸、右「页边」栏；做题标题叫「原文填空」（V7 没有这层小标题）；知识回顾插在题目上方，把题挤下去，「原文填空」在一屏里出现两次；2560x1440 下纸面贴左，右侧约五分之一空着（`compare/2560x1440-dark-quiz.png`） | V7 三栏版心，纸面居中 | `books/TextbookWorkspace.kt:774` 以及做题页布局；`Desk` 宽度约束 |
+代码位置按 TON-1648 拆分后的 main（`desktopApp/src/main/kotlin/com/coach/desktop/` 下的相对路径）。「状态」一栏随每个 PR 更新。
+
+| # | 类别 | 现象与证据 | 违反 | 代码位置 | 状态 |
+|---|---|---|---|---|---|
+| D1 | 字体回退错 / 标题不是宋 | 中文标题和正文全部落到系统黑体：书架标题、走法卡标题、「今天接着读」「本地练习与记录」「第6节 核糖体」「复习 1 题」「讲解」、阅读器标题和正文。拉丁字母（如 `knowledge-recap`）是 Literata，说明只缺中文。见 `compare/1920x1080-light-reader.png`、`-quiz.png` | 正文和标题应为 Literata + Noto Serif SC，界面字 IBM Plex Sans + Noto Sans SC | `shared/ui/src/jvmMain/kotlin/com/coach/ui/v7/V7Fonts.jvm.kt`。字体文件其实早已在 JVM classpath 上（`shared/ui/build.gradle.kts:22` 把 `androidMain/res` 加进 jvm 资源，`font/noto_serif_sc.ttf` 等都在），缺的是回退：Compose Desktop 把一组资源字体按字重只解析成一张字体，Skia 拿不到中文那张，中文就落到系统字 | **已修**（第 1 刀）：每张字体按字重注册进 Compose 用的同一个字体缓存，每条字链（拉丁在前、中文在后）登记成一个字族名，Skia 逐字回退到 Noto Serif SC / Noto Sans SC / 霞鹜文楷。拿不到缓存时退回原资源字体并打日志，`V7FontRegistryTest` 盯住这条路 |
+| D2 | 纸面错 | 书架、今天、课程三处的内容直接放在 desk `#E8E2D6` 上，没有 V7 那张纸。见 `compare/1920x1080-light-bookshelf.png`、`-today.png`、`-course.png` | V7 内容都在 sheet 上，四周留桌面 | `WindowsHomeCards.kt`（今天、课程）、`books/TextbookShelf.kt`（书架） | 未修 |
+| D3 | 多余线框 | V7 没有描边，桌面端到处是 1dp 线：走法卡有 `#E3DCCF` / `#34302A` 描边（bookshelf (322,634)）；顶栏底线 y=84，导航栏右线 x=114；「全部教材」上方、课程页、做题页都有分隔线；「全部教材」条目、今天「继续学」、课程「接着读」、小结「上一节」都是描边按钮（today (605,300)） | V7 只用色块和留白分层，不用描边 | `WindowsTextbookHost.kt:81`、`:116`、`:120`；`WindowsHomeCards.kt:54`；`books/TextbookShelf.kt:41`、`:44`；`books/TextbookLearning.kt:90`、`:140` | 未修 |
+| D4 | 顶栏 | 顶栏是衬线大字「Coach」（`titleMedium`）加「设置」。V7 是小号无衬线「Coach」、居中面包屑、右侧 Aa / 专心读。进阅读器、做题、复习后，`Desk` 又出一行「Coach 目录 返回书架」，「Coach」出现两次 | 顶栏只有一行 | `WindowsTextbookHost.kt:77`；`books/TextbookLearning.kt:71`、`books/TextbookReader.kt:154`、`books/TextbookReviewUi.kt:16`、`:48` 的 `Desk(...)` | 未修 |
+| D5 | 文案 | 英文 learning 混在中文里：书架条目「已开启 learning」、阅读器按钮「开启 learning」、读后提示「要开启 learning 吗？」、无文字层提示「learning 只使用可提取的内容」、导入报错「开启 learning 需要带文字层的教材」；做题后另起两行「你选择：核糖体」「与原文一致。」，和选项上的对勾重复；讲解里的出处是正文中的「【短块号】」加一个描边按钮，V7 是正文后一行松绿下划线「出处 · 教材 p.x」 | 文案用人话，不混英文；出处样式 | `books/TextbookShelf.kt:48`、`:91`、`:113`；`books/TextbookReader.kt:173`；`books/TextbookController.kt:136`；`books/TextbookPractice.kt:40-41`；`books/AnswerExplain.kt:91`、`books/BookExplain.kt:227`（块号是主线要的，保留，只改呈现） | 未修 |
+| D6 | 原文显示 | 阅读器里 markdown 标题带着井号显示成「## 第1节 细胞」。见 `compare/1920x1080-light-reader.png` | 标题应排成宋体标题，不露标记 | `books/TextbookReader.kt` 正文渲染 | 未修 |
+| D7 | 控件 / 暗色漏改 | 阅读器「页码」是 Material 描边输入框，带浮动标签；描边浅色 `#665F55`、深色 `#A0978A`（reader (1248,935)），在深色纸上很刺眼；「上一页」「下一页」是描边按钮 | 用纸面按钮和 V7 输入样式；深色用 line `#34302A` 一级的弱线 | `books/TextbookReader.kt:250-254` | 未修 |
+| D8 | 颜色不取 token | 复习条目是 `OutlinedCard`，底色 `#EBE9E4` / `#2A2925`，偏灰，不是 card（reviews (786,569)，左缘 x=152 有描边）；小结和知识回顾卡是 `#FCFAF4` / `#1D1B18`，放在 sheet `#FCFAF6` / `#1B1916` 上几乎看不见，原因是 `secondaryContainer` 叠 0.35 透明度；「讲解」块直接排在纸上，没有 PaperCard；阅读器高亮和当前批注行用 `secondaryContainer`，不是 `CoachV7.*.hl` | 卡片用 card，高亮用 hl，强调用 zhu / pine，不用 Material 动态色 | `books/TextbookReviewUi.kt:23`；`books/AnswerExplain.kt:157`、`books/KnowledgeRecap.kt:30`、`books/BookExplain.kt:221`；`books/BookLessonExplanation.kt:32`；`books/TextbookReader.kt:181`、`:237` | 未修 |
+| D9 | 导航状态 | 从「今天」或「课程」进入阅读器、做题、复习后，左栏高亮仍停在「书架」。见 `compare/1920x1080-light-quiz.png` 左栏 | 高亮跟着来处走 | `WindowsTextbookHost.kt` 导航栏选中逻辑 | 未修 |
+| D10 | 动效 | 桌面端只有 `Desk` 里的纸张进场用 300ms / 180ms（`shared/ui/src/commonMain/kotlin/com/coach/ui/v7/Desk.kt:94`）；卡片展开（讲解、小结、知识回顾）没有 260ms `expandMs`，是直接出现；JVM 上 `rememberReducedMotion()` 固定返回 false，Windows「显示动画」关掉后不会停 | 300 / 260 / 180ms，减少动态时全部关掉 | 减弱动态：`V7Fonts.jvm.kt` `rememberReducedMotion()`；卡片展开：`books/AnswerExplain.kt`、`books/KnowledgeRecap.kt`、`books/BookLessonExplanation.kt`。代码层核对，截图看不出时长 | **减弱动态已修**（第 1 刀）：读 Windows「在 Windows 中显示动画」（`UserPreferencesMask` 第 5 字节 0x02 位），30 秒复查一次，只读不写；`-Dcoach.reducedMotion=true\|false` 可强制。卡片展开未修，归第 5 刀 |
+| D11 | 版式 | 内容是一整栏，V7 是左目录、中间纸、右「页边」栏；做题标题叫「原文填空」（V7 没有这层小标题）；知识回顾插在题目上方，把题挤下去；同一屏有两个打开原文的入口：节标题下的「打开对应原文 · 第 x 页」和讲解后的「打开原文 · 块号」；2560x1440 下纸面贴左，右侧约五分之一空着（`compare/2560x1440-dark-quiz.png`），是 `Desk` 给页边栏留了 260–280dp，而本机教材页没有页边内容 | V7 三栏版心，纸面居中 | `books/TextbookLearning.kt:89`、`:93`；`books/BookSourceRow.kt:96`；`books/TextbookPractice.kt:23`；`shared/ui/src/commonMain/kotlin/com/coach/ui/v7/Desk.kt:122` | 未修 |
+
+清单之外、这次截图没覆盖的界面，后面各刀顺带对照：本地参考练习 `LocalExamPane`（`books/exam/LocalExamUi.kt:124`）、讲解配对面板 `BookExplainPanel`（`books/BookExplain.kt:134`）、选段就问 `BookPassageAsk`（`books/BookPassageAsk.kt:16`）、设置弹窗（`WindowsHomeCards.kt:75`）、笔记导出弹窗（`NotesExportDialog.kt:40`）。
 
 ## 修法和泳道
 
-修改等 TON-1648 拆完文件、`docs/desktop-lanes.md` 合进 main 之后再动。每个 PR 只碰一个泳道的文件，附改前改后对照图（同一测试重跑即得）。按文件先后建议：
+TON-1648 已拆完文件，泳道见 `docs/desktop-lanes.md`。每个 PR 从最新 main 切出，只碰一个泳道的文件，附改前改后对照图（同一测试重跑即得），并更新上表「状态」。顺序：
 
-1. 字体与动效基础（`shared/ui` jvmMain）：D1、D10 中的 reduced motion。改一处全局生效，先做。
-2. 外壳与导航（`WindowsTextbooks.kt` 或拆分后的 host 文件）：D2 今天 / 课程、D3 外壳的线、D4、D9。
-3. 书架（拆分后的书架文件）：D2 书架、D3 书架部分、D5「已开启 learning」。
-4. 阅读器：D6、D7。
-5. 做题、讲解、小结、知识回顾：D3、D5、D8、D10 卡片展开、D11 做题部分。
-6. 复习：D8 复习条目。
+1. 字体与动效基础（`shared/ui` jvmMain）：D1、D10 中的减弱动态。**已做**。
+2. 外壳与导航（`WindowsTextbookHost.kt`、`WindowsHomeCards.kt`）：D2 今天 / 课程、D3 外壳的线、D4、D9。
+3. 书架（`books/TextbookShelf.kt`）：D2 书架、D3 书架部分、D5「已开启 learning」。
+4. 阅读器（`books/TextbookReader.kt`）：D6、D7、D8 阅读器高亮、D5 阅读器按钮。
+5. 做题、讲解、小结、知识回顾（`books/TextbookLearning.kt`、`TextbookPractice.kt`、`AnswerExplain.kt`、`KnowledgeRecap.kt`、`BookLessonExplanation.kt`、`BookExplain.kt`、`BookSourceRow.kt`）：D3、D5、D8、D10 卡片展开、D11 做题部分。
+6. 复习（`books/TextbookReviewUi.kt`）：D8 复习条目。等 TON-1448 的复习 PR 合进 main 再动。
 7. 三栏版心（D11）：牵涉 `Desk` 和多个页面，等前几刀合完再单独定。
 
 ## 怎么重跑

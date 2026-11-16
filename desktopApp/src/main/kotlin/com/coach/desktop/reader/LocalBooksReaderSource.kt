@@ -109,8 +109,8 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
     private fun imageBlocking(document: String, pdfPage: Int, version: String?): ByteArray? {
         val book = findBook(document) ?: return null
         if (version != "1" || book.page(pdfPage) == null) return null
-        val bufferedImage = if (book.format == "pdf") {
-            runCatching { library.renderPdf(book, pdfPage) }.getOrNull()
+        val bufferedImage = if (book.format == "pdf" || book.format in com.coach.desktop.books.BookFormats.images) {
+            runCatching { library.renderOriginal(book, pdfPage) }.getOrNull()
         } else {
             renderFallbackImage(book, pdfPage)
         } ?: return null
@@ -171,7 +171,7 @@ internal class LocalBooksReaderSource(val library: TextbookLibrary) : ReaderSour
     private fun boxesBlocking(document: String, pdfPage: Int, version: String): ReaderReply {
         val book = findBook(document) ?: return ReaderReply(404, null)
         locationFailure(book, pdfPage, version)?.let { return it }
-        if (book.format != "pdf") {
+        if (book.format != "pdf" || book.page(pdfPage)?.ocr == true) {
             return ReaderReply(200, buildJsonObject {
                 put("version", version)
                 put("pdfPage", pdfPage)

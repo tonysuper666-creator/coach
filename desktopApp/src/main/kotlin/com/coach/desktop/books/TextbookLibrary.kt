@@ -26,7 +26,7 @@ import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
-internal class TextbookLibrary(val directory: Path, private val clock: Clock = Clock.systemDefaultZone()) {
+internal class TextbookLibrary(val directory: Path, private val clock: Clock = Clock.systemDefaultZone(), private val ocr: BookOcr = BundledBookOcr) {
     private val reviewStore = TextbookReviewStore { LocalDate.now(clock).toEpochDay() }
     init {
         Files.createDirectories(directory)
@@ -44,7 +44,15 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             sql.execute("CREATE TABLE IF NOT EXISTS book_learning_paths(book TEXT PRIMARY KEY,path TEXT NOT NULL CHECK(path IN ('READ','READ_AND_LEARN','QUESTION_FIRST')))")
             sql.execute("CREATE TABLE IF NOT EXISTS book_ladders(book TEXT PRIMARY KEY,session TEXT NOT NULL)")
         } }
-        database().use { reviewStore.migrate(it) }
+        database().use { db ->
+            val hasOcr = db.createStatement().use { sql -> sql.executeQuery("PRAGMA table_info(pages)").use { rows ->
+                var found = false
+                while (rows.next()) if (rows.getString("name") == "ocr") found = true
+                found
+            } }
+            if (!hasOcr) db.createStatement().use { it.execute("ALTER TABLE pages ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0") }
+            reviewStore.migrate(db)
+        }
         backfillReviews()
     }
     private fun database(): Connection = DriverManager.getConnection("jdbc:sqlite:${directory.resolve("library.sqlite")}").apply {
@@ -101,9 +109,9 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             sql.setString(1, id)
             sql.executeQuery().use { row ->
                 check(row.next()) { "这本教材已不在书架中。" }
-                val pages = db.prepareStatement("SELECT page,text FROM pages WHERE book=? ORDER BY page").use { query ->
+                val pages = db.prepareStatement("SELECT page,text,ocr FROM pages WHERE book=? ORDER BY page").use { query ->
                     query.setString(1, id)
-                    query.executeQuery().use { p -> buildList { while (p.next()) add(BookPage(p.getInt(1), p.getString(2))) } }
+                    query.executeQuery().use { p -> buildList { while (p.next()) add(BookPage(p.getInt(1), p.getString(2), p.getInt(3) == 1)) } }
                 }
                 val storedPage = row.getInt("reading_page")
                 Textbook(id, row.getString("title"), row.getString("format"), pages, if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
@@ -113,7 +121,8 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
         }
     }
 
-    @Synchronized fun importBook(source: Path): Textbook {
+    @Synchronized fun importBook(source: Path, control: BookImportControl = BookImportControl()): Textbook {
+        control.report(0, 0)
         require(Files.isRegularFile(source)) { "请选择一份教材文件，文件夹不能直接导入。" }
         require(Files.size(source) > 0) { "这份教材是空文件，请重新保存或下载后再导入。" }
         require(Files.size(source) <= 256L * 1024 * 1024) { "请选择不超过 256 MB 的教材。" }
@@ -124,13 +133,14 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
             val digest = MessageDigest.getInstance("SHA-256")
             Files.newInputStream(stage).use { input ->
                 val buffer = ByteArray(65536)
-                while (true) { val size = input.read(buffer); if (size < 0) break; digest.update(buffer, 0, size) }
+                while (true) { val size = input.read(buffer); if (size < 0) break; control.check(); digest.update(buffer, 0, size) }
             }
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return book(id)
             val fallback = source.fileName.toString().substringBeforeLast('.')
-            val extracted = TextbookExtraction.extract(stage, format, fallback)
+            val extracted = TextbookExtraction.extract(stage, format, fallback, ocr, control)
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
+            control.check()
             val target = original(id, format)
             // The immutable source is in place before the single transaction makes it visible.
             Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
@@ -142,14 +152,15 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
                         sql.setString(4, QuestionMode.CHOICE.name)
                         sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
                     }
-                    db.prepareStatement("INSERT INTO pages(book,page,text) VALUES(?,?,?)").use { sql ->
+                    db.prepareStatement("INSERT INTO pages(book,page,text,ocr) VALUES(?,?,?,?)").use { sql ->
                         for (page in extracted.pages) {
-                            sql.setString(1, id); sql.setInt(2, page.number); sql.setString(3, page.text); sql.addBatch()
+                            sql.setString(1, id); sql.setInt(2, page.number); sql.setString(3, page.text); sql.setInt(4, if (page.ocr) 1 else 0); sql.addBatch()
                         }
                         sql.executeBatch()
                     }
+                    control.check()
                     db.commit()
-                } catch (error: Exception) { db.rollback(); throw error }
+                } catch (error: Exception) { db.rollback(); Files.deleteIfExists(target); throw error }
             }
             return book(id)
         } finally { Files.deleteIfExists(stage) }
@@ -313,6 +324,15 @@ internal class TextbookLibrary(val directory: Path, private val clock: Clock = C
      * 返回的图片是只读共享的（调用方只转换/编码，不修改）。渲染分三段计时：loadPDF / 取页框 / renderImage，另记总耗时。
      * 同一本书同一页（文件大小+修改时间一致）并发调用只会真正渲染一次，其余等同一结果；失败不缓存。
      */
+    fun renderOriginal(book: Textbook, page: Int): BufferedImage {
+        require(book.page(page) != null)
+        return if (book.format == "pdf") renderPdf(book, page)
+        else {
+            require(book.format in BookFormats.images)
+            BookScanImages.read(original(book.id, book.format))
+        }
+    }
+
     fun renderPdf(book: Textbook, page: Int): BufferedImage {
         require(book.format == "pdf" && page in 1..book.pages.size)
         val file = original(book.id, book.format).toFile()
@@ -392,26 +412,52 @@ internal data class RenderTrace(val book: String, val page: Int, val outcome: St
 internal data class ExtractedBook(val title: String, val pages: List<BookPage>)
 
 internal object TextbookExtraction {
-    fun extract(path: Path, format: String, title: String): ExtractedBook = try {
-        extractContent(path, format, title)
+    fun extract(path: Path, format: String, title: String, ocr: BookOcr = BundledBookOcr, control: BookImportControl = BookImportControl()): ExtractedBook = try {
+        extractContent(path, format, title, ocr, control)
     } catch (e: org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException) {
         throw IllegalArgumentException("这本 PDF 有密码保护，请取消密码后再导入。", e)
+    } catch (e: java.util.concurrent.CancellationException) {
+        throw e
     } catch (e: IllegalArgumentException) {
         throw e
     } catch (e: Exception) {
         throw IllegalArgumentException("这份教材不完整或已损坏，请重新保存或下载后再导入。", e)
     }
 
-    private fun extractContent(path: Path, format: String, title: String): ExtractedBook = when (format) {
+    private fun extractContent(path: Path, format: String, title: String, ocr: BookOcr, control: BookImportControl): ExtractedBook = when (format) {
         "pdf" -> Loader.loadPDF(path.toFile()).use { pdf ->
             require(pdf.numberOfPages in 1..5000) { "这本 PDF 的页数暂不支持。" }
             require(pdf.currentAccessPermission.canExtractContent()) { "这本 PDF 限制了文字提取，请使用有阅读和提取权限的教材。" }
             val stripper = PDFTextStripper().apply { sortByPosition = true; paragraphEnd = "\n\n" }
             val pages = (1..pdf.numberOfPages).map { n ->
+                control.report(n, pdf.numberOfPages)
                 stripper.startPage = n; stripper.endPage = n
                 BookPage(n, clean(stripper.getText(pdf)))
             }
-            ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, pages)
+            require(pages.count { it.text.isBlank() } <= BookScanImages.MAX_OCR_PAGES) {
+                "扫描页超过 200 页，请把 PDF 拆分后再导入。"
+            }
+            val renderer by lazy { PDFRenderer(pdf) }
+            val recognized = pages.map { page ->
+                if (page.text.isNotBlank()) page else {
+                    control.report(page.number, pdf.numberOfPages, recognizing = true)
+                    val bounds = pdf.getPage(page.number - 1).cropBox
+                    require(bounds.width.isFinite() && bounds.height.isFinite() && bounds.width > 0 && bounds.height > 0) { "这页 PDF 尺寸无效，请重新保存后导入。" }
+                    // 300 dpi where possible; cap the decoded raster before allocating it.
+                    val scale = minOf(300f / 72f, 4000f / maxOf(bounds.width, bounds.height))
+                    BookScanImages.checkSize(kotlin.math.ceil(bounds.width * scale).toInt(), kotlin.math.ceil(bounds.height * scale).toInt())
+                    val image = renderer.renderImage(page.number - 1, scale)
+                    try { BookPage(page.number, ocr.recognize(image, control), ocr = true) }
+                    finally { image.flush() }
+                }
+            }
+            ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized)
+        }
+        "png", "jpg" -> {
+            control.report(1, 1, recognizing = true)
+            val image = BookScanImages.read(path)
+            try { ExtractedBook(title, listOf(BookPage(1, ocr.recognize(image, control), ocr = true))) }
+            finally { image.flush() }
         }
         "epub" -> epub(path, title)
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->

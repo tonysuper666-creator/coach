@@ -72,6 +72,7 @@ dependencies {
     implementation(libs.sqldelight.driver)
     implementation(libs.sqlite.jdbc)
     implementation(libs.serialization.json)
+    implementation("net.java.dev.jna:jna:5.17.0")
     implementation("org.apache.pdfbox:pdfbox:3.0.8")
     implementation("org.jsoup:jsoup:1.24.1")
     implementation("com.ibm.icu:icu4j:78.1")
@@ -123,6 +124,7 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 tasks.test {
+    if (providers.gradleProperty("coach.nativeOcr").orNull == "true") systemProperty("coach.nativeOcr", "true")
     if (providers.gradleProperty("coach.nativeFormats").orNull == "true") systemProperty("coach.nativeFormats", "true")
 }
 

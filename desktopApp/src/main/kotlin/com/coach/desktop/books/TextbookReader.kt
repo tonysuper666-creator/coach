@@ -67,10 +67,12 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         LaunchedEffect(book.id, ui.page) { onPage(book.pages.first().number) }
         return
     }
+    val hasOriginal = book.format == "pdf" || book.format in BookFormats.images
+    val textOnlySource = !hasOriginal || page.ocr
     val lastPage = book.pages.maxOf { it.number }
     val previousPage = book.pages.filter { it.number < ui.page }.maxByOrNull { it.number }?.number
     val nextPage = book.pages.filter { it.number > ui.page }.minByOrNull { it.number }?.number
-    var textView by remember(book.id) { mutableStateOf(book.format != "pdf") }
+    var textView by remember(book.id) { mutableStateOf(!hasOriginal || page.ocr) }
     var jump by remember(book.id, ui.page) { mutableStateOf(ui.page.toString()) }
     var retry by remember { mutableIntStateOf(0) }
     var notesOpen by remember(book.id) { mutableStateOf(false) }
@@ -78,6 +80,9 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     val explainer = remember { BookExplainer() }
     val explainConsent = remember(library) { ExplainConsent(library.directory) }
     val source = ui.source
+    LaunchedEffect(book.id, ui.page, source) {
+        if (page.ocr && source != null) textView = true
+    }
     var asking by remember(book.id, ui.page) { mutableStateOf(false) }
 
     val readerSource = remember(library) { com.coach.desktop.reader.LocalBooksReaderSource(library) }
@@ -113,8 +118,8 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     }
     val image by produceState<PageImage>(PageImage.Loading, book.id, ui.page, retry) {
         value = PageImage.Loading
-        if (book.format == "pdf") {
-            value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderPdf(book, page.number).toComposeImageBitmap()) } }
+        if (hasOriginal) {
+            value = try { withContext(Dispatchers.IO) { PageImage.Ready(library.renderOriginal(book, page.number).toComposeImageBitmap()) } }
             catch (cancel: CancellationException) { throw cancel }
             catch (_: Exception) { PageImage.Failed }
         }
@@ -140,7 +145,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         practiceSource?.warning != null -> practiceSource.warning
         practiceSource?.page != null && practiceSource.page != ui.page -> "无法确认原句：本题依据在第 ${practiceSource.page} 页。"
         practiceSource?.target != null && citedRange == null -> "无法确认原句：这一页的内容变了，这条出处无法定位。"
-        book.format != "pdf" -> null
+        textOnlySource -> null
         image is PageImage.Failed -> "无法确认原句：这一页的图像打不开。"
         remote.failure != null || remote.page is com.coach.desktop.reader.PageState.Failed -> "无法确认原句：无法读取这一页的定位信息。"
         remote.current != null && (remote.current?.id != book.id || remote.current?.version != "1") -> "无法确认原句：教材版本不一致。"
@@ -177,7 +182,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                if (book.format == "pdf") V7TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
+                if (hasOriginal) V7TextButton(onClick = { textView = !textView }, modifier = Modifier.testTag("book-original-toggle")) { Text(if (textView) "看原页" else "看文字") }
                 V7TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
                 V7TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
                     Text(if (explainOpen) "回到原文" else "讲解")
@@ -190,6 +195,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 }
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
+            if (page.ocr) Text(OCR_NOTICE, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("book-ocr-notice"))
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
@@ -208,7 +214,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                             addStyle(if (heading.level == 1) chapterStyle else sectionStyle, heading.title.first, heading.title.last + 1)
                         }
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
-                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
+                        val confirmedBlocks = if (practiceSource != null) emptyList() else if (textOnlySource) blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
                             blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
                         } else emptyList()
                         for (block in confirmedBlocks) {
@@ -216,7 +222,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         }
                         if (practiceSource != null) {
                             val markedRange = if (practiceSource.target != null) citedRange else if (quoteAnchor != null &&
-                                (book.format != "pdf" || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
+                                (textOnlySource || located is com.coach.desktop.reader.Located.Found && aspectOk)) {
                                 val start = page.text.indexOf(quoteAnchor)
                                 if (start >= 0 && page.text.indexOf(quoteAnchor, start + 1) < 0) start until start + quoteAnchor.length else null
                             } else null
@@ -309,7 +315,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         .border(1.dp, colors.borderSubtle, field).padding(horizontal = 10.dp, vertical = 9.dp))
                 V7TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
             }
-            Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
+            Text(when { book.format == "pdf" -> "页码按 PDF 原文件计算。"; book.format in BookFormats.images -> "一张图片为一页。"; else -> "页码按阅读器中的正文分页计算。" }, style = MaterialTheme.typography.bodySmall)
         }
     }
     if (asking) BookPassageAsk(book, page, support) { asking = false }

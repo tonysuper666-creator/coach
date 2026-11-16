@@ -1,0 +1,35 @@
+[
+  {
+    "name": "01-clean-serif",
+    "description": "清晰单栏 / clean scan",
+    "image": "01-clean-serif.png",
+    "width": 2200,
+    "height": 2400,
+    "font": "noto_serif_sc.ttf",
+    "font_size": 42,
+    "truth": "01-clean-serif.truth.txt",
+    "truth_characters": 463
+  },
+  {
+    "name": "02-two-columns",
+    "description": "双栏与术语 / columns",
+    "image": "02-two-columns.png",
+    "width": 2200,
+    "height": 2400,
+    "font": "noto_sans_sc.ttf",
+    "font_size": 38,
+    "truth": "02-two-columns.truth.txt",
+    "truth_characters": 671
+  },
+  {
+    "name": "03-camera-skew",
+    "description": "倾斜与压缩 / camera simulation",
+    "image": "03-camera-skew.png",
+    "width": 2200,
+    "height": 2400,
+    "font": "noto_serif_sc.ttf",
+    "font_size": 42,
+    "truth": "03-camera-skew.truth.txt",
+    "truth_characters": 420
+  }
+]

@@ -11,8 +11,9 @@ import java.util.zip.ZipFile
 
 /** Canonical names are also the extensions of immutable, content-addressed originals. */
 internal object BookFormats {
-    val supported = setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt")
-    const val description = "PDF、电子书、Word、幻灯片、网页和文本"
+    val images = setOf("png", "jpg")
+    val supported = images + setOf("pdf", "epub", "md", "txt", "docx", "pptx", "html", "mobi", "azw3", "rtf", "odt")
+    const val description = "PDF、电子书、Word、幻灯片、网页、文本和扫描图片"
 
     fun detect(path: Path, filename: String): String = try {
         detectContent(path, filename)
@@ -26,6 +27,8 @@ internal object BookFormats {
         val suffix = filename.substringAfterLast('.', "").lowercase(Locale.ROOT)
         val prefix = Files.newInputStream(path).use { it.readNBytes(8192) }
         val ascii = prefix.toString(Charsets.ISO_8859_1)
+        if (prefix.take(8).map { it.toInt() and 255 } == listOf(137, 80, 78, 71, 13, 10, 26, 10)) return "png"
+        if (prefix.take(3).map { it.toInt() and 255 } == listOf(255, 216, 255)) return "jpg"
         if (ascii.startsWith("%PDF-")) return "pdf"
         if (ascii.startsWith("PK")) return SafeBookArchive(path).use { zip ->
             when {
@@ -42,7 +45,7 @@ internal object BookFormats {
             throw IllegalArgumentException("这份 Office 文件可能已加密或使用旧版格式，请取消密码并另存为 Word（DOCX）或幻灯片（PPTX）。")
         }
         // Do not mistake a corrupt binary document for a short plain-text book.
-        val binarySuffix = suffix in setOf("pdf", "epub", "docx", "pptx", "odt", "mobi", "azw3", "rtf")
+        val binarySuffix = suffix in setOf("pdf", "epub", "docx", "pptx", "odt", "mobi", "azw3", "rtf", "png", "jpg", "jpeg")
         val damaged = "这份 ${suffix.uppercase(Locale.ROOT)} 文件不完整或已损坏，请重新保存或下载后再导入。"
         require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
         val text = try { BookText.decode(Files.readAllBytes(path)) } catch (e: IllegalArgumentException) {

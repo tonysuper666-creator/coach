@@ -434,6 +434,45 @@ original now passes (65 text pages / 21 members / 1,777 ranges); the report keep
 both the original failure and the subsequent result. The real Word trial still
 passes (72 text pages / 1,559 ranges).
 
+### Native-source index persistence
+
+New EPUB/DOCX imports also try to retain the exact mapping in the library's
+`book_native_sources` table. `TextbookLibrary.nativeSources` reads it after
+reopening; `retainNativeSources` explicitly backfills an old book from its
+retained original. The versioned index binds the original book identity, page
+order/numbers and every canonical UTF-16 code unit. Stale, damaged or unsupported
+records return no index. Backfill verifies the original archive before and after
+mapping; it never searches for a new text location. Index writes share the book
+import transaction. A mapping/validation failure leaves ordinary text import
+available; a database write failure rolls the import back.
+
+The record retains member hashes, XML element paths, namespaces/names, EPUB
+spine indices and exact ranges, including empty and nested ranges. It is an
+index into the already retained archive, **not** a flattened copy of styles,
+attributes, MathML/OMML or image resources. A future node resolver must verify
+the member hash before reading those original payloads. No range grants source
+hiding or rendering permission. Capture currently adds a second parser traversal;
+large-book latency and cancellation inside that traversal have not been measured.
+
+Build current desktop classes and run the Java 17 persistence exercise with a
+new private directory outside Git (the probe deliberately changes a disposable
+database and restores its pages):
+
+```sh
+javac --release 17 -cp "$DESKTOP_CLASSPATH" -d "$PRIVATE_STATE/native-classes" \
+  tools/reader-v2/reflow/NativeSourcePersistenceProbe.java
+java -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeSourcePersistenceProbe \
+  "$PRIVATE_EPUB" epub "$PRIVATE_NEW_EPUB_LIBRARY"
+java -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeSourcePersistenceProbe \
+  "$PRIVATE_DOCX" docx "$PRIVATE_NEW_DOCX_LIBRARY"
+```
+
+Only exit 0 passes. This checks canonical pages, learning blocks and citation
+results against ordinary extraction, equal reopened/backfilled indices, and
+refusal of a same-length page-text change. It prints aggregate counts only.
+Real originals and disposable libraries stay on their owning machine. The
+exercise does not establish semantic/character correctness or reader display.
+
 ### Explicit review of complete PDF objects and production persistence
 
 `ReviewedPdfVisualsProbe.java` exercises `PdfReviewedVisuals` and the production

@@ -53,6 +53,7 @@ internal class TextbookLibrary(
             if (!hasOcr) db.createStatement().use { it.execute("ALTER TABLE pages ADD COLUMN ocr INTEGER NOT NULL DEFAULT 0") }
             reviewStore.migrate(db)
             BookPageModelStore.migrate(db)
+            BookNativeSourceStore.migrate(db)
         }
         backfillReviews()
     }
@@ -129,6 +130,38 @@ internal class TextbookLibrary(
 
     @Synchronized fun pageTextLayout(bookId: String, page: Int): PageTextLayout? = database().use { db ->
         BookPageTextBoxStore.loadPage(db, bookId, page)
+    }
+
+    /** Persisted provenance only. Missing, stale, unsupported or damaged records return null. */
+    @Synchronized fun nativeSources(bookId: String): BookNativeSources? {
+        val book = book(bookId)
+        return database().use { BookNativeSourceStore.load(it, bookId, book.format, book.pages) }
+    }
+
+    /** Explicit backfill for old libraries; never relocate text or replace a valid saved index. */
+    @Synchronized fun retainNativeSources(bookId: String, control: BookImportControl = BookImportControl()): BookNativeSources? {
+        control.check()
+        nativeSources(bookId)?.let { return it }
+        val book = book(bookId)
+        if (book.format !in setOf("epub", "docx")) return null
+        val path = original(bookId, book.format)
+        fun checkOriginal() {
+            val hash = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(path).use { input ->
+                val buffer = ByteArray(65536)
+                while (true) { val n = input.read(buffer); if (n < 0) break; control.check(); hash.update(buffer, 0, n) }
+            }
+            require(hash.digest().joinToString("") { "%02x".format(it) } == bookId) { "原文件已变化，请重新导入。" }
+        }
+        checkOriginal()
+        val payload = BookNativeSourceStore.capture(path, book.format, bookId, book.pages, control) ?: return null
+        checkOriginal()
+        database().use { db ->
+            db.autoCommit = false
+            try { BookNativeSourceStore.saveInTransaction(db, bookId, payload); control.check(); db.commit() }
+            catch (error: Exception) { db.rollback(); throw error }
+        }
+        return nativeSources(bookId)
     }
 
     /** Explicit local review only. A preview or an adjacent model box is not approval.
@@ -215,6 +248,9 @@ internal class TextbookLibrary(
             }
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
             control.check()
+            // Optional second traversal, using the existing canonical-text equality gate. Failure
+            // omits the index rather than breaking an otherwise readable EPUB/Word import.
+            val nativeSources = BookNativeSourceStore.capture(stage, format, id, extracted.pages, control)
             val target = original(id, format)
             // The immutable source is in place before the single transaction makes it visible.
             Files.move(stage, target, StandardCopyOption.REPLACE_EXISTING)
@@ -239,6 +275,7 @@ internal class TextbookLibrary(
                         db, directory, id, extracted.pages.associate { it.number to it.text },
                         extracted.illustrations, extracted.pages.mapNotNull { it.textLayout },
                     )
+                    nativeSources?.let { BookNativeSourceStore.saveInTransaction(db, id, it) }
                     control.check()
                     db.commit()
                 } catch (error: Exception) {

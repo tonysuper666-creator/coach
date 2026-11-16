@@ -1,10 +1,6 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.LocalScrollbarStyle
-import androidx.compose.foundation.ScrollbarStyle
-import androidx.compose.foundation.TooltipArea
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -56,7 +52,9 @@ import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.V7Scrollbar
 import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.V7Tooltip
 import com.coach.ui.v7.v7FocusRing
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.ReaderDraftScope
@@ -168,7 +166,8 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             catch (_: Exception) { PageImage.Failed }
         }
     }
-    // 页图还没回来时按上一张（或文字层给的）宽高比先铺纸，图到了原地换掉，后面的按钮不往下跳。
+    // 页图还没回来时先铺纸：这一页自己有尺寸就按它铺，量不到才借上一张成功页图的比例。
+    // 图到了原地换掉，后面的按钮不往下跳；横竖混排的书也不会先铺上一页那张的纸再塌下来。
     var paperAspect by remember(book.id) { mutableStateOf<Float?>(null) }
     LaunchedEffect(image) {
         (image as? PageImage.Ready)?.let { paperAspect = it.image.width.toFloat() / it.image.height }
@@ -327,7 +326,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
                     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
                     val paperLine = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
-                    val aspect = readerPaperAspect(paperAspect, boxes?.width, boxes?.height)
+                    val aspect = readerPaperAspect(boxes?.width, boxes?.height, paperAspect)
                     Box(Modifier.fillMaxSize()) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             Box(Modifier.fillMaxWidth()) {
@@ -382,12 +381,13 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。
-                ReaderTooltip("上一页　←　PageUp") {
+                // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。提示用共享的 V7Tooltip，
+                // 快捷键那半截走数字字体，跟面板上的其他提示一致。
+                V7Tooltip("上一页", shortcut = "←  PageUp") {
                     PaperButton({ turnTo(previousPage) }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
                 }
                 // 页面下方不再常驻说明行；同一句挪到页码的悬停提示里，图片书/文字版各自说清。
-                ReaderTooltip(when {
+                V7Tooltip(when {
                     book.format == "pdf" -> "页码按 PDF 原文件计算。"
                     book.format in BookFormats.images -> "一张图片为一页。"
                     else -> "页码按阅读器中的正文分页计算。"
@@ -395,7 +395,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     Text("${ui.page} / $lastPage", color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers,
                         style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("reader-page-number"))
                 }
-                ReaderTooltip("下一页　→　PageDown") {
+                V7Tooltip("下一页", shortcut = "→  PageDown") {
                     PaperButton({ turnTo(nextPage) }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 }
                 Spacer(Modifier.weight(1f))
@@ -437,11 +437,14 @@ internal fun readerTyping(asking: Boolean, jumpFocused: Boolean, notesOpen: Bool
     asking || jumpFocused || (notesOpen && noting)
 
 /**
- * 页图还没到时的纸面宽高比：先按这张书这一页量过的比，其次按文字层的页面尺寸，
- * 都没有就按 A4（1:√2）铺。三种都是纸，图到了只换内容不换框，下面的按钮不跟着跳。
+ * 页图还没到时的纸面宽高比：先用这一页自己的几何（文字的框），这一页还没量到才借同一本书
+ * 上一张成功页图的比例，都没有就按 A4（1:√2）铺。三种都是纸，图到了只换内容不换框。
+ * 顺序不能反：上一页的比例是另一张纸，横竖混排的书照它铺，图一到就会塌掉一截。
  */
-internal fun readerPaperAspect(remembered: Float?, boxesWidth: Double?, boxesHeight: Double?): Float =
-    remembered ?: boxesWidth?.let { w -> boxesHeight?.takeIf { it > 0 }?.let { h -> (w / h).toFloat() } } ?: (1f / 1.4142f)
+internal fun readerPaperAspect(boxesWidth: Double?, boxesHeight: Double?, remembered: Float?): Float =
+    boxesWidth?.let { w -> boxesHeight?.takeIf { it > 0 }?.let { h -> (w / h).toFloat() } }
+        ?: remembered
+        ?: (1f / 1.4142f)
 
 /** 一行 Markdown 标题：[marks] 是井号连同后面的空白，[title] 是标题文字；都是原文里的字符下标。 */
 internal data class MarkdownHeading(val level: Int, val marks: IntRange, val title: IntRange)
@@ -455,38 +458,13 @@ internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHea
 }.toList()
 
 /**
- * 阅读区的细滚动条，形状照 P0 的 `v7/V7Scrollbar.kt`：8dp 宽、悬停由细边色转成三级灰，
- * 内容不满一屏时不出现。换成共享组件要重新编译并复核阅读区几何，列在本卡串行窗口。
+ * 阅读区的滚动条，直接用共享的 `v7/V7Scrollbar`：固定 12dp 的槽，槽里 4dp 细条悬停加粗到 8dp，
+ * 加粗不挪正文。内容不满一屏时整条不占位，跟清单 W5 说的一致。
  */
 @Composable
 private fun ReaderScrollbar(scroll: ScrollState, modifier: Modifier = Modifier) {
     if (scroll.maxValue <= 0) return
-    val colors = CoachTheme.colors
-    val style = ScrollbarStyle(
-        minimalHeight = 28.dp, thickness = 8.dp, shape = RoundedCornerShape(4.dp), hoverDurationMillis = 160,
-        unhoverColor = colors.borderSubtle, hoverColor = colors.fgTertiary,
-    )
-    CompositionLocalProvider(LocalScrollbarStyle provides style) {
-        VerticalScrollbar(rememberScrollbarAdapter(scroll), modifier, style = style)
-    }
-}
-
-/** 悬停提示的纸面小条，规格同 P0 的 `v7/V7Tooltip.kt`；换共享组件同上，列在串行窗口。 */
-@Composable
-private fun ReaderTip(text: String) {
-    val colors = CoachTheme.colors
-    val shape = RoundedCornerShape(6.dp)
-    Box(Modifier.background(colors.surface2, shape).border(1.dp, colors.borderSubtle, shape)
-        .padding(horizontal = 8.dp, vertical = 5.dp)) {
-        Text(text, color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-/** 约半秒后出提示，内容带名称或快捷键；鼠标离开就收。 */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun ReaderTooltip(text: String, content: @Composable () -> Unit) {
-    TooltipArea(tooltip = { ReaderTip(text) }, delayMillis = 500, content = content)
+    V7Scrollbar(rememberScrollbarAdapter(scroll), modifier)
 }
 
 /** 待办的阅读器焦点请求：发起时的书与出处。 */

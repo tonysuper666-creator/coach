@@ -2,6 +2,9 @@ package com.coach.desktop.books
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -10,7 +13,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -18,10 +24,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coach.design.tokens.CoachV7
+import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
+import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
+import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 import com.coach.desktop.reader.ReaderSession
 import com.coach.desktop.reader.ReaderDraftScope
 import com.coach.desktop.reader.NotesSection
@@ -156,21 +168,23 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { onPage(lesson.firstPage); session.goToPage(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
         }) {
+        val colors = CoachTheme.colors
+        val highlight = if (colors.dark) CoachV7.Dark.hl else CoachV7.Light.hl
         Column(Modifier.fillMaxSize().padding(20.dp).testTag("textbook-reader"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(if (source != null) "学习原文 · ${source.title}" else "教材阅读", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                if (book.format == "pdf") TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
-                TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
-                TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
+                if (book.format == "pdf") V7TextButton(onClick = { textView = !textView }) { Text(if (textView) "看原页" else "看文字") }
+                V7TextButton(onClick = { asking = true }, modifier = Modifier.testTag("ask-book-passage")) { Text("选段提问") }
+                V7TextButton(onClick = { explainOpen = !explainOpen }, enabled = !ui.busy, modifier = Modifier.testTag("book-explain-toggle")) {
                     Text(if (explainOpen) "回到原文" else "讲解")
                 }
-                TextButton(onClick = {
+                V7TextButton(onClick = {
                     if (notesOpen) session.cancelNote()
                     notesOpen = !notesOpen
                 }, enabled = !ui.busy && samePage, modifier = Modifier.testTag("books-notes-toggle")) {
                     Text(if (notesOpen) "收起批注" else "批注")
                 }
-                if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开启 learning") }
+                if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
@@ -178,9 +192,17 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
                 else if (textView) {
-                    val highlight = MaterialTheme.colorScheme.secondaryContainer
+                    // 标题字号取 V7 typography（随 Aa 缩放）：一级用 headlineLarge，其余用 titleLarge，字体换成宋体。
+                    val headingFont = LocalV7Fonts.current.display
+                    val chapterStyle = MaterialTheme.typography.headlineLarge.toSpanStyle().copy(fontFamily = headingFont)
+                    val sectionStyle = MaterialTheme.typography.titleLarge.toSpanStyle().copy(fontFamily = headingFont)
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
+                        // 原文里的 Markdown 标题：井号隐去、标题用宋体排大一号。字符不删，块范围和出处偏移照旧对得上原文。
+                        for (heading in markdownHeadings(page.text)) {
+                            addStyle(SpanStyle(color = Color.Transparent, fontSize = 0.1.sp), heading.marks.first, heading.marks.last + 1)
+                            addStyle(if (heading.level == 1) chapterStyle else sectionStyle, heading.title.first, heading.title.last + 1)
+                        }
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
                         val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {
                             blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
@@ -215,7 +237,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                                     androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
                                         val k = size.width / boxes.width.toFloat()
                                         for (r in located.rects) drawRect(
-                                            androidx.compose.ui.graphics.Color(0xFFFFE9A8).copy(alpha = 0.55f),
+                                            highlight,
                                             topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
                                             size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
                                         )
@@ -234,7 +256,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         Text("选一句原文写批注", style = MaterialTheme.typography.bodySmall)
                         session.pageLines().forEachIndexed { index, range ->
                             TextButton(onClick = { session.chooseNoteLine(index) }, modifier = Modifier.fillMaxWidth().testTag("books-note-line-$index"),
-                                colors = ButtonDefaults.textButtonColors(containerColor = if (session.noteLine == index) MaterialTheme.colorScheme.secondaryContainer else androidx.compose.ui.graphics.Color.Transparent)) {
+                                colors = ButtonDefaults.textButtonColors(containerColor = if (session.noteLine == index) highlight else Color.Transparent)) {
                                 Text(view.text.substring(range), modifier = Modifier.fillMaxWidth())
                             }
                         }
@@ -247,19 +269,36 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton({ previousPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                Text("${ui.page} / $lastPage", modifier = Modifier.testTag("reader-page-number"))
-                OutlinedButton({ nextPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                PaperButton({ previousPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
+                Text("${ui.page} / $lastPage", color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers,
+                    style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("reader-page-number"))
+                PaperButton({ nextPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
                 Spacer(Modifier.weight(1f))
-                OutlinedTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, label = { Text("页码") }, singleLine = true,
-                    modifier = Modifier.width(80.dp).testTag("page-jump"))
-                TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
+                Text("页码", color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
+                val field = RoundedCornerShape(8.dp)
+                BasicTextField(jump, { jump = it.filter(Char::isDigit).take(5) }, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
+                    cursorBrush = SolidColor(colors.fgPrimary),
+                    modifier = Modifier.width(64.dp).testTag("page-jump").v7FocusRing(field).clip(field).background(colors.surface2)
+                        .border(1.dp, colors.borderSubtle, field).padding(horizontal = 10.dp, vertical = 9.dp))
+                V7TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
             }
             Text(if (book.format == "pdf") "页码按 PDF 原文件计算。" else "页码按阅读器中的正文分页计算。", style = MaterialTheme.typography.bodySmall)
         }
     }
     if (asking) BookPassageAsk(book, page, support) { asking = false }
 }
+
+/** 一行 Markdown 标题：[marks] 是井号连同后面的空白，[title] 是标题文字；都是原文里的字符下标。 */
+internal data class MarkdownHeading(val level: Int, val marks: IntRange, val title: IntRange)
+
+private val markdownHeadingLine = Regex("(?m)^(#{1,6})[ \\t]+(\\S.*?)[ \\t\\r]*$")
+
+internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHeadingLine.findAll(text).map { m ->
+    val hashes = m.groups[1]!!.range
+    val title = m.groups[2]!!.range
+    MarkdownHeading(hashes.last - hashes.first + 1, hashes.first until title.first, title)
+}.toList()
 
 /** 待办的阅读器焦点请求：发起时的书与出处。 */
 internal class ReaderFocusTicket(val bookId: String?, val source: BookLesson?)

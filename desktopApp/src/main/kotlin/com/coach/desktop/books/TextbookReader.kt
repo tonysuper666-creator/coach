@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -19,10 +20,12 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -225,8 +228,26 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     val textScale = LocalV7TextScale.current.value
                     val bodyStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = CoachV7.Size.body * textScale,
                         lineHeight = CoachV7.Size.body * (CoachV7.LineHeight.body * textScale))
-                    SelectionContainer { Text(marked, style = bodyStyle,
-                        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp).testTag("reader-text")) }
+                    // 正文栏按 V7 measure 33em 限宽（中号 18sp → 594dp），在纸面内居中；窄窗口照旧占满可用宽度。
+                    // 只改显示：分页在导入时按文字块固定，页码、原文字符和出处偏移都不受栏宽影响。
+                    // 滚动留在整张纸上，鼠标停在栏外两侧也能滚。
+                    val measure = with(LocalDensity.current) { (CoachV7.Size.body * (33f * textScale)).toDp() }
+                    // 换页从顶部读起；打开出处时滚到标记那一段（栏收窄后正文更长，标记常落在首屏以下）。
+                    val scroll = remember(book.id, ui.page) { ScrollState(0) }
+                    var layout by remember(book.id, ui.page) { mutableStateOf<TextLayoutResult?>(null) }
+                    val markStart = marked.spanStyles.filter { it.item.background == highlight }.minOfOrNull { it.start }
+                    LaunchedEffect(book.id, ui.page, markStart, layout != null) {
+                        val laid = layout ?: return@LaunchedEffect
+                        if (markStart != null && markStart <= laid.layoutInput.text.length)
+                            scroll.scrollTo(laid.getLineTop(laid.getLineForOffset(markStart)).toInt())
+                    }
+                    SelectionContainer {
+                        Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
+                            contentAlignment = Alignment.TopCenter) {
+                            Text(marked, style = bodyStyle, onTextLayout = { layout = it },
+                                modifier = Modifier.widthIn(max = measure).fillMaxWidth().testTag("reader-text"))
+                        }
+                    }
                 } else {
                     when (val loaded = image) {
                         PageImage.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))

@@ -18,7 +18,10 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.coach.client.PairedCredentials
 import com.coach.desktop.books.*
+import com.coach.desktop.books.exam.*
+import com.coach.domain.*
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import java.awt.Color
 import java.awt.Font
 import java.awt.RenderingHints
@@ -58,6 +61,9 @@ class DesktopV7ScreenshotTest {
         "ask-pick" to "inner-read", "ask-unavailable" to "inner-read", "ask-too-long" to "inner-read",
         "explain-pairing" to "inner-read", "explain-consent" to "inner-read", "explain-answer" to "inner-read",
         "explain-source" to "inner-read", "explain-failed" to "inner-read",
+        // 第 9 刀：课程里的本地练习——入口、作答、保存冲突、读取确认、交卷确认、结果、冻结题源、历次结果，都对做题那一屏。
+        "exam-entry" to "inner-quiz", "exam-attempt" to "inner-quiz", "exam-conflict" to "inner-quiz", "exam-reload" to "inner-quiz",
+        "exam-submit" to "inner-quiz", "exam-result" to "inner-quiz", "exam-source" to "inner-quiz", "exam-history" to "inner-quiz",
     )
 
     @Test fun everyDesktopSceneInLightAndDarkAtWindowsScaling() {
@@ -68,6 +74,7 @@ class DesktopV7ScreenshotTest {
                 System.setProperty("coach.windows.theme", if (dark) "dark" else "light")
                 shots += walk(screen, dark)
                 shots += explainWalk(screen, dark)
+                shots += examWalk(screen, dark)
             }
         } finally {
             if (previous == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previous)
@@ -278,6 +285,88 @@ class DesktopV7ScreenshotTest {
             shot("explain-failed")
         }
         assertEquals(2, mac.explained)
+        return shots
+    }
+
+    /**
+     * 课程页底部的「本地练习与记录」：一份自编题卷（一道选择、一道论述），出处指向样例书第一节。
+     * 计时打开、30 分钟；另一窗口抢先写入一次，制造「读取已保存作答」冲突，再读回、交卷、看题源和历次结果。
+     */
+    private fun examWalk(screen: Screen, dark: Boolean): List<Shot> {
+        val root = Files.createTempDirectory("coach-v7-exam-")
+        val library = TextbookLibrary(root.resolve("library"))
+        val book = library.importBook(knowledgeRecapTextbook(root))
+        val lesson = book.lessons.first()
+        val source = json("docId" to book.id, "lessonId" to lesson.id, "pdfPage" to 1, "quote" to lesson.blocks.first { !it.heading }.text)
+        val store = LocalExamStore(library)
+        store.register(LocalExamPaper(json("id" to "v7-authored", "bookId" to book.id, "title" to "细胞结构小测",
+            "kind" to "paper", "origin" to "AUTHORED", "key_state" to "UNREVIEWED",
+            "sections" to JsonArray(listOf(json("title" to "细胞", "items" to JsonArray(listOf(
+                json("id" to "choice", "type" to "mcq", "stem" to "生物体结构和功能的基本单位是什么？", "marks" to 1,
+                    "options" to JsonArray(listOf("细胞", "细胞膜", "染色体").map(::JsonPrimitive)), "answer" to 0, "source" to source),
+                json("id" to "essay", "type" to "essay", "stem" to "用自己的话说说，为什么把细胞叫作「基本单位」。", "marks" to 3, "source" to source),
+            ))))))))
+        val controller = TextbookController(library)
+        val shots = mutableListOf<Shot>()
+        runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
+            setContent {
+                CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
+                    WindowsTextbookHost(controller) { null }
+                }
+            }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            fun shot(scene: String) { waitForIdle(); shots += capture(scene, screen, dark) }
+            fun has(tag: String) = onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+
+            ready(controller) { it.screen == BookScreen.HOME }
+            nav("课程").performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-paper-start-0") }
+            onNodeWithTag("local-timed-0").performScrollTo().performClick()
+            onNodeWithTag("local-paper-start-0").performScrollTo()
+            shot("exam-entry")
+
+            onNodeWithTag("local-paper-start-0").performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-exam-attempt") }
+            val id = store.active(book.id)!!.str("mockId")
+            onNodeWithTag("local-choice-choice-1").performScrollTo().performClick()
+            onNodeWithTag("local-text-essay").performScrollTo().performTextReplacement("细胞里装着完成生命活动要用的结构。")
+            waitUntil(timeoutMillis = 20_000) { store.get(book.id, id)["answers"]!!.jsonObject["essay"]?.jsonObject?.str("text") == "细胞里装着完成生命活动要用的结构。" }
+            onNodeWithTag("local-exam-back").performScrollTo()
+            shot("exam-attempt")
+
+            // 另一个窗口先存了一版（序号远大于本页），本页下一次保存就会被拒，出现「读取已保存作答」。
+            store.save(book.id, id, json("choice" to json("choice" to 0), "essay" to json("text" to "细胞能独立完成生命活动。")), 100)
+            onNodeWithTag("local-choice-choice-2").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-reload-saved") }
+            onNodeWithTag("local-reload-saved").performScrollTo()
+            shot("exam-conflict")
+
+            onNodeWithTag("local-reload-saved").performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-confirm-reload") }
+            shot("exam-reload")
+
+            onNodeWithTag("local-confirm-reload").performClick()
+            waitUntil(timeoutMillis = 20_000) { !has("local-reload-saved") }
+            onNodeWithTag("local-submit").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-confirm-submit") }
+            shot("exam-submit")
+
+            onNodeWithTag("local-confirm-submit").performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-exam-result") }
+            onNodeWithText("总分待评").assertExists()
+            shot("exam-result")
+
+            onNodeWithTag("local-source-essay").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-frozen-source") }
+            shot("exam-source")
+
+            onNodeWithTag("local-source-back").performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-exam-back") }
+            onNodeWithTag("local-exam-back").performScrollTo().performClick()
+            waitUntil(timeoutMillis = 20_000) { has("local-history-0") }
+            onNodeWithTag("local-history-0").performScrollTo()
+            shot("exam-history")
+        }
         return shots
     }
 

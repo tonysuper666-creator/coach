@@ -1,6 +1,7 @@
 package com.coach.desktop
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -16,6 +17,7 @@ import com.coach.desktop.books.exam.*
 import com.coach.desktop.books.Textbook
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
+import com.coach.ui.v7.LocalV7Fonts
 import com.coach.ui.v7.PaperButton
 import com.coach.ui.v7.PrimaryButton
 import com.coach.ui.v7.paperShadow
@@ -92,17 +94,28 @@ internal fun HostEmptyState(tag: String, title: String, text: String) {
     }
 }
 
+/**
+ * V7：设置弹窗和其他弹窗一样是 surface2 的纸。教材位置单列一格「字段名 + 叠在上面的一层 surface1 纸」，
+ * 路径用数字字体、可以整段换行；说明是 fgSecondary 小字，「知道了」走纸面按钮。
+ */
 @Composable
 internal fun HostSettings(directory: Path, onClose: () -> Unit) {
+    val colors = CoachTheme.colors
+    val paper = RoundedCornerShape(CoachV7.Radius.btn)
     AlertDialog(onDismissRequest = onClose, title = { Text("设置") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("教材和进度保存在这台电脑，不经过 Mac。")
-            Text(directory.toString(), style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.testTag("settings-library-directory"))
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("教材和进度保存在这台电脑，不经过 Mac。", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("教材位置", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+                Text(directory.toString(), style = MaterialTheme.typography.bodySmall, color = colors.fgPrimary,
+                    fontFamily = LocalV7Fonts.current.numbers,
+                    modifier = Modifier.fillMaxWidth().clip(paper).background(colors.surface1).border(1.dp, colors.borderSubtle, paper)
+                        .padding(horizontal = 12.dp, vertical = 10.dp).testTag("settings-library-directory"))
+            }
             Text("课程里可做本地教材参考练习；Mac 上的课程数据仍独立。",
-                style = MaterialTheme.typography.bodySmall)
+                style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
         }
     }, confirmButton = {
-        TextButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }
+        PaperButton(onClose, modifier = Modifier.testTag("close-settings")) { Text("知道了") }
     })
 }

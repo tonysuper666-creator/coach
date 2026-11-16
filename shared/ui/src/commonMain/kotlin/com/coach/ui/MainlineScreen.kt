@@ -69,7 +69,9 @@ fun MainlineScreen(c: CoachController, view: CourseView, onBack: () -> Unit, onO
                 else openWeek(n, quiz)
             } }
         }
-        else -> key(week) { MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek, directEntry = directEntry, parentLabel = parentLabel, targetKpId = if (directEntry) c.mainlineState().str("targetKp").ifBlank { null } else null, onBrowseWeek = onBrowseWeek, onNextSection = onNextSection) }
+        else -> key(week) { Column(Modifier.fillMaxSize()) {
+            MainlineWeek(c, http, view, week!!, entry, onBack = closeWeek, onOpenSteps, onOpenEssay, onReviewWeek, directEntry = directEntry, parentLabel = parentLabel, targetKpId = if (directEntry) c.mainlineState().str("targetKp").ifBlank { null } else null, onBrowseWeek = onBrowseWeek, onNextSection = onNextSection)
+        } }
     }
 }
 
@@ -382,7 +384,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     val showingCheckpoint = body != null && !reading && learning && (recapVisible || ladderSession.complete ||
         (item == null && (runtime.declaredKpTotal != null || runtime.declaredCapabilityTotal != null)))
-    val goUp: () -> Unit = { if (!reading && !directEntry) position(true) else onBack() }
+    val goUp: () -> Unit = { if (!reading && !directEntry && (body == null || items.isNotEmpty() || sections.isNotEmpty())) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
     TaskChrome(!reading || readerState.flag("focus"))
     AppBackHandler(reading && readerState.flag("focus"), priority = 100) { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
@@ -390,8 +392,10 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     if ((reading && !readerState.flag("focus")) || (!reading && !showingCheckpoint && (body == null || item == null))) Header("第 $number 周 · ${if (reading) "本周要点" else "选择题"}", if (reading) "← 选择题主线" else "← 第 $number 周", goUp)
     if (reading && readerState.flag("focus")) Header("第 $number 周", "退出专心读") { saveReader { JsonObject(it + ("focus" to JsonPrimitive(false))) } }
     if (body == null) {
-        CenterMessage(error ?: "正在读取…")
-        if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
+        Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Text(error ?: "正在读取…")
+            if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
+        }
         return
     }
     if (reading) {
@@ -429,6 +433,13 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     }
     if (item == null) {
         if (only != null) { CenterMessage("本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
+        if (items.isEmpty()) {
+            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("这一周还没有可用题目。请返回课程，选择已有内容继续学习。")
+                if (sections.isNotEmpty()) TextButton(onClick = { position(true) }) { Text("查看本周要点") }
+            }
+            return
+        }
         Text(if (learning) "这一节的题仍在核对，进度已保留。" else "这一节暂无对应题目。")
         if (learning) Text(runtime.scopeMessage, Modifier.testTag("ladder-scope-status"))
         TextButton(onClick = { position(true) }) { Text("返回本周要点") }

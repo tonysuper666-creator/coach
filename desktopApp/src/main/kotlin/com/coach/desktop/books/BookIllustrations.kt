@@ -421,6 +421,15 @@ internal object BookIllustrationStore {
         val pageOrdinals = HashMap<Int, Int>()
         val persisted = mutableListOf<BookIllustration>()
         try {
+            // A supplied page payload replaces that page's entire visual set. This lets a
+            // verified/manual crop set supersede automatic supplemental crops atomically.
+            // Unmentioned pages and content-addressed files remain intact, including on rollback.
+            db.prepareStatement("DELETE FROM $TABLE WHERE book=? AND page=?").use { sql ->
+                for (page in illustrations.map { it.page }.distinct()) {
+                    sql.setString(1, bookId); sql.setInt(2, page); sql.addBatch()
+                }
+                sql.executeBatch()
+            }
             db.prepareStatement(
                 """INSERT INTO $TABLE(
                     book,page,ordinal,anchor_offset,image_sha256,extension,width,height,caption,

@@ -482,7 +482,20 @@ internal object TextbookExtraction {
                     finally { image.flush() }
                 }
             }
-            ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized)
+            // Preserve canonical text and store supplemental enclosed regions through the
+            // same content-addressed transaction as other page visuals. Display is separate.
+            val visuals = mutableListOf<ExtractedIllustration>()
+            var visualBytes = 0L
+            for (page in recognized) {
+                control.report(page.number, pdf.numberOfPages)
+                if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes >= FormatBookImages.MAX_TOTAL) break
+                for (crop in PdfBoxedVisuals.extract(pdf, page, control)) {
+                    if (visuals.size >= FormatBookImages.MAX_IMAGES || visualBytes + crop.bytes.size > FormatBookImages.MAX_TOTAL) break
+                    visuals += crop
+                    visualBytes += crop.bytes.size
+                }
+            }
+            ExtractedBook(pdf.documentInformation.title?.trim()?.takeIf(String::isNotEmpty) ?: title, recognized, visuals)
         }
         "png", "jpg" -> {
             control.report(1, 1, recognizing = true)

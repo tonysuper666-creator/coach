@@ -37,7 +37,7 @@ class WindowsTextbooksTest {
             ready(controller) { it.prompt == BookPrompt.IMPORTED }
             onNodeWithTag("read-only").performClick()
             ready(controller) { it.screen == BookScreen.READER && it.prompt == BookPrompt.AFTER_READING }
-            onNodeWithText("要开启 learning 吗？").assertExists()
+            onNodeWithText("要开始学吗？").assertExists()
             onNodeWithTag("read-only").performClick()
             ready(controller) { it.prompt == null && it.book?.promptSeen == true }
             assertFalse(controller.state.value.book!!.learning)
@@ -47,6 +47,9 @@ class WindowsTextbooksTest {
             onNodeWithText("返回书架").performClick()
             ready(controller) { it.screen == BookScreen.HOME }
             capture("home")
+            // The shelf sits on V7's sheet and says everything in Chinese: the catalog row and prompts used to mix in "learning".
+            onNodeWithTag("shelf-sheet").assertExists()
+            onAllNodesWithText("learning", substring = true, ignoreCase = true).assertCountEquals(0)
             onNodeWithTag("home-question").performClick()
             ready(controller) { it.prompt == BookPrompt.START }
             onNodeWithTag("question-mode-CHOICE").performClick()

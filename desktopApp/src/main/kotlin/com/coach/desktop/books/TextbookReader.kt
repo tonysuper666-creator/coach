@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
+import com.coach.ui.LocalV7TextScale
 import com.coach.ui.theme.CoachTheme
 import com.coach.ui.v7.Desk
 import com.coach.ui.v7.LocalV7Fonts
@@ -187,7 +188,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 if (source == null) PaperButton(onLearn, enabled = !ui.busy) { Text(if (book.learning) "继续学" else "开始学") }
             }
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
-            sourceWarning?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+            sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
@@ -220,7 +221,11 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                                 addStyle(SpanStyle(background = highlight), markedRange.first, markedRange.last + 1)
                         }
                     }
-                    SelectionContainer { Text(marked, fontSize = 19.sp, lineHeight = 31.sp,
+                    // 正文字号、行距取 V7 内屏 token（18 × 1.85，对照 inner-read 参考图量过），随 Aa 小/中/大缩放。
+                    val textScale = LocalV7TextScale.current.value
+                    val bodyStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = CoachV7.Size.body * textScale,
+                        lineHeight = CoachV7.Size.body * (CoachV7.LineHeight.body * textScale))
+                    SelectionContainer { Text(marked, style = bodyStyle,
                         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp).testTag("reader-text")) }
                 } else {
                     when (val loaded = image) {

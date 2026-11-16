@@ -175,11 +175,31 @@ class DesktopV7ScreenshotTest {
                 .filter { it.item.fontFamily != null && it.item.color != androidx.compose.ui.graphics.Color.Transparent }
                 .also { assertTrue(it.isNotEmpty(), "正文里有标题") }.maxOf { it.item.fontSize.value }
             fun typeSize(label: String) { onNodeWithTag("v7-type-menu").performClick(); waitForIdle(); onNodeWithTag("v7-type-$label").performClick(); waitForIdle() }
+            // 正文（第 11 刀）：字号、行距取 V7 内屏 token（18 × 1.85），和标题一起随 Aa 缩放；原文字符和标记偏移不因缩放改变。
+            fun bodyStyle(): androidx.compose.ui.text.TextStyle {
+                val layouts = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+                onNodeWithTag("reader-text").fetchSemanticsNode()
+                    .config[androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult].action!!.invoke(layouts)
+                return layouts.single().layoutInput.style
+            }
+            fun marks() = onNodeWithTag("reader-text").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().let { t ->
+                    t.text to t.spanStyles.map { Triple(it.start, it.end, it.item.color) } }
+            fun assertBody(scale: Float, label: String) {
+                val style = bodyStyle()
+                assertEquals(coach.design.tokens.CoachV7.Size.body.value * scale, style.fontSize.value, 0.01f, "$label：正文字号")
+                assertEquals(coach.design.tokens.CoachV7.Size.body.value * coach.design.tokens.CoachV7.LineHeight.body * scale, style.lineHeight.value, 0.01f, "$label：正文行距")
+            }
             val normalHeading = headingSize()
+            val normalMarks = marks()
             assertEquals(coach.design.tokens.ReadingSizes.section.value, normalHeading, 0.01f, "二级标题用 section 字号")
+            assertBody(1f, "Aa 中")
             typeSize("大"); assertEquals(normalHeading * 1.15f, headingSize(), 0.01f, "Aa 大：标题跟着放大")
+            assertBody(1.15f, "Aa 大"); assertEquals(normalMarks, marks(), "Aa 大：原文和偏移不变")
             typeSize("小"); assertEquals(normalHeading * .9f, headingSize(), 0.01f, "Aa 小：标题跟着缩小")
+            assertBody(.9f, "Aa 小"); assertEquals(normalMarks, marks(), "Aa 小：原文和偏移不变")
             typeSize("中"); assertEquals(normalHeading, headingSize(), 0.01f)
+            assertBody(1f, "回到 Aa 中"); assertEquals(normalMarks, marks())
 
             // 选段提问（第 8 刀）：在真阅读器里点开。宿主没接问答方案商，发出去一定落到「暂时不能回答」，所以每次拍到的都一样。
             onNodeWithTag("ask-book-passage").performClick(); waitForIdle()

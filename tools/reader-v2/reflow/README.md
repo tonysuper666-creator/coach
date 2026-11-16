@@ -426,8 +426,13 @@ and exact XML element paths, unique source identities (including EPUB spine
 index), valid UTF-16 range endpoints, stale-text refusal and repeat extraction.
 It prints aggregate counts only; the production parser can still fail before
 mapping. It does not independently verify characters, semantic structure,
-rendering or persistence. The real EPUB trial in the report fails at the existing
-DOCTYPE prohibition; the real Word trial passes these provenance checks.
+rendering or persistence. EPUB member identity checks use the production
+`EpubXml` parser, then independently walk paths and check original-byte hashes;
+this is not an independent XML parser audit. The initial real EPUB trial failed
+at the DOCTYPE prohibition. With the guarded compatibility fix, the unchanged
+original now passes (65 text pages / 21 members / 1,777 ranges); the report keeps
+both the original failure and the subsequent result. The real Word trial still
+passes (72 text pages / 1,559 ranges).
 
 ### Regression commands
 

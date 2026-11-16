@@ -1147,7 +1147,8 @@ SHA-256、从 XML 根开始的元素子节点路径、namespace/localName、唯�
 | IDPF 官方样本中的 [Accessible EPUB 3 发布文件](https://github.com/IDPF/epub3-samples/releases/download/20230704/accessible_epub_3.epub) | 4,051,892 字节；SHA-256 `67f75b8e3cd1abe4bb143d91d5424191d5af3115c9d26ff029a38e19f8d16feb`；OPF 共 22 个 spine 条目，其中 1 个 `linear=no` | **退出 1**；既有解析器禁止 DOCTYPE，正文 XHTML 在 `TextbookLibrary.kt` 的 `xml(bytes)` 处失败，尚未进入映射 |
 
 没有删除 EPUB 的 DOCTYPE 或重打包后冒充原文件通过，也没有放开 XML 安全设置。
-真实 EPUB 兼容性是已观察到的用户缺陷，留在本卡待解决；本轮未改解析器。Word
+真实 EPUB 兼容性是本段已观察到的用户缺陷；本段未改解析器，后续修复和原文件
+重跑见下节「EPUB 的标准 DOCTYPE 兼容」。Word
 页数是现有分页函数的文字页，不是 Word 排版物理页。真实文件及运行记录在 Mac
 私有 `~/Coach/state/ton1669/native-real-20261116/`，不随工具或报告分发。
 
@@ -1173,3 +1174,75 @@ SHA-256、从 XML 根开始的元素子节点路径、namespace/localName、唯�
 
 本轮未重新运行 layout 26 项或前三项旧提取工具 PDF 集成，没有新 Windows 安装/
 模型下载测量。显示仍守 TON-1667、TON-1670 前置，32 格 winbox 真窗口均未验证。
+
+### EPUB 的标准 DOCTYPE 兼容
+
+IDPF 原始 EPUB 的 21 个正文 XHTML 均含 `<!DOCTYPE html>`。原先对所有 DOCTYPE
+一律拒绝，使它无法进入文字提取及出处映射。本段只改 EPUB XML 入口，未改 Word
+解析器、正文遍历、分页、UTF-16 范围、保存或阅读器显示。
+
+`EpubXml` 在同一份原始字节上先作 SAX 声明检查，再构建 DOM，不用正则剥除
+DOCTYPE、不修改或重打包 EPUB。允许 HTML5 的 `html` 声明（含 `about:legacy-compat`），
+以及 public/system 标识成对匹配的 W3C XHTML 1.0 Strict/Transitional/Frameset、
+XHTML 1.1 声明，系统标识仅接受规定的 W3C HTTP/HTTPS 路径。未知 DTD、非 `html`
+声明及根元素不符均拒绝。只允许声明身份，不读取 DTD 内容。
+
+两遍解析均显式开启 `FEATURE_SECURE_PROCESSING`，关闭外部一般/参数实体、外部
+DTD 加载和 XInclude，`ACCESS_EXTERNAL_DTD` / `ACCESS_EXTERNAL_SCHEMA` 为空；
+解析器若意外调用实体解析回调，直接抛错。预检还拒绝内部/外部实体（包括未使用的
+声明、参数实体和未解析实体）、元素/属性/记号声明，以及未能解析的实体引用。
+因此不接受依赖远端 DTD 提供的 `&nbsp;` 等名称实体，要求源文件使用 Unicode 或
+数值引用；这类文件明确失败，不静默丢字。未出现 DOCTYPE 的既有 XML 仍沿用同样
+的正文流程。设置依据是 [JDK 17 JAXP 安全指南](https://docs.oracle.com/en/java/javase/17/security/java-api-xml-processing-jaxp-security-guide.html)，
+不是“只关闭实体展开就足够”的假设。
+
+新增 7 项 `EpubXmlTest`，覆盖标准声明与无声明版本的规范页/范围/路径逐项一致、
+成员摘要仍来自含声明的原始字节、过期拒绝、UTF-8 BOM 和 UTF-16 编码、伪声明
+注释、自定义/错配/畸形声明、未使用实体/参数实体/扩展链/未解析实体/属性注入、
+文件实体、XInclude、schema，以及四个 XML 入口（container/encryption/OPF/XHTML）
+失败时已保存书库和临时导入文件不变。回环 HTTP 监听器记录 **0 次请求**；这证明
+列出的测试输入没有访问该端点，不是系统级断网证明。原有测试未删除或放宽。
+
+#### 原始真实文件重跑
+
+使用当前 checkout 的 Mac 生产 classes / runtime classpath，`NativeSourceProbe.java`
+以 `javac --release 17` 编译，退出 0。EPUB XML 身份核对也调用生产声明检查器，再
+独立核对路径、成员原始字节摘要和范围；不是第二套解析器的独立安全审计。
+
+| 原始文件 | 本次结果（退出均为 0） |
+|---|---|
+| 上节同一 IDPF EPUB，未改字节，SHA-256 仍为 `67f75b8e3cd1abe4bb143d91d5424191d5af3115c9d26ff029a38e19f8d16feb` | 65 个规范文字页、21 个正文成员、1,567 个元素，其中 1,554 个有范围，共 1,777 段；原成员摘要/路径、UTF-16 边界、过期拒绝和重复提取一致 |
+| 上节同一 DWP DOCX，未改字节，SHA-256 仍为 `c6652b14fa13f99871681bd36a04b10aa40889a56b6430781930083158fc2341` | 72 个规范文字页、2 个成员、3,707 个元素，其中 1,417 个有范围，共 1,559 段；结果与上一段一致 |
+
+原件、stdout/stderr 和编译记录仍只存 Mac 的既有私有材料目录。65/72 是文字分页，
+不是源文件的排版物理页；这里没有逐字符人工核验、语义正确率、阅读器保住率或
+真实样本的显示/持久化验收。上段 EPUB 退出 1 的历史记录保留，不改写为当时通过。
+
+#### 测试与后续边界
+
+首次 winbox 书库测试 188 项中 1 项失败：新加的 `&nbsp;` 拒绝断言未抛错。原因是
+外部 DTD 未加载时，SAX 可报告 `skippedEntity`，DOM 可留下无文字的实体节点；
+补上 `skippedEntity` 拒绝及 content handler 注册后修复，没有删除或放宽断言。
+同时注册 DTD handler 拒绝记号和未解析实体。
+
+本机 Mac 书库测试 188 项：新增 7 项全部通过；另有既有
+`TextbookLibraryTest.scanOnlyPdfRemainsReadableAndCannotPretendToBeAGeneratedCourse`
+在第 116 行发生 NPE（退出 1，另有既有 1 项跳过），未改该测试或扫描 PDF 路径。
+保留首轮 Windows 和本机失败日志，最终 Windows 结果单独记录。
+
+最终 `tools/dev/heavy ./gradlew :desktopApp:test --console=plain` 在 winbox 退出 0，
+`BUILD SUCCESSFUL in 7m 26s`，`:desktopApp:test` 实际执行，非 FROM-CACHE。
+返回的 109 份 JUnit 报告共 473 项：466 项通过、7 项既有环境测试跳过，
+0 failures / 0 errors；新增 `EpubXmlTest` 7 项全部执行并通过。
+heavy 快照 `f6c51ed481c4b259632e32101e26c87f1de7524f`，总计 464.74 秒。
+这次 Windows 全量通过不抹掉上面的 Mac 扫描 PDF 失败，其根因本段未定位。
+
+`tools/dev/heavy --local python3 -I -m unittest discover -s tools/reader-v2/reflow -v`
+退出 0，原 63 项全部通过且未改；reflow/layout 的 `compileall`、Mac 生产 classes
+编译与 `git diff --check` 均退出 0。本段未重新运行 layout 26 项、旧 PDF 集成或
+Docling，不新增这些项目的通过结论。
+
+无框候选仍全部 `import_allowed=false`；近白边不证明完整对象或排除了正文。
+独立目视核验、批准收据与自动导入、无标签跨页表、结构持久化仍待做，未将本次
+EPUB 兼容修复记作这些项目通过。显示继续等待 TON-1667、TON-1670；32 格 winbox
+真窗口均未验证，TON-1679 仍另案。

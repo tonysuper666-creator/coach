@@ -1,12 +1,18 @@
 package com.coach.desktop.books
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalScrollbarStyle
+import androidx.compose.foundation.ScrollbarStyle
+import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -15,12 +21,26 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -46,6 +66,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.awt.Cursor
 
 /**
  * 出处打开后这一页要标什么。练习依据只有页 + 原句；讲解出处还带着解析器核对过的块范围，
@@ -104,6 +125,29 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
         if (session.noteSaveTick > 0) session.commitNote()
     }
 
+    // 翻页键只到得了拿着键盘焦点的那棵子树，外壳的 Surface 只处理 Esc，所以阅读区自己是一个焦点目标：
+    // 换页、合上批注编辑区、离开页码框之后把焦点收回来，方向键马上又能用。
+    // 正在输入文字时不接管：提问弹窗、页码框、批注编辑区自己要用方向键。
+    val pageFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    var jumpFocused by remember { mutableStateOf(false) }
+    var pageFocused by remember { mutableStateOf(false) }
+    val typing = readerTyping(asking, jumpFocused, notesOpen, session.noting)
+    LaunchedEffect(book.id, ui.page, typing) {
+        if (typing) return@LaunchedEffect
+        // 进阅读屏那一帧焦点节点可能才刚挂上，第一次请求会被丢掉；等几帧再确认一次，最多试几回。
+        repeat(5) {
+            if (pageFocused) return@LaunchedEffect
+            withFrameNanos { }
+            runCatching { pageFocus.requestFocus() }
+        }
+    }
+    fun turnTo(pageNumber: Int?) {
+        pageNumber ?: return
+        onPage(pageNumber)
+        session.goToPage(pageNumber)
+    }
+
     val quoteAnchor = remember(ui.page, source, practiceSource) {
         if (source == null) null
         else if (practiceSource != null) practiceSource.quote?.takeIf { practiceSource.page == ui.page }
@@ -124,6 +168,12 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             catch (_: Exception) { PageImage.Failed }
         }
     }
+    // 页图还没回来时按上一张（或文字层给的）宽高比先铺纸，图到了原地换掉，后面的按钮不往下跳。
+    var paperAspect by remember(book.id) { mutableStateOf<Float?>(null) }
+    LaunchedEffect(image) {
+        (image as? PageImage.Ready)?.let { paperAspect = it.image.width.toFloat() / it.image.height }
+    }
+    val imageScroll = remember(book.id, ui.page) { ScrollState(0) }
     val view = (remote.page as? com.coach.desktop.reader.PageState.Ready)?.view
     val samePage = remote.current?.id == book.id && remote.current?.version == "1" &&
         view?.document == book.id && view.pdfPage == ui.page
@@ -199,7 +249,21 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             if (source != null) Text("对应教材第 ${source.firstPage}–${source.lastPage} 页 · 返回后保留学习进度", style = MaterialTheme.typography.bodySmall)
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
-            Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
+            Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")
+                .focusRequester(pageFocus).focusable().onFocusChanged { pageFocused = it.hasFocus }
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
+                    if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) return@onPreviewKeyEvent false
+                    when (readerPagingTurn(event.key, typing)) {
+                        ReaderTurn.Previous -> previousPage?.let(::turnTo)
+                        ReaderTurn.Next -> nextPage?.let(::turnTo)
+                        ReaderTurn.First -> turnTo(book.pages.first().number)
+                        ReaderTurn.Last -> turnTo(lastPage)
+                        null -> return@onPreviewKeyEvent false
+                    }
+                    true
+                }) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
                 else if (textView) {
                     // 标题字号取 V7 typography（随 Aa 缩放）：一级用 headlineLarge，其余用 titleLarge，字体换成宋体。
@@ -247,36 +311,53 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         if (markStart != null && markStart <= laid.layoutInput.text.length)
                             scroll.scrollTo(laid.getLineTop(laid.getLineForOffset(markStart)).toInt())
                     }
-                    SelectionContainer {
-                        Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
-                            contentAlignment = Alignment.TopCenter) {
-                            Text(marked, style = bodyStyle, onTextLayout = { layout = it },
-                                modifier = Modifier.widthIn(max = measure).fillMaxWidth().testTag("reader-text"))
+                    Box(Modifier.fillMaxSize()) {
+                        SelectionContainer {
+                            Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(22.dp).testTag("reader-scroll"),
+                                contentAlignment = Alignment.TopCenter) {
+                                Text(marked, style = bodyStyle, onTextLayout = { layout = it },
+                                    modifier = Modifier.widthIn(max = measure).fillMaxWidth().testTag("reader-text")
+                                        .pointerHoverIcon(PointerIcon(Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR))))
+                            }
                         }
+                        ReaderScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 } else {
-                    when (val loaded = image) {
-                        PageImage.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                        PageImage.Failed -> Column(Modifier.align(Alignment.Center)) {
-                            Text("这一页暂时打不开。")
-                            TextButton(onClick = { retry++ }) { Text("重试") }
-                        }
-                        is PageImage.Ready -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    // 页图就位前先铺一张同尺寸的纸（纸面底色、一道细边），图到了原地换掉：
+                    // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
+                    val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
+                    val paperLine = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
+                    val aspect = readerPaperAspect(paperAspect, boxes?.width, boxes?.height)
+                    Box(Modifier.fillMaxSize()) {
+                        Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             Box(Modifier.fillMaxWidth()) {
-                                Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
-                                if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
-                                    androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
-                                        val k = size.width / boxes.width.toFloat()
-                                        for (r in located.rects) drawRect(
-                                            highlight,
-                                            topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
-                                            size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
-                                        )
+                                when (val loaded = image) {
+                                    PageImage.Loading -> Box(Modifier.fillMaxWidth().aspectRatio(aspect)
+                                        .background(paper).border(1.dp, paperLine).testTag("reader-page-placeholder"))
+                                    PageImage.Failed -> Column(Modifier.fillMaxWidth().aspectRatio(aspect)
+                                        .background(paper).border(1.dp, paperLine).testTag("reader-page-placeholder"),
+                                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                        Text("这一页暂时打不开。", color = colors.fgSecondary)
+                                        TextButton(onClick = { retry++ }) { Text("重试") }
+                                    }
+                                    is PageImage.Ready -> {
+                                        Image(loaded.image, "${book.title} 第 ${ui.page} 页", contentScale = ContentScale.FillWidth,
+                                            modifier = Modifier.fillMaxWidth().aspectRatio(loaded.image.width.toFloat() / loaded.image.height).testTag("remote-image"))
+                                        if (located is com.coach.desktop.reader.Located.Found && aspectOk && boxes != null) {
+                                            androidx.compose.foundation.Canvas(Modifier.testTag("remote-highlight").semantics { contentDescription = "原句：$quoteAnchor" }.matchParentSize()) {
+                                                val k = size.width / boxes.width.toFloat()
+                                                for (r in located.rects) drawRect(
+                                                    highlight,
+                                                    topLeft = androidx.compose.ui.geometry.Offset(r.x0.toFloat() * k, r.y0.toFloat() * k),
+                                                    size = androidx.compose.ui.geometry.Size((r.x1 - r.x0).toFloat() * k, (r.y1 - r.y0).toFloat() * k),
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                        ReaderScrollbar(imageScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
             }
@@ -301,10 +382,22 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PaperButton({ previousPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
-                Text("${ui.page} / $lastPage", color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers,
-                    style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("reader-page-number"))
-                PaperButton({ nextPage?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                // 快捷键写在悬停提示里：不用记，也不用在页面上多一行说明。
+                ReaderTooltip("上一页　←　PageUp") {
+                    PaperButton({ turnTo(previousPage) }, enabled = !ui.busy && previousPage != null, modifier = Modifier.testTag("previous-page").testTag("bar-prev-page")) { Text("上一页") }
+                }
+                // 页面下方不再常驻说明行；同一句挪到页码的悬停提示里，图片书/文字版各自说清。
+                ReaderTooltip(when {
+                    book.format == "pdf" -> "页码按 PDF 原文件计算。"
+                    book.format in BookFormats.images -> "一张图片为一页。"
+                    else -> "页码按阅读器中的正文分页计算。"
+                }) {
+                    Text("${ui.page} / $lastPage", color = colors.fgSecondary, fontFamily = LocalV7Fonts.current.numbers,
+                        style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("reader-page-number"))
+                }
+                ReaderTooltip("下一页　→　PageDown") {
+                    PaperButton({ turnTo(nextPage) }, enabled = !ui.busy && nextPage != null, modifier = Modifier.testTag("next-page").testTag("bar-next-page")) { Text("下一页") }
+                }
                 Spacer(Modifier.weight(1f))
                 Text("页码", color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
                 val field = RoundedCornerShape(8.dp)
@@ -312,14 +405,43 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fgPrimary, textAlign = TextAlign.Center),
                     cursorBrush = SolidColor(colors.fgPrimary),
                     modifier = Modifier.width(64.dp).testTag("page-jump").v7FocusRing(field).clip(field).background(colors.surface2)
-                        .border(1.dp, colors.borderSubtle, field).padding(horizontal = 10.dp, vertical = 9.dp))
-                V7TextButton({ jump.toIntOrNull()?.let { onPage(it); session.goToPage(it) } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
+                        .border(1.dp, colors.borderSubtle, field).onFocusChanged { jumpFocused = it.isFocused }
+                        .padding(horizontal = 10.dp, vertical = 9.dp))
+                V7TextButton({ jump.toIntOrNull()?.let { turnTo(it); focusManager.clearFocus() } }, enabled = !ui.busy && jump.toIntOrNull()?.let { book.page(it) != null } == true) { Text("前往") }
             }
-            Text(when { book.format == "pdf" -> "页码按 PDF 原文件计算。"; book.format in BookFormats.images -> "一张图片为一页。"; else -> "页码按阅读器中的正文分页计算。" }, style = MaterialTheme.typography.bodySmall)
         }
     }
     if (asking) BookPassageAsk(book, page, support) { asking = false }
 }
+
+/** 键盘翻页的去向。 */
+internal enum class ReaderTurn { Previous, Next, First, Last }
+
+/**
+ * 阅读区认的翻页键：←/PageUp 上一页，→/PageDown 下一页，Home 首页，End 末页。
+ * 正在输入文字时一个都不接——方向键和 Home/End 归光标用。
+ */
+internal fun readerPagingTurn(key: Key, typing: Boolean): ReaderTurn? {
+    if (typing) return null
+    return when (key) {
+        Key.DirectionLeft, Key.PageUp -> ReaderTurn.Previous
+        Key.DirectionRight, Key.PageDown -> ReaderTurn.Next
+        Key.MoveHome -> ReaderTurn.First
+        Key.MoveEnd -> ReaderTurn.Last
+        else -> null
+    }
+}
+
+/** 焦点是否落在会吃掉方向键的文字输入里：选段提问、页码框、打开着的批注编辑区。 */
+internal fun readerTyping(asking: Boolean, jumpFocused: Boolean, notesOpen: Boolean, noting: Boolean): Boolean =
+    asking || jumpFocused || (notesOpen && noting)
+
+/**
+ * 页图还没到时的纸面宽高比：先按这张书这一页量过的比，其次按文字层的页面尺寸，
+ * 都没有就按 A4（1:√2）铺。三种都是纸，图到了只换内容不换框，下面的按钮不跟着跳。
+ */
+internal fun readerPaperAspect(remembered: Float?, boxesWidth: Double?, boxesHeight: Double?): Float =
+    remembered ?: boxesWidth?.let { w -> boxesHeight?.takeIf { it > 0 }?.let { h -> (w / h).toFloat() } } ?: (1f / 1.4142f)
 
 /** 一行 Markdown 标题：[marks] 是井号连同后面的空白，[title] 是标题文字；都是原文里的字符下标。 */
 internal data class MarkdownHeading(val level: Int, val marks: IntRange, val title: IntRange)
@@ -331,6 +453,41 @@ internal fun markdownHeadings(text: String): List<MarkdownHeading> = markdownHea
     val title = m.groups[2]!!.range
     MarkdownHeading(hashes.last - hashes.first + 1, hashes.first until title.first, title)
 }.toList()
+
+/**
+ * 阅读区的细滚动条，形状照 P0 的 `v7/V7Scrollbar.kt`：8dp 宽、悬停由细边色转成三级灰，
+ * 内容不满一屏时不出现。换成共享组件要重新编译并复核阅读区几何，列在本卡串行窗口。
+ */
+@Composable
+private fun ReaderScrollbar(scroll: ScrollState, modifier: Modifier = Modifier) {
+    if (scroll.maxValue <= 0) return
+    val colors = CoachTheme.colors
+    val style = ScrollbarStyle(
+        minimalHeight = 28.dp, thickness = 8.dp, shape = RoundedCornerShape(4.dp), hoverDurationMillis = 160,
+        unhoverColor = colors.borderSubtle, hoverColor = colors.fgTertiary,
+    )
+    CompositionLocalProvider(LocalScrollbarStyle provides style) {
+        VerticalScrollbar(rememberScrollbarAdapter(scroll), modifier, style = style)
+    }
+}
+
+/** 悬停提示的纸面小条，规格同 P0 的 `v7/V7Tooltip.kt`；换共享组件同上，列在串行窗口。 */
+@Composable
+private fun ReaderTip(text: String) {
+    val colors = CoachTheme.colors
+    val shape = RoundedCornerShape(6.dp)
+    Box(Modifier.background(colors.surface2, shape).border(1.dp, colors.borderSubtle, shape)
+        .padding(horizontal = 8.dp, vertical = 5.dp)) {
+        Text(text, color = colors.fgSecondary, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+/** 约半秒后出提示，内容带名称或快捷键；鼠标离开就收。 */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun ReaderTooltip(text: String, content: @Composable () -> Unit) {
+    TooltipArea(tooltip = { ReaderTip(text) }, delayMillis = 500, content = content)
+}
 
 /** 待办的阅读器焦点请求：发起时的书与出处。 */
 internal class ReaderFocusTicket(val bookId: String?, val source: BookLesson?)

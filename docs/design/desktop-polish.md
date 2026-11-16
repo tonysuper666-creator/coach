@@ -80,10 +80,10 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | A6 | 讨好口吻、感叹号 | 已对 | 代码 `rg '！'`：界面文案 0 处（只出现在断句正则里） | 没有「欢迎」「太棒了」 |
 | A7 | 空状态「暂无数据」 | 待修 | `LocalExamUi.kt:129` | 「部分章节暂无可用题」改成「有几节还没有题，这份练习只出了已有的。」去向：卡 P4 |
 | A8 | 长文居中 | 已对 | `TextAlign.Center` 仅 1 处，非正文 | |
-| A9 | Material 默认残留 | 待修 | `dark/notes-export`（绿色实心勾选框、▾ 下拉）；代码：`AlertDialog` 10、`TextButton` 12、`Checkbox` 2、`OutlinedTextField` 3、`DropdownMenu` 1、默认 `LinearProgressIndicator` 4、`CircularProgressIndicator` 1 | 对话框与表单件归 TON-1650 D12–D14；按钮按压水波纹见 M1；页图转圈见 E2 |
+| A9 | Material 默认残留 | 待修 | `dark/notes-export`（绿色实心勾选框、▾ 下拉）；代码：`AlertDialog` 10、`TextButton` 12、`Checkbox` 2、`OutlinedTextField` 3、`DropdownMenu` 1、默认 `LinearProgressIndicator` 4、`CircularProgressIndicator` 0（阅读页那份已换纸面占位，见 E2） | 对话框与表单件归 TON-1650 D12–D14；按钮按压水波纹见 M1；页图转圈见 E2 |
 | A10 | 基线不齐 | 待修 | `light/explain-failed` | 「讲解这段」按钮和右侧编号小字不在一条基线上；随 A11 去掉编号后消失 |
 | A11 | 占位文案、中英混杂、内部编号露出 | 待修 | `light/explain-failed`（`3f6e6f96…:p1:11`）、`light/exam-attempt`（`作答记录：local-d25dd1bb-…`）、`light/quiz`（「出题：选择」） | 用户看到的是哈希和 UUID。去向：讲解卡 P2；考试 P4；「出题：选择」改「题型：选择题」随 P4 一起看文案 |
-| A12 | 开发者口吻的说明 | 待修 | `light/reader`；`TextbookReader.kt:312` | 页面底部常驻「页码按 PDF 原文件计算。」像开发备注。收进页码的悬停提示，或只在两种页码不一致时出现。去向：P1 |
+| A12 | 开发者口吻的说明 | 已对 | `light/reader`；`TextbookReader.kt:389-396`（页码的悬停提示） | 页面底部常驻的「页码按 PDF 原文件计算。」已收进页码的悬停提示，正文下面不再有这行字；`light/reader` 改后截图底下只剩「上一页 1 / 1 下一页 · 页码 1 前往」。P1 |
 | A13 | 一屏多个主按钮 | 待修 | `light/today` | 今天页三个按钮里两个是黑底主按钮，看不出先点哪个。只留一个主按钮，其余用纸面按钮。`WindowsHomeCards.kt` 本轮无人占用，但等 P0 的按钮手感合并后再动，免得两次改同一处：P3 之后另排 |
 
 ### 成熟度
@@ -93,7 +93,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 截图 / 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | E1 | 第一次打开 / 空书架 | 已对 | `TextbookShelf.kt:38-65` | 一句说明 + 「上传教材」，格式和存放位置写在下面 |
-| E2 | 加载不转圈 | 待修 | `TextbookReader.kt:253`、`TextbookWorkspace.kt:120` | 页图加载用居中转圈；忙时顶部默认蓝色细条。改成纸面占位（同尺寸浅底页）和 token 色细条。去向：P1（阅读）；顶部细条在外壳文件，等 TON-1656 释放后并入 P5 |
+| E2 | 加载不转圈 | 待修（阅读已对） | `TextbookReader.kt:334-342`、`TextbookWorkspace.kt:120` | 页图加载的转圈已换成同尺寸纸面占位（`pgPaper` 底、`line` 细边，按上一张或页面框的宽高比先铺，图到了原地换掉）；打不开时同一张纸上给「这一页暂时打不开。」和「重试」。忙时顶部默认蓝色细条还在外壳文件里，等 TON-1656 释放后并入 P5 |
 | E3 | 出错给下一步 | 待修 | `light/explain-failed`；`TextbookWorkspace.kt:121`、`TextbookShelf.kt:142` | 讲解失败只有一行朱字，没有「重试」；工作区和书架错误仍用 `colorScheme.error`。去向：P2（讲解）；外壳和书架两处并入 P5、P3 |
 | E4 | 长书名 / 长段落 | 未验证 | — | 截图测试只有短书名 `knowledge-recap`。盲评轮补一本长书名隔离样书 |
 | E5 | 离线 | 已对 | `light/explain-failed`、`ask-unavailable` | 文案「暂时没连上 Mac，可继续阅读或稍后重试」是人话 |
@@ -103,11 +103,11 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
-| K1 | Tab 顺序 | 未验证 | — | 需 winbox 真窗口走一遍；派给 P1 交付时附 |
+| K1 | Tab 顺序 | 未验证 | — | 需 winbox 真窗口人手走一遍；`ReaderKeyboardPagingTest` 只核到阅读区拿到焦点后连按键，没有逐个 Tab 过去的顺序。仍待验，归 P1 串行窗口 |
 | K2 | 焦点环 | 已对（共享按钮） | `FocusRing.kt`；`V7DesktopFeedbackTest`、`V7FocusRingTest`、`V7ButtonWindowTest`；TON-1657 真窗口 `after-2d22cba1/` | 浅深像素测试覆盖鼠标隐藏、Tab 恢复；真 Windows 窗口里 OS Tab 聚焦按钮并画出环，随后 OS 鼠标点击同一按钮，焦点保留、环消失，浅深两套都有像素断言 |
-| K3 | 方向键 / PageUp / PageDown 翻页 | 待修 | `TextbookWorkspace.kt:108-122` 只处理 Esc；配对阅读器 `reader/ReaderKeys.kt` 已有 | 本机教材阅读不能用键盘翻页。去向：P1（在 `TextbookReader.kt` 内处理，不碰外壳） |
+| K3 | 方向键 / PageUp / PageDown 翻页 | 已对（阅读） | `TextbookReader.kt` 阅读区根节点上的 `onPreviewKeyEvent`；外壳仍只处理 Esc | ←/→/PageUp/PageDown 翻一页，Home/End 到首末页，到首末页不越界；焦点在页码框、提问输入框、批注编辑里时不翻页，从页码框跳走后按键交回阅读区。处理全在 `TextbookReader.kt` 内，`TextbookWorkspace.kt` 未改。`ReaderKeyboardPagingTest` 连按 4 次 PageDown 到第 5 页 |
 | K4 | Esc 关闭 | 已对 | `Key.Escape` 6 处 | 阅读、批注、对话框都能 Esc |
-| K5 | 快捷键看得见 | 已对（组件） | `V7Tooltip.kt`；`V7DesktopFeedbackTest` | 提示支持可选 `shortcut`，验证显示 Esc；阅读页快捷键接入仍归 P1 |
+| K5 | 快捷键看得见 | 已对（组件与阅读底栏） | `V7Tooltip.kt`；`V7DesktopFeedbackTest`；阅读页底栏本文件内的 `ReaderTooltip` | 组件支持可选 `shortcut`，验证显示 Esc；阅读页底栏三个控件悬停约 0.5 s 出提示：「上一页　←　PageUp」「下一页　→　PageDown」，页码的提示说清口径（PDF 为「页码按 PDF 原文件计算。」，图片书为「一张图片为一页。」，文字版为「页码按阅读器中的正文分页计算。」）。P0 已合并且合并后本地这份可换成 `V7Tooltip`，需编译和真窗口复核，列在 P1 串行待办 |
 | K6 | Ctrl+F | 不做 | — | 书内查找是新功能，本卡不加功能；记在 TON-1654「以后再说」 |
 | K7 | Enter 提交 | 未验证 | — | 选段就问、配对码输入框 Enter 是否提交，随 P2 核 |
 
@@ -116,8 +116,8 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | M1 | 悬停状态 | 已对（共享按钮） | `PaperButton.kt`、`ButtonFeedback.jvm.kt`；TON-1657 真窗口 `before/` → `after/` | PaperButton / PrimaryButton 使用既有 token 叠色，悬停浅底、按下更强，无桌面水波纹；禁用不响应。选项行不在本卡范围 |
-| M2 | 指针形状 | 已对（共享按钮） | `ButtonFeedback.jvm.kt:pointerHoverIcon` | 启用按钮为手形，禁用为默认指针；正文 I 形接入仍归 P1 |
-| M3 | 提示与延迟 | 已对（组件及导航示范） | `V7Tooltip.kt`、`DeskNavIcon.kt`；`V7DesktopFeedbackTest` | 导航图标悬停 500ms 出纸面提示，离开消失，细边及 UI 字体；Aa 等页面接入归 P1 |
+| M2 | 指针形状 | 已对（按钮与正文） | `ButtonFeedback.jvm.kt:pointerHoverIcon`；`TextbookReader.kt:320` | 启用按钮为手形，禁用为默认指针；阅读页正文已是 I 形（`TEXT_CURSOR`）。desktopApp 内 `pointerHoverIcon` 0 → 1 处，选择与批注区仍是默认指针 |
+| M3 | 提示与延迟 | 已对（组件与导航示范） | `V7Tooltip.kt`、`DeskNavIcon.kt`；`V7DesktopFeedbackTest` | 导航图标悬停 500ms 出纸面提示，离开消失，细边及 UI 字体；阅读页底栏三处用本文件内同规格的 `TooltipArea`（500ms），换 `V7Tooltip` 列在 P1 串行待办 |
 | M4 | 右键菜单 | 未验证 | `SelectionContainer` 4 处 | Compose 默认右键菜单的文字是否中文、是否只有「复制」，需真窗口核 |
 
 **排版**
@@ -138,7 +138,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | W2 | 窗口标题统一 | 待修 | 「Coach」「LerningCoach」「教材原文」三种 | 归 TON-1656 |
 | W3 | 最小窗口尺寸 / 贴靠 | 待修 | 全仓 `minimumSize` 0 处 | 拖得很窄时侧栏和正文会挤坏。先在 1/2、1/3 贴靠下截图定最小值，再设 `window.minimumSize`。`WindowsTextbooks.kt` 被 TON-1656 占用，排在其后：P5 |
 | W4 | 125/150/175% 缩放 | 未验证 | — | 截图测试固定 Density 1.5。P5 交付时在 winbox 改系统缩放各拍一张 |
-| W5 | 滚动条 | 已对（组件） | `V7Scrollbar.kt`；`V7DesktopFeedbackTest` | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。P1/P2/P3 分别接入阅读/讲解/书架 |
+| W5 | 滚动条 | 待修（阅读已接入） | `V7Scrollbar.kt`；阅读区 `ReaderScrollbar`（`TextbookReader.kt`） | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。阅读区已接入：8 dp 粗、悬停 160 ms 变深、内容不满一屏时不出现，`light/reader`、`dark/reader` 均可见。共享 `V7Scrollbar` 已合并，本地这层包装待换（需编译和真窗口复核，列在 P1 串行待办）；书架、讲解仍缺，去向 P3、P2 |
 | W6 | 跟随系统明暗 | 未验证 | `WindowsTextbookHost.kt:103` 用 `isSystemInDarkTheme()` | 运行中切换系统主题是否即时跟随需真窗口核；P5 |
 | W7 | 系统标题栏 | 已对 | 使用系统标题栏 | 不自绘，贴靠菜单可用 |
 
@@ -154,15 +154,17 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 
 main `941b08a2`，`desktopApp/src/main/kotlin/com/coach/desktop` 下 `rg -c`：
 
-| 项 | 数 | 修后（TON-1657） | 集中在 |
-| --- | --- | --- | --- |
-| `Color(0x` 硬编码颜色 | 45 | 45 | 全在 `reader/`；仍按匹配行计数（`rg -c`） |
-| `N.sp` 硬编码字号 | 68 | 68 | |
-| `AlertDialog(` / `TextButton(` | 10 / 12 | 10 / 12 | |
-| `OutlinedTextField(` / `Checkbox(` / `DropdownMenu(` | 3 / 2 / 1 | 3 / 2 / 1 | |
-| `*ProgressIndicator(` | 5 | 5 | |
-| `colorScheme.error` | 4 | 4 | |
-| `pointerHoverIcon` / `Tooltip` / 右键菜单 / `minimumSize` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 此表只数 desktopApp；共享 JVM 新增 `pointerHoverIcon` 调用 1 处、`TooltipArea` 调用 1 处 |
+| 项 | 数 | 修后（TON-1657） | 修后（P1） | 集中在 |
+| --- | --- | --- | --- | --- |
+| `Color(0x` 硬编码颜色 | 45 | 45 | 45 | 全在 `reader/`；仍按匹配行计数（`rg -c`）；阅读页只用 token，未新增 |
+| `N.sp` 硬编码字号 | 68 | 68 | 68 | 未新增 |
+| `AlertDialog(` / `TextButton(` | 10 / 12 | 10 / 12 | 未变 | |
+| `OutlinedTextField(` / `Checkbox(` / `DropdownMenu(` | 3 / 2 / 1 | 3 / 2 / 1 | 未变 | |
+| `*ProgressIndicator(` | 5 | 5 | 4 | 阅读页的 `CircularProgressIndicator` 已删；剩下 4 处都是 `LinearProgressIndicator`（NotesExportDialog、TextbookWorkspace、LocalExamUi 两处） |
+| `colorScheme.error` | 4 | 4 | 4 | 未新增 |
+| `pointerHoverIcon` / `Tooltip` / 右键菜单 / `minimumSize` | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 1 / 1 / 0 / 0 | 正文 I 形指针 1 处（`TextbookReader.kt:320`）；底栏 `ReaderTooltip` 的 `TooltipArea` 1 处。此表只数 desktopApp；共享 JVM 新增 `pointerHoverIcon` 调用 1 处、`TooltipArea` 调用 1 处 |
+
+每张修复卡交付时在本表追加一列「修后」。P1 一列在 rebase 后的 head 上按同一路径重数，`pointerHoverIcon` 和 `Tooltip` 按调用处算、import 行不计；其余行只报未变，不沿用旧口径重算。
 
 ### TON-1657 组件验收
 
@@ -183,7 +185,7 @@ Android actual 保留原填色和 LocalIndication，悬停叠色与无水波纹 
 | 卡 | 范围 | 文件 | 状态 |
 | --- | --- | --- | --- |
 | P0 按钮手感 | M1 M2 M3 K2 K5，以及 V7 细滚动条样式 | `shared/ui/.../v7/PaperButton.kt`、新文件 `shared/ui/.../v7/V7Tooltip.kt`、`V7Scrollbar.kt`（jvmMain） | 组件已实现，真窗口 Tab / 鼠标验收已过，TON-1657 |
-| P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | 本轮派 |
+| P1 本机阅读 | K3 E2(页图) W5(阅读) M2(正文) A12 | `books/TextbookReader.kt` | PR #325（`agent/cb-flash2/024eba4a5560`），已 rebase 到 main `ac702387`；待串行窗口：新 head 的 `desktopApp:test`、K1 Tab 顺序、占位图浅深截图，以及把本地 `ReaderTooltip`/`ReaderScrollbar` 换成 P0 的 `V7Tooltip`/`V7Scrollbar` |
 | P2 讲解卡 | A10 A11(出处) E3(讲解) D3 W5(讲解) K7 | `books/BookExplain.kt`、`books/AnswerExplain.kt`、`books/BookSourceRow.kt` | 本轮派 |
 | P3 书架 | A1(模式卡) E3(书架) W5(书架) | `books/TextbookShelf.kt` | 排队，P0 合并后 |
 | P4 本地参考练习文案 | A7 A11(作答记录、出题) | `books/exam/LocalExamUi.kt`、`books/TextbookLearning.kt` | 排队，等 TON-1650 第 13 刀合并 |

@@ -71,6 +71,11 @@ def source_mapping(bb, probe):
                 not 0 <= start < end <= len(text) // 2):
             ambiguous = True
             continue
+        try:
+            text[start * 2:end * 2].decode("utf-16-le")
+        except UnicodeDecodeError:
+            ambiguous = True
+            continue
         # Probe offsets are made by the same stripper operation, not by finding
         # an OCR string in the text (repeated words would make that ambiguous).
         selected.append([start, end])
@@ -89,8 +94,81 @@ def source_mapping(bb, probe):
             "replacement_range": ranges[0] if status == "mapped" else None}
 
 
+def verified_cell_bands(table, layout, probe, table_box):
+    """Prove cell text/geometry against PDF glyphs, without searching for strings.
+
+    Empty space between model boxes is insufficient. Every table glyph must
+    belong wholly to exactly one cell, and every cell must reproduce its text
+    from canonical UTF-16 slices (ignoring whitespace only). This is geometric
+    split evidence, not proof that the model chose the right semantic grid.
+    """
+    cells = table["cells"]
+    boxes = [crop_rect(c["bbox"], layout) for c in cells]
+    assigned = [[] for _ in cells]
+    text = utf16(probe["text"])
+    for glyph in probe["glyphs"]:
+        gb = glyph["bbox"]
+        if not intersects(table_box, gb):
+            continue
+        hits = [i for i, box in enumerate(boxes) if intersects(box, gb)]
+        if len(hits) != 1 or not contains(boxes[hits[0]], gb) or not contains(table_box, gb):
+            return None
+        start, end = glyph.get("start"), glyph.get("end")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text) // 2:
+            return None
+        assigned[hits[0]].append((start, end, gb))
+    bands = [[] for _ in range(table["rows"])]
+    all_ranges = []
+    for cell, glyphs in zip(cells, assigned):
+        spans = sorted(glyphs)
+        try:
+            actual = "".join(text[a*2:b*2].decode("utf-16-le") for a, b, _ in spans)
+        except UnicodeDecodeError:
+            return None
+        if "".join(actual.split()) != "".join(cell.get("text", "").split()):
+            return None
+        all_ranges.extend((a, b) for a, b, _ in spans)
+        if cell["rs"] == 1:
+            bands[cell["r"]].extend(bb for _, _, bb in spans)
+    # Reused/overlapping source runs cannot independently verify two cells.
+    ranges = sorted(all_ranges)
+    if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])):
+        return None
+    return [[min(bb[1] for bb in row), max(bb[3] for bb in row)] if row else None
+            for row in bands]
+
+
+def spanning_rule_ys(rules, left, right, low, high):
+    """A horizontal rule may consist of separate touching cell-edge segments.
+
+    Merge only collinear intervals. A gap, even a narrow one, is not a rule.
+    The endpoint tolerance is the existing PDF coordinate tolerance.
+    """
+    by_y = {}
+    for rule in rules:
+        if (len(rule) == 4 and all(math.isfinite(v) for v in rule) and
+                rule[0] < rule[2] and abs(rule[1] - rule[3]) < 0.05 and
+                low - 0.05 <= rule[1] <= high + 0.05):
+            by_y.setdefault(rule[1], []).append((rule[0], rule[2]))
+    matches = []
+    for y, spans in by_y.items():
+        spans.sort()
+        start, end = spans[0]
+        for a, b in spans[1:]:
+            if a > end:
+                if start <= left + 0.5 and end >= right - 0.5:
+                    matches.append(y)
+                    break
+                start = a
+            end = max(end, b)
+        else:
+            if start <= left + 0.5 and end >= right - 0.5:
+                matches.append(y)
+    return sorted(set(matches))
+
+
 def table_payload(block, layout, probe, geometry_safe=True):
-    """Retain model rows; certify cuts only with matching PDF horizontal rules.
+    """Retain model rows; certify cuts with PDF rules or exact cell/glyph evidence.
 
     Model cell boxes can be text boxes. Gaps alone are never cut coordinates.
     A complete grid can still be semantically wrong; this is not a quality score.
@@ -106,7 +184,8 @@ def table_payload(block, layout, probe, geometry_safe=True):
         cells.append(item)
     result = {"rows": table.get("rows"), "cols": table.get("cols"), "cells": cells,
               "row_bands": [], "row_breaks": [], "header_rows": [],
-              "repeat_header_region": None, "split_status": "unverified"}
+              "repeat_header_region": None, "split_status": "unverified",
+              "cell_text_status": "unverified"}
     if (not table_grid_valid(table) or not geometry_safe or not single_page or
             any(c["source_region"] is None for c in cells)):
         return result
@@ -129,6 +208,9 @@ def table_payload(block, layout, probe, geometry_safe=True):
         else:
             break
     result["header_rows"] = headers
+    verified_bands = verified_cell_bands(table, layout, probe, bb)
+    if verified_bands is not None:
+        result["cell_text_status"] = "exact_glyph_slices_whitespace_ignored"
     for row in range(1, n):
         if (not bands[row - 1] or not bands[row] or
                 any(c["r"] < row < c["r"] + c["rs"] for c in cells)):
@@ -136,17 +218,22 @@ def table_payload(block, layout, probe, geometry_safe=True):
         low, high = bands[row - 1][1], bands[row][0]
         if low > high:
             continue
-        ys = sorted({r[1] for r in probe.get("horizontal_rules", [])
-                     if r[0] <= bb[0] + 0.5 and r[2] >= bb[2] - 0.5 and
-                     low - 0.05 <= r[1] <= high + 0.05})
-        if len(ys) != 1:
+        ys = spanning_rule_ys(probe.get("horizontal_rules", []), bb[0], bb[2], low, high)
+        evidence = "pdf_horizontal_rule_and_cell_grid"
+        if len(ys) == 1:
+            y = ys[0]
+        elif (not ys and verified_bands is not None and verified_bands[row - 1] and
+              verified_bands[row] and low < high and
+              verified_bands[row - 1][1] <= low < high <= verified_bands[row][0]):
+            y = (low + high) / 2
+            evidence = "exact_cell_text_and_pdf_glyph_gap"
+        else:
             continue
-        y = ys[0]
         if any(g["bbox"][1] + 0.05 < y < g["bbox"][3] - 0.05 and
                g["bbox"][0] < bb[2] and g["bbox"][2] > bb[0] for g in probe["glyphs"]):
             continue
         result["row_breaks"].append({"before_row": row, "y": y / probe["height"],
-                                     "evidence": "pdf_horizontal_rule_and_cell_grid"})
+                                     "evidence": evidence})
     header_end = len(headers)
     header_cut = next((r["y"] for r in result["row_breaks"] if r["before_row"] == header_end), None)
     if header_cut is not None:
@@ -202,16 +289,30 @@ def build_payload(probe, layout):
     for b in layout["blocks"]:
         for ref in b.get("caption_refs", []):
             owners.setdefault(ref, set()).add(b["id"])
+    indexed = {item["id"]: item for item in payload["blocks"]}
     for b in layout["blocks"]:
         if b["kind"] not in ("table", "figure"):
             continue
         caption_refs = b.get("caption_refs", [])
         resolved = [refs.get(ref, []) for ref in caption_refs]
-        valid = bool(caption_refs) and all(len(matches) == 1 and matches[0]["kind"] == "caption" and
-                    len(owners[ref]) == 1 for ref, matches in zip(caption_refs, resolved))
+        valid = (bool(caption_refs) and len(set(caption_refs)) == len(caption_refs) and
+                 all(len(matches) == 1 and matches[0]["kind"] == "caption" and
+                     len(owners[ref]) == 1 for ref, matches in zip(caption_refs, resolved)))
         group = {"owner_id": b["id"], "caption_ids": [m[0]["id"] for m in resolved] if valid else [],
                  "caption_refs": caption_refs, "status": "linked" if valid else "unresolved",
                  "keep_together": valid}
+        # A caption can have several explicitly referenced continuation blocks.
+        # Preserve each piece's exact ranges; never enclose intervening body text
+        # in one range or infer an unlabelled continuation from its proximity.
+        parts = [indexed[m[0]["id"]] for m in resolved] if valid else []
+        group["source_parts"] = [{"id": part["id"], "source_region": part["source_region"],
+                                  "source_ranges": part["source_ranges"],
+                                  "mapping_status": part["mapping_status"]} for part in parts]
+        group["placement_status"] = ("source_parts_verified" if valid and trusted_order and
+                                      all(part["source_region"] is not None and
+                                          part["mapping_status"] in ("mapped", "discontiguous")
+                                          for part in parts) else "unverified")
+        group["replacement_range"] = None
         payload["caption_groups"].append(group)
     return payload
 

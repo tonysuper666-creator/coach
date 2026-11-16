@@ -81,7 +81,9 @@ public final class PdfReflowProbe {
                 if(type==PathIterator.SEG_MOVETO) { x=sx=xy[0]; y=sy=xy[1]; }
                 else if(type==PathIterator.SEG_LINETO || type==PathIterator.SEG_CLOSE) {
                     double nx=type==PathIterator.SEG_CLOSE?sx:xy[0],ny=type==PathIterator.SEG_CLOSE?sy:xy[1];
-                    if(Math.abs(y-ny)<0.05 && Math.abs(x-nx)>20)
+                    // A table rule may be painted one short cell edge at a time.
+                    // Keep those segments; the payload verifies full coverage.
+                    if(Math.abs(y-ny)<0.05 && Math.abs(x-nx)>0.05)
                         horizontalRules.add(box(new Rectangle2D.Double(Math.min(x,nx),y,Math.abs(x-nx),0)));
                     x=nx;y=ny;
                 } else if(type==PathIterator.SEG_CUBICTO) { x=xy[4];y=xy[5]; }

@@ -18,7 +18,11 @@ public final class SyntheticPdfFixture {
             PDPage table=new PDPage(new PDRectangle(400,400));doc.addPage(table);
             try(PDPageContentStream s=new PDPageContentStream(doc,table)) {
                 text(s,30,370,"Before table");
-                for(int y:new int[]{320,290,260,230}) { s.moveTo(30,y);s.lineTo(230,y);s.stroke(); }
+                for(int y:new int[]{320,290,260,230}) {
+                    if(y==290) {
+                        for(int x=30;x<230;x+=10) { s.moveTo(x,y);s.lineTo(x+10,y);s.stroke(); }
+                    } else { s.moveTo(30,y);s.lineTo(230,y);s.stroke(); }
+                }
                 for(int x:new int[]{30,130,230}) { s.moveTo(x,230);s.lineTo(x,320);s.stroke(); }
                 text(s,40,300,"Header A");text(s,140,300,"Header B");
                 text(s,40,270,"A1");text(s,140,270,"B1");

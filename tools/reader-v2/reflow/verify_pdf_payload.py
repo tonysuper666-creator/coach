@@ -6,6 +6,7 @@ layout geometry isolates mapping from model accuracy. See README for B checks.
 """
 import argparse
 import base64
+import copy
 import json
 import os
 from pathlib import Path
@@ -62,6 +63,22 @@ def verify(classpath):
         assert [r["before_row"] for r in table["row_breaks"]] == [1, 2]
         assert table["repeat_header_region"] == [0.075, 0.2, 0.575, 0.275]
         assert payload["caption_groups"][0]["caption_ids"] == ["caption"]
+        # The header separator consists of twenty independently painted short
+        # edges. Preserve and join them; do not require one full-width operator.
+        assert sum(r[1] == 110 and r[2] - r[0] == 10 for r in rows[0]["horizontal_rules"]) == 20
+        borderless = copy.deepcopy(blocks[:1])
+        values = ["Header A", "Header B", "A1", "B1", "A2", "B2"]
+        for cell, value in zip(borderless[0]["table"]["cells"], values):
+            r, c = cell["r"], cell["c"]
+            cell["text"] = value
+            cell["bbox"] = [35 + 100*c, 85 + 30*r, 125 + 100*c, 105 + 30*r]
+        verified = build_payload(dict(rows[0], horizontal_rules=[]), layout(rows[0], borderless))
+        table = verified["blocks"][0]["table"]
+        assert table["cell_text_status"] == "exact_glyph_slices_whitespace_ignored"
+        assert [r["before_row"] for r in table["row_breaks"]] == [1, 2]
+        assert all(r["evidence"] == "exact_cell_text_and_pdf_glyph_gap" for r in table["row_breaks"])
+        assert table["repeat_header_region"] == [0.075, 0.2, 0.575, 0.275]
+        assert verified["text"] == expected[0]
         p = rows[1]
         b = {"id": "left", "kind": "unknown", "bbox": [25, 35, 150, 90]}
         mapped = build_payload(p, layout(p, [b]))["blocks"][0]

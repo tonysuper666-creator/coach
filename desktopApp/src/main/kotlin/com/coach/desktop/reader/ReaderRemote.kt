@@ -79,7 +79,7 @@ private fun failureOf(r: ReaderReply, pdfPage: Int? = null): ReaderFailure = whe
 
 data class ReaderDocInfo(val id: String, val title: String, val version: String, val pages: Int)
 class ReaderPageView(val document: String, val pdfPage: Int, val printedPage: Int?, val text: String, val textSha256: String, val image: ByteArray?)
-data class StudyQuestion(val id: String, val stem: String, val status: String, val anchor: String)
+data class StudyQuestion(val id: String, val stem: String, val status: String, val anchor: String, val week: Int? = null)
 data class StudyView(val questions: List<StudyQuestion>, val unlocated: Int, val available: Boolean)
 data class ServerProgress(val pdfPage: Int, val version: String, val revision: Long, val stale: Boolean)
 
@@ -405,7 +405,7 @@ class ReaderRemote(private val source: ReaderSource, private val newMutationId: 
         val qs = (b["questions"] as? JsonArray ?: return StudyState.Failed(ReaderFailure.BadResponse("题目"))).mapNotNull {
             val o = it as? JsonObject ?: return@mapNotNull null
             val id = o.str("id") ?: return@mapNotNull null
-            StudyQuestion(id, o.str("stem").orEmpty(), o.str("status").orEmpty(), o.str("anchor").orEmpty())
+            StudyQuestion(id, o.str("stem").orEmpty(), o.str("status").orEmpty(), o.str("anchor").orEmpty(), o.int("week")?.takeIf { it > 0 })
         }
         return StudyState.Ready(StudyView(qs, b.int("unlocated") ?: 0, (b["available"] as? JsonPrimitive)?.booleanOrNull ?: true))
     }

@@ -181,7 +181,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     var recapVisible by remember { mutableStateOf(page.value.flag("recapVisible")) }
     var asked by remember { mutableStateOf(page.value.flag("asked")) }
     var askOpen by remember { mutableStateOf(false) }
-    var body by remember { mutableStateOf(page.value["body"] as? JsonObject) }
+    var body by remember { mutableStateOf(if (only != null && page.value["pending"] !is JsonObject) null else page.value["body"] as? JsonObject) }
     var error by remember { mutableStateOf<String?>(null) }
     var retryable by remember { mutableStateOf(true) }
     var retry by remember { mutableStateOf(0) }
@@ -192,7 +192,24 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
             val r = withContext(Dispatchers.IO) { http.mainlineWeek(number, c.tutor.agentRunId) }
             error = r.error ?: if (r.body == null) "连不上 Mac，正在自动重连…" else null
             retryable = r.retryable
-            if (r.body != null) { body = r.body; save("body" to r.body!!); break }
+            if (r.body != null) {
+                val fresh = r.body!!
+                // Keep the original displayed option order for an unsubmitted page-practice draft.
+                val saved = page.value
+                val savedBody = saved["body"] as? JsonObject
+                val draftId = saved.str("item")
+                val oldItem = (savedBody?.get("items") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.firstOrNull { it.str("id") == draftId }
+                val freshItems = fresh["items"] as? JsonArray
+                val restored = if (only != null && (saved["choice"] as? JsonPrimitive)?.intOrNull != null && oldItem != null && freshItems != null) {
+                    JsonObject(fresh + ("items" to JsonArray(freshItems.map { element ->
+                        val q = element as? JsonObject
+                        if (q != null && q.str("id") == draftId && oldItem["options"] != null)
+                            JsonObject(q + ("options" to oldItem.getValue("options")) + ("layout" to (oldItem["layout"] ?: JsonNull)))
+                        else element
+                    })))
+                } else fresh
+                body = restored; save("body" to restored); break
+            }
             if (!r.retryable) break
             delay(1500)
         } while (true)
@@ -382,7 +399,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         }
         position(false, id, selectedFilter = selectedFilter)
     }
-    val showingCheckpoint = body != null && !reading && learning && (recapVisible || ladderSession.complete ||
+    val showingCheckpoint = only == null && body != null && !reading && learning && (recapVisible || ladderSession.complete ||
         (item == null && (runtime.declaredKpTotal != null || runtime.declaredCapabilityTotal != null)))
     val goUp: () -> Unit = { if (!reading && !directEntry && (body == null || items.isNotEmpty() || sections.isNotEmpty())) position(true) else onBack() }
     AppBackHandler(!reading, priority = 10, onBack = goUp)
@@ -394,7 +411,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
     if (body == null) {
         Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Text(error ?: "正在读取…")
-            if (!retryable) TextButton(onClick = { retry++ }) { Text("重试") }
+            if (error != null) TextButton(onClick = { retry++ }) { Text("重试") }
         }
         return
     }
@@ -432,7 +449,7 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         return
     }
     if (item == null) {
-        if (only != null) { CenterMessage("本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
+        if (only != null) { CenterMessage("这题当前暂不能开始练习。本页登记的题在这一周的选择题里找不到，请稍后重试或回到选择题主线。"); return }
         if (items.isEmpty()) {
             Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("这一周还没有可用题目。请返回课程，选择已有内容继续学习。")
@@ -466,6 +483,8 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
         return
     }
     val explanation = done?.get("explanation") as? JsonObject
+    var relatedOpen by remember(item.str("id"), number) { mutableStateOf(false) }
+    if (relatedOpen) RelatedQuestionNotes(http, number, item.str("id"), c.tutor.agentRunId) { relatedOpen = false }
     // The answer response supplies the real KP link. Before answering, do not show an unrelated active KP's page.
     val sourceKp = done?.str("kpId")?.let(view::kp)
     val d = pageDetails(c, view, number, kp = sourceKp, includeSource = sourceKp != null)
@@ -600,9 +619,11 @@ private fun MainlineWeek(c: CoachController, http: CourseHttp, view: CourseView,
                 .padding(horizontal = m.horizontalPadding).padding(top = m.topPadding, bottom = 24.dp)) {
                 Column(Modifier.heightIn(min = pageHeight.coerceAtLeast(0.dp))) {
                 Row {
-                    TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("先看要点") }
+                    if (only == null) TextButton(onClick = { position(true) }, modifier = Modifier.testTag("mainline-open-notes")) { Text("先看要点") }
                     TextButton(onClick = { askOpen = true }, modifier = Modifier.testTag("mainline-ask")) { Text("问一句") }
                 }
+                if (only == null && sourceKp == null) Text("教材位置待确认", Modifier.testTag("mainline-source-unknown"))
+                TextButton(onClick = { relatedOpen = true }, modifier = Modifier.testTag("mainline-related-notes")) { Text("查看相关要点") }
                 if ((item["ladder"] as? JsonObject)?.str("kind") == "try_first") Text("先试试 · 还没学过，错了正常，不计会没会。")
                 if (runtime.context.syntheticOnly) Text(runtime.scopeMessage, Modifier.testTag("ladder-synthetic-status"))
                 Row(Modifier.fillMaxWidth().testTag("mainline-heading"), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -779,7 +800,49 @@ private fun Outcome(r: JsonObject, today: Long, onReviewWeek: (Int) -> Unit) {
 
 /** The reader's "去做这几题": the existing weekly walk restricted to the questions registered on one page; closing returns to the reader untouched. */
 @Composable
-internal fun PagePractice(c: CoachController, week: Int, ids: Set<String>, onClose: () -> Unit) {
+private fun RelatedQuestionNotes(http: CourseHttp, week: Int, questionId: String, agentRunId: String?, onClose: () -> Unit) {
+    var retry by remember(week, questionId) { mutableIntStateOf(0) }
+    var selected by remember(week, questionId) { mutableStateOf<String?>(null) }
+    val reply by produceState<MockReply?>(null, week, questionId, retry) {
+        value = null
+        value = withContext(Dispatchers.IO) { http.mainlineWeek(week, agentRunId) }
+    }
+    val body = reply?.body
+    val notesError = body?.str("notesError").orEmpty()
+    val question = (body?.get("items") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.firstOrNull { it.str("id") == questionId }
+    val facts = question?.strings("factIds").orEmpty().toSet()
+    val matches = (body?.get("notes") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        .filter { it.str("body").isNotBlank() && it.strings("fact_ids").any(facts::contains) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose) {
+        Surface(shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp)) {
+            Column(Modifier.padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("相关要点 · 第 $week 周", style = MaterialTheme.typography.titleLarge)
+                when {
+                    reply == null -> Text("正在读取…")
+                    body == null || notesError.isNotBlank() -> {
+                        Text(notesError.ifBlank { reply?.error ?: "连接失败，请重试。" }, Modifier.testTag("related-notes-error"))
+                        TextButton(onClick = { retry++ }, modifier = Modifier.testTag("related-notes-retry")) { Text("重试") }
+                    }
+                    question == null -> Text("这题当前暂不能开始练习")
+                    matches.isEmpty() -> Text("这题暂没有可用的相关要点", Modifier.testTag("related-notes-empty"))
+                    else -> {
+                        matches.forEachIndexed { index, note ->
+                            val key = "$index:${note.str("section_id")}"
+                            TextButton(onClick = { selected = key }, modifier = Modifier.testTag("related-note-$index")) {
+                                Text(note.str("title").ifBlank { "要点 ${index + 1}" })
+                            }
+                            if (selected == key) Text(note.str("body"), Modifier.testTag("related-note-body"))
+                        }
+                    }
+                }
+                TextButton(onClick = onClose) { Text("返回题目") }
+            }
+        }
+    }
+}
+
+@Composable
+fun PagePractice(c: CoachController, week: Int, ids: Set<String>, onClose: () -> Unit) {
     val revision by c.sync.revision.collectAsState()
     val view by produceState<CourseView?>(null, revision) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {

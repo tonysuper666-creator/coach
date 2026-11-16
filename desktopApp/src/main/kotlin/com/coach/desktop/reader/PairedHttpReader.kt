@@ -1,9 +1,11 @@
 package com.coach.desktop.reader
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -19,6 +21,10 @@ import com.coach.desktop.DesktopConnectionSettings
 import com.coach.desktop.DesktopIdentity
 import com.coach.desktop.DesktopPairing
 import com.coach.desktop.DesktopPairingGate
+import com.coach.desktop.DesktopLearningSession
+import com.coach.ui.CoachController
+import com.coach.ui.CoachTheme
+import com.coach.ui.PagePractice
 import com.coach.desktop.requireDevelopmentServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -49,25 +55,40 @@ internal fun PairedHttpReader(
     identity: DesktopIdentity,
     course: String,
     request: ReaderOpenRequest? = null,
+    controller: CoachController? = null,
 ) {
     val host = remember(settings, identity, course) { pairedReaderHost(settings, identity, course) }
+    val owned = remember(settings, identity, course, controller) {
+        if (controller == null) DesktopLearningSession(settings, identity, course) else null
+    }
+    DisposableEffect(owned) {
+        owned?.start()
+        onDispose { owned?.close() }
+    }
     LaunchedEffect(host) {
         withContext(Dispatchers.IO) { DesktopPairing(settings).awaitRevocation(identity) }
         host.revoke()
     }
-    ReaderHostContent(host, request)
+    ReaderHostContent(host, request, controller ?: owned?.controller)
 }
 
 @Composable
-internal fun ReaderHostContent(host: ReaderHostController, request: ReaderOpenRequest? = null) {
+internal fun ReaderHostContent(host: ReaderHostController, request: ReaderOpenRequest? = null, controller: CoachController? = null) {
     DisposableEffect(host) { onDispose { host.close() } }
     LaunchedEffect(host, request) { host.open(request) }
+    var practice by remember(host) { mutableStateOf<StudyQuestion?>(null) }
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize()) {
         if (!host.session.draftsKept()) Text("未保存的批注仅在此窗口保留，关闭前请复制。", Modifier.testTag("reader-persistence-notice").padding(8.dp))
         if (!host.authorized) Text("配对已失效。未保存的文字仍在此窗口，请先复制。", Modifier.testTag("reader-pairing-revoked").padding(8.dp))
         val failure = host.openingFailure
         if (failure != null) Text(failure.text, Modifier.padding(8.dp))
-        else ReaderWindow(host.session)
+        else ReaderWindow(host.session, onPractice = if (controller != null && host.authorized) ({ practice = it }) else null)
+    }
+    val question = practice
+    if (question != null && controller != null && question.week != null) CoachTheme {
+        Surface(Modifier.fillMaxSize()) { PagePractice(controller, question.week, setOf(question.id)) { practice = null } }
+    }
     }
 }
 

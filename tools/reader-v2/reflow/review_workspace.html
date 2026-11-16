@@ -22,6 +22,10 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 .viewport {background:#dddcd7;border:1px solid var(--line);overflow:auto;flex:1;min-height:220px;position:relative}
 .canvas {position:relative;width:100%;line-height:0} .canvas img {display:block;width:100%;height:auto;max-width:none}
 .marker {position:absolute;border:2px solid #a85c1b;pointer-events:none}.marker.current {border:3px solid #087a42;box-shadow:0 0 0 1px #fff}
+.marker.draft {border:3px dashed #b24820} #pageCanvas.drawing {cursor:crosshair;touch-action:none;user-select:none}
+.editor {border:1px solid var(--line);padding:10px;display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap}
+.editor input {font:inherit;color:inherit;background:var(--field);border:1px solid var(--line);padding:5px;width:80px}
+.editor p {flex-basis:100%;margin:0;color:var(--muted);font-size:13px}
 .checks {display:flex;gap:12px 24px;flex-wrap:wrap} .checks label {cursor:pointer} input[type=checkbox] {accent-color:var(--accent);width:16px;height:16px;vertical-align:middle}
 .decision {display:flex;align-items:center;gap:10px;flex-wrap:wrap} #status {color:var(--muted);margin-right:auto}
 #message {min-height:24px;color:var(--muted);margin:0} .note {font-size:13px;color:var(--muted);margin:0}
@@ -36,8 +40,17 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 <div class="toolbar"><span id="name"></span><button id="previous">上一张</button><button id="next">下一张</button>
 <label>缩放 <select id="zoom"><option value="fit">适合宽度</option><option value="1">原尺寸 100%</option><option value="2">放大 200%</option></select></label></div>
 <div class="panes">
-<section class="pane"><h2>完整原页 · 绿框为当前裁片，棕框为其他候选</h2><div class="viewport" id="pageView"><div class="canvas" id="pageCanvas"><img id="page" alt="完整原页"><div id="markers"></div></div></div></section>
+<section class="pane"><h2>完整原页 · 绿框为当前裁片，棕框为其他候选</h2><div class="viewport" id="pageView"><div class="canvas" id="pageCanvas"><img id="page" alt="完整原页" draggable="false"><div id="markers"></div></div></div></section>
 <section class="pane"><h2>裁片 · 请切到原尺寸检查边缘与小字</h2><div class="viewport" id="cropView"><div class="canvas" id="cropCanvas"><img id="crop" alt="当前裁片"></div></div></section>
+</div>
+<div class="editor" aria-label="调整裁图边界">
+<button id="draw" aria-pressed="false">在原页重新画框</button>
+<label>左 <input id="left" type="number" min="0" step="1"></label><label>上 <input id="top" type="number" min="0" step="1"></label>
+<label>右 <input id="right" type="number" min="1" step="1"></label><label>下 <input id="bottom" type="number" min="1" step="1"></label>
+<button id="setEdges">应用边界</button><button id="discardEdit">撤销改框</button>
+<label class="file">恢复改框草稿<input id="resumeEdits" type="file" accept="application/json,.json"></label>
+<button id="saveEdits">下载改框请求</button>
+<p id="editNote">可重画或用原图像素微调，把标题、图注和来源一起框住。改框后须重新生成预览，再逐张批准。</p>
 </div>
 <div class="checks">
 <label><input type="checkbox" id="wholeObject">主体完整，无截断</label>
@@ -57,6 +70,8 @@ const checkIds = ["wholeObject", "labels", "noProseOrDuplicate"];
 let rows = batch.items.map(item => ({id:item.id, review:item.review, decision:"UNREVIEWED",
   checks:Object.fromEntries(checkIds.map(id => [id,false]))}));
 let index = 0, loaded = false, generation = 0, dirty = false;
+let edits = rows.map(() => null), drawing = false, drag = null;
+const edges = ["left", "top", "right", "bottom"];
 function overlaps(a,b) {return a.page===b.page && a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom;}
 function message(text) {$("message").textContent = text;}
 function stats() {
@@ -68,21 +83,37 @@ function stats() {
     button.setAttribute("aria-current", String(index===i));
     button.addEventListener("click", () => show(i)); return button;
   }));
-  $("status").textContent = labels[rows[index].decision];
+  $("status").textContent = edits[index] ? "改框草稿 · 须重新生成预览" : labels[rows[index].decision];
 }
-function updateApproval() {$("approve").disabled = !loaded || !checkIds.every(id => $(id).checked);}
+function updateApproval() {
+  $("approve").disabled = !loaded || !!edits[index] || drawing || !checkIds.every(id => $(id).checked);
+  for (const id of checkIds) $(id).disabled = !!edits[index] || drawing;
+}
 function zoom() {
   const scale = $("zoom").value;
-  for (const [canvas, img] of [["pageCanvas","page"],["cropCanvas","crop"]])
-    $(canvas).style.width = scale === "fit" ? "100%" : `${$(img).naturalWidth * Number(scale)}px`;
+  for (const [canvas, img] of [["pageCanvas","page"],["cropCanvas","crop"]]) {
+    const s=edits[index], width=img==="crop" && s ? s.right-s.left : $(img).naturalWidth;
+    $(canvas).style.width = scale === "fit" ? "100%" : `${width * Number(scale)}px`;
+  }
 }
 async function show(next) {
+  setDrawing(false);
   index = next; const token = ++generation; loaded = false; updateApproval(); message("");
   const row = rows[index], s = row.review.selection, context = batch.pages[s.page];
   $("name").textContent = `${index+1} / ${rows.length} · ${row.id} · 第 ${s.page} 页`;
   $("previous").disabled = index===0; $("next").disabled = index===rows.length-1;
   for (const id of checkIds) $(id).checked = row.checks[id];
   $("page").src = context.image; $("crop").src = batch.items[index].image;
+  renderMarkers();
+  for (const id of ["pageView","cropView"]) {$(id).scrollTop=0; $(id).scrollLeft=0;}
+  stats();
+  try {await Promise.all([$("page").decode(),$("crop").decode()]);
+    if (token!==generation) return;
+    loaded=true; renderEdit(); zoom(); updateApproval();
+  } catch {if(token===generation) message("图片未能完整打开，请重新生成预览。");}
+}
+function renderMarkers() {
+  const row=rows[index], s=row.review.selection, context=batch.pages[s.page];
   $("markers").replaceChildren(...rows.filter(r => r.review.selection.page===s.page).map(r => {
     const marker = document.createElement("div"), box = r.review.selection;
     marker.className = `marker${r===row ? " current" : ""}`;
@@ -90,17 +121,57 @@ async function show(next) {
       width:`${100*(box.right-box.left)/context.width}%`,height:`${100*(box.bottom-box.top)/context.height}%`});
     return marker;
   }));
-  for (const id of ["pageView","cropView"]) {$(id).scrollTop=0; $(id).scrollLeft=0;}
-  stats();
-  try {await Promise.all([$("page").decode(),$("crop").decode()]);
-    if (token!==generation) return;
-    loaded=true; zoom(); updateApproval();
-  } catch {if(token===generation) message("图片未能完整打开，请重新生成预览。");}
+  if (edits[index]) {
+    const box=edits[index], marker=document.createElement("div"); marker.className="marker draft";
+    Object.assign(marker.style,{left:`${100*box.left/context.width}%`,top:`${100*box.top/context.height}%`,
+      width:`${100*(box.right-box.left)/context.width}%`,height:`${100*(box.bottom-box.top)/context.height}%`});
+    $("markers").append(marker);
+  }
+}
+function renderEdit() {
+  const s=edits[index] || rows[index].review.selection;
+  for (const key of edges) $(key).value=s[key];
+  $("discardEdit").disabled=!edits[index]; $("saveEdits").disabled=!edits.some(Boolean);
+  $("editNote").textContent=edits[index] ? "右图是改框草稿（橙色虚线），不能批准。下载改框请求后重新生成生产预览，再从待复核开始。" :
+    "可重画或用原图像素微调，把标题、图注和来源一起框住。改框后须重新生成预览，再逐张批准。";
+  if (edits[index]) {
+    const canvas=document.createElement("canvas"); canvas.width=s.right-s.left; canvas.height=s.bottom-s.top;
+    canvas.getContext("2d").drawImage($("page"),s.left,s.top,canvas.width,canvas.height,0,0,canvas.width,canvas.height);
+    $("crop").src=canvas.toDataURL("image/png");
+  } else $("crop").src=batch.items[index].image;
+  // Use the selection width immediately; the previous image may still be decoding.
+  $("cropCanvas").style.width=$("zoom").value==="fit" ? "100%" : `${(s.right-s.left)*Number($("zoom").value)}px`;
+  renderMarkers(); stats(); updateApproval();
+}
+function validSelection(s, original) {
+  const context=batch.pages[original.page];
+  return s && Object.keys(s).length===6 && s.page===original.page && s.kind===original.kind &&
+    edges.every(k=>Number.isInteger(s[k])) && s.left>=0 && s.top>=0 && s.left<s.right && s.top<s.bottom &&
+    s.right<=context.width && s.bottom<=context.height;
+}
+function changeSelection(s) {
+  const row=rows[index], original=row.review.selection;
+  if (!validSelection(s,original)) {message("边界须为页内整数像素，且左小于右、上小于下。当前裁片未改变。");return;}
+  edits[index]=edges.every(k=>s[k]===original[k]) ? null : s;
+  row.decision="UNREVIEWED"; row.checks=Object.fromEntries(checkIds.map(id=>[id,false]));
+  for (const id of checkIds) $(id).checked=false;
+  dirty=true; renderEdit(); message("边界已更新；原批准已撤销。新框须重新生成预览并复核。");
+}
+function setDrawing(value) {
+  drawing=value; drag=null; $("pageCanvas").classList.toggle("drawing",value);
+  $("draw").setAttribute("aria-pressed",String(value));
+  $("draw").textContent=value ? "取消画框" : "在原页重新画框"; updateApproval();
+  if (!value) renderMarkers();
+}
+function point(event) {
+  const rect=$("page").getBoundingClientRect(), page=batch.pages[rows[index].review.selection.page];
+  return {x:Math.max(0,Math.min(page.width,(event.clientX-rect.left)*page.width/rect.width)),
+    y:Math.max(0,Math.min(page.height,(event.clientY-rect.top)*page.height/rect.height))};
 }
 function decide(decision) {
   const row = rows[index];
   if (decision==="COMPLETE_OBJECT_WITH_LABELS") {
-    if (!loaded || !checkIds.every(id => $(id).checked)) return;
+    if (!loaded || edits[index] || drawing || !checkIds.every(id => $(id).checked)) return;
     if (rows.some(other => other!==row && other.decision==="COMPLETE_OBJECT_WITH_LABELS" && overlaps(row.review.selection,other.review.selection))) {
       message("与另一张已批准裁片重叠。请先拒绝重复版本，再保留完整的一份。"); return;
     }
@@ -131,18 +202,75 @@ for (const id of checkIds) $(id).addEventListener("change", () => {
 $("previous").addEventListener("click", () => show(Math.max(0,index-1)));
 $("next").addEventListener("click", () => show(Math.min(rows.length-1,index+1)));
 $("zoom").addEventListener("change", zoom);
+$("draw").addEventListener("click",()=>{if(loaded)setDrawing(!drawing);});
+$("pageCanvas").addEventListener("pointerdown",event=>{
+  if(!drawing || !loaded || event.button!==0 || !event.isPrimary) return;
+  event.preventDefault(); drag={start:point(event),pointer:event.pointerId}; $("pageCanvas").setPointerCapture(event.pointerId);
+});
+$("pageCanvas").addEventListener("pointerup",event=>{
+  if(!drag || drag.pointer!==event.pointerId) return;
+  const start=drag.start, end=point(event); setDrawing(false);
+  if(Math.abs(start.x-end.x)<1 || Math.abs(start.y-end.y)<1) {message("请拖出有宽高的矩形，当前裁片未改变。");return;}
+  changeSelection({...rows[index].review.selection,left:Math.floor(Math.min(start.x,end.x)),top:Math.floor(Math.min(start.y,end.y)),
+    right:Math.ceil(Math.max(start.x,end.x)),bottom:Math.ceil(Math.max(start.y,end.y))});
+});
+$("pageCanvas").addEventListener("pointermove",event=>{
+  if(!drag || drag.pointer!==event.pointerId)return;
+  const start=drag.start,end=point(event),context=batch.pages[rows[index].review.selection.page];
+  renderMarkers();const marker=document.createElement("div");marker.className="marker draft";
+  Object.assign(marker.style,{left:`${100*Math.min(start.x,end.x)/context.width}%`,top:`${100*Math.min(start.y,end.y)/context.height}%`,
+    width:`${100*Math.abs(start.x-end.x)/context.width}%`,height:`${100*Math.abs(start.y-end.y)/context.height}%`});
+  $("markers").append(marker);
+});
+$("pageCanvas").addEventListener("pointercancel",()=>{setDrawing(false);renderMarkers();});
+$("setEdges").addEventListener("click",()=>{
+  if(!loaded)return;
+  if(edges.some(k=>$(k).value.trim()==="")) {message("请填写四条边界。");return;}
+  changeSelection({...rows[index].review.selection,...Object.fromEntries(edges.map(k=>[k,Number($(k).value)]))});
+});
+$("discardEdit").addEventListener("click",()=>changeSelection({...rows[index].review.selection}));
+function download(value,name) {
+  const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:"application/json"}));
+  const link=document.createElement("a");link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$("saveEdits").addEventListener("click",()=>{
+  const changed=edits.filter(Boolean);
+  if(!changed.length)return;
+  if(changed.some((s,i)=>changed.slice(0,i).some(o=>overlaps(s,o)))) {message("改框请求互相重叠。请撤销重复版本，只保留完整的一份。");return;}
+  download({schema:1,purpose:"selection-edits",items:rows.map((r,i)=>({id:r.id,review:r.review,
+    pageSha256:batch.pages[r.review.selection.page].sha256,selection:edits[i]}))},"crop-selection-edits.json");
+  message("已下载改框请求（不含批准）。请重新生成生产预览，再逐张复核。复核进度仍须另行保存。");
+});
+$("resumeEdits").addEventListener("change",async event=>{
+  const file=event.target.files[0];if(!file)return;
+  try {
+    if(file.size>2*1024*1024)throw Error();const saved=JSON.parse(await file.text());
+    if(saved.schema!==1 || saved.purpose!=="selection-edits" || !Array.isArray(saved.items) || saved.items.length!==rows.length)throw Error();
+    const byId=new Map(saved.items.map(r=>[r.id,r]));if(byId.size!==rows.length)throw Error();
+    const restored=rows.map(r=>{
+      const s=byId.get(r.id);
+      if(!s || JSON.stringify(s.review)!==JSON.stringify(r.review) || s.pageSha256!==batch.pages[r.review.selection.page].sha256 ||
+        (s.selection!==null && (!validSelection(s.selection,r.review.selection) || edges.every(k=>s.selection[k]===r.review.selection[k]))))throw Error();
+      return s.selection;
+    });
+    const changed=restored.filter(Boolean);
+    if(!changed.length || changed.some((s,i)=>changed.slice(0,i).some(o=>overlaps(s,o))))throw Error();
+    edits=restored;
+    rows.forEach((r,i)=>{if(edits[i]){r.decision="UNREVIEWED";r.checks=Object.fromEntries(checkIds.map(id=>[id,false]));}});
+    dirty=true;await show(index);message("已恢复改框草稿。改过的裁片须重新生成预览和复核。");
+  } catch {message("无法恢复改框：批次、原页或边界不符。当前草稿未改变。");}
+  event.target.value="";
+});
 $("approve").addEventListener("click", () => decide("COMPLETE_OBJECT_WITH_LABELS"));
 $("reject").addEventListener("click", () => decide("REJECTED"));
 $("reset").addEventListener("click", () => decide("UNREVIEWED"));
 $("save").addEventListener("click", () => {
-  const url=URL.createObjectURL(new Blob([JSON.stringify({schema:1,items:rows},null,2)],{type:"application/json"}));
-  const link=document.createElement("a"); link.href=url; link.download="crop-review-decisions.json";
-  link.click(); setTimeout(() => URL.revokeObjectURL(url),1000); dirty=false;
+  download({schema:1,items:rows},"crop-review-decisions.json"); dirty=edits.some(Boolean);
   message("已下载复核进度。请保存在本机的私有材料目录。");
 });
 $("resume").addEventListener("change", async event => {
   const file=event.target.files[0]; if(!file) return;
-  try {if(file.size>2*1024*1024) throw Error();
+  try {if(file.size>2*1024*1024 || edits.some(Boolean)) throw Error();
     const restored=validateResume(JSON.parse(await file.text())); rows=restored; dirty=false; await show(index);
     message("已恢复这批裁片的复核进度。");
   } catch {message("无法恢复：文件不属于当前预览，或复核记录不完整。当前决定未改变。");}

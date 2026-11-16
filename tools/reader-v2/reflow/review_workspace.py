@@ -4,6 +4,8 @@
 prepare consumes production ReviewedPdfVisualsProbe previews, never raw B/C
 candidates. export revalidates those previews and writes only explicit approvals
 for the existing production importer to re-render and check again.
+selections exports changed rectangles only; they need a fresh production preview
+and another explicit review before import.
 """
 from __future__ import annotations
 
@@ -48,13 +50,16 @@ def validate_review(review):
     for key in ("documentSha256", "pageTextSha256", "pngSha256"):
         if not isinstance(review[key], str) or not re.fullmatch(r"[0-9a-f]{64}", review[key]):
             raise ValueError("invalid source digest")
-    s = review["selection"]
+    validate_selection(review["selection"])
+
+
+def validate_selection(s):
     if not isinstance(s, dict) or set(s) != {"page", "left", "top", "right", "bottom", "kind"}:
         raise ValueError("invalid selection")
     if any(type(s[k]) is not int for k in ("page", "left", "top", "right", "bottom")):
         raise ValueError("selection needs integer edges")
     if not (s["page"] >= 1 and 0 <= s["left"] < s["right"] <= 4096 and
-            0 <= s["top"] < s["bottom"] <= 4096 and s["kind"] in KINDS):
+            0 <= s["top"] < s["bottom"] <= 4096 and isinstance(s["kind"], str) and s["kind"] in KINDS):
         raise ValueError("invalid selection geometry or kind")
 
 
@@ -110,7 +115,8 @@ def load_previews(directory):
         if len({r["review"]["pageTextSha256"] for r in items if r["review"]["selection"]["page"] == page}) != 1:
             raise ValueError("mixed canonical text on one page")
     return {"schema": 1, "items": items, "pages": {
-        str(n): {"image": data_url(raw), "width": raster.width, "height": raster.height}
+        str(n): {"image": data_url(raw), "width": raster.width, "height": raster.height,
+                 "sha256": hashlib.sha256(raw).hexdigest()}
         for n, (raw, raster) in pages.items()
     }}
 
@@ -191,18 +197,70 @@ def export(previews, decisions, output):
     return {"approved": len(reviews), "not_exported": len(bundle["items"]) - len(reviews)}
 
 
+def selection_edits(bundle, saved):
+    """Edits request a fresh production preview; they never carry approval."""
+    if (not isinstance(saved, dict) or set(saved) != {"schema", "purpose", "items"} or
+            type(saved["schema"]) is not int or saved["schema"] != 1 or
+            saved["purpose"] != "selection-edits" or not isinstance(saved["items"], list) or
+            len(saved["items"]) != len(bundle["items"])):
+        raise ValueError("invalid selection edit batch")
+    drafts = {row["id"]: row["review"] for row in bundle["items"]}
+    seen, changed = set(), []
+    for row in saved["items"]:
+        if not isinstance(row, dict) or set(row) != {"id", "review", "pageSha256", "selection"}:
+            raise ValueError("invalid selection edit row")
+        identity = row["id"]
+        if (not isinstance(identity, str) or identity in seen or identity not in drafts or
+                row["review"] != drafts[identity]):
+            raise ValueError("stale, unknown or duplicate edit")
+        validate_review(row["review"])
+        seen.add(identity)
+        original = drafts[identity]["selection"]
+        page = bundle["pages"][str(original["page"])]
+        if row["pageSha256"] != page["sha256"]:
+            raise ValueError("full-page context changed; regenerate workspace")
+        selection = row["selection"]
+        if selection is None:
+            continue
+        validate_selection(selection)
+        if (selection["page"] != original["page"] or selection["kind"] != original["kind"] or
+                selection["right"] > page["width"] or
+                selection["bottom"] > page["height"] or selection == original):
+            raise ValueError("edit must change the crop within its original page")
+        changed.append(selection)
+    if not changed:
+        raise ValueError("no changed selections")
+    if any(overlap(s, old) for i, s in enumerate(changed) for old in changed[:i]):
+        raise ValueError("edited selections overlap; retain one complete version")
+    return changed
+
+
+def selections(previews, edits, output):
+    bundle = load_previews(previews)
+    changed = selection_edits(bundle, read_json(private(edits)))
+    write_new(output, {f"edited-{i:04d}.selection.json": json.dumps(s, indent=2) + "\n"
+                       for i, s in enumerate(changed, 1)})
+    return {"selections": len(changed), "approved": 0, "requires_fresh_preview": True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "export"):
+    for name in ("prepare", "export", "selections"):
         command = commands.add_parser(name)
         command.add_argument("--previews", type=Path, required=True)
         command.add_argument("--out", type=Path, required=True)
         if name == "export":
             command.add_argument("--decisions", type=Path, required=True)
+        if name == "selections":
+            command.add_argument("--edits", type=Path, required=True)
     args = parser.parse_args()
-    result = (prepare(args.previews, args.out) if args.command == "prepare" else
-              export(args.previews, args.decisions, args.out))
+    if args.command == "prepare":
+        result = prepare(args.previews, args.out)
+    elif args.command == "export":
+        result = export(args.previews, args.decisions, args.out)
+    else:
+        result = selections(args.previews, args.edits, args.out)
     print(json.dumps(result))
 
 

@@ -609,6 +609,49 @@ successful browser save alone is not an import test. The private trial reused
 the four objects independently accepted in PR #355 and its rejected photograph;
 it adds workflow evidence, not new object coverage.
 
+### Correct a crop before approving it
+
+Use **在原页重新画框** to drag a replacement rectangle on the full page, or change
+the four integer pixel edges and select **应用边界**. Reverse-direction drawing,
+fit width and scrolled 100%/200% views use the original raster coordinates.
+The orange dashed rectangle and right-hand image show a **draft**, not a fresh
+production preview. Changing any edge revokes the old approval and checklist;
+approving that draft is disabled. Discarding it also leaves the original pending.
+
+Download **改框请求**, then regenerate and review the changed objects:
+
+```sh
+tools/dev/heavy --local "$REVIEW_PYTHON" tools/reader-v2/reflow/review_workspace.py \
+  selections --previews "$PRIVATE_NEW_PREVIEWS" --edits "$PRIVATE_SAVED_EDITS" \
+  --out "$PRIVATE_CHANGED_SELECTIONS"
+java -cp "$PRIVATE_STATE/reviewed-classes:$DESKTOP_CLASSPATH" ReviewedPdfVisualsProbe \
+  preview "$PRIVATE_PDF" "$PRIVATE_CHANGED_SELECTIONS" "$PRIVATE_CHANGED_PREVIEWS"
+tools/dev/heavy --local "$REVIEW_PYTHON" tools/reader-v2/reflow/review_workspace.py \
+  prepare --previews "$PRIVATE_CHANGED_PREVIEWS" --out "$PRIVATE_CHANGED_WORKSPACE"
+# Open the new workspace, compare the new full page and crop, check and approve anew.
+# Use export and apply above with the changed previews and newly saved decisions.
+```
+
+All output directories must be new and private. The request covers the exact old
+batch, immutable draft receipts and full-page PNG hashes. Unknown, duplicate,
+missing or stale rows, invalid/out-of-page edges and overlapping changed
+rectangles fail before output. Only changed selections are emitted; there are
+**zero approvals**. Production preview re-renders the supplied PDF and rechecks
+text geometry; every new receipt starts UNREVIEWED. Old decisions cannot approve
+the changed rectangle. Unchanged objects retain their separate review workflow.
+Save/resume edits separately from review decisions; restoring old decisions is
+refused while edits exist. A failed draft restore leaves current state intact.
+
+This is manual grouping in a single rectangle, not automatic caption detection,
+deduplication or a completeness proof. White space and valid text geometry can
+still surround an incomplete object. A photo and its credit may have no single
+rectangle that avoids nearby body text; retain rejection rather than importing
+an unsafe expansion. The private round trip repaired a deliberately shortened
+version of one previously accepted table, reproduced its complete pixels and
+imported it after fresh approval. It adds workflow evidence, not new coverage;
+an expanded photograph was refused by production preview. Old B/C candidates
+remain unapproved, and no reader display acceptance follows from these checks.
+
 ### Regression commands
 
 ```sh
@@ -626,7 +669,7 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 71 reflow tests (Pillow required for the eight new workspace tests) cover diff accounting, private-output guards, stale identities,
+The 79 reflow tests (Pillow required for the 16 workspace/edit tests) cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
@@ -640,6 +683,10 @@ It uses known proposals and does not measure B/C recognition.
 The eight workspace tests additionally cover explicit approval/export, required
 checks, stale/partial/duplicate decisions, overlap refusal, changed PNG/context,
 mixed source identities, inert untrusted names/CSP and Git/symlink/overwrite guards.
+Eight selection-edit tests additionally cover request/approval separation, exact
+batch/page identity, stale full-page context outside the old crop, integer edges,
+changed page/kind refusal, changed-rectangle approval refusal, overlap/touching,
+and output guards. The preceding 71 tests are unchanged.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

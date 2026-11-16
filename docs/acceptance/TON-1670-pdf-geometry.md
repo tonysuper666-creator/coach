@@ -65,6 +65,13 @@ argument and artifact helpers to invoke that same runner locally, retaining its
 global mutexes, isolated worktree, memory check and low priority. No repository
 runner was changed.
 
+The subsequent full `:desktopApp:test` run also passed: 418 tests in 97 suites,
+0 failures, 0 errors, 5 existing skipped tests, exit 0 (388.663 seconds). These
+counts were read from that run's artifact ZIP, not accumulated local reports.
+The actual task-local command was `python ./verify_pdf_geometry.py :desktopApp:test`;
+on a host with the configured SSH alias, the repository command remains
+`tools/dev/heavy ./gradlew :desktopApp:test`.
+
 Synthetic overlays are generated under `desktopApp/build/screens/pdf-page-text`.
 The complex page and 90-degree cropped page were visually inspected at 150%:
 boxes follow the original letters, including the rotated text. No real-book

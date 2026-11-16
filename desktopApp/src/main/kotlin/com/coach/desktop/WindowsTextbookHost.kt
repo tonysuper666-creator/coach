@@ -14,6 +14,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.coach.desktop.books.exam.*
+import com.coach.desktop.books.textbookFileDrop
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.AnswerExplain
 import com.coach.desktop.books.BookScreen
@@ -112,7 +113,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val dark = remember { windowsThemeOverride(System.getProperty("coach.windows.theme")) }
     CoachTheme(dark ?: systemDark) {
         val colors = com.coach.ui.theme.CoachTheme.colors
-        Surface(Modifier.fillMaxSize().testTag("windows-host"), color = colors.bgCanvas) {
+        Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
+            scope.launch { if (drafts.flush() && exams.flush()) controller.importDroppedBooks(files) }
+        }.testTag("windows-host"), color = colors.bgCanvas) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val rail = maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {

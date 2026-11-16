@@ -11,13 +11,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.text.AnnotatedString
 import com.coach.desktop.books.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.swing.Swing
 import org.junit.Assume.assumeTrue
 import java.awt.GraphicsEnvironment
 import java.awt.Robot
@@ -43,7 +37,6 @@ class MultiformatNativeWindowTest {
         assumeTrue(System.getProperty("coach.nativeFormats") == "true")
         assumeTrue(System.getProperty("os.name").startsWith("Windows"))
         val root = Files.createTempDirectory("coach-native-formats-")
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Swing)
         val previousTheme = System.getProperty("coach.windows.theme")
         try {
             val files = listOf("gbk.txt", "lesson.docx", "lesson.pptx").map { name ->
@@ -86,6 +79,7 @@ class MultiformatNativeWindowTest {
                                 override fun isDataFlavorSupported(flavor: DataFlavor) = flavor == DataFlavor.javaFileListFlavor
                                 override fun getTransferData(flavor: DataFlavor): Any {
                                     require(isDataFlavorSupported(flavor))
+                                    println("NATIVE_DRAG_EXPORT ${sourceFile.fileName}")
                                     return listOf(sourceFile.toFile())
                                 }
                             }
@@ -94,7 +88,6 @@ class MultiformatNativeWindowTest {
                     isAlwaysOnTop = true
                     isVisible = true
                 } }
-                val drop = edt { installTextbookDropTarget(window) { paths -> scope.launch { controller.importDroppedBooks(paths) } } }
                 try {
                     waitFor("initial shelf") { node(window, "upload-textbook") != null }
                     shot(window, dark, "shelf")
@@ -123,21 +116,23 @@ class MultiformatNativeWindowTest {
                         edt { assertTrue(node(window, "book-passage-question")!!.config[SemanticsActions.SetText].action!!.invoke(AnnotatedString("请解释这个概念，并给一个例子。"))) }
                         click(window, "book-passage-send")
                         waitFor("local synthetic reply") { requests.size == index + 1 && node(window, "book-passage-citation") != null }
+                        val pageLabel = controller.state.value.book!!.pageLabel(requests.last().passage.page)
+                        assertTrue(edt { nodes(window).any { it.config.getOrNull(SemanticsProperties.Text)?.any { t -> t.text == "出处 · $pageLabel" } == true } })
                         shot(window, dark, "${file.fileName}-reply")
                         click(window, "book-passage-citation")
                         waitFor("source") { node(window, "book-passage-source") != null }
                         val shown = edt { node(window, "book-passage-source")!!.config[SemanticsProperties.Text].joinToString("") { it.text } }
                         assertEquals(requests.last().passage.text, shown)
+                        assertTrue(edt { nodes(window).any { it.config.getOrNull(SemanticsProperties.Text)?.any { t -> t.text == "原文 · $pageLabel" } == true } })
                         shot(window, dark, "${file.fileName}-source")
                         // Close the two actual dialogs through their semantics, preserving the source page.
                         clickText(window, "回到问题")
                         click(window, "book-passage-close")
                         println("NATIVE_FORMAT theme=${if (dark) "dark" else "light"} file=${file.fileName} pages=${controller.state.value.book!!.pages.size} sourcePage=${requests.last().passage.page} exactUtf16=true")
                     }
-                } finally { edt { drop.close(); source.dispose(); window.dispose() } }
+                } finally { edt { source.dispose(); window.dispose() } }
             }
         } finally {
-            scope.cancel()
             if (previousTheme == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previousTheme)
             root.toFile().deleteRecursively()
         }

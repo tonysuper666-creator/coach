@@ -85,7 +85,7 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                         Text(result.text, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
                         result.sources.forEach { passage ->
                             V7TextButton({ source = passage }, Modifier.testTag("book-passage-citation")) {
-                                Text("出处 · 第 ${passage.page} 页")
+                                Text("出处 · ${book.pageLabel(passage.page)}")
                             }
                         }
                     }
@@ -104,7 +104,7 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
             dismissButton = { V7TextButton({ pendingConsent = null }, Modifier.testTag("ask-consent-deny")) { Text("不允许") } })
     }
     source?.let { passage ->
-        AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · 第 ${passage.page} 页") },
+        AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · ${book.pageLabel(passage.page)}") },
             text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
                 Text(passage.text, Modifier.testTag("book-passage-source"))
             } }, confirmButton = { V7TextButton({ source = null }) { Text("回到问题") } })

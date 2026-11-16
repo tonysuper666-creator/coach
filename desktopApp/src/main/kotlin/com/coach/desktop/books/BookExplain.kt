@@ -239,7 +239,7 @@ internal fun BookExplainPanel(book: Textbook, page: Int, consent: ExplainConsent
             }, dismissButton = { V7TextButton({ pending = null }, modifier = Modifier.testTag("explain-consent-deny")) { Text("不允许") } })
     }
     opened?.let { (citation, block) ->
-        AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · 第 ${citation.page} 页") },
+        AlertDialog(onDismissRequest = { opened = null }, title = { Text("原文 · ${book.pageLabel(citation.page)}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.testTag("explain-source-card")) {
                     Text(citation.blockId, style = MaterialTheme.typography.labelMedium, fontFamily = numbers, color = colors.fgSecondary,

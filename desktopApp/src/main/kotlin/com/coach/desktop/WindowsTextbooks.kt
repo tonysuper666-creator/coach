@@ -69,14 +69,6 @@ internal fun runWindowsTextbooks() {
                 width = initialBounds.width.dp, height = initialBounds.height.dp,
                 position = WindowPosition.Absolute(initialBounds.x.dp, initialBounds.y.dp),
             )) {
-            DisposableEffect(window, controller, drafts, exams) {
-                val drop = com.coach.desktop.books.installTextbookDropTarget(window) { files ->
-                    scope.launch {
-                        if (drafts.flush() && exams.flush()) controller.importDroppedBooks(files)
-                    }
-                }
-                onDispose { drop.close() }
-            }
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
                     val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)

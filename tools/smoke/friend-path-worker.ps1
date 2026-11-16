@@ -8,7 +8,8 @@ param(
     [string]$PairCode = '',
     [string]$ClientSeed = '',                   # an already paired private client dir; copied per run, never modified
     [string]$Selection = '',                    # private JSON {selection, blocks[id=<sha>:p<page>:0]}; stays on winbox
-    [int]$StartTimeoutSec = 150
+    [int]$StartTimeoutSec = 150,
+    [switch]$KeepGoing                          # 某步失败后仍尝试后面不依赖它的步骤（默认停在第一个失败）
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Win-Drive.ps1')
@@ -126,16 +127,52 @@ try {
     $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0
     while ((Get-Date) -lt $deadline -and -not $outcome) {
         Start-Sleep -Seconds 4; $n++
-        Scroll-At 900 700 -5; Start-Sleep -Milliseconds 800
-        $lines = Shot 4 "result$n"
-        $e = Has $lines @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没有得到可核对')
-        if ($e) { $outcome = 'error'; $errText = (($lines | Where-Object { $_.Text -match '无法讲解|尚未核实|尚未接通|连不上|超时|没有得到可核对' } | Select-Object -First 1).Text) }
-        elseif (Has $lines @('出处', '来源', '引用')) { $outcome = 'ok' }
+        $seen = @()
+        foreach ($view in 0, 1) {                       # 讲解出现在原文段落下面：每轮看顶部和滚到底各一次，不累计滚动
+            if ($view -eq 1) { Scroll-At 900 700 -10; Start-Sleep -Milliseconds 800 }
+            $lines = Shot 4 "result$n-$view"; $seen += $lines
+        }
+        Scroll-At 900 700 20; Start-Sleep -Milliseconds 500
+        $e = Has $seen @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没有得到可核对')
+        if ($e) { $outcome = 'error'; $errText = (($seen | Where-Object { $_.Text -match '无法讲解|尚未核实|尚未接通|连不上|超时|没有得到可核对' } | Select-Object -First 1).Text) }
+        elseif (Has $seen @('出处')) { $outcome = 'ok' }
     }
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
     if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
     Pass 4 '选中一段后得到带出处的讲解'
-    Fail 5 '尚未实现：边看边学出讲解'
+    # ⑦ 先做（依赖第 4 步留在屏幕上的讲解）：点「出处」，应弹出原文卡
+    $cardOk = $null
+    $o = Await-Text 7 'cite' @('出处') 10
+    if (-not $o) { $cardOk = '讲解下面没有「出处」链接' }
+    else {
+        Click-At $o.X $o.Y; Start-Sleep -Seconds 3
+        $lines = Shot 7 'card'
+        if (-not (Has $lines @('原文')) -or -not (Has $lines @("第$physPage页", "第 $physPage 页"))) { $cardOk = '点了出处但没有弹出标着页码的原文卡' }
+        Send-Keys '{ESC}'; Start-Sleep -Seconds 1
+    }
+
+    # ⑤ 边看边学出讲解
+    $five = $null
+    try {
+        Click-Label 5 @('开始学') '找不到「开始学」'; Start-Sleep -Seconds 2
+        Click-Label 5 @('边看边学') '找不到「边看边学」'; Start-Sleep -Seconds 1
+        Click-Label 5 @('开始边看边学') '找不到「开始边看边学」'
+        $deadline = (Get-Date).AddSeconds(90); $res = $null
+        while ((Get-Date) -lt $deadline -and -not $res) {
+            Start-Sleep -Seconds 5; $lines = Shot 5 'learn'
+            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法讲解|尚未核实|连不上|超时' } | Select-Object -First 1
+            if ($e) { $res = "拒绝：$($e.Text)" } elseif (Has $lines @('出处')) { $res = 'ok' }
+        }
+        if ($res -eq 'ok') { Pass 5 '边看边学出了带出处的讲解' } elseif ($res) { Fail 5 "边看边学的讲解没出来，界面说「$($res.Substring(3))」" } else { Fail 5 '90 秒内边看边学既没有讲解也没有报错' }
+    } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $five = 'failed' }
+    if ($five -and -not $KeepGoing) { throw 'STEP_FAILED' }
+
+    # ⑥ 做题学：需要同一本书已准入的选择题；缺题不算通过
+    $six = $null
+    try { Fail 6 '尚未实现：做题（需要该书已准入的选择题，TON-1453 未签前缺题不记成功）' } catch { if ("$_" -ne 'STEP_FAILED') { throw }; $six = 'failed' }
+    if (-not $KeepGoing) { throw 'STEP_FAILED' }
+
+    if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处弹出第 $physPage 页原文卡" }
 } catch {
     if ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {

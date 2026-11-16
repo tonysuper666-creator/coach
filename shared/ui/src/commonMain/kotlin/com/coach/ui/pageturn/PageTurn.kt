@@ -68,11 +68,18 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
     /** 跳页时还要快速翻过几张；0 = 没有。 */
     var riffle by mutableIntStateOf(0)
         private set
+    /** 快翻时画面上沿途的位置；不快翻时等于 [position]。 */
+    private var riffleAt by mutableIntStateOf(0)
+    val shownPosition: Int get() = if (riffle > 0) riffleAt else position
     private val progressAnim = Animatable(0f)
-    private var dragProgress by mutableFloatStateOf(0f)
     internal var reduced = false
     /** 当前效果；None 时 turn/jump 直接换页，拖动也不起。 */
     var style by mutableStateOf(PageTurnStyle.Flip)
+    /** 布局改变（单双页切换）或手势取消时加一，让旧的翻页动画作废、不再提交位置。 */
+    private var epoch = 0
+    private var dragging = false
+
+    private val instant get() = reduced || style == PageTurnStyle.None
 
     /** 0..1，当前翻起的页翻到哪了。 */
     val progress: Float get() = progressAnim.value
@@ -81,55 +88,85 @@ class PageTurnState(val pageCount: Int, initialPosition: Int = 0) {
     val canGoBack get() = stepPosition(position, pageCount, columns, false) != null
 
     /** 自动翻一页（键盘、点页边、拖选到页边停住时都调它）。返回是否真的翻了。 */
-    suspend fun turn(forward: Boolean, durationMs: Int = if (reduced || style == PageTurnStyle.None) 0 else CoachV7.Motion.pageMs): Boolean {
+    suspend fun turn(forward: Boolean, durationMs: Int = if (instant) 0 else CoachV7.Motion.pageMs): Boolean {
         if (turning) return false
-        val target = stepPosition(position, pageCount, columns, forward) ?: return false
-        if (durationMs <= 0) { position = target; return true }
+        if (stepPosition(position, pageCount, columns, forward) == null) return false
+        if (durationMs <= 0) { commitStep(forward); return true }
         this.forward = forward; turning = true
+        val mine = epoch
         try {
             progressAnim.snapTo(0f)
             progressAnim.animateTo(1f, tween(durationMs, easing = LinearOutSlowInEasing))
-            position = target
-        } finally { turning = false; progressAnim.snapTo(0f) }
+            if (mine == epoch) commitStep(forward)
+        } finally { if (mine == epoch) { turning = false; progressAnim.snapTo(0f) } }
         return true
     }
 
-    /** 跳页：中间几页只快速翻过去（最多 6 张），不一页一页播。 */
+    /** 按提交那一刻的列数算落点，所以动画中途切单双页也不会写回旧落点。 */
+    private fun commitStep(fwd: Boolean) {
+        stepPosition(position, pageCount, columns, fwd)?.let { position = it }
+    }
+
+    /** 跳页：中间几页只快速翻过去（最多 6 张），不一页一页播；画面上沿途换不同的页。 */
     suspend fun jumpTo(page: Int) {
         val target = normalizePosition(page, pageCount, columns)
         if (target == position || turning) return
         val fwd = target > position
-        val leaves = if (reduced || style == PageTurnStyle.None) 0 else riffleLeaves(position, target, columns)
+        val leaves = if (instant) 0 else riffleLeaves(position, target, columns)
+        if (leaves == 0) { position = target; return }
+        val mine = epoch
+        val from = position
+        var finished = false
         try {
             for (i in 0 until leaves) {
+                if (mine != epoch) return
                 riffle = leaves - i
+                // 第 i 张从沿途的第 i 个位置翻起，最后一张从离目标一步处翻到目标
+                riffleAt = normalizePosition(from + (target - from) * i / leaves, pageCount, columns)
                 forward = fwd; turning = true
                 progressAnim.snapTo(0f)
                 progressAnim.animateTo(1f, tween(RIFFLE_MS, easing = LinearOutSlowInEasing))
-                turning = false
             }
-        } finally { riffle = 0; turning = false; progressAnim.snapTo(0f); position = target }
+            finished = mine == epoch
+        } finally {
+            if (mine == epoch) {
+                if (finished) position = target
+                riffle = 0; turning = false; progressAnim.snapTo(0f)
+            }
+        }
     }
 
     internal fun clampTo(columnsNow: Int) {
+        if (columnsNow != columns) {
+            // 布局变了：作废正在进行的翻页和拖动，按新列数规整位置
+            epoch++; dragging = false; turning = false; riffle = 0
+        }
         columns = columnsNow
         position = normalizePosition(position, pageCount, columnsNow)
     }
 
     internal suspend fun beginDrag(fwd: Boolean): Boolean {
-        if (style == PageTurnStyle.None || turning || stepPosition(position, pageCount, columns, fwd) == null) return false
-        forward = fwd; turning = true; progressAnim.snapTo(0f); return true
+        if (instant || turning || stepPosition(position, pageCount, columns, fwd) == null) return false
+        forward = fwd; turning = true; dragging = true; progressAnim.snapTo(0f); return true
     }
 
-    internal suspend fun dragTo(p: Float) { progressAnim.snapTo(p) }
+    internal suspend fun dragTo(p: Float) { if (dragging) progressAnim.snapTo(p) }
+
+    /** 手势被取消（布局切换、窗口失焦、手势协程被撤）：回弹，不留 turning。 */
+    internal fun abortDrag() {
+        if (!dragging) return
+        dragging = false; epoch++; turning = false
+    }
 
     internal suspend fun endDrag(complete: Boolean) {
+        if (!dragging) return
+        dragging = false
+        val mine = epoch
         try {
             val ms = ((if (complete) 1f - progress else progress) * CoachV7.Motion.pageMs).toInt().coerceAtLeast(60)
-            val goal = if (complete) 1f else 0f
-            if (reduced) progressAnim.snapTo(goal) else progressAnim.animateTo(goal, tween(ms, easing = LinearOutSlowInEasing))
-            if (complete) stepPosition(position, pageCount, columns, forward)?.let { position = it }
-        } finally { turning = false; progressAnim.snapTo(0f) }
+            progressAnim.animateTo(if (complete) 1f else 0f, tween(ms, easing = LinearOutSlowInEasing))
+            if (complete && mine == epoch) commitStep(forward)
+        } finally { if (mine == epoch) { turning = false; progressAnim.snapTo(0f) } }
     }
 
     private companion object { const val RIFFLE_MS = 90 }
@@ -202,35 +239,48 @@ fun PageTurnView(
                     if (!inEdge) return@awaitEachGesture
                     val tracker = VelocityTracker()
                     tracker.addPosition(down.uptimeMillis, down.position)
+                    val instantMode = state.reduced || state.style == PageTurnStyle.None
                     var dragging = false
+                    var swiped = false
                     var lastX = down.position.x
-                    while (true) {
-                        val ev = awaitPointerEvent()
-                        val c = ev.changes.firstOrNull { it.id == down.id } ?: break
-                        tracker.addPosition(c.uptimeMillis, c.position)
-                        lastX = c.position.x
-                        val slop = abs(c.position.x - down.position.x) > viewConfiguration.touchSlop
-                        if (!dragging && slop && (inCorner || c.type == PointerType.Touch)) {
-                            dragging = true
-                            scope.launch { if (!state.beginDrag(fwd)) dragging = false }
+                    try {
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
+                            tracker.addPosition(c.uptimeMillis, c.position)
+                            lastX = c.position.x
+                            val slop = abs(c.position.x - down.position.x) > viewConfiguration.touchSlop
+                            if (slop && (inCorner || c.type == PointerType.Touch)) {
+                                if (instantMode) { swiped = true; c.consume() }
+                                else if (!dragging) {
+                                    dragging = true
+                                    scope.launch { if (!state.beginDrag(fwd)) dragging = false }
+                                }
+                            }
+                            if (dragging) {
+                                c.consume()
+                                val p = dragProgress(down.position.x, c.position.x, fwd, w * travelFactor)
+                                scope.launch { state.dragTo(p) }
+                            }
+                            if (!c.pressed) break
                         }
-                        if (dragging) {
-                            c.consume()
-                            val p = dragProgress(down.position.x, c.position.x, fwd, w * travelFactor)
-                            scope.launch { state.dragTo(p) }
-                        }
-                        if (!c.pressed) break
-                    }
-                    if (dragging) {
-                        val vx = tracker.calculateVelocity().x
                         val p = dragProgress(down.position.x, lastX, fwd, w * travelFactor)
-                        scope.launch { state.endDrag(shouldCompleteTurn(p, if (fwd) -vx else vx)) }
-                    } else launchTurn(fwd)
+                        val vx = tracker.calculateVelocity().x
+                        val complete = shouldCompleteTurn(p, if (fwd) -vx else vx)
+                        when {
+                            dragging -> { dragging = false; scope.launch { state.endDrag(complete) } }
+                            swiped -> if (complete) launchTurn(fwd)
+                            else -> launchTurn(fwd)
+                        }
+                    } finally {
+                        // 手势协程被撤（缩放窗口、pointerInput 重启）：没走到 endDrag 就回弹，不留 turning
+                        if (dragging) state.abortDrag()
+                    }
                 }
             }
             .background(paper)
     ) {
-        val pos = state.position
+        val pos = state.shownPosition
         val n = state.pageCount
         val fwd = state.forward
         val t = state.progress
@@ -274,21 +324,20 @@ fun PageTurnView(
             val backIdx = if (fwd) pos + 2 else pos - 1
             val shown = if (back) backIdx else frontIdx
             val dens = density.density
-            Box(Modifier.align(side).width(pageW).fillMaxHeight()) {
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        rotationY = angle + (if (back) 180f else 0f)
-                        transformOrigin = origin
-                        cameraDistance = 128f * dens
-                        alpha = if (c == 1) 1f - t * 0.7f else 1f
-                    }.background(paper)
-                ) {
+            Box(Modifier.align(side).width(pageW).fillMaxHeight().graphicsLayer {
+                // 整张纸绕书脊转到另一侧；背面朝向只在内层校正，位置不动
+                rotationY = angle
+                transformOrigin = origin
+                cameraDistance = 128f * dens
+                alpha = if (c == 1) 1f - t * 0.7f else 1f
+            }.background(paper)) {
+                Box(Modifier.fillMaxSize().graphicsLayer { rotationY = if (back) 180f else 0f }) {
                     if (shown in 0 until n) page(shown)
                     // 背面隐约透字：纸的反面，字淡一层
                     if (back) Box(Modifier.fillMaxSize().background(paper.copy(alpha = if (showThrough) 0.78f else 1f)))
-                    // 翻起页自己的明暗：越接近垂直越暗
-                    Box(Modifier.fillMaxSize().background(shadow.copy(alpha = 0.12f * castShadowAlpha(t))))
                 }
+                // 翻起页自己的明暗：越接近垂直越暗
+                Box(Modifier.fillMaxSize().background(shadow.copy(alpha = 0.12f * castShadowAlpha(t))))
             }
             if (c == 2) {
                 // 翻起页投在底下那页上的影

@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.runSkikoComposeUiTest
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import coach.design.tokens.CoachV7
@@ -135,5 +137,74 @@ class PageTurnViewTest {
         mainClock.advanceTimeBy(16); waitForIdle()
         assertFalse(state.turning)
         assertEquals(state.columns, state.position)
+    }
+
+    private fun androidx.compose.ui.test.SkikoComposeUiTest.host(state: PageTurnState, reduced: Boolean = false, minDp: androidx.compose.runtime.MutableState<Int>? = null, scopeOut: (CoroutineScope) -> Unit) {
+        mainClock.autoAdvance = false
+        setContent {
+            scopeOut(rememberCoroutineScope())
+            CompositionLocalProvider(LocalV7ReducedMotion provides reduced) {
+                PageTurnView(state, paper = Color.White, spreadMinDp = minDp?.value ?: 1400, modifier = Modifier.fillMaxSize()) { Text("p$it") }
+            }
+        }
+        mainClock.advanceTimeBy(64); waitForIdle()
+    }
+
+    @Test fun layoutChangeCancelsDragAndTurnWorksAfter() = runSkikoComposeUiTest(size = androidx.compose.ui.geometry.Size(1600f, 900f)) {
+        val state = PageTurnState(20)
+        val minDp = androidx.compose.runtime.mutableStateOf(1400)
+        lateinit var scope: CoroutineScope
+        host(state, minDp = minDp) { scope = it }
+        scope.launch { assertTrue(state.beginDrag(true)); state.dragTo(0.4f) }
+        mainClock.advanceTimeBy(32); waitForIdle()
+        assertTrue(state.turning)
+        minDp.value = 3000
+        mainClock.advanceTimeBy(64); waitForIdle()
+        assertEquals(1, state.columns)
+        assertFalse(state.turning)
+        scope.launch { state.turn(true) }
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertTrue(state.position > 0)
+    }
+
+    @Test fun singleToDoubleMidTurnKeepsEvenPosition() = runSkikoComposeUiTest(size = androidx.compose.ui.geometry.Size(1600f, 900f)) {
+        val state = PageTurnState(20)
+        val minDp = androidx.compose.runtime.mutableStateOf(3000)
+        lateinit var scope: CoroutineScope
+        host(state, minDp = minDp) { scope = it }
+        assertEquals(1, state.columns)
+        scope.launch { state.turn(true) }
+        mainClock.advanceTimeBy(100); waitForIdle()
+        minDp.value = 1400
+        mainClock.advanceTimeBy(800); waitForIdle()
+        assertEquals(2, state.columns); assertFalse(state.turning)
+        assertEquals(0, state.position % 2)
+    }
+
+    @Test fun riffleShowsDifferentPagesAlongTheWay() = runSkikoComposeUiTest(size = androidx.compose.ui.geometry.Size(1600f, 900f)) {
+        val state = PageTurnState(40)
+        lateinit var scope: CoroutineScope
+        host(state) { scope = it }
+        scope.launch { state.jumpTo(38) }
+        val seen = mutableSetOf<Int>()
+        repeat(40) { mainClock.advanceTimeBy(20); waitForIdle(); if (state.riffle > 0) seen += state.shownPosition }
+        assertTrue(seen.size >= 3, "riffle should pass distinct pages, saw $seen")
+        assertEquals(38, state.position)
+    }
+
+    @Test fun reducedMotionTouchSwipeSwapsWithoutAnimating() = runSkikoComposeUiTest(size = androidx.compose.ui.geometry.Size(1600f, 900f)) {
+        val state = PageTurnState(20)
+        lateinit var scope: CoroutineScope
+        host(state, reduced = true) { scope = it }
+        var everTurning = false
+        onRoot().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(1590f, 100f))
+            moveTo(androidx.compose.ui.geometry.Offset(1000f, 100f)); everTurning = everTurning || state.turning
+            moveTo(androidx.compose.ui.geometry.Offset(300f, 100f)); everTurning = everTurning || state.turning
+            up()
+        }
+        mainClock.advanceTimeBy(64); waitForIdle()
+        assertFalse(everTurning); assertFalse(state.turning)
+        assertEquals(2, state.position)
     }
 }

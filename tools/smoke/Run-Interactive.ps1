@@ -9,7 +9,7 @@ $done = "$LogFile.done"; Remove-Item $done, $LogFile -ErrorAction SilentlyContin
 $inner = "& '$Script' $($ScriptArgs -join ' ') *>&1 | Out-File -Encoding utf8 '$LogFile'; Set-Content '$done' `$LASTEXITCODE"
 $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc"
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -STA -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc"
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSec)
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Settings $settings | Out-Null

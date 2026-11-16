@@ -52,6 +52,17 @@ $env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_TOKEN
 $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
 if ($serverPort -in 18791, 8791, 8790) { throw "拒绝：$serverPort 是生产端口，冒烟只用隔离测试端口。" }
+$script:RepoMarker = $Repo
+Mark-ExistingClients
+# 桌面上已有别的 Coach 窗口（别的智能体的测试）时先等它走，等不到就如实报忙，不抢输入
+$busyUntil = (Get-Date).AddSeconds(180)
+while ((Get-ClientPids).Count -gt 0 -and (Get-Date) -lt $busyUntil) { Start-Sleep -Seconds 5 }
+if ((Get-ClientPids).Count -gt 0) {
+    $why = '桌面被别的 Coach 窗口占用 180 秒没空出来，没有启动（避免抢输入）'; Note "步骤1 失败：$why"
+    [pscustomobject]@{ passed = 0; total = 7; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = @([pscustomobject]@{ Step = 1; Name = $steps[0]; Ok = $false; Why = $why }) } |
+        ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
+    exit 1
+}
 Mark-ExistingClients
 $gradle = Start-Process (Join-Path $Repo 'gradlew.bat') -ArgumentList ':desktopApp:run', '-Pcoach.course=', '--console=plain', '--offline' -WorkingDirectory $Repo `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $OutDir 'client.out.log') -RedirectStandardError (Join-Path $OutDir 'client.err.log')
@@ -139,7 +150,7 @@ try {
     }
     if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
     if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
-    Pass 4 '选中一段后得到带出处的讲解'
+    $explainOk = $true
     # ⑦ 先做（依赖第 4 步留在屏幕上的讲解）：点「出处」，应弹出原文卡
     $cardOk = $null
     # 出处可能在视口外：先看当前屏，找不到就先往下再往上有界滚动（最多 8 次）
@@ -156,6 +167,45 @@ try {
         if (-not (Has $lines @('原文')) -or -not (Has $lines @("第$physPage页", "第 $physPage 页"))) { $cardOk = '点了出处但没有弹出标着页码的原文卡' }
         Send-Keys '{ESC}'; Start-Sleep -Seconds 1
     }
+
+    # ④（续）实际输入问题：选段提问 → 选中该段 → 粘贴问题（剪贴板，避开输入法）→ 点发送 → 等带出处的回答
+    $askWhy = $null
+    try {
+        Click-Label 4 @('选段提问') '找不到「选段提问」'; Start-Sleep -Seconds 2
+        $lines = Shot 4 'ask-dlg'
+        $pp = $null; foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $pp = Find-Text @($l) ($l.Text.Substring(0, 6)); break } }
+        if (-not $pp) { throw '提问对话框里找不到可信选段所在的段落' }
+        Click-At $pp.X $pp.Y; Start-Sleep -Seconds 2
+        $lines = Shot 4 'ask-picked'
+        $ctr = Has $lines @('0/500', '/500'); $lab = Has $lines @('想问什么')
+        if ($ctr) { Click-At ($ctr.X + 300) ($ctr.Y - 100) } elseif ($lab) { Click-At ($lab.X + 300) ($lab.Y + 90) } else { throw '找不到提问输入框' }
+        Paste-Text '用大白话解释一下，这里的专用人力资本是什么意思？'; Start-Sleep -Seconds 1
+        # 发送按钮在字数计数「n/500」下面约 57 像素；对话框内容可能滚动，按钮被挤出视野时先滚一下再点
+        $sent = $false
+        Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 800   # 先滚一下让对话框布局稳定，再按截图定位
+        foreach ($try in 1..4) {
+            $lines = Shot 4 'ask-send'; $c2 = Has $lines @('/500')
+            if (-not $c2) { Start-Sleep -Seconds 1; continue }
+            if ($c2.Y + 57 -gt 1075) { Scroll-At 1080 700 -3; Start-Sleep -Milliseconds 600; continue }
+            Start-Sleep -Milliseconds 500
+            Click-At ($c2.X1 + 45) ($c2.Y + 57); $sent = $true; break
+        }
+        if (-not $sent) { throw '找不到「发送」按钮的位置' }
+        $deadline = (Get-Date).AddSeconds(120); $got = $null; $i = 0
+        while ((Get-Date) -lt $deadline -and -not $got) {
+            Start-Sleep -Seconds 6; $i++
+            Scroll-At 1080 600 -10; Start-Sleep -Milliseconds 600
+            $lines = Shot 4 "ask-wait$i"
+            $e = $lines | Where-Object { $_.Text -match '尚未接通|无法回答|不能回答|尚未核实|连不上|超时' } | Select-Object -First 1
+            if ($e) { throw "服务拒绝了提问：$($e.Text)" }
+            if ((Has $lines @('出处')) -and (Has $lines @("第$physPage页", "第 $physPage 页"))) { $got = $true }
+        }
+        if (-not $got) { throw '120 秒内提问没有得到带出处的回答' }
+        Send-Keys '{ESC}'; Start-Sleep -Seconds 1
+    } catch { if ("$_" -like 'DESKTOP_BUSY*') { throw }; $askWhy = "$_"; try { Send-Keys '{ESC}' } catch { } }
+    if ($askWhy) {
+        try { Fail 4 "讲解这段可用，但实际提问失败：$askWhy" } catch { if ("$_" -ne 'STEP_FAILED') { throw }; if (-not $KeepGoing) { throw 'STEP_FAILED' } }
+    } else { Pass 4 '选中一段能得到带出处的讲解，也能输入问题得到带出处的回答' }
 
     # ⑤ 边看边学出讲解
     $five = $null
@@ -180,7 +230,8 @@ try {
 
     if ($cardOk) { Fail 7 $cardOk } else { Pass 7 "点出处弹出第 $physPage 页原文卡" }
 } catch {
-    if ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
+    if ("$_" -like 'DESKTOP_BUSY*') { $n = $results.Count + 1; [void]$results.Add([pscustomobject]@{ Step = $n; Name = $steps[[Math]::Min($n - 1, 6)]; Ok = $false; Why = "$_" }); Note "$_" }
+    elseif ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {
     $passed = @($results | Where-Object Ok).Count
     $summary = [pscustomobject]@{ passed = $passed; total = 7; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }

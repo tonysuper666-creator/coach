@@ -374,8 +374,67 @@ production storage still need implementation and regression tests.
 
 ## Checks
 
+### Borderless B/C crop review experiment
+
+`crop_candidates.py` tries the original B boxes, C regions and overlapping
+pairwise unions (at most 1.5 times the larger proposal's area). A union is an
+alternative, **not agreement that an object is complete**. Supply a fresh
+`PdfReflowProbe` file and the existing local layout JSON files:
+
+```sh
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/crop_candidates.py \
+  --pdf "$PRIVATE_PDF" --probe "$PRIVATE_STATE/probe.jsonl" \
+  --layout "$PRIVATE_LAYOUT" --out "$PRIVATE_STATE/new-crop-review"
+```
+
+The new output directory must be outside Git. JSON/PNGs contain private source
+ranges and page content; keep them on the source machine. The CLI renders at 2x,
+searches 2–8 points outward and checks a two-point edge band: every RGB channel
+must be at least 250, and the interior must contain detectable ink. It verifies
+whole glyph containment and keeps exact disjoint source ranges. It refuses stale
+document/page frames, clipped/unsupported/rotated or incompletely mapped pages,
+old probes missing safety facts, out-of-page edges and excessive budgets
+(512 proposals, raster long edge 4096). Very pale ink can escape the threshold.
+
+`boundary_verified` means these raster/mapping checks passed. Detached labels can
+remain outside a white edge; body paragraphs can be fully enclosed. Consequently
+**every** candidate keeps `semantic_status=unverified`, `import_allowed=false`,
+`hide_source_allowed=false` and `replacement_range=null`. This experiment is not
+connected to production import, storage, source-text replacement or rendering.
+The report records actual manual false positives and incomplete objects; do not
+batch-import this output. It does not associate cross-page tables.
+
+### Production native-source smoke check with independently authored books
+
+`NativeSourceProbe.java` calls the existing production extraction/mapping APIs.
+Build the desktop classes for the checkout under review, then supply their full
+runtime classpath (compiled classes plus dependencies):
+
+```sh
+mkdir -p "$PRIVATE_STATE/native-classes"
+javac --release 17 -cp "$DESKTOP_CLASSPATH" -d "$PRIVATE_STATE/native-classes" \
+  tools/reader-v2/reflow/NativeSourceProbe.java
+java -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeSourceProbe \
+  "$PRIVATE_DOCX" docx
+java -cp "$PRIVATE_STATE/native-classes:$DESKTOP_CLASSPATH" NativeSourceProbe \
+  "$PRIVATE_EPUB" epub
+```
+
+Use `;` instead of `:` on Windows. Only a zero exit is a passing result; preserve
+each input's exit code separately. This checks ZIP member hashes, namespace/name
+and exact XML element paths, unique source identities (including EPUB spine
+index), valid UTF-16 range endpoints, stale-text refusal and repeat extraction.
+It prints aggregate counts only; the production parser can still fail before
+mapping. It does not independently verify characters, semantic structure,
+rendering or persistence. The real EPUB trial in the report fails at the existing
+DOCTYPE prohibition; the real Word trial passes these provenance checks.
+
+### Regression commands
+
 ```sh
 python3 -I -m unittest discover -s tools/reader-v2/reflow -v
+tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_pdf_payload.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_cross_page_tables.py \
@@ -387,12 +446,17 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 54 reflow tests cover diff accounting, private-output guards, stale identities,
+The 63 reflow tests cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
 batch refusal/budget cases, native MCID association/refusal cases, and self-authored
-EPUB/Word structure/byte retention. The original 45 tests are unchanged.
+EPUB/Word structure/byte retention. The original 54 tests are unchanged; nine new
+crop tests cover safe/refused boundaries, detached-label and body risks, exact
+disjoint ranges, frame conversion and budgets. The new crop CLI integration uses
+the existing own four-page fixture, verifies three saved crops pixel for pixel,
+checks disjoint/CropBox mappings and refuses rotation and stale PDF identity.
+It uses known proposals and does not measure B/C recognition.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,

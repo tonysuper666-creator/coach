@@ -1083,3 +1083,93 @@ Table … continued”显式文字模式，命中页数为 0。**这不是不存
 未改，沿用 PR #351 的既有证据。真实 Word/EPUB 验证、B+C 联合质量、对象完整性、
 无标签跨页表和表头图片仍未完成。显示继续等待 TON-1667、TON-1670；32 格 winbox
 真窗口验收未验证，考试 UI 间歇失败仍归 TON-1679。
+
+### 无框候选的边界试验、B+C 联合筛查与真实原生材料
+
+本轮基于 PR #352 合并后的主干 `25cc5b14`，只增加本机诊断工具、回归与文档，
+不改生产导入、存储或阅读器。结论是：**B/C 可以提供更多候选，近白边和精确文字
+映射仍不足以批准无框图表自动导入**。真实联合候选里已看到正文和不完整对象，
+不能把本轮结果外推为阅读器保住率，也不能把未裁断的局部等同于完整图表。
+
+#### 边界检查及许可
+
+新增 `crop_candidates.py` 保留 B、C 及相交框的并集备选，并集面积不得超过较大框
+的 1.5 倍；去重但不把并集叫作模型共识。使用原 PDF 的 2 倍栅格，在候选外扩
+2–8 pt，四边各 2 pt 的每个 RGB 通道都须至少为 250，且内部有可检测墨迹。
+白边只表示在该阈值下未检测到穿边墨迹，极浅墨迹可能逃过；分离的轴标题、图注
+可完整落在框外，整段正文也可能符合白边条件。工具不以其证明语义完整。
+
+输出栅格边缘取整后回投 CropBox，字形必须完整在框内；保存精确、不连续的 UTF-16
+出处段，不生成包围区间。文档/页框过期、旋转字形、裁剪或不支持的绘制、未映射
+文字、旧探针缺安全字段、越界，以及候选/栅格预算超限均拒绝。每页输入/去重候选
+上限 512，栅格长边上限 4096；不自动缩放越界框以凑成功。**所有**结果始终为
+`semantic_status=unverified`、`import_allowed=false`、`hide_source_allowed=false`、
+`replacement_range=null`；没有接生产导入或隐藏。无标签跨页表关联也未解决。
+
+#### 原 20 页联合候选的实际结果
+
+重新运行相同 PDFBox 探针，20 页 canonical text 与历史 A 逐字相同；复用原 B 布局，
+没有重新调用 Docling。B/C 与并集备选去重后 **193 个**：66 个通过上述边界检查、
+77 个未找到满足条件的边界、50 个因页面几何不安全拒绝。
+
+执行者在 Mac 对照原页与全部 66 张通过边界检查的裁片，逐项记下裁片索引、PNG
+摘要及判定。此次“完整主体”包括表格全部行列、公式全部行及编号、知识框标题与
+框、图形必要轴标签；**不包含框外图注、表注和图片署名的完整归组**，因此不代表
+最终书页对象已完整。结果如下，候选数和对象数分别计数：
+
+| 本轮口径 | 数量 | 限制 |
+|---|---:|---|
+| 通过边界检查的候选 | 66 | 不是语义通过 |
+| 包含完整主体的候选 | 57 | 含同一对象的 17 张重复备选 |
+| 正文误候选或夹入正文 | 5 | 近白边仍可包含正文 |
+| 不完整主体 | 4 | 包括公式截段或缺编号、图形缺标签 |
+| 去重后覆盖的特殊对象主体 | 40 / 67 | 本机人工筛查，未独立复核，未显示 |
+
+上述 57 + 5 + 4 = 66，40 + 17 = 57。逐页可复算记录为 Mac 私有
+`~/Coach/state/ton1669/combined-crops-20261116/review-private.json`；原页、裁片与
+接触表只留 Mac，不进 Git、Windows、评论或附件。该指标是在边界拒绝后实际裁片
+上的主体检查，与旧 B 60/C 24 的候选框筛查不同；旧 67/60/24、21/17/21、内部结构
+235/366/34 等数字不改、不相加，也不宣称联合方案超过旧单方案。裁片语义、图注
+归组、阅读顺序和显示的联合质量仍需验证。下一步应以完整对象及排除正文的显式
+证据批准导入；仅扩大框或降低白边条件会掩盖这些失败。
+
+#### 独立作者的真实 Word 与 EPUB
+
+新增 `NativeSourceProbe.java`，直接调用已有生产提取及映射 API；核对源 ZIP 成员
+SHA-256、从 XML 根开始的元素子节点路径、namespace/localName、唯一来源身份
+（EPUB 包含原始 spine 下标）、页号与 UTF-16 合法边界，改动规范页文字后须拒绝，
+并检查重复提取页文字相等。不使用二次全文搜索定位；这仍不是逐字符/语义正确率，
+也不证明源结构已在阅读器显示或持久化。
+
+| 真实材料及来源 | 原始文件证据 | 生产路径结果 |
+|---|---|---|
+| DWP [Leaders guide on accessibility](https://accessibility-manual.dwp.gov.uk/tools-and-resources/govuk-resources) 的官方 DOCX | 42,664 字节；SHA-256 `c6652b14fa13f99871681bd36a04b10aa40889a56b6430781930083158fc2341` | 退出 0；72 个规范文字页、2 个成员、3,707 个元素，1,417 个有文字范围，共 1,559 段；身份/范围核对、过期拒绝及重复提取通过 |
+| IDPF 官方样本中的 [Accessible EPUB 3 发布文件](https://github.com/IDPF/epub3-samples/releases/download/20230704/accessible_epub_3.epub) | 4,051,892 字节；SHA-256 `67f75b8e3cd1abe4bb143d91d5424191d5af3115c9d26ff029a38e19f8d16feb`；OPF 共 22 个 spine 条目，其中 1 个 `linear=no` | **退出 1**；既有解析器禁止 DOCTYPE，正文 XHTML 在 `TextbookLibrary.kt` 的 `xml(bytes)` 处失败，尚未进入映射 |
+
+没有删除 EPUB 的 DOCTYPE 或重打包后冒充原文件通过，也没有放开 XML 安全设置。
+真实 EPUB 兼容性是已观察到的用户缺陷，留在本卡待解决；本轮未改解析器。Word
+页数是现有分页函数的文字页，不是 Word 排版物理页。真实文件及运行记录在 Mac
+私有 `~/Coach/state/ton1669/native-real-20261116/`，不随工具或报告分发。
+
+#### 验证与保留的失败
+
+- `python3 -I -m unittest discover -s tools/reader-v2/reflow -v`：63 tests OK，
+  退出 0；原 54 项未改，新增 9 项边界/风险回归，无删除、跳过或放宽。
+- `tools/dev/heavy --local "$DOCLING_PYTHON" tools/reader-v2/reflow/verify_crop_candidates.py
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"`：复用既有自生成四页 PDF，核对独立
+  PDFTextStripper 原文、实际 CLI 与 3 张逐像素裁片、不连续/CropBox 映射、旋转和
+  过期拒绝，退出 0。使用已知框，不是模型识别率；Java 使用 `--release 17`。
+- 初次真实裁片运行因 SLF4J 启动日志混入探针 stdout 而 JSON 解析失败；过滤实际
+  JSON 行后，第二次因 pypdfium2 的 PdfPage 不支持上下文管理器失败。改用显式
+  `try/finally close` 后成功。首次新增 CLI 回归因同类日志混入 base64 失败，修正
+  独立参考行的识别；第二次使用单字框会切穿同一单词，被边界检查正确拒绝，已将
+  CropBox 正例改为已知完整行。保留失败日志，不降低裁边或既有断言。
+- `NativeSourceProbe.java` 使用 javac 17 编译退出 0；真实 Word 运行退出 0，真实
+  EPUB 运行退出 1，分开记录，不用包装器后续命令成功掩盖该失败。
+- reflow/layout 的 `compileall` 与 `git diff --cached --check` 均退出 0。
+- `tools/dev/heavy ./gradlew :desktopApp:test --console=plain`：winbox 退出 0，
+  `BUILD SUCCESSFUL in 15s`，但 `:desktopApp:test FROM-CACHE`，不算新全量实际执行。
+  heavy 快照 `1c749bc1af4638e1d5d3cc8aa0f2025e7fdb908a`，总计 28.30 秒。
+
+本轮未重新运行 layout 26 项或前三项旧提取工具 PDF 集成，没有新 Windows 安装/
+模型下载测量。显示仍守 TON-1667、TON-1670 前置，32 格 winbox 真窗口均未验证。

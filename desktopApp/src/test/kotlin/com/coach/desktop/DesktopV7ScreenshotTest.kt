@@ -67,7 +67,7 @@ class DesktopV7ScreenshotTest {
         "exam-entry" to "inner-quiz", "exam-attempt" to "inner-quiz", "exam-conflict" to "inner-quiz", "exam-reload" to "inner-quiz",
         "exam-submit" to "inner-quiz", "exam-result" to "inner-quiz", "exam-source" to "inner-quiz", "exam-history" to "inner-quiz",
         // 第 10 刀：书架顶栏的「设置」弹窗；课程窗口的「导出复习提纲」——初始、按知识点选、导出成功、导出失败。都对周览那一屏。
-        "settings" to "inner-week", "notes-export" to "inner-week", "notes-export-point" to "inner-week",
+        "settings" to "inner-week", "notes-export" to "inner-week", "notes-export-point" to "inner-week", "notes-export-week-menu" to "inner-week",
         "notes-export-done" to "inner-week", "notes-export-failed" to "inner-week",
         // 第 13 刀：简答作答——写到一半、离开再回来接着写、对照原文并自评。都对做题那一屏。
         "short-answer" to "inner-quiz", "short-answer-restored" to "inner-quiz", "short-answer-revealed" to "inner-quiz",
@@ -433,10 +433,23 @@ class DesktopV7ScreenshotTest {
             onNodeWithText("尚未选择保存位置").assertExists()
             shot("notes-export")
 
+            // 第 14 刀：周次下拉的展开态，当前是第 1 周；点第 2 周后菜单收起、选中改成第 2 周，再改回第 1 周。
+            fun menuItem(label: String) = onNode(hasText(label) and hasAnyAncestor(isPopup()))
+            onNodeWithTag("notes-picker").performClick(); waitForIdle()
+            menuItem("第 3 周").assertExists()
+            shot("notes-export-week-menu")
+            onNodeWithTag("notes-week-1").assertIsSelected(); onNodeWithTag("notes-week-2").assertIsNotSelected()
+            menuItem("第 2 周").performClick(); waitForIdle()
+            assertEquals(2, state.week); assertFalse(state.expanded)
+            onNodeWithTag("notes-picker").performClick(); waitForIdle()
+            menuItem("第 1 周").performClick(); waitForIdle()
+            assertEquals(1, state.week); assertFalse(state.expanded)
+
             onNodeWithText("按知识点", substring = true).performClick(); waitForIdle()
             onNodeWithText("细胞是基本单位", substring = true).performClick(); waitForIdle()
             onNodeWithText("细胞膜控制物质进出").assertExists()
             shot("notes-export-point")
+            onNodeWithTag("notes-point-kp-cell").assertIsSelected()
             onNodeWithText("细胞膜控制物质进出").performClick(); waitForIdle()
 
             onNodeWithText("选择本机文件夹…").performClick(); waitForIdle()

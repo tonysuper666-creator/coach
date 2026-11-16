@@ -28,8 +28,9 @@ internal data class Textbook(
 ) {
     val lessons: List<BookLesson> by lazy { StudyCoachCourse.plan(id, title, pages) }
     val finished get() = learning && lessonIndex >= lessons.size
+    fun page(pdfPage: Int): BookPage? = pages.firstOrNull { it.number == pdfPage }
 }
-internal data class BookSummary(val id: String, val title: String, val pageCount: Int, val readingPage: Int, val learning: Boolean)
+internal data class BookSummary(val id: String, val title: String, val pageCount: Int, val lastPage: Int, val readingPage: Int, val learning: Boolean)
 internal data class Practice(val prompt: String, val reference: String, val answer: String, val options: List<String>)
 internal data class PracticeAnswer(val text: String = "", val revealed: Boolean = false, val understood: Boolean? = null)
 

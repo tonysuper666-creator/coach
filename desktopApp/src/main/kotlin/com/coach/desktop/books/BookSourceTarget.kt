@@ -7,7 +7,7 @@ import java.security.MessageDigest
  * Typed source -> reader target. Built only from a typed [OwnedBookCitation]; it never reads
  * model text or the "出处" footer. The book id is the local content SHA-256 and is never a
  * course/document id of the paired server. [pdfPage] is the physical page number the reader
- * opens (LocalBooksReaderSource: version "1", page 1..pages.size).
+ * opens (LocalBooksReaderSource: version "1", existing physical pages).
  */
 internal data class BookSourceTarget(
     val book: String, val bookTitle: String, val pdfPage: Int, val start: Int, val end: Int,
@@ -51,10 +51,7 @@ internal open class BookSourceResolver(private val library: TextbookLibrary) {
             }
             val book = loaded.book ?: return@map no(BookSourceRefusal.BOOK_MISSING)
             if (!loaded.fileOk) return@map no(BookSourceRefusal.FILE_CHANGED)
-            // The reader indexes pages by position; the stored number must agree with it.
-            val index = book.pages.indexOfFirst { it.number == citation.page }
-            if (index < 0 || index + 1 != citation.page) return@map no(BookSourceRefusal.PAGE_MISSING)
-            val page = book.pages[index]
+            val page = book.page(citation.page) ?: return@map no(BookSourceRefusal.PAGE_MISSING)
             if (citation.start < 0 || citation.end <= citation.start || citation.end > page.text.length) return@map no(BookSourceRefusal.RANGE_INVALID)
             // A UTF-16 boundary inside a surrogate pair would quote half a character.
             if (splitsSurrogate(page.text, citation.start) || splitsSurrogate(page.text, citation.end)) return@map no(BookSourceRefusal.RANGE_INVALID)

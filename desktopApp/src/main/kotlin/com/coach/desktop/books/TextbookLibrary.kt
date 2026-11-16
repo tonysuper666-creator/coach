@@ -51,8 +51,8 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     @Synchronized fun catalog(): List<BookSummary> = database().use { db ->
-        db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
-            while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
+        db.createStatement().use { sql -> sql.executeQuery("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.book=b.id) AS page_count, (SELECT max(p.page) FROM pages p WHERE p.book=b.id) AS last_page FROM books b ORDER BY touched DESC,id").use { rows -> buildList {
+            while (rows.next()) add(BookSummary(rows.getString("id"), rows.getString("title"), rows.getInt("page_count"), rows.getInt("last_page"), rows.getInt("reading_page"), rows.getInt("learning") == 1))
         } } }
     }
 
@@ -104,7 +104,8 @@ internal class TextbookLibrary(val directory: Path) {
                     query.setString(1, id)
                     query.executeQuery().use { p -> buildList { while (p.next()) add(BookPage(p.getInt(1), p.getString(2))) } }
                 }
-                Textbook(id, row.getString("title"), row.getString("format"), pages, row.getInt("reading_page"),
+                val storedPage = row.getInt("reading_page")
+                Textbook(id, row.getString("title"), row.getString("format"), pages, if (pages.any { it.number == storedPage }) storedPage else pages.first().number,
                     row.getInt("lesson_index"), row.getInt("learning") == 1, row.getInt("prompt_seen") == 1,
                     QuestionMode.valueOf(row.getString("mode")))
             }
@@ -134,10 +135,10 @@ internal class TextbookLibrary(val directory: Path) {
             database().use { db ->
                 db.autoCommit = false
                 try {
-                    db.prepareStatement("INSERT INTO books(id,title,format,mode,touched) VALUES(?,?,?,?,?)").use { sql ->
+                    db.prepareStatement("INSERT INTO books(id,title,format,mode,touched,reading_page) VALUES(?,?,?,?,?,?)").use { sql ->
                         sql.setString(1, id); sql.setString(2, extracted.title); sql.setString(3, format)
                         sql.setString(4, QuestionMode.CHOICE.name)
-                        sql.setLong(5, System.currentTimeMillis()); sql.executeUpdate()
+                        sql.setLong(5, System.currentTimeMillis()); sql.setInt(6, extracted.pages.minOf { it.number }); sql.executeUpdate()
                     }
                     db.prepareStatement("INSERT INTO pages(book,page,text) VALUES(?,?,?)").use { sql ->
                         for (page in extracted.pages) {
@@ -158,7 +159,7 @@ internal class TextbookLibrary(val directory: Path) {
     }
 
     @Synchronized fun save(book: Textbook) {
-        require(book.readingPage in 1..book.pages.size && book.lessonIndex in 0..book.lessons.size)
+        require(book.page(book.readingPage) != null && book.lessonIndex in 0..book.lessons.size)
         database().use { db -> db.prepareStatement("UPDATE books SET reading_page=?,lesson_index=?,learning=?,prompt_seen=?,mode=?,touched=? WHERE id=?").use { sql ->
             sql.setInt(1, book.readingPage); sql.setInt(2, book.lessonIndex); sql.setInt(3, if (book.learning) 1 else 0)
             sql.setInt(4, if (book.promptSeen) 1 else 0); sql.setString(5, book.questionMode.name)
@@ -443,9 +444,18 @@ internal object TextbookExtraction {
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-            val text = clean(decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF"))
+            val text = decoder.decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path))).toString().removePrefix("\uFEFF")
             require(text.isNotBlank()) { "教材中没有文字。" }
-            ExtractedBook(title, paginate(text))
+            val markers = Regex("<!--\\s*PDF 第 (\\d+) 页 · 书第 (.*?) 页\\s*-->").findAll(text).toList()
+            val marked = markers.mapIndexed { index, marker ->
+                BookPage(marker.groupValues[1].toInt(), text.substring(marker.range.first, markers.getOrNull(index + 1)?.range?.first ?: text.length))
+            }
+            require(marked.all { it.number > 0 } && marked.map { it.number }.distinct().size == marked.size) { "教材里的 PDF 页标记不完整或重复，无法确认页码。" }
+            ExtractedBook(title, marked.ifEmpty {
+                val cleaned = clean(text)
+                require(cleaned.isNotBlank()) { "教材中没有文字。" }
+                paginate(cleaned)
+            })
         }
     }
 

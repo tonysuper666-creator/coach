@@ -24,7 +24,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -193,14 +192,16 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
                 else if (textView) {
+                    // 标题字号取 V7 typography（随 Aa 缩放）：一级用 headlineLarge，其余用 titleLarge，字体换成宋体。
                     val headingFont = LocalV7Fonts.current.display
+                    val chapterStyle = MaterialTheme.typography.headlineLarge.toSpanStyle().copy(fontFamily = headingFont)
+                    val sectionStyle = MaterialTheme.typography.titleLarge.toSpanStyle().copy(fontFamily = headingFont)
                     val marked = buildAnnotatedString {
                         append(page.text.ifBlank { "这一页没有可提取文字，请切换到原页阅读。" })
                         // 原文里的 Markdown 标题：井号隐去、标题用宋体排大一号。字符不删，块范围和出处偏移照旧对得上原文。
                         for (heading in markdownHeadings(page.text)) {
                             addStyle(SpanStyle(color = Color.Transparent, fontSize = 0.1.sp), heading.marks.first, heading.marks.last + 1)
-                            addStyle(SpanStyle(fontFamily = headingFont, fontWeight = FontWeight.SemiBold, fontSize = if (heading.level <= 2) 24.sp else 21.sp),
-                                heading.title.first, heading.title.last + 1)
+                            addStyle(if (heading.level == 1) chapterStyle else sectionStyle, heading.title.first, heading.title.last + 1)
                         }
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
                         val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {

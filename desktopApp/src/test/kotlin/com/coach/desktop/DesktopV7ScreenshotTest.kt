@@ -135,6 +135,17 @@ class DesktopV7ScreenshotTest {
             assertTrue(hashes.all { i -> readerText.spanStyles.any {
                 it.item.color == androidx.compose.ui.graphics.Color.Transparent && i in it.start until it.end } }, "标题井号要隐去")
             shot("reader")
+            // 标题字号走 V7 typography：中号时等于 section token，Aa 选小、大时跟着缩放。
+            fun headingSize(): Float = onNodeWithTag("reader-text").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().spanStyles
+                .filter { it.item.fontFamily != null && it.item.color != androidx.compose.ui.graphics.Color.Transparent }
+                .also { assertTrue(it.isNotEmpty(), "正文里有标题") }.maxOf { it.item.fontSize.value }
+            fun typeSize(label: String) { onNodeWithTag("v7-type-menu").performClick(); waitForIdle(); onNodeWithTag("v7-type-$label").performClick(); waitForIdle() }
+            val normalHeading = headingSize()
+            assertEquals(coach.design.tokens.ReadingSizes.section.value, normalHeading, 0.01f, "二级标题用 section 字号")
+            typeSize("大"); assertEquals(normalHeading * 1.15f, headingSize(), 0.01f, "Aa 大：标题跟着放大")
+            typeSize("小"); assertEquals(normalHeading * .9f, headingSize(), 0.01f, "Aa 小：标题跟着缩小")
+            typeSize("中"); assertEquals(normalHeading, headingSize(), 0.01f)
 
             nav("课程").performClick(); waitForIdle()
             onNodeWithTag("host-course-learn").performClick()

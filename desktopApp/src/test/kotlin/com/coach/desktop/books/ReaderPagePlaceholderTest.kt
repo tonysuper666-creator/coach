@@ -13,9 +13,10 @@ import kotlin.test.*
 
 /**
  * 页图加载先用同尺寸的纸占位（`pgPaper` 底、`line` 细边），图到了原地换掉。
- * 这里核三件事：占位用的宽高比怎么挑（这一页的几何优先，上一页的比例只兜底）；
- * 横竖混排时横页铺出来的纸和真图是不是同一个高度；A4 书页上「占位」和「真图」是不是同一个宽高比，
- * 也就是图到了会不会把下面的按钮顶下去。样本都是自造的合成 PDF，不碰真实教材。
+ * 这里核四件事：占位用的宽高比怎么挑（这一页真量过的几何优先，上一页的比例只兜底）；
+ * 哪些页面的几何算真量过（图片书和 OCR 页那份常数不算）；横竖混排时横页铺出来的纸和真图
+ * 是不是同一个高度；A4 书页上「占位」和「真图」是不是同一个宽高比，也就是图到了会不会把
+ * 下面的按钮顶下去。样本都是自造的合成 PDF，不碰真实教材。
  */
 @OptIn(ExperimentalTestApi::class)
 class ReaderPagePlaceholderTest {
@@ -36,6 +37,15 @@ class ReaderPagePlaceholderTest {
         assertEquals(0.72f, readerPaperAspect(600.0, 0.0, 0.72f))
         // 两样都没有就按 A4 铺，先给一张像纸的框。
         assertEquals(portrait, readerPaperAspect(null, null, null))
+    }
+
+    @Test fun onlyMeasuredPageGeometryIsTrusted() {
+        // pdf 的非 OCR 页给的是本页 cropBox。
+        assertTrue(readerBoxesAreGeometry("pdf", ocr = false))
+        // 图片书和 OCR 页那份是 1200x1600 的常数，不当几何用，仍旧按上一张真图铺。
+        assertFalse(readerBoxesAreGeometry("pdf", ocr = true))
+        assertFalse(readerBoxesAreGeometry("png", ocr = false))
+        assertFalse(readerBoxesAreGeometry("jpg", ocr = false))
     }
 
     @Test fun aLandscapePageRendersIntoThePaperItsGeometryPromised() {

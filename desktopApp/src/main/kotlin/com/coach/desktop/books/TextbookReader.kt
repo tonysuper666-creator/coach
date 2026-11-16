@@ -326,7 +326,10 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                     // 不出现转圈，下面的按钮和批注也不被推下去。打不开时同一张纸上给重试。
                     val paper = if (colors.dark) CoachV7.Dark.pgPaper else CoachV7.Light.pgPaper
                     val paperLine = if (colors.dark) CoachV7.Dark.line else CoachV7.Light.line
-                    val aspect = readerPaperAspect(boxes?.width, boxes?.height, paperAspect)
+                    // 只有 pdf 的非 OCR 页，boxes 才是这一页真实的 cropBox；图片书和 OCR 页那份是
+                    // 1200x1600 的占位常数，按它铺纸反而会和真图差一截，所以只认真量过的几何。
+                    val pageBoxes = if (readerBoxesAreGeometry(book.format, page.ocr)) boxes else null
+                    val aspect = readerPaperAspect(pageBoxes?.width, pageBoxes?.height, paperAspect)
                     Box(Modifier.fillMaxSize()) {
                         Column(Modifier.fillMaxSize().verticalScroll(imageScroll).padding(end = 12.dp).testTag("remote-pages")) {
                             Box(Modifier.fillMaxWidth()) {
@@ -445,6 +448,12 @@ internal fun readerPaperAspect(boxesWidth: Double?, boxesHeight: Double?, rememb
     boxesWidth?.let { w -> boxesHeight?.takeIf { it > 0 }?.let { h -> (w / h).toFloat() } }
         ?: remembered
         ?: (1f / 1.4142f)
+
+/**
+ * 这一页的「几何」是不是真量出来的：只有 pdf 的非 OCR 页给的是本页 cropBox，
+ * 图片书和 OCR 页那份 1200x1600 是按经验补的常数，照它铺纸会和真图差一截。
+ */
+internal fun readerBoxesAreGeometry(format: String, ocr: Boolean): Boolean = format == "pdf" && !ocr
 
 /** 一行 Markdown 标题：[marks] 是井号连同后面的空白，[title] 是标题文字；都是原文里的字符下标。 */
 internal data class MarkdownHeading(val level: Int, val marks: IntRange, val title: IntRange)

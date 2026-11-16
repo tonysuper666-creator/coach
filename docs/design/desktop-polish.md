@@ -83,7 +83,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | A9 | Material 默认残留 | 待修 | `dark/notes-export`（绿色实心勾选框、▾ 下拉）；代码：`AlertDialog` 10、`TextButton` 12、`Checkbox` 2、`OutlinedTextField` 3、`DropdownMenu` 1、默认 `LinearProgressIndicator` 4、`CircularProgressIndicator` 0（阅读页那份已换纸面占位，见 E2） | 对话框与表单件归 TON-1650 D12–D14；按钮按压水波纹见 M1；页图转圈见 E2 |
 | A10 | 基线不齐 | 待修 | `light/explain-failed` | 「讲解这段」按钮和右侧编号小字不在一条基线上；随 A11 去掉编号后消失 |
 | A11 | 占位文案、中英混杂、内部编号露出 | 待修 | `light/explain-failed`（`3f6e6f96…:p1:11`）、`light/exam-attempt`（`作答记录：local-d25dd1bb-…`）、`light/quiz`（「出题：选择」） | 用户看到的是哈希和 UUID。去向：讲解卡 P2；考试 P4；「出题：选择」改「题型：选择题」随 P4 一起看文案 |
-| A12 | 开发者口吻的说明 | 已对 | `light/reader`；`TextbookReader.kt:390-397`（页码的悬停提示） | 页面底部常驻的「页码按 PDF 原文件计算。」已收进页码的悬停提示，正文下面不再有这行字；`light/reader` 改后截图底下只剩「上一页 1 / 1 下一页 · 页码 1 前往」。P1 |
+| A12 | 开发者口吻的说明 | 已对 | `light/reader`；`TextbookReader.kt:393-401`（页码的悬停提示） | 页面底部常驻的「页码按 PDF 原文件计算。」已收进页码的悬停提示，正文下面不再有这行字；`light/reader` 改后截图底下只剩「上一页 1 / 1 下一页 · 页码 1 前往」。P1 |
 | A13 | 一屏多个主按钮 | 待修 | `light/today` | 今天页三个按钮里两个是黑底主按钮，看不出先点哪个。只留一个主按钮，其余用纸面按钮。`WindowsHomeCards.kt` 本轮无人占用，但等 P0 的按钮手感合并后再动，免得两次改同一处：P3 之后另排 |
 
 ### 成熟度
@@ -93,7 +93,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 截图 / 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | E1 | 第一次打开 / 空书架 | 已对 | `TextbookShelf.kt:38-65` | 一句说明 + 「上传教材」，格式和存放位置写在下面 |
-| E2 | 加载不转圈 | 待修（阅读已对） | `TextbookReader.kt:334-342`、`TextbookWorkspace.kt:120` | 页图加载的转圈已换成同尺寸纸面占位（`pgPaper` 底、`line` 细边，按这一页的页面框先铺（图片书和 OCR 页那份 1200×1600 是常数，不当几何用），这一页量不到几何才借上一张成功页图的比例，图到了原地换掉）；打不开时同一张纸上给「这一页暂时打不开。」和「重试」。忙时顶部默认蓝色细条还在外壳文件里，等 TON-1656 释放后并入 P5 |
+| E2 | 加载不转圈 | 待修（阅读已对） | `TextbookReader.kt:333-345`、`TextbookWorkspace.kt:120` | 页图加载的转圈已换成同尺寸纸面占位（`pgPaper` 底、`line` 细边，按这一页的页面框先铺（图片书和 OCR 页那份 1200×1600 是常数，不当几何用），这一页量不到几何才借上一张成功页图的比例，图到了原地换掉）；打不开时同一张纸上给「这一页暂时打不开。」和「重试」。忙时顶部默认蓝色细条还在外壳文件里，等 TON-1656 释放后并入 P5 |
 | E3 | 出错给下一步 | 待修 | `light/explain-failed`；`TextbookWorkspace.kt:121`、`TextbookShelf.kt:142` | 讲解失败只有一行朱字，没有「重试」；工作区和书架错误仍用 `colorScheme.error`。去向：P2（讲解）；外壳和书架两处并入 P5、P3 |
 | E4 | 长书名 / 长段落 | 未验证 | — | 截图测试只有短书名 `knowledge-recap`。盲评轮补一本长书名隔离样书 |
 | E5 | 离线 | 已对 | `light/explain-failed`、`ask-unavailable` | 文案「暂时没连上 Mac，可继续阅读或稍后重试」是人话 |

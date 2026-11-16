@@ -86,6 +86,57 @@ essential labels, formula lines and knowledge-box header/frame. Nested formulas
 inside a counted box are not counted twice. Keep unknown reading-order counts
 `null`; a pipeline gate is not a manual reading-order assessment.
 
+For the report's cross-block screen, compare the original page with A's canonical
+text and B's ordered blocks (including figures/formulas without text). Count one
+group for repeated interleaving of a caption with the same figure or sidebar with
+body text; do not count the same figure's detached axis title again. Count
+separate affected figures or body paragraphs separately. A table title moved
+from above to below its table is one error. Adjacent floating figures may precede
+or follow a complete paragraph, but must not interrupt it. Exclude headers,
+footers, within-table cell order, within-formula linearisation, missing glyphs and
+duplicates. These are confirmed lower bounds, not a complete readability score.
+Save per-page event notes privately beside the counts. C's text order equals A
+by construction; its eventual crop/body reading stream remains unmeasured.
+
+## Existing environment and offline timing
+
+`platform_probe.py` measures an already provisioned Docling environment and
+pre-fetched models. It does not install packages or download models. Use the
+same self-authored PDF on each machine; never transfer real textbooks to make a
+platform comparison. Generate synthetic files with the existing
+`../layout/make_synthetic.py`, then copy the exact `mixed.pdf` (including its hash)
+to the second machine. Fresh generation may have a different PDF timestamp/hash.
+
+```sh
+tools/dev/heavy --local /path/to/docling-venv/bin/python \
+  tools/reader-v2/reflow/platform_probe.py \
+  --pdf /private/synthetic/mixed.pdf --pages 1,2,3,4 \
+  --models-dir /private/models --out /private/state/platform-run --repeats 2
+```
+
+In an approved Windows working directory, invoke the same script with the
+existing environment's Python, for example:
+
+```powershell
+& D:\work\venv\Scripts\python.exe tools\reader-v2\reflow\platform_probe.py `
+  --pdf D:\work\synthetic\mixed.pdf --pages 1,2,3,4 `
+  --models-dir D:\work\models --out D:\private-state\platform-run --repeats 2
+```
+
+Output is `platform-metrics.json` plus private per-page JSON. The receipt records
+package versions, PDF hash, existing venv/model logical file bytes, engine
+import/construction time and each page's first/repeated conversion time. The
+first conversion may load models lazily; neither it nor a repeated process is a
+clean-machine cold-start benchmark. Footprints exclude base Python, installers
+and external download caches; they are not filesystem allocation, minimal
+dependencies or the product's package-size increase.
+
+Before importing Docling the process sets HF/Transformers offline and rejects
+Python socket `connect/connect_ex`, recording attempted connections. Native
+extensions and subprocess network access are not sandboxed; this is not an OS
+firewall or packet-capture proof. No API route is added. Block counts/status are
+diagnostics, not manual preservation or reading-order acceptance.
+
 ## Checks
 
 ```sh

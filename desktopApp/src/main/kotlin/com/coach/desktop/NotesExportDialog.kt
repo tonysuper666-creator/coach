@@ -190,7 +190,7 @@ internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Un
                 verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(includePdf, null, enabled = !busy, colors = CheckboxDefaults.colors(checkedColor = v7Pine(),
                     uncheckedColor = colors.fgSecondary, checkmarkColor = colors.surface1))
-                Text("Markdown + 可打印 PDF", style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                Text("Markdown + 可打印 PDF", style = MaterialTheme.typography.labelLarge, color = colors.fgPrimary)
             }
         }
         NotesField("保存位置") {

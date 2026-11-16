@@ -121,6 +121,9 @@ class TextbookLibraryTest {
         c.importBook(scan); c.read(); c.dismissPrompt(); c.learn(LearningPath.QUESTION_FIRST); c.enableLearning()
         assertFalse(c.state.value.book!!.learning)
         assertTrue(c.state.value.error!!.contains("没有可提取"))
+        // 报错是给人看的：说清还能翻原页、要开始学需要什么，不夹英文。
+        assertTrue(c.state.value.error!!.contains("仍可翻看 PDF 原页"))
+        assertFalse(c.state.value.error!!.contains("learning"))
         c.dismissPrompt(); c.read()
         assertEquals(BookScreen.READER, c.state.value.screen)
         assertTrue(c.library.renderPdf(c.state.value.book!!, 1).width > 0)

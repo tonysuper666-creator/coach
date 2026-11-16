@@ -53,6 +53,11 @@ internal class TextbookController(val library: TextbookLibrary) {
             screen = if (active == null) BookScreen.HOME else BookScreen.REVIEWING)
     }
 
+    suspend fun importDroppedBooks(paths: List<Path>) {
+        if (paths.size != 1) action { throw IllegalArgumentException("请一次拖入一份教材。") }
+        else importBook(paths.single())
+    }
+
     suspend fun importBook(path: Path) = action {
         val book = library.importBook(path)
         library.closeReview()

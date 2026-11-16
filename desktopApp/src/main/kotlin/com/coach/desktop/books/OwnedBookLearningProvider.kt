@@ -104,7 +104,7 @@ internal class OwnedBookLearningProvider(
     private fun verifiedBook(id: String): Textbook {
         require(id.matches(Regex("[a-f0-9]{64}")))
         val book = library.book(id)
-        require(book.id == id && book.format in setOf("pdf", "epub", "md", "txt"))
+        require(book.id == id && book.format in BookFormats.supported)
         val digest = MessageDigest.getInstance("SHA-256")
         Files.newInputStream(library.directory.resolve("$id.${book.format}")).use { input ->
             val buffer = ByteArray(65536)

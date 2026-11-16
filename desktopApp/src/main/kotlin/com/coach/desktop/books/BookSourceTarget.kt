@@ -11,10 +11,10 @@ import java.security.MessageDigest
  */
 internal data class BookSourceTarget(
     val book: String, val bookTitle: String, val pdfPage: Int, val start: Int, val end: Int,
-    val quote: String, val pageTextSha256: String,
+    val quote: String, val pageTextSha256: String, val pageLabel: String = "第 $pdfPage 页",
 ) {
     /** Plain-language label for the UI; no SHA or offsets. */
-    val label: String get() = "《$bookTitle》第 $pdfPage 页"
+    val label: String get() = "《$bookTitle》$pageLabel"
 }
 
 internal enum class BookSourceRefusal { MALFORMED_BOOK, BOOK_MISSING, FILE_CHANGED, PAGE_MISSING, RANGE_INVALID, QUOTE_MISMATCH, NOT_ONE_BODY_BLOCK }
@@ -60,7 +60,7 @@ internal open class BookSourceResolver(private val library: TextbookLibrary) {
             val oneBlock = loaded.blocks.any { !it.heading && it.page == citation.page && citation.start >= it.start && citation.end <= it.end }
             if (!oneBlock) return@map no(BookSourceRefusal.NOT_ONE_BODY_BLOCK)
             val sha = MessageDigest.getInstance("SHA-256").digest(page.text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
-            BookSourceResolution.Resolved(BookSourceTarget(book.id, book.title, citation.page, citation.start, citation.end, quote, sha))
+            BookSourceResolution.Resolved(BookSourceTarget(book.id, book.title, citation.page, citation.start, citation.end, quote, sha, book.pageLabel(citation.page)))
         }
     }
 

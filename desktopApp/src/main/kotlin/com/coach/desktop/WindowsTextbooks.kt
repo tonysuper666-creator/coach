@@ -71,7 +71,7 @@ internal fun runWindowsTextbooks() {
             )) {
             WindowsTextbookHost(controller, drafts, exams, chooseBook = {
                 withContext(Dispatchers.Swing) {
-                    val dialog = FileDialog(window, "上传教材 · PDF / EPUB / Markdown / 文本", FileDialog.LOAD)
+                    val dialog = FileDialog(window, "上传教材 · ${com.coach.desktop.books.BookFormats.description}", FileDialog.LOAD)
                     try {
                         dialog.isVisible = true
                         dialog.file?.let { Path.of(dialog.directory, it) }

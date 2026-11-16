@@ -14,6 +14,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.coach.desktop.books.exam.*
+import com.coach.desktop.books.textbookFileDrop
 import com.coach.desktop.books.AnswerDrafts
 import com.coach.desktop.books.AnswerExplain
 import com.coach.desktop.books.BookScreen
@@ -63,7 +64,8 @@ internal fun rememberAnswerExplain(library: TextbookLibrary): AnswerExplain {
 @Composable
 internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerDrafts = rememberAnswerDrafts(controller),
     exams: LocalExamController = rememberLocalExamController(controller.library),
-    answerExplain: AnswerExplain = rememberAnswerExplain(controller.library), chooseBook: suspend () -> Path?) {
+    answerExplain: AnswerExplain = rememberAnswerExplain(controller.library),
+    learningSupport: com.coach.desktop.books.BookLearningSupport? = null, chooseBook: suspend () -> Path?) {
     var tab by rememberSaveable { mutableStateOf(AppTab.RESOURCES) }
     // 今天 / 课程 open their book inside 书架's workspace; the rail keeps pointing where the reader came from
     // until they pick another entry or the workspace is back on the shelf.
@@ -73,6 +75,13 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val examUi by exams.state.collectAsState()
     val scope = rememberCoroutineScope()
     val book = ui.book
+    LaunchedEffect(ui.prompt, book?.id) {
+        if (ui.prompt == com.coach.desktop.books.BookPrompt.IMPORTED) {
+            origin = null
+            settings = false
+            tab = AppTab.RESOURCES
+        }
+    }
     // On the shelf with nothing being opened over it; a start prompt still belongs to the book being opened.
     val onShelf = book == null || (ui.screen == BookScreen.HOME && ui.prompt == null)
     LaunchedEffect(book?.id) { book?.let { exams.load(it) } }
@@ -104,7 +113,9 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     val dark = remember { windowsThemeOverride(System.getProperty("coach.windows.theme")) }
     CoachTheme(dark ?: systemDark) {
         val colors = com.coach.ui.theme.CoachTheme.colors
-        Surface(Modifier.fillMaxSize().testTag("windows-host"), color = colors.bgCanvas) {
+        Surface(Modifier.fillMaxSize().textbookFileDrop { files ->
+            scope.launch { if (drafts.flush() && exams.flush()) controller.importDroppedBooks(files) }
+        }.testTag("windows-host"), color = colors.bgCanvas) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val rail = maxWidth >= 700.dp
                 val settingsButton: @Composable () -> Unit = {
@@ -138,7 +149,7 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
                                     Text("正在读取本书练习…")
                                 }
                             })
-                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, chooseBook = chooseBook)
+                        else -> TextbookWorkspace(controller, drafts, loadOnMount = false, answerExplain = answerExplain, support = learningSupport, chooseBook = chooseBook)
                     }
                 }
                 val deskSelect = remember { { picked: AppTab -> select(picked) } }

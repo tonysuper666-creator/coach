@@ -12,6 +12,7 @@ import androidx.compose.ui.window.rememberDialogState
 import com.coach.client.CourseView
 import com.coach.client.MathHttp
 import com.coach.client.RenderedMath
+import com.coach.domain.WeekPoint
 import com.coach.domain.weekPoints
 import com.coach.ui.CoachController
 import java.awt.Desktop
@@ -36,25 +37,36 @@ fun NotesExportAction(view: CourseView, controller: CoachController, mathHttp: M
     frozen?.let { snapshot -> NotesExportDialog(snapshot, controller, mathHttp) { frozen = null } }
 }
 
+/** 导出弹窗里会变的东西：弹窗和截图测试共用一份，面板只读它、按回调改它。 */
+internal class NotesExportState(val weeks: List<Int>, val points: List<WeekPoint>, week: Int?, directory: Path?) {
+    var byWeek by mutableStateOf(weeks.isNotEmpty())
+    var week by mutableStateOf(week)
+    var point by mutableStateOf(points.firstOrNull()?.id)
+    var expanded by mutableStateOf(false)
+    var includePdf by mutableStateOf(true)
+    var directory by mutableStateOf(directory)
+    var busy by mutableStateOf(false)
+    var status by mutableStateOf<String?>(null)
+    var saved by mutableStateOf<Path?>(null)
+    var failed by mutableStateOf(false)
+    val canExport: Boolean get() = !busy && directory != null && (if (byWeek) week != null else point != null)
+}
+
 @Composable
 private fun NotesExportDialog(view: CourseView, controller: CoachController, mathHttp: MathHttp, close: () -> Unit) {
-    val points = remember(view) { weekPoints(view.events) }
-    val weeks = remember(points) { points.flatMap { it.weeks }.filter { it in 1..52 }.distinct().sorted() }
-    var byWeek by remember { mutableStateOf(weeks.isNotEmpty()) }
-    var week by remember { mutableStateOf(System.getenv("COACH_NOTES_VERIFY_WEEK")?.toIntOrNull()?.takeIf { it in weeks } ?: weeks.firstOrNull()) }
-    var point by remember { mutableStateOf(points.firstOrNull()?.id) }
-    var expanded by remember { mutableStateOf(false) }
-    var includePdf by remember { mutableStateOf(true) }
-    var directory by remember { mutableStateOf<Path?>(System.getenv("COACH_NOTES_VERIFY_DIR")?.let { File(it).toPath() }) }
-    var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var saved by remember { mutableStateOf<Path?>(null) }
+    val state = remember(view) {
+        val points = weekPoints(view.events)
+        val weeks = points.flatMap { it.weeks }.filter { it in 1..52 }.distinct().sorted()
+        NotesExportState(weeks, points,
+            System.getenv("COACH_NOTES_VERIFY_WEEK")?.toIntOrNull()?.takeIf { it in weeks } ?: weeks.firstOrNull(),
+            System.getenv("COACH_NOTES_VERIFY_DIR")?.let { File(it).toPath() })
+    }
     val scope = rememberCoroutineScope()
-    fun export() {
+    fun export() { with(state) {
         val destination = directory ?: return
         val selection = if (byWeek) NotesSelection(week = week) else NotesSelection(pointId = point)
         val cached = controller.math.assets.toMap()
-        busy = true; saved = null; status = "正在整理账本与复习资料…"
+        busy = true; saved = null; failed = false; status = "正在整理账本与复习资料…"
         scope.launch {
             try {
                 val draft = NotesCore.build(notesRequest(view, controller.courseId, selection))
@@ -74,7 +86,7 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                 if (unresolved > 0) status += " PDF 有 $unresolved 处公式未能渲染，已标注并保留原始 TeX；请检查公式服务和源资料。"
                 if (unresolvedImages > 0) status += " PDF 有 $unresolvedImages 张图片未嵌入，已标注；原引用保留在 Markdown。仅嵌入账本自带的 PNG/JPEG，不读取外部文件或网址。"
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (e: Exception) { status = e.message ?: "导出失败，请重试" }
+            catch (e: Exception) { failed = true; status = e.message ?: "导出失败，请重试" }
             finally {
                 busy = false
                 System.getenv("COACH_NOTES_VERIFY_CAPTURE")?.let {
@@ -84,8 +96,26 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                 }
             }
         }
+    } }
+    DialogWindow(onCloseRequest = { if (!state.busy) close() }, title = "导出复习提纲", state = rememberDialogState(width = 600.dp, height = 610.dp)) {
+        NotesExportPanel(state, onPickDirectory = {
+            val picker = JFileChooser().apply { fileSelectionMode = JFileChooser.DIRECTORIES_ONLY; dialogTitle = "选择保存位置" }
+            if (picker.showOpenDialog(window) == JFileChooser.APPROVE_OPTION) state.directory = picker.selectedFile.toPath()
+        }, onExport = ::export, onClose = close, onOpen = { path -> Desktop.getDesktop().open(path.toFile()) })
+        LaunchedEffect(Unit) {
+            if (System.getenv("COACH_NOTES_VERIFY_DIR") != null) {
+                delay(1800)
+                System.getenv("COACH_NOTES_VERIFY_CAPTURE")?.let { VerifyHooks.capture(window, File(it)) }
+                export()
+            }
+        }
     }
-    DialogWindow(onCloseRequest = { if (!busy) close() }, title = "导出复习提纲", state = rememberDialogState(width = 600.dp, height = 610.dp)) {
+}
+
+/** 导出窗口里的全部内容；窗口外壳和文件选择框留在 [NotesExportDialog]。 */
+@Composable
+internal fun NotesExportPanel(state: NotesExportState, onPickDirectory: () -> Unit, onExport: () -> Unit, onClose: () -> Unit,
+    onOpen: (Path) -> Unit) { with(state) {
         MaterialTheme {
             Surface(Modifier.fillMaxSize()) {
                 Column(Modifier.padding(28.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -103,28 +133,17 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                         }
                     }
                     Row { Checkbox(checked = includePdf, onCheckedChange = { includePdf = it }, enabled = !busy); Text("Markdown + 可打印 PDF", Modifier.padding(top = 12.dp)) }
-                    OutlinedButton(onClick = {
-                        val picker = JFileChooser().apply { fileSelectionMode = JFileChooser.DIRECTORIES_ONLY; dialogTitle = "选择保存位置" }
-                        if (picker.showOpenDialog(window) == JFileChooser.APPROVE_OPTION) directory = picker.selectedFile.toPath()
-                    }, enabled = !busy) { Text("选择本机文件夹…") }
+                    OutlinedButton(onClick = onPickDirectory, enabled = !busy) { Text("选择本机文件夹…") }
                     Text(directory?.toString() ?: "尚未选择保存位置", style = MaterialTheme.typography.bodySmall)
                     Text("文件只保存在所选目录的新文件夹内。PDF 公式使用与应用相同的 Mac 公式服务；无法渲染的公式会标注并保留源码。", style = MaterialTheme.typography.bodySmall)
                     status?.let { Text(it, color = if (saved != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
                     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(onClick = ::export, enabled = !busy && directory != null && (if (byWeek) week != null else point != null)) { Text(if (busy) "正在导出…" else "导出") }
-                        TextButton(onClick = close, enabled = !busy) { Text("关闭") }
-                        saved?.let { path -> TextButton(onClick = { Desktop.getDesktop().open(path.toFile()) }) { Text("打开文件夹") } }
+                        Button(onClick = onExport, enabled = canExport) { Text(if (busy) "正在导出…" else "导出") }
+                        TextButton(onClick = onClose, enabled = !busy) { Text("关闭") }
+                        saved?.let { path -> TextButton(onClick = { onOpen(path) }) { Text("打开文件夹") } }
                     }
                 }
             }
         }
-        LaunchedEffect(Unit) {
-            if (System.getenv("COACH_NOTES_VERIFY_DIR") != null) {
-                delay(1800)
-                System.getenv("COACH_NOTES_VERIFY_CAPTURE")?.let { VerifyHooks.capture(window, File(it)) }
-                export()
-            }
-        }
-    }
-}
+} }

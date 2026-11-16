@@ -3,7 +3,9 @@ package com.coach.desktop
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -64,6 +66,9 @@ class DesktopV7ScreenshotTest {
         // 第 9 刀：课程里的本地练习——入口、作答、保存冲突、读取确认、交卷确认、结果、冻结题源、历次结果，都对做题那一屏。
         "exam-entry" to "inner-quiz", "exam-attempt" to "inner-quiz", "exam-conflict" to "inner-quiz", "exam-reload" to "inner-quiz",
         "exam-submit" to "inner-quiz", "exam-result" to "inner-quiz", "exam-source" to "inner-quiz", "exam-history" to "inner-quiz",
+        // 第 10 刀：书架顶栏的「设置」弹窗；课程窗口的「导出复习提纲」——初始、按知识点选、导出成功、导出失败。都对周览那一屏。
+        "settings" to "inner-week", "notes-export" to "inner-week", "notes-export-point" to "inner-week",
+        "notes-export-done" to "inner-week", "notes-export-failed" to "inner-week",
     )
 
     @Test fun everyDesktopSceneInLightAndDarkAtWindowsScaling() {
@@ -75,6 +80,7 @@ class DesktopV7ScreenshotTest {
                 shots += walk(screen, dark)
                 shots += explainWalk(screen, dark)
                 shots += examWalk(screen, dark)
+                shots += notesWalk(screen, dark)
             }
         } finally {
             if (previous == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previous)
@@ -134,6 +140,13 @@ class DesktopV7ScreenshotTest {
             ready(controller) { it.screen == BookScreen.HOME }
             onNodeWithTag("library-title").assertExists()
             shot("bookshelf")
+
+            // 设置弹窗（第 10 刀）：弹窗在另一层，整幅画面一起拍。
+            onNodeWithTag("open-settings").performClick(); waitForIdle()
+            onNodeWithTag("settings-library-directory").assertTextEquals(directory.toString())
+            shots += capture("settings", screen, dark, whole = true)
+            onNodeWithTag("close-settings").performClick(); waitForIdle()
+            onNodeWithTag("settings-library-directory").assertDoesNotExist()
 
             nav("今天").performClick(); waitForIdle()
             onNodeWithTag("host-today-book").assertExists()
@@ -370,6 +383,51 @@ class DesktopV7ScreenshotTest {
         return shots
     }
 
+    /**
+     * 导出复习提纲是课程窗口里另开的一扇窗，测试里开不了真窗口：把窗口里的面板放在同一张桌面上，大小与窗口一致（600×610）。
+     * 周次、知识点是自造的；「成功」「失败」两种状态直接写进状态，不真的导出，不碰磁盘以外的东西。
+     */
+    private fun notesWalk(screen: Screen, dark: Boolean): List<Shot> {
+        val points = listOf(WeekPoint("kp-cell", "细胞是基本单位", setOf(1, 2)), WeekPoint("kp-membrane", "细胞膜控制物质进出", setOf(2)),
+            WeekPoint("kp-nucleus", "细胞核里有遗传信息", setOf(3)))
+        val state = NotesExportState(listOf(1, 2, 3), points, 1, null)
+        val shots = mutableListOf<Shot>()
+        runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
+            setContent {
+                com.coach.ui.CoachTheme(dark) {
+                    val colors = com.coach.ui.theme.CoachTheme.colors
+                    Surface(Modifier.fillMaxSize().testTag("windows-host"), color = colors.bgCanvas) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                            Box(Modifier.size(600.dp, 610.dp).border(1.dp, colors.borderSubtle)) {
+                                NotesExportPanel(state, onPickDirectory = { state.directory = Path.of("D:/学习/复习提纲") },
+                                    onExport = {}, onClose = {}, onOpen = {})
+                            }
+                        }
+                    }
+                }
+            }
+            fun shot(scene: String) { waitForIdle(); shots += capture(scene, screen, dark, whole = true) }
+            onNodeWithText("尚未选择保存位置").assertExists()
+            shot("notes-export")
+
+            onNodeWithText("按知识点", substring = true).performClick(); waitForIdle()
+            onNodeWithText("细胞是基本单位", substring = true).performClick(); waitForIdle()
+            onNodeWithText("细胞膜控制物质进出").assertExists()
+            shot("notes-export-point")
+            onNodeWithText("细胞膜控制物质进出").performClick(); waitForIdle()
+
+            onNodeWithText("选择本机文件夹…").performClick(); waitForIdle()
+            state.saved = Path.of("D:/学习/复习提纲/coach-notes-1")
+            state.status = "已导出：5 条待练错题，账本序号 128。"
+            shot("notes-export-done")
+
+            state.saved = null; state.failed = true
+            state.status = "目标文件夹已存在同名导出，未覆盖。请换一个文件夹后重试。"
+            shot("notes-export-failed")
+        }
+        return shots
+    }
+
     private class FakeMac(home: Path) : BookExplainer(DesktopConnectionSettings(home = home, environment = { null })) {
         var explained = 0
         override suspend fun load() { defaultAddress = "mac.local"; loaded = true }
@@ -391,11 +449,12 @@ class DesktopV7ScreenshotTest {
         waitForIdle()
     }
 
-    private fun ComposeUiTest.capture(scene: String, screen: Screen, dark: Boolean): Shot {
+    private fun ComposeUiTest.capture(scene: String, screen: Screen, dark: Boolean, whole: Boolean = false): Shot {
         val theme = if (dark) "dark" else "light"
         val file = out.resolve(screen.name).resolve(theme).resolve("$scene.png")
         Files.createDirectories(file.parent)
-        val image = onNodeWithTag("windows-host").captureToImage().toAwtImage()
+        // 弹窗、下拉菜单在另一层，只拍 windows-host 会漏掉；whole 拍整个场景。
+        val image = (if (whole) (this as SkikoComposeUiTest).captureToImage() else onNodeWithTag("windows-host").captureToImage()).toAwtImage()
         assertTrue(ImageIO.write(image, "png", file.toFile()))
         val saved = assertNotNull(ImageIO.read(file.toFile()))
         assertEquals(screen.width, saved.width, "$scene 宽度要等于 ${screen.name} 的物理像素")

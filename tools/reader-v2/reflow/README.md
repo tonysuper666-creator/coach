@@ -307,6 +307,54 @@ multi-page cell geometry; consumers must explicitly understand this batch payloa
 Docling may emit independent page tables instead of one multi-page source item;
 those remain unassociated and cannot use this continuation path.
 
+### An explicit source independent of the model
+
+`TaggedTableProbe.java` reads an existing PDF's structure tree and page MCIDs.
+One standard `Table` with direct `TR` / `TH` / `TD` children supplies an explicit
+cross-page identity even when Docling emits unrelated page tables. Both the
+forward structure references and the page's reverse `ParentTree` owners must
+agree. Source paths are local to the output's document SHA-256; never join paths
+across documents. This is a conservative tagged-PDF subset, not a tag generator
+or a heuristic for untagged books.
+
+Keep all outputs private, as for the ordinary probe:
+
+```sh
+mkdir -p "$PRIVATE_STATE/classes"
+javac --release 17 -cp "$PDFBOX_CLASSPATH" -d "$PRIVATE_STATE/classes" \
+  tools/reader-v2/reflow/PdfReflowProbe.java \
+  tools/reader-v2/reflow/TaggedTableProbe.java
+java -cp "$PRIVATE_STATE/classes:$PDFBOX_CLASSPATH" PdfReflowProbe \
+  "$PRIVATE_PDF" "$PHYSICAL_PAGES" > "$PRIVATE_STATE/probe.jsonl"
+java -cp "$PRIVATE_STATE/classes:$PDFBOX_CLASSPATH" TaggedTableProbe \
+  "$PRIVATE_PDF" "$PHYSICAL_PAGES" > "$PRIVATE_STATE/tagged-native.json"
+python3 tools/reader-v2/reflow/tagged_tables.py \
+  --native "$PRIVATE_STATE/tagged-native.json" \
+  --probe "$PRIVATE_STATE/probe.jsonl" --out "$PRIVATE_STATE/tagged-tables.json"
+```
+
+The classpath example uses the POSIX separator; use `;` on Windows. Request all
+physical pages referenced by a table. The consumer checks the independent
+ordinary probe's document hash, exact canonical text, page frame and complete
+glyph offsets/boxes before accepting evidence. MCIDs are tracked through the
+same canonical stripper's actual `TextPosition` objects; repeated MCID sequences,
+lost/merged glyphs, `ActualText`, forms, clipping and unsafe frames are refused.
+Missing/reused references, mismatched reverse owners, nonconsecutive pages,
+cross-page cells, overlapping rows, partial UTF-16 boundaries, row/column spans
+and verification-budget exhaustion produce no partial table. Role maps and
+non-direct table hierarchies are currently unsupported.
+
+`source_kind=pdf_structure_tree_mcid` and `verified_tagged_association` mean the
+source tags' rows/cells have exact canonical slices on their physical pages.
+They do not establish that the author tagged the table correctly. The output
+retains each cell's disjoint ranges, source path, MCIDs, TH flag and tight glyph
+envelope, plus text-safe row-gap cuts. Tight glyph envelopes exclude borders,
+padding and nontext content, so **they are not crop boundaries**: `crop_ready`
+and `hide_source_allowed` remain false, `source_region`, `repeat_header` and all
+`replacement_range` fields remain null. TH flags alone do not implement repeated
+headers. This separate payload does not alter model groups or ordinary page
+payloads, and is not connected to automatic import, persistence or display.
+
 For native packages, retain source structure before a future importer flattens it:
 
 ```sh
@@ -332,16 +380,19 @@ tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_pdf_payload.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
 tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_cross_page_tables.py \
   --pdfbox-classpath "$PDFBOX_CLASSPATH"
+tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_tagged_tables.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
 DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   tools/dev/heavy --local "$DOCLING_PYTHON" \
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 45 reflow tests cover diff accounting, private-output guards, stale identities,
+The 54 reflow tests cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
 exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
 caption fragment references, scoped cross-page table partitions and header copies,
-batch refusal/budget cases and self-authored EPUB/Word structure/byte retention.
+batch refusal/budget cases, native MCID association/refusal cases, and self-authored
+EPUB/Word structure/byte retention. The original 45 tests are unchanged.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
 120 glyph spans, segmented table rules, borderless table/header evidence,
@@ -350,7 +401,12 @@ MediaBox/CropBox and rotation. It uses known layout boxes to isolate mapping
 from model quality. The second integration generates three self-authored pages,
 checks three exact fragments and three row cuts, verifies source/repeat/source
 header modes and refuses stale text. It also uses known source geometry and is
-not a Docling table recognition test. The 26 layout tests separately exercise real Docling on
+not a Docling table recognition test. The tagged integration instead reads actual
+PDF structure/ParentTree/marked-content operators, with no injected layout JSON:
+one table, three fragments and three text-safe cuts; seven unsupported/ambiguous
+PDF modes plus stale/missing pages are refused, and all canonical pages match a
+plain stripper. This remains a self-authored parser regression, not real-book
+coverage. The 26 layout tests separately exercise real Docling on
 synthetic PDFs with local models. Set the existing model path explicitly when
 the default offline cache is empty. Real geometry still needs private visual
 review; product offset regressions and the 32 reader UI cells remain unverified.

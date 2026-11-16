@@ -25,7 +25,7 @@ public final class PdfReflowProbe {
     }
     record Glyph(String text, String font, Box box, int start, int end) {}
     record Region(String kind, Box box) {}
-    static final class Text extends PDFTextStripper {
+    static class Text extends PDFTextStripper {
         final List<Glyph> glyphs = new ArrayList<>();
         final StringWriter raw = new StringWriter();
         final List<int[]> unmapped = new ArrayList<>();

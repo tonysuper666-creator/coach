@@ -35,6 +35,12 @@ class BookExplainTest {
             put("sources", buildJsonArray { add(buildJsonObject { put("anchor", "S1"); put("docId", "$book:p9:9"); put("pdfPage", 9) }) })
         }
         assertIs<ExplainResult.Refused>(ExplainWire.parse(foreign, sent), "A block that was never sent cannot be cited")
+        val wrongPage = JsonObject(good + ("sources" to buildJsonArray {
+            add(buildJsonObject { put("anchor", "S1"); put("docId", blocks[1].id); put("pdfPage", 4) })
+        }))
+        assertIs<ExplainResult.Refused>(ExplainWire.parse(wrongPage, sent))
+        val mixed = JsonObject(good + ("sources" to JsonArray(good["sources"]!!.jsonArray + foreign["sources"]!!.jsonArray)))
+        assertIs<ExplainResult.Refused>(ExplainWire.parse(mixed, sent), "A valid citation cannot hide a foreign one")
     }
 
     @Test fun consentIsPerBookAndNothingIsAllowedByDefault() {

@@ -20,6 +20,35 @@ class LibraryExplainTest {
     private fun request(selection: String, blocks: JsonArray) = json("requestId" to "ab12", "kind" to "explain", "selection" to selection, "blocks" to blocks)
     private val id = "0123abcd:p12:340"
 
+    @Test fun boundParagraphExtractionAndQuestionRetainAllAuthorizationGates() = runBlocking {
+        Harness(local = true).use { h ->
+            h.actor.execute { registerSourcePage("SYNTHETIC", h.sourceId, "Synthetic book", 12,
+                "An _economic_ explanation of resources and a_b costs of 1-2.") }
+            val paragraph = "An eco-\nnomic explanation of re-\nsources and a_b costs of 1-2."
+            val question = "Why are resources relevant?"
+            val valid = JsonObject(request(paragraph, blocks(h.localId to paragraph)) + json("kind" to "ask", "question" to question))
+            for (invalid in listOf("", "x".repeat(501))) {
+                assertEquals(400, h.post(JsonObject(valid + json("question" to invalid))).first)
+            }
+            for ((block, selection) in listOf(
+                "${"0".repeat(64)}:p12:0" to paragraph,
+                "${h.version}:p13:0" to paragraph,
+                h.localId to paragraph.replace("a_b", "ab"),
+                h.localId to paragraph.replace("1-2", "12"))) {
+                assertEquals(409, h.post(request(selection, blocks(block to selection))).first)
+            }
+            assertEquals(0, h.stub.requests)
+            h.reply()
+            val (status, body) = h.post(valid)
+            assertEquals(200, status)
+            assertEquals(h.localId, body.getValue("sources").jsonArray.single().jsonObject.str("docId"))
+            assertTrue(h.stub.requestBodies.single().contains(question))
+            h.actor.execute { h.update("UPDATE outline_kp SET anchors='[]'") }
+            assertEquals(409, h.post(valid).first)
+            assertEquals(1, h.stub.requests)
+        }
+    }
+
     @Test fun blocksBecomeAnchorablePagesCarryingTheirIds() = Harness().use { h ->
         val untrusted = libraryExplainRequest(request("price elasticity", blocks(id to "Synthetic price   elasticity is a ratio.", "0123abcd:p12:900" to "Next synthetic block.")))
         assertFalse(untrusted.scope.permits(id, 12, true), "Parsing client text cannot mint a trusted scope")

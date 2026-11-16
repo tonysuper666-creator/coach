@@ -39,6 +39,8 @@ internal sealed interface BookLearningReply {
 
 /** A real, authorized explanation/answer provider must be supplied here; source text is not a reply. */
 internal interface BookLearningSupport {
+    fun consentRequired(book: String): Boolean = false
+    fun allow(book: String) {}
     suspend fun explain(request: BookExplanationRequest): BookLearningReply
     suspend fun ask(request: BookPassageQuestion): BookLearningReply
 }

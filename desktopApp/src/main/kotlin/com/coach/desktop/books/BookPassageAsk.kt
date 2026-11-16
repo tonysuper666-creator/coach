@@ -26,6 +26,9 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
     var request by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
     var reply by remember(book.id, page.number) { mutableStateOf<BookLearningReply?>(null) }
     var revision by remember(book.id, page.number) { mutableIntStateOf(0) }
+    var pendingConsent by remember(book.id, page.number) { mutableStateOf<BookPassageQuestion?>(null) }
+    var source by remember(book.id, page.number) { mutableStateOf<BookPassage?>(null) }
+    fun send(input: BookPassageQuestion) { reply = null; request = input; revision++ }
     LaunchedEffect(request, revision) {
         val input = request ?: return@LaunchedEffect
         reply = try {
@@ -37,7 +40,7 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
     }
     val colors = CoachTheme.colors
     // V7：弹窗是 surface2 的纸；段落、选中的原文和输入框都是叠在上面的一层 surface1 纸，按钮走纸面按钮，不用 Material 描边。
-    AlertDialog(onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
+    AlertDialog(modifier = Modifier.testTag("book-passage-dialog"), onDismissRequest = onClose, title = { Text("就这段问一句") }, text = {
         Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()).testTag("book-passage-ask"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (selected == null) {
@@ -72,15 +75,19 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
                         request = null
                         reply = BookLearningReply.Unavailable("这段原文的位置无法确认，请重新选择。")
                     } else {
-                        reply = null
-                        request = BookPassageQuestion(passage, question)
-                        revision++
+                        val input = BookPassageQuestion(passage, question)
+                        if (support.consentRequired(book.id)) pendingConsent = input else send(input)
                     }
                 }, enabled = BookPassageQuestion.accepts(question) && (request == null || reply != null), modifier = Modifier.testTag("book-passage-send")) { Text("发送") }
                 when (val result = reply) {
                     null -> if (request != null) Text("正在读这段问题…", style = MaterialTheme.typography.bodySmall, color = colors.fgSecondary)
                     is BookLearningReply.Text -> PaperCard(Modifier.testTag("book-passage-reply"), color = colors.surface1) {
                         Text(result.text, style = MaterialTheme.typography.bodyMedium, color = colors.fgPrimary)
+                        result.sources.forEach { passage ->
+                            V7TextButton({ source = passage }, Modifier.testTag("book-passage-citation")) {
+                                Text("出处 · 第 ${passage.page} 页")
+                            }
+                        }
                     }
                     is BookLearningReply.Unavailable -> Text(result.message, Modifier.testTag("book-passage-unavailable"),
                         style = MaterialTheme.typography.bodySmall, color = v7Alert())
@@ -88,4 +95,18 @@ internal fun BookPassageAsk(book: Textbook, page: BookPage, support: BookLearnin
             }
         }
     }, confirmButton = { V7TextButton(onClose, modifier = Modifier.testTag("book-passage-close")) { Text("回到阅读") } })
+    pendingConsent?.let { input ->
+        AlertDialog(onDismissRequest = { pendingConsent = null }, title = { Text("把这段发到你的 Mac？") },
+            text = { Text("会把你选的原文和问题发给你配对的 Mac，由它的 AI 回答。这本书之后不再询问。《${book.title}》允许吗？") },
+            confirmButton = { V7TextButton({
+                support.allow(book.id); pendingConsent = null; send(input)
+            }, Modifier.testTag("ask-consent-allow")) { Text("允许并提问") } },
+            dismissButton = { V7TextButton({ pendingConsent = null }, Modifier.testTag("ask-consent-deny")) { Text("不允许") } })
+    }
+    source?.let { passage ->
+        AlertDialog(onDismissRequest = { source = null }, title = { Text("原文 · 第 ${passage.page} 页") },
+            text = { Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
+                Text(passage.text, Modifier.testTag("book-passage-source"))
+            } }, confirmButton = { V7TextButton({ source = null }) { Text("回到问题") } })
+    }
 }

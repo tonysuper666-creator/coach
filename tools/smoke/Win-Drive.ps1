@@ -63,8 +63,9 @@ function Save-Shot([string]$path) {
     $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
 }
 
-# OCR a saved PNG; returns lines as objects { Text, X, Y, W, H, Words } in window coordinates.
-function Read-Screen([string]$png) {
+# OCR a saved PNG; returns lines as objects { Text, Words } in window coordinates.
+# Dark themes lose small low-contrast labels, so the picture is read twice (as is and inverted) and the lines are merged.
+function Read-Bitmap([string]$png) {
     $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($png)) ([Windows.Storage.StorageFile])
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $dec = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
@@ -75,6 +76,19 @@ function Read-Screen([string]$png) {
         $ws = @($l.Words)
         [pscustomobject]@{ Text = (($ws | ForEach-Object { $_.Text }) -join ''); Words = $ws }
     }
+}
+function Read-Screen([string]$png) {
+    $src = New-Object System.Drawing.Bitmap $png
+    $inv = New-Object System.Drawing.Bitmap $src.Width, $src.Height
+    $g = [System.Drawing.Graphics]::FromImage($inv)
+    $cm = New-Object System.Drawing.Imaging.ColorMatrix (, [single[][]]@(@(-1,0,0,0,0), @(0,-1,0,0,0), @(0,0,-1,0,0), @(0,0,0,1,0), @(1,1,1,0,1)))
+    $ia = New-Object System.Drawing.Imaging.ImageAttributes; $ia.SetColorMatrix($cm)
+    $g.DrawImage($src, (New-Object System.Drawing.Rectangle 0, 0, $src.Width, $src.Height), 0, 0, $src.Width, $src.Height, [System.Drawing.GraphicsUnit]::Pixel, $ia)
+    $g.Dispose(); $src.Dispose()
+    $invPath = [IO.Path]::ChangeExtension($png, 'inv.png'); $inv.Save($invPath, [System.Drawing.Imaging.ImageFormat]::Png); $inv.Dispose()
+    $a = @(Read-Bitmap $png); $b = @(Read-Bitmap $invPath)
+    Remove-Item $invPath -ErrorAction SilentlyContinue
+    $a + $b
 }
 
 # Locate a substring on screen (spaces ignored); returns the centre and box of the matched words, or $null.
@@ -177,4 +191,13 @@ function List-AppWindows {
             $script:WinList += "[$($sb.ToString())] vis=$([WD]::IsWindowVisible($x)) rect=$($r.L),$($r.T),$($r.R),$($r.B)" }
         return $true }, [IntPtr]::Zero) | Out-Null
     $script:WinList
+}
+
+# Mouse-wheel inside the window; negative delta scrolls down.
+function Scroll-At([int]$x, [int]$y, [int]$notches) {
+    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150
+    $r = Get-Rect
+    [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null; Start-Sleep -Milliseconds 100
+    $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
+    [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
 }

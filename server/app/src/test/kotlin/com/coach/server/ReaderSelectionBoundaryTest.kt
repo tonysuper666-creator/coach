@@ -5,6 +5,20 @@ import com.coach.store.SourcePage
 import kotlin.test.*
 
 class ReaderSelectionBoundaryTest {
+    @Test fun boundPdfComparisonPreservesMeaningfulCharacters() {
+        assertTrue(containsBoundBookSelection("An _economic_ explanation of resources.", "An eco-\nnomic explanation of re-\nsources."))
+        assertTrue(containsBoundBookSelection("An eco-\r\n nomic explanation.", "An economic explanation."))
+        for ((source, selection) in listOf(
+            "a_b" to "ab", "_unpaired" to "unpaired", "cost-effective" to "costeffective",
+            "1-\n2" to "12", "not equal" to "equal not", "decreased" to "increased",
+            "one\n\ntwo" to "onetwo", "_x_2" to "x2", "_10_" to "10")) {
+            assertFalse(containsBoundBookSelection("Before $source after", "Before $selection after"),
+                "$source must not authorize $selection")
+        }
+        assertFalse(containsBoundBookSelection("text", " "))
+        assertFalse(containsReaderSelection("An _economic_ explanation.", "An eco-\nnomic explanation."),
+            "Nonlocal reader matching keeps its original literal boundary")
+    }
     @Test fun literalSelectionMustSurviveVisibilityAndBudgetFiltering() {
         val public = SourcePage("book", 1, "Synthetic   visible passage.")
         val later = SourcePage("book", 2, "Synthetic unread chapter.")

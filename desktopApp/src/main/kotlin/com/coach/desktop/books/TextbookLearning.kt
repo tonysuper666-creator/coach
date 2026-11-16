@@ -69,7 +69,7 @@ internal fun TextbookLearning(ui: LibraryUi, support: BookLearningSupport, scrol
         }
         onFocusRestored()
     }
-    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false,
+    Desk(crumb = book.title, onBack = onBack, backLabel = "返回书架", showNavigation = false, hasMargin = false,
         status = if (lesson == null) "本书学习结束" else "第 ${book.lessonIndex + 1} / ${book.lessons.size} 节", directory = {
             Text("学习路线", style = MaterialTheme.typography.titleMedium)
             book.lessons.forEachIndexed { index, item -> V7TextButton({ onLesson(index) }, enabled = !ui.busy) { Text("${index + 1}. ${item.title}") } }

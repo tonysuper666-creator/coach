@@ -58,6 +58,8 @@ data class DeskMetrics(val window: DeskWindow, val horizontalPadding: Dp, val to
 val LocalDeskMetrics = staticCompositionLocalOf { DeskMetrics(DeskWindow.Inner, CoachV7.Layout.mainPx, CoachV7.Layout.mainPt, CoachV7.Layout.optH) }
 /** Whether the companion column is actually composed in the current layout. */
 val LocalDeskMarginVisible = staticCompositionLocalOf { false }
+/** 无页边时纸面的最大宽度：V7 正文栏加页边栏，再加两侧正文内边距。 */
+internal val deskPaperMax = CoachV7.Layout.colw + CoachV7.Layout.wRail + CoachV7.Layout.mainPx * 2
 
 /** The page stays in the same composition when the directory/margin collapse or focus mode changes. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,6 +79,8 @@ fun Desk(
     onCrumbClick: (() -> Unit)? = null,
     directory: @Composable () -> Unit = {},
     margin: @Composable () -> Unit = {},
+    /** 本页有没有页边内容。false 时不留空的页边栏、不出「出处与批注」开关，纸面居中（V7 三栏版心）。 */
+    hasMargin: Boolean = true,
     footer: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
@@ -119,7 +123,7 @@ fun Desk(
         val sheetHeight = maxHeight * .7f
         val inner = window == DeskWindow.Inner || window == DeskWindow.Medium
         val landscape = window == DeskWindow.OuterLandscape
-        val marginWidth = if (inner && !focused && !marginCollapsed) (windowWidth * .30f).coerceIn(260.dp, 280.dp) else 0.dp
+        val marginWidth = if (hasMargin && inner && !focused && !marginCollapsed) (windowWidth * .30f).coerceIn(260.dp, 280.dp) else 0.dp
         val metrics = DeskMetrics(window,
             if (inner) 24.dp else 16.dp,
             if (landscape) 12.dp else 20.dp,
@@ -165,15 +169,20 @@ fun Desk(
                                 }
                             }
                         }
-                        if (!focused) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
+                        if (!focused && hasMargin) Text(if (inner && !marginCollapsed) "收起" else "出处与批注",
                             Modifier.v7FocusRing().clickable { if (inner) marginCollapsed = !marginCollapsed else marginSheet = true }.testTag("v7-margin-toggle"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         Text(if (focused) "退出专心读" else "专心读",
                             Modifier.v7FocusRing().clickable { if (onFocus != null) onFocus() else localFocus = !localFocus }.testTag("v7-focus"), style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                     }
                 }
-                Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)) {
+                // 没有页边内容时，纸面占去页边的位置，但不超过「正文栏 + 页边栏」的版心宽，并居中。
+                val centered = !hasMargin && inner && !focused
+                Row(Modifier.weight(1f).fillMaxWidth().padding(top = if (inner && !focused) 8.dp else 0.dp, bottom = if (inner && !focused) 12.dp else 0.dp)
+                    .then(if (centered) Modifier.padding(horizontal = 16.dp) else Modifier)) {
                     // Keep the paper in place so a resize never recreates the reading composition.
-                    Box(Modifier.weight(1f).fillMaxHeight().padding(top = if (inner && !focused) 4.dp else 0.dp)
+                    Box(Modifier.weight(1f).fillMaxHeight()
+                        .then(if (centered) Modifier.wrapContentWidth(Alignment.CenterHorizontally).widthIn(max = deskPaperMax).fillMaxWidth() else Modifier)
+                        .padding(top = if (inner && !focused) 4.dp else 0.dp)
                         .then(if (inner && !focused) Modifier.paperShadow("sheet", colors.dark) else Modifier)
                         .clip(if (focused) RoundedCornerShape(0.dp) else if (!inner) RoundedCornerShape(bottomStart = CoachV7.Radius.sheet, bottomEnd = CoachV7.Radius.sheet) else RoundedCornerShape(CoachV7.Radius.sheet))
                         .background(colors.surface1)
@@ -188,7 +197,7 @@ fun Desk(
                 if (!managed && !inner && !focused && showNavigation) LocalDeskNavigation.current?.invoke(false)
             }
         }
-        if (marginSheet && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {
+        if (marginSheet && hasMargin && !inner && !focused) ModalBottomSheet(onDismissRequest = { marginSheet = false }) {
             Box(Modifier.fillMaxWidth().height(sheetHeight).padding(16.dp).testTag("v7-margin-sheet")) { margin() }
         }
     }

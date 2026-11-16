@@ -10,6 +10,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.imageio.ImageIO
+import kotlin.math.abs
 import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
@@ -160,9 +161,14 @@ class WindowsTextbooksTest {
             onNodeWithTag("enable-learning").performClick()
             ready(controller) { it.screen == BookScreen.LEARNING }
 
-            // 两栏落在实际宿主：正文与出处栏并排，目录只在抽屉里。
+            // 版心落在实际宿主：学习页没有页边内容，不留空的页边栏，纸面在桌面里居中；目录只在抽屉里。
             onNodeWithTag("v7-paper").assertIsDisplayed()
-            onNodeWithTag("v7-margin").assertIsDisplayed()
+            onNodeWithTag("v7-margin").assertDoesNotExist()
+            onNodeWithTag("v7-margin-toggle").assertDoesNotExist()
+            val desk = onNodeWithTag("v7-desk").getBoundsInRoot()
+            val paper = onNodeWithTag("v7-paper").getBoundsInRoot()
+            assertTrue(abs(((paper.left - desk.left) - (desk.right - paper.right)).value) <= 1f,
+                "paper is centred in the desk: desk=$desk paper=$paper")
             onAllNodesWithTag("v7-directory-drawer").assertCountEquals(0)
             onNodeWithTag("v7-directory-toggle").performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithTag("v7-directory-drawer").fetchSemanticsNodes().isNotEmpty() }

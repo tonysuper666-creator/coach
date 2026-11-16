@@ -25,6 +25,12 @@ class WindowsLearningPathsTest {
         // 讲解通道给一个确定不联网的实现：这台机器的配对与 Mac 都不参与这条测试。
         val gate = AnswerExplain(ExplainConsent(directory), load = {}, ready = { true }, paired = { false },
             explain = { _, _ -> ExplainResult.Refused("测试里不配对") })
+        // 选段问答有独立的配对通道：隔离它的默认凭据目录，绝不借用机器上的配对。
+        assertTrue(System.getenv("COACH_CLIENT_DIR").isNullOrBlank())
+        assertTrue(System.getenv("COACH_TOKEN_FILE").isNullOrBlank())
+        val previousHome = System.getProperty("user.home")
+        System.setProperty("user.home", root.resolve("unpaired-home").toString())
+        try {
         runSkikoComposeUiTest(size = Size(1100f, 800f), density = Density(1f)) {
             setContent { key(controller) { WindowsTextbookHost(controller, answerExplain = gate) { nextFile } } }
             ready(controller) { it.catalog.isEmpty() }
@@ -43,6 +49,9 @@ class WindowsLearningPathsTest {
             onNodeWithTag("ask-paragraph-0").performClick()
             onNodeWithTag("book-passage-question").performTextInput("Why does this synthetic body stay in orbit?")
             onNodeWithTag("book-passage-send").performClick()
+            onNodeWithTag("ask-consent-allow").assertExists()
+            onNodeWithTag("book-passage-unavailable").assertDoesNotExist()
+            onNodeWithTag("ask-consent-allow").performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("book-passage-unavailable").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("book-selected-passage").assertTextContains(a.lessons[0].text)
             onNodeWithText("回到阅读").performClick()
@@ -170,6 +179,9 @@ class WindowsLearningPathsTest {
             assertEquals(2, controller.state.value.book!!.readingPage)
             capture("restored-guided-route")
             println("LEARNING_PATH_TRACE two-books: READ/page2/reopen -> GUIDED/explanation-unavailable/explicit-questions/retained-draft -> QUESTION_FIRST/NONE/CHOICE/lesson2-answer -> new-host:each-book-own-walk/page/lesson/answer; raw-source-only-after-click")
+        }
+        } finally {
+            if (previousHome == null) System.clearProperty("user.home") else System.setProperty("user.home", previousHome)
         }
     }
 

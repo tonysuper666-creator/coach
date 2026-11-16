@@ -14,7 +14,7 @@ import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 internal object StructuredBookExtraction {
-    fun extract(path: Path, format: String, title: String): ExtractedBook = when (format) {
+    fun extract(path: Path, format: String, title: String, control: BookImportControl = BookImportControl()): ExtractedBook = when (format) {
         "html" -> html(BookText.decode(Files.readAllBytes(path)), title)
         "rtf" -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
@@ -27,31 +27,84 @@ internal object StructuredBookExtraction {
             val bookTitle = if (zip.contains("docProps/core.xml")) xml(zip.read("docProps/core.xml")).all("title").firstOrNull()?.textContent?.trim()?.takeIf(String::isNotEmpty) ?: title else title
             when (format) {
                 "docx" -> word(zip, bookTitle)
-                "pptx" -> slides(zip, bookTitle)
+                "pptx" -> slides(zip, bookTitle, control)
                 "odt" -> odt(zip, title)
                 else -> throw IllegalArgumentException("请使用 PDF、电子书、Word、幻灯片、网页或文本教材。")
             }
         }
     }
 
-    fun html(text: String, title: String): ExtractedBook {
+    private data class HtmlContent(val title: String, val text: String, val images: List<Pair<Int, HtmlElement>>)
+
+    private fun htmlContent(text: String): HtmlContent {
         val doc = Jsoup.parse(text)
         doc.select("script,style,nav,header,footer,aside,form,iframe,noscript,[hidden],[aria-hidden=true]").remove()
         val main = doc.selectFirst("article") ?: doc.selectFirst("main,[role=main]") ?: doc.body()
         val output = StringBuilder()
+        val images = mutableListOf<Pair<Int, HtmlElement>>()
         fun visit(node: HtmlNode) {
             if (node is TextNode) { output.append(node.wholeText); return }
             val name = (node as? HtmlElement)?.normalName().orEmpty()
             val block = name in setOf("p", "div", "li", "section", "article", "h1", "h2", "h3", "h4", "h5", "h6", "br", "tr", "pre", "blockquote")
             if (block) output.append("\n\n")
             if (name.matches(Regex("h[1-6]"))) output.append("# ")
+            if (name == "img") images += output.length to (node as HtmlElement)
             node.childNodes().forEach(::visit)
             if (name in setOf("td", "th")) output.append(" | ")
             if (block) output.append("\n\n")
         }
         visit(main)
-        return ExtractedBook(doc.title().trim().ifEmpty { title }, BookText.chapters(output.toString()))
+        return HtmlContent(doc.title().trim(), output.toString(), images)
     }
+
+    fun html(text: String, title: String): ExtractedBook {
+        val content = htmlContent(text)
+        return htmlImages(text, ExtractedBook(content.title.ifEmpty { title }, BookText.chapters(content.text)), null)
+    }
+
+    fun htmlImages(text: String, book: ExtractedBook, directory: Path?): ExtractedBook {
+        val content = htmlContent(text)
+        val images = htmlPlacements(content) { FormatBookImages.htmlAsset(it.attr("src"), directory) }
+        return book.copy(illustrations = FormatBookImages.attach(content.text, book.pages, images))
+    }
+
+    private fun htmlPlacements(content: HtmlContent, load: (HtmlElement) -> ByteArray?): List<FormatBookImages.Placement> {
+        require(content.images.size <= FormatBookImages.MAX_IMAGES) { "网页插图过多，请分册导入。" }
+        var total = 0L
+        return content.images.mapNotNull { (offset, image) ->
+            load(image)?.let { bytes ->
+                total += bytes.size
+                require(total <= FormatBookImages.MAX_TOTAL) { "这份材料插图超过 64 MB，请分册导入。" }
+                FormatBookImages.Placement(offset, bytes, image.attr("alt").ifBlank { image.attr("title") })
+            }
+        }
+    }
+
+    fun kindle(book: com.coach.desktop.books.mobi.KindleText.Book, title: String): ExtractedBook {
+        val pages = mutableListOf<BookPage>()
+        val images = mutableListOf<ExtractedIllustration>()
+        for (document in book.documents()) {
+            val content = htmlContent(document)
+            val local = BookText.chapters(content.text)
+            val placements = htmlPlacements(content) { image ->
+                val index = kindleImageIndex(image)
+                index?.let { book.images()[it] }
+            }
+            val base = pages.size
+            pages += local.map { it.copy(number = it.number + base) }
+            images += FormatBookImages.attach(content.text, local, placements).map {
+                ExtractedIllustration(it.page + base, it.anchorOffset, it.bytes, it.extension, it.width, it.height, it.caption)
+            }
+            require(images.size <= FormatBookImages.MAX_IMAGES && images.sumOf { it.bytes.size.toLong() } <= FormatBookImages.MAX_TOTAL) {
+                "这本 Kindle 书插图过多或超过 64 MB，请分册导入。"
+            }
+        }
+        return ExtractedBook(title, pages, images)
+    }
+
+    private fun kindleImageIndex(image: HtmlElement): Int? = image.attr("recindex").toIntOrNull()
+        ?: Regex("(?i)^kindle:embed:([0-9a-v]+)(?:[?].*)?$").matchEntire(image.attr("src"))
+            ?.groupValues?.get(1)?.toIntOrNull(32)
 
     private fun word(zip: SafeBookArchive, title: String): ExtractedBook {
         val footnotes = if (zip.contains("word/footnotes.xml")) xml(zip.read("word/footnotes.xml")).all("footnote")
@@ -61,6 +114,30 @@ internal object StructuredBookExtraction {
             .filter { style -> style.all("outlineLvl").isNotEmpty() || style.all("name").any { it.attr("val").matches(Regex("(?i)heading\\s*\\d+")) } }
             .map { it.attr("styleId") }.toSet() else emptySet()
         val output = StringBuilder()
+        val placements = mutableListOf<FormatBookImages.Placement>()
+        val rels = if (zip.contains("word/_rels/document.xml.rels")) relationships(zip, "word/_rels/document.xml.rels") else emptyMap()
+        var imageBytes = 0L
+        fun appendInline(node: Node) {
+            val base = output.length
+            val value = inline(node) { image, offset ->
+                val id = if (image.localName == "blip") image.attr("embed") else image.attr("id")
+                val target = rels[id] ?: return@inline
+                require(placements.size < FormatBookImages.MAX_IMAGES) { "这份 Word 插图过多，请分册导入。" }
+                val bytes = zip.read(zip.resolve("word/document.xml", target))
+                imageBytes += bytes.size
+                require(imageBytes <= FormatBookImages.MAX_TOTAL) { "这份 Word 插图超过 64 MB，请分册导入。" }
+                var ancestor: Node? = image.parentNode
+                var caption: String? = null
+                while (ancestor is Element && ancestor.localName !in setOf("p", "tc", "body")) {
+                    caption = caption ?: (ancestor.all("docPr") + ancestor.all("cNvPr")).firstNotNullOfOrNull {
+                        it.attr("descr").ifBlank { it.attr("title") }.takeIf(String::isNotBlank)
+                    }
+                    ancestor = ancestor.parentNode
+                }
+                placements += FormatBookImages.Placement(base + offset, bytes, caption)
+            }
+            output.append(value)
+        }
         fun visit(node: Node) {
             if (node !is Element) return
             when (node.localName) {
@@ -69,12 +146,18 @@ internal object StructuredBookExtraction {
                     val style = node.all("pStyle").firstOrNull()?.attr("val").orEmpty()
                     output.append("\n\n")
                     if (style in headingStyles || style.matches(Regex("(?i)heading[1-9]"))) output.append("# ")
-                    output.append(inline(node))
+                    appendInline(node)
                     output.append("\n\n")
                 }
                 "tbl" -> node.children().filter { it.localName == "tr" }.forEach { row ->
                     output.append("\n\n")
-                    output.append(row.children().filter { it.localName == "tc" }.joinToString(" | ") { cell -> cell.children().filter { it.localName == "p" }.joinToString(" ") { inline(it) } })
+                    row.children().filter { it.localName == "tc" }.forEachIndexed { cellIndex, cell ->
+                        if (cellIndex > 0) output.append(" | ")
+                        cell.children().filter { it.localName == "p" }.forEachIndexed { paragraphIndex, paragraph ->
+                            if (paragraphIndex > 0) output.append(" ")
+                            appendInline(paragraph)
+                        }
+                    }
                     output.append("\n\n")
                 }
                 "sectPr" -> if (node.all("type").any { it.attr("val") in setOf("nextPage", "evenPage", "oddPage") }) output.append('\u000c')
@@ -90,23 +173,29 @@ internal object StructuredBookExtraction {
             val ids = Regex("【脚注 ([0-9]+)】").findAll(page.text).map { it.groupValues[1] }.distinct().toList()
             page.copy(text = page.text + ids.joinToString("") { id -> "\n\n脚注 $id：${footnotes[id] ?: "（原文件缺少这条脚注）"}" })
         }
-        return ExtractedBook(title, pages)
+        return ExtractedBook(title, pages, FormatBookImages.attach(output.toString(), divided, placements))
     }
 
-    private fun inline(node: Node): String {
-        if (node !is Element) return ""
-        return when (node.localName) {
-            "t" -> node.textContent
-            "tab" -> "\t"
-            "br" -> if (node.attr("type") == "page") "\u000c" else "\n"
-            "cr" -> "\n"
-            "footnoteReference" -> "【脚注 ${node.attr("id")}】"
-            "del", "instrText" -> ""
-            else -> node.children().joinToString("") { inline(it) }
+    private fun inline(node: Node, image: ((Element, Int) -> Unit)? = null): String {
+        val output = StringBuilder()
+        fun visit(current: Node) {
+            if (current !is Element) return
+            when (current.localName) {
+                "t" -> output.append(current.textContent)
+                "tab" -> output.append('\t')
+                "br" -> output.append(if (current.attr("type") == "page") '\u000c' else '\n')
+                "cr" -> output.append('\n')
+                "footnoteReference" -> output.append("【脚注 ${current.attr("id")}】")
+                "del", "instrText" -> return
+                "blip", "imagedata" -> { image?.invoke(current, output.length); current.children().forEach(::visit) }
+                else -> current.children().forEach(::visit)
+            }
         }
+        visit(node)
+        return output.toString()
     }
 
-    private fun slides(zip: SafeBookArchive, title: String): ExtractedBook {
+    private fun slides(zip: SafeBookArchive, title: String, control: BookImportControl): ExtractedBook {
         val presentation = xml(zip.read("ppt/presentation.xml"))
         val relationships = relationships(zip, "ppt/_rels/presentation.xml.rels")
         val ids = presentation.all("sldId")
@@ -127,7 +216,7 @@ internal object StructuredBookExtraction {
             BookPage(i + 1, text.trim() + if (notes.isNotBlank()) "\n\n备注\n\n$notes" else "")
         }
         require(pages.any { it.text.isNotBlank() }) { "这份幻灯片只有图片，没有可读取的文字；请使用文字版材料。" }
-        return ExtractedBook(title, pages)
+        return ExtractedBook(title, pages, PptBookImages.render(zip, pages, control))
     }
 
     private fun slideInline(node: Element): String = when (node.localName) {
@@ -176,7 +265,7 @@ internal object StructuredBookExtraction {
     private fun relationships(zip: SafeBookArchive, path: String) = xml(zip.read(path)).all("Relationship")
         .filter { it.attr("TargetMode") != "External" }.associate { it.attr("Id") to it.attr("Target") }
 
-    private fun xml(bytes: ByteArray): Element {
+    internal fun xml(bytes: ByteArray): Element {
         val factory = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)

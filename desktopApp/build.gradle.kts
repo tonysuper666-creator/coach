@@ -75,6 +75,7 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.17.0")
     implementation("org.apache.pdfbox:pdfbox:3.0.8")
     implementation("org.jsoup:jsoup:1.24.1")
+    implementation("org.apache.poi:poi-ooxml:5.5.1")
     implementation("com.ibm.icu:icu4j:78.1")
     implementation(compose.desktop.currentOs)
     implementation(libs.coroutines.swing)

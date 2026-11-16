@@ -151,7 +151,11 @@ internal class TextbookLibrary(
             val id = digest.digest().joinToString("") { "%02x".format(it) }
             if (catalog().any { it.id == id }) return book(id)
             val fallback = source.fileName.toString().substringBeforeLast('.')
-            val extracted = extractBook(stage, format, fallback, ocr, control)
+            val extracted = extractBook(stage, format, fallback, ocr, control).let { book ->
+                if (format == "html") StructuredBookExtraction.htmlImages(
+                    BookText.decode(Files.readAllBytes(stage)), book, source.toAbsolutePath().parent
+                ) else book
+            }
             require(extracted.pages.isNotEmpty()) { "教材中没有可打开的页面。" }
             control.check()
             val target = original(id, format)
@@ -489,10 +493,9 @@ internal object TextbookExtraction {
         "epub" -> epub(path, title)
         "mobi", "azw3" -> com.coach.desktop.books.mobi.KindleText.read(Files.readAllBytes(path)).let { book ->
             val name = book.title().ifBlank { title }
-            ExtractedBook(name, book.documents().flatMap { StructuredBookExtraction.html(it, name).pages }
-                .mapIndexed { i, page -> page.copy(number = i + 1) })
+            StructuredBookExtraction.kindle(book, name)
         }
-        "docx", "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title)
+        "docx", "pptx", "html", "rtf", "odt" -> StructuredBookExtraction.extract(path, format, title, control)
         else -> {
             require(Files.size(path) <= 32L * 1024 * 1024) { "文本教材请控制在 32 MB 以内。" }
             val text = BookText.decode(Files.readAllBytes(path))

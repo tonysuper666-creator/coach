@@ -34,8 +34,9 @@ Windows 桌面端每个主要界面和 V7「案头」设计包逐张对照后的
 | D9 | 导航状态 | 从「今天」或「课程」进入阅读器、做题、复习后，左栏高亮仍停在「书架」。见 `compare/1920x1080-light-quiz.png` 左栏 | 高亮跟着来处走 | `WindowsTextbookHost.kt` 导航栏选中逻辑 | **已修**（第 2 刀）：从今天、课程打开的书，导航高亮留在来处，回到书架首页或另选一项才换；`WindowsTextbooksTest.railFollowsWhereTheBookWasOpenedFromAndEachPageHasOneBar` 盯住，同时检查每页只有一个「Coach」 |
 | D10 | 动效 | 桌面端只有 `Desk` 里的纸张进场用 300ms / 180ms（`shared/ui/src/commonMain/kotlin/com/coach/ui/v7/Desk.kt:94`）；卡片展开（讲解、小结、知识回顾）没有 260ms `expandMs`，是直接出现；JVM 上 `rememberReducedMotion()` 固定返回 false，Windows「显示动画」关掉后不会停 | 300 / 260 / 180ms，减少动态时全部关掉 | 减弱动态：`V7Fonts.jvm.kt` `rememberReducedMotion()`；卡片展开：`books/AnswerExplain.kt`、`books/KnowledgeRecap.kt`、`books/BookLessonExplanation.kt`。代码层核对，截图看不出时长 | **减弱动态已修**（第 1 刀）：读 Windows「在 Windows 中显示动画」（`UserPreferencesMask` 第 5 字节 0x02 位），30 秒复查一次，只读不写；`-Dcoach.reducedMotion=true\|false` 可强制。**卡片展开已修**（第 5 刀）：讲解、小结、知识回顾、逐书同意出现时按 `CoachV7.Motion.expandMs`（260ms）和 V7 缓动从上往下展开并淡入，内容变长（讲解从「正在读取」到正文）也按 260ms 长高；减弱动态时直接出现。收起不做动画，点「继续做题」后卡片当场消失 |
 | D11 | 版式 | 内容是一整栏，V7 是左目录、中间纸、右「页边」栏；做题标题叫「原文填空」（V7 没有这层小标题）；知识回顾插在题目上方，把题挤下去；同一屏有两个打开原文的入口：节标题下的「打开对应原文 · 第 x 页」和讲解后的「打开原文 · 块号」；2560x1440 下纸面贴左，右侧约五分之一空着（`compare/2560x1440-dark-quiz.png`），是 `Desk` 给页边栏留了 260–280dp，而本机教材页没有页边内容 | V7 三栏版心，纸面居中 | `books/TextbookLearning.kt:89`、`:93`；`books/BookSourceRow.kt:96`；`books/TextbookPractice.kt:23`；`shared/ui/src/commonMain/kotlin/com/coach/ui/v7/Desk.kt:122` | **做题部分已修**（第 5 刀）：「原文填空」小标题去掉（简答题只留一行灰色「简答自检」），题干用 `titleMedium`；知识回顾挪到这一题和讲解后面、小结前面，不再把题挤下去；节标题下的「打开对应原文」降成导语同一行的小字按钮「本节原文 · 第 x 页」，讲解后的出处改成下划线小字，两处不再一样重。**版心已修**（第 7 刀）：`Desk` 新增 `hasMargin`，桌面学习、做题、阅读器、复习四处没有页边内容的页面传 `false`，不再留空的页边栏、不出「出处与批注」开关，纸面在桌面里居中，最宽 1046dp（`colw` + `wRail` + 两侧 `mainPx`）；有页边内容的页面（安卓、iOS 和共享界面）默认 `true`，页边、窄屏抽屉和专心读照旧 |
+| D12 | 阅读器讲解面板与选段就问 | 第 8 刀补拍后看到：讲解面板的 Mac 地址、配对码是 Material 描边输入框带浮动标签，「配对」是 Material 实心钮；逐块正文写死 `17.sp / 27.sp`，块号写死 `12.sp` 等宽字，「讲解这段」是描边按钮；配对失败、讲解失败用 `colorScheme.error` 红；逐书同意、出处弹窗用 Material `TextButton` 和默认字号。选段就问弹窗里段落是描边按钮，问题框是 Material 描边输入框，「暂时不能回答」用默认色，「回到阅读」是 Material `TextButton`。见截图场景 `explain-pairing`、`ask-unavailable` | 字号走 V7 typography，按钮用纸面按钮，输入块用纸面底加弱线，提醒用 zhu，不用 Material 描边和红 | `books/BookExplain.kt`（配对表单、逐块正文、同意与出处弹窗）；`books/BookPassageAsk.kt` | **已修**（第 8 刀）：两处输入框改成同一个 V7 输入块 `V7Field`（标签在上、`surface1`/`surface2` 底、`borderSubtle` 弱线、8dp 圆角、V7 焦点环，出错时线变 zhu）；「配对」「发送」「允许」改 `PrimaryButton`，「讲解这段」和段落选择改 `PaperButton`，「不允许」「关闭」「回到阅读」改 `V7TextButton`；逐块正文用 `bodyLarge`，块号用 `labelMedium` + 数字字体，次要说明用 `fgSecondary`；配对失败、讲解失败、超长提示、「暂时不能回答」都用 zhu；选中的原文和回答放进 `PaperCard`。配对、逐书同意、网络、原文偏移、500 字上限和所有 testTag 不变 |
 
-清单之外、这次截图没覆盖的界面，后面各刀顺带对照：本地参考练习 `LocalExamPane`（`books/exam/LocalExamUi.kt:124`）、讲解配对面板 `BookExplainPanel`（`books/BookExplain.kt:134`）、选段就问 `BookPassageAsk`（`books/BookPassageAsk.kt:16`）、设置弹窗（`WindowsHomeCards.kt:75`）、笔记导出弹窗（`NotesExportDialog.kt:40`）。
+清单之外、这次截图没覆盖的界面，后面各刀顺带对照：本地参考练习 `LocalExamPane`（`books/exam/LocalExamUi.kt:124`）、设置弹窗（`WindowsHomeCards.kt:75`）、笔记导出弹窗（`NotesExportDialog.kt:40`）。
 
 ## 修法和泳道
 
@@ -48,6 +49,7 @@ TON-1648 已拆完文件，泳道见 `docs/desktop-lanes.md`。每个 PR 从最�
 5. 做题、讲解、小结、知识回顾（`books/TextbookLearning.kt`、`TextbookPractice.kt`、`AnswerExplain.kt`、`KnowledgeRecap.kt`、`BookLessonExplanation.kt`、`BookExplain.kt`、`BookSourceRow.kt`）：D3、D5、D8、D10 卡片展开、D11 做题部分。**已做**。
 6. 复习（`books/TextbookReviewUi.kt`，另把 `books/TextbookShelf.kt` 的 `PaperTile` 从 private 改 internal 以便复用）：D8 复习条目。**已做**。
 7. 三栏版心（D11）：`shared/ui/.../v7/Desk.kt` 加 `hasMargin`，桌面 `TextbookLearning.kt`、`TextbookReader.kt`、`TextbookReviewUi.kt` 传 `false`；回归测试 `DeskMarginLayoutTest`（有／无页边）和 `WindowsTextbooksTest`（实际宿主里纸面居中、无空页边）。**已做**。
+8. 阅读器讲解与选段就问（`books/BookExplain.kt`、`books/BookPassageAsk.kt`）：D12。截图测试补拍 8 个场景：阅读器里点「选段提问」→ 选段落（`ask-pick`）→ 输入问题点「发送」得到「暂时不能回答」（`ask-unavailable`）→ 超过 500 字（`ask-too-long`）→ 点「回到阅读」关掉弹窗；讲解面板单独放在同一张纸上，用测试里的假 Mac（不连网、不存真凭据）：配对码错（`explain-pairing`）→ 配对成功 → 点「讲解这段」弹出逐书同意（`explain-consent`）→ 允许后出讲解（`explain-answer`）→ 点出处看到原文那一块（`explain-source`，断言原文和第一块一致）→ 关闭 → 再讲一段失败（`explain-failed`）。阅读器里真实的讲解面板仍走真实配对。**已做**。
 
 ## 怎么重跑
 
@@ -66,5 +68,6 @@ tools/dev/heavy ./gradlew :desktopApp:test
 - 阅读器文字视图里，标题下方的空隙比上方略大（标题行变高，空行没变）：读起来不别扭，先不调；试过给标题段落单独设行高，空行会跟着变大，反而更松。
 - 阅读器正文本身（`books/TextbookReader.kt` 的 `reader-text`）沿用 main 上写死的 `19.sp / 31.sp`，不随 Aa 缩放：本刀之前就这样，偏差表没列。改成 `bodyLarge` 会让正文从 19sp 变成 16sp，需要对照 V7 定正文字号后再动。
 - 简答题的作答框仍是 Material 描边输入框（`books/TextbookPractice.kt` 的 `practice-answer`）：截图里没拍到简答题，偏差表也没列；要改时照阅读器「页码」做成 `surface2` 底、弱线输入块。
-- 阅读器讲解面板（`books/BookExplain.kt`）里配对表单、逐块正文写死的 `17.sp / 27.sp`、块号的 `12.sp` 等宽字、出错时的 `colorScheme.error`：桌面截图测试没拍到这个面板，第 5 刀只改了回答卡和出处；其余等对照 V7 阅读器侧栏时一起改。
+- 选段就问在测试宿主里只能拍到「暂时不能回答」：宿主用的是 `UnconnectedBookLearningSupport`，没有接回答服务，所以「回答」那张 `PaperCard` 没有截图；接通后补拍。
+- `V7Field`（`books/BookExplain.kt` 末尾）目前只在讲解和选段就问里用；阅读器「页码」、简答作答框以后若要统一，可改用它，本刀不动别的泳道。
 - 知识回顾、讲解、小结卡收起不做动画：测试要求点「继续做题」后卡片当场消失，收起动画会让卡在 260ms 里还留着；要做得先和测试对齐。

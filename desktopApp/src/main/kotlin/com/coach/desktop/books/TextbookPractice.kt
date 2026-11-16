@@ -1,17 +1,27 @@
 package com.coach.desktop.books
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import coach.design.tokens.CoachV7
 import com.coach.ui.v7.AnswerOption
 import com.coach.ui.v7.V7TextButton
+import com.coach.ui.v7.v7FocusRing
 
 @Composable
 internal fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practice, answer: PracticeAnswer, onAnswer: (PracticeAnswer) -> Unit, onSource: () -> Unit, sourceEnabled: Boolean, sourceFocus: FocusRequester,
@@ -58,8 +68,19 @@ internal fun SourcePractice(lesson: String, mode: QuestionMode, practice: Practi
             if (showReference) Text("原文：${practice.reference}")
         }
     } else {
-        OutlinedTextField(draft, { draft = it; onAnswer(answer.copy(text = it, revealed = false, understood = null)) }, label = { Text("写下你的理解") },
-            minLines = 3, modifier = Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }.testTag("short-answer"))
+        // V7 弱线纸面输入：字段名在框上方，框是卡片色块加一道细线，聚焦时外圈一道焦点环；不再用 Material 描边浮动标签。
+        val shape = RoundedCornerShape(CoachV7.Radius.btn)
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("写下你的理解", style = MaterialTheme.typography.labelMedium, color = colors.fgSecondary)
+            BasicTextField(draft, { draft = it; onAnswer(answer.copy(text = it, revealed = false, understood = null)) },
+                minLines = 3, textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fgPrimary),
+                cursorBrush = SolidColor(colors.fgPrimary),
+                modifier = Modifier.fillMaxWidth().onFocusChanged { typing = it.isFocused }
+                    .semantics { contentDescription = "写下你的理解" }
+                    .v7FocusRing(shape).clip(shape).background(colors.surface2)
+                    .border(1.dp, colors.borderSubtle, shape).padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("short-answer"))
+        }
         V7TextButton({ onAnswer(answer.copy(text = draft, revealed = true)) }, enabled = draft.isNotBlank(),
             modifier = Modifier.testTag("reveal-reference")) { Text("对照原文自检") }
         if (answer.revealed) {

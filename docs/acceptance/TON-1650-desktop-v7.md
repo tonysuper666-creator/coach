@@ -39,8 +39,9 @@ Windows 桌面端每个主要界面和 V7「案头」设计包逐张对照后的
 | D14 | 设置与复习提纲导出弹窗 | 第 10 刀补拍后看到：设置弹窗里教材位置是一行裸路径，跟说明文字混在一起，「知道了」是 Material `TextButton`；导出弹窗的「周次 / 知识点」是 ●○ 字符拼的假单选，「PDF」是 Material 黑色勾选框，说明文字用 `fgPrimary`，保存位置是裸文字，「选择本机文件夹…」「导出」「关闭」是 Material 胶囊钮，导出失败和成功都用默认色或 Material 主色。见截图场景 `settings`、`notes-export`、`notes-export-point`、`notes-export-done`、`notes-export-failed` | 字段名在上、纸面块、松绿选中、zhu 提醒，按钮用纸面 / 主按钮，不用 Material 胶囊和黑勾 | `WindowsHomeCards.kt`（`HostSettings`）；`NotesExportDialog.kt` | **已修**（第 10 刀）：设置弹窗加小字段名「教材位置」，路径用数字字体放进 `surface1` 底、`borderSubtle` 弱线的纸面块，「知道了」改 `PaperButton`。导出弹窗按「范围 / 周次或知识点 / 格式 / 保存位置」四个字段排，字段名 `labelMedium` + `fgSecondary`；范围改成真单选（`selectable` + `Role.RadioButton`，选中 `pineWash` 底、松绿线和字，带 V7 焦点环）；周次 / 知识点下拉入口改 `PaperButton`；PDF 勾选改整行可点（`Role.Checkbox`）的松绿勾选框；保存位置放进纸面块，未选时灰字「尚未选择保存位置」；失败提示用 zhu，成功用 `successFg`，进度条松绿；「导出」改 `PrimaryButton`，「关闭」改 `V7TextButton`，「打开文件夹」改 `PaperButton`。设置读写、导出范围、格式、取消、失败反馈和所有 testTag 不变 |
 | D15 | 阅读器正文与出处提示 | 第 11 刀对照后确认：阅读器正文 `reader-text` 写死 `19.sp / 31.sp`，Aa 选小、大时标题会变、正文不变；出处提示（「无法确认原句：……」）用 Material `colorScheme.error` 红。见截图场景 `reader` | V7 内屏正文 token `Size.body` 18 × `LineHeight.body` 1.85（约 33.3）。`inner-read` 参考图是 1224 宽的页面按 2 倍出图，正文行距量得 66px ÷ 2 = 33px，和 token 对得上。提醒用 zhu | `books/TextbookReader.kt` | **已修**（第 11 刀）：正文改用 `bodyLarge`（字体、深色降字重不变），字号、行距换成 `CoachV7.Size.body`、`LineHeight.body`，乘 Aa 倍数（小 0.9 / 中 1 / 大 1.15）。没有用 `ReadingSizes.body` 的 16sp，那是按 Fold8 可用窗口校准的，不是 V7 正文。出处提示改成 `v7Alert()`（zhu）。原文字符、井号隐去、高亮和出处偏移都不变；截图测试真点 Aa 小 / 中 / 大再回中，逐次核对正文字号和行距，并核对原文和所有标记的起止位置不变；`PracticeSourceMultiBlockTest` 核对出处提示是朱色 |
 | D16 | 阅读器正文栏宽 | 第 11 刀对照后确认：桌面阅读器正文 `reader-text` 铺满整张纸，2560x1440 下一行六七十个字；换页时滚动位置沿用上一页，读到底翻页会落在下一页的中下部；打开出处只翻到那一页，被引的块常在首屏以下。见截图场景 `reader` | V7 正文栏 `.col{max-width:var(--measure)}`，`measure: 33em`（中号 18sp → 594dp，即 `Layout.colw`），在纸面内居中 | `books/TextbookReader.kt` | **已修**（第 12 刀）：正文栏最宽 33em（按正文字号换算，随 Aa 缩放：小 534dp / 中 594dp / 大 683dp），在纸面内居中；纸面比栏还窄时占满可用宽度。滚动仍在整张纸上，鼠标停在栏外两侧也能滚。换页从顶部读起；打开出处时滚到被引那一块。分页不受影响：导入时就把页切好存下（PDF 按原页；Markdown / 文本有页标记按标记，没有就由 `TextbookLibrary.paginate` 按文字块切；EPUB 逐章再按文字块切），页码、原文字符、出处与批注偏移都和栏宽无关。`ReaderMeasureUiTest` 用合成长段落（导入切成三页）在 1920x1080、2560x1440、窄窗口和 Aa 小 / 大 / 中下核对栏宽、居中、滚到底读到最后一个字、换页回顶、栏外滚轮，并核对出处页的标记偏移和滚入可见 |
+| D17 | 简答作答框 | 第 12 刀后补拍简答题看到：教材做题页的简答作答框（`short-answer`）是 Material 描边输入框，字段名「写下你的理解」是浮动标签，嵌在描边上；聚焦时整圈描边加粗变色，和本地练习里已改好的简答输入块不是一个样子。见截图场景 `short-answer`、`short-answer-restored`、`short-answer-revealed` | V7 输入是 `surface2` 纸面色块加一道弱线，字段名放在框上方，聚焦只加焦点环 | `books/TextbookPractice.kt` | **已修**（第 13 刀）：字段名「写下你的理解」放在框上方一行 `labelMedium` 灰字；作答框改成 `surface2` 底、`borderSubtle` 一像素弱线、`Radius.btn` 圆角、内边距 12×10dp，聚焦时外圈 V7 焦点环，和本地练习的简答输入块同一套。输入仍是同一个文本框（中文输入法照旧），离开再回来恢复草稿、打字时不被回写覆盖、「对照原文自检」、「还需复习」「我已理解」和 `short-answer` 等 testTag 都不变 |
 
-设置弹窗和笔记导出弹窗原先在清单之外，第 10 刀补拍后列为 D14。阅读器正文字号和出处提示原先记在「以后再说」，第 11 刀对照 V7 后列为 D15；正文栏宽随后列为 D16。
+设置弹窗和笔记导出弹窗原先在清单之外，第 10 刀补拍后列为 D14。阅读器正文字号和出处提示原先记在「以后再说」，第 11 刀对照 V7 后列为 D15；正文栏宽随后列为 D16。简答作答框原先记在「以后再说」，第 13 刀补拍简答题后列为 D17。
 
 ## 修法和泳道
 
@@ -58,6 +59,7 @@ TON-1648 已拆完文件，泳道见 `docs/desktop-lanes.md`。每个 PR 从最�
 10. 设置与复习提纲导出弹窗（`WindowsHomeCards.kt` 的 `HostSettings`、`NotesExportDialog.kt`）：D14。先把导出弹窗的状态和面板抽成 `NotesExportState` / `NotesExportPanel`（外观不变），截图测试补拍 5 个场景：设置（`settings`）→ 导出按周（`notes-export`）→ 切到按知识点（`notes-export-point`）→ 导出成功（`notes-export-done`）→ 导出失败（`notes-export-failed`）。另在 winbox 真窗口用隔离书架走一遍：上传样例书 → Esc 关掉入书架提示 → 侧栏「设置」→ 弹窗里的教材位置是本次隔离目录 → 「知道了」关闭 → 关掉客户端重开 → 书还在 → 再开设置，位置不变 → Esc 关闭，浅色、深色各 16/16。导出弹窗要已配对、带知识点的课程窗口才打得开，本刀没走真窗口；QA 验收时用隔离合成台账在 winbox 原生窗口补验通过（选文件夹 / 取消、按知识点 Markdown、按周 PDF、保存失败后重试、关闭），真实配对课程入口仍未验证，见「以后再说」。**已做**。
 11. 阅读器正文与出处提示（`books/TextbookReader.kt`）：D15。先对照 V7 定正文字号：取内屏 token 18 × 1.85，不取 Fold8 校准的 16sp；正文随 Aa 缩放，出处提示改 zhu。截图测试真点 Aa 小 / 大 / 中，核对正文、标题按 0.9 / 1.15 / 1 缩放，原文和标记偏移不变；两尺寸明暗改前改后图对照 `reader`。**已做**。
 12. 阅读器正文栏宽（`books/TextbookReader.kt`）：D16。先核对分页路径：页只在导入时切好存下，PDF 按原页，其余由 `TextbookLibrary.paginate` 按文字块切（每块至多 4000 字，优先在 2000 字以后的换行处断），阅读器只显示已存页，栏宽不动分页、页码和偏移，所以只改显示。正文栏按 V7 `measure: 33em` 收住并居中；换页回顶、出处滚到被引块。新增 `ReaderMeasureUiTest`（两尺寸 + 窄窗口 × Aa 三档 + 翻页 + 出处）；两尺寸明暗改前改后图对照 `reader`。**已做**。
+13. 简答作答框（`books/TextbookPractice.kt`）：D17。截图测试补拍简答题三个场景：写到一半（`short-answer`）→ 去「今天」再回到课程，草稿还在（`short-answer-restored`）→ 对照原文自检并点「我已理解」（`short-answer-revealed`）；作答框照本地练习的简答输入块改成纸面弱线，字段名在框上方。两尺寸明暗改前改后图对照这三个场景。**已做**。
 
 ## 怎么重跑
 
@@ -72,9 +74,8 @@ tools/dev/heavy ./gradlew :desktopApp:test
 - 导入报错「开启 learning 需要带文字层的教材」（`books/TextbookController.kt:136`）：在模型文件里，不属于书架泳道，等改控制器的那一刀顺手换成中文。
 - 书架弹窗里「这次怎么读」「出题」的 `FilterChip` 未选中时有描边：桌面截图测试没有拍到这个弹窗，偏差表里也没列，先不动；要改需另加弹窗截图再对照 V7。
 - 阅读器文字视图里，标题下方的空隙比上方略大（标题行变高，空行没变）：读起来不别扭，先不调；试过给标题段落单独设行高，空行会跟着变大，反而更松。
-- 简答题的作答框仍是 Material 描边输入框（`books/TextbookPractice.kt` 的 `practice-answer`）：截图里没拍到简答题，偏差表也没列；要改时照阅读器「页码」做成 `surface2` 底、弱线输入块。
 - 第 8 刀的「暂时不能回答」截图是当时未接回答服务时拍的历史结果。#314 后真实宿主使用配对问答：首次发送先询问逐书同意；允许后若没有配对，才显示暂时无法回答。已有逐书同意且已配对时会尝试回答；该历史截图不能证明现在的配对回答效果。
-- `V7Field`（`books/BookExplain.kt` 末尾）目前只在讲解和选段就问里用；阅读器「页码」、简答作答框以后若要统一，可改用它，本刀不动别的泳道。
+- `V7Field`（`books/BookExplain.kt` 末尾）目前只在讲解和选段就问里用；阅读器「页码」以后若要统一，可改用它。简答作答框第 13 刀照本地练习的简答输入块写（多行、字段名在上方），没有用单行的 `V7Field`。
 - 知识回顾、讲解、小结卡收起不做动画：测试要求点「继续做题」后卡片当场消失，收起动画会让卡在 260ms 里还留着；要做得先和测试对齐。
 - 课程页还在读本书练习时的占位（`WindowsTextbookHost.kt:136-137`）仍用 `colorScheme.error` 配「正在读取本书练习…」：在外壳文件里，不属于本地练习泳道；要改时换成 `fgSecondary`。
 - `WindowsLocalExamUiTest.failedAcceptedAnswerBlocksCloseAndRetryPersistsIt` 在 `--rerun-tasks` 下偶尔失败，正常跑通过：本刀没改这条测试，也没改保存逻辑，先记下，等有人碰保存队列时一起看。

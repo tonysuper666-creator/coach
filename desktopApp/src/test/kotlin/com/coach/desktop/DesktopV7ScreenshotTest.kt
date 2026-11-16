@@ -69,6 +69,8 @@ class DesktopV7ScreenshotTest {
         // 第 10 刀：书架顶栏的「设置」弹窗；课程窗口的「导出复习提纲」——初始、按知识点选、导出成功、导出失败。都对周览那一屏。
         "settings" to "inner-week", "notes-export" to "inner-week", "notes-export-point" to "inner-week",
         "notes-export-done" to "inner-week", "notes-export-failed" to "inner-week",
+        // 第 13 刀：简答作答——写到一半、离开再回来接着写、对照原文并自评。都对做题那一屏。
+        "short-answer" to "inner-quiz", "short-answer-restored" to "inner-quiz", "short-answer-revealed" to "inner-quiz",
     )
 
     @Test fun everyDesktopSceneInLightAndDarkAtWindowsScaling() {
@@ -81,6 +83,7 @@ class DesktopV7ScreenshotTest {
                 shots += explainWalk(screen, dark)
                 shots += examWalk(screen, dark)
                 shots += notesWalk(screen, dark)
+                shots += shortAnswerWalk(screen, dark)
             }
         } finally {
             if (previous == null) System.clearProperty("coach.windows.theme") else System.setProperty("coach.windows.theme", previous)
@@ -444,6 +447,63 @@ class DesktopV7ScreenshotTest {
             state.saved = null; state.failed = true
             state.status = "目标文件夹已存在同名导出，未覆盖。请换一个文件夹后重试。"
             shot("notes-export-failed")
+        }
+        return shots
+    }
+
+    /**
+     * 简答作答（第 13 刀）：做题学、出简答，第一节写一半；去「今天」再回到课程，草稿从本地读回；
+     * 对照原文自检后选「我已理解」。教材同样是自造的六节短文，不联网。
+     */
+    private fun shortAnswerWalk(screen: Screen, dark: Boolean): List<Shot> {
+        val root = Files.createTempDirectory("coach-v7-short-")
+        val controller = TextbookController(TextbookLibrary(root.resolve("library")))
+        runBlocking {
+            controller.importBook(knowledgeRecapTextbook(root))
+            controller.chooseLearningPath(LearningPath.QUESTION_FIRST)
+            controller.mode(QuestionMode.SHORT_ANSWER); controller.enableLearning()
+            controller.back()
+        }
+        val draft = "细胞是生物体结构和功能的基本单位：身体由细胞搭起来，生命活动也在细胞里完成。"
+        val shots = mutableListOf<Shot>()
+        runSkikoComposeUiTest(size = Size(screen.width.toFloat(), screen.height.toFloat()), density = Density(scale)) {
+            setContent {
+                CompositionLocalProvider(LocalSystemTheme provides if (dark) SystemTheme.Dark else SystemTheme.Light) {
+                    WindowsTextbookHost(controller) { null }
+                }
+            }
+            fun nav(label: String) = onNode(hasAnyAncestor(hasTestTag("host-navigation")) and hasText(label))
+            fun shot(scene: String) { waitForIdle(); shots += capture(scene, screen, dark) }
+            fun learn() {
+                nav("课程").performClick(); waitForIdle()
+                onNodeWithTag("host-course-learn").performClick()
+                ready(controller) { it.screen == BookScreen.LEARNING && it.book?.questionMode == QuestionMode.SHORT_ANSWER }
+            }
+
+            ready(controller) { it.screen == BookScreen.HOME }
+            learn()
+            onNodeWithTag("short-answer").performScrollTo().performTextInput(draft)
+            ready(controller) { it.answer.text == draft }
+            onNodeWithTag("reveal-reference").assertIsEnabled()
+            // 字段名在框上方，不压在描边上。
+            val label = onNodeWithText("写下你的理解").fetchSemanticsNode().boundsInRoot
+            val field = onNodeWithTag("short-answer").fetchSemanticsNode().boundsInRoot
+            assertTrue(label.bottom <= field.top, "字段名要在作答框上方：$label / $field")
+            shot("short-answer")
+
+            nav("今天").performClick(); waitForIdle()
+            onNodeWithTag("host-today-book").assertExists()
+            learn()
+            onNodeWithTag("short-answer").performScrollTo().assertTextContains(draft)
+            assertFalse(controller.state.value.answer.revealed)
+            shot("short-answer-restored")
+
+            onNodeWithTag("reveal-reference").performScrollTo().performClick()
+            ready(controller) { it.answer.revealed && it.answer.text == draft }
+            onNodeWithText("我已理解").performScrollTo().performClick()
+            ready(controller) { it.answer.understood == true }
+            onNodeWithText("我已理解").performScrollTo()
+            shot("short-answer-revealed")
         }
         return shots
     }

@@ -247,16 +247,30 @@ unrotated CropBox coordinates. Schema-1 payloads retain:
   evidence only: production still needs boundary review, nonoverlapping blocks
   and persistence. A discontiguous or untrusted-order block cannot hide text.
 - Table cells with row/column spans and header flags. `row_breaks` require a
-  complete single-page grid, usable cell geometry and a unique painted PDF
-  horizontal rule between adjacent rows, without a crossing glyph or rowspan.
-  A matching header cut supplies `repeat_header_region`. Multi-page, clipped,
+  complete single-page grid and usable cell geometry. Evidence is either a
+  unique painted PDF horizontal rule (including exactly collinear, touching
+  cell-edge segments), or a gap verified against every cell's exact canonical
+  glyph slices, ignoring whitespace only. For the latter, every table glyph
+  must lie wholly within exactly one cell; reused/overlapping source slices,
+  mismatched cell text and unmapped or partial-surrogate offsets reject the
+  evidence. Model-box gaps alone never suffice. A cut cannot cross any glyph
+  or rowspan; an empty adjacent row has no glyph-gap evidence. A matching cut
+  after all leading header rows supplies `repeat_header_region`. Multi-page, clipped,
   rotated or unsupported geometry keeps logical cells but supplies no cell
   regions/cuts. `verified_boundaries` certifies these geometric checks only;
   it does not establish correct model row assignments or permit splitting a
   semantically incorrect table. Borderless tables may have no certified cut.
 - `caption_groups`: explicit, unique, same-page Docling references to caption
-  blocks. Missing/ambiguous references remain unresolved. A linked group does
-  not establish paragraph continuation, final placement or caption deduplication.
+  blocks. Missing/ambiguous/duplicate references remain unresolved. `source_parts`
+  preserves each referenced caption fragment's own source region and exact
+  ranges in reference order, including explicitly labelled continuations.
+  `placement_status=source_parts_verified` requires trustworthy layout order,
+  usable regions and mapped/discontiguous ranges for every part. This status
+  certifies the fragment mappings, not the semantic continuation or the owner's
+  placement. Group `replacement_range` is always null: intervening body text
+  is never enclosed in a replacement span. `keep_together` is an association
+  request, not proof of same-page rendering. Unlabelled continuations, final
+  placement and caption deduplication still require verification.
 
 Different nonrotated CropBox/MediaBox frames can be converted when both sources
 agree; this is distinct from legacy C's conservative benchmark fallback flag.
@@ -291,12 +305,14 @@ DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
   -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-The 25 reflow tests cover diff accounting, private-output guards, stale identities,
+The 33 reflow tests cover diff accounting, private-output guards, stale identities,
 UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
-caption references and self-authored EPUB/Word structure/byte retention.
+exact cell/glyph evidence and its refusal cases, touching vs gapped PDF rules,
+caption fragment references and self-authored EPUB/Word structure/byte retention.
 The Java integration compiles with `--release 17`, generates four self-authored
 PDF pages and compares against an independent plain PDFTextStripper baseline:
-120 glyph spans, table/header, callout/formula, interleaved columns, negative
+120 glyph spans, segmented table rules, borderless table/header evidence,
+callout/formula, interleaved columns, negative
 MediaBox/CropBox and rotation. It uses known layout boxes to isolate mapping
 from model quality; the 26 layout tests separately exercise real Docling on
 synthetic PDFs with local models. Set the existing model path explicitly when

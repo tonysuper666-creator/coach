@@ -137,6 +137,36 @@ extensions and subprocess network access are not sandboxed; this is not an OS
 firewall or packet-capture proof. No API route is added. Block counts/status are
 diagnostics, not manual preservation or reading-order acceptance.
 
+## Fresh dependency installation
+
+`install_probe.py` creates a new venv on an existing machine, with system site
+packages excluded. It installs explicit top-level pins using isolated pip with
+its cache disabled, saves resolved dependency versions and private pip output,
+then copies pre-provisioned local models. The output directory must be new and
+outside this checkout. Package installation requires network access; model
+download time is **not** measured.
+
+```powershell
+& D:\work\base-python\python.exe tools\reader-v2\reflow\install_probe.py `
+  --out D:\private-state\fresh-install --models-dir D:\work\models `
+  --packages docling==2.149.0 torch==2.15.0 transformers==5.22.2 pypdfium2==5.15.2
+
+& D:\private-state\fresh-install\venv\Scripts\python.exe `
+  tools\reader-v2\reflow\platform_probe.py `
+  --pdf D:\work\synthetic\mixed.pdf --pages 1,2,3,4 `
+  --models-dir D:\private-state\fresh-install\models `
+  --out D:\private-state\fresh-install\verify --repeats 2
+```
+
+`install-metrics.json` separates empty venv bytes, installed venv bytes, their
+dependency increment, model bytes, base Python bytes, pip time and local model
+copy time. These are logical file sizes, not allocated disk space or a product
+installer. Base Python is already installed; this is not a clean OS, a minimal
+dependency search or a model-download benchmark. Transitive packages are
+resolved at run time, so compare the saved versions before comparing runs.
+Use the new venv in the second command to verify it can actually convert pages;
+a successful pip exit alone does not establish a working runtime.
+
 ## Checks
 
 ```sh

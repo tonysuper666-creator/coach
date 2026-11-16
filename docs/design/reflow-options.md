@@ -35,7 +35,8 @@ B 的文字若替换 A，会产生 14,705 个 code-point edit-script changed；�
 
 TON-1665 的统一页资产模型已随 PR #337 合入主干，下文直接沿用其字段和存储。
 **第二阶段显示仍须等 TON-1667、TON-1670 的显示改动合并**；TON-1670 的导入/字框
-PR #334 合并不等于显示前置完成。本轮提取工具没有改阅读器、导入模型或共享 UI。
+PR #334 合并不等于显示前置完成。提取工具及下文生产映射回归均未开启自动裁图导入、
+阅读器显示或共享 UI。
 
 ## 材料与方法
 
@@ -399,6 +400,58 @@ PR #342 合并后，本轮先补通用提取工具，**尚未接入产品导入�
 的生产载荷；本轮没有生成位图或 `BookIllustration`，也没有完成 B+C 联合质量验收。
 显示继续等待 TON-1667/TON-1670，32 格真窗口验收仍全部未验证。
 
+## 生产映射与隐藏回归
+
+PR #345 合并后的这一段补入桌面生产包，但**没有开启自动裁图导入或阅读器显示**。
+`PdfVisualSourceMapping` 直接使用 TON-1670 的 `PdfPageTextExtraction`，要求结果与
+既有 canonical text 逐字一致，再按实际字形框收集 UTF-16 区间。区间间只有空白时
+可合并；有正文则返回 `DISCONTIGUOUS`，不提供一个包围区间。部分字形、多框跨界、
+重叠的内外字形、缺少字形映射、不同 frame、旋转或旧文字均不提供单段替代范围。
+这只是文字覆盖映射；**不证明裁图可见性、裁剪完整性或阅读顺序**，提取调用方仍须
+核验这些条件后才可填 `sourceStart/sourceEnd`。本次没有自动连接 B/C 候选或改导入器。
+
+`BookIllustrationLayout.segment(..., hideReplacedSourceText = true)` 过去会从锚点
+跳到替代区间末尾，锚点早于起点时可能吞掉中间正文。现在只有同一页、特殊块类型、
+有源矩形、合法非空 UTF-16 区间且 `anchorOffset == sourceStart` 才考虑隐藏；与其他
+声明区间重叠，或内部还有其他资产锚点时保留原文。默认仍不隐藏；全部文字片段继续
+引用原串的精确半开区间。该函数的防护不代替提取端的几何及归属核验，也没有修改存储
+格式或加强入库 schema；不可靠载荷仍必须保留原文/原页。
+
+### 真实页核对与生产导入回归
+
+Mac 本机使用生产类处理原 20 页，canonical text **20/20 与历史 A 一致**。
+原有 235 个候选中 48 个无可用源矩形；其余 187 个矩形的生产映射如下。这与 Python
+实验的 126/12/45/48/4 使用不同实现和入口条件，不能当作质量涨跌，也不改旧表。
+
+| 生产映射结果 | 数量 |
+|---|---:|
+| MAPPED | 31 |
+| DISCONTIGUOUS | 4 |
+| AMBIGUOUS | 132 |
+| NO_TEXT | 4 |
+| UNSAFE_GEOMETRY | 16 |
+
+对 31 个单段结果分别打开/关闭隐藏，62 次片段检查均符合原串减去声明区间的结果，
+所有保留文字片段的偏移均可精确回取。该核对只调用生产提取、映射和分段函数，没有
+导入整本真实教材、生成真实裁图或证明这些范围应当隐藏，更不是阅读器保住率。
+私有清单、字串、区域和日志仍仅在 Mac 的 `~/Coach/state/ton1669/`。
+
+新增 `PdfVisualSourceMappingTest` 的 8 项回归覆盖空白间隙、代理对、不连续正文、
+过期文字、部分字形、旋转/缺框、锚点错位、重叠/混页资产和非法旧范围。集成项生成
+一页自有 PDF，含前后正文、表格、公式和知识框，使用负 MediaBox 与不同 CropBox；
+走真实 `TextbookLibrary.importBook`，对**已知区域**映射、栅格裁图并沿用
+`BookPageModelStore` 保存，重开后核对三种资产、图片文件、canonical text、全部
+正文块及出处解析结果不变。已知区域测试隔离偏移/存储，不证明自动检测正确。
+
+首次定向运行 14 项中 1 项失败：新增测试错误地要求跨正文块的整张表格引用可解析，
+违反现有 `NOT_ONE_BODY_BLOCK` 约束；改为逐个比较保存前后的合法正文引用，没有
+修改解析器、跳过测试或放宽已有测试。另一次临时 Mac classpath 构建因 init script
+误作用于 included build 失败，修正为仅对存在 desktopApp 的构建注册后编译退出 0。
+最终命令与结果见复现节和交付收据。
+
+可靠长表行边界、图注续段、EPUB/Word 结构到 canonical text 的生产映射仍未解决；
+没有扩展 TON-1665 共享字段。显示仍守 TON-1667/TON-1670 前置，32 格均未验证。
+
 ## 产品实现契约与下一步
 
 ### 与 TON-1665 共用的现有页资产模型
@@ -434,11 +487,11 @@ PR #342 合并后，本轮先补通用提取工具，**尚未接入产品导入�
 公式放行；CropBox/MediaBox 无法可靠对应时同样回退。按 6.7 换算的 8dp 白边也要
 计入实际裁图范围和字框变换。工具侧转换已覆盖合成几何反例，生产裁图/字框变换仍待验证。
 
-**隐藏原文字前还要加强生产端约束。** 现有 `BookIllustrationLayout.segment` 默认
-保留全部文字，启用 `hideReplacedSourceText` 才跳过替代区间。TON-1669 拟要求用于
-隐藏的块 `anchorOffset == sourceStart`，范围互不重叠，并证明区间中的字都属于该块。
-这是待实现的生产端约束，不是现有模型已自动保证的条件。双栏文字若交错成不连续范围，
-不能用最小/最大偏移包出一个大区间而吞掉正文；当前单区间字段表达不了时保留原文/原页。
+**隐藏仍需提取端证明区间中的字都属于该块。** `BookIllustrationLayout.segment`
+默认保留全部文字，启用 `hideReplacedSourceText` 后也检查合法边界、起点锚点及块间
+冲突，详见上方生产回归。防护不证明来源归属，也不是入库 schema 的保证。双栏文字若
+交错成不连续范围，不能用最小/最大偏移包出一个大区间；当前单区间字段表达不了时
+保留原文/原页，`PdfVisualSourceMapping.singleRange` 不会为此提供替代范围。
 
 ### 现有模型仍缺少的载荷
 
@@ -632,5 +685,32 @@ PR #341 已经 QA-C 验收并合并。本次在其合并后的主干 `bbd1bfef` 
 退出 0，14 秒，仍为 `:desktopApp:test FROM-CACHE`；heavy 快照为
 `905ec89bf2d637e5d2a60723a13a7a5366ba604b`，不增加实际 UI 测试通过的结论。
 
-未修改生产导入/阅读器或考试测试。真实长表切点、EPUB/Word 到既有页文字的映射、
-生产隐藏范围回归、B+C 联合质量、独立逐页复核和显示验收仍未完成；显示前置不变。
+以上为 PR #345 的交付记录。当时未修改生产导入/阅读器或考试测试；生产隐藏范围
+回归的后续结果见下节。真实长表切点、EPUB/Word 到既有页文字的映射、B+C 联合质量、
+独立逐页复核和显示验收仍未完成；显示前置不变。
+
+### 生产映射与隐藏的本次检查
+
+本次基于 PR #345 合并后的主干 `c6309df8`。仅改桌面页资产分段函数、新增 PDF
+映射器及其测试，以及本文档，没有更改导入器、存储 schema、阅读器或既有测试。
+
+- `python3 -I -m unittest discover -s tools/reader-v2/reflow`：25 tests OK，退出 0。
+- `tools/dev/heavy ./gradlew :desktopApp:test --tests
+  com.coach.desktop.books.PdfVisualSourceMappingTest --tests
+  com.coach.desktop.books.BookIllustrationModelTest --console=plain`：首次 14 项中
+  新增项失败 1 项，退出 1；原因及修正见上节，没有改解析器或既有测试。
+- 修正新增出处断言后，`tools/dev/heavy ./gradlew :desktopApp:test --console=plain`：
+  winbox 退出 0，445 tests、0 failures、0 errors、7 skipped，新增映射套件 8 项均通过。
+  `BUILD SUCCESSFUL in 7m 9s`，`:desktopApp:test` 实际执行，非 FROM-CACHE；快照
+  `78e3cbadf36dfdb7fd8773db1047e5f47d7f0961`。7 项跳过均为既有 live-server/原生
+  窗口环境测试，新套件无跳过；不把本次通过解释为 32 格显示验收。
+- 随后补上与无效资产声明区间重叠、混页资产等边界，使用最终代码再次执行同一全量
+  命令：winbox 退出 0，445 tests、0 failures、0 errors、7 skipped；新增套件仍为
+  8 项、0 跳过。`BUILD SUCCESSFUL in 7m 56s`，`:desktopApp:test` 实际执行；快照
+  `90b2bddc1d477b1fbaf11157d31dd8c74df499ff`，控制台 session 1，Gradle 477.444 秒。
+- 最终版本的 Mac `classes` 编译退出 0；本机私有 Java 包装器调用相同生产提取、映射
+  和分段类，20 页、187 个已知矩形、62 次隐藏开关检查，退出 0，汇总见上节。
+  首次临时 init script 配置失败与修正已保留，私有包装器不随仓库分发。
+
+长表行/表头、图注续段及原生结构映射仍需补齐；B/C 候选没有自动接入本映射器，
+调用方仍须验证裁图完整性与阅读顺序。未跑新的模型下载、Windows 安装测量或 D 路线。

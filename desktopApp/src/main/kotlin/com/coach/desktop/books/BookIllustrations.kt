@@ -717,7 +717,8 @@ internal sealed interface BookPageSegment {
  * 按 UTF-16 锚点将一页切分为交错的正文片段与视觉块（插图或裁图块）：
  * - [hideReplacedSourceText] 为 false（默认）时，拼接全部正文片段与原页文字逐字一致；
  * - [hideReplacedSourceText] 为 true 时，带 [BookIllustration.sourceStart]/[sourceEnd] 的裁图块
- *   只隐藏其覆盖的原页扁平文字，其余正文片段的 UTF-16 偏移仍然逐位对应原文。
+ *   仅在锚点等于合法区间起点、存在原页框且不与其他块冲突时隐藏；其余正文偏移不变。
+ *   提取端仍负责验证裁图覆盖与阅读顺序；不可靠的映射应不设置替换区间。
  */
 internal object BookIllustrationLayout {
     fun segment(
@@ -729,6 +730,24 @@ internal object BookIllustrationLayout {
             return if (pageText.isEmpty()) emptyList() else listOf(BookPageSegment.Text(0, pageText.length, pageText))
         }
         val ordered = illustrations.sortedWith(compareBy<BookIllustration> { it.anchorOffset }.thenBy { it.order })
+        val candidates = if (hideReplacedSourceText && ordered.map { it.page }.distinct().size == 1) {
+            ordered.filter { item ->
+                val start = item.sourceStart
+                val end = item.sourceEnd
+                item.kind != PageVisualKind.ILLUSTRATION && item.sourceRegion != null &&
+                    start != null && end != null && start < end && item.anchorOffset == start &&
+                    BookIllustrationAnchors.isValidAnchor(pageText, start) &&
+                    BookIllustrationAnchors.isValidAnchor(pageText, end)
+            }
+        } else emptyList()
+        // Conflicts fall back to visible source text for all involved blocks, independently
+        // of asset order. Never hide another illustration's anchor inside a replacement.
+        val hidden = candidates.filter { item ->
+            ordered.none { other -> other !== item && other.sourceStart != null && other.sourceEnd != null &&
+                other.sourceStart < item.sourceEnd!! && item.sourceStart!! < other.sourceEnd } &&
+                ordered.none { other -> other !== item &&
+                    other.anchorOffset > item.sourceStart!! && other.anchorOffset < item.sourceEnd!! }
+        }
         val result = mutableListOf<BookPageSegment>()
         var cursor = 0
         for (item in ordered) {
@@ -738,11 +757,8 @@ internal object BookIllustrationLayout {
                 cursor = anchor
             }
             result.add(BookPageSegment.Illustration(item))
-            if (hideReplacedSourceText) {
-                val replaced = item.replacedSourceRange
-                if (replaced != null && replaced.first >= cursor && replaced.last + 1 <= pageText.length) {
-                    cursor = maxOf(cursor, replaced.last + 1)
-                }
+            if (hidden.any { it === item }) {
+                cursor = item.sourceEnd!!
             }
         }
         if (cursor < pageText.length) {

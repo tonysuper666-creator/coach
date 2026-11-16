@@ -318,9 +318,12 @@ def build_payload(probe, layout):
 
 
 def run(args):
+    from cross_page_tables import build_continuations
+
     out = outside_repo(args.out)
     # Validate the whole batch before writing any payload (no mixed old/new rows).
     pages = []
+    probes, layouts = [], []
     seen = set()
     for line in args.probe.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
@@ -329,11 +332,15 @@ def run(args):
         seen.add(row["page"])
         layout = json.loads((args.layout / f'{row["page"]:05d}.json').read_text(encoding="utf-8"))
         pages.append(build_payload(row, layout))
+        probes.append(row)
+        layouts.append(layout)
+    continuations = build_continuations(probes, layouts)
     if out.exists():
         raise ValueError("output must be new; refusing stale payloads")
     out.mkdir(parents=True)
     for page in pages:
         (out / f'{page["page"]:05d}.json').write_text(json.dumps(page, ensure_ascii=False), encoding="utf-8")
+    (out / "table-continuations.json").write_text(json.dumps(continuations, ensure_ascii=False), encoding="utf-8")
     print(f"source payloads: {len(pages)} pages; private output written")
 
 

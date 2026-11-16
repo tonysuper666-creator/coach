@@ -19,9 +19,10 @@ import os
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 
-PIPELINE_VERSION = "5"   # bump on any behaviour change: it is part of the cache version key
+PIPELINE_VERSION = "6"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -213,6 +214,10 @@ class DoclingEngine:
         """Return {page_no(1-based): {"size":(w,h), "blocks":[...], "layout_score":x}}."""
         res = self.conv.convert(str(pdf), page_range=(first, last))
         doc = res.document
+        # self_ref is local to THIS conversion graph, not the input PDF. Separate
+        # page/chunk conversions can all contain a different '#/tables/0'. Cache
+        # this scope with every occurrence; never join refs from separate graphs.
+        source_scope = uuid.uuid4().hex
         pages = {}
         for pno, p in doc.pages.items():
             pages[pno] = {"size": (p.size.width, p.size.height), "blocks": [], "layout_score": None}
@@ -233,6 +238,7 @@ class DoclingEngine:
                 blk = {"label": label, "bbox": [bb.l, bb.t, bb.r, bb.b],
                        "text": getattr(item, "text", None) or None, "order": order,
                        "source_ref": item.self_ref,
+                       "source_scope": source_scope,
                        "caption_refs": [r.cref for r in getattr(item, "captions", [])],
                        "provenance_count": len(item.prov)}
                 if label in ("table", "document_index"):
@@ -311,7 +317,7 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
                "reading_order": i,
                "confidence": None,   # Docling gives no per-block score; only page layout_score
                "status": "ok"}
-        for key in ("source_ref", "caption_refs", "provenance_count"):
+        for key in ("source_ref", "source_scope", "caption_refs", "provenance_count"):
             if key in b:
                 blk[key] = b[key]
         if kind == "table":

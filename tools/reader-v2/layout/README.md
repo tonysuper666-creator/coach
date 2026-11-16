@@ -21,7 +21,7 @@ Exit code 1 if any document failed. Per-document stats line: pages ok/failed/res
 ## Cache layout (consumers only read this; no engine needed)
 
 ```
-<cache>/<doc_id>/latest.json                 {"version": "<sha16>-p5-docling2.149.0"}
+<cache>/<doc_id>/latest.json                 {"version": "<sha16>-p6-docling2.149.0"}
 <cache>/<doc_id>/<version>/manifest.json     written last = complete
 <cache>/<doc_id>/<version>/pages/00001.json  one file per page, 1-based physical page number
 <cache>/<doc_id>/.partial-<version>/         unfinished run; reruns skip finished pages
@@ -74,7 +74,7 @@ readable; the pipeline-version bump causes new runs to regenerate missing fields
 - `/Rotate` ≠ 0: Docling reports unrotated-space geometry and (with a CropBox) a wrong page size, and 180° pages come out in reverse order → flagged `unknown` + fallback; no shift applied.
 - Display formulas are not enriched by default; a standalone formula line may be labelled `figure`/`text`. Do not infer formula correctness from OCR.
 - Scanned pages go through Docling's built-in RapidOCR (local); a blank/undetected scan gives `empty`.
-- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "5").
+- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "6"). Blocks carry a `source_scope` unique to one conversion graph: `source_ref` alone is not unique across separate page/chunk conversions.
 - Single-column verdict is checked (text must run top-to-bottom) and downgraded to `unknown`+fallback when narrow blocks sit side by side without forming columns; a column must hold >=25% of page height in text. Tables whose cells do not cover rows*cols are `unknown`. Thresholds are tuned on synthetic pages only; real-page tuning needs the Mac run.
 - Column detection is geometric (≥2 disjoint x-intervals with ≥2 narrow blocks each); full-width headings on a two-column page may land in column 1.
 - Server consumer: `server/app/.../reader/v2/LayoutCache.kt` (read-only; `LayoutPage.orderTrusted` is the single gate for sentence anchoring). Its test passed on Windows via `./gradlew :server:app:test --tests 'com.coach.server.reader.v2.*'`; the Python test `test_page_json_has_every_field_the_kotlin_consumer_reads` pins the contract.

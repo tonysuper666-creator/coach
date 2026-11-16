@@ -13,6 +13,7 @@ public class WD {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, IntPtr e);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
@@ -36,11 +37,15 @@ $script:AppPid = 0
 
 # Other agents may run their own Coach windows on this desktop. Only the process this script started is ever touched.
 $script:Known = @()
-function Get-ClientPids { @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object { $_.CommandLine -like '*com.coach.desktop.MainKt*' } | ForEach-Object { [int]$_.ProcessId }) }
+$script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
+function Get-ClientPids([switch]$Mine) {
+    @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object {
+        $_.CommandLine -like '*com.coach.desktop.MainKt*' -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Contains($script:RepoMarker)) } | ForEach-Object { [int]$_.ProcessId })
+}
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
     $script:Win = [IntPtr]::Zero
-    $mine = @(Get-ClientPids | Where-Object { $script:Known -notcontains $_ })
+    $mine = @(Get-ClientPids -Mine | Where-Object { $script:Known -notcontains $_ })
     if (-not $mine) { return $false }
     $script:AppPid = $mine[0]
     [WD]::EnumWindows({ param($x, $l)
@@ -115,8 +120,25 @@ function Find-Text($lines, [string]$needle) {
     return $null
 }
 
+
+# Other agents run their own Coach windows on this desktop. Never send input unless the foreground window is ours.
+function Assert-OurForeground {
+    foreach ($i in 1..5) {
+        $fg = [WD]::GetForegroundWindow(); $p = 0; [WD]::GetWindowThreadProcessId($fg, [ref]$p) | Out-Null
+        if ($p -eq $script:AppPid) { return }
+        $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
+        # 系统通知、搜索框等瞬时抢前台：夺回前台继续；只有别的 Java 客户端占着前台才停手
+        if ($pn -ne 'java' -and $pn -ne 'javaw') { [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 400; continue }
+        Start-Sleep -Milliseconds 600; [WD]::SetForegroundWindow($script:Win) | Out-Null
+    }
+    $fg = [WD]::GetForegroundWindow(); $p = 0; [WD]::GetWindowThreadProcessId($fg, [ref]$p) | Out-Null
+    if ($p -eq $script:AppPid) { return }
+    $pn = (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName
+    if ($pn -ne 'java' -and $pn -ne 'javaw') { return }   # 通知之类的非客户端窗口，输入仍发往本客户端
+    throw "DESKTOP_BUSY：前台是别的 Java 客户端（进程 $p）而不是本次启动的客户端（$($script:AppPid)），为避免误点其他窗口，已停手"
+}
 function Click-At([int]$x, [int]$y) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150
+    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
     $r = Get-Rect
     [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null; Start-Sleep -Milliseconds 100
     [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60; [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
@@ -124,7 +146,7 @@ function Click-At([int]$x, [int]$y) {
 
 # Drag from (x1,y1) to (x2,y2) inside the window, e.g. to select text.
 function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150
+    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
     $r = Get-Rect
     [WD]::SetCursorPos($r.L + $x1, $r.T + $y1) | Out-Null; Start-Sleep -Milliseconds 100
     [WD]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 120
@@ -133,7 +155,7 @@ function Drag-Between([int]$x1, [int]$y1, [int]$x2, [int]$y2) {
     [WD]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)
 }
 
-function Send-Keys([string]$keys) { [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; [System.Windows.Forms.SendKeys]::SendWait($keys) }
+function Send-Keys([string]$keys) { [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground; [System.Windows.Forms.SendKeys]::SendWait($keys) }
 
 # Wait until a label shows on screen. Returns the match, or $null on timeout. Every poll leaves a PNG so a failure is inspectable.
 function Wait-Text([string]$dir, [string]$name, [string[]]$needles, [int]$timeoutSec) {
@@ -195,9 +217,15 @@ function List-AppWindows {
 
 # Mouse-wheel inside the window; negative delta scrolls down.
 function Scroll-At([int]$x, [int]$y, [int]$notches) {
-    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150
+    [WD]::SetForegroundWindow($script:Win) | Out-Null; Start-Sleep -Milliseconds 150; Assert-OurForeground
     $r = Get-Rect
     [WD]::SetCursorPos($r.L + $x, $r.T + $y) | Out-Null; Start-Sleep -Milliseconds 100
     $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int](120 * $notches)), 0)
     [WD]::mouse_event(0x800, 0, 0, $delta, [IntPtr]::Zero)
+}
+
+# Typing through SendKeys goes through the active IME (pinyin garbles Latin text); the clipboard avoids it.
+function Paste-Text([string]$text) {
+    [System.Windows.Forms.Clipboard]::SetText($text)
+    Send-Keys '^v'
 }

@@ -159,7 +159,7 @@ class V7InteractionTest {
                 Desk("合成周页") { Text("合成正文") }
             }
         } }
-        compose.onNodeWithText("LearningCoach").performClick()
+        compose.onNodeWithText("Coach").performClick()
         compose.onNodeWithText("记录").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(AppTab.RECORDS, selected) }
     }

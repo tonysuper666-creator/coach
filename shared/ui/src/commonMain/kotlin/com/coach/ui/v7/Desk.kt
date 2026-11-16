@@ -20,8 +20,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.TextStyle
@@ -133,18 +131,14 @@ fun Desk(
         CompositionLocalProvider(LocalDeskMetrics provides metrics, LocalReadingFocus provides focused,
             LocalDeskMarginVisible provides (marginWidth > 0.dp)) {
             Column(Modifier.fillMaxSize()) {
-                var leftBarWidth by remember { mutableIntStateOf(0) }
-                var rightBarWidth by remember { mutableIntStateOf(0) }
-                val density = LocalDensity.current
-                val centerWidth = with(density) { (windowWidth - 32.dp - maxOf(leftBarWidth, rightBarWidth).toDp() * 2 - 16.dp).coerceAtLeast(0.dp) }
                 Box(Modifier.fillMaxWidth().height(if (inner) 48.dp else 72.dp).padding(horizontal = 16.dp)) {
-                    Row(Modifier.align(if (inner) Alignment.CenterStart else Alignment.TopStart).height(48.dp).onSizeChanged { leftBarWidth = it.width }, verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.align(if (inner) Alignment.CenterStart else Alignment.TopStart).height(48.dp), verticalAlignment = Alignment.CenterVertically) {
                         val home = LocalDeskSelect.current
-                        if (managed) Text("LearningCoach", Modifier.clickable { home(AppTab.TODAY) }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
+                        if (managed) Text("Coach", Modifier.clickable { home(AppTab.TODAY) }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
                         else Box {
                             var menu by remember { mutableStateOf(false) }
                             val select = LocalDeskSelect.current
-                            Text("LearningCoach", Modifier.clickable { menu = true }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
+                            Text("Coach", Modifier.clickable { menu = true }, style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong)
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                 AppTab.entries.forEach { tab -> DropdownMenuItem(text = { Text(tab.label) }, onClick = { menu = false; select(tab) }) }
                             }
@@ -158,10 +152,10 @@ fun Desk(
                         append(crumb)
                         val start = crumb.lastIndexOf('·').takeIf { it >= 0 }?.plus(1) ?: 0
                         addStyle(SpanStyle(fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary), start, crumb.length)
-                    }, Modifier.align(if (inner) Alignment.Center else Alignment.BottomStart).padding(bottom = if (inner) 0.dp else 4.dp).widthIn(max = if (inner) minOf(windowWidth * .30f, centerWidth) else windowWidth - 32.dp)
+                    }, Modifier.align(if (inner) Alignment.Center else Alignment.BottomStart).padding(bottom = if (inner) 0.dp else 4.dp).widthIn(max = if (inner) windowWidth * .30f else windowWidth - 32.dp)
                         .then(if (onCrumbClick != null) Modifier.v7FocusRing().clickable(onClick = onCrumbClick).testTag("v7-week-picker") else Modifier), style = MaterialTheme.typography.labelLarge,
                         color = colors.fgSecondary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp).onSizeChanged { rightBarWidth = it.width }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(Modifier.align(if (inner) Alignment.CenterEnd else Alignment.TopEnd).height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         val barStatus = if (inner) status else compactStatus
                         if (metrics.statusInBar && barStatus.isNotBlank()) Text(barStatus, style = MaterialTheme.typography.labelLarge, color = colors.fgSecondary)
                         var typeMenu by remember { mutableStateOf(false) }

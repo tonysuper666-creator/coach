@@ -189,12 +189,12 @@ private fun hostCrumb(destination: AppTab): String = when (destination) {
     else -> "书架"
 }
 
-/** The same 48dp bar `Desk` draws: a small sans "LearningCoach" at the left and the place in the middle, no rule below. */
+/** The same 48dp bar `Desk` draws: a small sans "Coach" at the left and the place in the middle, no rule below. */
 @Composable
 private fun HostBar(crumb: String, onHome: () -> Unit) {
     val colors = com.coach.ui.theme.CoachTheme.colors
     Box(Modifier.fillMaxWidth().height(HostBarHeight).padding(horizontal = 16.dp).testTag("host-bar")) {
-        Text("LearningCoach", Modifier.align(Alignment.CenterStart).clickable(onClick = onHome),
+        Text("Coach", Modifier.align(Alignment.CenterStart).clickable(onClick = onHome),
             style = MaterialTheme.typography.labelLarge, fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary)
         Text(crumb, Modifier.align(Alignment.Center).testTag("host-crumb"), style = MaterialTheme.typography.labelLarge,
             fontWeight = CoachV7.Weight.uiStrong, color = colors.fgPrimary)

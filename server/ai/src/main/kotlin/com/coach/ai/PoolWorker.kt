@@ -31,6 +31,10 @@ class PoolWorker(
             }
             val (job, token) = claimed ?: return null
             return work(job, token)
+        } catch (e: BatchPending) {
+            val (job, token) = requireNotNull(claimed)
+            val released = withContext(NonCancellable) { actor.execute { deferSupply(token, e.retryAfterMillis) } }
+            return Step(job.id, job.kind, if (released) "pending" else "stale")
         } catch (e: CancellationException) {
             // Shutdown is not a verdict on the source; the next worker should pick the job up again.
             claimed?.let { release(it.second) }
@@ -42,10 +46,12 @@ class PoolWorker(
         val input = job.subject
         val background = input.flag("background")
         val type = requestType ?: if (background) "background" else "foreground"
-        if (job.kind in setOf("gen_constructed","review_constructed")) return try { runConstructed(job,token,type) }
+        val jobClient = if (background) client.forBatchJob(token.epoch, job.id) else client
+        if (job.kind in setOf("gen_constructed","review_constructed")) return try { runConstructed(job,token,type,jobClient) }
+        catch(e: BatchPending) { throw e }
         catch(e: CancellationException) { throw e }
         catch(e: Exception) { actor.execute { failSupply(token,"MALFORMED") }; throw e }
-        val pool = QuestionPool(client)
+        val pool = QuestionPool(jobClient)
         if (job.kind == "gen_mcq") {
             val avoid = actor.execute { poolStems(input.str("course"),input.str("kp")) }
             // Generation-side reference for a question pool, never shown to a learner: deliberately not windowed to the learned range.
@@ -60,6 +66,8 @@ class PoolWorker(
                         internalReference=reference.joinToString("\n\n"))
                 }
             } catch (e: CancellationException) {
+                throw e
+            } catch (e: BatchPending) {
                 throw e
             } catch (e: Exception) {
                 actor.execute { failSupply(token,"MALFORMED") }
@@ -79,11 +87,13 @@ class PoolWorker(
                 // Repair quotations before review; the response cannot replace questions, options or keys.
                 val repair = try { withContext(Dispatchers.IO) {
                     beforeCall(BridgeClient.CLAUDE)
-                    client.chat(ChatRequest("repair_mcq_sources",BridgeClient.CLAUDE,Prompts.GEN_SYSTEM,
+                    jobClient.chat(ChatRequest("repair_mcq_sources",BridgeClient.CLAUDE,Prompts.GEN_SYSTEM,
                         "Return ONLY [{\"id\":0,\"source_quote\":\"exact contiguous supporting source text\"}, ...] for every candidate. Copy at least eight words verbatim, including HTML/LaTeX/Markdown; do not render symbols, paraphrase or join fragments. Do not change any question or key.\nSource:\n"+
                         input.str("excerpt")+"\nCandidates:\n"+JsonArray(questions.mapIndexed { i,q -> JsonObject(storedMcq(q)+("id" to JsonPrimitive(i))) }),
                         false,background=background,maxTokens=2500))
                 } } catch (e: CancellationException) {
+                    throw e
+                } catch (e: BatchPending) {
                     throw e
                 } catch (e: Exception) {
                     actor.execute { failSupply(token,"MALFORMED") }
@@ -113,6 +123,8 @@ class PoolWorker(
                     background=background)
             }
         } catch (e: CancellationException) {
+            throw e
+        } catch (e: BatchPending) {
             throw e
         } catch (e: Exception) {
             actor.execute { failSupply(token,"MALFORMED") }
@@ -146,7 +158,7 @@ class PoolWorker(
         withContext(NonCancellable) { withTimeoutOrNull(5_000) { actor.execute { releaseJob(token) } } }
     }
 
-    private suspend fun runConstructed(job: SupplyJob, token: Fence, type: String): Step {
+    private suspend fun runConstructed(job: SupplyJob, token: Fence, type: String, jobClient: BridgeClient): Step {
         val input=job.subject
         val generating=job.kind == "gen_constructed"
         val question=if(generating) null else TaskParsing.constructed(JsonArray(listOf(input.getValue("question"))).toString()).single().copy(kpId=input.str("kp"))
@@ -154,9 +166,9 @@ class PoolWorker(
         val avoid=if(generating) actor.execute { poolStems(input.str("course"),input.str("kp")) } else emptyList()
         var response=withContext(Dispatchers.IO) {
             beforeCall(model)
-            client.chat(ChatRequest(job.kind,model,if(generating) Prompts.GEN_SYSTEM else Prompts.CROSS_REVIEW_SYSTEM,
+            jobClient.chat(ChatRequest(job.kind,model,if(generating) Prompts.GEN_SYSTEM else Prompts.CROSS_REVIEW_SYSTEM,
                 if(generating) Prompts.genConstructed(input.str("objective"),input.str("excerpt"),2) + "\nDo not repeat these previous stems:\n" + avoid.joinToString("\n")
-                else Prompts.reviewConstructedKey(requireNotNull(question),input.str("excerpt")),false,background=true,maxTokens=4000))
+                else Prompts.reviewConstructedKey(requireNotNull(question),input.str("excerpt")),false,background=input.flag("background"),maxTokens=4000))
         }
         actor.execute { recordAiCall(response.call.toJson(),type) }
         fun validShape(q: ConstructedQuestion): Boolean = q.stem.length >= 15 && q.referenceAnswer.isNotBlank() &&
@@ -174,9 +186,9 @@ class PoolWorker(
             // Repair source quotations once before freezing; question, reference, criteria and points cannot change.
             val repaired=withContext(Dispatchers.IO) {
                 beforeCall(model)
-                client.chat(ChatRequest("repair_constructed_sources",model,Prompts.GEN_SYSTEM,
+                jobClient.chat(ChatRequest("repair_constructed_sources",model,Prompts.GEN_SYSTEM,
                     "Fix ONLY rubric basis strings by copying contiguous exact source text. Keep every stem, reference_answer, rubric id, text and points unchanged. No paraphrases or ellipses. Return the complete JSON array.\nSource:\n"+
-                    input.str("excerpt")+"\nCandidates:\n"+JsonArray(initial.map(::storedConstructed)),false,background=true,maxTokens=4000))
+                    input.str("excerpt")+"\nCandidates:\n"+JsonArray(initial.map(::storedConstructed)),false,background=input.flag("background"),maxTokens=4000))
             }
             actor.execute { recordAiCall(repaired.call.toJson(),type) }
             fun withoutBasis(q: ConstructedQuestion)=q.copy(rubric=q.rubric.map { it.copy(basis="") })
@@ -214,7 +226,7 @@ class PoolWorker(
     suspend fun ensure(course: String, kp: String, objective: String, excerpt: String, target: Int,
         background: Boolean = false): String? = actor.execute {
         require(target > 0)
-        enqueueConstructed(course,kp,objective,excerpt)
+        enqueueConstructed(course,kp,objective,excerpt,background)
         if (poolAvailable(course,kp) >= target) null else enqueueSupply(course,kp,objective,excerpt,background)
     }
 }

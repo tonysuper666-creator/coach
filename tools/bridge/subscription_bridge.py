@@ -44,6 +44,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from api_route import ApiRouter, ApiFailure, route as api_model
 from api_budget import Denied
+from api_batch import BatchRouter, BatchPending, TASKS as BATCH_TASKS
 
 # ---------- 路径与配置（全部在 Coach 目录里） ----------
 
@@ -523,6 +524,7 @@ class ReqCtx:
     transport: str = "subscription"
     api_fallback: str | None = None
     stream_reset: bool = False
+    batch_key: str = ""
 
     def queue_ms(self) -> float:
         if self.t_acq is None:
@@ -1304,7 +1306,8 @@ def build_req(body: dict, headers: Any) -> ReqCtx:
                   exact_model=(headers.get("x-coach-model-policy") or "").lower() == "exact",
                   test_traffic=tag == "test", traffic=traffic, production_source=trusted,
                   task=(headers.get("x-coach-task") or "")[:64],
-                  format_attempt=2 if headers.get("x-coach-format-attempt") == "2" else 0,
+                  format_attempt=int(headers.get("x-coach-format-attempt")) if headers.get("x-coach-format-attempt") in ("1", "2") else 0,
+                  batch_key=(headers.get("x-coach-batch-key") or "")[:128],
                   stream_reset=headers.get("x-coach-stream-reset") == "v1",
                   in_chars=len(spec_data.system) + len(spec_data.prompt))
 
@@ -1334,6 +1337,34 @@ async def dispatch_cli(req: ReqCtx, model: str, effort: str | None) -> Outcome:
 
 
 API_ROUTER = ApiRouter()
+API_BATCH = BatchRouter(API_ROUTER)
+
+
+async def dispatch_batch(req: ReqCtx, model: str, effort: str | None) -> Outcome:
+    """Only durable background supply jobs opt in; interactive calls stay synchronous."""
+    try:
+        result = await API_BATCH.run(req.batch_key, req.task, model, req.spec_data.system,
+                                     req.spec_data.prompt, req.body.get("max_tokens"), req.format_attempt)
+        req.transport = result["transport"]
+        req.physical_calls = result.get("physical_calls", 1)
+        req.api_fallback = result.get("api_fallback")
+        req.t_acq = time.monotonic()
+        return Outcome("complete", None, "stop", result["served_by"], text=result["text"], usage=result["usage"])
+    except (ApiFailure, Denied, OSError) as error:
+        reason = str(error) if isinstance(error, (ApiFailure, Denied)) else "batch_state_io"
+        req.api_fallback = reason
+        write_log(request_id=req.request_id, task=req.task, event="api_fallback", reason=reason)
+        outcome = await dispatch_cli(req, model, effort)
+        if outcome.status == "complete":
+            try:
+                API_BATCH.cache_fallback(req.batch_key, {"text": outcome.text, "served_by": outcome.served_by,
+                    "usage": outcome.usage, "transport": "subscription", "physical_calls": req.physical_calls,
+                    "api_fallback": reason})
+            except (Denied, OSError):
+                # A damaged cache must neither trigger another API submission nor
+                # discard a usable subscription result. Retain the evidence on disk.
+                write_log(request_id=req.request_id, task=req.task, event="batch_cache_unavailable")
+        return outcome
 
 
 async def routed_events(req: ReqCtx, model: str, effort: str | None) -> AsyncIterator[dict]:
@@ -1688,7 +1719,9 @@ async def chat(request: Request):
 
         # ---- 非流式 / 非真流式后端 ----
         try:
-            oc = await wait_disconnect(request, dispatch(req, target, effort_for(req, MODELS[target].backend)))
+            batch = req.batch_key and req.background and not req.stream and req.task in BATCH_TASKS
+            operation = dispatch_batch if batch else dispatch
+            oc = await wait_disconnect(request, operation(req, target, effort_for(req, MODELS[target].backend)))
         except BridgeError as e:
             if req.fallback_enabled and e.reason in ("cli_exit", "timeout"):
                 oc = await fallback_call(req, e)
@@ -1720,6 +1753,9 @@ async def chat(request: Request):
                              "usage": oc.usage,
                              "x_coach": oc.x_coach(req)}, headers=headers)
 
+    except BatchPending:
+        return JSONResponse({"x_coach_batch": "pending", "retry_after_ms": 60000}, status_code=202,
+                            headers={"Retry-After": "60"})
     except BridgeError as e:
         rid = req.request_id if req else (request.headers.get("x-request-id") or secrets.token_hex(8))
         headers = {"X-Request-Id": rid, "X-Coach-Fallback": "on" if (req and req.fallback_enabled) else "off"}

@@ -974,7 +974,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         val id = uid(); sql("INSERT INTO jobs(job_id,kind,subject,state,created_at,updated_at,question_version,answer_hash) VALUES(?,?,?,'queued',?,?,?,?)",id,kind,subject,clock(),clock(),questionVersion,answerHash);return id
     }
     fun claimJob(id: String): Fence? = transaction {
-        if(sql("UPDATE jobs SET state='running',fence=fence+1,attempts=attempts+1,updated_at=? WHERE job_id=? AND state='queued'",clock(),id) == 0) null
+        if(sql("UPDATE jobs SET state='running',fence=fence+1,attempts=attempts+1,updated_at=? WHERE job_id=? AND state='queued' AND updated_at<=?",clock(),id,clock()) == 0) null
         else Fence(hello().epoch,query("SELECT fence FROM jobs WHERE job_id=?",id) { it.getLong(1) }.single(),id)
     }
     fun completeJob(token: Fence, questionVersion: String?, answerHash: String?): Boolean {
@@ -991,7 +991,7 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun enqueueSupply(course: String, kp: String, objective: String, excerpt: String, background: Boolean = false): String = transaction {
         require(course.isNotBlank() && course != "__system__" && kp.isNotBlank() && objective.isNotBlank() && excerpt.isNotBlank())
         val hash = sha256((objective + "\u0000" + excerpt).toByteArray(Charsets.UTF_8))
-        val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash && it.kind in setOf("gen_mcq","blind_review") }
+        val active = supplyJobs(course, kp).firstOrNull { it.packHash == hash && it.kind in setOf("gen_mcq","blind_review") && (background || !it.subject.flag("background")) }
         active?.id ?: enqueueJob("gen_mcq", json("course" to course, "kp" to kp, "objective" to objective,
             "excerpt" to excerpt, "background" to background).toString(), hash)
     }
@@ -1018,6 +1018,13 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
         if (token.epoch != hello().epoch) return false
         return sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE job_id=? AND fence=? AND state='running'",
             clock(),token.id,token.value) == 1
+    }
+    /** Pending provider batches do not occupy a claim or consume a retry attempt. */
+    fun deferSupply(token: Fence, delayMillis: Long): Boolean {
+        require(delayMillis in 1_000..300_000)
+        if (token.epoch != hello().epoch) return false
+        return sql("UPDATE jobs SET state='queued',fence=fence+1,attempts=MAX(attempts-1,0),updated_at=? WHERE job_id=? AND fence=? AND state='running' AND kind IN ('gen_mcq','blind_review','gen_constructed','review_constructed')",
+            clock()+delayMillis,token.id,token.value) == 1
     }
     /** Retain the failed job, and atomically queue one fresh schema-constrained attempt. */
     fun retryMalformedSupply(token: Fence, job: SupplyJob): Boolean = transaction {
@@ -1056,15 +1063,15 @@ class LedgerStore(val directory: Path, private val clock: () -> Long = System::c
     fun constructedQuestions(course: String, kp: String): List<JsonObject> = query("SELECT q.question_id,q.stem_md,d.reference_answer,d.rubric,d.rubric_fingerprint FROM questions q JOIN question_kp k USING(question_id) JOIN constructed_details d USING(question_id) WHERE q.course_id=? AND k.kp_id=? AND q.key_state='VERIFIED' AND q.format<>'ESSAY'",course,kp) {
         json("questionId" to it.getString(1),"stem" to it.getString(2),"referenceAnswer" to it.getString(3),"rubric" to LedgerJson.parseToJsonElement(it.getString(4)),"rubricFingerprint" to it.getString(5))
     }
-    fun enqueueConstructed(course: String, kp: String, objective: String, excerpt: String): String? = transaction {
-        enqueueConstructedInTransaction(course,kp,objective,excerpt)
+    fun enqueueConstructed(course: String, kp: String, objective: String, excerpt: String, background: Boolean = true): String? = transaction {
+        enqueueConstructedInTransaction(course,kp,objective,excerpt,background)
     }
-    private fun enqueueConstructedInTransaction(course: String, kp: String, objective: String, excerpt: String): String? {
+    private fun enqueueConstructedInTransaction(course: String, kp: String, objective: String, excerpt: String, background: Boolean = true): String? {
         require(excerpt.isNotBlank() && objective.isNotBlank())
         if (projection(course).mastery[kp]?.passed != true || constructedAvailable(course,kp) >= 2) return null
         val hash=sha256((objective+"\u0000"+excerpt).toByteArray(Charsets.UTF_8))
-        return supplyJobs(course,kp).firstOrNull { it.packHash==hash && it.kind in setOf("gen_constructed","review_constructed") }?.id
-            ?: enqueueJob("gen_constructed",json("course" to course,"kp" to kp,"objective" to objective,"excerpt" to excerpt,"background" to true).toString(),hash)
+        return supplyJobs(course,kp).firstOrNull { it.packHash==hash && it.kind in setOf("gen_constructed","review_constructed") && (background || !it.subject.flag("background")) }?.id
+            ?: enqueueJob("gen_constructed",json("course" to course,"kp" to kp,"objective" to objective,"excerpt" to excerpt,"background" to background).toString(),hash)
     }
     fun queueConstructedReviews(token: Fence, job: SupplyJob, questions: List<JsonObject>, generator: String): Boolean = transaction {
         if (!completeJob(token,job.packHash,null)) return@transaction false

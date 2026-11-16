@@ -21,7 +21,7 @@ Exit code 1 if any document failed. Per-document stats line: pages ok/failed/res
 ## Cache layout (consumers only read this; no engine needed)
 
 ```
-<cache>/<doc_id>/latest.json                 {"version": "<sha16>-p1-docling2.149.0"}
+<cache>/<doc_id>/latest.json                 {"version": "<sha16>-p5-docling2.149.0"}
 <cache>/<doc_id>/<version>/manifest.json     written last = complete
 <cache>/<doc_id>/<version>/pages/00001.json  one file per page, 1-based physical page number
 <cache>/<doc_id>/.partial-<version>/         unfinished run; reruns skip finished pages
@@ -50,13 +50,33 @@ Block `status`: `ok`, `missing` (text block without text), `unknown` (unclassifi
 `unrecognized` (formula region, no text). Consumers: tables/figures are never part of sentence flow;
 formulas/unknown/rotated pages anchor to the original-page region.
 
+Pipeline 5 adds optional extraction evidence without changing schema 1's existing
+fields or the consumer contract:
+
+- Blocks retain Docling `source_ref`, explicit `caption_refs` and
+  `provenance_count`. Every page occurrence is emitted; references are document
+  local, not canonical-text offsets. Missing links must not be inferred from y.
+- Table cells additionally retain `bbox`, `column_header`, `row_header` and
+  `row_section`. Cell boxes use the same unrotated MediaBox points as block
+  boxes. They may enclose text rather than the full grid cell: a gap is not
+  evidence of a safe row cut.
+- Table `geometry_status` is `single_page` only for one provenance occurrence.
+  For `ambiguous_multi_page`, cell boxes have no page identifiers; preserve the
+  logical grid but do not assign these boxes to individual page crops.
+
+`../reflow/source_payload.py` joins this evidence with PDFBox's unchanged source
+text and exact glyph offsets in a separate private experiment. It does not
+change `BookPage`, the importer or the reader. Existing schema-1 caches remain
+readable; the pipeline-version bump causes new runs to regenerate missing fields.
+
 ## Known limits (measured on synthetic pages, Docling 2.149.0)
 
 - `/Rotate` ≠ 0: Docling reports unrotated-space geometry and (with a CropBox) a wrong page size, and 180° pages come out in reverse order → flagged `unknown` + fallback; no shift applied.
 - Display formulas are not enriched by default; a standalone formula line may be labelled `figure`/`text`. Do not infer formula correctness from OCR.
 - Scanned pages go through Docling's built-in RapidOCR (local); a blank/undetected scan gives `empty`.
-- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "4").
+- `PIPELINE_VERSION` is part of the cache key: any behaviour change must bump it so stale structures are re-analysed (now "5").
 - Single-column verdict is checked (text must run top-to-bottom) and downgraded to `unknown`+fallback when narrow blocks sit side by side without forming columns; a column must hold >=25% of page height in text. Tables whose cells do not cover rows*cols are `unknown`. Thresholds are tuned on synthetic pages only; real-page tuning needs the Mac run.
 - Column detection is geometric (≥2 disjoint x-intervals with ≥2 narrow blocks each); full-width headings on a two-column page may land in column 1.
 - Server consumer: `server/app/.../reader/v2/LayoutCache.kt` (read-only; `LayoutPage.orderTrusted` is the single gate for sentence anchoring). Its test passed on Windows via `./gradlew :server:app:test --tests 'com.coach.server.reader.v2.*'`; the Python test `test_page_json_has_every_field_the_kotlin_consumer_reads` pins the contract.
-- Not done here: real-textbook runs (Mac-resident material).
+- Tests here use synthetic PDFs. Separate Mac-only real-textbook runs and their
+  limits are recorded in `docs/design/reflow-options.md`; source outputs stay private.

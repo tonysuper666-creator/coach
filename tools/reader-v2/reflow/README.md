@@ -215,12 +215,90 @@ check the downloaded files can convert the synthetic PDF under the documented
 offline constraints. Preserve failed attempts as well as successful receipts;
 download success alone does not prove conversion success.
 
+## Source mappings and structural payloads
+
+These are extraction experiments, **not production assets or reader support**.
+All output includes private source content and must remain outside Git. Use new
+output directories for each run; neither command overwrites previous evidence.
+
+`PdfReflowProbe.java` now emits document SHA, physical page/frame, exact UTF-16
+glyph spans, unmatched stripper ranges and painted horizontal rules. It uses the
+same stripper settings and cleaning as before. A word whose presentation-form
+expansion does not match the stripper's output has null glyph offsets; it must
+not be located by searching for possibly repeated words.
+
+Given that probe's JSONL and pipeline-5 page JSON, join them with:
+
+```sh
+python3 tools/reader-v2/reflow/source_payload.py \
+  --probe "$PRIVATE_STATE/probe.jsonl" \
+  --layout "$PRIVATE_STATE/layout-pages" --out "$PRIVATE_STATE/source-payloads"
+```
+
+Document hash, physical page and frames must match before any output is written.
+Each payload keeps the source `text` unchanged and hashes its UTF-16 bytes.
+Source regions, cell regions, row bands and cut positions use normalized,
+unrotated CropBox coordinates. Schema-1 payloads retain:
+
+- `source_ranges`: exact half-open UTF-16 intervals selected by whole glyph
+  boxes. Only intervening whitespace may join intervals. Partial/unmapped
+  glyphs are ambiguous; interleaved body text keeps intervals discontiguous.
+  `replacement_range`, `anchor_offset` and `hide_source_allowed` are candidate
+  evidence only: production still needs boundary review, nonoverlapping blocks
+  and persistence. A discontiguous or untrusted-order block cannot hide text.
+- Table cells with row/column spans and header flags. `row_breaks` require a
+  complete single-page grid, usable cell geometry and a unique painted PDF
+  horizontal rule between adjacent rows, without a crossing glyph or rowspan.
+  A matching header cut supplies `repeat_header_region`. Multi-page, clipped,
+  rotated or unsupported geometry keeps logical cells but supplies no cell
+  regions/cuts. `verified_boundaries` certifies these geometric checks only;
+  it does not establish correct model row assignments or permit splitting a
+  semantically incorrect table. Borderless tables may have no certified cut.
+- `caption_groups`: explicit, unique, same-page Docling references to caption
+  blocks. Missing/ambiguous references remain unresolved. A linked group does
+  not establish paragraph continuation, final placement or caption deduplication.
+
+Different nonrotated CropBox/MediaBox frames can be converted when both sources
+agree; this is distinct from legacy C's conservative benchmark fallback flag.
+No crops are rasterized or saved as `BookIllustration`, and no shared model,
+canonical importer or UI flow is changed.
+
+For native packages, retain source structure before a future importer flattens it:
+
+```sh
+python3 tools/reader-v2/reflow/native_payload.py \
+  --source "$PRIVATE_BOOK" --out "$PRIVATE_STATE/native-payload"
+```
+
+Supports `.epub` and `.docx`. `package.json` retains EPUB spine order and each
+member's namespace-expanded element tree, attributes, mixed `text`/`tail` and
+children. Exact member bytes are stored as hash-named `blobs`, preserving styles,
+images, relationships, MathML/OMML and merged-cell metadata even if a secondary
+XML member cannot be parsed. Archive names are metadata, never output paths;
+external resources are not fetched. This is source retention, not a renderer or
+reconstruction of Word style inheritance. `offset_mapping_status` remains
+`requires_import_integration`: native structure-to-`BookPage.text` mapping and
+production storage still need implementation and regression tests.
+
 ## Checks
 
 ```sh
-python3 -m unittest discover -s tools/reader-v2/reflow -p 'test_*.py' -v
+python3 -I -m unittest discover -s tools/reader-v2/reflow -v
+tools/dev/heavy --local python3 tools/reader-v2/reflow/verify_pdf_payload.py \
+  --pdfbox-classpath "$PDFBOX_CLASSPATH"
+DOCLING_ARTIFACTS_PATH="$DOCLING_MODELS" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  tools/dev/heavy --local "$DOCLING_PYTHON" \
+  -m unittest discover -s tools/reader-v2/layout/tests -v
 ```
 
-These check diff accounting, private-output guards and stale-run isolation. Real
-page geometry still needs local visual review; synthetic block/offset regression
-tests belong with the eventual production implementation.
+The 25 reflow tests cover diff accounting, private-output guards, stale identities,
+UTF-16/surrogate mappings, discontiguous ranges, table cuts/headers/rowspans,
+caption references and self-authored EPUB/Word structure/byte retention.
+The Java integration compiles with `--release 17`, generates four self-authored
+PDF pages and compares against an independent plain PDFTextStripper baseline:
+120 glyph spans, table/header, callout/formula, interleaved columns, negative
+MediaBox/CropBox and rotation. It uses known layout boxes to isolate mapping
+from model quality; the 26 layout tests separately exercise real Docling on
+synthetic PDFs with local models. Set the existing model path explicitly when
+the default offline cache is empty. Real geometry still needs private visual
+review; product offset regressions and the 32 reader UI cells remain unverified.

@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = "4"   # bump on any behaviour change: it is part of the cache version key
+PIPELINE_VERSION = "5"   # bump on any behaviour change: it is part of the cache version key
 SCHEMA_VERSION = 1
 CHUNK_PAGES = 10
 
@@ -225,13 +225,16 @@ class DoclingEngine:
         order = 0
         for item, _lvl in doc.iterate_items():
             label = getattr(item.label, "value", str(item.label))
-            for prov in (item.prov or [])[:1]:
+            for prov in (item.prov or []):
                 pg = pages.get(prov.page_no)
                 if pg is None:
                     continue
                 bb = prov.bbox.to_top_left_origin(pg["size"][1])
                 blk = {"label": label, "bbox": [bb.l, bb.t, bb.r, bb.b],
-                       "text": getattr(item, "text", None) or None, "order": order}
+                       "text": getattr(item, "text", None) or None, "order": order,
+                       "source_ref": item.self_ref,
+                       "caption_refs": [r.cref for r in getattr(item, "captions", [])],
+                       "provenance_count": len(item.prov)}
                 if label in ("table", "document_index"):
                     d = getattr(item, "data", None)
                     if d is not None:
@@ -239,6 +242,16 @@ class DoclingEngine:
                             {"r": c.start_row_offset_idx, "c": c.start_col_offset_idx,
                              "rs": c.row_span, "cs": c.col_span, "text": c.text}
                             for c in (getattr(d, "table_cells", None) or [])]}
+                        for cell, c in zip(blk["table"]["cells"], d.table_cells):
+                            cb = c.bbox.to_top_left_origin(pg["size"][1]) if c.bbox else None
+                            cell.update(bbox=[cb.l, cb.t, cb.r, cb.b] if cb else None,
+                                        column_header=bool(c.column_header),
+                                        row_header=bool(c.row_header),
+                                        row_section=bool(c.row_section))
+                        # A cell bbox has no page identifier. Never guess which
+                        # occurrence of a multi-page table it belongs to.
+                        blk["table"]["geometry_status"] = (
+                            "single_page" if len(item.prov) == 1 else "ambiguous_multi_page")
                 pg["blocks"].append(blk)
             order += 1
         return pages
@@ -298,8 +311,17 @@ def build_page_json(page_no: int, raw: dict | None, meta: dict, doc_sha: str) ->
                "reading_order": i,
                "confidence": None,   # Docling gives no per-block score; only page layout_score
                "status": "ok"}
+        for key in ("source_ref", "caption_refs", "provenance_count"):
+            if key in b:
+                blk[key] = b[key]
         if kind == "table":
             t = b.get("table")
+            if t:
+                t = dict(t, cells=[dict(c) for c in t["cells"]])
+                for cell in t["cells"]:
+                    if cell.get("bbox") is not None:
+                        l, top, r, bottom = cell["bbox"]
+                        cell["bbox"] = [l + dx, top + dy, r + dx, bottom + dy]
             blk["table"] = t
             blk["status"] = "ok" if table_grid_valid(t) else "unknown"   # partial/overlapping grids are not trusted
             if blk["status"] == "unknown":

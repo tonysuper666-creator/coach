@@ -48,6 +48,17 @@ class ReaderExplanationTest {
             "有依据。【S1】\n\nWait, I should correct the formatting."
         )) assertNull(checkedReaderPayload(invalid, pack), invalid)
     }
+    @Test fun insufficientEvidenceReturnsFixedUncitedResponseWithoutRetry() = runBlocking {
+        Harness().use { h ->
+            h.stub.stream(1, """{"paragraphs":[]}""", StubTutor.terminal("complete"), StubTutor.DONE)
+            val answer = h.reader.explain("d", "c", json("requestId" to "ae", "kind" to "explain"),
+                "Synthetic pears", pack.pages, com.coach.domain.scope.VisibleScope.learner())
+            assertEquals("依据不足，无法确认。", answer.str("text"))
+            assertTrue(answer.getValue("sources").jsonArray.isEmpty())
+            assertEquals(1, h.stub.requests)
+            assertNull(checkedReaderPayload("""{"paragraphs":[],"extra":"unsupported claim"}""", pack))
+        }
+    }
     @Test fun citationsAndVerbatimQuotesMustAllBelongToVisiblePages() {
         val result = checkedReaderAnswer("“Synthetic pears”是这里的例子。【S1】", pack)!!
         assertEquals(4, result.second.single().jsonObject.num("pdfPage"))

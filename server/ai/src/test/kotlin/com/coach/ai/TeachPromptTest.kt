@@ -9,10 +9,10 @@ class TeachPromptTest {
     @Test
     fun reviewedBasisReplacesTheVerifyAgainstSourceInstruction() {
         val ordinary = TeachPrompt.build("q", "pack")
-        assertTrue(ordinary.contains("answer only from the course pack below"))
+        assertTrue(ordinary.contains("answer only from the course pack above"))
 
         val reviewed = TeachPrompt.build("q", "pack", reviewedBasis = true)
-        assertFalse(reviewed.contains("answer only from the course pack below"))
+        assertFalse(reviewed.contains("answer only from the course pack above"))
         assertTrue(reviewed.contains("the reviewed explanations above are the basis for the answer"))
     }
 

@@ -135,7 +135,7 @@ TON-1656 第 3 条按此收尾：顶栏字标不改字，只确认窗口标题�
 | # | 项 | 状态 | 位置 | 说明与去向 |
 | --- | --- | --- | --- | --- |
 | W1 | 窗口与任务栏图标 | 待修 | `build.gradle.kts:101-116` 无 `iconFile`；`Window(...)` 无 `icon` | 现在是 Java 默认图标。图标已在本 PR 交付（第 2 节），接线归 TON-1656 |
-| W2 | 窗口标题统一 | 待修 | 「Coach」「LerningCoach」「教材原文」三种 | 归 TON-1656 |
+| W2 | 窗口标题统一 | 待修 | 「Coach」、旧占位拼写、「教材原文」三种 | 归 TON-1656 |
 | W3 | 最小窗口尺寸 / 贴靠 | 待修 | 全仓 `minimumSize` 0 处 | 拖得很窄时侧栏和正文会挤坏。先在 1/2、1/3 贴靠下截图定最小值，再设 `window.minimumSize`。`WindowsTextbooks.kt` 被 TON-1656 占用，排在其后：P5 |
 | W4 | 125/150/175% 缩放 | 未验证 | — | 截图测试固定 Density 1.5。P5 交付时在 winbox 改系统缩放各拍一张 |
 | W5 | 滚动条 | 已对（组件） | `V7Scrollbar.kt`；`V7DesktopFeedbackTest` | V7 颜色，4dp → 8dp 悬停加粗，12dp 固定槽；拖动实际 ScrollState，正文不位移。P1/P2/P3 分别接入阅读/讲解/书架 |

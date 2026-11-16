@@ -119,13 +119,13 @@ private fun NotesExportDialog(view: CourseView, controller: CoachController, mat
                 busy = false
                 System.getenv("COACH_NOTES_VERIFY_CAPTURE")?.let {
                     delay(300)
-                    java.awt.Window.getWindows().firstOrNull { w -> w.isVisible && w is java.awt.Dialog && w.title == "导出复习提纲" }
+                    java.awt.Window.getWindows().firstOrNull { w -> w.isVisible && w is java.awt.Dialog && w.title == "导出复习提纲 · LearningCoach" }
                         ?.let { window -> VerifyHooks.capture(window, File(it)) }
                 }
             }
         }
     } }
-    DialogWindow(onCloseRequest = { if (!state.busy) close() }, title = "导出复习提纲", state = rememberDialogState(width = 600.dp, height = 610.dp)) {
+    DialogWindow(onCloseRequest = { if (!state.busy) close() }, title = "导出复习提纲 · LearningCoach", state = rememberDialogState(width = 600.dp, height = 610.dp)) {
         NotesExportPanel(state, onPickDirectory = {
             val picker = JFileChooser().apply { fileSelectionMode = JFileChooser.DIRECTORIES_ONLY; dialogTitle = "选择保存位置" }
             if (picker.showOpenDialog(window) == JFileChooser.APPROVE_OPTION) state.directory = picker.selectedFile.toPath()

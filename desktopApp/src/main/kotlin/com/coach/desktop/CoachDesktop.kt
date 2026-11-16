@@ -54,7 +54,7 @@ fun runCoach() {
     application {
         var readerIdentity by remember { mutableStateOf<DesktopIdentity?>(null) }
         var readerController by remember { mutableStateOf<CoachController?>(null) }
-        Window(onCloseRequest = ::exitApplication, title = "LerningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
+        Window(onCloseRequest = ::exitApplication, title = "LearningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
                 DisposableEffect(session) {
@@ -74,7 +74,7 @@ fun runCoach() {
         }
         // Keep the course controller mounted; closing this window returns to its original state.
         readerIdentity?.let { identity ->
-            Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文",
+            Window(onCloseRequest = { readerIdentity = null; readerController = null }, title = "教材原文 · LearningCoach",
                 state = rememberWindowState(width = 1200.dp, height = 760.dp)) {
                 PairedHttpReader(settings, identity, course, controller = readerController)
             }

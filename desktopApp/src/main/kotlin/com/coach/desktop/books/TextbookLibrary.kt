@@ -11,7 +11,6 @@ import org.apache.pdfbox.text.PDFTextStripper
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.awt.image.BufferedImage
-import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -22,8 +21,6 @@ import java.time.Clock
 import java.time.LocalDate
 import java.util.UUID
 import java.util.zip.ZipFile
-import javax.xml.XMLConstants
-import javax.xml.parsers.DocumentBuilderFactory
 
 /** All state belongs to this Windows library. No server, course ID, token or user corpus is opened. */
 internal class TextbookLibrary(
@@ -565,18 +562,7 @@ internal object TextbookExtraction {
                 require(bytes.size <= 16 * 1024 * 1024) { "EPUB 的单个章节过大。" }; bytes
             }
         }
-        fun xml(bytes: ByteArray): Element {
-            val factory = DocumentBuilderFactory.newInstance().apply {
-                isNamespaceAware = true
-                setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-                setFeature("http://xml.org/sax/features/external-general-entities", false)
-                setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-                setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-                setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
-                isXIncludeAware = false; isExpandEntityReferences = false
-            }
-            return factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes)).documentElement
-        }
+        fun xml(bytes: ByteArray): Element = EpubXml.parse(bytes)
         fun Element.all(name: String): List<Element> = getElementsByTagNameNS("*", name).let { list -> (0 until list.length).map { list.item(it) as Element } }
         if (zip.getEntry("META-INF/encryption.xml") != null) {
             val encryption = xml(read("META-INF/encryption.xml"))

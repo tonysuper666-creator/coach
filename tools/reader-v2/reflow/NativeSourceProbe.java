@@ -58,7 +58,10 @@ public class NativeSourceProbe {
                 if(!roots.containsKey(member)) {
                     byte[] bytes;
                     try(var stream=zip.getInputStream(zip.getEntry(member))) { bytes=stream.readAllBytes(); }
-                    roots.put(member,factory.newDocumentBuilder().parse(new java.io.ByteArrayInputStream(bytes)).getDocumentElement());
+                    // EPUB uses the production declaration guard too; path/hash/range checks below
+                    // remain independent assertions. This is not a second XML parser audit.
+                    roots.put(member,format.equals("epub") ? EpubXml.INSTANCE.parse(bytes) :
+                        factory.newDocumentBuilder().parse(new java.io.ByteArrayInputStream(bytes)).getDocumentElement());
                     hashes.put(member,HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)));
                 }
                 require(hashes.get(member).equals(type.getMethod("getMemberSha256").invoke(element)));

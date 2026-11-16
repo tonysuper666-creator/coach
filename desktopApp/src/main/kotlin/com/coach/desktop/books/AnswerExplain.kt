@@ -168,6 +168,7 @@ internal fun LessonSummaryCard(
 }
 
 private fun summaryLine(practice: Practice, answer: PracticeAnswer): String {
+    if (answer.guessed) return "你把这次作答标记为猜的，已留在复习里；选对也不计作独立答对。"
     val picked = answer.text.trim()
     return if (practice.options.isNotEmpty()) {
         if (picked == practice.answer) "你选了「$picked」，和原文一致。"

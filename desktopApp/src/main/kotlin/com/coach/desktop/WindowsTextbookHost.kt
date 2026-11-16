@@ -23,6 +23,7 @@ import com.coach.ui.AppTab
 import com.coach.ui.CoachTheme
 import com.coach.ui.DeskNavigation
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.nio.file.Path
 
 /** Legacy tokens keep their storage identity; the three visible destinations are the same projection the app uses. */
@@ -66,6 +67,10 @@ internal fun WindowsTextbookHost(controller: TextbookController, drafts: AnswerD
     LaunchedEffect(controller) {
         val current = controller.state.value
         if (current.catalog.isEmpty() && current.book == null && current.prompt == null) controller.load()
+        while (true) {
+            delay(60_000)
+            controller.refreshReviews()
+        }
     }
     fun openInWorkspace(action: suspend () -> Unit) { tab = AppTab.RESOURCES; scope.launch { action() } }
     val systemDark = isSystemInDarkTheme()

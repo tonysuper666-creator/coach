@@ -203,6 +203,14 @@ internal class TextbookController(val library: TextbookLibrary) {
             prompt = null, reviews = library.reviews()) }
     }
 
+    /** The mounted host refreshes this projection across local midnight, including on 今天. */
+    suspend fun refreshReviews() = action(showBusy = false) {
+        val current = mutable.value.review
+        val updated = current?.let { library.review(it.book, it.lesson, it.mode) }
+        mutable.update { it.copy(reviews = library.reviews(), review = updated,
+            answer = updated?.answer ?: it.answer) }
+    }
+
     suspend fun openReview(entry: LocalBookReview) = action {
         val review = library.review(entry.book, entry.lesson, entry.mode)
         val book = library.book(review.book)

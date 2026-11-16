@@ -48,6 +48,28 @@ class ReaderExplanationTest {
             "有依据。【S1】\n\nWait, I should correct the formatting."
         )) assertNull(checkedReaderPayload(invalid, pack), invalid)
     }
+    @Test fun diagnosticCodesDistinguishRefusalsWithoutLeakingContentOrChangingValidation() {
+        val cases = listOf(
+            "PRIVATE " + "x".repeat(12_000) to ReaderFormatReason.PAYLOAD_SIZE,
+            "PRIVATE invalid JSON" to ReaderFormatReason.PAYLOAD_JSON,
+            "{\"paragraphs\":[],\"PRIVATE\":true}" to ReaderFormatReason.ROOT_FIELDS,
+            payload("PRIVATE\nline") to ReaderFormatReason.PARAGRAPH_TEXT,
+            payload("PRIVATE", "S99") to ReaderFormatReason.ANCHORS,
+            payload("PRIVATE page 99") to ReaderFormatReason.ANSWER_LOCATOR,
+            payload("“PRIVATE fabricated quotation”") to ReaderFormatReason.ANSWER_CITATION,
+        )
+        for ((input, expected) in cases) {
+            val reasons = mutableListOf<ReaderFormatReason>()
+            assertNull(checkedReaderPayload(input, pack, reasons::add))
+            assertEquals(listOf(expected), reasons)
+            assertFalse(reasons.single().name.contains("PRIVATE"))
+        }
+        val reasons = mutableListOf<ReaderFormatReason>()
+        assertNotNull(checkedReaderPayload(payload("有依据的说明。"), pack, reasons::add))
+        assertNotNull(checkedReaderPayload("{\"paragraphs\":[]}", pack, reasons::add))
+        assertTrue(reasons.isEmpty())
+        assertEquals(ReaderFormatReason.STREAM_JSON, ReaderFormat().reason)
+    }
     @Test fun insufficientEvidenceReturnsFixedUncitedResponseWithoutRetry() = runBlocking {
         Harness().use { h ->
             h.stub.stream(1, """{"paragraphs":[]}""", StubTutor.terminal("complete"), StubTutor.DONE)

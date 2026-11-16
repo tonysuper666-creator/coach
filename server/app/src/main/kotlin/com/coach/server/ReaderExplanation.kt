@@ -93,10 +93,16 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                     if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
                     if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")
-                    val checked = checkedReaderPayload(result.text, safePack) ?: throw ReaderFormat(result.call.servedBy)
+                    val checked = checkedReaderPayload(result.text, safePack) { reason ->
+                        throw ReaderFormat(result.call.servedBy, reason)
+                    } ?: error("Reader payload rejected without a reason")
                     outcome = "complete"
                     return reply(checked.first, checked.second)
                 } catch (e: ReaderFormat) {
+                    // id was validated above; every other field is a fixed code or a bounded counter.
+                    org.slf4j.LoggerFactory.getLogger("coach.reader").info(
+                        "COACH reader.format request={} reason={} attempt={} traffic={}",
+                        id, e.reason.name, formatAttempt + 1, if (BridgeConfig().testTraffic) "test" else "user")
                     if (request.cancelled.get() || e.servedBy?.startsWith("claude-haiku-") != true || formatAttempt >= 2) throw e
                     formatAttempt++
                     // A fresh attempt gets its own body deadline; the original total deadline still applies.
@@ -130,37 +136,46 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
 }
 
 /** Empty paragraphs mean insufficient evidence; every actual paragraph needs a declared citation. */
-internal fun checkedReaderPayload(payload: String, pack: SourcePack): Pair<String, JsonArray>? {
-    if (payload.length > 12_000) return null
-    val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull() ?: return null
-    if (root.keys != setOf("paragraphs")) return null
-    val paragraphs = root["paragraphs"] as? JsonArray ?: return null
+internal fun checkedReaderPayload(payload: String, pack: SourcePack,
+    onReject: (ReaderFormatReason) -> Unit = {}): Pair<String, JsonArray>? {
+    fun reject(reason: ReaderFormatReason): Pair<String, JsonArray>? { onReject(reason); return null }
+    if (payload.length > 12_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
+    val root = runCatching { Json.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+        ?: return reject(ReaderFormatReason.PAYLOAD_JSON)
+    if (root.keys != setOf("paragraphs")) return reject(ReaderFormatReason.ROOT_FIELDS)
+    val paragraphs = root["paragraphs"] as? JsonArray ?: return reject(ReaderFormatReason.ROOT_FIELDS)
     if (paragraphs.isEmpty()) return "依据不足，无法确认。" to JsonArray(emptyList())
-    if (paragraphs.size !in 1..2) return null
+    if (paragraphs.size !in 1..2) return reject(ReaderFormatReason.PARAGRAPH_COUNT)
     val rendered = paragraphs.map { value ->
-        val paragraph = value as? JsonObject ?: return null
-        if (paragraph.keys != setOf("text", "anchors")) return null
-        val text = (paragraph["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-        if (text.isBlank() || text.any { it == '\n' || it == '\r' || it == '【' || it == '】' }) return null
-        val anchors = paragraph["anchors"] as? JsonArray ?: return null
-        if (anchors.isEmpty() || anchors.size > pack.anchors.size) return null
+        val paragraph = value as? JsonObject ?: return reject(ReaderFormatReason.PARAGRAPH_FIELDS)
+        if (paragraph.keys != setOf("text", "anchors")) return reject(ReaderFormatReason.PARAGRAPH_FIELDS)
+        val text = (paragraph["text"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: return reject(ReaderFormatReason.PARAGRAPH_TEXT)
+        if (text.isBlank() || text.any { it == '\n' || it == '\r' || it == '【' || it == '】' })
+            return reject(ReaderFormatReason.PARAGRAPH_TEXT)
+        val anchors = paragraph["anchors"] as? JsonArray ?: return reject(ReaderFormatReason.ANCHORS)
+        if (anchors.isEmpty() || anchors.size > pack.anchors.size) return reject(ReaderFormatReason.ANCHORS)
         val ids = anchors.map { anchor ->
             (anchor as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it in pack.anchors }
-                ?: return null
+                ?: return reject(ReaderFormatReason.ANCHORS)
         }
-        if (ids.distinct().size != ids.size) return null
+        if (ids.distinct().size != ids.size) return reject(ReaderFormatReason.DUPLICATE_ANCHORS)
         text + ids.joinToString("") { "【$it】" }
     }.joinToString("\n\n")
     // Apply the existing whole-answer quotation, locator and citation gate unchanged.
-    return checkedReaderAnswer(rendered, pack)
+    return checkedReaderAnswer(rendered, pack, onReject)
 }
 
 /** Reject the whole answer if any paragraph fails; actual page locators are always server supplied. */
-internal fun checkedReaderAnswer(text: String, pack: SourcePack): Pair<String, JsonArray>? {
-    if (text.isBlank() || text.length > 12_000 || Regex("(?:PDF\\s*(?:page|第)|(?:page|页码)\\s*[:：]?\\s*\\d)", RegexOption.IGNORE_CASE).containsMatchIn(text)) return null
+internal fun checkedReaderAnswer(text: String, pack: SourcePack,
+    onReject: (ReaderFormatReason) -> Unit = {}): Pair<String, JsonArray>? {
+    fun reject(reason: ReaderFormatReason): Pair<String, JsonArray>? { onReject(reason); return null }
+    if (text.isBlank() || text.length > 12_000) return reject(ReaderFormatReason.PAYLOAD_SIZE)
+    if (Regex("(?:PDF\\s*(?:page|第)|(?:page|页码)\\s*[:：]?\\s*\\d)", RegexOption.IGNORE_CASE).containsMatchIn(text))
+        return reject(ReaderFormatReason.ANSWER_LOCATOR)
     val gate = SourceCitationGate(pack.anchors)
     val paragraphs = gate.push(text) + gate.finish(true)
-    if (gate.accepted == 0 || gate.accepted != gate.checked) return null
+    if (gate.accepted == 0 || gate.accepted != gate.checked) return reject(ReaderFormatReason.ANSWER_CITATION)
     val used = Regex("【S([0-9]+)】").findAll(text).map { it.groupValues[1].toInt() }.distinct().toList()
     return paragraphs.joinToString("").trim() to JsonArray(used.map { n ->
         val page = pack.browsable[n - 1]

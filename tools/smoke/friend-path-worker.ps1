@@ -6,6 +6,8 @@ param(
     [Parameter(Mandatory)][string]$Book,       # PDF on winbox, kept out of Git
     [string]$Url = '',                          # isolated test server on the Mac (never the production 18791)
     [string]$PairCode = '',
+    [string]$ClientSeed = '',                   # an already paired private client dir; copied per run, never modified
+    [string]$Selection = '',                    # private JSON {selection, blocks[id=<sha>:p<page>:0]}; stays on winbox
     [int]$StartTimeoutSec = 150
 )
 $ErrorActionPreference = 'Stop'
@@ -31,6 +33,10 @@ function Await-Text([int]$n, [string]$tag, [string[]]$needles, [int]$sec) {
     do { $lines = Shot $n $tag; $m = Has $lines $needles; if ($m) { return $m }; Start-Sleep -Seconds 2 } while ((Get-Date) -lt $deadline)
     return $null
 }
+function Page-Of($lines) { foreach ($l in $lines) { $mm = [regex]::Match($l.Text, '(\d+)[/／](\d+)'); if ($mm.Success) { return "$($mm.Groups[1].Value)/$($mm.Groups[2].Value)" } }; return $null }
+# The lowest on-screen occurrence of a label (e.g. the last 「讲解这段」 button on a page).
+function Find-Lowest($lines, [string]$needle) { $best = $null; foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m -and (-not $best -or $m.Y -gt $best.Y)) { $best = $m } }; $best }
+function Find-All($lines, [string]$needle) { $all = @(); foreach ($l in $lines) { $m = Find-Text @($l) $needle; if ($m) { $all += $m } }; $all | Sort-Object Y }
 function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
     $m = Await-Text $n 'find' $labels $sec
     if (-not $m) { Fail $n "$why（屏幕上找不到「$($labels -join '」或「')」）" }
@@ -40,6 +46,7 @@ function Click-Label([int]$n, [string[]]$labels, [string]$why, [int]$sec = 15) {
 $env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot'; $env:GRADLE_USER_HOME = 'D:\agent\gradle-home'; $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 $lib = Join-Path $OutDir 'bookshelf'; $client = Join-Path $OutDir 'client'
 New-Item -ItemType Directory -Force $lib, $client | Out-Null
+if ($ClientSeed) { Copy-Item -Recurse -Force (Join-Path $ClientSeed '*') $client }
 $env:COACH_LIBRARY_DIR = $lib; $env:COACH_CLIENT_DIR = $client; $env:COACH_TOKEN_FILE = (Join-Path $OutDir 'unused-token')
 $env:COACH_URL = if ($Url) { $Url } else { 'http://127.0.0.1:18999' }
 $serverPort = ([uri]$env:COACH_URL).Port
@@ -65,33 +72,70 @@ try {
 
     # ③ 翻页
     Click-Label 3 @('先读', '继续看书') '找不到「先读」'
+    $d = Await-Text 3 'dismiss' @('要开始学吗') 8
+    if ($d) { Send-Keys '{ESC}'; Start-Sleep -Seconds 1 }   # 暂不开启：只读这本书
     $m = Await-Text 3 'reader' @('下一页') 60
     if (-not $m) { Fail 3 '没有进到阅读器' }
-    $before = Shot 3 'page-before'
-    $page0 = ($before | Where-Object { $_.Text -match '^\d+[/／]\d+$' } | Select-Object -First 1).Text
+    $page0 = $null
+    foreach ($try in 1..5) {
+        $before = Shot 3 'page-before'
+        $page0 = Page-Of $before
+        if ($page0) { break }; Start-Sleep -Seconds 2
+    }
     $page1 = $page0
     foreach ($try in 1..3) {
         Click-At $m.X $m.Y
         $stop = (Get-Date).AddSeconds(8)
-        while ((Get-Date) -lt $stop -and $page1 -eq $page0) {
+        while ((Get-Date) -lt $stop -and (-not $page1 -or $page1 -eq $page0)) {
             Start-Sleep -Seconds 2; $after = Shot 3 'page-after'
-            $page1 = ($after | Where-Object { $_.Text -match '^\d+[/／]\d+$' } | Select-Object -First 1).Text
+            $page1 = Page-Of $after
         }
-        if ($page1 -ne $page0) { break }
+        if ($page1 -and $page1 -ne $page0) { break }
     }
     if (-not $page0 -or -not $page1 -or $page0 -eq $page1) { Fail 3 "点了下一页页码没变（前 $page0，后 $page1）" }
     Pass 3 "页码 $page0 → $page1"
 
-    # ④ 选中就问：需要 Mac 上的隔离测试服务（配对 + AI）。先确认它连得上，连不上就停在这一步并说清楚。
-    if (-not $Url) { Fail 4 '没有给隔离测试服务地址（-Url），问讲解必须配对 Mac 上的测试服务' }
+    # ④ 前提：隔离测试服务必须连得上，连不上就停在这一步并说清楚
+    if (-not $Url) { Fail 4 '没有给隔离测试服务地址（-Url），问讲解必须连 Mac 上的测试服务' }
     $u = [uri]$Url
     $tcp = New-Object Net.Sockets.TcpClient
     $reach = $false
     try { $reach = $tcp.ConnectAsync($u.Host, $u.Port).Wait(5000) -and $tcp.Connected } catch { }
     $tcp.Close()
     if (-not $reach) { Fail 4 "测试服务 $($u.Host):$($u.Port) 5 秒内连不上，讲解问不出去（端口写错或服务没起）" }
-    if (-not $PairCode) { Fail 4 '没有配对码（-PairCode），客户端无法配对测试服务' }
-    Fail 4 '服务连得上，但「选中就问」的界面驱动还没写完（步骤 4–7 待补）'
+    if (-not $Selection -or -not (Test-Path $Selection)) { Fail 4 '没有可信选段文件（-Selection）' }
+    # ④ 选中就问出讲解：跳到可信选段所在页 → 文字视图 → 点该段的「讲解这段」→ 同意发给 Mac → 等讲解或报错
+    $sel = Get-Content $Selection -Raw -Encoding UTF8 | ConvertFrom-Json
+    $physPage = [int]([regex]::Match($sel.blocks[0].id, ':p(\d+):').Groups[1].Value)
+    $g = Await-Text 4 'goto' @('前往') 10
+    if (-not $g) { Fail 4 '找不到页码跳转的「前往」' }
+    Click-At ($g.X - 106) $g.Y; Send-Keys '^a'; Send-Keys "$physPage"; Start-Sleep -Milliseconds 500
+    Click-At $g.X $g.Y; Start-Sleep -Seconds 3
+    Click-Label 4 @('看文字') '找不到「看文字」'; Start-Sleep -Seconds 2
+    Click-Label 4 @('讲解') '找不到「讲解」'; Start-Sleep -Seconds 3
+    $lines = Shot 4 'blocks'
+    # 可信选段所在的段落：用它开头的几个词在屏幕上定位，再取它下面最近的「讲解这段」
+    $words = (($sel.selection -replace '[^A-Za-z ]', ' ').Trim() -split '\s+' | Select-Object -First 4) -join ''
+    $para = $null; foreach ($l in $lines) { if ($l.Text -replace '[^A-Za-z]', '' -like "*$words*") { $para = Find-Text @($l) ($l.Text.Substring(0, 6)); break } }
+    $buttons = @(Find-All $lines '讲解这段')
+    $target = if ($para) { $buttons | Where-Object { $_.Y -gt $para.Y } | Select-Object -First 1 } else { $null }
+    if (-not $target) { Fail 4 '讲解模式下找不到可信选段所在段落的「讲解这段」' }
+    Click-At $target.X $target.Y
+    $c = Await-Text 4 'consent' @('允许并讲解') 15
+    if ($c) { Click-At $c.X $c.Y }       # 这本书第一次讲解的同意框（开发验收允许点）
+    $deadline = (Get-Date).AddSeconds(120); $outcome = $null; $errText = $null; $n = 0
+    while ((Get-Date) -lt $deadline -and -not $outcome) {
+        Start-Sleep -Seconds 4; $n++
+        Scroll-At 900 700 -5; Start-Sleep -Milliseconds 800
+        $lines = Shot 4 "result$n"
+        $e = Has $lines @('无法讲解', '尚未核实', '尚未接通', '连不上', '超时', '没有得到可核对')
+        if ($e) { $outcome = 'error'; $errText = (($lines | Where-Object { $_.Text -match '无法讲解|尚未核实|尚未接通|连不上|超时|没有得到可核对' } | Select-Object -First 1).Text) }
+        elseif (Has $lines @('出处', '来源', '引用')) { $outcome = 'ok' }
+    }
+    if ($outcome -eq 'error') { Fail 4 "服务回了拒绝：$errText" }
+    if ($outcome -ne 'ok') { Fail 4 '120 秒内既没有讲解也没有报错' }
+    Pass 4 '选中一段后得到带出处的讲解'
+    Fail 5 '尚未实现：边看边学出讲解'
 } catch {
     if ("$_" -ne 'STEP_FAILED') { Note "脚本异常：$_"; [void]$results.Add([pscustomobject]@{ Step = $results.Count + 1; Name = $steps[[Math]::Min($results.Count, 6)]; Ok = $false; Why = "脚本异常：$_" }) }
 } finally {
@@ -99,6 +143,7 @@ try {
     $summary = [pscustomobject]@{ passed = $passed; total = 7; time = (Get-Date -Format 'o'); outDir = $OutDir; server = $env:COACH_URL; steps = $results }
     $summary | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
     Stop-MyClient
+    if ($ClientSeed) { Remove-Item -Recurse -Force $client -ErrorAction SilentlyContinue }   # 配对凭据只在运行期存在
     Stop-Process -Id $gradle.Id -Force -ErrorAction SilentlyContinue
     Note "结果 $passed/7"
 }

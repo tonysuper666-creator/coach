@@ -22,11 +22,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.ParagraphStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -203,10 +201,6 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                             addStyle(SpanStyle(color = Color.Transparent, fontSize = 0.1.sp), heading.marks.first, heading.marks.last + 1)
                             addStyle(SpanStyle(fontFamily = headingFont, fontWeight = FontWeight.SemiBold, fontSize = if (heading.level <= 2) 24.sp else 21.sp),
                                 heading.title.first, heading.title.last + 1)
-                            // 标题贴着下面的正文：行高多出的部分放在上方，标题和它那一节读成一组。
-                            val lineEnd = page.text.indexOf('\n', heading.title.last + 1).let { if (it < 0) page.text.length else it + 1 }
-                            addStyle(ParagraphStyle(lineHeight = 44.sp, lineHeightStyle = LineHeightStyle(LineHeightStyle.Alignment.Bottom, LineHeightStyle.Trim.None)),
-                                heading.marks.first, lineEnd)
                         }
                         val blocks = source?.blocks.orEmpty().filter { it.page == ui.page }
                         val confirmedBlocks = if (practiceSource != null) emptyList() else if (book.format != "pdf") blocks else if (located is com.coach.desktop.reader.Located.Found && aspectOk) {

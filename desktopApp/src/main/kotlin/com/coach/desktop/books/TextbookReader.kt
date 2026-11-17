@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coach.design.tokens.CoachV7
 import com.coach.ui.theme.CoachTheme
@@ -287,6 +288,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
     }
 
     Desk(crumb = book.title, onBack = onBack, backLabel = if (source != null) { if (ui.review != null) "返回复习" else "返回学习" } else "返回书架", showNavigation = false, hasMargin = false,
+        paperMaxWidth = if (textView) Dp.Infinity else Dp.Unspecified,
         status = "${book.pageLabel(ui.page)} · 共 $lastPage ${if (book.format == "pptx") "张" else "页"}", directory = {
             Text("教材目录", style = MaterialTheme.typography.titleMedium)
             for (lesson in book.lessons) TextButton(onClick = { turnTo(lesson.firstPage) }, enabled = !ui.busy) { Text(lesson.title) }
@@ -316,7 +318,7 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
             sourceWarning?.let { Text(it, color = v7Alert(), style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("source-anchor-status")) }
             Box(Modifier.weight(1f).fillMaxWidth().background(MaterialTheme.colorScheme.surface).testTag("reader-page")
-                .focusRequester(pageFocus).focusable().onFocusChanged { pageFocused = it.hasFocus }
+                .focusRequester(pageFocus).onFocusChanged { pageFocused = it.isFocused }
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     // Ctrl/Alt/Win 组合留给系统；纯方向键才翻页。
@@ -325,15 +327,19 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         else readerPagingTurn(event.key, typing)
                     turn?.let(::turnLayout) ?: return@onPreviewKeyEvent false
                     true
-                }) {
+                }.focusable()) {
                 if (explainOpen) BookExplainPanel(book, ui.page, explainConsent, explainer)
                 else if (textView) {
-                    val ranges = remember(book.pages, source, practiceSource) {
+                    val ranges = remember(book.pages, source, practiceSource, ui.page, quoteAnchor, located, aspectOk) {
                         val result = mutableMapOf<Int, List<IntRange>>()
                         if (practiceSource == null) {
                             source?.blocks.orEmpty().groupBy { it.page }.forEach { (number, blocks) ->
                                 val stored = book.page(number)?.text.orEmpty()
-                                result[number] = blocks.filter { it.start >= 0 && it.end > it.start &&
+                                val confirmed = if (book.format != "pdf" || book.page(number)?.ocr == true) blocks
+                                    else if (number == ui.page && located is com.coach.desktop.reader.Located.Found && aspectOk)
+                                        blocks.filter { !it.heading && it.text == quoteAnchor }.take(1)
+                                    else emptyList()
+                                result[number] = confirmed.filter { it.start >= 0 && it.end > it.start &&
                                     it.end <= stored.length && stored.substring(it.start, it.end) == it.text }
                                     .map { it.start until it.end }
                             }
@@ -353,7 +359,10 @@ internal fun TextbookReader(ui: LibraryUi, library: TextbookLibrary, support: Bo
                         result
                     }
                     BookPageView(book, paging, ranges, ::turnLayout, onPosition = { number ->
-                        if (paging.publishedImportPage != number) {
+                        // The workspace's busy indicator temporarily changes the available
+                        // height. Do not persist that transient reflow while a page save is
+                        // in flight, otherwise the new bookmark starts another save/reflow.
+                        if (!ui.busy && paging.publishedImportPage != number) {
                             paging.publishedImportPage = number
                             onPage(number)
                             session.goToPage(number)

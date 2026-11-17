@@ -145,6 +145,16 @@ class BookPageNativeWindowTest {
                     shot(window, dark, "pdf-text-return")
                     println("NATIVE_PAGINATION theme=${if (dark) "dark" else "light"} keyboardTurns=10 sourceExact=true viewRoundTrip=true; checking spread resize next")
                     edt { window.setSize(2500, minOf(window.height, 1000)) }
+                    waitFor("actual reader reaches spread threshold") {
+                        edt { val area = node(window, "book-page-layout")!!.boundsInRoot
+                            val scale = window.graphicsConfiguration.defaultTransform.scaleX
+                            area.width / scale >= 1460 }
+                    }
+                    edt {
+                        val scale = window.graphicsConfiguration.defaultTransform.scaleX
+                        val area = node(window, "book-page-layout")!!.boundsInRoot
+                        println("NATIVE_SIZE awtWidth=${window.width} scale=$scale readerPx=${area.width} readerDp=${area.width / scale}")
+                    }
                     waitFor("two touching sheets") { node(window, "book-sheet-1") != null }
                     shot(window, dark, "wide-spread")
                     edt { window.setSize(1100, minOf(window.height, 850)) }

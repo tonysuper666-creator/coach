@@ -122,7 +122,7 @@ def operation(path):
         yield
 
 
-def start(path, source_head, database, stop, launch):
+def start(path, source_head, database, stop, launch, after_ready=None):
     """Hold the operation lock across stop, offline revoke AND startup decision.
 
     stop() must independently wait for the owned JVM and managed children to
@@ -138,6 +138,8 @@ def start(path, source_head, database, stop, launch):
         require(Path(policy['binding']['database']) == Path(database).resolve(strict=True))
         if source_head in policy['capableHeads']:
             launch()
+            if after_ready is not None:
+                after_ready()
             return
         durable_marker(blocked)
         try:
@@ -154,3 +156,7 @@ def start(path, source_head, database, stop, launch):
             raise
         blocked.unlink()
         sync_directory(blocked.parent)
+        # Pair-code writes must finish before another switch/revoke can acquire
+        # the operation lock. A pairing failure does not undo a ready service.
+        if after_ready is not None:
+            after_ready()

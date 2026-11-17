@@ -50,7 +50,7 @@ PR #373 已合并为 `3312d2c954fe3fa5e49eb21f8ada1b0a906984d1`，包含 `friend
 
 ## 执行器适配与隔离演练
 
-**不创建或部署 `friend-start-policy.json`，不 arm `friend_service_guard`，不部署 launcher。** 已合的 `ton1175_switch.py friendAccess` 仍要求策略和持久 helper，不能直接用于本方案；后续执行器适配须去掉该依赖，只允许新增朋友端口和配置，保留其他配置、活动保护及指针事务，再交冻结候选审查。TON-1663 的原 stage 固定旧候选，不复用其审批。历史入口归档/拒绝桩另列 backlog 卫生工作，不挡 TON-1688，也不宣称同用户权限隔离。
+**不创建或部署 `friend-start-policy.json`，不 arm `friend_service_guard`，不部署 launcher。** `ton1175_switch.py` 的新方案使用仅含 `publicPort`、`config` 的 `friendAccess`；无需策略、持久 helper 或吊销。stage 记录 `friendCredentialDomain=coach-friend-v1`、初始暂停配置及控制器文件哈希，switch 前复核配置权限、内容、端口空闲及控制器。这个标记不证明二进制能力，冻结候选审查和实际旧/新 JVM 演练仍须证明包含朋友哈希域实现。仅新增两个朋友变量，保留原 HOME、API state、其他配置、900 秒活动保护、指针事务及五分钟验收失败回滚。恢复仍核对控制器，不依赖朋友配置存在、仍暂停或朋友端口空闲；不调用 Funnel 或离线吊销。旧三字段（含 `policy`）模式仅保留历史 stage 的原约束和恢复兼容，不用于新生产方案，不把旧 stage 静默转成新模式。TON-1663 的原 stage 固定旧候选，不复用其审批。历史入口归档/拒绝桩另列 backlog 卫生工作，不挡 TON-1688，也不宣称同用户权限隔离。
 
 生产前仍需 reviewer 和独立 cross_review 对实际冻结候选、执行器和恢复方案复核；两者与执行者异厂，且彼此不是同一人或同一模型。代码普通审查不等于生产审批。
 
@@ -98,7 +98,7 @@ package/probe 证明原生安装、配对、讲解和截图流程，不证明朋
 | #371 协议探针与 9 项安全测试 | 已由异厂 reviewer 验收并合并；不是本次重新实跑或生产验收 |
 | #373 原生驱动及 package/probe 代码 | 已由异厂 reviewer 验收并合并；Actions、实际包安装及外网未验证 |
 | 实际安装及空 Funnel | 租约释放后重查：实际源码 `4c99ac32`，Funnel 空；私有配置哈希另存，不证明当前空闲 |
-| 执行器适配 | 旧 guard 方案已停止推进、未部署；无策略的朋友配置适配和冻结候选完整指针事务待验证 |
+| 执行器适配 | 新增无策略的朋友配置适配；旧 guard 未部署。fixture 事务及故障恢复另验，冻结候选完整指针事务、实际生产控制器 CLI 和原生五分钟验收仍待验证 |
 | 历史 guard 方案的实际旧/新 JVM 隔离回滚、错误方法真实监听 | `4c99ac32` 实际安装与 `e244d664` 构建产物演练通过：20 条私有路径、4 组错误方法；owner、新事件、非零预算文件及产物保留，朋友 token/待用码拒绝；未包含 LaunchAgent、bridge、真实费用或原生客户端 |
 | 哈希域代码与隔离 JVM | `093964d6` 源码：store/app 共 383 项测试（含新增 7 项）通过，无跳过；实际旧安装 `4c99ac32` 与候选 JVM 不经 guard/吊销降级，未撤销朋友 token/待用码均拒绝，owner/新事件/非零预算 fixture/产物保留；回到候选朋友仍有效，残留朋友名的旧 owner 码拒绝。20 条私有路径、4 组错误方法通过；不是指针事务、bridge/真实费用或原生验收 |
 | 哈希域候选的生产 reviewer + cross_review | 未取得 |

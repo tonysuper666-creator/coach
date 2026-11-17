@@ -8,8 +8,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$out = Join-Path $Evidence (Get-Date -Format 'yyyyMMdd-HHmmss')
+$out = Join-Path $Evidence ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force $out | Out-Null
+$out = (Resolve-Path $out).Path
 $args2 = "-Repo '$repo' -OutDir '$out' -Book '$Book'"
 if ($Url) { $args2 += " -Url '$Url'" }
 if ($KeepGoing) { $args2 += ' -KeepGoing' }

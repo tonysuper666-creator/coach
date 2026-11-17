@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -26,7 +27,7 @@ import kotlinx.coroutines.CancellationException
 /**
  * 「做题学」答完之后的讲解：同一本书只问一次能不能把这段发出去，问过之后才连已配对的 Mac。
  * [load] 每次进入这张卡都重读配对文件，所以在原文页配好对回到这里就能直接用。
- * [explain] 是唯一的网络入口，测试传一个本地函数即可，不碰网络。
+ * [explain] 与 [ask] 复用同一配对通道，测试传本地函数即可，不碰网络。
  */
 internal class AnswerExplain(
     val consent: ExplainConsent,
@@ -35,7 +36,13 @@ internal class AnswerExplain(
     val paired: () -> Boolean,
     val explain: suspend (chosen: SourceBlock, blocks: List<SourceBlock>) -> ExplainResult,
     val revoked: () -> Boolean = { false },
-)
+    val ask: (suspend (SourceBlock, String) -> ExplainResult)? = null,
+) {
+    // Generated practice is deliberately window-local: never grade it with the saved cloze key.
+    val practices = mutableStateMapOf<String, GeneratedPractice>()
+    val answers = mutableStateMapOf<String, PracticeAnswer>()
+    val recaps = mutableStateMapOf<String, com.coach.domain.LadderSession>()
+}
 
 /** Windows 主机的接线：配对与「这本书允许吗」沿用原文页已有的那一套，不另建通道。 */
 internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent) = AnswerExplain(
@@ -45,6 +52,7 @@ internal fun answerExplainWith(explainer: BookExplainer, consent: ExplainConsent
     paired = { explainer.identity != null },
     explain = { chosen, blocks -> explainer.explain(chosen, blocks) },
     revoked = { explainer.revoked },
+    ask = { chosen, question -> explainer.ask(chosen, question) },
 )
 
 /**
@@ -162,13 +170,14 @@ internal fun LessonSummaryCard(
     lesson: BookLesson,
     practice: Practice,
     answer: PracticeAnswer,
+    temporary: Boolean = false,
     nav: @Composable () -> Unit,
 ) {
     V7ExpandIn {
         PaperCard(Modifier.v7Resize().testTag("book-summary-card"), contentPadding = PaddingValues(16.dp)) {
             Text("小结", style = MaterialTheme.typography.titleMedium)
             Text("这一节：${lesson.title}", style = MaterialTheme.typography.bodyMedium)
-            Text(summaryLine(practice, answer), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("book-summary-detail"))
+            Text(summaryLine(practice, answer, temporary), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag("book-summary-detail"))
             Text("原文在「${lesson.title}」这一节，第 ${lesson.firstPage} 页起；要回看时再打开。",
                 style = MaterialTheme.typography.bodySmall, color = CoachTheme.colors.fgSecondary)
             nav()
@@ -176,7 +185,9 @@ internal fun LessonSummaryCard(
     }
 }
 
-private fun summaryLine(practice: Practice, answer: PracticeAnswer): String {
+private fun summaryLine(practice: Practice, answer: PracticeAnswer, temporary: Boolean): String {
+    if (temporary) return if (answer.guessed) "你把这次作答标记为猜的，选对也不计作独立答对。题目和作答只保留在这次练习中。"
+        else "你选了「${answer.text}」，${if (answer.text == practice.answer) "与本题答案一致" else "本题答案是「${practice.answer}」"}。题目和作答只保留在这次练习中。"
     if (answer.guessed) return "你把这次作答标记为猜的，已留在复习里；选对也不计作独立答对。"
     val picked = answer.text.trim()
     return if (practice.options.isNotEmpty()) {
@@ -188,6 +199,109 @@ private fun summaryLine(practice: Practice, answer: PracticeAnswer): String {
             true -> "你写下了 $written 个字，并标记了已理解。"
             false -> "你写下了 $written 个字，并标记了还需复习。"
             null -> "你写下了 $written 个字，还没标记是否理解。"
+        }
+    }
+}
+
+
+internal data class GeneratedPractice(val practice: Practice, val explanation: BookLearningReply.Text)
+
+/** The existing cited selection-answer channel returns one plain paragraph, not a new API schema. */
+internal object LessonPracticeWire {
+    const val question = "为了检验我是否理解这段，请给一道中文四选一练习。把题干、四个选项、正确答案和答后解析写在同一段，依次用这些分隔词：题干：… 选项A：… 选项B：… 选项C：… 选项D：… 答案：A 解析：…。只考这段支持的一个知识点，只有一个正确选项，其他选项是明确错误的理解；解析说明为什么。不要摘抄原文长句，不要换行。依据不够就说明原因。"
+
+    fun parse(book: Textbook, chosen: SourceBlock, result: Explanation): GeneratedPractice? {
+        if (result.citations.isEmpty() || result.citations.any { it.blockId != chosen.id || it.page != chosen.page }) return null
+        val text = result.citations.fold(result.text) { value, citation -> value.replace("【${citation.anchor}】", "") }.trim()
+        val pattern = Regex("题干[：:]\\s*(.+?)\\s*选项A[：:]\\s*(.+?)\\s*选项B[：:]\\s*(.+?)\\s*选项C[：:]\\s*(.+?)\\s*选项D[：:]\\s*(.+?)\\s*答案[：:]\\s*([A-D])\\s*[；;。]?\\s*解析[：:]\\s*(.+)", RegexOption.DOT_MATCHES_ALL)
+        val match = pattern.matchEntire(text) ?: return null
+        val parts = match.groupValues.drop(1).map { it.trim().trimEnd('；', ';') }
+        val options = parts.subList(1, 5)
+        if (parts.any { it.isBlank() } || options.distinct().size != 4 || parts[0].length > 1000 || options.any { it.length > 600 }) return null
+        val source = runCatching { BookPassage.from(book, chosen) }.getOrNull() ?: return null
+        return GeneratedPractice(Practice(parts[0], chosen.text, options[parts[5][0] - 'A'], options),
+            BookLearningReply.Text(parts[6], listOf(source)))
+    }
+}
+
+/** One provider call makes both the question and hidden answer explanation; navigation never recharges it. */
+@Composable
+internal fun GeneratedLessonPractice(
+    book: Textbook, lesson: BookLesson, gate: AnswerExplain,
+    sourceFocus: androidx.compose.ui.focus.FocusRequester,
+    sources: @Composable (List<BookPassage>) -> Unit,
+    onSource: (Practice) -> Unit, onRepair: () -> Unit, nav: @Composable () -> Unit,
+) {
+    val key = "${book.id}:${lesson.id}"
+    var allowed by remember(book.id) { mutableStateOf(gate.consent.allowed(book.id)) }
+    var attempt by remember(key) { mutableStateOf(0) }
+    var failure by remember(key) { mutableStateOf<BookLearningReply.Unavailable?>(null) }
+    val generated = gate.practices[key]
+    LaunchedEffect(gate, key, attempt, allowed) {
+        gate.load()
+        if (generated != null || !allowed || !gate.paired()) return@LaunchedEffect
+        failure = null
+        val chosen = lesson.blocks.firstOrNull { !it.heading && it.text.trim().length in 40..4000 }
+        if (chosen == null) {
+            failure = BookLearningReply.Unavailable("这一节没有足够的正文可以出题，请从目录选择有正文的一节。")
+            return@LaunchedEffect
+        }
+        try {
+            when (val result = checkNotNull(gate.ask).invoke(chosen, LessonPracticeWire.question)) {
+                is ExplainResult.Refused -> failure = BookLearningReply.Unavailable(result.message, result.trouble)
+                is ExplainResult.Done -> {
+                    val parsed = LessonPracticeWire.parse(book, chosen, result.explanation)
+                    if (parsed == null) failure = BookLearningReply.Unavailable("这次没有得到格式完整、出处可核对的选择题，可以重试。")
+                    else gate.practices[key] = parsed
+                }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { failure = BookLearningReply.Unavailable("出题暂时读不到，可以重试或先读原文。") }
+    }
+    when {
+        generated != null -> {
+            val answer = gate.answers[key] ?: PracticeAnswer()
+            Text("本次练习", Modifier.testTag("generated-practice"), style = MaterialTheme.typography.labelMedium)
+            SourcePractice(lesson.id, QuestionMode.CHOICE, generated.practice, answer, { updated ->
+                gate.answers[key] = updated
+                if (updated.revealed) {
+                    val q = com.coach.domain.LadderQuestion(key, lesson.id, lesson.id, "concept", 1, key, key, syntheticOnly = true)
+                    gate.recaps[book.id] = com.coach.domain.QuestionLadder.record(gate.recaps[book.id] ?: com.coach.domain.LadderSession(),
+                        q, false, generated.explanation.text)
+                }
+            }, { onSource(generated.practice) }, true, sourceFocus, showReference = false, temporary = true)
+            if (answer.revealed) {
+                PaperCard(Modifier.testTag("book-lesson-explanation"), contentPadding = PaddingValues(16.dp)) {
+                    Text("答后讲解", style = MaterialTheme.typography.titleMedium)
+                    Text(generated.explanation.text, Modifier.testTag("book-explanation-text"))
+                    sources(generated.explanation.sources)
+                }
+                val recap = gate.recaps[book.id]
+                if (recap?.recapOpen == true) KnowledgeRecapCard(recap) {
+                    gate.recaps[book.id] = com.coach.domain.QuestionLadder.closeRecap(recap)
+                }
+                LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true, nav = nav)
+            } else nav()
+        }
+        !gate.ready() -> Text("正在看这台电脑和 Mac 的连接…")
+        !gate.paired() -> {
+            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "出题需要连上已配对的 Mac。")
+            V7TextButton(onRepair) { Text("去原文页配对") }
+            nav()
+        }
+        !allowed -> {
+            Text(ExplainPrivacy.ask(book.title) + "这次用它生成选择题和答后讲解，题目只用于这次练习。")
+            PrimaryButton({ gate.consent.allow(book.id); allowed = true }, Modifier.testTag("practice-allow")) { Text("允许并出题") }
+            nav()
+        }
+        failure != null -> {
+            ExplainTroubleLine(checkNotNull(failure), onRetry = { attempt++ }, onRepair = onRepair,
+                modifier = Modifier.testTag("practice-unavailable"))
+            nav()
+        }
+        else -> {
+            Text("正在按本节原文出题…", Modifier.testTag("practice-loading"))
+            nav()
         }
     }
 }

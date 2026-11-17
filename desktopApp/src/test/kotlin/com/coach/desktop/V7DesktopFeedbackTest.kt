@@ -6,6 +6,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -91,6 +92,32 @@ class V7DesktopFeedbackTest {
         waitForIdle()
         onNodeWithText("返回书架").assertDoesNotExist()
     }
+
+    @Test fun tooltipSitsAboveABottomEdgeAnchorAndStaysWhileThePointerRests() =
+        runSkikoComposeUiTest(size = Size(400f, 240f), density = Density(1f)) {
+            setContent { CoachTheme(false) {
+                Box(Modifier.fillMaxSize().background(Theme.colors.bgCanvas),
+                    contentAlignment = Alignment.BottomCenter) {
+                    V7Tooltip("上一页", Modifier.testTag("tip")) {
+                        Box(Modifier.size(88.dp, 32.dp).testTag("anchor")) { Text("上一页按钮") }
+                    }
+                }
+            } }
+            mainClock.autoAdvance = false
+            onNodeWithTag("tip").performMouseInput { moveTo(center) }
+            mainClock.advanceTimeBy(600)
+            waitForIdle()
+            onNodeWithText("上一页").assertExists()
+            val tip = onNodeWithText("上一页").fetchSemanticsNode().boundsInRoot
+            val anchor = onNodeWithTag("anchor").fetchSemanticsNode().boundsInRoot
+            val overlaps = tip.left < anchor.right && anchor.left < tip.right &&
+                tip.top < anchor.bottom && anchor.top < tip.bottom
+            assertFalse(overlaps, "提示不能盖住锚点：tooltip=$tip anchor=$anchor")
+            assertTrue(tip.bottom <= anchor.top, "底边锚点上方放得下时应放在上方：tooltip=$tip anchor=$anchor")
+            mainClock.advanceTimeBy(1500)
+            waitForIdle()
+            onNodeWithText("上一页").assertExists()
+        }
 
     @Test fun scrollbarExpandsWithoutMovingContentAndDragsTheActualScrollState() {
         for (dark in listOf(false, true)) runSkikoComposeUiTest(size = Size(260f, 240f), density = Density(1f)) {

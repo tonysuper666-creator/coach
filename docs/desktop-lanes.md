@@ -35,6 +35,10 @@
 - `ReaderRemote.kt`、`ReaderHostController.kt`、`LocalBooksReaderSource.kt` 等数据接线仍按实际文件
   申领，不因界面泳道不同而允许同时修改。课程配对入口 `CoachDesktop.kt` / `DesktopCourseHost.kt`
   与本机教材外壳分开，不能将两者的身份或数据源混用。
+- `shared/ui/src/jvmMain/kotlin/com/coach/ui/v7/V7Tooltip.kt` 是阅读底栏、导航图标等所有 V7 提示
+  共用的壳；改它的定位、延迟或外观会同时改变全部调用点，改动须列出受影响的调用方。
+  `desktopApp/src/test/kotlin/com/coach/desktop/V7DesktopFeedbackTest.kt` 是这个壳的回归，
+  两者一起申领、一起交付（TON-1658 的提示定位修复占用中）。
 
 拆分只移动原有顶层声明，包名、函数调用、`remember` / effect 的位置与 key、状态拥有者、测试标签、
 文案和回调顺序保持不变。跨文件调用需要的少量 `private` 声明改为模块内 `internal`，不开放公共 API。

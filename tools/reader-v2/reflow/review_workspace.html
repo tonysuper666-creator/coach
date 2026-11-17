@@ -18,10 +18,14 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 .work {min-width:0;display:flex;flex-direction:column;padding:16px 20px;gap:12px;overflow:auto}
 .toolbar {display:flex;gap:10px;align-items:center;flex-wrap:wrap} #name {font-weight:600;overflow-wrap:anywhere;margin-right:auto}
 .panes {display:grid;grid-template-columns:1fr 1fr;gap:16px;min-height:240px;flex:1}
+.panes.comparing {grid-template-columns:1fr 1fr 1fr}
 .pane {display:flex;flex-direction:column;min-width:0;min-height:0} h2 {font-size:15px;font-weight:500;margin:0 0 6px}
+.pane[hidden] {display:none} .compare-controls {display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.compare-controls select {min-width:0;width:100%} #compareStatus {margin:0 0 6px;color:var(--muted);overflow-wrap:anywhere}
 .viewport {background:#dddcd7;border:1px solid var(--line);overflow:auto;flex:1;min-height:220px;position:relative}
 .canvas {position:relative;width:100%;line-height:0} .canvas img {display:block;width:100%;height:auto;max-width:none}
 .marker {position:absolute;border:2px solid #a85c1b;pointer-events:none}.marker.current {border:3px solid #087a42;box-shadow:0 0 0 1px #fff}
+.marker.compared {border:3px dashed #2768c4;box-shadow:0 0 0 1px #fff}
 .marker.draft {border:3px dashed #b24820} #pageCanvas.drawing {cursor:crosshair;touch-action:none;user-select:none}
 .editor {border:1px solid var(--line);padding:10px;display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap}
 .editor input {font:inherit;color:inherit;background:var(--field);border:1px solid var(--line);padding:5px;width:80px}
@@ -30,7 +34,7 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 .decision {display:flex;align-items:center;gap:10px;flex-wrap:wrap} #status {color:var(--muted);margin-right:auto}
 #message {min-height:24px;color:var(--muted);margin:0} .note {font-size:13px;color:var(--muted);margin:0}
 @media (prefers-color-scheme:dark) {:root {--paper:#232723;--ink:#eeeade;--line:#53594f;--muted:#bdc2b6;--accent:#377454;--field:#2c312b}.viewport {background:#41453f}}
-@media (max-width:950px) {main {grid-template-columns:170px 1fr;height:auto;min-height:calc(100vh - 84px)} .panes {grid-template-columns:1fr}.viewport {height:48vh;flex:auto} .work {overflow:visible} header {padding:12px 16px} header p {flex-basis:100%}}
+@media (max-width:950px) {main {grid-template-columns:170px 1fr;height:auto;min-height:calc(100vh - 84px)} .panes,.panes.comparing {grid-template-columns:1fr}.viewport {height:48vh;flex:auto} .work {overflow:visible} header {padding:12px 16px} header p {flex-basis:100%}}
 </style>
 <header><h1>裁片复核</h1><p>对照原页逐张检查。所有内容仅在本机打开。</p>
 <label class="file">继续上次复核<input id="resume" type="file" accept="application/json,.json"></label>
@@ -40,8 +44,15 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 <div class="toolbar"><span id="name"></span><button id="previous">上一张</button><button id="next">下一张</button>
 <label>缩放 <select id="zoom"><option value="fit">适合宽度</option><option value="1">原尺寸 100%</option><option value="2">放大 200%</option></select></label></div>
 <div class="panes">
-<section class="pane"><h2>完整原页 · 绿框为当前裁片，棕框为其他候选</h2><div class="viewport" id="pageView"><div class="canvas" id="pageCanvas"><img id="page" alt="完整原页" draggable="false"><div id="markers"></div></div></div></section>
+<section class="pane"><h2>完整原页 · 绿框为当前裁片，蓝框为对照裁片</h2><div class="viewport" id="pageView"><div class="canvas" id="pageCanvas"><img id="page" alt="完整原页" draggable="false"><div id="markers"></div></div></div></section>
 <section class="pane"><h2>裁片 · 请切到原尺寸检查边缘与小字</h2><div class="viewport" id="cropView"><div class="canvas" id="cropCanvas"><img id="crop" alt="当前裁片"></div></div></section>
+<section class="pane" id="comparison" aria-label="比较相交裁片" hidden>
+<h2 id="compareHeading">比较相交裁片</h2>
+<div class="compare-controls"><select id="compareChoice" aria-label="选择相交裁片"></select><button id="openComparison">切到这张继续复核</button></div>
+<p id="compareStatus"></p>
+<div class="viewport" id="compareView"><div class="canvas" id="compareCanvas"><img id="compareCrop" alt="相交裁片的原预览"></div></div>
+<p class="note">这里只列与当前原框直接相交的裁片。相交不代表同一对象；请对照原页检查，所有版本都保留。</p>
+</section>
 </div>
 <div class="editor" aria-label="调整裁图边界">
 <button id="draw" aria-pressed="false">在原页重新画框</button>
@@ -57,7 +68,7 @@ nav {padding:14px;border-right:1px solid var(--line);overflow:auto} #progress {c
 <label><input type="checkbox" id="labels">标题、图注、表注和来源齐全</label>
 <label><input type="checkbox" id="noProseOrDuplicate">不混入正文，只保留完整的一份</label>
 </div>
-<div class="decision"><span id="status" role="status"></span><button id="reset">留待复核</button><button id="reject">拒绝这张</button><button id="approve" class="primary">批准完整对象</button></div>
+<div class="decision"><span id="status" role="status"></span><button id="reset">留待复核</button><button id="reject">拒绝这张</button><button id="approve" class="primary">批准完整对象</button><button id="replaceApproval" hidden></button></div>
 <p id="message" role="alert"></p><p class="note">保存后会下载复核文件。只有明确批准的对象才能导出入库；未审和拒绝的对象不会入库。关闭前请保存进度。勾选是人工声明，不能代替对照原页。</p>
 </section></main>
 <script id="batch" type="application/json">__BATCH__</script>
@@ -71,6 +82,7 @@ let rows = batch.items.map(item => ({id:item.id, review:item.review, decision:"U
   checks:Object.fromEntries(checkIds.map(id => [id,false]))}));
 let index = 0, loaded = false, generation = 0, dirty = false;
 let edits = rows.map(() => null), drawing = false, drag = null;
+let compareIndex = null;
 const edges = ["left", "top", "right", "bottom"];
 function overlaps(a,b) {return a.page===b.page && a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom;}
 function message(text) {$("message").textContent = text;}
@@ -84,15 +96,50 @@ function stats() {
     button.addEventListener("click", () => show(i)); return button;
   }));
   $("status").textContent = edits[index] ? "改框草稿 · 须重新生成预览" : labels[rows[index].decision];
+  renderComparison(); updateApproval();
+}
+function conflicts() {
+  return rows.filter((r,i)=>i!==index && r.decision==="COMPLETE_OBJECT_WITH_LABELS" &&
+    overlaps(rows[index].review.selection,r.review.selection));
 }
 function updateApproval() {
-  $("approve").disabled = !loaded || !!edits[index] || drawing || !checkIds.every(id => $(id).checked);
+  const disabled = !loaded || !!edits[index] || drawing || !checkIds.every(id => $(id).checked);
+  $("approve").disabled = disabled;
+  const count=conflicts().length;
+  $("replaceApproval").hidden = count===0;
+  $("replaceApproval").disabled = disabled || count===0;
+  $("replaceApproval").textContent = `改用当前裁片，撤销 ${count} 张相交批准`;
   for (const id of checkIds) $(id).disabled = !!edits[index] || drawing;
+}
+function renderComparison() {
+  const s=rows[index].review.selection;
+  const peers=rows.map((r,i)=>i).filter(i=>i!==index && overlaps(s,rows[i].review.selection));
+  if(!peers.includes(compareIndex)) compareIndex=peers[0] ?? null;
+  $("comparison").hidden=peers.length===0;
+  document.querySelector(".panes").classList.toggle("comparing",peers.length>0);
+  $("compareHeading").textContent=`比较相交裁片 · ${peers.length} 张`;
+  $("compareChoice").replaceChildren(...peers.map(i=>{
+    const option=document.createElement("option");option.value=String(i);
+    option.textContent=`${rows[i].id} · ${edits[i] ? "有改框草稿" : labels[rows[i].decision]}`;
+    return option;
+  }));
+  renderMarkers();
+  if(compareIndex===null) {$("compareCrop").removeAttribute("src");return;}
+  $("compareChoice").value=String(compareIndex);
+  $("compareStatus").textContent=edits[compareIndex] ? "原预览 · 此版本有改框草稿，须重新生成预览" :
+    `原预览 · ${labels[rows[compareIndex].decision]}`;
+  if($("compareCrop").getAttribute("src")!==batch.items[compareIndex].image) {
+    $("compareCrop").src=batch.items[compareIndex].image;
+    $("compareView").scrollTop=0;$("compareView").scrollLeft=0;
+  }
+  zoom();
 }
 function zoom() {
   const scale = $("zoom").value;
-  for (const [canvas, img] of [["pageCanvas","page"],["cropCanvas","crop"]]) {
-    const s=edits[index], width=img==="crop" && s ? s.right-s.left : $(img).naturalWidth;
+  for (const [canvas, img] of [["pageCanvas","page"],["cropCanvas","crop"],["compareCanvas","compareCrop"]]) {
+    const s=img==="crop" ? (edits[index] || rows[index].review.selection) :
+      img==="compareCrop" && compareIndex!==null ? rows[compareIndex].review.selection : null;
+    const width=s ? s.right-s.left : $(img).naturalWidth;
     $(canvas).style.width = scale === "fit" ? "100%" : `${width * Number(scale)}px`;
   }
 }
@@ -116,7 +163,7 @@ function renderMarkers() {
   const row=rows[index], s=row.review.selection, context=batch.pages[s.page];
   $("markers").replaceChildren(...rows.filter(r => r.review.selection.page===s.page).map(r => {
     const marker = document.createElement("div"), box = r.review.selection;
-    marker.className = `marker${r===row ? " current" : ""}`;
+    marker.className = `marker${r===row ? " current" : r===rows[compareIndex] ? " compared" : ""}`;
     Object.assign(marker.style, {left:`${100*box.left/context.width}%`,top:`${100*box.top/context.height}%`,
       width:`${100*(box.right-box.left)/context.width}%`,height:`${100*(box.bottom-box.top)/context.height}%`});
     return marker;
@@ -168,15 +215,23 @@ function point(event) {
   return {x:Math.max(0,Math.min(page.width,(event.clientX-rect.left)*page.width/rect.width)),
     y:Math.max(0,Math.min(page.height,(event.clientY-rect.top)*page.height/rect.height))};
 }
-function decide(decision) {
+function decide(decision, replace=false) {
   const row = rows[index];
+  let revoked=0;
   if (decision==="COMPLETE_OBJECT_WITH_LABELS") {
     if (!loaded || edits[index] || drawing || !checkIds.every(id => $(id).checked)) return;
-    if (rows.some(other => other!==row && other.decision==="COMPLETE_OBJECT_WITH_LABELS" && overlaps(row.review.selection,other.review.selection))) {
-      message("与另一张已批准裁片重叠。请先拒绝重复版本，再保留完整的一份。"); return;
+    const others=conflicts();
+    if (others.length && !replace) {
+      message("与已批准裁片重叠。请比较版本；确认改用当前裁片时，可撤销相交批准。"); return;
+    }
+    // Explicitly revoke only direct conflicts, never transitive neighbours or all same-page items.
+    // Revoked versions remain available for review; intersection is not semantic duplication.
+    for (const other of others) {
+      other.decision="UNREVIEWED";other.checks=Object.fromEntries(checkIds.map(id=>[id,false]));revoked++;
     }
   }
-  row.decision = decision; dirty=true; stats(); message("已记录，请保存复核进度。");
+  row.decision = decision; dirty=true; stats();
+  message(revoked ? `已批准当前裁片；${revoked} 张相交批准已撤销并清空勾选，保留待复核。请保存进度。` : "已记录，请保存复核进度。");
 }
 function validateResume(saved) {
   if (!saved || saved.schema!==1 || !Array.isArray(saved.items) || saved.items.length!==rows.length) throw Error();
@@ -202,6 +257,12 @@ for (const id of checkIds) $(id).addEventListener("change", () => {
 $("previous").addEventListener("click", () => show(Math.max(0,index-1)));
 $("next").addEventListener("click", () => show(Math.min(rows.length-1,index+1)));
 $("zoom").addEventListener("change", zoom);
+$("compareChoice").addEventListener("change",()=>{
+  compareIndex=Number($("compareChoice").value);renderComparison();
+  $("compareView").scrollTop=0;$("compareView").scrollLeft=0;
+});
+$("openComparison").addEventListener("click",()=>{if(compareIndex!==null)show(compareIndex);});
+$("compareCrop").addEventListener("error",()=>{if(compareIndex!==null)message("相交裁片未能完整打开，请重新生成预览。");});
 $("draw").addEventListener("click",()=>{if(loaded)setDrawing(!drawing);});
 $("pageCanvas").addEventListener("pointerdown",event=>{
   if(!drawing || !loaded || event.button!==0 || !event.isPrimary) return;
@@ -262,6 +323,7 @@ $("resumeEdits").addEventListener("change",async event=>{
   event.target.value="";
 });
 $("approve").addEventListener("click", () => decide("COMPLETE_OBJECT_WITH_LABELS"));
+$("replaceApproval").addEventListener("click", () => decide("COMPLETE_OBJECT_WITH_LABELS",true));
 $("reject").addEventListener("click", () => decide("REJECTED"));
 $("reset").addEventListener("click", () => decide("UNREVIEWED"));
 $("save").addEventListener("click", () => {

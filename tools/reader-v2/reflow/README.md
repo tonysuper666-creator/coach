@@ -585,8 +585,20 @@ connections with a CSP. It shows the entire source page beside one crop, marks
 other same-page candidates and supports native-size scrolling, light/dark themes,
 previous/next navigation and save/resume. Opening or checking a crop never
 approves it; explicit approval needs all three statements. Unchecking revokes an
-approval. Two overlapping approvals are refused; the reviewer chooses one
-complete version. This is an aid to human review, not semantic deduplication,
+approval. When crops intersect, a third pane shows an alternative beside the
+current crop and full page. The green page marker identifies the current crop;
+the dashed blue marker identifies the comparison crop. Both crops use the same
+fit / 100% / 200% control. The selector lists only direct intersections on the
+same page, with each version's review status; it does not fold connected groups
+or discard any candidate. “切到这张继续复核” opens the alternative for its own review.
+
+Two overlapping approvals are refused by ordinary approval and export. After
+checking all three statements, the reviewer can explicitly choose “改用当前裁片，
+撤销 N 张相交批准”. This approves the current version and resets only its directly
+intersecting approved versions to pending, clearing their checks. Disjoint and
+other-page approvals stay unchanged. No version is auto-selected. Draft edits
+cannot be approved or replace approvals; the comparison pane labels their
+original preview. This is an aid to human review, not semantic deduplication,
 automatic label grouping, a signature or the reader's display acceptance.
 
 Prepare checks bounded PNGs, crop hashes and pixel equality with the full-page
@@ -608,6 +620,24 @@ themes and a narrow viewport. Finally export and use production `apply`; a
 successful browser save alone is not an import test. The private trial reused
 the four objects independently accepted in PR #355 and its rejected photograph;
 it adds workflow evidence, not new object coverage.
+
+The comparison browser regression creates its own two-page fixture, drives the
+actual HTML, and passes the saved replacement decisions through Python export.
+It needs Pillow in `REVIEW_PYTHON`, a Playwright Node module and Chromium:
+
+```sh
+tools/dev/heavy --local node tools/reader-v2/reflow/verify_review_comparison.cjs \
+  --python "$REVIEW_PYTHON" --playwright-module "$PLAYWRIGHT_MODULE" \
+  --browser "$CHROMIUM_EXECUTABLE"
+```
+
+Without `--out` its temporary fixture is removed after the browser closes. To
+retain self-authored screenshots and decisions, use `--out "$NEW_PRIVATE_DIR"`
+with an existing private parent and a new directory outside Git. Checks include
+direct versus transitive intersections, other-page isolation, one/two approval
+replacement, revoked checklists, draft isolation, unchanged decisions on rejected
+restore, both themes, an 800px viewport and no HTTP requests. These are offline
+review-tool checks, not the reader's 32-cell Windows acceptance.
 
 ### Correct a crop before approving it
 

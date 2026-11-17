@@ -12,6 +12,9 @@ public class WD {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
@@ -19,6 +22,7 @@ public class WD {
   [DllImport("user32.dll")] public static extern uint GetQueueStatus(uint flags);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   public static void Activate(IntPtr h) {
+    if (IsIconic(h)) ShowWindow(h, 9); // SW_RESTORE, before requesting foreground
     if (GetForegroundWindow() == h) return;
     uint ignored;
     uint foreground = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
@@ -54,7 +58,7 @@ $script:Known = @()
 $script:RepoMarker = ''   # 本次检出的目录；设置后只认命令行里带这个目录的客户端进程（别人的 Coach 窗口永远不是我的）
 function Get-ClientPids([switch]$Mine) {
     @(Get-CimInstance Win32_Process -Filter "Name='java.exe'" | Where-Object {
-        $_.CommandLine -like '*com.coach.desktop.MainKt*' -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Contains($script:RepoMarker)) } | ForEach-Object { [int]$_.ProcessId })
+        $_.CommandLine -like '*com.coach.desktop.MainKt*' -and (-not $Mine -or -not $script:RepoMarker -or $_.CommandLine.Replace('\','/').Contains($script:RepoMarker.TrimEnd([char[]]'\/').Replace('\','/') + '/desktopApp/build/')) } | ForEach-Object { [int]$_.ProcessId })
 }
 function Mark-ExistingClients { $script:Known = Get-ClientPids }
 function Find-CoachWindow {
@@ -109,6 +113,10 @@ function Save-Shot([string]$path, [IntPtr]$Window = [IntPtr]::Zero) {
     if ($Window -eq [IntPtr]::Zero) { $Window = $script:Win }
     Invoke-ForegroundStep -Window $Window -Action {
         $r = New-Object WD+RECT; [WD]::GetWindowRect($Window, [ref]$r) | Out-Null; $w = $r.R - $r.L; $h = $r.B - $r.T
+        $client = New-Object WD+RECT
+        if ([WD]::IsIconic($Window) -or -not [WD]::GetClientRect($Window, [ref]$client) -or $client.R -le 0 -or $client.B -le 0) {
+            throw 'WIN_DRIVE_FOCUS_LOST: window has no drawable client area; retry this capture'
+        }
         $bmp = New-Object System.Drawing.Bitmap $w, $h
         try {
             $g = [System.Drawing.Graphics]::FromImage($bmp)

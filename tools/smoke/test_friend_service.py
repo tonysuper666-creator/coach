@@ -21,6 +21,42 @@ adapter = module("friend_bridge", "friend-service-bridge.py")
 
 
 class ServiceIsolationTest(unittest.TestCase):
+    def test_friend_api_keeps_existing_owner_ledger_and_explicit_private_limits(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(service.Path, "home", return_value=Path(temp).resolve()):
+            state = Path(temp).resolve() / "Coach/state"
+            root = state / "isolated"
+            root.mkdir(parents=True)
+            ledger = state / "api-credit-ledger.json"
+            original = b'{"cycles":{"owner":{"spent":17,"reserved":{"pending":3},"limit":100}},"months":{}}'
+            ledger.write_bytes(original)
+            service.private_json(root / "friends.json", {"paused": True,
+                "defaults": {"daily_calls": 100, "daily_tokens": 1_000_000}})
+            config = {"friendApi": True, "apiStateDir": str(state)}
+            env = service.friend_api_environment(root, config)
+            self.assertEqual(env["COACH_API_STATE_DIR"], str(state))
+            self.assertEqual(env["COACH_FRIEND_CONFIG"], str(root / "friends.json"))
+            self.assertEqual(ledger.read_bytes(), original)
+            self.assertEqual(service.friend_api_environment(root, {}), {})
+            for change in ({"apiStateDir": str(root)}, {"apiStateDir": str(state / "missing")},
+                           {"apiStateDir": "relative"}, {"friendApi": "true"}):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    service.friend_api_environment(root, config | change)
+            for policy in ({"paused": False}, {"paused": False, "defaults": {"daily_calls": -1, "daily_tokens": 1}},
+                           {"paused": False, "defaults": {"daily_calls": True, "daily_tokens": 1}}):
+                service.private_json(root / "friends.json", policy)
+                with self.assertRaises(ValueError):
+                    service.friend_api_environment(root, config)
+            service.private_json(root / "friends.json", {"paused": False,
+                "defaults": {"daily_calls": 100, "daily_tokens": 1_000_000}})
+            (root / "friends.json").chmod(0o644)
+            with self.assertRaises(ValueError):
+                service.friend_api_environment(root, config)
+            (root / "friends.json").unlink()
+            (root / "friends.json").symlink_to(ledger)
+            with self.assertRaises(ValueError):
+                service.friend_api_environment(root, config)
+            self.assertEqual(ledger.read_bytes(), original)
+
     def test_production_and_adjacent_bridge_ports_refused(self):
         for port in (0, 8790, 8791, 8789, 18790, 18791, 65535):
             with self.subTest(port=port), self.assertRaises(ValueError):
@@ -50,6 +86,54 @@ class ServiceIsolationTest(unittest.TestCase):
 
 
 class BridgeBoundaryTest(unittest.IsolatedAsyncioTestCase):
+    async def friend_request(self, header_change=None, body_change=None):
+        received, output = [], []
+        async def upstream(scope, receive, send):
+            received.append((scope, await receive()))
+        headers = {b"x-coach-traffic": b"test", b"x-coach-task": b"READER_SELECTION",
+            b"x-coach-friend": b"a" * 64, b"x-coach-friend-device": b"friend-pc",
+            b"x-coach-fallback": b"on", b"x-coach-background": b"on", b"x-coach-batch-key": b"batch"}
+        headers.update(header_change or {})
+        body = {"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "fixture"}]}
+        body.update(body_change or {})
+        queue = asyncio.Queue()
+        await queue.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+        await adapter.FriendApiOnly(upstream)({"type": "http", "path": "/v1/chat/completions",
+            "headers": list(headers.items())}, queue.get, self.sender(output))
+        return received, output
+
+    async def test_friend_api_preserves_identity_and_shared_api_request_contract(self):
+        received, output = await self.friend_request()
+        scope, part = received[0]
+        headers = dict(scope["headers"])
+        self.assertEqual(headers[b"x-coach-friend"], b"a" * 64)
+        self.assertEqual(headers[b"x-coach-friend-device"], b"friend-pc")
+        self.assertEqual(headers[b"x-coach-fallback"], b"off")
+        self.assertEqual(headers[b"x-coach-background"], b"off")
+        self.assertEqual(headers[b"x-coach-batch-key"], b"")
+        self.assertNotIn("response_format", json.loads(part["body"]))
+        self.assertEqual(output, [])
+
+    async def test_friend_api_rejects_owner_missing_identity_other_models_tools_and_formats(self):
+        cases = [({b"x-coach-friend": b""}, {}), ({b"x-coach-friend-device": b""}, {}),
+            ({b"x-coach-task": b"OTHER"}, {}), ({b"x-coach-traffic": b"user"}, {}),
+            ({}, {"model": "gpt-6.1-sol"}), ({}, {"tools": [{"type": "function"}]}),
+            ({}, {"response_format": {"type": "json_object"}})]
+        for headers, body in cases:
+            received, output = await self.friend_request(headers, body)
+            self.assertEqual(received, [])
+            self.assertIn(output[0]["status"], (400, 403))
+
+    def test_only_existing_keychain_item_is_read_without_secret_in_arguments(self):
+        from types import SimpleNamespace
+        with patch.object(adapter.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"fixture-key\n")) as run:
+            self.assertEqual(adapter.existing_gift_key(), "fixture-key")
+            self.assertNotIn("fixture-key", str(run.call_args))
+            self.assertTrue(run.call_args.kwargs["capture_output"])
+        with patch.object(adapter.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"")):
+            with self.assertRaisesRegex(ValueError, "Existing gift key unavailable"):
+                adapter.existing_gift_key()
+
     async def call_adapter(self, traffic=b"test", payload=None):
         received, output = [], []
         async def upstream(scope, receive, send):

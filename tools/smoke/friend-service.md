@@ -76,6 +76,56 @@ hello 200 from winbox. Windows credentials have an owner-only ACL and are saved
 under `D:/agent/friend-path-service/client/pairing`; `result.json` is the receipt.
 `connection.json` contains credentials and must remain private. Do not attach it.
 
+## Private friend API mode
+
+The snapshot/subscription mode above remains the default. For the native client
+to import its own local book as a real friend, stop this isolated environment,
+back up its config, runtime and SQLite database privately, and replace only its
+`runtime/` with a current reviewed `:server:app:installDist` output. Keep the
+isolated database, registrations and library; do not run `prepare` again or
+change source visibility or learning records. Record the server build revision,
+JAR SHA-256 and bridge source revision separately in the private config/receipt.
+
+Set `friendApi: true` and `apiStateDir` in the private `config.json`. The state
+path must resolve to the existing `~/Coach/state`, with its existing
+`api-credit-ledger.json`. The same file contains owner cycles, monthly usage,
+reservations and friend usage; a new empty ledger would reset the owner's cap.
+Do not copy an old ledger back after requests. Compare its cycles/months and
+pending reservations before the first request. Books, the service SQLite database
+and bridge process state still stay under the isolated service root.
+
+Create a service-root `friends.json`, owned by the current user with mode 0600:
+
+```json
+{"paused":true,"defaults":{"daily_calls":100,"daily_tokens":1000000}}
+```
+
+Start paused, then explicitly unpause for the authorized verification. Existing
+provider monthly limits remain in force. Only the bridge process reads the
+existing `coach-anthropic-api` Keychain item, using the same item as
+`tools/bridge/run.sh`; no key is written to config, a file, argv, output or the
+server JVM environment. It accepts only test reader requests with a friend ID
+and device, and retains the shared gift API router, friend daily limits and
+owner monthly accounting. It never falls back to a subscription CLI. The model
+request uses the normal reader identity; actual API model selection and
+`served_by` remain the shared router's responsibility.
+
+Pair using a private file containing the friend name (never an argument):
+
+```sh
+python3 tools/smoke/friend-service.py pair --winbox --friend-name-file "$FRIEND_NAME_FILE"
+```
+
+The Windows helper requires the pair response to say `friend`, checks public
+status 200, private hello 404, anonymous 401 and replay 401, and replaces only
+the private seed credentials. Coordinate with the existing smoke owner before
+replacing them. An already running native client needs its existing smoke owner
+to load the new seed; this helper does not operate a desktop window. Real book
+import, consent, OCR and screenshots stay on Windows. Use that native flow for
+friend verification; the legacy `probe` is an owner snapshot probe and does not
+validate a friend's local source contract. Synthetic fixtures do not accept a
+real textbook or prove real API usage, revocation or cost reconciliation.
+
 For the native Windows development client, set `COACH_URL` to the running
 instance's tailnet URL and `COACH_CLIENT_DIR` to
 `D:/agent/friend-path-service/client`. Also set `COACH_TOKEN_FILE` to an unused

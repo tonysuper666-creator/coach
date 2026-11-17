@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private, daemon-supervised friend-path service. Never opens the production ledger."""
+"""Private, daemon-supervised friend-path service. Never opens the production SQLite database."""
 import argparse
 import fcntl
 import hashlib
@@ -139,6 +139,28 @@ def clean_environment():
             and k not in {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID"}}
 
 
+def friend_api_environment(root, config):
+    if not config.get("friendApi", False):
+        return {}
+    require(config["friendApi"] is True, "invalid friend API mode")
+    # Sharing the owner's existing credit ledger is intentional: a new empty
+    # directory would reset the monthly cap. Book/SQLite/bridge state stay private.
+    state = Path(config["apiStateDir"])
+    require(state.is_absolute() and str(state.resolve()) == str(state) and
+            state == (Path.home() / "Coach/state").resolve() and
+            (state / "api-credit-ledger.json").is_file(), "existing owner credit ledger required")
+    policy = root / "friends.json"
+    metadata = policy.lstat()
+    require(policy.is_file() and not policy.is_symlink() and metadata.st_uid == os.getuid() and
+            metadata.st_mode & 0o777 == 0o600, "private friend policy required")
+    settings = json.loads(policy.read_text())
+    require(type(settings.get("paused")) is bool and isinstance(settings.get("defaults"), dict) and
+            all(type(settings["defaults"].get(k)) is int and settings["defaults"][k] >= 0
+                for k in ("daily_calls", "daily_tokens")), "explicit friend limits required")
+    return {"COACH_API_STATE_DIR": str(state), "COACH_FRIEND_CONFIG": str(policy),
+            "COACH_FRIEND_API_ONLY": "1"}
+
+
 def serve(args):
     root, config = load(args.root)
     # Same private snapshot must never run in two environments/port blocks.
@@ -152,11 +174,15 @@ def serve(args):
     env = clean_environment()
     env.update(COACH_BRIDGE_HOME=str(root / "bridge"), COACH_API_STATE_DIR=str(root / "api"),
         BRIDGE_PORT=str(bridge_port), BRIDGE_BACKGROUND_BACKEND="", BRIDGE_AGY_ENABLED="0")
+    api_env = friend_api_environment(root, config)
+    env.update(api_env)
     server_env = env | {"JAVA_HOME": config["javaHome"], "COACH_PORT": str(server_port),
         "COACH_TAIL_HOST": config["tailHost"], "COACH_TRAFFIC": "test", "COACH_DEVICE_ID": "friend-service-admin",
         "COACH_TOKEN_FILE": str(root / "data/admin-token"), "COACH_DATA_DIR": str(root / "data"),
         "COACH_READER_LIBRARY": str(root / "library"), "COACH_BRIDGE_URL": f"http://127.0.0.1:{bridge_port}",
         "COACH_READER_MODEL": "gpt-6.1-sol"}
+    if api_env:
+        server_env["COACH_READER_MODEL"] = "claude-sonnet-5-5"
     for key, directory in [("LOG", "logs"), ("STATE", "state"), ("RUN", "run"), ("PACKS", "packs"), ("MOCK", "mock"), ("GENERATED", "generated")]:
         server_env[f"COACH_{key}_DIR"] = str(root / directory)
     children, logs = [], []
@@ -173,7 +199,7 @@ def serve(args):
             children.append(subprocess.Popen(argv, env=child_env, stdout=log, stderr=log, cwd=REPO))
         private_json(root / "running.json", dict(pid=os.getpid(), childPids=[p.pid for p in children],
             port=server_port, bridgePort=bridge_port, url=f"http://{config['tailHost']}:{server_port}", startedAt=int(time.time())))
-        print(f"Isolated service starting on {server_port}; bridge on loopback {bridge_port}; subscription model gpt-6.1-sol", flush=True)
+        print(f"Isolated service starting on {server_port}; bridge on loopback {bridge_port}; friend API mode {bool(api_env)}", flush=True)
         while True:
             for child in children:
                 require(child.poll() is None, "service child exited; inspect private logs")
@@ -198,9 +224,16 @@ def pair(args):
     running = json.loads((root / "running.json").read_text())
     port, _ = ports(running["port"])
     admin = dict(deviceId="friend-service-admin", token=(root / "data/admin-token").read_text().strip())
-    status, code = request(f"http://127.0.0.1:{port}/v1/pairing-code", {}, admin)
+    body = {}
+    if args.friend_name_file:
+        name = args.friend_name_file.read_text().strip()
+        require(name and len(name) <= 80 and not any(ord(c) < 32 or ord(c) == 127 for c in name), "invalid private friend name")
+        require(configured_friend_api(args.root), "friend API configuration required")
+        body["friend"] = name
+    status, code = request(f"http://127.0.0.1:{port}/v1/pairing-code", body, admin)
     require(status == 200, "pair-code request failed")
-    private_json(root / "pairing.json", dict(url=running["url"], **code))
+    handoff = dict(url=running["url"], role="friend" if body else "owner", **code)
+    private_json(root / "pairing.json", handoff)
     if args.winbox:
         # Secrets go through stdin, never SSH arguments, shell history or public output.
         uploaded = subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
@@ -209,14 +242,19 @@ def pair(args):
         require(uploaded.returncode == 0, "Windows helper upload failed")
         completed = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "winbox",
             "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File D:/agent/logs/friend-service-winbox.ps1"],
-            input=json.dumps(dict(url=running["url"], **code)), text=True, capture_output=True, timeout=60)
+            input=json.dumps(handoff), text=True, capture_output=True, timeout=60)
         require(completed.returncode == 0, "Windows pairing failed; no credential printed")
         receipt = json.loads(completed.stdout)
         require(receipt.get("passed") is True, "Windows pairing did not pass")
         private_json(root / "winbox-result.json", receipt)
-        print(json.dumps(receipt))
+        print(json.dumps({k: v for k, v in receipt.items() if k not in {"url", "clientDir"}}))
     else:
         print("New single-use code written to private output; expires in five minutes. No credential printed.")
+
+
+def configured_friend_api(root):
+    root, config = load(root)
+    return bool(friend_api_environment(root, config))
 
 
 def probe(args):
@@ -282,7 +320,9 @@ def main():
     for name in ["document", "tail-host", "runtime-revision"]:
         prep.add_argument("--" + name, required=True)
     commands.add_parser("serve").add_argument("--port", type=int, default=int(os.environ.get("MULTICA_PORT", "0")))
-    commands.add_parser("pair", help="write a fresh code, optionally pair winbox and store private credentials").add_argument("--winbox", action="store_true")
+    pair_parser = commands.add_parser("pair", help="write a fresh code, optionally pair winbox and store private credentials")
+    pair_parser.add_argument("--winbox", action="store_true")
+    pair_parser.add_argument("--friend-name-file", type=Path, help="private friend name; omitted preserves legacy owner pairing")
     probe_parser = commands.add_parser("probe", help="authorized real-source Q&A; output contains counts, never original text")
     probe_parser.add_argument("--selection-file", type=Path, required=True)
     probe_parser.add_argument("--kind", choices=("explain", "example"), default="explain")

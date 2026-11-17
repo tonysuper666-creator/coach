@@ -5,10 +5,13 @@ No book, explanation, credentials, URL or server response is written to output.
 This is not native-client or real-material acceptance.
 """
 import argparse
+import http.client
+import ipaddress
 import json
 import os
 import re
 import socket
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -71,9 +74,40 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def public_route(host):
+    # MagicDNS can reach Serve directly while the public Funnel is broken.
+    addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+    check(addresses and all(ipaddress.ip_address(value).is_global for value in addresses),
+          "public DNS required; tailnet or local route is not external acceptance")
+    print("PASS dns=public")
+
+
+def failure_category(error):
+    # An allowlist, never exception messages, hostnames, errno text or class names.
+    cause = error.reason if isinstance(error, urllib.error.URLError) else error
+    for kind, label in (
+        (ssl.SSLCertVerificationError, "tls-certificate"),
+        (ssl.SSLEOFError, "tls-eof"),
+        (ssl.SSLError, "tls-other"),
+        (socket.gaierror, "dns"),
+        (TimeoutError, "timeout"),
+        (ConnectionRefusedError, "connection-refused"),
+        (http.client.RemoteDisconnected, "http-disconnected"),
+        (ConnectionResetError, "connection-reset"),
+        (http.client.HTTPException, "http-protocol"),
+        (OSError, "network-io"),
+        (KeyError, "configuration"),
+        (ValueError, "invalid-data"),
+    ):
+        if isinstance(cause, kind):
+            return label
+    return "unexpected"
+
+
 class Client:
     def __init__(self, url):
         self.url = url
+        self.stage = "configuration"
         # Never forward a bearer token or pairing code to a redirect or proxy.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
@@ -95,21 +129,34 @@ class Client:
             return response.code, data
 
 
+def anonymous(client):
+    client.stage = "anonymous-status"
+    check(client.request("/v1/public/status")[0] == 401, "anonymous status")
+    print("PASS anonymous_https=401")
+
+
 def surface(client, code):
+    client.stage = "pairing-configuration"
     check(re.fullmatch(r"[0-9]{6}", code) is not None, "pairing code configuration")
     mask(code)
-    check(client.request("/v1/public/status")[0] == 401, "anonymous status")
+    anonymous(client)
+    client.stage = "pairing"
     status, body = client.request("/v1/pair", "POST", body={"code": code, "name": "External protocol check"})
     check(status == 200, "friend pairing")
     auth = credential(body)
+    client.stage = "pairing-replay"
     check(client.request("/v1/pair", "POST", body={"code": code})[0] == 401, "single-use pairing")
+    client.stage = "friend-status"
     status, body = client.request("/v1/public/status", auth=auth)
     check(status == 200 and json.loads(body).get("online") is True, "friend status")
     for identity in (None, auth):
+        client.stage = "private-paths"
         for path in DENIED:
             check(client.request(path, auth=identity) == (404, b""), "private path boundary")
+        client.stage = "wrong-methods"
         for method, path in WRONG_METHODS:
             check(client.request(path, method, identity) == (404, b""), "method boundary")
+    client.stage = "anonymous-explanation"
     for path in ("/v1/library/explain", "/v1/library/explain/cancel"):
         check(client.request(path, "POST", body={})[0] == 401, "anonymous explanation")
     # Authenticated malformed requests, books and API traffic are deliberately absent.
@@ -117,8 +164,11 @@ def surface(client, code):
 
 
 def revocation(client, revoked, active):
+    client.stage = "revocation-configuration"
     check(revoked["deviceId"] != active["deviceId"] and revoked["token"] != active["token"], "distinct devices")
+    client.stage = "revoked-status"
     check(client.request("/v1/public/status", auth=revoked)[0] == 401, "revoked device")
+    client.stage = "active-control-status"
     status, body = client.request("/v1/public/status", auth=active)
     check(status == 200 and json.loads(body).get("online") is True, "other friend remains online")
     print("PASS revoked=401 other_friend=200")
@@ -142,24 +192,35 @@ def closed_ports(host):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("surface", "revocation"))
+    parser.add_argument("mode", choices=("transport", "surface", "revocation"))
     args = parser.parse_args(argv)
+    client = None
+    stage = "configuration"
     try:
         url = endpoint(os.environ["COACH_FRIEND_URL"])
         client = Client(url)
-        if args.mode == "surface":
+        client.stage = "public-dns"
+        public_route(urllib.parse.urlsplit(url).hostname)
+        if args.mode == "transport":
+            # No code or bearer credential is needed to locate TLS failures.
+            anonymous(client)
+        elif args.mode == "surface":
+            client.stage = "pairing-configuration"
             surface(client, os.environ["COACH_FRIEND_CODE"])
         else:
+            client.stage = "revocation-configuration"
             revocation(client, credential(os.environ["COACH_REVOKED_CREDENTIAL"]),
                        credential(os.environ["COACH_ACTIVE_CREDENTIAL"]))
+        client.stage = "alternate-ports"
         closed_ports(urllib.parse.urlsplit(url).hostname)
         print("SCOPE protocol-only; native GUI, real explanation, quota ledger and cleanup require separate verification")
         return 0
     except CheckFailed as error:
         # Labels are fixed program literals; never serialize responses/exceptions.
-        print("FAIL " + str(error), file=sys.stderr)
-    except Exception:
-        print("FAIL configuration or transport; private diagnostic values suppressed", file=sys.stderr)
+        print("FAIL stage=" + (client.stage if client else stage) + " check=" + str(error), file=sys.stderr)
+    except Exception as error:
+        print("FAIL stage=" + (client.stage if client else stage) + " category=" + failure_category(error)
+              + "; private diagnostic values suppressed", file=sys.stderr)
     return 1
 
 

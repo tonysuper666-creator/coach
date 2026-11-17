@@ -34,14 +34,21 @@ class SuspensionDetector(private var wall: Long = System.currentTimeMillis(), pr
     }
 }
 
-fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null) =
-    ledgerRoutes(actor, pushes, chat, adminDevice, observation) { }
+fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService? = null, adminDevice: String = "desktop", observation: UsageObservation? = null, friends: FriendAccess? = null, publicOnly: Boolean = false) =
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation, friends, publicOnly) { }
+
+// Preserve the existing explicit test-hook overload.
+internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit) =
+    ledgerRoutes(actor, pushes, chat, adminDevice, observation, null, false, beforeLedgerFrame)
 
 // Test seam: pause an individual connection at the point its nonempty frame is sent.
-internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, beforeLedgerFrame: suspend (String) -> Unit) {
+internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedFlow<String>, chat: ChatService?, adminDevice: String, observation: UsageObservation?, friends: FriendAccess? = null, publicOnly: Boolean = false, beforeLedgerFrame: suspend (String) -> Unit) {
     if (observation != null) observeUsage(observation)
     install(WebSockets) { pingPeriod = kotlin.time.Duration.parse("5s");timeout=kotlin.time.Duration.parse("15s");maxFrameSize=1_048_576 }
     intercept(ApplicationCallPipeline.Call) {
+        if (publicOnly && !friendPath(call)) {
+            call.respondText("", status=HttpStatusCode.NotFound); finish(); return@intercept
+        }
         // Pairing is the only unauthenticated operation, and only this exact POST.
         val pairing = call.request.path() == "/v1/pair" && call.request.httpMethod == HttpMethod.Post
         if (call.request.queryParameters.names().any { it.lowercase() in setOf("token", "access_token", "authorization", "code") }) {
@@ -53,13 +60,19 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             val device = call.request.header("X-Coach-Device")
             val authorization = call.request.header("Authorization")
             val token = authorization?.takeIf { it.startsWith("Bearer ") }?.removePrefix("Bearer ")
-            if (device == null || token == null || call.request.headers.getAll("Authorization")?.size != 1 ||
-                !actor.execute { authorize(device,token) }) {
+            val identity = if (device == null || token == null || call.request.headers.getAll("Authorization")?.size != 1) null
+                else actor.execute { if (authorize(device, token)) Pair(device, friendName(device)) else null }
+            if (identity == null) {
                 call.respondText("Unauthorized",status=HttpStatusCode.Unauthorized)
                 finish()
                 return@intercept
             }
-            call.attributes.put(observedDevice, device)
+            val friend = identity.second
+            if ((publicOnly && friend == null) || (friend != null && !friendPath(call))) {
+                call.respondText("", status=HttpStatusCode.NotFound); finish(); return@intercept
+            }
+            call.attributes.put(observedDevice, identity.first)
+            if (friend != null) call.attributes.put(observedFriend, friend)
         }
     }
 
@@ -175,20 +188,42 @@ internal fun Application.ledgerRoutes(actor: LedgerActor, pushes: MutableSharedF
             }
             if (size > 1024) { call.respond(HttpStatusCode.PayloadTooLarge); return@post }
             val body = runCatching { LedgerJson.parseToJsonElement(buffer.decodeToString(0,size)).jsonObject }.getOrNull()
-            val credential = actor.execute { pair(body?.str("code").orEmpty(), body?.str("name").orEmpty()) }
+            val credential = actor.execute { pair(body?.str("code").orEmpty(), body?.str("name").orEmpty(), publicOnly) }
             if (credential == null) call.respondText("Pairing rejected", status=HttpStatusCode.Unauthorized)
-            else call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token).toString(), ContentType.Application.Json)
+            else call.respondText(json("deviceId" to credential.deviceId, "token" to credential.token, "role" to credential.role).toString(), ContentType.Application.Json)
         }
         post("/v1/pairing-code") {
             if (!call.requireAdmin()) return@post
             call.response.headers.append(HttpHeaders.CacheControl, "no-store")
-            val code = actor.execute { createPairingCode() }
+            val text = call.receiveText()
+            val body = if (text.isBlank()) json() else runCatching { LedgerJson.parseToJsonElement(text).jsonObject }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest)
+            val friend = body.str("friend").ifBlank { null }
+            if (friend != null && (friend.length > 80 || friend.any { it.isISOControl() })) return@post call.respond(HttpStatusCode.BadRequest)
+            val code = actor.execute { createPairingCode(friend) }
             call.respondText(json("code" to code.code, "expiresAt" to code.expiresAt).toString(), ContentType.Application.Json)
         }
         get("/v1/devices") {
             if (!call.requireAdmin()) return@get
-            val devices = actor.execute { pairedDevices() }.map { json("deviceId" to it.id, "name" to it.name, "createdAt" to it.createdAt, "revokedAt" to it.revokedAt) }
+            val devices = actor.execute { pairedDevices() }.map { json("deviceId" to it.id, "name" to it.name, "createdAt" to it.createdAt, "revokedAt" to it.revokedAt,
+                "role" to if (it.friendName == null) "owner" else "friend", "friend" to it.friendName,
+                "friendId" to it.friendName?.let(::friendId), "lastUsedAt" to it.lastUsedAt,
+                "today" to it.friendName?.let { name -> runCatching { friends?.status(name, it.id) }.getOrNull() }) }
             call.respondText(JsonArray(devices).toString(), ContentType.Application.Json)
+        }
+        get("/v1/public/status") {
+            val name = call.attributes.getOrNull(observedFriend) ?: return@get call.respond(HttpStatusCode.Forbidden)
+            call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+            try { call.respondText((friends ?: throw FriendServiceError()).status(name, call.attributes[observedDevice]).toString(), ContentType.Application.Json) }
+            catch (e: FriendServiceError) { call.respondText(e.body.toString(), ContentType.Application.Json, e.status) }
+        }
+        post("/v1/friends/revoke") {
+            if (!call.requireAdmin()) return@post
+            val body = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            val name = body?.str("friend").orEmpty()
+            if (name.isBlank() || name.length > 80) return@post call.respond(HttpStatusCode.BadRequest)
+            actor.execute { revokeFriend(name) }
+            call.respond(HttpStatusCode.NoContent)
         }
         delete("/v1/devices/{device}") {
             if (!call.requireAdmin()) return@delete

@@ -12,7 +12,9 @@ import io.ktor.http.*
 import kotlinx.serialization.json.jsonObject
 
 /** Keep secrets out of generated toString/exception messages. */
-class PairedCredentials(val deviceId: String, val token: String)
+class PairedCredentials(val deviceId: String, val token: String, val role: String = "owner") {
+    init { require(role in setOf("owner", "friend")) }
+}
 
 internal expect fun checkCoachNetworkPolicy(url: Url)
 
@@ -37,9 +39,17 @@ class PairingClient(private val baseUrl: String) {
         }
         check(response.status == HttpStatusCode.OK) { "Pairing rejected; request a new code on your Mac" }
         val body = LedgerJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        return PairedCredentials(body.str("deviceId"), body.str("token")).also {
+        return PairedCredentials(body.str("deviceId"), body.str("token"), body.str("role").ifBlank { "owner" }).also {
             check(it.deviceId.isNotBlank() && it.token.length == 43) { "Invalid pairing response" }
         }
+    }
+    /** Friends never probe hello, snapshots or the owner's learning ledger. */
+    suspend fun friendAuthorized(credentials: PairedCredentials): Boolean {
+        val response = client.get("${baseUrl.trimEnd('/')}/v1/public/status") {
+            header("X-Coach-Device", credentials.deviceId)
+            header(HttpHeaders.Authorization, "Bearer ${credentials.token}")
+        }
+        return response.status != HttpStatusCode.Unauthorized
     }
     fun close() = client.close()
 }

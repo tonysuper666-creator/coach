@@ -67,8 +67,10 @@ class ApiRouter:
             "anthropic": os.environ.get("COACH_ANTHROPIC_API_KEY", ""),
             "openai": os.environ.get("COACH_OPENAI_API_KEY", "")}
 
-    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0):
-        model = route(task, requested, format_attempt)
+    async def events(self, task: str, requested: str, system: str, prompt: str, max_tokens: int | None, format_attempt=0, friend=None, device=None):
+        if friend is not None and (task != "READER_SELECTION" or vendor(requested) != "anthropic"):
+            raise Denied("invalid_friend_route")
+        model = CONFIG["models"]["draft"] if friend is not None else route(task, requested, format_attempt)
         if model is None:
             raise Denied("unrouted_task")
         provider = vendor(model)
@@ -82,7 +84,7 @@ class ApiRouter:
         if input_bound > 90_000:
             raise Denied("unsupported_context_price")
         maximum = cost(model, {"input_tokens": input_bound, "output_tokens": output_limit})
-        reservation = self.ledger.reserve(provider, key, maximum)
+        reservation = self.ledger.reserve(provider, key, maximum, friend=friend, device=device, tokens=input_bound + output_limit)
         # Past this point a timeout, cancellation, HTTP error or missing terminal
         # usage retains the full reservation, including across process restarts.
         yield {"kind": "attempt", "model": model}
@@ -158,7 +160,7 @@ class ApiRouter:
                 usage["cached_tokens"] = usage.get("cache_read_input_tokens", 0)
                 usage["input_tokens"] = usage.get("input_tokens", -1) + usage["cached_tokens"]
             actual = cost(model, usage)
-            self.ledger.settle(provider, reservation, actual)
+            self.ledger.settle(provider, reservation, actual, usage=usage)
             if finish != "end_turn" or not text:
                 raise ApiFailure("api_incomplete")
             yield {"kind": "complete", "text": "".join(text), "served_by": served,

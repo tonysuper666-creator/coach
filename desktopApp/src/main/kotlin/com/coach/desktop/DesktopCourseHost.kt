@@ -16,3 +16,10 @@ internal fun DesktopCourseContent(session: DesktopLearningSession, initialKp: St
     CoachApp(session.controller, initialKp, autoStart, initialSource = initialSource,
         courseActions = { view -> NotesExportAction(view, session.controller, session.mathHttp) })
 }
+
+/** Reuse the local bookshelf in configured-course installations, without constructing any ledger clients. */
+@Composable
+internal fun FriendCourseContent(directory: java.nio.file.Path? = null, chooseBook: suspend () -> java.nio.file.Path?) {
+    val root = androidx.compose.runtime.remember(directory) { directory ?: windowsLibraryDirectory() }
+    WindowsTextbooksContent(root, chooseBook)
+}

@@ -24,24 +24,30 @@ internal fun pairingCommand(args: Array<String>, data: Path) {
     secureTokenFile(path)
     val port = System.getenv("COACH_PORT")?.toInt() ?: 18791
     val endpoint = when (args.first()) {
-        "pair-code" -> { require(args.size == 1); "/v1/pairing-code" }
+        "pair-code" -> { require(args.size == 1 || (args.size == 3 && args[1] == "--friend")); "/v1/pairing-code" }
+        "revoke-friend" -> { require(args.size == 2); "/v1/friends/revoke" }
         "devices" -> { require(args.size == 1); "/v1/devices" }
         else -> {
             require(args.size == 2 && args[1].matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "usage: app revoke DEVICE_ID" }
             "/v1/devices/${args[1]}"
         }
     }
-    val method = when (args.first()) { "pair-code" -> "POST"; "devices" -> "GET"; else -> "DELETE" }
+    val method = when (args.first()) { "pair-code", "revoke-friend" -> "POST"; "devices" -> "GET"; else -> "DELETE" }
+    val body = when {
+        args.first() == "pair-code" && args.size == 3 -> com.coach.domain.json("friend" to args[2]).toString()
+        args.first() == "revoke-friend" -> com.coach.domain.json("friend" to args[1]).toString()
+        else -> ""
+    }
     val request = HttpRequest.newBuilder(URI("http://127.0.0.1:$port$endpoint"))
         .timeout(Duration.ofSeconds(10))
         .header("Authorization", "Bearer ${Files.readString(path).trim()}")
         .header("X-Coach-Device", System.getenv("COACH_DEVICE_ID") ?: "desktop")
-        .method(method, HttpRequest.BodyPublishers.noBody()).build()
+        .method(method, HttpRequest.BodyPublishers.ofString(body)).build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString())
     check(response.statusCode() in 200..299) { "Coach management request failed (${response.statusCode()})" }
     if (args.first() == "pair-code") {
         val body = LedgerJson.parseToJsonElement(response.body()).jsonObject
         println("Pairing code: ${body.str("code")} (single use; expires in 5 minutes)")
-    } else if (method == "DELETE") println("Device revoked")
+    } else if (method == "DELETE" || args.first() == "revoke-friend") println("Device(s) revoked")
     else println(response.body())
 }

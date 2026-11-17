@@ -27,8 +27,11 @@ internal class DesktopPairing(
         val client = PairingClient(url)
         try {
             val value = client.pair(code, name.take(80))
-            val transport = HttpLedgerTransport(url, value.deviceId, value.token)
-            try { transport.hello(null) } finally { transport.close() }
+            if (value.role == "friend") check(client.friendAuthorized(value))
+            else {
+                val transport = HttpLedgerTransport(url, value.deviceId, value.token)
+                try { transport.hello(null) } finally { transport.close() }
+            }
             settings.saveAddress(url)
             store.save(url, value)
             return DesktopIdentity(url, value)
@@ -37,6 +40,14 @@ internal class DesktopPairing(
 
     /** Offline is not revocation. Only an authenticated endpoint's explicit 401 retires a pairing. */
     suspend fun stillAuthorized(identity: DesktopIdentity): Boolean {
+        if (identity.credentials.role == "friend") {
+            val client = PairingClient(identity.serverUrl)
+            return try {
+                client.friendAuthorized(identity.credentials).also { if (!it) store.clear(identity.serverUrl, identity.credentials) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { true }
+            finally { client.close() }
+        }
         val transport = HttpLedgerTransport(identity.serverUrl, identity.credentials.deviceId, identity.credentials.token)
         return try { transport.hello(null); true }
         catch (cancelled: CancellationException) { throw cancelled }

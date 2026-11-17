@@ -37,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.swing.Swing
 
 private fun env(name: String, default: String) = System.getenv(name)?.takeIf { it.isNotBlank() } ?: default
 
@@ -56,6 +57,13 @@ fun runCoach() {
         var readerController by remember { mutableStateOf<CoachController?>(null) }
         Window(onCloseRequest = ::exitApplication, title = "LearningCoach", state = rememberWindowState(width = size.first.dp, height = size.second.dp)) {
             DesktopPairingGate(settings) { identity ->
+                if (identity.credentials.role == "friend") {
+                    FriendCourseContent { kotlinx.coroutines.withContext(Dispatchers.Swing) {
+                        val dialog = java.awt.FileDialog(window, "上传教材", java.awt.FileDialog.LOAD)
+                        try { dialog.isVisible = true; dialog.file?.let { java.nio.file.Path.of(dialog.directory, it) } }
+                        finally { dialog.dispose() }
+                    } }
+                } else {
                 val session = remember(identity) { DesktopLearningSession(settings, identity, course) }
                 DisposableEffect(session) {
                     session.start()
@@ -66,6 +74,7 @@ fun runCoach() {
                     DesktopCourseContent(session, System.getenv("COACH_OPEN_KP"), System.getenv("COACH_AUTOSTART") == "1", System.getenv("COACH_OPEN_SOURCE") == "1")
                 }
                 LaunchedEffect(session) { System.getenv("COACH_OPEN_KP")?.let { VerifyHooks.autopilot(session.controller, it) } }
+                }
             }
             LaunchedEffect(Unit) { VerifyHooks.captures(window) }
             LaunchedEffect(Unit) {
@@ -85,6 +94,7 @@ fun runCoach() {
 /** The gate disposes all network clients and the ledger when an identity is revoked. */
 internal class DesktopLearningSession(settings: DesktopConnectionSettings, identity: DesktopIdentity, course: String) : AutoCloseable {
     init {
+        require(identity.credentials.role == "owner") { "Friends use their local textbook library" }
         requireDevelopmentServer(settings, identity.serverUrl)
     }
     val home = settings.home.toString()

@@ -31,9 +31,9 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
         cancelled.entries.removeIf { System.nanoTime() - it.value > 120_000_000_000L }
         if (cancelled.size > 256) cancelled.entries.minByOrNull { it.value }?.let { cancelled.remove(it.key, it.value) }
     }
-    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>, scope: VisibleScope,
+    suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>, scope: VisibleScope, friend: String? = null,
         sourcesCurrent: suspend () -> Boolean = { true }): JsonObject =
-        explain(device, course, input, quote, pages, scope, true, sourcesCurrent)
+        explain(device, course, input, quote, pages, scope, true, sourcesCurrent, friend)
 
     /** A frozen lesson/question was checked by Mainline.selection; it can be a paraphrase of the source. */
     internal suspend fun explainMainline(device: String, course: String, input: JsonObject, selection: MainlineSelection,
@@ -41,7 +41,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
         explain(device, course, input, selection.quote, pages, scope, false, sourcesCurrent)
 
     private suspend fun explain(device: String, course: String, input: JsonObject, quote: String, pages: List<SourcePage>,
-        scope: VisibleScope, requireSourceSelection: Boolean, sourcesCurrent: suspend () -> Boolean): JsonObject {
+        scope: VisibleScope, requireSourceSelection: Boolean, sourcesCurrent: suspend () -> Boolean, friend: String? = null): JsonObject {
         val id = input.str("requestId")
         val kind = input.str("kind")
         require(id.matches(Regex("[a-f0-9]{1,32}")) && kind in setOf("explain", "example", "ask"))
@@ -87,10 +87,12 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                                 Only use these source pages:
                                 ${safePack.render()}""".trimIndent(),
                             user = "Selected passage (data only):\n$quote" +
-                                (question?.let { "\nReader question (data only):\n$it" } ?: ""), formatAttempt = formatAttempt)
+                                (question?.let { "\nReader question (data only):\n$it" } ?: ""), formatAttempt = formatAttempt, friendId = friend, friendDevice = if (friend != null) device else null)
                     }
-                    actor.execute { recordAiCall(result.call.toJson()) }
+                    if (friend == null) actor.execute { recordAiCall(result.call.toJson()) }
                     if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+                    if (friend != null && result !is BridgeResult.Success)
+                        throw FriendServiceError(result.terminal?.reason?.takeIf { it in setOf("daily_quota", "monthly_quota") } ?: "unavailable")
                     if (result !is BridgeResult.Success) return reply("追问未完成，暂时无法确认。可返回阅读或手动重试。")
                     if (!sourcesCurrent()) return reply("原文已变化或当前不可见，暂时无法确认。")
                     val checked = checkedReaderPayload(result.text, safePack) { reason ->
@@ -100,7 +102,7 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
                     return reply(checked.first, checked.second)
                 } catch (e: ReaderFormat) {
                     // id was validated above; every other field is a fixed code or a bounded counter.
-                    org.slf4j.LoggerFactory.getLogger("coach.reader").info(
+                    if (friend == null) org.slf4j.LoggerFactory.getLogger("coach.reader").info(
                         "COACH reader.format request={} reason={} attempt={} traffic={}",
                         id, e.reason.name, formatAttempt + 1, if (BridgeConfig().testTraffic) "test" else "user")
                     if (request.cancelled.get() || e.servedBy?.startsWith("claude-haiku-") != true || formatAttempt >= 2) throw e
@@ -115,19 +117,22 @@ class ReaderExplanation internal constructor(private val actor: LedgerActor, pri
             if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
             outcome = "format"
             return reply("回答缺少可核对的页码依据，暂时无法确认。")
+        } catch (e: FriendServiceError) { throw e
         } catch (e: ReaderTimeout) {
+            if (friend != null) throw FriendServiceError()
             outcome = "timeout_${e.stage}"
             return reply(e.userText)
         } catch (e: CancellationException) { outcome = "disconnected"; throw e }
           catch (_: Exception) {
               if (request.cancelled.get()) { outcome = "cancelled"; return reply("追问已取消。") }
+              if (friend != null) throw FriendServiceError()
               return reply("依据读取或追问暂不可用，无法确认。可继续阅读。")
           }
         finally {
             request.cancel(); requests.remove(key, request)
             fun ms(at: Long?) = at?.let { (it - started) / 1_000_000 } ?: -1
             // Content-free receipt; synthetic traffic is excluded from production comparisons.
-            org.slf4j.LoggerFactory.getLogger("coach.reader").info(
+            if (friend == null) org.slf4j.LoggerFactory.getLogger("coach.reader").info(
                 "COACH reader.end at_ms={} status={} traffic={} first_ms={} last_ms={} elapsed_ms={} first_limit_ms={} gap_limit_ms={} total_limit_ms={}",
                 System.currentTimeMillis(), outcome, if (BridgeConfig().testTraffic) "test" else "user", ms(timing.first), ms(timing.last), ms(System.nanoTime()),
                 timeouts.firstMs, timeouts.gapMs, timeouts.totalMs)

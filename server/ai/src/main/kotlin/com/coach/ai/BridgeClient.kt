@@ -44,6 +44,8 @@ data class ChatRequest(
     val background: Boolean = false,
     val maxTokens: Int? = null,
     val formatAttempt: Int = 0,
+    val friendId: String? = null,
+    val friendDevice: String? = null,
 )
 
 /** `x_coach` 终态帧（ADR-0002：这是唯一可信的结束信号）。 */
@@ -473,6 +475,8 @@ class BridgeClient(
             require(key.matches(Regex("[a-f0-9]{64}"))) { "Invalid local production bridge credential" }
             builder.header("X-Coach-Production-Key",key)
         }
+        request.friendId?.let { builder.header("X-Coach-Friend", it) }
+        request.friendDevice?.let { builder.header("X-Coach-Friend-Device", it) }
         request.effort?.let { builder.header("X-Coach-Effort", it) }
         if (request.background) builder.header("X-Coach-Background", "1")
         batchKey(request)?.let { builder.header("X-Coach-Batch-Key", it) }

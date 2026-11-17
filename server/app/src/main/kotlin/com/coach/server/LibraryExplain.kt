@@ -95,9 +95,11 @@ internal fun libraryExplainRequest(input: JsonObject): LibraryExplainRequest {
 }
 
 fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanation?, library: ReaderLibrary? = null,
-    imports: ImportedBookSources? = null) {
+    imports: ImportedBookSources? = null, friends: FriendAccess? = null) {
     routing {
         post("/v1/library/explain") { call.withReaderConnection {
+            val friend = call.attributes.getOrNull(observedFriend)
+            var requestId = ""
             try {
                 val channel = call.receiveChannel()
                 val bytes = ByteArray(131_073)
@@ -110,26 +112,45 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
                 if (size > 131_072) throw MockError(HttpStatusCode.PayloadTooLarge, "选中的原文过长，请缩短后重试。")
                 val input = LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject
                 val parsed = libraryExplainRequest(input)
-                val binding = if (parsed.isLocalBook) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
-                val personal = input["localSource"] != null && parsed.isLocalBook && withContext(Dispatchers.IO) {
+                requestId = input.str("requestId")
+                if (friend != null && (!parsed.isLocalBook || input["localSource"] == null))
+                    throw MockError(HttpStatusCode.Forbidden, "请先导入自己的书，再选择原文讲解。")
+                val importStore = if (friend == null) imports else (friends ?: throw FriendServiceError()).imports(friend)
+                val binding = if (friend == null && parsed.isLocalBook) library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) else null
+                val personal = input["localSource"] != null && parsed.isLocalBook && (friend != null || withContext(Dispatchers.IO) {
                     // Unreadable catalogs fail closed, including while generating.
                     runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
                 }
+                )
                 val receipt = if (personal) withContext(Dispatchers.IO) {
-                    (imports ?: throw MockError(HttpStatusCode.ServiceUnavailable, "Mac 还未接通新书讲解，请更新服务后重试。"))
+                    (importStore ?: throw MockError(HttpStatusCode.ServiceUnavailable, "Mac 还未接通新书讲解，请更新服务后重试。"))
                         .register(call.attributes[observedDevice], input, parsed)
                 } else null
                 val request = if (receipt == null) actor.execute { parsed.authorize(this, binding) } else null
                 val scope = request?.scope ?: VisibleScope.learner().narrowToPages(parsed.pages.single().docId,
                     parsed.pages.single().pdfPage..parsed.pages.single().pdfPage)
-                val body = reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope) {
+                if (friend != null && reader == null) throw FriendServiceError()
+                val body = reader?.explain(call.attributes[observedDevice], "library", input, parsed.quote, parsed.pages, scope,
+                    friend?.let(::friendId)) {
                     if (receipt != null) withContext(Dispatchers.IO) {
-                        imports!!.isCurrent(receipt) && runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false)
+                        importStore!!.isCurrent(receipt) && (if (friend != null) actor.execute {
+                            authorize(call.attributes[observedDevice], call.request.header("Authorization")!!.removePrefix("Bearer ")) &&
+                                friendName(call.attributes[observedDevice]) == friend
+                        } else runCatching { library?.reservesVersion(parsed.bookId) != true }.getOrDefault(false))
                     } else (binding == null || library?.explanationSource(parsed.bookId, parsed.pages.single().pdfPage) == binding) &&
                         actor.execute { request!!.isCurrent(this) }
                 }
                     ?: json("text" to "讲解服务暂不可用，无法确认。", "sources" to JsonArray(emptyList()), "elapsedMs" to 0)
+                if (friend != null) withContext(Dispatchers.IO) {
+                    try { friends!!.record(friend, call.attributes[observedDevice], requestId, "complete", body) }
+                    catch (_: Exception) { throw FriendServiceError() }
+                }
                 call.respondText(body.toString(), ContentType.Application.Json)
+            } catch (e: FriendServiceError) {
+                if (friend != null) withContext(Dispatchers.IO) {
+                    runCatching { friends?.record(friend, call.attributes[observedDevice], requestId, e.code) }
+                }
+                call.respondText(e.body.toString(), ContentType.Application.Json, e.status)
             } catch (e: MockError) {
                 call.respondText(json("error" to e.message).toString(), ContentType.Application.Json, e.status)
             } catch (e: IllegalArgumentException) {
@@ -139,7 +160,16 @@ fun Application.libraryExplainRoutes(actor: LedgerActor, reader: ReaderExplanati
             }
         } }
         post("/v1/library/explain/cancel") {
-            val input = runCatching { LedgerJson.parseToJsonElement(call.receiveText()).jsonObject }.getOrNull()
+            val bytes = ByteArray(1025)
+            val channel = call.receiveChannel()
+            var size = 0
+            while (size < bytes.size) {
+                val count = channel.readAvailable(bytes, size, bytes.size - size)
+                if (count < 0) break
+                size += count
+            }
+            if (size > 1024) return@post call.respond(HttpStatusCode.PayloadTooLarge)
+            val input = runCatching { LedgerJson.parseToJsonElement(bytes.decodeToString(0, size)).jsonObject }.getOrNull()
             reader?.cancel(call.attributes[observedDevice], "library", input?.str("requestId").orEmpty())
             call.respondText("{}", ContentType.Application.Json)
         }

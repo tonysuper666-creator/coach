@@ -206,7 +206,7 @@ internal object LessonPracticeWire {
 
     fun parse(book: Textbook, chosen: SourceBlock, result: Explanation): GeneratedPractice? {
         if (result.citations.isEmpty() || result.citations.any { it.blockId != chosen.id || it.page != chosen.page }) return null
-        val text = result.citations.fold(result.text) { value, citation -> value.replace("【${citation.anchor}】", "") }.trim()
+        val text = ReadableText.withoutCitationMarks(result.text)
         val pattern = Regex("题干[：:]\\s*(.+?)\\s*选项A[：:]\\s*(.+?)\\s*选项B[：:]\\s*(.+?)\\s*选项C[：:]\\s*(.+?)\\s*选项D[：:]\\s*(.+?)\\s*答案[：:]\\s*([A-D])\\s*[；;。]?\\s*解析[：:]\\s*(.+)", RegexOption.DOT_MATCHES_ALL)
         val match = pattern.matchEntire(text) ?: return null
         val parts = match.groupValues.drop(1).map { it.trim().trimEnd('；', ';') }
@@ -224,7 +224,9 @@ internal fun GeneratedLessonPractice(
     book: Textbook, lesson: BookLesson, gate: AnswerExplain,
     sourceFocus: androidx.compose.ui.focus.FocusRequester,
     sources: @Composable (List<BookPassage>) -> Unit,
-    onSource: (Practice) -> Unit, onRepair: () -> Unit, nav: @Composable () -> Unit,
+    onSource: (Practice) -> Unit, onRepair: () -> Unit,
+    fallback: @Composable () -> Unit,
+    nav: @Composable () -> Unit,
 ) {
     val key = "${book.id}:${lesson.id}"
     var allowed by remember(book.id) { mutableStateOf(gate.consent.allowed(book.id)) }
@@ -277,21 +279,23 @@ internal fun GeneratedLessonPractice(
                 LessonSummaryCard(book, lesson, generated.practice, answer, temporary = true, nav = nav)
             } else nav()
         }
-        !gate.ready() -> Text("正在看这台电脑和 Mac 的连接…")
+        // 连不上的时候不能让这一节空着：配对只管「现出题」，原文出的题和作答照常。
+        !gate.ready() -> fallback()
         !gate.paired() -> {
-            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "出题需要连上已配对的 Mac。")
+            Text(if (gate.revoked()) ExplainTrouble.REVOKED else "现出题和答后讲解要用配对的 Mac；连上之前，这一节先用原文出的题。")
             V7TextButton(onRepair) { Text("去原文页配对") }
-            nav()
+            fallback()
         }
         !allowed -> {
-            Text(ExplainPrivacy.ask(book.title) + "这次用它生成选择题和答后讲解，题目只用于这次练习。")
+            // 允许与否只决定「按本节原文现出题」；这一节原文出的题始终在，读者不必先答应再答题。
+            Text(ExplainPrivacy.ask(book.title) + "允许后，这一节会用 Mac 按原文现出一题并给答后讲解；题目只用于这次练习。")
             PrimaryButton({ gate.consent.allow(book.id); allowed = true }, Modifier.testTag("practice-allow")) { Text("允许并出题") }
-            nav()
+            fallback()
         }
         failure != null -> {
             ExplainTroubleLine(checkNotNull(failure), onRetry = { attempt++ }, onRepair = onRepair,
                 modifier = Modifier.testTag("practice-unavailable"))
-            nav()
+            fallback()
         }
         else -> {
             Text("正在按本节原文出题…", Modifier.testTag("practice-loading"))

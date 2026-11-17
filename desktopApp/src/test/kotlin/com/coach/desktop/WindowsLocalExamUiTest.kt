@@ -354,6 +354,8 @@ class WindowsLocalExamUiTest {
                 db.createStatement().use { it.execute("""CREATE TRIGGER reject_save BEFORE UPDATE OF answers_json ON local_exam_attempts
                     BEGIN SELECT RAISE(ABORT,'synthetic save failure'); END""") }
             }
+            // 试卷落库和界面换页不是同一拍：等选项真的画出来再点，别跟这一帧抢。
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-choice-${first.id}-$correct").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-choice-${first.id}-$correct").performScrollTo().performClick()
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("local-exam-error").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithTag("local-choice-${first.id}-$correct").assertIsSelected()
